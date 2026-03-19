@@ -1,0 +1,23 @@
+{
+    // 使用 VS Code 调试 Python 脚本
+    "version": "0.2.0",
+    "configurations": [
+        // {
+        //     "name": "Python: Current File",
+        //     "type": "python",
+        //     "request": "launch",
+        //     "program": "${file}",
+        //     "console": "integratedTerminal"
+        // },
+        {
+            "name": "Test_diffPolicy",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/metadrive/policy/diffusion_policy/test_transfuser_policy.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--checkpoint", "outputs/diffusion/checkpoints/diffusion-epoch=98.ckpt"
+            ]
+        }
+    ]
+}
