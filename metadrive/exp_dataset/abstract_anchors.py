@@ -11,6 +11,7 @@ DEFAULT_DATASET_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/metadrive_da
 DEFAULT_NUM_ANCHORS = 8
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parent / f"metadrive_anchors.npy"
 DEFAULT_FIGURE_PATH = Path(__file__).resolve().parent / f"metadrive_anchors.png"
+DEFAULT_TRAJECTORY_KEY = "trajectory"
 
 
 def resolve_shard_paths(dataset_root: Path, split: str) -> List[Path]:
@@ -39,6 +40,7 @@ def resolve_shard_paths(dataset_root: Path, split: str) -> List[Path]:
 
 def load_trajectory_matrix(
 	shard_paths: Sequence[Path],
+	trajectory_key: str,
 	max_trajectories: int | None,
 	rng: np.random.RandomState,
 ) -> np.ndarray:
@@ -46,7 +48,12 @@ def load_trajectory_matrix(
 	total_samples = 0
 	for shard_path in shard_paths:
 		with np.load(shard_path, allow_pickle=False) as shard:
-			trajectory_xy = shard["trajectory"][..., :2].astype(np.float64)
+			if trajectory_key not in shard:
+				raise KeyError(
+					f"Trajectory key {trajectory_key!r} not found in {shard_path.name}; "
+					f"available_keys={sorted(shard.files)}"
+				)
+			trajectory_xy = shard[trajectory_key][..., :2].astype(np.float64)
 		chunks.append(trajectory_xy)
 		total_samples += int(trajectory_xy.shape[0])
 
@@ -161,6 +168,7 @@ def generate_plan_anchors(
 	dataset_root: Path,
 	output_path: Path,
 	split: str,
+	trajectory_key: str,
 	num_anchors: int,
 	max_trajectories: int | None,
 	seed: int,
@@ -169,7 +177,12 @@ def generate_plan_anchors(
 ) -> np.ndarray:
 	rng = np.random.RandomState(seed)
 	shard_paths = resolve_shard_paths(dataset_root, split)
-	data = load_trajectory_matrix(shard_paths, max_trajectories=max_trajectories, rng=rng)
+	data = load_trajectory_matrix(
+		shard_paths,
+		trajectory_key=trajectory_key,
+		max_trajectories=max_trajectories,
+		rng=rng,
+	)
 	centers, _, inertia = run_kmeans(
 		data=data,
 		num_clusters=num_anchors,
@@ -194,6 +207,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
 	parser.add_argument("--output-path", type=Path, default=DEFAULT_OUTPUT_PATH)
 	parser.add_argument("--split", type=str, default="all")
+	parser.add_argument("--trajectory-key", type=str, default=DEFAULT_TRAJECTORY_KEY)
 	parser.add_argument("--num-anchors", type=int, default=DEFAULT_NUM_ANCHORS)
 	parser.add_argument("--max-trajectories", type=int, default=100000)
 	parser.add_argument("--seed", type=int, default=0)
@@ -211,6 +225,7 @@ def main() -> None:
 		dataset_root=args.dataset_root,
 		output_path=args.output_path,
 		split=args.split,
+		trajectory_key=args.trajectory_key,
 		num_anchors=args.num_anchors,
 		max_trajectories=args.max_trajectories,
 		seed=args.seed,

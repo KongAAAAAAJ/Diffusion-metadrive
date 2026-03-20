@@ -364,13 +364,19 @@ class MetaDriveTransfuserDataset(Dataset):
     def get_sample_metadata(self, idx: int) -> Dict[str, Union[int, str]]:
         shard_idx, sample_idx = self._index[idx]
         shard_path = self.shard_paths[shard_idx]
-        return {
+        metadata = {
             "sample_index": int(idx),
             "shard_index": int(shard_idx),
             "shard_name": shard_path.name,
             "shard_stem": shard_path.stem,
             "local_index": int(sample_idx),
         }
+        shard = self._load_shard(shard_idx)
+        if "trajectory_mode" in shard:
+            value = np.asarray(shard["trajectory_mode"][sample_idx]).reshape(-1)
+            if value.size > 0:
+                metadata["trajectory_mode"] = int(value[0])
+        return metadata
 
     # 用于按索引获取一个样本的特征和目标
     def __getitem__(self, idx):

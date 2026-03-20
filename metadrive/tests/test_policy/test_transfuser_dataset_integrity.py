@@ -51,6 +51,8 @@ def _raw_payload(num_samples: int = 2):
         "lidar": np.zeros((num_samples, 32), dtype=np.float32),
         "ego_state": np.zeros((num_samples, 8), dtype=np.float32),
         "trajectory": np.zeros((num_samples, 8, 3), dtype=np.float32),
+        "trajectory_raw": np.zeros((num_samples, 8, 3), dtype=np.float32),
+        "trajectory_mode": np.zeros((num_samples,), dtype=np.int8),
         "agent_states": np.zeros((num_samples, 16, 5), dtype=np.float32),
         "agent_labels": np.zeros((num_samples, 16), dtype=bool),
         "bev_raster": np.zeros((num_samples, 3, 16, 16), dtype=np.uint8),
@@ -274,3 +276,18 @@ def test_processed_dir_dataset_returns_sample(tmp_path: Path):
 
     assert tuple(features["camera_feature"].shape) == (3, 256, 768)
     assert tuple(targets["bev_semantic_map"].shape) == (128, 256)
+
+
+def test_dataset_metadata_exposes_optional_trajectory_mode(tmp_path: Path):
+    dataset_root = tmp_path / "raw_dataset"
+    shard_name = "shard_000111.npz"
+    payload = _raw_payload(num_samples=2)
+    payload["trajectory_mode"][:] = np.asarray([1, 4], dtype=np.int8)
+    _write_npz(dataset_root / "shards" / shard_name, payload)
+    _write_split(dataset_root, "train", [shard_name])
+
+    dataset = MetaDriveTransfuserDataset(dataset_root, build_transfuser_config("small"), split="train")
+
+    metadata = dataset.get_sample_metadata(1)
+
+    assert metadata["trajectory_mode"] == 4

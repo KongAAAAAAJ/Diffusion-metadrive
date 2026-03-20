@@ -40,12 +40,21 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Dict, List
 
+import matplotlib
 import numpy as np
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from metadrive.component.vehicle.base_vehicle import BaseVehicle
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
 from metadrive.examples.ppo_expert import expert as ppo_expert
-from metadrive.policy.idm_policy import IDMPolicy
+from metadrive.exp_dataset.trajectory_correction import (
+    TrajectoryCorrectionContext,
+    TrajectoryMode,
+    classify_trajectory_mode,
+    correct_trajectory_geometry,
+)
+from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
 from metadrive.policy.diffusion_policy.transfuser_features import BoundingBox2DIndex
 from metadrive.utils import Config
 from metadrive.exp_dataset.metadrive_dataset import split_shards
@@ -91,6 +100,22 @@ class ExpertCollectorConfig:
     val_split_ratio: float = 0.1
     test_split_ratio: float = 0.1
     split_seed: int = 0
+
+    # Trajectory correction
+    trajectory_correction_enabled: bool = True
+    save_raw_trajectory: bool = True
+    mode_classifier_version: str = "v1"
+    centerline_attraction_strength: float = 0.85
+    smoothing_strength: float = 0.25
+    trajectory_visualization_enabled: bool = False
+    trajectory_visualization_window_mode: str = "adaptive"
+    trajectory_visualization_front_margin: float = 25.0
+    trajectory_visualization_rear_margin: float = 8.0
+    trajectory_visualization_lateral_margin: float = 10.0
+    trajectory_visualization_min_span_x: float = 35.0
+    trajectory_visualization_min_span_y: float = 20.0
+    trajectory_visualization_max_span_x: float = 90.0
+    trajectory_visualization_max_span_y: float = 36.0
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +202,56 @@ def _wrap_to_pi(angle: float) -> float:
     return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
+def _safe_lane_ordinal(lane_index) -> int | None:
+    if lane_index is None:
+        return None
+    if isinstance(lane_index, (tuple, list)) and lane_index:
+        candidate = lane_index[-1]
+    else:
+        candidate = lane_index
+    if isinstance(candidate, (int, np.integer)):
+        return int(candidate)
+    return None
+
+
+def _pose_world_to_array(position, heading_theta: float) -> np.ndarray:
+    return np.asarray([position[0], position[1], heading_theta], dtype=np.float32)
+
+
+def _select_reference_lane(vehicle):
+    navigation = getattr(vehicle, "navigation", None)
+    current_ref_lanes = getattr(navigation, "current_ref_lanes", None)
+    if current_ref_lanes:
+        lane_idx = _safe_lane_ordinal(getattr(vehicle, "lane_index", None))
+        if lane_idx is not None and 0 <= lane_idx < len(current_ref_lanes):
+            return current_ref_lanes[lane_idx]
+        if getattr(vehicle, "lane", None) in current_ref_lanes:
+            return vehicle.lane
+        return current_ref_lanes[0]
+    return getattr(vehicle, "lane", None)
+
+
+def _extract_front_object_state(vehicle, ref_lane) -> tuple[float | None, float | None]:
+    if ref_lane is None or not hasattr(vehicle, "lidar"):
+        return None, None
+    try:
+        current_ref_lanes = getattr(vehicle.navigation, "current_ref_lanes", None)
+        all_objects = vehicle.lidar.get_surrounding_objects(vehicle)
+        surrounding_objects = FrontBackObjects.get_find_front_back_objs(
+            all_objects,
+            ref_lane,
+            vehicle.position,
+            max_distance=IDMPolicy.MAX_LONG_DIST,
+            ref_lanes=current_ref_lanes if current_ref_lanes and ref_lane in current_ref_lanes else None,
+        )
+        front_object = surrounding_objects.front_object()
+        front_distance = surrounding_objects.front_min_distance()
+        front_speed = None if front_object is None else float(getattr(front_object, "speed_km_h", 0.0))
+        return float(front_distance), front_speed
+    except Exception:
+        return None, None
+
+
 def _world_to_ego_xy(vehicle, obj_position: np.ndarray) -> np.ndarray:
     dx = obj_position[0] - vehicle.position[0]
     dy = obj_position[1] - vehicle.position[1]
@@ -256,6 +331,23 @@ def build_frame(
     state_275 = np.concatenate([ego_state, other_states, lidar], axis=0).astype(np.float32)
     bev_raster = _to_chw_uint8(topdown_obs)
     agent_states, agent_labels = extract_agent_targets(vehicle, collector_config)
+    reference_lane = _select_reference_lane(vehicle)
+    if reference_lane is not None:
+        ref_long, ref_lat = reference_lane.local_coordinates(vehicle.position)
+        reference_pose_world = _pose_world_to_array(
+            reference_lane.position(ref_long, 0.0),
+            reference_lane.heading_theta_at(ref_long),
+        )
+        reference_lane_index = _safe_lane_ordinal(getattr(reference_lane, "index", None))
+        lane_width = float(getattr(reference_lane, "width", getattr(vehicle.lane, "width", 4.0)))
+    else:
+        ref_long, ref_lat = 0.0, 0.0
+        reference_pose_world = pose_to_array(vehicle)
+        reference_lane_index = _safe_lane_ordinal(getattr(vehicle, "lane_index", None))
+        lane_width = float(getattr(vehicle.lane, "width", 4.0))
+    front_object_distance, front_object_speed_km_h = _extract_front_object_state(vehicle, reference_lane)
+    current_ref_lanes = getattr(vehicle.navigation, "current_ref_lanes", None)
+    next_ref_lanes = getattr(vehicle.navigation, "next_ref_lanes", None)
     return {
         "ego_state": ego_state,
         "other_states": other_states,
@@ -269,7 +361,22 @@ def build_frame(
         "front_camera": _to_hwc_uint8(front_camera_obs),
         "right_camera": _to_hwc_uint8(right_camera_obs),
         "ego_pose_world": pose_to_array(vehicle),
+        "reference_pose_world": reference_pose_world,
         "action": extract_last_action(vehicle),
+        "lane_index": np.asarray(
+            -1 if _safe_lane_ordinal(getattr(vehicle, "lane_index", None)) is None
+            else _safe_lane_ordinal(getattr(vehicle, "lane_index", None)),
+            dtype=np.int16,
+        ),
+        "reference_lane_index": np.asarray(-1 if reference_lane_index is None else reference_lane_index, dtype=np.int16),
+        "reference_longitudinal": np.asarray(ref_long, dtype=np.float32),
+        "reference_lateral": np.asarray(ref_lat, dtype=np.float32),
+        "lane_width": np.asarray(lane_width, dtype=np.float32),
+        "current_ref_lane_count": np.asarray(len(current_ref_lanes) if current_ref_lanes else 1, dtype=np.int16),
+        "next_ref_lane_count": np.asarray(len(next_ref_lanes), dtype=np.int16) if next_ref_lanes is not None else np.asarray(-1, dtype=np.int16),
+        "front_object_distance": np.asarray(-1.0 if front_object_distance is None else front_object_distance, dtype=np.float32),
+        "front_object_speed_km_h": np.asarray(-1.0 if front_object_speed_km_h is None else front_object_speed_km_h, dtype=np.float32),
+        "ego_speed_km_h": np.asarray(float(vehicle.speed_km_h), dtype=np.float32),
     }
 
 
@@ -281,6 +388,9 @@ def build_episode_samples(
     frames: List[Dict[str, np.ndarray]],
     config: ExpertCollectorConfig,
     traffic_density: float,
+    visualization_dir: Path | None = None,
+    episode_index: int = 0,
+    map_geometry: List[Dict[str, np.ndarray]] | None = None,
 ) -> List[Dict[str, np.ndarray]]:
     """Slide a window over episode frames to build labelled training samples."""
     frame_count = len(frames)
@@ -300,13 +410,79 @@ def build_episode_samples(
 
         current_frame = frames[start_idx]
         current_pose = current_frame["ego_pose_world"]
-        trajectory = np.stack(
+        raw_trajectory = np.stack(
             [
                 world_future_to_local(current_pose, frames[start_idx + offset]["ego_pose_world"])
                 for offset in future_offsets
             ],
             axis=0,
-        )  # (trajectory_num_poses, 3)
+        )
+        reference_trajectory = np.stack(
+            [
+                world_future_to_local(current_pose, frames[start_idx + offset]["reference_pose_world"])
+                for offset in future_offsets
+            ],
+            axis=0,
+        )
+        future_lane_indices = tuple(
+            int(frames[start_idx + offset]["reference_lane_index"])
+            if int(frames[start_idx + offset]["reference_lane_index"]) >= 0 else None
+            for offset in future_offsets
+        )
+        current_lane_index = int(current_frame["reference_lane_index"]) if int(current_frame["reference_lane_index"]) >= 0 else None
+        next_ref_lane_count = int(current_frame["next_ref_lane_count"])
+        context = TrajectoryCorrectionContext(
+            current_lane_index=current_lane_index,
+            future_lane_indices=future_lane_indices,
+            current_ref_lane_count=max(int(current_frame["current_ref_lane_count"]), 1),
+            next_ref_lane_count=(next_ref_lane_count if next_ref_lane_count >= 0 else None),
+            lane_width=max(float(current_frame["lane_width"]), 1.0),
+            front_object_distance=(
+                None if float(current_frame["front_object_distance"]) < 0.0 else float(current_frame["front_object_distance"])
+            ),
+            ego_speed_km_h=float(current_frame["ego_speed_km_h"]),
+            front_object_speed_km_h=(
+                None if float(current_frame["front_object_speed_km_h"]) < 0.0 else float(current_frame["front_object_speed_km_h"])
+            ),
+        )
+        trajectory_mode = classify_trajectory_mode(raw_trajectory, context)
+        trajectory = raw_trajectory
+        correction_metrics = {
+            "strong_correction": 0.0,
+            "mean_abs_lateral_before": float(np.mean(np.abs(raw_trajectory[:, 1]))),
+            "mean_abs_lateral_after": float(np.mean(np.abs(raw_trajectory[:, 1]))),
+            "final_abs_lateral_before": float(np.abs(raw_trajectory[-1, 1])),
+            "final_abs_lateral_after": float(np.abs(raw_trajectory[-1, 1])),
+            "mean_point_shift": 0.0,
+        }
+        if bool(config.trajectory_correction_enabled) and config.expert_type == "ppo":
+            trajectory, correction_metrics = correct_trajectory_geometry(
+                raw_trajectory,
+                trajectory_mode,
+                reference_trajectory=reference_trajectory,
+                attraction_strength=config.centerline_attraction_strength,
+                smoothing_strength=config.smoothing_strength,
+            )
+        if (
+            bool(config.trajectory_visualization_enabled)
+            and config.expert_type == "ppo"
+            and visualization_dir is not None
+        ):
+            plot_path = visualization_dir / (
+                f"ep_{episode_index:05d}_sample_{start_idx:05d}_"
+                f"{trajectory_mode.name.lower()}.png"
+            )
+            save_trajectory_visualization(
+                output_path=plot_path,
+                raw_trajectory=raw_trajectory,
+                corrected_trajectory=trajectory,
+                config=config,
+                trajectory_mode=trajectory_mode,
+                episode_index=episode_index,
+                sample_index=start_idx,
+                current_pose=current_pose,
+                map_geometry=map_geometry,
+            )
 
         samples.append(
             {
@@ -322,11 +498,19 @@ def build_episode_samples(
                 "right_camera": current_frame["right_camera"],
                 "state_275": current_frame["state_275"],
                 "trajectory": trajectory,
+                "trajectory_mode": np.asarray(int(trajectory_mode), dtype=np.int8),
+                "trajectory_correction_strength": np.asarray(correction_metrics["strong_correction"], dtype=np.float32),
+                "trajectory_mean_abs_lateral_before": np.asarray(correction_metrics["mean_abs_lateral_before"], dtype=np.float32),
+                "trajectory_mean_abs_lateral_after": np.asarray(correction_metrics["mean_abs_lateral_after"], dtype=np.float32),
+                "trajectory_final_abs_lateral_before": np.asarray(correction_metrics["final_abs_lateral_before"], dtype=np.float32),
+                "trajectory_final_abs_lateral_after": np.asarray(correction_metrics["final_abs_lateral_after"], dtype=np.float32),
                 "ego_pose_world": current_frame["ego_pose_world"],
                 "action": current_frame["action"],
                 "traffic_density": td_arr,
             }
         )
+        if bool(config.save_raw_trajectory):
+            samples[-1]["trajectory_raw"] = raw_trajectory
 
     return samples
 
@@ -340,6 +524,228 @@ def format_eta(seconds: float) -> str:
     if hours > 0:
         return f"{hours:d}h{minutes:02d}m{secs:02d}s"
     return f"{minutes:02d}m{secs:02d}s"
+
+
+def _iter_road_network_lanes(road_network) -> List:
+    graph = getattr(road_network, "graph", None)
+    if graph is None:
+        return []
+
+    lanes = []
+    seen = set()
+
+    def visit(node) -> None:
+        if node is None:
+            return
+        if hasattr(node, "get_polyline") and hasattr(node, "position"):
+            node_id = id(node)
+            if node_id not in seen:
+                seen.add(node_id)
+                lanes.append(node)
+            return
+        if hasattr(node, "lane"):
+            visit(node.lane)
+            return
+        if isinstance(node, dict):
+            for value in node.values():
+                visit(value)
+            return
+        if isinstance(node, (list, tuple, set)):
+            for value in node:
+                visit(value)
+
+    visit(graph)
+    return lanes
+
+
+def _sample_lane_polyline_world(lane, lateral_scale: float, interval: float = 2.0) -> np.ndarray:
+    longs = np.arange(0.0, max(float(lane.length), 0.0), interval, dtype=np.float32)
+    longs = np.concatenate([longs, np.asarray([float(lane.length)], dtype=np.float32)])
+    points = []
+    for longitudinal in longs:
+        lateral = float(lane.width_at(float(longitudinal))) * lateral_scale
+        point = lane.position(float(longitudinal), lateral)
+        points.append(np.asarray(point[:2], dtype=np.float32))
+    return np.stack(points, axis=0)
+
+
+def build_map_visualization_geometry(env: DatasetCollectEnv) -> List[Dict[str, np.ndarray]]:
+    road_network = getattr(env.current_map, "road_network", None)
+    if road_network is None:
+        return []
+    geometry = []
+    for lane in _iter_road_network_lanes(road_network):
+        geometry.append(
+            {
+                "center": _sample_lane_polyline_world(lane, 0.0),
+                "left_boundary": _sample_lane_polyline_world(lane, -0.5),
+                "right_boundary": _sample_lane_polyline_world(lane, 0.5),
+            }
+        )
+    return geometry
+
+
+def resolve_map_visualization_geometry(
+    env: DatasetCollectEnv,
+    visualization_enabled: bool,
+    cached_geometry: List[Dict[str, np.ndarray]] | None,
+) -> List[Dict[str, np.ndarray]] | None:
+    if not visualization_enabled:
+        return None
+    if cached_geometry is not None:
+        return cached_geometry
+    engine = getattr(env, "engine", None)
+    if engine is None or getattr(engine, "current_map", None) is None:
+        return None
+    return build_map_visualization_geometry(env)
+
+
+def world_polyline_to_local(current_pose: np.ndarray, polyline_world: np.ndarray) -> np.ndarray:
+    polyline_world = np.asarray(polyline_world, dtype=np.float32)
+    dx = polyline_world[:, 0] - float(current_pose[0])
+    dy = polyline_world[:, 1] - float(current_pose[1])
+    heading = float(current_pose[2])
+    cos_h = math.cos(heading)
+    sin_h = math.sin(heading)
+    local_x = cos_h * dx + sin_h * dy
+    local_y = -sin_h * dx + cos_h * dy
+    return np.stack([local_x, local_y], axis=1).astype(np.float32, copy=False)
+
+
+def compute_visualization_window(
+    raw_xy: np.ndarray,
+    corrected_xy: np.ndarray,
+    config: ExpertCollectorConfig,
+) -> tuple[float, float, float, float]:
+    all_xy = np.concatenate([raw_xy[:, :2], corrected_xy[:, :2], np.zeros((1, 2), dtype=np.float32)], axis=0)
+    x_min = float(np.min(all_xy[:, 0])) - float(config.trajectory_visualization_rear_margin)
+    x_max = float(np.max(all_xy[:, 0])) + float(config.trajectory_visualization_front_margin)
+    y_min = float(np.min(all_xy[:, 1])) - float(config.trajectory_visualization_lateral_margin)
+    y_max = float(np.max(all_xy[:, 1])) + float(config.trajectory_visualization_lateral_margin)
+
+    span_x = x_max - x_min
+    span_y = y_max - y_min
+    min_span_x = float(config.trajectory_visualization_min_span_x)
+    min_span_y = float(config.trajectory_visualization_min_span_y)
+    max_span_x = float(config.trajectory_visualization_max_span_x)
+    max_span_y = float(config.trajectory_visualization_max_span_y)
+
+    if span_x < min_span_x:
+        center_x = 0.5 * (x_min + x_max)
+        x_min = center_x - 0.5 * min_span_x
+        x_max = center_x + 0.5 * min_span_x
+    if span_y < min_span_y:
+        center_y = 0.5 * (y_min + y_max)
+        y_min = center_y - 0.5 * min_span_y
+        y_max = center_y + 0.5 * min_span_y
+
+    if (x_max - x_min) > max_span_x:
+        center_x = 0.5 * (x_min + x_max)
+        x_min = center_x - 0.5 * max_span_x
+        x_max = center_x + 0.5 * max_span_x
+    if (y_max - y_min) > max_span_y:
+        center_y = 0.5 * (y_min + y_max)
+        y_min = center_y - 0.5 * max_span_y
+        y_max = center_y + 0.5 * max_span_y
+
+    return x_min, x_max, y_min, y_max
+
+
+def polyline_intersects_window(
+    polyline_xy: np.ndarray,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+) -> bool:
+    polyline_xy = np.asarray(polyline_xy, dtype=np.float32)
+    if polyline_xy.size == 0:
+        return False
+    return not (
+        float(np.max(polyline_xy[:, 0])) < x_min or
+        float(np.min(polyline_xy[:, 0])) > x_max or
+        float(np.max(polyline_xy[:, 1])) < y_min or
+        float(np.min(polyline_xy[:, 1])) > y_max
+    )
+
+
+def save_trajectory_visualization(
+    output_path: Path,
+    raw_trajectory: np.ndarray,
+    corrected_trajectory: np.ndarray,
+    config: ExpertCollectorConfig,
+    trajectory_mode: TrajectoryMode,
+    episode_index: int,
+    sample_index: int,
+    current_pose: np.ndarray,
+    map_geometry: List[Dict[str, np.ndarray]] | None = None,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_xy = np.asarray(raw_trajectory[:, :2], dtype=np.float32)
+    corrected_xy = np.asarray(corrected_trajectory[:, :2], dtype=np.float32)
+    x_min, x_max, y_min, y_max = compute_visualization_window(raw_xy, corrected_xy, config)
+
+    plt.figure(figsize=(6, 4))
+    if map_geometry:
+        for lane_geometry in map_geometry:
+            center_xy = world_polyline_to_local(current_pose, lane_geometry["center"])
+            left_xy = world_polyline_to_local(current_pose, lane_geometry["left_boundary"])
+            right_xy = world_polyline_to_local(current_pose, lane_geometry["right_boundary"])
+            if not (
+                polyline_intersects_window(center_xy, x_min, x_max, y_min, y_max)
+                or polyline_intersects_window(left_xy, x_min, x_max, y_min, y_max)
+                or polyline_intersects_window(right_xy, x_min, x_max, y_min, y_max)
+            ):
+                continue
+            plt.plot(left_xy[:, 0], left_xy[:, 1], color="#808080", linewidth=0.9, alpha=0.4, zorder=1)
+            plt.plot(right_xy[:, 0], right_xy[:, 1], color="#808080", linewidth=0.9, alpha=0.4, zorder=1)
+            plt.plot(
+                center_xy[:, 0], center_xy[:, 1],
+                color="#caa64b", linewidth=0.8, alpha=0.45, linestyle="--", zorder=1
+            )
+    plt.plot(raw_xy[:, 0], raw_xy[:, 1], marker="o", linewidth=2, label="ppo_raw")
+    plt.plot(corrected_xy[:, 0], corrected_xy[:, 1], marker="o", linewidth=2, label="corrected")
+    plt.scatter([0.0], [0.0], c="black", s=30, label="ego_start")
+    plt.xlim(x_min, x_max)
+    plt.ylim(y_min, y_max)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.title(f"ep={episode_index} sample={sample_index} mode={trajectory_mode.name.lower()}")
+    plt.axis("equal")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close()
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"Unable to parse boolean value: {value}")
+
+
+def trajectory_mode_name(mode_value: int) -> str:
+    return TrajectoryMode(int(mode_value)).name.lower()
+
+
+def build_trajectory_mode_summary(mode_counts: Dict[str, int], total_samples: int) -> Dict[str, Dict[str, float]]:
+    denom = max(int(total_samples), 1)
+    return {
+        mode_name: {
+            "count": int(count),
+            "ratio": float(count) / float(denom),
+        }
+        for mode_name, count in mode_counts.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -398,9 +804,14 @@ class ShardWriter:
 def rollout_episode(
     env: DatasetCollectEnv,
     config: ExpertCollectorConfig,
-) -> List[Dict[str, np.ndarray]]:
+) -> tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]] | None]:
     """Drive one episode with the selected expert; return raw frame list."""
     obs_dict, _ = env.reset()
+    map_geometry = resolve_map_visualization_geometry(
+        env=env,
+        visualization_enabled=bool(config.trajectory_visualization_enabled),
+        cached_geometry=None,
+    )
     agent_id = list(obs_dict.keys())[0]  # single-agent env → always one key
 
     frames: List[Dict[str, np.ndarray]] = []
@@ -444,7 +855,7 @@ def rollout_episode(
             done = True
         step += 1
 
-    return frames
+    return frames, map_geometry
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +869,7 @@ def write_manifest(
     total_samples: int,
     total_episodes: int,
     split_summary: Dict,
+    correction_summary: Dict,
 ) -> None:
     manifest = {
         "dataset_name": config.dataset_name,
@@ -469,6 +881,7 @@ def write_manifest(
         "map": "hybrid_fixed (SSXCOCSS)",
         "traffic_density_range": [config.traffic_density_min, config.traffic_density_max],
         "splits": {name: len(shards) for name, shards in split_summary.items()},
+        "trajectory_correction": correction_summary,
         "config": {
             k: (str(v) if isinstance(v, Path) else v)
             for k, v in asdict(config).items()
@@ -487,8 +900,11 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     dataset_root = config.output_root / config.dataset_name
     shard_dir = dataset_root / "shards"
     report_dir = dataset_root / "reports"
+    visualization_dir = report_dir / "trajectory_visualizations"
     shard_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
+    if bool(config.trajectory_visualization_enabled):
+        visualization_dir.mkdir(parents=True, exist_ok=True)
 
     rng = np.random.RandomState(config.start_seed)
     writer = ShardWriter(shard_dir, config.samples_per_shard)
@@ -496,6 +912,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     # Create a single env with the default hybrid map (num_scenarios=1 ensures
     # the same map is used on every reset; only traffic_density is updated).
     env = DatasetCollectEnv({"use_render": False, "num_scenarios": 1, "image_on_cuda": True})
+    map_geometry = None
 
     # 保存环境参数配置
     config_path = dataset_root / "env_config.json"
@@ -506,6 +923,14 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     total_episodes = 0
     total_env_steps = 0
     wall_start = time.perf_counter()
+    mode_counts: Dict[str, int] = {mode.name.lower(): 0 for mode in TrajectoryMode}
+    correction_accumulator = {
+        "mean_abs_lateral_before": 0.0,
+        "mean_abs_lateral_after": 0.0,
+        "final_abs_lateral_before": 0.0,
+        "final_abs_lateral_after": 0.0,
+        "strong_correction_fraction": 0.0,
+    }
 
     try:
         while total_samples < config.target_samples:
@@ -514,12 +939,32 @@ def run_collection(config: ExpertCollectorConfig) -> None:
             traffic_density = sample_traffic_density(rng, config)
             env.config["traffic_density"] = traffic_density
 
-            frames = rollout_episode(env, config)
-            samples = build_episode_samples(frames, config, traffic_density)
+            frames, episode_map_geometry = rollout_episode(env, config)
+            map_geometry = resolve_map_visualization_geometry(
+                env=env,
+                visualization_enabled=bool(config.trajectory_visualization_enabled),
+                cached_geometry=(map_geometry if map_geometry is not None else episode_map_geometry),
+            )
+            samples = build_episode_samples(
+                frames,
+                config,
+                traffic_density,
+                visualization_dir=visualization_dir if bool(config.trajectory_visualization_enabled) else None,
+                episode_index=total_episodes + 1,
+                map_geometry=map_geometry,
+            )
             writer.add_samples(samples)
             total_samples += len(samples)
             total_episodes += 1
             total_env_steps += len(frames)
+            for sample in samples:
+                mode_name = trajectory_mode_name(int(sample["trajectory_mode"]))
+                mode_counts[mode_name] += 1
+                correction_accumulator["mean_abs_lateral_before"] += float(sample["trajectory_mean_abs_lateral_before"])
+                correction_accumulator["mean_abs_lateral_after"] += float(sample["trajectory_mean_abs_lateral_after"])
+                correction_accumulator["final_abs_lateral_before"] += float(sample["trajectory_final_abs_lateral_before"])
+                correction_accumulator["final_abs_lateral_after"] += float(sample["trajectory_final_abs_lateral_after"])
+                correction_accumulator["strong_correction_fraction"] += float(sample["trajectory_correction_strength"])
 
             elapsed = max(time.perf_counter() - wall_start, 1e-6)
             step_per_sec = total_env_steps / elapsed
@@ -544,9 +989,26 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         test_ratio=config.test_split_ratio,
         seed=config.split_seed,
     )
-    write_manifest(config, dataset_root, report_dir, total_samples, total_episodes, split_summary)
+    denom = max(total_samples, 1)
+    trajectory_mode_summary = build_trajectory_mode_summary(mode_counts, total_samples)
+    correction_summary = {
+        "enabled": bool(config.trajectory_correction_enabled),
+        "mode_counts": mode_counts,
+        "mode_summary": trajectory_mode_summary,
+        "mean_abs_lateral_before": correction_accumulator["mean_abs_lateral_before"] / denom,
+        "mean_abs_lateral_after": correction_accumulator["mean_abs_lateral_after"] / denom,
+        "final_abs_lateral_before": correction_accumulator["final_abs_lateral_before"] / denom,
+        "final_abs_lateral_after": correction_accumulator["final_abs_lateral_after"] / denom,
+        "strong_correction_fraction": correction_accumulator["strong_correction_fraction"] / denom,
+    }
+    write_manifest(config, dataset_root, report_dir, total_samples, total_episodes, split_summary, correction_summary)
 
     print("Splits: " + ", ".join(f"{k}={len(v)} shards" for k, v in split_summary.items()))
+    mode_stats_text = ", ".join(
+        f"{mode}={stats['count']} ({stats['ratio']:.1%})"
+        for mode, stats in trajectory_mode_summary.items()
+    )
+    print(f"Trajectory modes: {mode_stats_text}")
     print(f"Done. samples={total_samples}  output={dataset_root}")
 
     # TODO: 添加提取anchors过程
@@ -565,7 +1027,7 @@ def parse_args() -> ExpertCollectorConfig:
         default = getattr(config, f.name)
         opts: dict = {"default": default, "dest": f.name}
         if isinstance(default, bool):
-            opts["action"] = "store_true"
+            opts["type"] = _coerce_bool
         elif isinstance(default, Path):
             opts["type"] = Path
         else:

@@ -116,6 +116,7 @@ def test_summarize_open_loop_records_tracks_mode_hist():
             "pred_final_xy": [1.0, 0.5],
             "gt_final_xy": [1.0, 0.2],
             "mode_idx": 7,
+            "trajectory_mode": 2,
         },
         {
             "trajectory_l1": 0.2,
@@ -126,10 +127,12 @@ def test_summarize_open_loop_records_tracks_mode_hist():
             "pred_final_xy": [1.0, -0.2],
             "gt_final_xy": [1.0, -0.1],
             "mode_idx": 3,
+            "trajectory_mode": 2,
         },
     ])
 
     assert summary["mode_hist"] == {"3": 1, "7": 1}
+    assert summary["trajectory_mode_hist"] == {"2": 2}
     assert "7" in summary["mode_final_y_mean"]
     assert summary["ade_mean"] == pytest.approx(0.15)
     assert summary["fde_mean"] == pytest.approx(0.3)
@@ -194,3 +197,4 @@ def test_evaluate_open_loop_writes_summary_and_images(tmp_path: Path):
     assert "gt_trajectory_xy" in samples[0]
     assert "ade" in samples[0]
     assert "fde" in samples[0]
+    assert "trajectory_mode" in samples[0]

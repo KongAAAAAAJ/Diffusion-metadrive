@@ -137,6 +137,7 @@ def write_open_loop_csv(records: List[Dict], output_path: Path) -> None:
         "shard_name",
         "local_index",
         "mode_idx",
+        "trajectory_mode",
         "pred_final_x",
         "pred_final_y",
         "gt_final_x",
@@ -157,6 +158,7 @@ def write_open_loop_csv(records: List[Dict], output_path: Path) -> None:
                     "shard_name": record["shard_name"],
                     "local_index": record["local_index"],
                     "mode_idx": record["mode_idx"],
+                    "trajectory_mode": record.get("trajectory_mode"),
                     "pred_final_x": record["pred_final_xy"][0],
                     "pred_final_y": record["pred_final_xy"][1],
                     "gt_final_x": record["gt_final_xy"][0],
@@ -184,6 +186,7 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
             "rightward_bias_fraction": 0.0,
             "mode_hist": {},
             "mode_final_y_mean": {},
+            "trajectory_mode_hist": {},
         }
     traj_l1 = np.asarray([record["trajectory_l1"] for record in records], dtype=np.float64)
     final_l2 = np.asarray([record["trajectory_final_l2"] for record in records], dtype=np.float64)
@@ -193,6 +196,7 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
     pred_y = np.asarray([record["pred_final_xy"][1] for record in records], dtype=np.float64)
     gt_y = np.asarray([record["gt_final_xy"][1] for record in records], dtype=np.float64)
     mode_hist = Counter(int(record["mode_idx"]) for record in records if record["mode_idx"] is not None)
+    trajectory_mode_hist = Counter(int(record["trajectory_mode"]) for record in records if record.get("trajectory_mode") is not None)
     mode_y = defaultdict(list)
     for record in records:
         if record["mode_idx"] is not None:
@@ -209,6 +213,7 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
         "rightward_bias_fraction": float((pred_y > 0).mean()),
         "mode_hist": {str(key): int(value) for key, value in sorted(mode_hist.items())},
         "mode_final_y_mean": {str(key): float(np.mean(value)) for key, value in sorted(mode_y.items())},
+        "trajectory_mode_hist": {str(key): int(value) for key, value in sorted(trajectory_mode_hist.items())},
     }
 
 
@@ -274,6 +279,7 @@ def evaluate_open_loop(
             record = {
                 **metadata,
                 "mode_idx": mode_idx,
+                "trajectory_mode": metadata.get("trajectory_mode"),
                 "pred_final_xy": [float(pred_traj[-1, 0]), float(pred_traj[-1, 1])],
                 "gt_final_xy": [float(gt_traj[-1, 0]), float(gt_traj[-1, 1])],
                 "pred_trajectory_xy": np.asarray(pred_traj[:, :2], dtype=np.float64).tolist(),

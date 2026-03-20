@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/checkpoints/run_1/diffusion-epoch=98.ckpt}"
-EPISODES="${EPISODES:-1}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_3/checkpoints/diffusion-epoch=97.ckpt}"
+EPISODES="${EPISODES:-3}"
 RENDER="${RENDER:-1}"
 CONTROLLER_TYPE="${CONTROLLER_TYPE:-stabilized}"
 PRINT_TRAJECTORY_DEBUG="${PRINT_TRAJECTORY_DEBUG:-1}"

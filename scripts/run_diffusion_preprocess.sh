@@ -4,8 +4,8 @@ set -euo pipefail
 # Optional offline feature caching only. Training does not require this step by default.
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-INPUT_ROOT="${INPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/meta_data_idm}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/meta_data_idm_pre_tiny}"
+INPUT_ROOT="${INPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_ppo}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_ppo_preprocessed_small_dir}"
 MODEL_SIZE="${MODEL_SIZE:-small}"
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-dir}"
 

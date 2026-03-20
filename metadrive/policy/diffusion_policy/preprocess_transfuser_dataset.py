@@ -27,6 +27,15 @@ PROCESSED_FIELDS = (
     "agent_labels",
     "bev_semantic_map",
 )
+OPTIONAL_PASSTHROUGH_FIELDS = (
+    "trajectory_mode",
+    "trajectory_raw",
+    "trajectory_correction_strength",
+    "trajectory_mean_abs_lateral_before",
+    "trajectory_mean_abs_lateral_after",
+    "trajectory_final_abs_lateral_before",
+    "trajectory_final_abs_lateral_after",
+)
 
 
 def parse_args():
@@ -144,7 +153,11 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
         processed["agent_labels"].append(tensor_to_numpy(targets["agent_labels"]).astype(bool))
         processed["bev_semantic_map"].append(tensor_to_numpy(targets["bev_semantic_map"]).astype(np.uint8))
 
-    return {key: np.stack(values, axis=0) for key, values in processed.items()}
+    payload = {key: np.stack(values, axis=0) for key, values in processed.items()}
+    for field in OPTIONAL_PASSTHROUGH_FIELDS:
+        if field in shard:
+            payload[field] = np.asarray(shard[field])
+    return payload
 
 
 def output_shard_path(output_root: Path, shard_name: str, output_format: str) -> Path:

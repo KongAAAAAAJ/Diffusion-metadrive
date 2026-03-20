@@ -87,6 +87,33 @@ def test_run_dataset_collect_script_supports_idm_expert():
     assert "metadrive_idm_500_seed10" in stdout
 
 
+def test_run_dataset_collect_script_supports_trajectory_visualization():
+    stdout = _run_script(
+        "run_dataset_collect.sh",
+        PYTHON_BIN="/bin/echo",
+        TRAJECTORY_VISUALIZATION_ENABLED="1",
+        TRAJECTORY_VISUALIZATION_FRONT_MARGIN="30",
+        TRAJECTORY_VISUALIZATION_LATERAL_MARGIN="12",
+    )
+
+    assert "--trajectory-visualization-enabled 1" in stdout
+    assert "--trajectory-visualization-front-margin 30" in stdout
+    assert "--trajectory-visualization-lateral-margin 12" in stdout
+
+
+def test_run_abstract_anchors_script_supports_trajectory_key():
+    stdout = _run_script(
+        "run_abstract_anchors.sh",
+        PYTHON_BIN="/bin/echo",
+        EXPERT_NAME="ppo",
+        TRAJECTORY_KEY="trajectory_raw",
+    )
+
+    assert "metadrive_ppo" in stdout
+    assert "--trajectory-key trajectory_raw" in stdout
+    assert "metadrive_anchors_ppo.npy" in stdout
+
+
 def test_run_diffusion_preprocess_and_train_defaults_match_readme_contract():
     preprocess_stdout = _run_script("run_diffusion_preprocess.sh", PYTHON_BIN="/bin/echo")
     train_stdout = _run_script("run_diffusion_train.sh", PYTHON_BIN="/bin/echo")
