@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 
 def get_hazard_scenario_configs() -> List[dict]:
@@ -10,7 +10,7 @@ def get_hazard_scenario_configs() -> List[dict]:
             "name": "static_obstacle_detour",
             "description": "Static lane blockage requiring platoon detour or compression.",
             "env_overrides": {
-                "traffic_density": 0.04,
+                "traffic_density": 0.15,
                 "accident_prob": 0.15,
             },
         },
@@ -31,3 +31,12 @@ def get_hazard_scenario_configs() -> List[dict]:
             },
         },
     ]
+
+
+def get_hazard_scenario_config(name: Optional[str]) -> Optional[dict]:
+    if name is None:
+        return None
+    for config in get_hazard_scenario_configs():
+        if config["name"] == name:
+            return config
+    raise ValueError(f"Unknown hazard scenario: {name}")

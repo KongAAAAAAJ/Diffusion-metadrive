@@ -34,24 +34,25 @@
 - Phase 1 task `1.4` acceptance passed on the `meta_drive` environment
 - Phase 1 task `1.5` rollout acceptance passed on the `meta_drive` environment
 - Phase 1 task `1.5` rollout acceptance re-validated on the default `SSXCOCSS` map with background traffic
+- Phase 1 task `1.6` info field enrichment acceptance passed on the `meta_drive` environment
+- Phase 1 task `1.7` hazard scenario integration acceptance passed on the `meta_drive` environment
 
 ### In Progress
 
-- Finishing Phase 1 remaining tasks `1.6~1.7`
+- Preparing handoff from completed `Phase 1` to the next phase
 
 ### Blockers
 
-- `Phase 1` info field enrichment (`1.6`) and hazard integration (`1.7`) are still pending
+- No active blockers for `Phase 1`
 
 ### Next Step
 
-- Implement `1.6` required info fields for Phase 5 reward wiring
-- Implement `1.7` hazard scenario integration into `PlatoonEnv`
+- Start `Phase 2` data collection work or consume `Phase 1` outputs in `Phase 5/6`
 
 ## Phase Checklist
 
 - `Phase 0`: `completed`
-- `Phase 1`: `in_progress`
+- `Phase 1`: `completed`
 - `Phase 2`: `not_started`
 - `Phase 3`: `not_started`
 - `Phase 4`: `not_started`
@@ -186,6 +187,33 @@
   - `phase1.md` 中旧的 `1.5` 实际结果仍是此前短直道配置下的日志；根据要求本次未改文档，只在执行日志中记录新的严格验收结果
   - `1.6~1.7` 仍待完成
 
+### 2026-03-22 — Phase 1 tasks 1.6~1.7 completion
+
+- 修改目标:
+  完成 `1.6` 的奖励函数对接字段补充，以及 `1.7` 的 `hazard_scenario` 到 `PlatoonEnv` 的真实集成，并按 `phase1.md` 要求完成验收
+- 涉及文件:
+  - `envs/platoon_env.py`
+  - `scenarios/hazard_scenarios.py`
+  - `tests/acceptance/test_phase1_task6.py`
+  - `tests/acceptance/test_phase1_task7.py`
+  - `AGENTS.md`
+  - `EXECUTE_LOG.md`
+- 关键设计选择:
+  - `info` 中新增并真实计算 `progress`、`jerk`、`delta_steering`、`speed_km_h`
+  - `progress` 采用“同 lane 用纵向坐标差、跨 lane 用平面位移兜底”的方式，保证 3 步 IDM rollout 后为正
+  - `jerk` 与 `delta_steering` 基于连续两步低层控制动作差分得到，确保为有限 float
+  - `hazard_scenario` 在环境初始化前解析并应用 `env_overrides`，不再把该字段错误透传给 MetaDrive 原生配置
+  - `static_obstacle_detour` 的 `traffic_density` 按 `phase1.md` 验收要求固定为 `0.15`
+- 最小测试方式:
+  - `python -m py_compile envs/platoon_env.py scenarios/hazard_scenarios.py tests/acceptance/test_phase1_task6.py tests/acceptance/test_phase1_task7.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase1_task6.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase1_task7.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase1_task3.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase1_task5.py -v`
+- 风险 / 未决事项:
+  - `Phase 1` 现已完成，后续若进入 `Phase 5` 还需要继续验证这些 `info` 字段是否满足奖励数值稳定性，而不仅是字段存在性
+  - `EXECUTE_LOG.md` 中保留了 `1.5` 的两次不同验收背景记录，后续引用结果时应优先使用默认地图+背景交通的那次
+
 ## Open Decisions
 
 - `PlatoonEnv` 的真实 MetaDrive 后端依赖需要如何在当前环境中稳定导入并运行
@@ -198,8 +226,8 @@
   2. `docs/problem_definition.md`
   3. `docs/io_spec.md`
   4. `docs/metrics_spec.md`
-- 当前已完成 Phase 1 的 `1.1-1.5`，并已在 `meta_drive` 解释器下真实跑过 acceptance
-- 下一个最优先动作是推进 `1.6`，补全 `info` 字段到 Phase 5 奖励函数所需格式
+- 当前已完成 Phase 1 的 `1.1-1.7`，并已在 `meta_drive` 解释器下真实跑过 acceptance
+- 下一个最优先动作是切到 `Phase 2`，或直接消费 `Phase 1` 的 `info` 字段与 hazard 场景接口推进 `Phase 5/6`
 - 执行 Phase 1 后续修复时，必须继续同步更新：
   - `AGENTS.md` 的完成标记
   - `EXECUTE_LOG.md` 的 `Current Status` 和 `Task Log`

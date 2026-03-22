@@ -9,7 +9,7 @@
 | Phase | 文件 | 状态 | 摘要 |
 |-------|------|------|------|
 | 0 | [`docs/phases/phase0.md`](docs/phases/phase0.md) | ✅ 完成 | 接口冻结 |
-| 1 | [`docs/phases/phase1.md`](docs/phases/phase1.md) | 🔶 进行中 | 编队环境 (1.1~1.5✅, 1.6~1.7☐) |
+| 1 | [`docs/phases/phase1.md`](docs/phases/phase1.md) | ✅ 完成 | 编队环境 (1.1~1.7✅) |
 | 2 | [`docs/phases/phase2.md`](docs/phases/phase2.md) | ☐ 待开始 | 数据采集 |
 | 3 | [`docs/phases/phase3.md`](docs/phases/phase3.md) | ☐ 待开始 | 单车训练 |
 | 4 | [`docs/phases/phase4.md`](docs/phases/phase4.md) | ☐ 待开始 | 编队 Planner |

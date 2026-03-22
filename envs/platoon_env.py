@@ -21,6 +21,7 @@ except Exception as exc:  # pragma: no cover - import errors are surfaced at run
 
 
 from evaluation.platoon_metrics import PlatoonMetrics
+from scenarios.hazard_scenarios import get_hazard_scenario_config
 
 
 def _wrap_to_pi(angle: float) -> float:
@@ -84,13 +85,15 @@ class PlatoonEnv(BaseMultiEnv):
                 "PlatoonEnv requires the full MetaDrive runtime. "
                 "Please install/run the AGENTS.md environment dependencies before using this environment."
             ) from _METADRIVE_IMPORT_ERROR
-        merged = self._merge_config(config)
+        merged = self._resolve_hazard_scenario(self._merge_config(config))
         self._env_overrides = self._extract_env_overrides(merged)
         self._runtime_flags = self._extract_runtime_flags(merged)
         self.platoon_config = PlatoonEnvConfig(**self._extract_platoon_config(merged))
         self._metrics = PlatoonMetrics(formation_error_threshold=self.platoon_config.formation_error_threshold)
         self._last_info: dict[str, dict] = {}
         self._agent_ids = [f"agent{i}" for i in range(self.platoon_config.num_agents)]
+        self._last_actions: dict[str, np.ndarray] = {}
+        self._last_progress_refs: dict[str, tuple[object, float, np.ndarray]] = {}
         super().__init__(config=self._build_metadrive_config())
 
     @classmethod
@@ -99,6 +102,15 @@ class PlatoonEnv(BaseMultiEnv):
         if config:
             defaults.update(dict(config))
         return defaults
+
+    @staticmethod
+    def _resolve_hazard_scenario(config: Mapping[str, object]) -> dict[str, object]:
+        resolved = dict(config)
+        scenario_name = resolved.get("hazard_scenario", None)
+        scenario_config = get_hazard_scenario_config(scenario_name)
+        if scenario_config is not None:
+            resolved.update(dict(scenario_config.get("env_overrides", {})))
+        return resolved
 
     @staticmethod
     def _extract_platoon_config(config: Mapping[str, object]) -> dict[str, object]:
@@ -136,12 +148,12 @@ class PlatoonEnv(BaseMultiEnv):
             "vehicle_length_m",
             "formation_error_threshold",
         }
-        runtime_only_keys = {"enable_idm_lane_change"}
+        runtime_only_keys = {"enable_idm_lane_change", "hazard_scenario"}
         return {key: value for key, value in config.items() if key not in platoon_keys and key not in runtime_only_keys}
 
     @staticmethod
     def _extract_runtime_flags(config: Mapping[str, object]) -> dict[str, object]:
-        runtime_only_keys = {"enable_idm_lane_change"}
+        runtime_only_keys = {"enable_idm_lane_change", "hazard_scenario"}
         return {key: value for key, value in config.items() if key in runtime_only_keys}
 
     def _build_metadrive_config(self) -> dict:
@@ -190,6 +202,12 @@ class PlatoonEnv(BaseMultiEnv):
         if "enable_idm_lane_change" in self._runtime_flags:
             self.config["enable_idm_lane_change"] = bool(self._runtime_flags["enable_idm_lane_change"])
             self.engine.global_config["enable_idm_lane_change"] = bool(self._runtime_flags["enable_idm_lane_change"])
+        self._last_actions = {
+            agent_id: np.zeros((2,), dtype=np.float32) for agent_id in self._agent_ids
+        }
+        self._last_progress_refs = {
+            agent_id: self._capture_progress_reference(agent_id) for agent_id in self._agent_ids
+        }
         self._last_info = {}
         return self._augment_observations(obs)
 
@@ -229,7 +247,7 @@ class PlatoonEnv(BaseMultiEnv):
 
     def low_level_step(self, actions: Dict[str, np.ndarray], control_mode: str = "low_level"):
         obs, reward, terminated, truncated, info = super().step(actions)
-        info = self._build_info_dict(control_mode, base_info=info)
+        info = self._build_info_dict(control_mode, actions=actions, base_info=info)
         terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
         obs = self._augment_observations(obs)
         self._metrics.update(info)
@@ -277,16 +295,62 @@ class PlatoonEnv(BaseMultiEnv):
         )
         return terminated, truncated
 
-    def _build_info_dict(self, control_mode: str, base_info: Optional[Mapping[str, dict]] = None) -> dict[str, dict]:
+    def _capture_progress_reference(self, agent_id: str) -> tuple[object, float, np.ndarray]:
+        vehicle = self.agents.get(agent_id)
+        if vehicle is None:
+            return (None, 0.0, np.zeros((2,), dtype=np.float32))
+        lane = getattr(vehicle, "lane", None)
+        if lane is not None:
+            longitudinal = float(lane.local_coordinates(vehicle.position)[0])
+        else:
+            longitudinal = 0.0
+        return (lane, longitudinal, np.asarray(vehicle.position[:2], dtype=np.float32))
+
+    def _compute_progress(self, agent_id: str) -> float:
+        vehicle = self.agents.get(agent_id)
+        if vehicle is None:
+            return 0.0
+        previous_lane, previous_s, previous_xy = self._last_progress_refs.get(
+            agent_id, (None, 0.0, np.asarray(vehicle.position[:2], dtype=np.float32))
+        )
+        lane = getattr(vehicle, "lane", None)
+        current_xy = np.asarray(vehicle.position[:2], dtype=np.float32)
+        if lane is not None and previous_lane is lane:
+            current_s = float(lane.local_coordinates(vehicle.position)[0])
+            progress = current_s - float(previous_s)
+        else:
+            progress = float(np.linalg.norm(current_xy - previous_xy))
+            current_s = float(lane.local_coordinates(vehicle.position)[0]) if lane is not None else 0.0
+        self._last_progress_refs[agent_id] = (lane, current_s, current_xy)
+        return float(progress)
+
+    def _build_info_dict(
+        self,
+        control_mode: str,
+        actions: Mapping[str, np.ndarray],
+        base_info: Optional[Mapping[str, dict]] = None,
+    ) -> dict[str, dict]:
         info = {}
         min_gap = self._compute_min_gap()
         active_ids = list(self.agents.keys())
         for agent_id in active_ids:
             agent_info = dict((base_info or {}).get(agent_id, {}))
+            current_action = np.asarray(actions.get(agent_id, np.zeros((2,), dtype=np.float32)), dtype=np.float32).reshape(2,)
+            previous_action = self._last_actions.get(agent_id, np.zeros((2,), dtype=np.float32))
+            delta_steering = float(current_action[0] - previous_action[0])
+            jerk = float(current_action[1] - previous_action[1])
             agent_info["formation_relation_state"] = self.get_formation_relation_state(agent_id)
             agent_info["formation_error"] = self._compute_agent_formation_error(agent_id)
             agent_info["min_gap"] = min_gap
             agent_info["control_mode"] = control_mode
+            agent_info["crash"] = bool(agent_info.get("crash", False))
+            agent_info["arrive_dest"] = bool(agent_info.get("arrive_dest", False))
+            agent_info["out_of_road"] = bool(agent_info.get("out_of_road", False))
+            agent_info["progress"] = float(self._compute_progress(agent_id))
+            agent_info["jerk"] = jerk
+            agent_info["delta_steering"] = delta_steering
+            agent_info["speed_km_h"] = float(self._agent_speed_km_h(agent_id))
+            self._last_actions[agent_id] = current_action
             info[agent_id] = agent_info
         return info
 

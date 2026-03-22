@@ -1,5 +1,5 @@
 WARNING:matplotlib:/home/kong/.config/matplotlib is not a writable directory
-WARNING:matplotlib:Matplotlib created a temporary cache directory at /tmp/matplotlib-y_vtskjk because there was an issue with the default path (/home/kong/.config/matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+WARNING:matplotlib:Matplotlib created a temporary cache directory at /tmp/matplotlib-z021fp9_ because there was an issue with the default path (/home/kong/.config/matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
 INFO:matplotlib.font_manager:Failed to extract font properties from /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf: In FT2Font: Can not load face (unknown file format; error code 0x2)
 INFO:matplotlib.font_manager:generated new fontManager
 /home/kong/anaconda3/envs/meta_drive/lib/python3.9/site-packages/pygame/pkgdata.py:25: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
