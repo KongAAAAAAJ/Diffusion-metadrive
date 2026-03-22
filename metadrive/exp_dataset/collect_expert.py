@@ -360,6 +360,8 @@ def build_frame(
         "left_camera": _to_hwc_uint8(left_camera_obs),
         "front_camera": _to_hwc_uint8(front_camera_obs),
         "right_camera": _to_hwc_uint8(right_camera_obs),
+        "camera": _to_hwc_uint8(front_camera_obs),
+        "rgb": _to_hwc_uint8(front_camera_obs),
         "ego_pose_world": pose_to_array(vehicle),
         "reference_pose_world": reference_pose_world,
         "action": extract_last_action(vehicle),
@@ -496,6 +498,8 @@ def build_episode_samples(
                 "left_camera": current_frame["left_camera"],
                 "front_camera": current_frame["front_camera"],
                 "right_camera": current_frame["right_camera"],
+                "camera": current_frame["camera"],
+                "rgb": current_frame["rgb"],
                 "state_275": current_frame["state_275"],
                 "trajectory": trajectory,
                 "trajectory_mode": np.asarray(int(trajectory_mode), dtype=np.int8),
@@ -870,6 +874,7 @@ def write_manifest(
     total_episodes: int,
     split_summary: Dict,
     correction_summary: Dict,
+    collection_wall_time_sec: float,
 ) -> None:
     manifest = {
         "dataset_name": config.dataset_name,
@@ -880,6 +885,7 @@ def write_manifest(
         "expert_type": config.expert_type,
         "map": "hybrid_fixed (SSXCOCSS)",
         "traffic_density_range": [config.traffic_density_min, config.traffic_density_max],
+        "collection_wall_time_sec": float(collection_wall_time_sec),
         "splits": {name: len(shards) for name, shards in split_summary.items()},
         "trajectory_correction": correction_summary,
         "config": {
@@ -982,6 +988,8 @@ def run_collection(config: ExpertCollectorConfig) -> None:
 
     writer.close()
 
+    collection_wall_time_sec = time.perf_counter() - wall_start
+
     split_summary = split_shards(
         dataset_root=dataset_root,
         train_ratio=config.train_split_ratio,
@@ -1001,7 +1009,16 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         "final_abs_lateral_after": correction_accumulator["final_abs_lateral_after"] / denom,
         "strong_correction_fraction": correction_accumulator["strong_correction_fraction"] / denom,
     }
-    write_manifest(config, dataset_root, report_dir, total_samples, total_episodes, split_summary, correction_summary)
+    write_manifest(
+        config,
+        dataset_root,
+        report_dir,
+        total_samples,
+        total_episodes,
+        split_summary,
+        correction_summary,
+        collection_wall_time_sec=collection_wall_time_sec,
+    )
 
     print("Splits: " + ", ".join(f"{k}={len(v)} shards" for k, v in split_summary.items()))
     mode_stats_text = ", ".join(

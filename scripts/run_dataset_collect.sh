@@ -18,6 +18,9 @@ TRAJECTORY_VISUALIZATION_ENABLED="${TRAJECTORY_VISUALIZATION_ENABLED:-1}"  # 开
 TRAJECTORY_VISUALIZATION_FRONT_MARGIN="${TRAJECTORY_VISUALIZATION_FRONT_MARGIN:-25}"  # 前向可视化范围（单位：米）
 TRAJECTORY_VISUALIZATION_LATERAL_MARGIN="${TRAJECTORY_VISUALIZATION_LATERAL_MARGIN:-10}"  # 横向可视化范围（单位：米）
 
+LOG_PATH="${OUTPUT_ROOT}/collect_command.log"
+mkdir -p "${OUTPUT_ROOT}"
+
 "${PYTHON_BIN}" -m metadrive.exp_dataset.collect_expert \
     --target-samples "${TARGET_SAMPLES}" \
     --output-root "${OUTPUT_ROOT}" \
@@ -31,4 +34,5 @@ TRAJECTORY_VISUALIZATION_LATERAL_MARGIN="${TRAJECTORY_VISUALIZATION_LATERAL_MARG
     --smoothing-strength "${SMOOTHING_STRENGTH}" \
     --trajectory-visualization-enabled "${TRAJECTORY_VISUALIZATION_ENABLED}" \
     --trajectory-visualization-front-margin "${TRAJECTORY_VISUALIZATION_FRONT_MARGIN}" \
-    --trajectory-visualization-lateral-margin "${TRAJECTORY_VISUALIZATION_LATERAL_MARGIN}"
+    --trajectory-visualization-lateral-margin "${TRAJECTORY_VISUALIZATION_LATERAL_MARGIN}" \
+    2>&1 | tee "${LOG_PATH}"

@@ -63,6 +63,7 @@ export DATA_DIR="${DATA_DIR:-/media/kong/Elements_SE/Diffusion_Data/metadrive_da
 - [ ] 待完成
 - **交付物**：更新 `scripts/run_dataset_collect.sh`、`tests/acceptance/test_phase2_task3.py`
 - **验收指标**（4 项）：
+  1. 采集场景既支持固定Hybrid map+随机traffic density采集方式，也支持随机道路结构+随机traffic density采集方式
   1. 覆盖 ≥ 4 种道路结构（直道、弯道、交叉口、环岛中至少 4 种）
   2. ≥ 2 种 traffic density（如 0.02 和 0.08）
   3. 总 seed 数 ≥ 10

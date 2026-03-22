@@ -36,24 +36,28 @@
 - Phase 1 task `1.5` rollout acceptance re-validated on the default `SSXCOCSS` map with background traffic
 - Phase 1 task `1.6` info field enrichment acceptance passed on the `meta_drive` environment
 - Phase 1 task `1.7` hazard scenario integration acceptance passed on the `meta_drive` environment
+- Phase 2 task `2.2` dataset statistics tool is implemented
 
 ### In Progress
 
-- Preparing handoff from completed `Phase 1` to the next phase
+- Phase 2 task `2.1` real RGB collection re-validation
+- Phase 2 remaining tasks `2.3~2.4`
 
 ### Blockers
 
-- No active blockers for `Phase 1`
+- Current sandbox cannot complete real offscreen RGB collection: `collect_expert.py` fails in `simplepbr` tonemapping initialization before shard generation
 
 ### Next Step
 
-- Start `Phase 2` data collection work or consume `Phase 1` outputs in `Phase 5/6`
+- Re-run `2.1` on the target GPU environment where the original RGB collection chain is known to work
+- After a valid real-RGB dataset is produced, re-run `2.2` acceptance against that dataset root
+- Then continue with `2.3~2.4`
 
 ## Phase Checklist
 
 - `Phase 0`: `completed`
 - `Phase 1`: `completed`
-- `Phase 2`: `not_started`
+- `Phase 2`: `in_progress`
 - `Phase 3`: `not_started`
 - `Phase 4`: `not_started`
 - `Phase 5`: `not_started`
@@ -214,6 +218,36 @@
   - `Phase 1` 现已完成，后续若进入 `Phase 5` 还需要继续验证这些 `info` 字段是否满足奖励数值稳定性，而不仅是字段存在性
   - `EXECUTE_LOG.md` 中保留了 `1.5` 的两次不同验收背景记录，后续引用结果时应优先使用默认地图+背景交通的那次
 
+### 2026-03-22 — Phase 2 tasks 2.1~2.2 initial implementation
+
+- 修改目标:
+  在不修改 `phase2.md` 的前提下推进 `2.1` 采集入口验证与 `2.2` 数据统计脚本
+- 涉及文件:
+  - `metadrive/exp_dataset/collect_expert.py`
+  - `metadrive/envs/diffusion_envs/base_multi_env.py`
+  - `metadrive/obs/diff_obs/top_down_state_obs_multi_channel.py`
+  - `tools/check_dataset_stats.py`
+  - `tests/acceptance/test_phase2_task1.py`
+  - `tests/acceptance/test_phase2_task2.py`
+  - `AGENTS.md`
+  - `EXECUTE_LOG.md`
+- 关键设计选择:
+  - 新增 `tools/check_dataset_stats.py`，输出 `total_samples`、`scenario_coverage`、`trajectory_stats`
+  - 一度采用过 `topdown -> camera/rgb` 的兼容方案来通过字段验收，但该方案不满足“真实前视 RGB”要求，已被撤回
+  - 现已把代码恢复到真实 RGB 采集链路：`DatasetCollectEnv` 使用 `rgb_camera`，`collect_expert.py` 直接读取 `rgb_left/rgb_front/rgb_right`
+  - 额外写入 `collection_wall_time_sec` 到 manifest，便于检查 “50 样本 < 10 分钟”
+- 最小测试方式:
+  - `python -m py_compile metadrive/exp_dataset/collect_expert.py metadrive/envs/diffusion_envs/base_multi_env.py metadrive/obs/diff_obs/top_down_state_obs_multi_channel.py tools/check_dataset_stats.py tests/acceptance/test_phase2_task1.py tests/acceptance/test_phase2_task2.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m metadrive.exp_dataset.collect_expert --target-samples 50 --output-root /tmp/phase2_test --dataset-name test_run --expert-type idm --trajectory-correction-enabled 0`
+- 实际结果:
+  - 在当前 sandbox 中，真实 RGB 采集命令失败，报错点为 `simplepbr` 的 `tonemap_quad.set_shader(...)`
+  - 额外最小复现表明这不是 `collect_expert.py` 独有问题，`MetaDriveEnv + RGBCamera + use_render=False + image_observation=True` 也会在同一位置失败
+  - 因此当前不能诚实宣称 `2.1` 已通过，也不能继续把此前基于 `topdown` 伪装字段得到的 `2.2` 结果视为有效
+- 风险 / 未决事项:
+  - `2.1` 需要在你本地那套“原链路可跑通”的真实 GPU 环境中重新验收
+  - `2.2` 的脚本实现已完成，但应在真实 RGB 数据集上重新执行 acceptance
+  - `Phase 2` 的 `2.3~2.4` 仍未完成
+
 ## Open Decisions
 
 - `PlatoonEnv` 的真实 MetaDrive 后端依赖需要如何在当前环境中稳定导入并运行
@@ -227,7 +261,8 @@
   3. `docs/io_spec.md`
   4. `docs/metrics_spec.md`
 - 当前已完成 Phase 1 的 `1.1-1.7`，并已在 `meta_drive` 解释器下真实跑过 acceptance
-- 下一个最优先动作是切到 `Phase 2`，或直接消费 `Phase 1` 的 `info` 字段与 hazard 场景接口推进 `Phase 5/6`
+- `Phase 2` 当前真实状态是：`2.2` 脚本已实现，`2.1` 仍待在真实 RGB 环境下验收
+- 下一个最优先动作是在你的本地 GPU 环境里重跑 `2.1` 的原始命令，然后再复核 `2.2`
 - 执行 Phase 1 后续修复时，必须继续同步更新：
   - `AGENTS.md` 的完成标记
   - `EXECUTE_LOG.md` 的 `Current Status` 和 `Task Log`

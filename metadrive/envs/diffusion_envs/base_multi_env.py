@@ -101,6 +101,7 @@ class DatasetCollectEnv(BaseMultiEnv):
                 sensors=dict(
                     rgb_camera=(RGBCamera, 320, 180),
                 ),
+                dataset_camera_views={},
                 transfuser_config=transfuser_config_to_dict(build_transfuser_config("small")),
                 transfuser_checkpoint_path=None,
                 transfuser_policy_device="cpu",
