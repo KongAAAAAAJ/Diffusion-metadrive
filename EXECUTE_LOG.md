@@ -2,8 +2,8 @@
 
 ## Project Snapshot
 
-- Current phase: `Phase 1`
-- Primary track: Build the minimum 3-vehicle platoon environment, metrics, scenarios, and verification entrypoint
+- Current phase: `Phase 2`
+- Primary track: Single-vehicle expert data collection, coverage expansion, and dataset integrity validation
 - Last updated: `2026-03-22`
 - Completed modules:
   - `docs/problem_definition.md`
@@ -13,6 +13,7 @@
   - `evaluation/platoon_metrics.py`
   - `scenarios/hazard_scenarios.py`
   - `scripts/verify_phase1.py`
+  - `tools/check_dataset_stats.py`
 - Current code baseline:
   - single-vehicle expert collection in `metadrive/exp_dataset/collect_expert.py`
   - single-vehicle diffusion training in `metadrive/policy/diffusion_policy/train_transfuser.py`
@@ -36,28 +37,29 @@
 - Phase 1 task `1.5` rollout acceptance re-validated on the default `SSXCOCSS` map with background traffic
 - Phase 1 task `1.6` info field enrichment acceptance passed on the `meta_drive` environment
 - Phase 1 task `1.7` hazard scenario integration acceptance passed on the `meta_drive` environment
-- Phase 2 task `2.2` dataset statistics tool is implemented
+- Phase 2 task `2.1` real RGB collection acceptance passed on the `meta_drive` environment
+- Phase 2 task `2.2` dataset statistics tool acceptance passed
+- Phase 2 task `2.3` collection coverage plan script acceptance passed
+- Phase 2 task `2.4` dataset integrity acceptance passed
 
 ### In Progress
 
-- Phase 2 task `2.1` real RGB collection re-validation
-- Phase 2 remaining tasks `2.3~2.4`
+- Phase 3 planning handoff
 
 ### Blockers
 
-- Current sandbox cannot complete real offscreen RGB collection: `collect_expert.py` fails in `simplepbr` tonemapping initialization before shard generation
+- 当前无 Phase 2 blocker；需要进入 Phase 3 前确认训练所使用的预处理数据根目录与脚本默认值一致
 
 ### Next Step
 
-- Re-run `2.1` on the target GPU environment where the original RGB collection chain is known to work
-- After a valid real-RGB dataset is produced, re-run `2.2` acceptance against that dataset root
-- Then continue with `2.3~2.4`
+- 进入 `Phase 3`，按 `docs/phases/phase3.md` 开始单车训练链路验收
+- 训练前先核对 `run_diffusion_preprocess.sh`、`run_diffusion_train.sh`、anchor 路径与当前 Phase 2 数据目录
 
 ## Phase Checklist
 
 - `Phase 0`: `completed`
 - `Phase 1`: `completed`
-- `Phase 2`: `in_progress`
+- `Phase 2`: `completed`
 - `Phase 3`: `not_started`
 - `Phase 4`: `not_started`
 - `Phase 5`: `not_started`
@@ -248,16 +250,72 @@
   - `2.2` 的脚本实现已完成，但应在真实 RGB 数据集上重新执行 acceptance
   - `Phase 2` 的 `2.3~2.4` 仍未完成
 
+### 2026-03-22 — Phase 2 tasks 2.1~2.4 completion
+
+- 修改目标:
+  完成 `phase2.md` 的 `2.3~2.4`，并顺带在目标 `meta_drive` 环境中重新核实 `2.1~2.2` 的真实 RGB 采集与统计验收
+- 涉及文件:
+  - `metadrive/exp_dataset/collect_expert.py`
+  - `scripts/run_dataset_collect.sh`
+  - `tools/check_dataset_stats.py`
+  - `tests/acceptance/test_phase2_task3.py`
+  - `tests/acceptance/test_phase2_task4.py`
+  - `AGENTS.md`
+  - `EXECUTE_LOG.md`
+- 关键设计选择:
+  - 先排查执行环境差异，确认 `run_dataset_collect.sh` 默认解释器已切到 `/home/kong/anaconda3/envs/meta_drive/bin/python`
+  - 用提升权限方式重跑真实 RGB 链路，确认此前失败来自 sandbox 的 Panda3D/offscreen 渲染限制，而不是脚本或 `PYTHON_BIN` 配置错误
+  - `collect_expert.py` 新增地图采集配置入口：`use_hybrid_map`、`hybrid_map_sequence`、`map_block_num`、`num_scenarios`
+  - `run_dataset_collect.sh` 新增 `COLLECTION_MODE` 与 `DRY_RUN`，支持：
+    - 固定 Hybrid map + 随机 traffic density
+    - 随机道路结构 + 随机 traffic density
+    - 覆盖直道 / 弯道 / 交叉口 / 环岛四类结构
+    - `SEED_LIST` 默认 10 个 seed，density 默认含 `0.02` 与 `0.08`
+  - `tools/check_dataset_stats.py` 新增 `--check-integrity`，支持对父目录下多个数据集自动扫描，并输出：
+    - 样本总数
+    - 技能覆盖
+    - 轨迹范围
+    - 有限值检查
+    - 总体验收通过标志
+- 最小测试方式:
+  - `TARGET_SAMPLES=8 OUTPUT_ROOT=/tmp/phase2_run_script DATASET_NAME=test_run EXPERT_TYPE=idm TRAJECTORY_CORRECTION_ENABLED=0 TRAJECTORY_VISUALIZATION_ENABLED=0 bash scripts/run_dataset_collect.sh`
+  - `rm -rf /tmp/phase2_test && mkdir -p /tmp/phase2_test && PYTHONPATH="$PWD:$PYTHONPATH" /home/kong/anaconda3/envs/meta_drive/bin/python -m metadrive.exp_dataset.collect_expert --target-samples 50 --output-root /tmp/phase2_test --dataset-name test_run --expert-type idm --trajectory-correction-enabled 0 2>&1 | tee /tmp/phase2_test/collect_command.log`
+  - `pytest tests/acceptance/test_phase2_task1.py -q`
+  - `pytest tests/acceptance/test_phase2_task2.py -q`
+  - `pytest tests/acceptance/test_phase2_task3.py -q`
+  - `pytest tests/acceptance/test_phase2_task4.py -q`
+  - `python tools/check_dataset_stats.py --dataset-root /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets --check-integrity`
+- 实际结果:
+  - `run_dataset_collect.sh` 在 `meta_drive` 环境下真实 RGB 链路可跑通，8 样本 smoke run 成功生成 71 样本
+  - 官方 `2.1` 命令在 `meta_drive` 环境下成功生成 85 样本，真实包含 `front_camera/camera/rgb/lidar/ego_state/trajectory`
+  - `pytest tests/acceptance/test_phase2_task1.py -q` → `4 passed`
+  - `pytest tests/acceptance/test_phase2_task2.py -q` → `4 passed`
+  - `pytest tests/acceptance/test_phase2_task3.py -q` → `3 passed`
+  - `pytest tests/acceptance/test_phase2_task4.py -q` → `3 passed`
+  - `python tools/check_dataset_stats.py --dataset-root /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets --check-integrity` 输出：
+    - `total_samples = 60960`
+    - `skill_coverage.straight = 11613`
+    - `skill_coverage.turn = 15518`
+    - `skill_coverage.lane_change = 8852`
+    - `skill_coverage.obstacle_avoidance = 312`
+    - `finite_ok = true`
+    - `trajectory_range_ok = true`
+    - `passed = true`
+- 风险 / 未决事项:
+  - 当前 `2.4` 的完整性统计是对 `$DATA_DIR` 下多个现有原始数据集做聚合扫描；Phase 3 开始前需要明确实际训练使用的那一份数据根目录
+  - `run_dataset_collect.sh` 的 `phase2_plan` 模式会批量生成多份数据集，正式大规模采集前应先确定最终命名和存储策略
+
 ## Open Decisions
 
-- `PlatoonEnv` 的真实 MetaDrive 后端依赖需要如何在当前环境中稳定导入并运行
-- Phase 1 完成后，危险工况是继续增强注入逻辑，还是直接转入 Phase 2 数据统计
+- Phase 3 使用哪一份 Phase 2 原始数据集作为唯一训练源
+- 是否需要在 Phase 3 前先统一 raw / preprocessed 数据命名规范
 
 ## Handoff Notes
 
 - 如果上下文不足，先读本文件，再读：
   1. `AGENTS.md`
-  2. `docs/problem_definition.md`
+  2. `docs/phases/phase2.md`
+  3. `docs/problem_definition.md`
   3. `docs/io_spec.md`
   4. `docs/metrics_spec.md`
 - 当前已完成 Phase 1 的 `1.1-1.7`，并已在 `meta_drive` 解释器下真实跑过 acceptance

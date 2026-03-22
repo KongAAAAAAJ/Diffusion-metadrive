@@ -94,6 +94,10 @@ class ExpertCollectorConfig:
     # Traffic (map is fixed; only density varies)
     traffic_density_min: float = 0.06
     traffic_density_max: float = 0.08
+    use_hybrid_map: bool = True
+    hybrid_map_sequence: str = "SSXCOCSS"
+    map_block_num: int = 5
+    num_scenarios: int = 1
 
     # Dataset split
     train_split_ratio: float = 0.8
@@ -124,6 +128,12 @@ class ExpertCollectorConfig:
 
 def sample_traffic_density(rng: np.random.RandomState, config: ExpertCollectorConfig) -> float:
     return float(rng.uniform(config.traffic_density_min, config.traffic_density_max))
+
+
+def describe_map_config(config: ExpertCollectorConfig) -> str:
+    if bool(config.use_hybrid_map):
+        return f"hybrid_fixed ({config.hybrid_map_sequence})"
+    return f"random_block_map (map={config.map_block_num}, num_scenarios={config.num_scenarios})"
 
 
 def _to_jsonable(value):
@@ -883,7 +893,7 @@ def write_manifest(
         "episodes": total_episodes,
         "output_root": str(dataset_root),
         "expert_type": config.expert_type,
-        "map": "hybrid_fixed (SSXCOCSS)",
+        "map": describe_map_config(config),
         "traffic_density_range": [config.traffic_density_min, config.traffic_density_max],
         "collection_wall_time_sec": float(collection_wall_time_sec),
         "splits": {name: len(shards) for name, shards in split_summary.items()},
@@ -915,9 +925,16 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     rng = np.random.RandomState(config.start_seed)
     writer = ShardWriter(shard_dir, config.samples_per_shard)
 
-    # Create a single env with the default hybrid map (num_scenarios=1 ensures
-    # the same map is used on every reset; only traffic_density is updated).
-    env = DatasetCollectEnv({"use_render": False, "num_scenarios": 1, "image_on_cuda": True})
+    env = DatasetCollectEnv(
+        {
+            "use_render": False,
+            "num_scenarios": int(config.num_scenarios),
+            "image_on_cuda": True,
+            "use_hybrid_map": bool(config.use_hybrid_map),
+            "hybrid_map_sequence": config.hybrid_map_sequence,
+            "map": int(config.map_block_num),
+        }
+    )
     map_geometry = None
 
     # 保存环境参数配置

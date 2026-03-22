@@ -10,7 +10,7 @@
 |-------|------|------|------|
 | 0 | [`docs/phases/phase0.md`](docs/phases/phase0.md) | ✅ 完成 | 接口冻结 |
 | 1 | [`docs/phases/phase1.md`](docs/phases/phase1.md) | ✅ 完成 | 编队环境 (1.1~1.7✅) |
-| 2 | [`docs/phases/phase2.md`](docs/phases/phase2.md) | 🔶 进行中 | 数据采集 (2.1 RGB链路待验收, 2.2统计脚本已实现, 2.3~2.4☐) |
+| 2 | [`docs/phases/phase2.md`](docs/phases/phase2.md) | ✅ 完成 | 数据采集 (2.1~2.4✅) |
 | 3 | [`docs/phases/phase3.md`](docs/phases/phase3.md) | ☐ 待开始 | 单车训练 |
 | 4 | [`docs/phases/phase4.md`](docs/phases/phase4.md) | ☐ 待开始 | 编队 Planner |
 | 5 | [`docs/phases/phase5.md`](docs/phases/phase5.md) | ☐ 待开始 | RL 微调 |
