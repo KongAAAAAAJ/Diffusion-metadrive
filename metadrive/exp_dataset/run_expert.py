@@ -8,11 +8,12 @@ import numpy as np
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run PPO/IDM expert in DatasetCollectEnv for quick inspection.")
-    parser.add_argument("--expert-type", type=str, default="ppo", choices=("ppo", "idm"))
+    parser.add_argument("--expert-type", type=str, default="idm", choices=("ppo", "idm"))
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--render", type=int, choices=(0, 1), default=1)
     parser.add_argument("--print-obs-summary", type=int, choices=(0, 1), default=1)
     parser.add_argument("--print-trajectory-debug", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--print-idm-debug", type=int, choices=(0, 1), default=0)
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -79,15 +80,60 @@ def _print_trajectory_debug(vehicle, collect_expert_module) -> None:
     )
 
 
+
+def _print_idm_debug(step: int, vehicle, expert_policy) -> None:
+    base_policy = expert_policy._ensure_policy() if hasattr(expert_policy, "_ensure_policy") else expert_policy
+    target_lane = getattr(base_policy, "routing_target_lane", None)
+    current_lane_index = getattr(vehicle, "lane_index", None)
+    target_lane_index = None if target_lane is None else getattr(target_lane, "index", None)
+    current_ref_lanes = getattr(vehicle.navigation, "current_ref_lanes", None) or []
+    next_ref_lanes = getattr(vehicle.navigation, "next_ref_lanes", None) or []
+
+    target_long = None
+    target_lat = None
+    target_heading = None
+    steer = None
+    if target_lane is not None:
+        target_long, target_lat = target_lane.local_coordinates(vehicle.position)
+        target_heading = target_lane.heading_theta_at(target_long + 1)
+    action = getattr(base_policy, "action_info", {}).get("action")
+    if action is not None and len(action) >= 1:
+        steer = float(action[0])
+
+    print(
+        "[idm_debug] "
+        f"step={step} "
+        f"veh_lane={current_lane_index} "
+        f"target_lane={target_lane_index} "
+        f"current_ref={[lane.index for lane in current_ref_lanes]} "
+        f"next_ref={[lane.index for lane in next_ref_lanes]} "
+        f"target_long={None if target_long is None else round(float(target_long), 3)} "
+        f"target_lat={None if target_lat is None else round(float(target_lat), 3)} "
+        f"target_heading={None if target_heading is None else round(float(target_heading), 3)} "
+        f"speed_kmh={float(vehicle.speed_km_h):.3f} "
+        f"steer={None if steer is None else round(steer, 4)} "
+        f"yellow={bool(getattr(vehicle, 'on_yellow_continuous_line', False))} "
+        f"on_lane={bool(getattr(vehicle, 'on_lane', True))}"
+    )
+
+
 def main(argv: Iterable[str] | None = None) -> None:
     args = parse_args(argv)
 
     from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
     from metadrive.examples.ppo_expert import expert as ppo_expert
     from metadrive.exp_dataset import collect_expert as collect_expert_module
-    from metadrive.policy.idm_policy import IDMPolicy
+    from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy
 
-    env = DatasetCollectEnv()
+    # !暂时降低RGB相机分辨率以提升渲染效率
+    from metadrive.component.sensors.rgb_camera import RGBCamera
+    env = DatasetCollectEnv(config={
+        "traffic_density": 0.1,
+        "use_render": bool(args.render),
+        "sensors": dict(
+            rgb_camera=(RGBCamera, 40, 25),  # 320x180 RGB camera
+        ),
+    })
     obs_dict, _ = env.reset()
     if bool(args.print_obs_summary):
         _print_observation_summary(obs_dict)
@@ -106,8 +152,10 @@ def main(argv: Iterable[str] | None = None) -> None:
                     _print_trajectory_debug(vehicle, collect_expert_module)
             else:
                 if idm_policy is None:
-                    idm_policy = IDMPolicy(vehicle, random_seed=0)
+                    idm_policy = ExpertIDMPolicy(vehicle, random_seed=0)
                 actions[agent_id] = idm_policy.act()
+                if bool(args.print_idm_debug):
+                    _print_idm_debug(step, vehicle, idm_policy)
 
         obs_dict, reward, terminated, truncated, info = env.step(actions)
         if bool(args.render):
@@ -127,6 +175,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             )
             ep_reward = 0.0
             step = 0
+            idm_policy = None
             if ep_count >= args.episodes:
                 break
             obs_dict, _ = env.reset()
