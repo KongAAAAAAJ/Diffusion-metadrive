@@ -55,6 +55,7 @@ from metadrive.exp_dataset.trajectory_correction import (
     correct_trajectory_geometry,
 )
 from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
+from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy
 from metadrive.policy.diffusion_policy.transfuser_features import BoundingBox2DIndex
 from metadrive.utils import Config
 from metadrive.exp_dataset.metadrive_dataset import split_shards
@@ -71,8 +72,8 @@ from metadrive.exp_dataset.metadrive_dataset import split_shards
 class ExpertCollectorConfig:
     # Output
     output_root: Path = Path("/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets")
-    dataset_name: str = "metadrive_ppo"
-    expert_type: str = "ppo"
+    dataset_name: str = "metadrive_ppo_data"
+    expert_type: str = "ppo"  # idm | ppo
     target_samples: int = 100
     start_seed: int = 0
     samples_per_shard: int = 2048
@@ -857,7 +858,7 @@ def rollout_episode(
             action = ppo_expert(vehicle, deterministic=True)
         elif config.expert_type == "idm":
             if idm_policy is None:
-                idm_policy = IDMPolicy(vehicle, random_seed=config.start_seed)
+                idm_policy = ExpertIDMPolicy(vehicle, random_seed=config.start_seed)
             action = idm_policy.act()
         else:
             raise ValueError(f"Unsupported expert_type: {config.expert_type}")

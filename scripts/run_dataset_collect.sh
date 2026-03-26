@@ -4,22 +4,28 @@ set -euo pipefail
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
-TARGET_SAMPLES="${TARGET_SAMPLES:-500}"
+
+TARGET_SAMPLES="${TARGET_SAMPLES:-5000}" # *
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
-EXPERT_TYPE="${EXPERT_TYPE:-ppo}"
-START_SEED="${START_SEED:-10}"
-DATASET_NAME="${DATASET_NAME:-metadrive_${EXPERT_TYPE}_test}"
-COLLECTION_MODE="${COLLECTION_MODE:-single}"  # single | fixed_hybrid | random_road | phase2_plan
-DRY_RUN="${DRY_RUN:-0}"
+
+EXPERT_TYPE="${EXPERT_TYPE:-idm}" # *
+START_SEED="${START_SEED:-10}" # *
 SEED_LIST="${SEED_LIST:-10,11,12,13,14,15,16,17,18,19}"
-LOW_TRAFFIC_DENSITY="${LOW_TRAFFIC_DENSITY:-0.02}"
-HIGH_TRAFFIC_DENSITY="${HIGH_TRAFFIC_DENSITY:-0.08}"
+
+COLLECTION_MODE="${COLLECTION_MODE:-single}"  # *single | fixed_hybrid | random_road | phase2_plan
+
+DATASET_NAME="${DATASET_NAME:-1_metaData_${EXPERT_TYPE}_${COLLECTION_MODE}}"
+
+LOW_TRAFFIC_DENSITY="${LOW_TRAFFIC_DENSITY:-0.08}" # *
+HIGH_TRAFFIC_DENSITY="${HIGH_TRAFFIC_DENSITY:-0.12}"
+
 USE_HYBRID_MAP="${USE_HYBRID_MAP:-1}"
-HYBRID_MAP_SEQUENCE="${HYBRID_MAP_SEQUENCE:-SSXCOCSS}"
+HYBRID_MAP_SEQUENCE="${HYBRID_MAP_SEQUENCE:-SSXCOCSS}"  # used in single
+
 MAP_BLOCK_NUM="${MAP_BLOCK_NUM:-5}"
 NUM_SCENARIOS="${NUM_SCENARIOS:-1}"
 
-TRAJECTORY_CORRECTION_ENABLED="${TRAJECTORY_CORRECTION_ENABLED:-1}"  # 开启轨迹修正
+TRAJECTORY_CORRECTION_ENABLED="${TRAJECTORY_CORRECTION_ENABLED:-1}"  # 开启轨迹修正，only in ppo
 SAVE_RAW_TRAJECTORY="${SAVE_RAW_TRAJECTORY:-1}"  # 保存原始轨迹
 MODE_CLASSIFIER_VERSION="${MODE_CLASSIFIER_VERSION:-v1}"  
 CENTERLINE_ATTRACTION_STRENGTH="${CENTERLINE_ATTRACTION_STRENGTH:-0.85}"
@@ -43,8 +49,8 @@ run_collect_job() {
     local density_min="$8"
     local density_max="$9"
 
-    local dataset_name="${DATASET_NAME}_${label}_seed${seed}"
-    local log_path="${OUTPUT_ROOT}/collect_command_${label}_seed${seed}.log"
+    local dataset_name="${DATASET_NAME}"
+    local log_path="${OUTPUT_ROOT}/collect_command_${DATASET_NAME}.log"
     local cmd=(
         "${PYTHON_BIN}" -m metadrive.exp_dataset.collect_expert
         --target-samples "${TARGET_SAMPLES}"
@@ -69,12 +75,6 @@ run_collect_job() {
     )
 
     echo "mode=${mode} label=${label} seed=${seed} density=[${density_min},${density_max}] use_hybrid_map=${use_hybrid_map} hybrid_map_sequence=${hybrid_map_sequence} map_block_num=${map_block_num} num_scenarios=${num_scenarios}"
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        printf 'DRY_RUN:'
-        printf ' %q' "${cmd[@]}"
-        printf '\n'
-        return 0
-    fi
 
     "${cmd[@]}" 2>&1 | tee "${log_path}"
 }

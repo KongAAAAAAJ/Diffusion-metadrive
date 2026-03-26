@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# run_data_pipeline.sh — unified data pipeline: collect → anchors → preprocess
+# Usage: STAGE=all|collect|anchors|preprocess [VAR=val ...] bash scripts/run_data_pipeline.sh
+set -euo pipefail
+
+PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+
+# ── Stage selector ──────────────────────────────────────────────────────────
+STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess  # 选择数据处理阶段
+
+# *── Shared paths ────────────────────────────────────────────────────────────
+EXPERT_TYPE="${EXPERT_TYPE:-idm}"
+COLLECTION_MODE="${COLLECTION_MODE:-single}"  # 选择地图模式：single | fixed_hybrid | random_road | phase2_plan
+DATASET_NAME="${DATASET_NAME:-metaData_${EXPERT_TYPE}_${COLLECTION_MODE}}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
+
+# Derived paths (auto-chained between stages)
+COLLECT_OUTPUT="${OUTPUT_ROOT}/${DATASET_NAME}"
+ANCHORS_OUTPUT="${ANCHORS_OUTPUT:-${REPO_ROOT}/metadrive/exp_dataset/anchors.npy}"
+ANCHORS_FIGURE="${ANCHORS_FIGURE:-${REPO_ROOT}/metadrive/exp_dataset/anchors.png}"
+PREPROCESS_OUTPUT="${PREPROCESS_OUTPUT:-${COLLECT_OUTPUT}_preprocessed}"
+
+# ── Stage 1: Data Collection ────────────────────────────────────────────────
+run_collect() {
+    echo "=== [1/3] Data Collection (mode=${COLLECTION_MODE}) ==="
+
+    TARGET_SAMPLES="${TARGET_SAMPLES:-40000}"  # *
+    START_SEED="${START_SEED:-10}" # *
+    SEED_LIST="${SEED_LIST:-10,11,12,13,14,15,16,17,18,19}"
+    LOW_TRAFFIC_DENSITY="${LOW_TRAFFIC_DENSITY:-0.08}"
+    HIGH_TRAFFIC_DENSITY="${HIGH_TRAFFIC_DENSITY:-0.12}"
+    USE_HYBRID_MAP="${USE_HYBRID_MAP:-1}"
+    HYBRID_MAP_SEQUENCE="${HYBRID_MAP_SEQUENCE:-SSXCOCSS}"
+    MAP_BLOCK_NUM="${MAP_BLOCK_NUM:-5}"
+    NUM_SCENARIOS="${NUM_SCENARIOS:-1}"
+    TRAJECTORY_CORRECTION_ENABLED="${TRAJECTORY_CORRECTION_ENABLED:-1}"
+    SAVE_RAW_TRAJECTORY="${SAVE_RAW_TRAJECTORY:-1}"
+    MODE_CLASSIFIER_VERSION="${MODE_CLASSIFIER_VERSION:-v1}"
+    CENTERLINE_ATTRACTION_STRENGTH="${CENTERLINE_ATTRACTION_STRENGTH:-0.85}"
+    SMOOTHING_STRENGTH="${SMOOTHING_STRENGTH:-0.25}"
+    TRAJECTORY_VISUALIZATION_ENABLED="${TRAJECTORY_VISUALIZATION_ENABLED:-1}"
+    TRAJECTORY_VISUALIZATION_FRONT_MARGIN="${TRAJECTORY_VISUALIZATION_FRONT_MARGIN:-25}"
+    TRAJECTORY_VISUALIZATION_LATERAL_MARGIN="${TRAJECTORY_VISUALIZATION_LATERAL_MARGIN:-10}"
+
+    mkdir -p "${OUTPUT_ROOT}"
+
+    _collect_job() {
+        local use_hybrid_map="$1" hybrid_map_sequence="$2" map_block_num="$3"
+        local num_scenarios="$4" seed="$5" density_min="$6" density_max="$7"
+        local log_path="${OUTPUT_ROOT}/collect_command_${DATASET_NAME}.log"
+        "${PYTHON_BIN}" -m metadrive.exp_dataset.collect_expert \
+            --target-samples "${TARGET_SAMPLES}" \
+            --output-root "${OUTPUT_ROOT}" \
+            --dataset-name "${DATASET_NAME}" \
+            --expert-type "${EXPERT_TYPE}" \
+            --start-seed "${seed}" \
+            --trajectory-correction-enabled "${TRAJECTORY_CORRECTION_ENABLED}" \
+            --save-raw-trajectory "${SAVE_RAW_TRAJECTORY}" \
+            --mode-classifier-version "${MODE_CLASSIFIER_VERSION}" \
+            --centerline-attraction-strength "${CENTERLINE_ATTRACTION_STRENGTH}" \
+            --smoothing-strength "${SMOOTHING_STRENGTH}" \
+            --trajectory-visualization-enabled "${TRAJECTORY_VISUALIZATION_ENABLED}" \
+            --trajectory-visualization-front-margin "${TRAJECTORY_VISUALIZATION_FRONT_MARGIN}" \
+            --trajectory-visualization-lateral-margin "${TRAJECTORY_VISUALIZATION_LATERAL_MARGIN}" \
+            --traffic-density-min "${density_min}" \
+            --traffic-density-max "${density_max}" \
+            --use-hybrid-map "${use_hybrid_map}" \
+            --hybrid-map-sequence "${hybrid_map_sequence}" \
+            --map-block-num "${map_block_num}" \
+            --num-scenarios "${num_scenarios}" \
+            2>&1 | tee "${log_path}"
+    }
+
+    IFS=',' read -r -a SEEDS <<< "${SEED_LIST}"
+
+    case "${COLLECTION_MODE}" in
+        single)
+            _collect_job "${USE_HYBRID_MAP}" "${HYBRID_MAP_SEQUENCE}" "${MAP_BLOCK_NUM}" \
+                "${NUM_SCENARIOS}" "${START_SEED}" "${LOW_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+            ;;
+        fixed_hybrid|phase2_plan)
+            for seed in "${SEEDS[@]}"; do
+                _collect_job "1" "SSSSS"  "5" "1" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${LOW_TRAFFIC_DENSITY}"
+                _collect_job "1" "CCSCC"  "5" "1" "${seed}" "${HIGH_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+                _collect_job "1" "SXSXS"  "5" "1" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+                _collect_job "1" "SOSSO"  "5" "1" "${seed}" "${HIGH_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+            done
+            [[ "${COLLECTION_MODE}" == "fixed_hybrid" ]] && return 0
+            ;;&
+        random_road|phase2_plan)
+            for seed in "${SEEDS[@]}"; do
+                _collect_job "0" "SSXCOCSS" "${MAP_BLOCK_NUM}" "10" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+            done
+            ;;
+        *)
+            echo "Unsupported COLLECTION_MODE: ${COLLECTION_MODE}" >&2; exit 1 ;;
+    esac
+    echo "=== [1/3] Done. Output: ${COLLECT_OUTPUT} ==="
+}
+
+# ── Stage 2: Anchor Extraction ──────────────────────────────────────────────
+run_anchors() {
+    echo "=== [2/3] Anchor Extraction ==="
+    TRAJECTORY_KEY="${TRAJECTORY_KEY:-trajectory}"
+    NUM_ANCHORS="${NUM_ANCHORS:-8}"  # *
+    ANCHOR_SEED="${ANCHOR_SEED:-0}"
+
+    "${PYTHON_BIN}" -m metadrive.exp_dataset.abstract_anchors \
+        --dataset-root "${COLLECT_OUTPUT}" \
+        --output-path "${ANCHORS_OUTPUT}" \
+        --trajectory-key "${TRAJECTORY_KEY}" \
+        --num-anchors "${NUM_ANCHORS}" \
+        --seed "${ANCHOR_SEED}" \
+        --figure-path "${ANCHORS_FIGURE}" \
+        --no-show
+    echo "=== [2/3] Done. Anchors: ${ANCHORS_OUTPUT} ==="
+}
+
+# ── Stage 3: Diffusion Preprocess ───────────────────────────────────────────
+run_preprocess() {
+    echo "=== [3/3] Diffusion Preprocess ==="
+    MODEL_SIZE="${MODEL_SIZE:-small}"
+    OUTPUT_FORMAT="${OUTPUT_FORMAT:-dir}"
+
+    "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.preprocess_transfuser_dataset \
+        --input-root "${COLLECT_OUTPUT}" \
+        --output-root "${PREPROCESS_OUTPUT}" \
+        --output-format "${OUTPUT_FORMAT}" \
+        --model-size "${MODEL_SIZE}"
+    echo "=== [3/3] Done. Preprocessed: ${PREPROCESS_OUTPUT} ==="
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+echo "Pipeline config: STAGE=${STAGE} EXPERT_TYPE=${EXPERT_TYPE} COLLECTION_MODE=${COLLECTION_MODE}"
+echo "  collect_output=${COLLECT_OUTPUT}"
+echo "  anchors_output=${ANCHORS_OUTPUT}"
+echo "  preprocess_output=${PREPROCESS_OUTPUT}"
+echo ""
+
+case "${STAGE}" in
+    all)       run_collect; run_anchors; run_preprocess ;;
+    collect)   run_collect ;;
+    anchors)   run_anchors ;;
+    preprocess) run_preprocess ;;
+    *)
+        echo "Unknown STAGE='${STAGE}'. Use: all | collect | anchors | preprocess" >&2
+        exit 1 ;;
+esac
+
+echo "=== Pipeline complete ==="

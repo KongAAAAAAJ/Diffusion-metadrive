@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-EXPERT_NAME="${EXPERT_NAME:-ppo}" # "ppo" or "idm"
+EXPERT_NAME="${EXPERT_NAME:-idm}" # "ppo" or "idm"
 TRAJECTORY_KEY="${TRAJECTORY_KEY:-trajectory}" # "trajectory" 规则修正后, "trajectory_raw" ppo直接输出轨迹
 
 DEFAULT_DATASET_ROOT="/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_${EXPERT_NAME}"

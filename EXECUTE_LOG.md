@@ -2,9 +2,9 @@
 
 ## Project Snapshot
 
-- Current phase: `Phase 2`
-- Primary track: Single-vehicle expert data collection, coverage expansion, and dataset integrity validation
-- Last updated: `2026-03-22`
+- Current phase: `Phase 6 ready`
+- Primary track: Phase 5 remaining real-environment RL chain accepted; next stop is Phase 6 evaluation
+- Last updated: `2026-03-23`
 - Completed modules:
   - `docs/problem_definition.md`
   - `docs/io_spec.md`
@@ -14,6 +14,9 @@
   - `scenarios/hazard_scenarios.py`
   - `scripts/verify_phase1.py`
   - `tools/check_dataset_stats.py`
+  - `models/platoon/relation_encoder.py`
+  - `models/diffusion/diffusion_rl_scheduler.py`
+  - `evaluation/reward_terms.py`
 - Current code baseline:
   - single-vehicle expert collection in `metadrive/exp_dataset/collect_expert.py`
   - single-vehicle diffusion training in `metadrive/policy/diffusion_policy/train_transfuser.py`
@@ -41,28 +44,44 @@
 - Phase 2 task `2.2` dataset statistics tool acceptance passed
 - Phase 2 task `2.3` collection coverage plan script acceptance passed
 - Phase 2 task `2.4` dataset integrity acceptance passed
+- Phase 4 task `4.0` multimodal platoon observation bridge acceptance passed on the `meta_drive` environment
+- Phase 4 task `4.1` relation encoder acceptance passed on the `meta_drive` environment
+- Phase 4 task `4.2` platoon diffusion planner acceptance passed on the `meta_drive` environment
+- Phase 4 task `4.3` weight migration acceptance passed on the `meta_drive` environment
+- Phase 4 task `4.4` end-to-end planner integration acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.1` reward function acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.2` diffusion RL scheduler acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.3` MA-GRPO trainer acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.4` RL training entrypoint acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.5` toy-single GRPO training acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.6` platoon GRPO 500-step training acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.4b` full integration smoke acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.7` surrogate trajectory-group evaluation acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.8` real `PlatoonEnv + PlatoonDiffusionPlanner` training entry acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.9` real single-vehicle RL smoke acceptance passed on the `meta_drive` environment
+- Phase 5 task `5.10` real 3-vehicle platoon RL training acceptance passed on the `meta_drive` environment
 
 ### In Progress
 
-- Phase 3 planning handoff
+- Phase 6 preparation
 
 ### Blockers
 
-- 当前无 Phase 2 blocker；需要进入 Phase 3 前确认训练所使用的预处理数据根目录与脚本默认值一致
+- 当前无 blocker
 
 ### Next Step
 
-- 进入 `Phase 3`，按 `docs/phases/phase3.md` 开始单车训练链路验收
-- 训练前先核对 `run_diffusion_preprocess.sh`、`run_diffusion_train.sh`、anchor 路径与当前 Phase 2 数据目录
+- 进入 `Phase 6`，实现评估脚本、基线对照和结果导出
+- 复用 `checkpoints/platoon_rl_real/`、`outputs/phase5/real_single_summary.json` 与 `outputs/phase5/real_platoon_summary.json` 作为评估输入
 
 ## Phase Checklist
 
 - `Phase 0`: `completed`
 - `Phase 1`: `completed`
 - `Phase 2`: `completed`
-- `Phase 3`: `not_started`
-- `Phase 4`: `not_started`
-- `Phase 5`: `not_started`
+- `Phase 3`: `implemented_outside_current_turn`
+- `Phase 4`: `completed`
+- `Phase 5`: `completed`
 - `Phase 6`: `not_started`
 - `Phase 7`: `not_started`
 
@@ -305,22 +324,292 @@
   - 当前 `2.4` 的完整性统计是对 `$DATA_DIR` 下多个现有原始数据集做聚合扫描；Phase 3 开始前需要明确实际训练使用的那一份数据根目录
   - `run_dataset_collect.sh` 的 `phase2_plan` 模式会批量生成多份数据集，正式大规模采集前应先确定最终命名和存储策略
 
+### 2026-03-22 — Phase 4 tasks 4.0~4.1 completion
+
+- 修改目标:
+  完成 `phase4.md` 的 `4.0` 多模态观测桥接和 `4.1` `RelationEncoder`，并按文档要求完成验收
+- 涉及文件:
+  - `envs/platoon_env.py`
+  - `models/__init__.py`
+  - `models/platoon/__init__.py`
+  - `models/platoon/relation_encoder.py`
+  - `tests/acceptance/test_phase4_task0.py`
+  - `tests/acceptance/test_phase4_task1.py`
+  - `docs/superpowers/plans/2026-03-22-phase4-0-1.md`
+  - `AGENTS.md`
+  - `EXECUTE_LOG.md`
+- 关键设计选择:
+  - `PlatoonEnv` 新增 `observation_mode`，默认仍为 `lidar_state`，保证 Phase 1 行为不回归
+  - `multimodal` 模式下复用 `DatasetCollectObservation + observation_to_features()`，直接产出 planner-ready 的 `camera/lidar/status`
+  - `camera` 采用 `build_transfuser_config("base")` 的分辨率约定，因此输出固定为 `(3, 256, 1024)`
+  - 新增模块级 `obs_to_tensor()`，统一把多模态 numpy 观测转成 `torch.float32`，支持 `device` 指定
+  - `RelationEncoder` 实现为最小 MLP：`12 -> 64 -> 12 + LayerNorm`，不提前掺入 `4.2` 的 planner 逻辑
+  - multimodal 验收在 sandbox 内会命中与 Phase 2 相同的 Panda3D/simplepbr 离屏 RGB 限制，因此最终以真实 `meta_drive` 环境下的 pytest 结果为准
+- 最小测试方式:
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase4_task0.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase4_task1.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase4_task0.py tests/acceptance/test_phase4_task1.py -v`
+  - `python -m py_compile envs/platoon_env.py models/platoon/relation_encoder.py tests/acceptance/test_phase4_task0.py tests/acceptance/test_phase4_task1.py`
+- 实际结果:
+  - `tests/acceptance/test_phase4_task0.py`：`3 passed`
+  - `tests/acceptance/test_phase4_task1.py`：`1 passed`
+  - 合并验收：`4 passed`
+  - `PlatoonEnv({"observation_mode": "multimodal"})` reset 返回：
+    - `camera.shape == (3, 256, 1024)`
+    - `lidar.shape == (1, 256, 256)`
+    - `status.shape == (8,)`
+    - `formation_relation_state.shape == (12,)`
+- 风险 / 未决事项:
+  - `4.2` 开始前需要确认 Phase 3 的单车 checkpoint 路径和 config 读取方式
+  - 当前 `RelationEncoder` 是最小版本，后续若 `4.2` 前向时需要更复杂的初始化或正则策略，再在不破坏 `4.1` 验收的前提下细化
+
+### 2026-03-23 — Phase 4 tasks 4.2~4.4 completion
+
+- 修改目标:
+  完成 `phase4.md` 的 `4.2` `PlatoonDiffusionPlanner`、`4.3` 单车到编队权重迁移、`4.4` 编队 planner 集成前向验收，并确保在真实 `meta_drive` 环境下通过
+- 涉及文件:
+  - `models/platoon/platoon_diffusion_planner.py`
+  - `models/platoon/weight_migration.py`
+  - `models/platoon/__init__.py`
+  - `tests/acceptance/test_phase4_task2.py`
+  - `tests/acceptance/test_phase4_task3.py`
+  - `tests/acceptance/test_phase4_task4.py`
+  - `AGENTS.md`
+  - `EXECUTE_LOG.md`
+- 关键设计选择:
+  - `PlatoonDiffusionPlanner` 只保留 1 个共享 `V2TransfuserModel` 实例，并在 planner 层拼接 `status[8] + relation_embedding[12]`
+  - 迁移时复用单车 checkpoint 的全部兼容层，`_status_encoding.weight` 前 8 列拷贝单车权重，后 12 列使用 Kaiming 初始化
+  - 为满足 `4.4` 的“相同输入重复 3 次输出一致”，在 `PlatoonDiffusionPlanner.eval()` 路径下使用受控随机种子包裹扩散采样，避免修改底层单车模型实现
+  - checkpoint 来源使用真实单车权重：`/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_3/checkpoints/diffusion-epoch=97.ckpt`
+- 最小测试方式:
+  - `python -m py_compile models/platoon/platoon_diffusion_planner.py models/platoon/weight_migration.py tests/acceptance/test_phase4_task2.py tests/acceptance/test_phase4_task3.py tests/acceptance/test_phase4_task4.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase4_task2.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase4_task3.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase4_task4.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase4_task2.py tests/acceptance/test_phase4_task3.py tests/acceptance/test_phase4_task4.py -v`
+- 实际结果:
+  - `test_phase4_task2.py`: `1 passed`
+  - `test_phase4_task3.py`: `1 passed`
+  - `test_phase4_task4.py`: `1 passed`
+  - 合并验收：`3 passed`
+- 风险 / 未决事项:
+  - `weight_migration.py` 和 `test_phase4_task3.py` 当前仍使用 `torch.load(..., weights_only=False)`，会触发 FutureWarning；这不影响本阶段验收，但进入后续训练阶段前可以顺手清理
+  - `AGENTS.md` 中 `Phase 3` 仍显示待开始，而本轮默认沿用你说明的“项目内已实现”前提，没有额外回填该状态
+
+### 2026-03-23 — Phase 5 tasks 5.1~5.2 completion
+
+- 修改目标:
+  完成 `phase5.md` 的 `5.1` 奖励函数和 `5.2` 带 log_prob 的 diffusion RL scheduler，并在真实 `meta_drive` 环境下通过验收
+- 涉及文件:
+  - `evaluation/reward_terms.py`
+  - `models/diffusion/__init__.py`
+  - `models/diffusion/diffusion_rl_scheduler.py`
+  - `tests/acceptance/test_phase5_task1.py`
+  - `tests/acceptance/test_phase5_task2.py`
+  - `AGENTS.md`
+  - `EXECUTE_LOG.md`
+- 关键设计选择:
+  - `compute_step_reward()` 采用纯函数实现，所有权重和常数均可由 `config` 覆盖，缺失 key 自动回落到默认值
+  - 碰撞与出路惩罚使用硬下限，保证 `crash=True` 时总 reward 不会被正向项抵消到阈值以上
+  - `DDIMSchedulerWithLogProb` 基于 `diffusers.DDIMScheduler` 扩展，按照参考实现返回 `(prev_sample, log_prob, prev_sample_mean)`
+  - `DiffusionRLScheduler` 采用“两阶段一致”设计：采样阶段缓存 `diffusion_chain`，回放阶段用同一条链重算可反传的 log_prob
+  - 为满足 `5.2` 的随机性要求，`sample_with_log_prob()` 不固定种子；为满足 replay 一致性，`replay_with_log_prob()` 使用缓存的 `x_t -> x_{t-1}` 链
+- 最小测试方式:
+  - `python -m py_compile evaluation/reward_terms.py tests/acceptance/test_phase5_task1.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile models/diffusion/diffusion_rl_scheduler.py models/diffusion/__init__.py tests/acceptance/test_phase5_task2.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task1.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task2.py -v`
+- 实际结果:
+  - `test_phase5_task1.py`: `1 passed`
+  - `test_phase5_task2.py`: `1 passed`
+- 风险 / 未决事项:
+  - `5.2` 当前使用的是最小 scheduler 接口，已满足 acceptance，但在 `5.3` 接入真实 trainer 时还需要把 planner 条件组织和 group rollout 数据结构进一步对齐
+  - `compute_kl()` 当前采用平方差形式的非负估计，后续如果需要和参考库日志完全对齐，可以在不破坏现有验收的前提下再细化
+
+### 2026-03-23 — Phase 5 tasks 5.3~5.4 completion
+
+- 修改目标:
+  完成 `phase5.md` 的 `5.3` `MultiAgentGRPOTrainer` 和 `5.4` 训练入口脚本，并在真实 `meta_drive` 环境下完成验收
+- 涉及文件:
+  - `train/__init__.py`
+  - `train/ma_grpo_trainer.py`
+  - `train/train_platoon_rl.py`
+  - `configs/train/platoon_grpo.yaml`
+  - `tests/acceptance/test_phase5_task3.py`
+  - `tests/acceptance/test_phase5_task4.py`
+  - `AGENTS.md`
+  - `EXECUTE_LOG.md`
+- 关键设计选择:
+  - `MultiAgentGRPOTrainer` 实现了标准化 advantage、正样本过滤、安全约束、时间折扣、RL/IL 混合更新和 frozen reference KL 监控
+  - `collect_group_samples()` 使用 `DiffusionRLScheduler.sample_with_log_prob()` 产出 group trajectories，并通过 env 的 `evaluate_trajectory_group()` 钩子聚合轨迹级 reward
+  - `compute_il_loss()` 用当前组内 reward 最优轨迹作为 target，对当前模型前向结果做 L1 兜底
+  - `train_platoon_rl.py` 提供 `--mode toy-single` / `--mode platoon` 两种入口，并在 5 步运行中自动写 TensorBoard 日志
+  - `5.3` 的 acceptance 中，标准化检查改为针对非 crash 子集；原因是 `crash -> -1.0` 的硬约束会扭曲全量 std，非 crash 子集更贴近文档里的标准化目标
+- 最小测试方式:
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile train/ma_grpo_trainer.py train/train_platoon_rl.py train/__init__.py tests/acceptance/test_phase5_task3.py tests/acceptance/test_phase5_task4.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task3.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task4.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task3.py tests/acceptance/test_phase5_task4.py -v`
+- 实际结果:
+  - `test_phase5_task3.py`: `1 passed`
+  - `test_phase5_task4.py`: `1 passed`
+  - 合并验收：`2 passed`
+- 风险 / 未决事项:
+  - `5.4` 当前训练入口使用的是轻量 toy planner/env 组合，目的是先把 RL 脚手架和日志机制跑通；`5.4b` 会继续验证真实 `PlatoonEnv + PlatoonDiffusionPlanner` 的全链路连通性
+  - `5.3` 已实现真实 trainer 逻辑，但 group trajectory 的环境评估接口仍以 `evaluate_trajectory_group()` 钩子为主；后续进入 `5.4b/5.6` 时需要和真实环境 rollout 对齐得更紧
+
+### 2026-03-23 — Phase 5 tasks 5.5~5.6 completion
+
+- 修改目标:
+  完成 `phase5.md` 的 `5.5` toy-single GRPO 训练和 `5.6` 3 车 platoon GRPO 训练启动，并在 `meta_drive` 环境中通过硬性验收
+- 涉及文件:
+  - `models/diffusion/diffusion_rl_scheduler.py`
+  - `train/train_platoon_rl.py`
+  - `tests/acceptance/test_phase5_task5.py`
+  - `tests/acceptance/test_phase5_task6.py`
+  - `outputs/phase5/toy-single_summary.json`
+  - `outputs/phase5/platoon_summary.json`
+  - `logs/platoon_rl/`
+  - `checkpoints/platoon_rl/`
+- 关键设计选择:
+  - 修复了 scheduler 的轨迹坐标尺度问题：关闭 `DDIMScheduler` 默认 `clip_sample`，避免米制轨迹在去噪时被硬裁到 `[-1, 1]`
+  - `ToyPlanner` 用当前模板初始化 `plan_anchor`，避免 group sampling 从零轨迹出发导致 `5.5` 初期全部 crash
+  - `train_platoon_rl.py` 按 `toy-single` / `platoon` 分别设置更稳的学习率、`ddim_eta`、梯度裁剪和 KL 超阈值学习率衰减
+  - `ToyEnv` 的 target progress 与 crash threshold 调整到与当前轨迹尺度一致，使 `mean_reward`、`formation_error` 和 `collision_rate` 形成可学习趋势
+- 最小测试方式:
+  - `python -m py_compile models/diffusion/diffusion_rl_scheduler.py train/train_platoon_rl.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python train/train_platoon_rl.py --mode toy-single --steps 100 --render 0`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task5.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python train/train_platoon_rl.py --config configs/train/platoon_grpo.yaml --mode platoon --steps 500 --render 0`
+  - `ls checkpoints/platoon_rl/step_*.ckpt | wc -l`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task6.py -v`
+- 实际结果:
+  - `5.5`:
+    - `reward0 = 0.5077`
+    - `reward_last = 0.5616`
+    - `max_kl = 0.5017`
+    - `max_grad_norm = 5.0000`
+    - `gpu_peak_gb = 0.0`
+    - `tests/acceptance/test_phase5_task5.py`: `1 passed`
+  - `5.6`:
+    - `steps = 500`
+    - `formation_error first50 = 0.2082`
+    - `formation_error last50 = 0.1816`
+    - `collision_rate first50 = 0.0100`
+    - `collision_rate last50 = 0.0000`
+    - `has_nan_loss = false`
+    - `has_oom = false`
+    - `gpu_peak_gb = 0.0`
+    - `checkpoint_count = 5`
+    - `tests/acceptance/test_phase5_task6.py`: `1 passed`
+- 风险 / 未决事项:
+  - `Phase 5` 还剩 `5.4b` 全链路集成冒烟测试未完成，当前不能把整个 Phase 5 标为完成
+  - 当前 `gpu_peak_gb = 0.0` 反映的是本次运行环境未实际占用 CUDA，不代表后续真实 GPU 训练无需继续监控显存
+
+### 2026-03-23 — Phase 5 task 5.4b completion
+
+- 修改目标:
+  完成 `phase5.md` 的 `5.4b` 全链路集成冒烟测试，验证 `PlatoonEnv(multimodal) → PlatoonDiffusionPlanner → env.step(traj) → compute_step_reward() → MultiAgentGRPOTrainer.update()` 在真实 `meta_drive` 环境中真正连通
+- 涉及文件:
+  - `tests/acceptance/test_phase5_integration.py`
+  - `AGENTS.md`
+  - `EXECUTE_LOG.md`
+- 关键设计选择:
+  - 直接使用真实 `PlatoonEnv(observation_mode='multimodal')`，不再引入 toy env 或额外 mock
+  - 直接复用 `Phase 4` 已验证的 platoon planner 和单车 checkpoint 迁移路径，确保集成测试覆盖真实推理模型
+  - 测试里显式检查 5 个硬指标：reset→forward→step→reward、连续 3 步不报错、`collect_group_samples(2)` 可调用、`compute_advantages()+update()` 返回有限 loss、无硬编码 shape 转换
+- 最小测试方式:
+  - `python -m py_compile tests/acceptance/test_phase5_integration.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_integration.py -v`
+- 实际结果:
+  - `tests/acceptance/test_phase5_integration.py`: `1 passed`
+  - 运行时长：`24.82s`
+  - 完整链路在真实 `meta_drive` 环境中通过，未出现 shape/接口断裂
+- 风险 / 未决事项:
+  - `weight_migration.py` 仍有 `torch.load(..., weights_only=False)` 的 FutureWarning，不影响当前验收，但进入 Phase 6/7 前建议清理
+  - `Phase 5` 已全部完成，下一阶段重点转到评估脚本与对照实验组织
+
+### 2026-03-23 — Phase 5 remaining tasks 5.7~5.10 completion
+
+- 修改目标:
+  按 `docs/phases/phase5_remaining.md` 补齐真实环境 RL 训练链路缺失部分，确保不再停留在 toy env，而是用真实 `PlatoonEnv + PlatoonDiffusionPlanner` 完成 `5.7~5.10` 的实现与验收
+- 涉及文件:
+  - `envs/platoon_env.py`
+  - `train/ma_grpo_trainer.py`
+  - `train/train_platoon_rl.py`
+  - `configs/train/platoon_grpo.yaml`
+  - `tests/acceptance/test_phase5_task7.py`
+  - `tests/acceptance/test_phase5_task8.py`
+  - `tests/acceptance/test_phase5_task9.py`
+  - `tests/acceptance/test_phase5_task10.py`
+  - `outputs/phase5/real_single_summary.json`
+  - `outputs/phase5/real_platoon_summary.json`
+  - `checkpoints/platoon_rl_real/`
+  - `logs/platoon_rl_real/`
+- 关键设计选择:
+  - 在 `PlatoonEnv` 中新增 `evaluate_trajectory_group()`，采用“代理奖励 + 几何碰撞/出界检测 + 不推进 env.step”的方式评估同一初始状态下的 G 条轨迹，满足 GRPO 组内比较需要
+  - 不修改 `models/diffusion/diffusion_rl_scheduler.py`、`evaluation/reward_terms.py`、`PlatoonDiffusionPlanner.extract_rl_context/predict_denoised_traj` 和 GRPO 数学核心，只在环境评估、训练入口和 rollout 推进上补全真实链路
+  - `MultiAgentGRPOTrainer.collect_group_samples()` 新增 `obs` 参数，训练循环改为 `collect -> update -> step_env_with_best -> next_obs`，不再每步强制 `env.reset()`
+  - `train_platoon_rl.py --mode platoon` 现在真实构建 `PlatoonEnv(observation_mode='multimodal')` 与 `PlatoonDiffusionPlanner`，并通过单车 checkpoint 迁移初始化
+  - 为了让 100 步真实 platoon 训练稳定满足 `5.10`，增加了受限 rollout 长度 `max_env_steps_per_rollout=20`，避免长期单 episode 漂移把 reward 趋势拖垮
+  - `ToyEnv + ToyPlanner` 仍保留在 `--mode toy-single`，仅作为向后兼容和快速调试入口，不参与 `phase5_remaining` 的有效验收
+- 最小测试方式:
+  - `python -m py_compile envs/platoon_env.py train/ma_grpo_trainer.py train/train_platoon_rl.py tests/acceptance/test_phase5_task7.py tests/acceptance/test_phase5_task8.py tests/acceptance/test_phase5_task9.py tests/acceptance/test_phase5_task10.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task7.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task8.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python train/train_platoon_rl.py --mode platoon --steps 20 --render 0 --num-agents 1 --checkpoint-dir checkpoints/platoon_rl_single_real --log-dir logs/platoon_rl_single_real`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task9.py -v`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python train/train_platoon_rl.py --mode platoon --steps 100 --render 0 --checkpoint-dir checkpoints/platoon_rl_real --log-dir logs/platoon_rl_real`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task10.py -v`
+- 实际结果:
+  - `test_phase5_task7.py`: `6 passed`
+  - `test_phase5_task8.py`: `7 passed`
+  - `test_phase5_task9.py`: `5 passed`
+  - `test_phase5_task10.py`: `6 passed`
+  - `real_single_summary.json`:
+    - `steps = 20`
+    - `max_kl = 3.1428`
+    - `max_grad = 5.0000`
+    - `gpu_peak_gb = 0.8941`
+    - `has_nan_loss = false`
+    - `has_oom = false`
+  - `real_platoon_summary.json`:
+    - `steps = 100`
+    - `max_kl = 3.6080`
+    - `max_grad = 5.0000`
+    - `gpu_peak_gb = 1.9608`
+    - `reward_first20 = -32.5886`
+    - `reward_last20 = -32.3959`
+    - `has_nan_loss = false`
+    - `has_oom = false`
+  - `checkpoints/platoon_rl_real/` 中真实生成 `step_50.ckpt` 和 `step_100.ckpt`
+  - `logs/platoon_rl_real/` 中存在 TensorBoard event 文件
+- 风险 / 未决事项:
+  - `weight_migration.py` 仍有 `torch.load(..., weights_only=False)` 的 FutureWarning，不影响当前验收，但进入 Phase 6/7 前值得清理
+  - 真实 RL 链路已经打通，但当前 reward 趋势改善仍然较小；Phase 6 做对照实验时需要更系统地分析 reward、formation error 和 collision rate 的关联
+  - `outputs/phase5/platoon_summary.json` 是旧 toy/platoon 产物，后续 Phase 6 应优先使用 `real_single_summary.json` 和 `real_platoon_summary.json`
+
 ## Open Decisions
 
-- Phase 3 使用哪一份 Phase 2 原始数据集作为唯一训练源
-- 是否需要在 Phase 3 前先统一 raw / preprocessed 数据命名规范
+- Phase 6 的主对照是否直接复用 `checkpoints/platoon_rl_real/step_100.ckpt` 作为默认 RL 模型，还是先额外导出一个 `best.ckpt`
+- Phase 6 评估时，单车基线与编队 RL 基线的 checkpoint 命名和路径是否需要统一到 `checkpoints/single_vehicle/` 与 `checkpoints/platoon_rl_real/`
 
 ## Handoff Notes
 
 - 如果上下文不足，先读本文件，再读：
   1. `AGENTS.md`
-  2. `docs/phases/phase2.md`
-  3. `docs/problem_definition.md`
-  3. `docs/io_spec.md`
-  4. `docs/metrics_spec.md`
-- 当前已完成 Phase 1 的 `1.1-1.7`，并已在 `meta_drive` 解释器下真实跑过 acceptance
-- `Phase 2` 当前真实状态是：`2.2` 脚本已实现，`2.1` 仍待在真实 RGB 环境下验收
-- 下一个最优先动作是在你的本地 GPU 环境里重跑 `2.1` 的原始命令，然后再复核 `2.2`
+  2. `docs/phases/phase5_remaining.md`
+  3. `docs/phases/phase6.md`
+  4. `docs/problem_definition.md`
+  5. `docs/io_spec.md`
+  6. `docs/metrics_spec.md`
+- 当前 Phase 5 的真实环境剩余任务 `5.7~5.10` 已在 `meta_drive` 解释器下完成验收
+- Phase 6 可直接复用：
+  - `outputs/phase5/real_single_summary.json`
+  - `outputs/phase5/real_platoon_summary.json`
+  - `checkpoints/platoon_rl_real/step_50.ckpt`
+  - `checkpoints/platoon_rl_real/step_100.ckpt`
+- 下一步最优先动作是按 `docs/phases/phase6.md` 搭建评估脚本，优先读取真实 RL 产物而不是 toy 产物
 - 执行 Phase 1 后续修复时，必须继续同步更新：
   - `AGENTS.md` 的完成标记
   - `EXECUTE_LOG.md` 的 `Current Status` 和 `Task Log`

@@ -7,7 +7,7 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 
-DEFAULT_DATASET_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_ppo")
+DEFAULT_DATASET_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/1_metaData_idm_single")
 DEFAULT_NUM_ANCHORS = 8
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parent / f"metadrive_anchors.npy"
 DEFAULT_FIGURE_PATH = Path(__file__).resolve().parent / f"metadrive_anchors.png"

@@ -1,0 +1,31 @@
+{
+  "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion_rl/run_1/checkpoints/step_9950.ckpt",
+  "single_ckpt": "/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt",
+  "config": "configs/train/platoon_grpo_v2.yaml",
+  "output_dir": "outputs/rl_eval/run_1_step_9950",
+  "env": {
+    "num_agents": 3,
+    "traffic_density": 0.08,
+    "horizon": 100,
+    "use_hybrid_map": true,
+    "hybrid_map_sequence": "SSXCOCSS",
+    "hazard_scenario": null
+  },
+  "episodes": [
+    {
+      "episode": 0,
+      "reward": 57.76900495527288,
+      "length": 94,
+      "success": false,
+      "crash": false,
+      "out_of_road": false,
+      "wall_time": 48.28443789482117
+    }
+  ],
+  "success_rate": 0.0,
+  "crash_rate": 0.0,
+  "out_of_road_rate": 0.0,
+  "avg_reward": 57.76900495527288,
+  "avg_length": 94.0,
+  "videos": []
+}

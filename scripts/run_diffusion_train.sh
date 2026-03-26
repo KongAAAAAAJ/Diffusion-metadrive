@@ -3,9 +3,9 @@ set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL_SIZE="${MODEL_SIZE:-small}"
-EXPERT_NAME="${EXPERT_NAME:-ppo}"
-DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_ppo_preprocessed}"
-PLAN_ANCHOR_PATH="${PLAN_ANCHOR_PATH:-metadrive/exp_dataset/metadrive_anchors_${EXPERT_NAME}.npy}"
+EXPERT_NAME="${EXPERT_NAME:-idm}"
+DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaData_idm_single_preprocessed}"
+PLAN_ANCHOR_PATH="${PLAN_ANCHOR_PATH:-metadrive/exp_dataset/anchors.npy}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 PRECISION="${PRECISION:-auto}"
 CHECK_VAL_EVERY_N_EPOCH="${CHECK_VAL_EVERY_N_EPOCH:-1}"
@@ -22,4 +22,5 @@ DATASET_FORMAT="${DATASET_FORMAT:-auto}"
     --precision "${PRECISION}" \
     --check-val-every-n-epoch "${CHECK_VAL_EVERY_N_EPOCH}" \
     --val-visualization-interval "${VAL_VIS_INTERVAL}" \
-    --max-epochs "${MAX_EPOCHS}"
+    --max-epochs "${MAX_EPOCHS}" \
+    --cache-shards-in-memory

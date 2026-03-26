@@ -1,0 +1,48 @@
+group_size: 2
+num_agents: 3
+lr: 0.00005
+kl_target: 8.0
+lr_decay_factor: 0.8
+lr_grow_factor: 1.05
+max_grad_norm: 10.0
+total_steps: 500
+checkpoint_interval: 50
+
+ddim_steps: 4
+ddim_eta: 0.02
+advantage_discount_gamma: 0.8
+
+beta_reg_max: 1.0
+beta_reg_min: 0.1
+beta_reg_warmup_frac: 0.3
+beta_reg_decay_frac: 0.4
+
+lambda_local: 0.7
+lambda_team: 0.3
+joint_top_k: 2
+num_joint_groups: 8
+use_closedloop: true
+closedloop_workers: 8
+
+reward_config:
+  delta_s_max: 10.0
+  d_norm: 10.0
+  d_safe: 8.0
+  w_progress: 1.0
+  w_formation: 0.5
+  w_safety: 0.3
+  w_collision: 10.0
+  w_road: 5.0
+  w_comfort: 0.1
+  w_team_formation: 0.5
+  w_team_safety: 1.0
+  w_team_efficiency: 0.3
+  w_team_collision: 10.0
+
+traffic_density: 0.08
+horizon: 100
+max_env_steps_per_rollout: 20
+
+freeze_backbone: true
+freeze_tf_decoder: false
+freeze_trajectory_head: false
