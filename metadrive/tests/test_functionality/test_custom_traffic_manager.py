@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _load_custom_traffic_manager_module():
     module_name = "custom_traffic_manager_test"
-    path = REPO_ROOT / "envs/traffic_manager.py"
+    path = REPO_ROOT / "metadrive/envs/diffusion_envs/traffic_manager.py"
     stubbed = {}
 
     def register(name: str, module: types.ModuleType) -> None:
@@ -61,6 +61,26 @@ def test_before_reset_reads_target_speed_from_global_config():
 
     assert manager.before_reset_called is True
     assert manager._custom_target_speed == 25.0
+
+
+def test_before_reset_samples_target_speed_from_range_with_seeded_rng():
+    module = _load_custom_traffic_manager_module()
+    manager = module.CustomTrafficManager()
+    manager.engine.global_config = {"traffic_target_speed": (20.0, 27.0)}
+    manager.np_random = __import__("numpy").random.RandomState(123)
+
+    manager.before_reset()
+    sampled_speed = manager._custom_target_speed
+
+    assert manager.before_reset_called is True
+    assert 20.0 <= sampled_speed <= 27.0
+
+    second_manager = module.CustomTrafficManager()
+    second_manager.engine.global_config = {"traffic_target_speed": (20.0, 27.0)}
+    second_manager.np_random = __import__("numpy").random.RandomState(123)
+    second_manager.before_reset()
+
+    assert second_manager._custom_target_speed == sampled_speed
 
 
 def test_before_step_caps_background_policy_target_speed_without_raising_lower_limits():

@@ -55,9 +55,7 @@ from metadrive.exp_dataset.trajectory_correction import (
     correct_trajectory_geometry,
 )
 from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
-# from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy as Expert
-from metadrive.exp_dataset.hierarchical_expert import HierarchicalExpertIDMPolicy as Expert
-from metadrive.exp_dataset.hierarchical_expert.driving_style import DrivingStyleProfile
+from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy as Expert
 from metadrive.policy.diffusion_policy.transfuser_features import BoundingBox2DIndex
 from metadrive.utils import Config
 from metadrive.exp_dataset.metadrive_dataset import split_shards
@@ -92,10 +90,10 @@ class ExpertCollectorConfig:
 
     # Trajectory supervision
     horizon_steps: int = 100       # minimum future context required per sample
-    target_stride_steps: int = 5  # step interval between consecutive waypoints
-    sample_stride_steps: int = 2  # sliding-window stride inside one episode
-    trajectory_num_poses: int = 8 # number of future waypoints per sample
-    trajectory_dt: float = 0.1
+    target_stride_steps: int = 5  # 轨迹点之间的时间间隔（step）
+    sample_stride_steps: int = 2  # 两个样本之间的时间间隔（step）
+    trajectory_num_poses: int = 8 # 轨迹点数量
+    trajectory_dt: float = 0.1  # 仿真时间步长（s）
     num_bounding_boxes: int = 16
     lidar_min_x: float = -32.0  # lidar的感知范围（相对于ego车坐标系）
     lidar_max_x: float = 32.0
@@ -190,16 +188,13 @@ def _to_jsonable(value):
     return str(value)
 
 
-def build_hierarchical_expert_policy(
+def build_expert_policy(
     vehicle,
     random_seed: int,
 ):
-    # Pass the default style explicitly so collection behavior does not drift with
-    # future constructor defaults inside HierarchicalExpertIDMPolicy.
     return Expert(
-        vehicle,
+        control_object=vehicle,
         random_seed=random_seed,
-        style_profile=DrivingStyleProfile(),
     )
 
 
@@ -1084,7 +1079,7 @@ def rollout_episode(
             action = ppo_expert(vehicle, deterministic=True)
         elif config.expert_type == "idm":
             if idm_policy is None:
-                idm_policy = build_hierarchical_expert_policy(
+                idm_policy = build_expert_policy(
                     vehicle,
                     random_seed=config.start_seed,
                 )
@@ -1349,7 +1344,7 @@ def parse_args() -> ExpertCollectorConfig:
         else:
             opts["type"] = type(default)
         if f.name == "expert_type":
-            opts["choices"] = ("ppo", "idm")
+            opts["choices"] = ("idm", "ppo")
         parser.add_argument(f"--{f.name.replace('_', '-')}", **opts)
     parser.parse_args(namespace=config)
     return config

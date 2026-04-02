@@ -3,6 +3,7 @@ from metadrive.envs.diffusion_envs.custom_hybrid_map import MAHybridPGMapManager
 from metadrive.obs.state_obs import LidarStateObservation
 from metadrive.obs.diff_obs.top_down_state_obs_multi_channel import TopDownLidarStateObservation, DatasetCollectObservation
 from metadrive.component.sensors.rgb_camera import RGBCamera
+from metadrive.component.pgblock.first_block import FirstPGBlock
 from metadrive.utils import Config
 from metadrive.manager.traffic_manager import TrafficMode
 from metadrive.engine.engine_utils import initialize_global_config
@@ -28,17 +29,21 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 
                 horizon=2000,
                 force_seed_spawn_manager=True,  # 车辆生成点seed是否与全局seed绑定（可复现性）
-                spawn_strategy="map_respawn_roads",
-                spawn_diversify_roads=True,
-                spawn_roads=None,
+                ego_spawn_mode="main_route_only",
+                ego_spawn_route_start=(FirstPGBlock.NODE_2, FirstPGBlock.NODE_3),
+                ego_spawn_buffer_mode="traffic_gap",
+                ego_spawn_buffer_scale=1.0,
+                traffic_spawn_min_gap_ahead=12.0,
+                traffic_spawn_min_gap_behind=8.0,
+                traffic_spawn_lane_relaxation=True,
                 use_render=True,
                 camera_height=30,  # [m] 观察视角高度
 
                 # traffic
                 traffic_density=0.06,
-                traffic_mode=TrafficMode.Respawn,  # Respawn, Trigger, Basic, Hybrid
+                traffic_mode=TrafficMode.Hybrid,  # Respawn, Trigger, Basic, Hybrid
                 random_traffic=True,
-                traffic_target_speed=None,
+                traffic_target_speed=(20.0, 27.0),  # [km/h] 按 seed 可复现地为每个 episode 采样目标车速
                 accident_prob=0.,  # 在reset()时，生成一个静态事故/施工场景的概率
 
                 # Agent
@@ -56,50 +61,16 @@ class BaseMultiEnv(MultiAgentMetaDrive):
         )
         return config
 
-    def _collect_map_respawn_roads(self):
-        current_map = getattr(self, "current_map", None)
-        if current_map is None and hasattr(self, "engine"):
-            current_map = getattr(self.engine, "current_map", None)
-        if current_map is None:
-            return []
-
-        roads = []
-        seen = set()
-        for block in getattr(current_map, "blocks", []) or []:
-            for road in getattr(block, "get_respawn_roads", lambda: [])() or []:
-                if hasattr(road, "start_node") and hasattr(road, "end_node"):
-                    key = (road.start_node, road.end_node, road.__class__)
-                else:
-                    key = id(road)
-                if key in seen:
-                    continue
-                seen.add(key)
-                roads.append(road)
-        return roads
-
-    def _refresh_map_spawn_roads_if_needed(self):
-        if self.config.get("spawn_strategy") != "map_respawn_roads":
-            return
-        if self.config.get("spawn_roads") is not None:
-            return
-        if not hasattr(self, "engine"):
-            return
-        spawn_manager = getattr(self.engine, "spawn_manager", None)
-        if spawn_manager is None or not hasattr(spawn_manager, "refresh_spawn_roads"):
-            return
-        spawn_roads = self._collect_map_respawn_roads()
-        if not spawn_roads:
-            return
-        spawn_manager.refresh_spawn_roads(spawn_roads)
-
     def setup_engine(self):
         super(BaseMultiEnv, self).setup_engine()
         # 用 MAHybridPGMapManager 替换默认的 PGMapManager，
         # 在 use_hybrid_map=False 时其行为与 PGMapManager 完全一致。
         self.engine.update_manager("map_manager", MAHybridPGMapManager())
-        from envs.traffic_manager import CustomTrafficManager
+        from metadrive.envs.diffusion_envs.route_spawn_manager import RouteAwareSpawnManager
+        from metadrive.envs.diffusion_envs.route_traffic_manager import RouteAwareTrafficManager
 
-        self.engine.update_manager("traffic_manager", CustomTrafficManager())
+        self.engine.update_manager("spawn_manager", RouteAwareSpawnManager())
+        self.engine.update_manager("traffic_manager", RouteAwareTrafficManager())
 
     @staticmethod
     def _get_candidate_drivable_lanes(vehicle):

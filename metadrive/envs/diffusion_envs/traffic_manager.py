@@ -23,10 +23,20 @@ class CustomTrafficManager(PGTrafficManager):
 
     def before_reset(self) -> None:
         super().before_reset()
-        self._custom_target_speed = self.engine.global_config.get(
+        configured_target_speed = self.engine.global_config.get(
             "traffic_target_speed",
             self.CUSTOM_TARGET_SPEED,
         )
+        if isinstance(configured_target_speed, (tuple, list)) and len(configured_target_speed) == 2:
+            min_speed = float(configured_target_speed[0])
+            max_speed = float(configured_target_speed[1])
+            if max_speed < min_speed:
+                min_speed, max_speed = max_speed, min_speed
+            self._custom_target_speed = float(self.np_random.uniform(min_speed, max_speed))
+        elif configured_target_speed is None:
+            self._custom_target_speed = None
+        else:
+            self._custom_target_speed = float(configured_target_speed)
         self._base_normal_speeds = {}
 
     def _apply_speed_cap(self, vehicle) -> None:

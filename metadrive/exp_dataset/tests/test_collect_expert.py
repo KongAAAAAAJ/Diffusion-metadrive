@@ -15,11 +15,8 @@ def _load_module():
     class _StubConfig(dict):
         pass
 
-    stub_module = ModuleType("metadrive.exp_dataset.hierarchical_expert")
-    stub_module.HierarchicalExpertPolicy = type("HierarchicalExpertPolicy", (), {})
-    stub_module.HierarchicalExpertIDMPolicy = type("HierarchicalExpertIDMPolicy", (), {})
-    driving_style_module = ModuleType("metadrive.exp_dataset.hierarchical_expert.driving_style")
-    driving_style_module.DrivingStyleProfile = type("DrivingStyleProfile", (), {})
+    expert_idm_module = ModuleType("metadrive.exp_dataset.expert_idm_policy")
+    expert_idm_module.ExpertIDMPolicy = type("ExpertIDMPolicy", (), {})
 
     base_vehicle_module = ModuleType("metadrive.component.vehicle.base_vehicle")
     base_vehicle_module.BaseVehicle = type("BaseVehicle", (), {})
@@ -61,8 +58,7 @@ def _load_module():
     dataset_module.split_shards = lambda **kwargs: {"train": [], "val": [], "test": []}
 
     injected_module_names = [
-        stub_module,
-        driving_style_module,
+        expert_idm_module,
         base_vehicle_module,
         env_module,
         ppo_module,
@@ -314,39 +310,32 @@ def test_rollout_episode_skips_video_capture_when_disabled(monkeypatch):
     assert captured["count"] == 0
 
 
-def test_build_hierarchical_expert_policy_uses_explicit_default_style():
+def test_build_expert_policy_uses_vehicle_and_random_seed_only():
     vehicle = object()
     created = {}
 
     original_expert = getattr(collect_expert, "Expert", None)
-    original_driving_style = getattr(collect_expert, "DrivingStyleProfile", None)
     try:
         collect_expert.Expert = Mock(
-            side_effect=lambda vehicle, random_seed, style_profile: (
+            side_effect=lambda control_object, random_seed: (
                 created.update(
                     {
-                        "vehicle": vehicle,
+                        "vehicle": control_object,
                         "random_seed": random_seed,
-                        "style_profile": style_profile,
                     }
                 )
                 or "policy"
             )
         )
-        collect_expert.DrivingStyleProfile = Mock(side_effect=original_driving_style)
 
-        policy = collect_expert.build_hierarchical_expert_policy(vehicle, random_seed=7)
+        policy = collect_expert.build_expert_policy(vehicle, random_seed=7)
 
         assert policy == "policy"
         assert created["vehicle"] is vehicle
         assert created["random_seed"] == 7
-        assert isinstance(created["style_profile"], original_driving_style)
-        collect_expert.DrivingStyleProfile.assert_called_once_with()
     finally:
         if original_expert is not None:
             collect_expert.Expert = original_expert
-        if original_driving_style is not None:
-            collect_expert.DrivingStyleProfile = original_driving_style
 
 
 def test_parse_args_defaults_save_videos_to_false(monkeypatch):

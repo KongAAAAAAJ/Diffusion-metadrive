@@ -204,6 +204,7 @@ class IntersectionSpeedRegulator:
 
 class ExpertIDMPolicy(IDMPolicy):
     """Dataset-facing IDM policy aligned with the background-traffic IDM."""
+    MAX_STEERING = IDMPolicy.MAX_STEERING_ANGLE
 
     def __init__(self, control_object, random_seed: int = 0):
         super().__init__(control_object=control_object, random_seed=random_seed)

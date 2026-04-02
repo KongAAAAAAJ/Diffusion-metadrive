@@ -5,10 +5,12 @@ PYTHON_BIN="/home/kong/anaconda3/envs/meta_drive/bin/python"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_ROOT="/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets"
 DATASET_NAME="metaIDM"
-LOG_PATH="${OUTPUT_ROOT}/collect_command_${DATASET_NAME}.log"
+REPORT_DIR="${OUTPUT_ROOT}/${DATASET_NAME}/reports"
+LOG_PATH="${REPORT_DIR}/collect_command_${DATASET_NAME}.log"
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 mkdir -p "${OUTPUT_ROOT}"
+mkdir -p "${REPORT_DIR}"
 
 cd "${REPO_ROOT}"
 
