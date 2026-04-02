@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 
+import numpy as np
+
 
 def _load_module():
     point_lane_module = ModuleType("metadrive.component.lane.point_lane")
@@ -36,9 +38,19 @@ def _load_module():
             self.heading_pid = PIDController(1.7, 0.01, 3.5)
             self.lateral_pid = PIDController(0.3, 0.002, 0.05)
             self.enable_lane_change = self.engine.global_config.get("enable_idm_lane_change", True)
+            self.action_info = {}
+            self.routing_target_lane = "target-lane"
 
         def steering_control(self, target_lane):
             return ("idm", target_lane)
+
+        def act(self, *args, **kwargs):
+            action = [0.25, 0.5]
+            self.action_info["action"] = action
+            return action
+
+        def reset(self):
+            self.action_info.clear()
 
     idm_module.IDMPolicy = IDMPolicy
 
@@ -91,3 +103,81 @@ def test_expert_idm_policy_keeps_parent_lane_change_setting():
     policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
 
     assert policy.enable_lane_change is True
+
+
+def test_expert_idm_policy_initializes_intersection_regulator():
+    vehicle = SimpleNamespace(lidar=SimpleNamespace(get_surrounding_objects=lambda _: []))
+
+    policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
+
+    assert isinstance(policy.intersection_regulator, expert_idm_policy.IntersectionSpeedRegulator)
+
+
+def test_expert_idm_policy_act_applies_intersection_adjustment():
+    surrounding = [object()]
+    vehicle = SimpleNamespace(lidar=SimpleNamespace(get_surrounding_objects=lambda _: surrounding))
+    policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
+    policy.routing_target_lane = "ref-lane"
+    policy.intersection_regulator.adjust = lambda ego, all_objects, target_lane, idm_acc: -1.25
+
+    action = policy.act()
+
+    assert action == [0.25, -1.25]
+    assert policy.action_info["action"] == [0.25, -1.25]
+
+
+def test_expert_idm_policy_reset_clears_intersection_regulator_state():
+    vehicle = SimpleNamespace(lidar=SimpleNamespace(get_surrounding_objects=lambda _: []))
+    policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
+    policy.intersection_regulator._last_accel = -2.0
+    policy.action_info["action"] = [0.1, -0.2]
+
+    policy.reset()
+
+    assert policy.intersection_regulator._last_accel is None
+    assert policy.action_info == {}
+
+
+def test_intersection_regulator_returns_idm_acc_without_conflict():
+    regulator = expert_idm_policy.IntersectionSpeedRegulator()
+    ego = SimpleNamespace(
+        position=np.asarray([0.0, 0.0], dtype=np.float64),
+        speed=8.0,
+        heading_theta=0.0,
+    )
+
+    adjusted = regulator.adjust(ego=ego, all_objects=[], target_lane=None, idm_acc=0.4)
+
+    assert adjusted == 0.4
+    assert regulator._last_accel is None
+
+
+def test_intersection_regulator_detects_crossing_conflict_and_brakes():
+    regulator = expert_idm_policy.IntersectionSpeedRegulator()
+    ego = SimpleNamespace(
+        position=np.asarray([0.0, 0.0], dtype=np.float64),
+        speed=8.0,
+        heading_theta=0.0,
+    )
+    crossing = SimpleNamespace(
+        position=np.asarray([12.0, -12.0], dtype=np.float64),
+        speed=8.0,
+        heading_theta=np.pi / 2,
+    )
+    lane = SimpleNamespace(
+        length=60.0,
+        local_coordinates=lambda position: (float(position[0]), float(position[1])),
+        position=lambda longitudinal, lateral: np.asarray([longitudinal, lateral], dtype=np.float64),
+    )
+    crossing_lane = SimpleNamespace(
+        length=60.0,
+        local_coordinates=lambda position: (float(position[1] + 20.0), float(position[0] - 10.0)),
+        position=lambda longitudinal, lateral: np.asarray([10.0 + lateral, -20.0 + longitudinal], dtype=np.float64),
+    )
+    crossing.navigation = SimpleNamespace(current_ref_lanes=[crossing_lane])
+    crossing.lane_index = ("c", "d", 0)
+
+    adjusted = regulator.adjust(ego=ego, all_objects=[crossing], target_lane=lane, idm_acc=0.4)
+
+    assert adjusted < 0.0
+    assert adjusted < 0.4

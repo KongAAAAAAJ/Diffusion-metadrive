@@ -15,11 +15,215 @@ from metadrive.policy.idm_policy import IDMPolicy
 from metadrive.utils.math import wrap_to_pi
 
 
+class IntersectionSpeedRegulator:
+    """Inline intersection-conflict speed regulator for ExpertIDMPolicy."""
+
+    HORIZON = 3.0
+    DT = 0.2
+    CANDIDATE_RADIUS = 40.0
+    CONFLICT_DIST = 4.5
+    SAFE_TIME_GAP = 1.5
+    MAX_BRAKING = -4.5
+    ACCEL_RATE_LIMIT = 1.0
+    COMMITTED_TIME = 0.8
+    COMMITTED_SPEED = 3.0
+    EMERGENCY_DIST = 2.5
+    SPEED_EPS = 1e-3
+
+    def __init__(self):
+        self._last_accel = None
+
+    def reset(self):
+        self._last_accel = None
+
+    def adjust(self, ego, all_objects, target_lane, idm_acc: float) -> float:
+        candidates = self._filter_candidates(ego, all_objects)
+        ego_path = self._predict_path_on_lane(ego, target_lane)
+        conflicts = []
+        for obj in candidates:
+            conflict = self._evaluate_conflict(ego, ego_path, obj)
+            if conflict is not None:
+                conflicts.append(conflict)
+
+        target_acc = float(idm_acc)
+        if conflicts:
+            target_acc = min(self._compute_target_acc(ego, conflict, idm_acc) for conflict in conflicts)
+
+        if target_acc >= float(idm_acc) - 1e-6:
+            self._last_accel = None
+            return float(idm_acc)
+        return self._limit_rate(target_acc)
+
+    def _filter_candidates(self, ego, all_objects) -> list:
+        candidates = []
+        ego_position = np.asarray(getattr(ego, "position", np.zeros(2)), dtype=np.float64)
+        ego_dir = self._get_direction(ego)
+        for obj in all_objects:
+            if obj is ego or not hasattr(obj, "position"):
+                continue
+            position = np.asarray(obj.position, dtype=np.float64)
+            if not np.all(np.isfinite(position)):
+                continue
+            if np.linalg.norm(position - ego_position) > self.CANDIDATE_RADIUS:
+                continue
+            if float(np.dot(ego_dir, self._get_direction(obj))) > 0.7:
+                continue
+            candidates.append(obj)
+        return candidates
+
+    def _predict_path_on_lane(self, obj, lane) -> np.ndarray:
+        speed = self._get_speed(obj)
+        if lane is not None and hasattr(lane, "local_coordinates") and hasattr(lane, "position"):
+            try:
+                long, _ = lane.local_coordinates(np.asarray(obj.position, dtype=np.float64))
+                long = float(max(long, 0.0))
+                lane_length = float(getattr(lane, "length", long + self.HORIZON * max(speed, 1.0)))
+                samples = []
+                for t in self._time_samples():
+                    sample_long = float(np.clip(long + max(speed, 0.5) * t, 0.0, lane_length))
+                    samples.append(np.asarray(lane.position(sample_long, 0.0), dtype=np.float64))
+                return np.stack(samples, axis=0)
+            except Exception:
+                pass
+        return self._predict_path_straight(obj)
+
+    def _predict_path_straight(self, obj) -> np.ndarray:
+        origin = np.asarray(obj.position, dtype=np.float64)
+        direction = self._get_direction(obj)
+        speed = max(self._get_speed(obj), 0.5)
+        return np.stack([origin + direction * speed * t for t in self._time_samples()], axis=0)
+
+    def _get_obj_lane(self, obj):
+        navigation = getattr(obj, "navigation", None)
+        current_ref_lanes = getattr(navigation, "current_ref_lanes", None) or []
+        if current_ref_lanes:
+            lane_index = getattr(obj, "lane_index", None)
+            if isinstance(lane_index, (tuple, list)) and lane_index:
+                candidate_idx = lane_index[-1]
+                if isinstance(candidate_idx, (int, np.integer)) and 0 <= int(candidate_idx) < len(current_ref_lanes):
+                    return current_ref_lanes[int(candidate_idx)]
+            current_lane = getattr(obj, "lane", None)
+            if current_lane in current_ref_lanes:
+                return current_lane
+            return current_ref_lanes[0]
+        return getattr(obj, "lane", None)
+
+    def _get_direction(self, obj) -> np.ndarray:
+        heading = getattr(obj, "heading", None)
+        if heading is not None:
+            direction = np.asarray(heading, dtype=np.float64)
+            norm = np.linalg.norm(direction)
+            if norm > self.SPEED_EPS:
+                return direction / norm
+        velocity = getattr(obj, "velocity_km_h", None)
+        if velocity is not None:
+            direction = np.asarray(velocity, dtype=np.float64)
+            norm = np.linalg.norm(direction)
+            if norm > self.SPEED_EPS:
+                return direction / norm
+        heading_theta = getattr(obj, "heading_theta", None)
+        if heading_theta is not None:
+            return np.asarray([math.cos(float(heading_theta)), math.sin(float(heading_theta))], dtype=np.float64)
+        return np.asarray([1.0, 0.0], dtype=np.float64)
+
+    def _get_speed(self, obj) -> float:
+        if hasattr(obj, "speed"):
+            return max(float(obj.speed), 0.0)
+        if hasattr(obj, "speed_km_h"):
+            return max(float(obj.speed_km_h) / 3.6, 0.0)
+        velocity = getattr(obj, "velocity_km_h", None)
+        if velocity is not None:
+            return max(float(np.linalg.norm(np.asarray(velocity, dtype=np.float64))) / 3.6, 0.0)
+        return 0.0
+
+    def _evaluate_conflict(self, ego, ego_path, obj) -> dict | None:
+        obj_path = self._predict_path_on_lane(obj, self._get_obj_lane(obj))
+        speed_ego = max(self._get_speed(ego), self.SPEED_EPS)
+        speed_obj = max(self._get_speed(obj), self.SPEED_EPS)
+        diff = ego_path[:, np.newaxis, :] - obj_path[np.newaxis, :, :]
+        dist_matrix = np.linalg.norm(diff, axis=2)
+        min_distance = float(np.min(dist_matrix))
+        if min_distance >= self.CONFLICT_DIST:
+            return None
+        ego_indices, obj_indices = np.where(dist_matrix < self.CONFLICT_DIST)
+        if ego_indices.size == 0:
+            return None
+        ego_times = ego_indices.astype(np.float64) * self.DT
+        obj_times = obj_indices.astype(np.float64) * self.DT
+        arrival_diff = np.abs(ego_times - obj_times)
+        valid = arrival_diff < (self.SAFE_TIME_GAP + 1.0)
+        if not np.any(valid):
+            return None
+        valid_indices = np.flatnonzero(valid)
+        order = np.lexsort((arrival_diff[valid_indices], ego_times[valid_indices]))
+        best = int(valid_indices[int(order[0])])
+        conflict_ego_time = float(ego_times[best])
+        conflict_obj_time = float(obj_times[best])
+        return {
+            "time_gap": conflict_ego_time,
+            "min_distance": min_distance,
+            "s_ego": speed_ego * conflict_ego_time,
+            "s_obj": speed_obj * conflict_obj_time,
+            "obj_speed": speed_obj,
+            "arrival_diff": float(arrival_diff[best]),
+        }
+
+    def _compute_target_acc(self, ego, conflict, idm_acc) -> float:
+        if self._should_hold_course(ego, conflict):
+            return float(idm_acc)
+        if conflict["time_gap"] < self.COMMITTED_TIME and conflict["min_distance"] < self.EMERGENCY_DIST:
+            return self.MAX_BRAKING
+        v_obj = max(float(conflict["obj_speed"]), self.SPEED_EPS)
+        t_obj = float(conflict["s_obj"] / v_obj)
+        t_target = max(t_obj + self.SAFE_TIME_GAP, self.DT)
+        v_ego = max(self._get_speed(ego), 0.0)
+        target_acc = 2.0 * (float(conflict["s_ego"]) - v_ego * t_target) / (t_target ** 2)
+        target_acc = min(float(target_acc), float(idm_acc))
+        return float(np.clip(target_acc, self.MAX_BRAKING, np.inf))
+
+    def _should_hold_course(self, ego, conflict) -> bool:
+        if conflict["time_gap"] >= self.COMMITTED_TIME:
+            return False
+        ego_speed = max(self._get_speed(ego), self.SPEED_EPS)
+        if ego_speed <= self.COMMITTED_SPEED:
+            return False
+        return float(conflict["min_distance"]) / ego_speed > self.COMMITTED_TIME
+
+    def _limit_rate(self, acc) -> float:
+        acc = float(acc)
+        if self._last_accel is None:
+            self._last_accel = acc
+            return acc
+        limited = float(np.clip(acc, self._last_accel - self.ACCEL_RATE_LIMIT, self._last_accel + self.ACCEL_RATE_LIMIT))
+        self._last_accel = limited
+        return limited
+
+    def _time_samples(self) -> np.ndarray:
+        return np.arange(0.0, self.HORIZON + self.DT * 0.5, self.DT, dtype=np.float64)
+
+
 class ExpertIDMPolicy(IDMPolicy):
     """Dataset-facing IDM policy aligned with the background-traffic IDM."""
 
     def __init__(self, control_object, random_seed: int = 0):
         super().__init__(control_object=control_object, random_seed=random_seed)
+        self.intersection_regulator = IntersectionSpeedRegulator()
+
+    def act(self, *args, **kwargs):
+        action = list(super().act(*args, **kwargs))
+        all_objects = self.control_object.lidar.get_surrounding_objects(self.control_object)
+        action[1] = self.intersection_regulator.adjust(
+            ego=self.control_object,
+            all_objects=all_objects,
+            target_lane=self.routing_target_lane,
+            idm_acc=action[1],
+        )
+        self.action_info["action"] = action
+        return action
+
+    def reset(self):
+        super().reset()
+        self.intersection_regulator.reset()
 
 
 

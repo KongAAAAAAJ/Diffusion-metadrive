@@ -38,6 +38,7 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 traffic_density=0.06,
                 traffic_mode=TrafficMode.Respawn,  # Respawn, Trigger, Basic, Hybrid
                 random_traffic=True,
+                traffic_target_speed=None,
                 accident_prob=0.,  # 在reset()时，生成一个静态事故/施工场景的概率
 
                 # Agent
@@ -96,6 +97,9 @@ class BaseMultiEnv(MultiAgentMetaDrive):
         # 用 MAHybridPGMapManager 替换默认的 PGMapManager，
         # 在 use_hybrid_map=False 时其行为与 PGMapManager 完全一致。
         self.engine.update_manager("map_manager", MAHybridPGMapManager())
+        from envs.traffic_manager import CustomTrafficManager
+
+        self.engine.update_manager("traffic_manager", CustomTrafficManager())
 
     @staticmethod
     def _get_candidate_drivable_lanes(vehicle):

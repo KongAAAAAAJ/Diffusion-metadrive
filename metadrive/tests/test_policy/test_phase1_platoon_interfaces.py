@@ -76,6 +76,22 @@ def test_platoon_env_teleport_mode_short_circuits_shape_inference():
     assert env._infer_control_mode(teleport_actions) == "teleport"
 
 
+def test_platoon_env_keeps_traffic_target_speed_in_env_overrides():
+    module = _load_platoon_module_with_torch_stub("phase1_platoon_env_traffic_speed")
+    config = {
+        "num_agents": 3,
+        "traffic_density": 0.04,
+        "traffic_target_speed": 25.0,
+        "enable_idm_lane_change": False,
+    }
+
+    env_overrides = module.PlatoonEnv._extract_env_overrides(config)
+    runtime_flags = module.PlatoonEnv._extract_runtime_flags(config)
+
+    assert env_overrides["traffic_target_speed"] == 25.0
+    assert "traffic_target_speed" not in runtime_flags
+
+
 def test_platoon_env_build_info_dict_handles_teleport_trajectory_actions():
     module = _load_platoon_module_with_torch_stub("phase1_platoon_env_info_teleport")
     env = module.PlatoonEnv.__new__(module.PlatoonEnv)

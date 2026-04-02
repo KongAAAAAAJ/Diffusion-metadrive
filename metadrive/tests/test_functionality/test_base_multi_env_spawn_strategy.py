@@ -33,6 +33,10 @@ def _load_base_multi_env_module():
         def default_config():
             return _StubConfig({"spawn_roads": ["default_spawn_road"]})
 
+        def setup_engine(self):
+            if not hasattr(self, "engine"):
+                self.engine = SimpleNamespace(update_manager=lambda *args, **kwargs: None)
+
     multi_agent_module.MultiAgentMetaDrive = _MultiAgentMetaDrive
     register("metadrive.envs.marl_envs.multi_agent_metadrive", multi_agent_module)
 
@@ -59,7 +63,7 @@ def _load_base_multi_env_module():
     register("metadrive.utils", utils_module)
 
     traffic_module = types.ModuleType("metadrive.manager.traffic_manager")
-    traffic_module.TrafficMode = SimpleNamespace(Trigger="Trigger")
+    traffic_module.TrafficMode = SimpleNamespace(Trigger="Trigger", Respawn="Respawn")
     register("metadrive.manager.traffic_manager", traffic_module)
 
     engine_utils_module = types.ModuleType("metadrive.engine.engine_utils")
@@ -93,6 +97,8 @@ def test_default_config_enables_map_respawn_roads_strategy():
     assert config["spawn_strategy"] == "map_respawn_roads"
     assert config["spawn_diversify_roads"] is True
     assert config["spawn_roads"] is None
+    assert "traffic_target_speed" in config
+    assert config["traffic_target_speed"] is None
 
 
 def test_collect_map_respawn_roads_merges_unique_roads_from_all_blocks():
@@ -126,3 +132,31 @@ def test_refresh_spawn_roads_if_needed_skips_when_user_explicitly_configured_spa
     env._refresh_map_spawn_roads_if_needed()
 
     assert refreshed == []
+
+
+def test_setup_engine_replaces_default_traffic_manager_with_custom_manager():
+    module = _load_base_multi_env_module()
+    env = module.BaseMultiEnv.__new__(module.BaseMultiEnv)
+    updates = []
+    env.engine = SimpleNamespace(update_manager=lambda name, manager: updates.append((name, manager.__class__.__name__)))
+
+    custom_manager_module = types.ModuleType("envs.traffic_manager")
+
+    class CustomTrafficManager:
+        pass
+
+    custom_manager_module.CustomTrafficManager = CustomTrafficManager
+    previous = sys.modules.get("envs.traffic_manager")
+    sys.modules["envs.traffic_manager"] = custom_manager_module
+    try:
+        env.setup_engine()
+    finally:
+        if previous is None:
+            sys.modules.pop("envs.traffic_manager", None)
+        else:
+            sys.modules["envs.traffic_manager"] = previous
+
+    assert updates == [
+        ("map_manager", "object"),
+        ("traffic_manager", "CustomTrafficManager"),
+    ]
