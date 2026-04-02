@@ -54,8 +54,12 @@ from metadrive.exp_dataset.trajectory_correction import (
     classify_trajectory_mode,
     correct_trajectory_geometry,
 )
+from metadrive.exp_dataset.trajectory_filter import (
+    OutOfRoadByReferenceLaneRule,
+    TrajectoryFilterPipeline,
+)
 from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
-from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy as Expert
+from metadrive.exp_dataset.expert_idm_policy import ExpertIDMConfig, ExpertIDMPolicy as Expert
 from metadrive.policy.diffusion_policy.transfuser_features import BoundingBox2DIndex
 from metadrive.utils import Config
 from metadrive.exp_dataset.metadrive_dataset import split_shards
@@ -101,8 +105,8 @@ class ExpertCollectorConfig:
     lidar_max_y: float = 32.0
 
     # Traffic (map is fixed; only density varies)
-    traffic_density_min: float = 0.06
-    traffic_density_max: float = 0.08
+    traffic_density_min: float = 0.1 # 0.06
+    traffic_density_max: float = 0.2 # 0.08
     use_hybrid_map: bool = True
     hybrid_map_sequence: str = "SSXCOCSS"
     map_block_num: int = 5
@@ -129,6 +133,32 @@ class ExpertCollectorConfig:
     trajectory_visualization_min_span_y: float = 20.0
     trajectory_visualization_max_span_x: float = 90.0
     trajectory_visualization_max_span_y: float = 36.0
+
+    # Trajectory quality filter
+    trajectory_filter_enabled: bool = True
+    trajectory_filter_rules: tuple[str, ...] = ("out_of_road",)
+    out_of_road_margin_ratio: float = 0.0
+    out_of_road_missing_lane_policy: str = "skip_point"
+
+    # Ego expert IDM overrides
+    expert_idm_distance_wanted: float = ExpertIDMConfig.distance_wanted
+    expert_idm_time_wanted: float = ExpertIDMConfig.time_wanted
+    expert_idm_delta: float = ExpertIDMConfig.delta
+    expert_idm_acc_factor: float = ExpertIDMConfig.acc_factor
+    expert_idm_deacc_factor: float = ExpertIDMConfig.deacc_factor
+    expert_idm_normal_speed_kmh: float = ExpertIDMConfig.normal_speed_kmh
+    expert_idm_max_speed_kmh: float = ExpertIDMConfig.max_speed_kmh
+    expert_idm_enable_lane_change: bool = ExpertIDMConfig.enable_lane_change
+    expert_idm_lane_change_freq: int = ExpertIDMConfig.lane_change_freq
+    expert_idm_lane_change_speed_increase: float = ExpertIDMConfig.lane_change_speed_increase
+    expert_idm_safe_lane_change_distance: float = ExpertIDMConfig.safe_lane_change_distance
+    expert_idm_max_long_dist: float = ExpertIDMConfig.max_long_dist
+    expert_idm_heading_pid_kp: float = ExpertIDMConfig.heading_pid_kp
+    expert_idm_heading_pid_ki: float = ExpertIDMConfig.heading_pid_ki
+    expert_idm_heading_pid_kd: float = ExpertIDMConfig.heading_pid_kd
+    expert_idm_lateral_pid_kp: float = ExpertIDMConfig.lateral_pid_kp
+    expert_idm_lateral_pid_ki: float = ExpertIDMConfig.lateral_pid_ki
+    expert_idm_lateral_pid_kd: float = ExpertIDMConfig.lateral_pid_kd
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +221,121 @@ def _to_jsonable(value):
 def build_expert_policy(
     vehicle,
     random_seed: int,
+    idm_config: ExpertIDMConfig | None = None,
 ):
     return Expert(
         control_object=vehicle,
         random_seed=random_seed,
+        idm_config=idm_config,
     )
+
+
+def build_expert_idm_config(config: ExpertCollectorConfig) -> ExpertIDMConfig:
+    return ExpertIDMConfig(
+        distance_wanted=float(config.expert_idm_distance_wanted),
+        time_wanted=float(config.expert_idm_time_wanted),
+        delta=float(config.expert_idm_delta),
+        acc_factor=float(config.expert_idm_acc_factor),
+        deacc_factor=float(config.expert_idm_deacc_factor),
+        normal_speed_kmh=float(config.expert_idm_normal_speed_kmh),
+        max_speed_kmh=float(config.expert_idm_max_speed_kmh),
+        enable_lane_change=bool(config.expert_idm_enable_lane_change),
+        lane_change_freq=int(config.expert_idm_lane_change_freq),
+        lane_change_speed_increase=float(config.expert_idm_lane_change_speed_increase),
+        safe_lane_change_distance=float(config.expert_idm_safe_lane_change_distance),
+        max_long_dist=float(config.expert_idm_max_long_dist),
+        heading_pid_kp=float(config.expert_idm_heading_pid_kp),
+        heading_pid_ki=float(config.expert_idm_heading_pid_ki),
+        heading_pid_kd=float(config.expert_idm_heading_pid_kd),
+        lateral_pid_kp=float(config.expert_idm_lateral_pid_kp),
+        lateral_pid_ki=float(config.expert_idm_lateral_pid_ki),
+        lateral_pid_kd=float(config.expert_idm_lateral_pid_kd),
+    )
+
+
+def build_trajectory_filter_pipeline(config: ExpertCollectorConfig) -> TrajectoryFilterPipeline | None:
+    if not bool(config.trajectory_filter_enabled):
+        return None
+
+    rules = []
+    for rule_name in tuple(config.trajectory_filter_rules):
+        if rule_name == "out_of_road":
+            rules.append(
+                OutOfRoadByReferenceLaneRule(
+                    out_of_road_margin_ratio=config.out_of_road_margin_ratio,
+                    out_of_road_missing_lane_policy=config.out_of_road_missing_lane_policy,
+                )
+            )
+    if not rules:
+        return None
+    return TrajectoryFilterPipeline(rules)
+
+
+def _filter_samples(
+    samples: List[Dict[str, np.ndarray]],
+    trajectory_filter: TrajectoryFilterPipeline | None,
+    filter_stats: Dict[str, object],
+) -> tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]]]:
+    if trajectory_filter is None:
+        filter_stats["total_checked"] += len(samples)
+        filter_stats["accepted"] += len(samples)
+        return samples, []
+
+    accepted = []
+    rejected = []
+    for sample in samples:
+        result = trajectory_filter.check_sample(sample)
+        filter_stats["total_checked"] += 1
+        filter_stats["missing_reference_lane_points"] += int(result.missing_reference_lane_points)
+        if result.passed:
+            accepted.append(sample)
+            filter_stats["accepted"] += 1
+            continue
+        rejected.append(sample)
+        filter_stats["rejected"] += 1
+        for reason in result.rejection_reasons:
+            filter_stats["rejection_reasons"][reason] = filter_stats["rejection_reasons"].get(reason, 0) + 1
+    return accepted, rejected
+
+
+def _prepare_samples_for_storage(samples: List[Dict[str, np.ndarray]]) -> List[Dict[str, np.ndarray]]:
+    prepared = []
+    for sample in samples:
+        prepared.append({key: value for key, value in sample.items() if not key.startswith("_")})
+    return prepared
+
+
+def _save_sample_visualizations(
+    samples: List[Dict[str, np.ndarray]],
+    output_dir: Path | None,
+    config: ExpertCollectorConfig,
+    episode_index: int,
+    map_geometry: List[Dict[str, np.ndarray]] | None,
+) -> None:
+    if output_dir is None or not bool(config.trajectory_visualization_enabled):
+        return
+
+    for sample in samples:
+        raw_trajectory = np.asarray(sample.get("_trajectory_raw", sample["trajectory"]), dtype=np.float32)
+        final_trajectory = np.asarray(sample["trajectory"], dtype=np.float32)
+        current_pose_value = sample["_current_pose"] if "_current_pose" in sample else sample["ego_pose_world"]
+        current_pose = np.asarray(current_pose_value, dtype=np.float32)
+        sample_index = int(sample.get("_sample_index", -1))
+        trajectory_mode = TrajectoryMode(int(sample["trajectory_mode"]))
+        plot_path = output_dir / (
+            f"ep_{episode_index:05d}_sample_{sample_index:05d}_{trajectory_mode.name.lower()}.png"
+        )
+        save_trajectory_visualization(
+            output_path=plot_path,
+            raw_trajectory=raw_trajectory,
+            corrected_trajectory=final_trajectory,
+            config=config,
+            trajectory_mode=trajectory_mode,
+            episode_index=episode_index,
+            sample_index=sample_index,
+            current_pose=current_pose,
+            map_geometry=map_geometry,
+        )
 
 
 DEFAULT_TOPDOWN_SCREEN_SIZE = 800
@@ -570,6 +710,24 @@ def build_episode_samples(
             ],
             axis=0,
         )
+        future_ego_pose_world = np.stack(
+            [
+                np.asarray(frames[start_idx + offset]["ego_pose_world"], dtype=np.float32)
+                for offset in future_offsets
+            ],
+            axis=0,
+        )
+        future_reference_pose_world = np.stack(
+            [
+                np.asarray(frames[start_idx + offset]["reference_pose_world"], dtype=np.float32)
+                for offset in future_offsets
+            ],
+            axis=0,
+        )
+        future_lane_width = np.asarray(
+            [float(frames[start_idx + offset]["lane_width"]) for offset in future_offsets],
+            dtype=np.float32,
+        )
         future_lane_indices = tuple(
             int(frames[start_idx + offset]["reference_lane_index"])
             if int(frames[start_idx + offset]["reference_lane_index"]) >= 0 else None
@@ -609,27 +767,6 @@ def build_episode_samples(
                 attraction_strength=config.centerline_attraction_strength,
                 smoothing_strength=config.smoothing_strength,
             )
-        if (
-            bool(config.trajectory_visualization_enabled)
-            and config.expert_type == "ppo"
-            and visualization_dir is not None
-        ):
-            plot_path = visualization_dir / (
-                f"ep_{episode_index:05d}_sample_{start_idx:05d}_"
-                f"{trajectory_mode.name.lower()}.png"
-            )
-            save_trajectory_visualization(
-                output_path=plot_path,
-                raw_trajectory=raw_trajectory,
-                corrected_trajectory=trajectory,
-                config=config,
-                trajectory_mode=trajectory_mode,
-                episode_index=episode_index,
-                sample_index=start_idx,
-                current_pose=current_pose,
-                map_geometry=map_geometry,
-            )
-
         samples.append(
             {
                 "ego_state": current_frame["ego_state"],
@@ -652,6 +789,13 @@ def build_episode_samples(
                 "trajectory_mean_abs_lateral_after": np.asarray(correction_metrics["mean_abs_lateral_after"], dtype=np.float32),
                 "trajectory_final_abs_lateral_before": np.asarray(correction_metrics["final_abs_lateral_before"], dtype=np.float32),
                 "trajectory_final_abs_lateral_after": np.asarray(correction_metrics["final_abs_lateral_after"], dtype=np.float32),
+                "future_ego_pose_world": future_ego_pose_world,
+                "future_reference_pose_world": future_reference_pose_world,
+                "future_reference_lane_index": np.asarray(
+                    [-1 if lane_index is None else lane_index for lane_index in future_lane_indices],
+                    dtype=np.int16,
+                ),
+                "future_lane_width": future_lane_width,
                 "ego_pose_world": current_frame["ego_pose_world"],
                 "reference_pose_world": current_frame["reference_pose_world"],
                 "action": current_frame["action"],
@@ -666,6 +810,9 @@ def build_episode_samples(
                 "current_ref_lane_count": np.asarray(current_frame["current_ref_lane_count"], dtype=np.int16),
                 "next_ref_lane_count": np.asarray(current_frame["next_ref_lane_count"], dtype=np.int16),
                 "traffic_density": td_arr,
+                "_sample_index": np.asarray(start_idx, dtype=np.int32),
+                "_current_pose": np.asarray(current_pose, dtype=np.float32),
+                "_trajectory_raw": np.asarray(raw_trajectory, dtype=np.float32),
             }
         )
         if bool(config.save_raw_trajectory):
@@ -1082,6 +1229,7 @@ def rollout_episode(
                 idm_policy = build_expert_policy(
                     vehicle,
                     random_seed=config.start_seed,
+                    idm_config=build_expert_idm_config(config),
                 )
             action = idm_policy.act()
         else:
@@ -1110,6 +1258,7 @@ def write_manifest(
     split_summary: Dict,
     correction_summary: Dict,
     collection_wall_time_sec: float,
+    filter_summary: Dict | None = None,
     resume: bool = False,
 ) -> None:
     manifest_path = report_dir / "manifest.json"
@@ -1129,6 +1278,15 @@ def write_manifest(
         "collection_wall_time_sec": float(collection_wall_time_sec),
         "splits": {name: len(shards) for name, shards in split_summary.items()},
         "trajectory_correction": correction_summary,
+        "trajectory_filter": filter_summary or {
+            "enabled": False,
+            "total_checked": 0,
+            "accepted": total_samples,
+            "rejected": 0,
+            "reject_rate": 0.0,
+            "rejection_reasons": {},
+            "missing_reference_lane_points": 0,
+        },
         "config": {
             k: (str(v) if isinstance(v, Path) else v)
             for k, v in asdict(config).items()
@@ -1156,11 +1314,14 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     shard_dir = dataset_root / "shards"
     report_dir = dataset_root / "reports"
     visualization_dir = report_dir / "trajectory_visualizations"
+    qual_visualization_dir = visualization_dir / "qual"
+    unqual_visualization_dir = visualization_dir / "unqual"
     video_dir = report_dir / "videos"
     shard_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
     if bool(config.trajectory_visualization_enabled):
-        visualization_dir.mkdir(parents=True, exist_ok=True)
+        qual_visualization_dir.mkdir(parents=True, exist_ok=True)
+        unqual_visualization_dir.mkdir(parents=True, exist_ok=True)
     if bool(config.save_videos):
         video_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1184,6 +1345,15 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     traffic_rng, spawn_rng = build_episode_rngs(config)
     fast_forward_episode_rngs(traffic_rng, spawn_rng, config, total_episodes)
     writer = ShardWriter(shard_dir, config.samples_per_shard, start_shard_index=start_shard_index)
+    trajectory_filter = build_trajectory_filter_pipeline(config)
+    filter_stats = {
+        "enabled": bool(trajectory_filter is not None),
+        "total_checked": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "rejection_reasons": {},
+        "missing_reference_lane_points": 0,
+    }
 
     # 2. 创建环境实例（单环境单线程采集）
     env_config = {
@@ -1251,11 +1421,27 @@ def run_collection(config: ExpertCollectorConfig) -> None:
                 )
 
             # 7. 更新统计信息并打印进度
-            writer.add_samples(samples)
-            total_samples += len(samples)
+            accepted_samples, rejected_samples = _filter_samples(samples, trajectory_filter, filter_stats)
+            _save_sample_visualizations(
+                accepted_samples,
+                qual_visualization_dir if bool(config.trajectory_visualization_enabled) else None,
+                config,
+                episode_index,
+                map_geometry,
+            )
+            _save_sample_visualizations(
+                rejected_samples,
+                unqual_visualization_dir if bool(config.trajectory_visualization_enabled) else None,
+                config,
+                episode_index,
+                map_geometry,
+            )
+            storable_samples = _prepare_samples_for_storage(accepted_samples)
+            writer.add_samples(storable_samples)
+            total_samples += len(storable_samples)
             total_episodes += 1
             total_env_steps += len(frames)
-            for sample in samples:
+            for sample in storable_samples:
                 mode_name = trajectory_mode_name(int(sample["trajectory_mode"]))
                 mode_counts[mode_name] += 1
                 correction_accumulator["mean_abs_lateral_before"] += float(sample["trajectory_mean_abs_lateral_before"])
@@ -1272,9 +1458,18 @@ def run_collection(config: ExpertCollectorConfig) -> None:
 
             print(
                 f"[ep={total_episodes}] total_samples={total_samples}/{config.target_samples} "
-                f"density={traffic_density:.3f} frames={len(frames)} ep_samples={len(samples)} "
+                f"density={traffic_density:.3f} frames={len(frames)} ep_samples={len(storable_samples)} "
                 f"step/s={step_per_sec:.2f} sample/s={sample_per_sec:.2f} ETA={format_eta(eta_seconds)}"
             )
+            if trajectory_filter is not None:
+                reject_rate = filter_stats["rejected"] / max(int(filter_stats["total_checked"]), 1)
+                print(
+                    "  filter: "
+                    f"accepted={filter_stats['accepted']} "
+                    f"rejected={filter_stats['rejected']} "
+                    f"reject_rate={reject_rate:.1%} "
+                    f"missing_lane_points={filter_stats['missing_reference_lane_points']}"
+                )
     finally:
         env.close()
 
@@ -1302,6 +1497,16 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         "final_abs_lateral_after": correction_accumulator["final_abs_lateral_after"] / denom,
         "strong_correction_fraction": correction_accumulator["strong_correction_fraction"] / denom,
     }
+    filter_summary = {
+        "enabled": bool(filter_stats["enabled"]),
+        "rules": list(config.trajectory_filter_rules) if bool(config.trajectory_filter_enabled) else [],
+        "total_checked": int(filter_stats["total_checked"]),
+        "accepted": int(filter_stats["accepted"]),
+        "rejected": int(filter_stats["rejected"]),
+        "reject_rate": float(filter_stats["rejected"]) / max(int(filter_stats["total_checked"]), 1),
+        "rejection_reasons": dict(filter_stats["rejection_reasons"]),
+        "missing_reference_lane_points": int(filter_stats["missing_reference_lane_points"]),
+    }
     write_manifest(
         config,
         dataset_root,
@@ -1310,6 +1515,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         total_episodes,
         split_summary,
         correction_summary,
+        filter_summary=filter_summary,
         collection_wall_time_sec=collection_wall_time_sec,
         resume=bool(config.resume),
     )
@@ -1341,6 +1547,8 @@ def parse_args() -> ExpertCollectorConfig:
             opts["type"] = _coerce_bool
         elif isinstance(default, Path):
             opts["type"] = Path
+        elif isinstance(default, tuple):
+            opts["type"] = lambda value: tuple(part.strip() for part in str(value).split(",") if part.strip())
         else:
             opts["type"] = type(default)
         if f.name == "expert_type":

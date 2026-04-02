@@ -202,13 +202,63 @@ class IntersectionSpeedRegulator:
         return np.arange(0.0, self.HORIZON + self.DT * 0.5, self.DT, dtype=np.float64)
 
 
+@dataclass(frozen=True)
+class ExpertIDMConfig:
+    # IDM parameters
+    distance_wanted: float = float(getattr(IDMPolicy, "DISTANCE_WANTED", 10.0))
+    time_wanted: float = float(getattr(IDMPolicy, "TIME_WANTED", 1.0))
+    delta: float = float(getattr(IDMPolicy, "DELTA", 10.0))
+    acc_factor: float = float(getattr(IDMPolicy, "ACC_FACTOR", 1.0))
+    deacc_factor: float = float(getattr(IDMPolicy, "DEACC_FACTOR", -5.0))
+    normal_speed_kmh: float = float(getattr(IDMPolicy, "NORMAL_SPEED", 30.0))
+    max_speed_kmh: float = float(getattr(IDMPolicy, "MAX_SPEED", 100.0))
+    enable_lane_change: bool = True
+    lane_change_freq: int = int(getattr(IDMPolicy, "LANE_CHANGE_FREQ", 50))
+    lane_change_speed_increase: float = float(getattr(IDMPolicy, "LANE_CHANGE_SPEED_INCREASE", 10.0))
+    safe_lane_change_distance: float = float(getattr(IDMPolicy, "SAFE_LANE_CHANGE_DISTANCE", 15.0))
+    max_long_dist: float = float(getattr(IDMPolicy, "MAX_LONG_DIST", 30.0))
+    heading_pid_kp: float = 1.7
+    heading_pid_ki: float = 0.01
+    heading_pid_kd: float = 3.5
+    lateral_pid_kp: float = 1 # 0.3
+    lateral_pid_ki: float = 0.002
+    lateral_pid_kd: float = 0.05
+
+
 class ExpertIDMPolicy(IDMPolicy):
     """Dataset-facing IDM policy aligned with the background-traffic IDM."""
     MAX_STEERING = IDMPolicy.MAX_STEERING_ANGLE
 
-    def __init__(self, control_object, random_seed: int = 0):
+    def __init__(self, control_object, random_seed: int = 0, idm_config: ExpertIDMConfig | None = None):
         super().__init__(control_object=control_object, random_seed=random_seed)
+        self.idm_config = idm_config or ExpertIDMConfig(enable_lane_change=bool(self.enable_lane_change))
+        self._apply_idm_config(self.idm_config)
         self.intersection_regulator = IntersectionSpeedRegulator()
+
+    def _apply_idm_config(self, idm_config: ExpertIDMConfig) -> None:
+        self.DISTANCE_WANTED = float(idm_config.distance_wanted)
+        self.TIME_WANTED = float(idm_config.time_wanted)
+        self.DELTA = float(idm_config.delta)
+        self.ACC_FACTOR = float(idm_config.acc_factor)
+        self.DEACC_FACTOR = float(idm_config.deacc_factor)
+        self.NORMAL_SPEED = float(idm_config.normal_speed_kmh)
+        self.MAX_SPEED = float(idm_config.max_speed_kmh)
+        self.enable_lane_change = bool(idm_config.enable_lane_change)
+        self.LANE_CHANGE_FREQ = int(idm_config.lane_change_freq)
+        self.LANE_CHANGE_SPEED_INCREASE = float(idm_config.lane_change_speed_increase)
+        self.SAFE_LANE_CHANGE_DISTANCE = float(idm_config.safe_lane_change_distance)
+        self.MAX_LONG_DIST = float(idm_config.max_long_dist)
+        self.target_speed = self.NORMAL_SPEED
+        self.heading_pid = PIDController(
+            float(idm_config.heading_pid_kp),
+            float(idm_config.heading_pid_ki),
+            float(idm_config.heading_pid_kd),
+        )
+        self.lateral_pid = PIDController(
+            float(idm_config.lateral_pid_kp),
+            float(idm_config.lateral_pid_ki),
+            float(idm_config.lateral_pid_kd),
+        )
 
     def act(self, *args, **kwargs):
         action = list(super().act(*args, **kwargs))

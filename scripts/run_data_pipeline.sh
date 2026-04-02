@@ -13,14 +13,14 @@ STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess  # 选择数据处
 # *── Shared paths ────────────────────────────────────────────────────────────
 EXPERT_TYPE="${EXPERT_TYPE:-idm}"
 COLLECTION_MODE="${COLLECTION_MODE:-single}"  # 选择地图模式：single | fixed_hybrid | random_road | phase2_plan
-DATASET_NAME="${DATASET_NAME:-metaData_strong_${EXPERT_TYPE}_${COLLECTION_MODE}}"
+DATASET_NAME="${DATASET_NAME:-metaIDM}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
 
 # Derived paths (auto-chained between stages)
 COLLECT_OUTPUT="${OUTPUT_ROOT}/${DATASET_NAME}"
 ANCHORS_OUTPUT="${ANCHORS_OUTPUT:-${REPO_ROOT}/metadrive/exp_dataset/anchors.npy}"
 ANCHORS_FIGURE="${ANCHORS_FIGURE:-${REPO_ROOT}/metadrive/exp_dataset/anchors.png}"
-PREPROCESS_OUTPUT="${PREPROCESS_OUTPUT:-${COLLECT_OUTPUT}_preprocessed}"
+PREPROCESS_OUTPUT="${PREPROCESS_OUTPUT:-${COLLECT_OUTPUT}_pp}"
 
 # ── Stage 1: Data Collection ────────────────────────────────────────────────
 run_collect() {

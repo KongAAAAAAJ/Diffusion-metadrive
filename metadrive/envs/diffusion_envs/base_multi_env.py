@@ -43,7 +43,7 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 traffic_density=0.06,
                 traffic_mode=TrafficMode.Hybrid,  # Respawn, Trigger, Basic, Hybrid
                 random_traffic=True,
-                traffic_target_speed=(20.0, 27.0),  # [km/h] 按 seed 可复现地为每个 episode 采样目标车速
+                traffic_target_speed=(18.0, 25.0),  # [km/h] 按 seed 可复现地为每个 episode 采样目标车速
                 accident_prob=0.,  # 在reset()时，生成一个静态事故/施工场景的概率
 
                 # Agent

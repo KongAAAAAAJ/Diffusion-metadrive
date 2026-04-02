@@ -12,7 +12,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy
+from metadrive.exp_dataset.expert_idm_policy import ExpertIDMConfig, ExpertIDMPolicy
 
 DEFAULT_OUTPUT_DIR = "/media/kong/Elements_SE/Diffusion_Data/outputs/expert"
 DEFAULT_VIDEO_FPS = 10
@@ -400,10 +400,11 @@ def _write_video(video_path: str, frames: list[np.ndarray], fps: int) -> None:
     mediapy.write_video(video_path, frames, fps=fps)
 
 
-def build_expert_policy(vehicle, random_seed: int):
+def build_expert_policy(vehicle, random_seed: int, idm_config: ExpertIDMConfig | None = None):
     return ExpertIDMPolicy(
         control_object=vehicle,
         random_seed=random_seed,
+        idm_config=idm_config,
     )
 
 
@@ -414,6 +415,7 @@ def run_evaluation(
     seed: int = 0,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     topdown_camera_height: float = DEFAULT_TOPDOWN_CAMERA_HEIGHT,
+    expert_idm_config: ExpertIDMConfig | None = None,
 ) -> EvalSummary:
     from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
 
@@ -435,6 +437,7 @@ def run_evaluation(
             idm_cache[agent_id] = build_expert_policy(
                 vehicle,
                 random_seed=seed,
+                idm_config=expert_idm_config,
             )
         return idm_cache[agent_id].act()
 
@@ -611,11 +614,49 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--topdown-camera-height", type=float, default=DEFAULT_TOPDOWN_CAMERA_HEIGHT)
     parser.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR, help="Directory for per-episode videos and summary JSON.")
     parser.add_argument("--output", type=str, default=None, help="Optional extra JSON output path.")
+    parser.add_argument("--expert-idm-distance-wanted", type=float, default=ExpertIDMConfig.distance_wanted)
+    parser.add_argument("--expert-idm-time-wanted", type=float, default=ExpertIDMConfig.time_wanted)
+    parser.add_argument("--expert-idm-delta", type=float, default=ExpertIDMConfig.delta)
+    parser.add_argument("--expert-idm-acc-factor", type=float, default=ExpertIDMConfig.acc_factor)
+    parser.add_argument("--expert-idm-deacc-factor", type=float, default=ExpertIDMConfig.deacc_factor)
+    parser.add_argument("--expert-idm-normal-speed-kmh", type=float, default=ExpertIDMConfig.normal_speed_kmh)
+    parser.add_argument("--expert-idm-max-speed-kmh", type=float, default=ExpertIDMConfig.max_speed_kmh)
+    parser.add_argument("--expert-idm-enable-lane-change", type=int, choices=(0, 1), default=int(ExpertIDMConfig.enable_lane_change))
+    parser.add_argument("--expert-idm-lane-change-freq", type=int, default=ExpertIDMConfig.lane_change_freq)
+    parser.add_argument("--expert-idm-lane-change-speed-increase", type=float, default=ExpertIDMConfig.lane_change_speed_increase)
+    parser.add_argument("--expert-idm-safe-lane-change-distance", type=float, default=ExpertIDMConfig.safe_lane_change_distance)
+    parser.add_argument("--expert-idm-max-long-dist", type=float, default=ExpertIDMConfig.max_long_dist)
+    parser.add_argument("--expert-idm-heading-pid-kp", type=float, default=ExpertIDMConfig.heading_pid_kp)
+    parser.add_argument("--expert-idm-heading-pid-ki", type=float, default=ExpertIDMConfig.heading_pid_ki)
+    parser.add_argument("--expert-idm-heading-pid-kd", type=float, default=ExpertIDMConfig.heading_pid_kd)
+    parser.add_argument("--expert-idm-lateral-pid-kp", type=float, default=ExpertIDMConfig.lateral_pid_kp)
+    parser.add_argument("--expert-idm-lateral-pid-ki", type=float, default=ExpertIDMConfig.lateral_pid_ki)
+    parser.add_argument("--expert-idm-lateral-pid-kd", type=float, default=ExpertIDMConfig.lateral_pid_kd)
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
 def main(argv: Iterable[str] | None = None) -> None:
     args = parse_args(argv)
+    expert_idm_config = ExpertIDMConfig(
+        distance_wanted=float(args.expert_idm_distance_wanted),
+        time_wanted=float(args.expert_idm_time_wanted),
+        delta=float(args.expert_idm_delta),
+        acc_factor=float(args.expert_idm_acc_factor),
+        deacc_factor=float(args.expert_idm_deacc_factor),
+        normal_speed_kmh=float(args.expert_idm_normal_speed_kmh),
+        max_speed_kmh=float(args.expert_idm_max_speed_kmh),
+        enable_lane_change=bool(args.expert_idm_enable_lane_change),
+        lane_change_freq=int(args.expert_idm_lane_change_freq),
+        lane_change_speed_increase=float(args.expert_idm_lane_change_speed_increase),
+        safe_lane_change_distance=float(args.expert_idm_safe_lane_change_distance),
+        max_long_dist=float(args.expert_idm_max_long_dist),
+        heading_pid_kp=float(args.expert_idm_heading_pid_kp),
+        heading_pid_ki=float(args.expert_idm_heading_pid_ki),
+        heading_pid_kd=float(args.expert_idm_heading_pid_kd),
+        lateral_pid_kp=float(args.expert_idm_lateral_pid_kp),
+        lateral_pid_ki=float(args.expert_idm_lateral_pid_ki),
+        lateral_pid_kd=float(args.expert_idm_lateral_pid_kd),
+    )
     summary = run_evaluation(
         n_episodes=args.episodes,
         env_config={
@@ -626,6 +667,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         seed=args.seed,
         output_dir=args.output_dir,
         topdown_camera_height=args.topdown_camera_height,
+        expert_idm_config=expert_idm_config,
     )
     print_summary(summary)
     if args.output:

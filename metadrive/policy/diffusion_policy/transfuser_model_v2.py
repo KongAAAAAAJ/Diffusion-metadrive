@@ -112,7 +112,7 @@ class V2TransfuserModel(nn.Module):
         # *单样本 shape=[1, 256, 256]，batch 后 shape=[B, 1, 256, 256]
         lidar_feature: torch.Tensor = features["lidar_feature"]
 
-        # *单样本 shape=[8]，batch 后 shape=[B, 8]
+        # *单样本 shape=[19]，batch 后 shape=[B, 19]
         status_feature: torch.Tensor = features["status_feature"]  # *导航命令[left, straight, right, lane_follow/other] + 车速[vx,vy] + 加速度[ax,ay]
         batch_size = status_feature.shape[0]
 

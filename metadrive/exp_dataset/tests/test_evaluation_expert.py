@@ -23,6 +23,30 @@ def _load_module():
     sys.modules["metadrive.exp_dataset.hierarchical_expert"] = hierarchical_pkg
 
     expert_policy_module = ModuleType("metadrive.exp_dataset.expert_idm_policy")
+    expert_policy_module.ExpertIDMConfig = type(
+        "ExpertIDMConfig",
+        (),
+        {
+            "distance_wanted": 10.0,
+            "time_wanted": 1.5,
+            "delta": 10.0,
+            "acc_factor": 1.0,
+            "deacc_factor": -5.0,
+            "normal_speed_kmh": 30.0,
+            "max_speed_kmh": 100.0,
+            "enable_lane_change": True,
+            "lane_change_freq": 50,
+            "lane_change_speed_increase": 10.0,
+            "safe_lane_change_distance": 15.0,
+            "max_long_dist": 30.0,
+            "heading_pid_kp": 1.7,
+            "heading_pid_ki": 0.01,
+            "heading_pid_kd": 3.5,
+            "lateral_pid_kp": 0.3,
+            "lateral_pid_ki": 0.002,
+            "lateral_pid_kd": 0.05,
+        },
+    )
     expert_policy_module.ExpertIDMPolicy = type("ExpertIDMPolicy", (), {})
     driving_style_module = ModuleType("metadrive.exp_dataset.hierarchical_expert.driving_style")
     driving_style_module.DrivingStyleProfile = type("DrivingStyleProfile", (), {})
@@ -61,22 +85,25 @@ summarize_metrics = evaluation_expert.summarize_metrics
 def test_build_expert_policy_creates_expert_idm_policy():
     vehicle = object()
     created = {}
+    idm_config = object()
     original_policy_cls = getattr(evaluation_expert, "ExpertIDMPolicy", None)
     try:
         evaluation_expert.ExpertIDMPolicy = Mock(
-            side_effect=lambda control_object, random_seed: created.update(
+            side_effect=lambda control_object, random_seed, idm_config=None: created.update(
                 {
                     "vehicle": control_object,
                     "random_seed": random_seed,
+                    "idm_config": idm_config,
                 }
             ) or "policy"
         )
 
-        policy = evaluation_expert.build_expert_policy(vehicle, random_seed=11)
+        policy = evaluation_expert.build_expert_policy(vehicle, random_seed=11, idm_config=idm_config)
 
         assert policy == "policy"
         assert created["vehicle"] is vehicle
         assert created["random_seed"] == 11
+        assert created["idm_config"] is idm_config
     finally:
         if original_policy_cls is not None:
             evaluation_expert.ExpertIDMPolicy = original_policy_cls
@@ -273,9 +300,18 @@ def test_sync_topdown_camera_with_agent_updates_existing_renderer_position():
 
 
 def test_parse_args_uses_standard_low_level_control_cli():
-    args = evaluation_expert.parse_args(["--episodes", "2", "--seed", "9"])
+    args = evaluation_expert.parse_args(
+        [
+            "--episodes", "2",
+            "--seed", "9",
+            "--expert-idm-heading-pid-kp", "2.6",
+            "--expert-idm-lateral-pid-kd", "0.08",
+        ]
+    )
 
     assert not hasattr(args, "expert")
     assert args.episodes == 2
     assert args.seed == 9
     assert not hasattr(args, "action_mode")
+    assert args.expert_idm_heading_pid_kp == 2.6
+    assert args.expert_idm_lateral_pid_kd == 0.08

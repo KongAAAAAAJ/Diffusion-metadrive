@@ -15,7 +15,73 @@ def _load_module():
     class _StubConfig(dict):
         pass
 
+    class _StubTrajectoryCorrectionContext:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _StubOutOfRoadByReferenceLaneRule:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def check_sample(self, sample):
+            return type(
+                "Result",
+                (),
+                {
+                    "passed": True,
+                    "rejection_reasons": [],
+                    "missing_reference_lane_points": 0,
+                },
+            )()
+
+    class _StubTrajectoryFilterPipeline:
+        def __init__(self, rules):
+            self.rules = list(rules)
+
+        def check_sample(self, sample):
+            verdicts = [rule.check_sample(sample) for rule in self.rules]
+            passed = all(verdict.passed for verdict in verdicts)
+            rejection_reasons = []
+            missing_reference_lane_points = 0
+            for verdict in verdicts:
+                rejection_reasons.extend(getattr(verdict, "rejection_reasons", []))
+                missing_reference_lane_points += int(getattr(verdict, "missing_reference_lane_points", 0))
+            return type(
+                "Result",
+                (),
+                {
+                    "passed": passed,
+                    "rejection_reasons": rejection_reasons,
+                    "missing_reference_lane_points": missing_reference_lane_points,
+                },
+            )()
+
+    class _StubExpertIDMConfig:
+        distance_wanted = 10.0
+        time_wanted = 1.5
+        delta = 10.0
+        acc_factor = 1.0
+        deacc_factor = -5.0
+        normal_speed_kmh = 30.0
+        max_speed_kmh = 100.0
+        enable_lane_change = True
+        lane_change_freq = 50
+        lane_change_speed_increase = 10.0
+        safe_lane_change_distance = 15.0
+        max_long_dist = 30.0
+        heading_pid_kp = 1.7
+        heading_pid_ki = 0.01
+        heading_pid_kd = 3.5
+        lateral_pid_kp = 0.3
+        lateral_pid_ki = 0.002
+        lateral_pid_kd = 0.05
+
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
     expert_idm_module = ModuleType("metadrive.exp_dataset.expert_idm_policy")
+    expert_idm_module.ExpertIDMConfig = _StubExpertIDMConfig
     expert_idm_module.ExpertIDMPolicy = type("ExpertIDMPolicy", (), {})
 
     base_vehicle_module = ModuleType("metadrive.component.vehicle.base_vehicle")
@@ -28,7 +94,7 @@ def _load_module():
     ppo_module.expert = lambda *args, **kwargs: np.zeros(2, dtype=np.float32)
 
     trajectory_module = ModuleType("metadrive.exp_dataset.trajectory_correction")
-    trajectory_module.TrajectoryCorrectionContext = type("TrajectoryCorrectionContext", (), {})
+    trajectory_module.TrajectoryCorrectionContext = _StubTrajectoryCorrectionContext
     trajectory_module.TrajectoryMode = Enum(
         "TrajectoryMode",
         {
@@ -57,6 +123,10 @@ def _load_module():
     dataset_module = ModuleType("metadrive.exp_dataset.metadrive_dataset")
     dataset_module.split_shards = lambda **kwargs: {"train": [], "val": [], "test": []}
 
+    trajectory_filter_module = ModuleType("metadrive.exp_dataset.trajectory_filter")
+    trajectory_filter_module.OutOfRoadByReferenceLaneRule = _StubOutOfRoadByReferenceLaneRule
+    trajectory_filter_module.TrajectoryFilterPipeline = _StubTrajectoryFilterPipeline
+
     injected_module_names = [
         expert_idm_module,
         base_vehicle_module,
@@ -67,6 +137,7 @@ def _load_module():
         transfuser_features_module,
         utils_module,
         dataset_module,
+        trajectory_filter_module,
     ]
     for module in injected_module_names:
         sys.modules[module.__name__] = module
@@ -91,6 +162,69 @@ detect_existing_state = collect_expert.detect_existing_state
 parse_args = collect_expert.parse_args
 run_collection = collect_expert.run_collection
 write_manifest = collect_expert.write_manifest
+
+
+def test_build_episode_samples_includes_future_reference_metadata(monkeypatch):
+    config = ExpertCollectorConfig(
+        expert_type="idm",
+        horizon_steps=8,
+        target_stride_steps=1,
+        sample_stride_steps=1,
+        trajectory_num_poses=3,
+        save_raw_trajectory=True,
+    )
+
+    monkeypatch.setattr(
+        collect_expert,
+        "classify_trajectory_mode",
+        lambda trajectory, context: 0,
+    )
+
+    frames = []
+    for idx in range(9):
+        frames.append(
+            {
+                "ego_state": np.asarray([idx], dtype=np.float32),
+                "other_states": np.asarray([idx], dtype=np.float32),
+                "lidar": np.asarray([idx], dtype=np.float32),
+                "bev_raster": np.zeros((1, 1, 1), dtype=np.uint8),
+                "bev_semantic_map": np.zeros((1, 1, 1), dtype=np.uint8),
+                "agent_states": np.zeros((1, 1), dtype=np.float32),
+                "agent_labels": np.zeros((1,), dtype=np.int64),
+                "left_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "front_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "right_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "rgb": np.zeros((1, 1, 3), dtype=np.uint8),
+                "state_275": np.zeros((275,), dtype=np.float32),
+                "ego_pose_world": np.asarray([float(idx), 0.1 * idx, 0.0], dtype=np.float32),
+                "reference_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "action": np.asarray([0.0, 0.0], dtype=np.float32),
+                "ego_speed_km_h": np.asarray(10.0, dtype=np.float32),
+                "front_object_distance": np.asarray(100.0, dtype=np.float32),
+                "front_object_speed_km_h": np.asarray(5.0, dtype=np.float32),
+                "lane_index": np.asarray(0, dtype=np.int16),
+                "reference_lane_index": np.asarray(idx % 2, dtype=np.int16),
+                "reference_longitudinal": np.asarray(float(idx), dtype=np.float32),
+                "reference_lateral": np.asarray(0.1 * idx, dtype=np.float32),
+                "lane_width": np.asarray(4.0 + 0.1 * idx, dtype=np.float32),
+                "current_ref_lane_count": np.asarray(1, dtype=np.int16),
+                "next_ref_lane_count": np.asarray(1, dtype=np.int16),
+            }
+        )
+
+    samples = collect_expert.build_episode_samples(frames, config, traffic_density=0.2)
+
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample["future_ego_pose_world"].shape == (3, 3)
+    assert sample["future_reference_pose_world"].shape == (3, 3)
+    assert sample["future_reference_lane_index"].shape == (3,)
+    assert sample["future_lane_width"].shape == (3,)
+    np.testing.assert_allclose(sample["future_ego_pose_world"][:, 0], np.asarray([1.0, 2.0, 3.0], dtype=np.float32))
+    np.testing.assert_allclose(sample["future_reference_pose_world"][:, 0], np.asarray([1.0, 2.0, 3.0], dtype=np.float32))
+    np.testing.assert_array_equal(sample["future_reference_lane_index"], np.asarray([1, 0, 1], dtype=np.int16))
+    np.testing.assert_allclose(sample["future_lane_width"], np.asarray([4.1, 4.2, 4.3], dtype=np.float32))
 
 
 def test_build_episode_rngs_uses_independent_streams():
@@ -310,32 +444,63 @@ def test_rollout_episode_skips_video_capture_when_disabled(monkeypatch):
     assert captured["count"] == 0
 
 
-def test_build_expert_policy_uses_vehicle_and_random_seed_only():
+def test_build_expert_policy_passes_vehicle_seed_and_idm_config():
     vehicle = object()
     created = {}
+    idm_config = object()
 
     original_expert = getattr(collect_expert, "Expert", None)
     try:
         collect_expert.Expert = Mock(
-            side_effect=lambda control_object, random_seed: (
+            side_effect=lambda control_object, random_seed, idm_config=None: (
                 created.update(
                     {
                         "vehicle": control_object,
                         "random_seed": random_seed,
+                        "idm_config": idm_config,
                     }
                 )
                 or "policy"
             )
         )
 
-        policy = collect_expert.build_expert_policy(vehicle, random_seed=7)
+        policy = collect_expert.build_expert_policy(vehicle, random_seed=7, idm_config=idm_config)
 
         assert policy == "policy"
         assert created["vehicle"] is vehicle
         assert created["random_seed"] == 7
+        assert created["idm_config"] is idm_config
     finally:
         if original_expert is not None:
             collect_expert.Expert = original_expert
+
+
+def test_build_expert_idm_config_uses_collector_config_overrides():
+    config = collect_expert.ExpertCollectorConfig(
+        expert_idm_distance_wanted=6.0,
+        expert_idm_time_wanted=1.1,
+        expert_idm_enable_lane_change=False,
+        expert_idm_lane_change_freq=19,
+        expert_idm_heading_pid_kp=2.3,
+        expert_idm_heading_pid_ki=0.11,
+        expert_idm_heading_pid_kd=4.6,
+        expert_idm_lateral_pid_kp=0.44,
+        expert_idm_lateral_pid_ki=0.006,
+        expert_idm_lateral_pid_kd=0.07,
+    )
+
+    built = collect_expert.build_expert_idm_config(config)
+
+    assert built.distance_wanted == 6.0
+    assert built.time_wanted == 1.1
+    assert built.enable_lane_change is False
+    assert built.lane_change_freq == 19
+    assert built.heading_pid_kp == 2.3
+    assert built.heading_pid_ki == 0.11
+    assert built.heading_pid_kd == 4.6
+    assert built.lateral_pid_kp == 0.44
+    assert built.lateral_pid_ki == 0.006
+    assert built.lateral_pid_kd == 0.07
 
 
 def test_parse_args_defaults_save_videos_to_false(monkeypatch):
@@ -427,6 +592,7 @@ def test_write_manifest_appends_resume_history(tmp_path):
         total_episodes=4,
         split_summary={"train": ["shard_000000.npz"], "val": [], "test": []},
         correction_summary={"mode_counts": {"keep_lane": 16}},
+        filter_summary={"enabled": True, "accepted": 16, "rejected": 0},
         collection_wall_time_sec=1.5,
         resume=True,
     )
@@ -437,6 +603,7 @@ def test_write_manifest_appends_resume_history(tmp_path):
     assert manifest["episodes"] == 4
     assert len(manifest["resume_history"]) == 2
     assert manifest["resume_history"][-1]["added_samples"] == 6
+    assert manifest["trajectory_filter"]["enabled"] is True
 
 
 def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monkeypatch, tmp_path):
@@ -504,6 +671,7 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
         split_summary,
         correction_summary,
         collection_wall_time_sec,
+        filter_summary=None,
         resume=False,
     ):
         written_manifest.update(
@@ -515,6 +683,7 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
                 "total_episodes": total_episodes,
                 "split_summary": split_summary,
                 "correction_summary": correction_summary,
+                "filter_summary": filter_summary,
                 "collection_wall_time_sec": collection_wall_time_sec,
                 "resume": resume,
             }
@@ -567,7 +736,267 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
     assert written_manifest["total_episodes"] == 3
     assert written_manifest["resume"] is True
     assert written_manifest["correction_summary"]["mode_counts"]["keep_lane"] == 6
+    assert written_manifest["filter_summary"]["accepted"] == 1
+    assert written_manifest["filter_summary"]["rejected"] == 0
     assert build_trajectory_mode_summary(written_manifest["correction_summary"]["mode_counts"], 6)["keep_lane"]["count"] == 6
+
+
+def test_run_collection_filters_rejected_samples_before_writer(monkeypatch, tmp_path):
+    class DummyEnv:
+        def __init__(self, config):
+            self.config = dict(config)
+
+        def close(self):
+            return None
+
+    class DummyWriter:
+        last_instance = None
+
+        def __init__(self, *args, **kwargs):
+            self.added = []
+            DummyWriter.last_instance = self
+
+        def add_samples(self, samples):
+            self.added.append(list(samples))
+            return len(samples)
+
+        def close(self):
+            return 0
+
+    class DummyFilter:
+        def check_sample(self, sample):
+            passed = bool(sample["keep"])
+            return type(
+                "Result",
+                (),
+                {
+                    "passed": passed,
+                    "rejection_reasons": ([] if passed else ["out_of_road"]),
+                    "missing_reference_lane_points": 0,
+                },
+            )()
+
+    captured_manifest = {}
+
+    def fake_write_manifest(*args, **kwargs):
+        captured_manifest["filter_summary"] = kwargs.get("filter_summary")
+
+    monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
+    monkeypatch.setattr(collect_expert, "ShardWriter", DummyWriter)
+    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
+    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
+    monkeypatch.setattr(collect_expert, "rollout_episode", lambda env, config, episode_spawn_seed, episode_index: ([{"frame": 1}], None, []))
+    monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
+    monkeypatch.setattr(
+        collect_expert,
+        "build_episode_samples",
+        lambda *args, **kwargs: [
+            {"keep": True, "trajectory_mode": np.asarray(0, dtype=np.int64), "trajectory_mean_abs_lateral_before": np.asarray(0.0, dtype=np.float32), "trajectory_mean_abs_lateral_after": np.asarray(0.0, dtype=np.float32), "trajectory_final_abs_lateral_before": np.asarray(0.0, dtype=np.float32), "trajectory_final_abs_lateral_after": np.asarray(0.0, dtype=np.float32), "trajectory_correction_strength": np.asarray(0.0, dtype=np.float32)},
+            {"keep": False, "trajectory_mode": np.asarray(0, dtype=np.int64), "trajectory_mean_abs_lateral_before": np.asarray(0.0, dtype=np.float32), "trajectory_mean_abs_lateral_after": np.asarray(0.0, dtype=np.float32), "trajectory_final_abs_lateral_before": np.asarray(0.0, dtype=np.float32), "trajectory_final_abs_lateral_after": np.asarray(0.0, dtype=np.float32), "trajectory_correction_strength": np.asarray(0.0, dtype=np.float32)},
+        ],
+    )
+    monkeypatch.setattr(collect_expert, "build_trajectory_filter_pipeline", lambda config: DummyFilter())
+    monkeypatch.setattr(collect_expert, "split_shards", lambda **kwargs: {"train": [], "val": [], "test": []})
+    monkeypatch.setattr(collect_expert, "write_manifest", fake_write_manifest)
+
+    run_collection(
+        ExpertCollectorConfig(
+            output_root=tmp_path,
+            dataset_name="filtered_dataset",
+            target_samples=1,
+            trajectory_filter_enabled=True,
+        )
+    )
+
+    assert DummyWriter.last_instance is not None
+    assert len(DummyWriter.last_instance.added) == 1
+    assert len(DummyWriter.last_instance.added[0]) == 1
+    assert captured_manifest["filter_summary"]["accepted"] == 1
+    assert captured_manifest["filter_summary"]["rejected"] == 1
+    assert captured_manifest["filter_summary"]["rejection_reasons"]["out_of_road"] == 1
+
+
+def test_run_collection_saves_qual_and_unqual_visualizations(monkeypatch, tmp_path):
+    class DummyEnv:
+        def __init__(self, config):
+            self.config = dict(config)
+
+        def close(self):
+            return None
+
+    class DummyWriter:
+        def add_samples(self, samples):
+            return len(samples)
+
+        def close(self):
+            return 0
+
+    class DummyFilter:
+        def check_sample(self, sample):
+            passed = bool(sample["keep"])
+            return type(
+                "Result",
+                (),
+                {
+                    "passed": passed,
+                    "rejection_reasons": ([] if passed else ["out_of_road"]),
+                    "missing_reference_lane_points": 0,
+                },
+            )()
+
+    captured_paths = []
+
+    monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
+    monkeypatch.setattr(collect_expert, "ShardWriter", lambda *args, **kwargs: DummyWriter())
+    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
+    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
+    monkeypatch.setattr(collect_expert, "rollout_episode", lambda env, config, episode_spawn_seed, episode_index: ([{"frame": 1}], None, []))
+    monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: [])
+    monkeypatch.setattr(
+        collect_expert,
+        "build_episode_samples",
+        lambda *args, **kwargs: [
+            {
+                "keep": True,
+                "trajectory": np.zeros((2, 3), dtype=np.float32),
+                "trajectory_mode": np.asarray(0, dtype=np.int64),
+                "trajectory_mean_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_mean_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_correction_strength": np.asarray(0.0, dtype=np.float32),
+                "_trajectory_raw": np.zeros((2, 3), dtype=np.float32),
+                "_sample_index": 3,
+                "_current_pose": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            },
+            {
+                "keep": False,
+                "trajectory": np.ones((2, 3), dtype=np.float32),
+                "trajectory_mode": np.asarray(0, dtype=np.int64),
+                "trajectory_mean_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_mean_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_correction_strength": np.asarray(0.0, dtype=np.float32),
+                "_trajectory_raw": np.ones((2, 3), dtype=np.float32),
+                "_sample_index": 5,
+                "_current_pose": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            },
+        ],
+    )
+    monkeypatch.setattr(collect_expert, "build_trajectory_filter_pipeline", lambda config: DummyFilter())
+    monkeypatch.setattr(collect_expert, "split_shards", lambda **kwargs: {"train": [], "val": [], "test": []})
+    monkeypatch.setattr(collect_expert, "write_manifest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        collect_expert,
+        "save_trajectory_visualization",
+        lambda output_path, **kwargs: captured_paths.append(Path(output_path)),
+    )
+
+    run_collection(
+        ExpertCollectorConfig(
+            output_root=tmp_path,
+            dataset_name="viz_dataset",
+            target_samples=1,
+            trajectory_filter_enabled=True,
+            trajectory_visualization_enabled=True,
+            expert_type="idm",
+        )
+    )
+
+    assert any(str(path).endswith("reports/trajectory_visualizations/qual/ep_00001_sample_00003_keep_lane.png") for path in captured_paths)
+    assert any(str(path).endswith("reports/trajectory_visualizations/unqual/ep_00001_sample_00005_keep_lane.png") for path in captured_paths)
+
+
+def test_run_collection_does_not_save_filter_visualizations_when_disabled(monkeypatch, tmp_path):
+    class DummyEnv:
+        def __init__(self, config):
+            self.config = dict(config)
+
+        def close(self):
+            return None
+
+    class DummyWriter:
+        def add_samples(self, samples):
+            return len(samples)
+
+        def close(self):
+            return 0
+
+    class DummyFilter:
+        def check_sample(self, sample):
+            passed = bool(sample["keep"])
+            return type(
+                "Result",
+                (),
+                {
+                    "passed": passed,
+                    "rejection_reasons": ([] if passed else ["out_of_road"]),
+                    "missing_reference_lane_points": 0,
+                },
+            )()
+
+    captured = {"calls": 0}
+
+    monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
+    monkeypatch.setattr(collect_expert, "ShardWriter", lambda *args, **kwargs: DummyWriter())
+    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
+    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
+    monkeypatch.setattr(collect_expert, "rollout_episode", lambda env, config, episode_spawn_seed, episode_index: ([{"frame": 1}], None, []))
+    monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: [])
+    monkeypatch.setattr(
+        collect_expert,
+        "build_episode_samples",
+        lambda *args, **kwargs: [
+            {
+                "keep": False,
+                "trajectory": np.zeros((2, 3), dtype=np.float32),
+                "trajectory_mode": np.asarray(0, dtype=np.int64),
+                "trajectory_mean_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_mean_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_correction_strength": np.asarray(0.0, dtype=np.float32),
+                "_trajectory_raw": np.zeros((2, 3), dtype=np.float32),
+                "_sample_index": 1,
+                "_current_pose": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            },
+            {
+                "keep": True,
+                "trajectory": np.zeros((2, 3), dtype=np.float32),
+                "trajectory_mode": np.asarray(0, dtype=np.int64),
+                "trajectory_mean_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_mean_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_correction_strength": np.asarray(0.0, dtype=np.float32),
+                "_trajectory_raw": np.zeros((2, 3), dtype=np.float32),
+                "_sample_index": 3,
+                "_current_pose": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            },
+        ],
+    )
+    monkeypatch.setattr(collect_expert, "build_trajectory_filter_pipeline", lambda config: DummyFilter())
+    monkeypatch.setattr(collect_expert, "split_shards", lambda **kwargs: {"train": [], "val": [], "test": []})
+    monkeypatch.setattr(collect_expert, "write_manifest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        collect_expert,
+        "save_trajectory_visualization",
+        lambda *args, **kwargs: captured.__setitem__("calls", captured["calls"] + 1),
+    )
+
+    run_collection(
+        ExpertCollectorConfig(
+            output_root=tmp_path,
+            dataset_name="viz_disabled_dataset",
+            target_samples=1,
+            trajectory_filter_enabled=True,
+            trajectory_visualization_enabled=False,
+            expert_type="idm",
+        )
+    )
+
+    assert captured["calls"] == 0
 
 
 def test_run_collection_uses_standard_physics_env_config(monkeypatch, tmp_path):

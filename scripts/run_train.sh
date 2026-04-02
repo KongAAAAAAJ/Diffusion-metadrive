@@ -34,7 +34,7 @@ STAGE="${STAGE:-1}"   # 1 | 2 | both
 # ---------------------------------------------------------------------------
 MODEL_SIZE="${MODEL_SIZE:-small}"
 EXPERT_NAME="${EXPERT_NAME:-idm}"
-DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaData_strong_idm_single_preprocessed}"
+DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaIDM_pp}"
 PLAN_ANCHOR_PATH="${PLAN_ANCHOR_PATH:-${REPO_ROOT}/metadrive/exp_dataset/anchors.npy}"
 STAGE1_OUTPUT_DIR="${STAGE1_OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion}"
 STAGE1_MAX_EPOCHS="${STAGE1_MAX_EPOCHS:-80}"  #

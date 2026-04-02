@@ -4,6 +4,7 @@ import argparse
 from typing import Iterable
 
 import numpy as np
+from metadrive.exp_dataset.expert_idm_policy import ExpertIDMConfig
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -14,6 +15,24 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--print-obs-summary", type=int, choices=(0, 1), default=1)
     parser.add_argument("--print-trajectory-debug", type=int, choices=(0, 1), default=0)
     parser.add_argument("--print-idm-debug", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--expert-idm-distance-wanted", type=float, default=ExpertIDMConfig.distance_wanted)
+    parser.add_argument("--expert-idm-time-wanted", type=float, default=ExpertIDMConfig.time_wanted)
+    parser.add_argument("--expert-idm-delta", type=float, default=ExpertIDMConfig.delta)
+    parser.add_argument("--expert-idm-acc-factor", type=float, default=ExpertIDMConfig.acc_factor)
+    parser.add_argument("--expert-idm-deacc-factor", type=float, default=ExpertIDMConfig.deacc_factor)
+    parser.add_argument("--expert-idm-normal-speed-kmh", type=float, default=ExpertIDMConfig.normal_speed_kmh)
+    parser.add_argument("--expert-idm-max-speed-kmh", type=float, default=ExpertIDMConfig.max_speed_kmh)
+    parser.add_argument("--expert-idm-enable-lane-change", type=int, choices=(0, 1), default=int(ExpertIDMConfig.enable_lane_change))
+    parser.add_argument("--expert-idm-lane-change-freq", type=int, default=ExpertIDMConfig.lane_change_freq)
+    parser.add_argument("--expert-idm-lane-change-speed-increase", type=float, default=ExpertIDMConfig.lane_change_speed_increase)
+    parser.add_argument("--expert-idm-safe-lane-change-distance", type=float, default=ExpertIDMConfig.safe_lane_change_distance)
+    parser.add_argument("--expert-idm-max-long-dist", type=float, default=ExpertIDMConfig.max_long_dist)
+    parser.add_argument("--expert-idm-heading-pid-kp", type=float, default=ExpertIDMConfig.heading_pid_kp)
+    parser.add_argument("--expert-idm-heading-pid-ki", type=float, default=ExpertIDMConfig.heading_pid_ki)
+    parser.add_argument("--expert-idm-heading-pid-kd", type=float, default=ExpertIDMConfig.heading_pid_kd)
+    parser.add_argument("--expert-idm-lateral-pid-kp", type=float, default=ExpertIDMConfig.lateral_pid_kp)
+    parser.add_argument("--expert-idm-lateral-pid-ki", type=float, default=ExpertIDMConfig.lateral_pid_ki)
+    parser.add_argument("--expert-idm-lateral-pid-kd", type=float, default=ExpertIDMConfig.lateral_pid_kd)
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -119,6 +138,26 @@ def _print_idm_debug(step: int, vehicle, expert_policy) -> None:
 
 def main(argv: Iterable[str] | None = None) -> None:
     args = parse_args(argv)
+    expert_idm_config = ExpertIDMConfig(
+        distance_wanted=float(args.expert_idm_distance_wanted),
+        time_wanted=float(args.expert_idm_time_wanted),
+        delta=float(args.expert_idm_delta),
+        acc_factor=float(args.expert_idm_acc_factor),
+        deacc_factor=float(args.expert_idm_deacc_factor),
+        normal_speed_kmh=float(args.expert_idm_normal_speed_kmh),
+        max_speed_kmh=float(args.expert_idm_max_speed_kmh),
+        enable_lane_change=bool(args.expert_idm_enable_lane_change),
+        lane_change_freq=int(args.expert_idm_lane_change_freq),
+        lane_change_speed_increase=float(args.expert_idm_lane_change_speed_increase),
+        safe_lane_change_distance=float(args.expert_idm_safe_lane_change_distance),
+        max_long_dist=float(args.expert_idm_max_long_dist),
+        heading_pid_kp=float(args.expert_idm_heading_pid_kp),
+        heading_pid_ki=float(args.expert_idm_heading_pid_ki),
+        heading_pid_kd=float(args.expert_idm_heading_pid_kd),
+        lateral_pid_kp=float(args.expert_idm_lateral_pid_kp),
+        lateral_pid_ki=float(args.expert_idm_lateral_pid_ki),
+        lateral_pid_kd=float(args.expert_idm_lateral_pid_kd),
+    )
 
     from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
     from metadrive.examples.ppo_expert import expert as ppo_expert
@@ -152,7 +191,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                     _print_trajectory_debug(vehicle, collect_expert_module)
             else:
                 if idm_policy is None:
-                    idm_policy = ExpertIDMPolicy(vehicle, random_seed=0)
+                    idm_policy = ExpertIDMPolicy(vehicle, random_seed=0, idm_config=expert_idm_config)
                 actions[agent_id] = idm_policy.act()
                 if bool(args.print_idm_debug):
                     _print_idm_debug(step, vehicle, idm_policy)
