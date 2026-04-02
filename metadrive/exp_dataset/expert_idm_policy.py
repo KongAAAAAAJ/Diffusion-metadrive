@@ -260,13 +260,87 @@ class ExpertIDMPolicy(IDMPolicy):
             float(idm_config.lateral_pid_kd),
         )
 
+    def _fallback_steering_lane(self, proposed_lane):
+        current_lane = getattr(self.control_object, "lane", None)
+        if current_lane is not None:
+            return current_lane
+        if self.routing_target_lane is not None:
+            return self.routing_target_lane
+        return proposed_lane
+
+    def _lane_heading_at_vehicle_position(self, lane) -> float | None:
+        if lane is None or not hasattr(lane, "local_coordinates") or not hasattr(lane, "heading_theta_at"):
+            return None
+        try:
+            longitudinal, _ = lane.local_coordinates(self.control_object.position)
+            return float(lane.heading_theta_at(float(longitudinal)))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _lane_is_opposite_by_index(current_lane, target_lane) -> bool:
+        current_index = getattr(current_lane, "index", None)
+        target_index = getattr(target_lane, "index", None)
+        if not (
+            isinstance(current_index, (tuple, list))
+            and isinstance(target_index, (tuple, list))
+            and len(current_index) >= 2
+            and len(target_index) >= 2
+        ):
+            return False
+        return tuple(current_index[:2]) == tuple(reversed(tuple(target_index[:2])))
+
+    def _is_illegal_crossing_lane_change(self, target_lane) -> bool:
+        current_lane = self._fallback_steering_lane(target_lane)
+        if target_lane is None or current_lane is None or target_lane is current_lane:
+            return False
+        if bool(getattr(self.control_object, "on_yellow_continuous_line", False)) or bool(
+            getattr(self.control_object, "on_white_continuous_line", False)
+        ):
+            return True
+        if self._lane_is_opposite_by_index(current_lane, target_lane):
+            return True
+        current_heading = self._lane_heading_at_vehicle_position(current_lane)
+        target_heading = self._lane_heading_at_vehicle_position(target_lane)
+        if current_heading is None or target_heading is None:
+            return False
+        return abs(float(wrap_to_pi(target_heading - current_heading))) > (np.pi / 2.0)
+
+    def _guard_steering_target_lane(self, target_lane):
+        if self._is_illegal_crossing_lane_change(target_lane):
+            return self._fallback_steering_lane(target_lane)
+        return target_lane
+
     def act(self, *args, **kwargs):
-        action = list(super().act(*args, **kwargs))
+        all_objects = self.control_object.lidar.get_surrounding_objects(self.control_object)
+        try:
+            success = self.move_to_next_road()
+            if success and self.enable_lane_change:
+                acc_front_obj, acc_front_dist, steering_target_lane = self.lane_change_policy(all_objects)
+            else:
+                surrounding_objects = FrontBackObjects.get_find_front_back_objs(
+                    all_objects,
+                    self.routing_target_lane,
+                    self.control_object.position,
+                    max_distance=self.MAX_LONG_DIST,
+                )
+                acc_front_obj = surrounding_objects.front_object()
+                acc_front_dist = surrounding_objects.front_min_distance()
+                steering_target_lane = self.routing_target_lane
+        except Exception:
+            acc_front_obj = None
+            acc_front_dist = 5
+            steering_target_lane = self.routing_target_lane
+
+        steering_target_lane = self._guard_steering_target_lane(steering_target_lane)
+        steering = self.steering_control(steering_target_lane)
+        acc = self.acceleration(acc_front_obj, acc_front_dist)
+        action = [steering, acc]
         all_objects = self.control_object.lidar.get_surrounding_objects(self.control_object)
         action[1] = self.intersection_regulator.adjust(
             ego=self.control_object,
             all_objects=all_objects,
-            target_lane=self.routing_target_lane,
+            target_lane=steering_target_lane,
             idm_acc=action[1],
         )
         self.action_info["action"] = action

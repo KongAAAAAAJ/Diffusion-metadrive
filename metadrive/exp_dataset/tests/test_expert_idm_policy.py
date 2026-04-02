@@ -298,17 +298,125 @@ def test_expert_idm_policy_pid_config_does_not_mutate_parent_defaults():
     assert (fresh_parent.lateral_pid.k_p, fresh_parent.lateral_pid.k_i, fresh_parent.lateral_pid.k_d) == original_lateral
 
 
+def test_expert_idm_policy_rejects_opposite_direction_lane_change():
+    vehicle = SimpleNamespace(
+        lidar=SimpleNamespace(get_surrounding_objects=lambda _: []),
+        position=np.asarray([0.0, 0.0], dtype=np.float64),
+        heading_theta=0.0,
+        on_yellow_continuous_line=False,
+        on_white_continuous_line=False,
+    )
+    current_lane = SimpleNamespace(
+        index=("A", "B", 0),
+        local_coordinates=lambda position: (0.0, 0.0),
+        heading_theta_at=lambda longitudinal: 0.0,
+    )
+    opposite_lane = SimpleNamespace(
+        index=("B", "A", 0),
+        local_coordinates=lambda position: (0.0, 0.0),
+        heading_theta_at=lambda longitudinal: np.pi,
+    )
+
+    policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
+    policy.routing_target_lane = current_lane
+    policy.move_to_next_road = lambda: True
+    policy.lane_change_policy = lambda all_objects: (None, 12.0, opposite_lane)
+    policy.acceleration = lambda front_obj, dist_to_front: 0.5
+    policy.intersection_regulator.adjust = lambda ego, all_objects, target_lane, idm_acc: idm_acc
+
+    action = policy.act()
+
+    assert action[0] == ("idm", current_lane)
+    assert policy.action_info["action"][0] == ("idm", current_lane)
+
+
+def test_expert_idm_policy_keeps_legal_same_direction_lane_change():
+    vehicle = SimpleNamespace(
+        lidar=SimpleNamespace(get_surrounding_objects=lambda _: []),
+        position=np.asarray([0.0, 0.0], dtype=np.float64),
+        heading_theta=0.0,
+        on_yellow_continuous_line=False,
+        on_white_continuous_line=False,
+    )
+    current_lane = SimpleNamespace(
+        index=("A", "B", 0),
+        local_coordinates=lambda position: (0.0, 0.0),
+        heading_theta_at=lambda longitudinal: 0.0,
+    )
+    right_lane = SimpleNamespace(
+        index=("A", "B", 1),
+        local_coordinates=lambda position: (0.0, 0.0),
+        heading_theta_at=lambda longitudinal: 0.0,
+    )
+
+    policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
+    policy.routing_target_lane = current_lane
+    policy.move_to_next_road = lambda: True
+    policy.lane_change_policy = lambda all_objects: (None, 12.0, right_lane)
+    policy.acceleration = lambda front_obj, dist_to_front: 0.5
+    policy.intersection_regulator.adjust = lambda ego, all_objects, target_lane, idm_acc: idm_acc
+
+    action = policy.act()
+
+    assert action[0] == ("idm", right_lane)
+
+
+def test_expert_idm_policy_rejects_lane_change_while_on_yellow_continuous_line():
+    vehicle = SimpleNamespace(
+        lidar=SimpleNamespace(get_surrounding_objects=lambda _: []),
+        position=np.asarray([0.0, 0.0], dtype=np.float64),
+        heading_theta=0.0,
+        on_yellow_continuous_line=True,
+        on_white_continuous_line=False,
+    )
+    current_lane = SimpleNamespace(
+        index=("A", "B", 0),
+        local_coordinates=lambda position: (0.0, 0.0),
+        heading_theta_at=lambda longitudinal: 0.0,
+    )
+    opposite_lane = SimpleNamespace(
+        index=("B", "A", 0),
+        local_coordinates=lambda position: (0.0, 0.0),
+        heading_theta_at=lambda longitudinal: np.pi,
+    )
+
+    policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
+    policy.routing_target_lane = current_lane
+    policy.move_to_next_road = lambda: True
+    policy.lane_change_policy = lambda all_objects: (None, 12.0, opposite_lane)
+    policy.acceleration = lambda front_obj, dist_to_front: 0.5
+    policy.intersection_regulator.adjust = lambda ego, all_objects, target_lane, idm_acc: idm_acc
+
+    action = policy.act()
+
+    assert action[0] == ("idm", current_lane)
+
+
 def test_expert_idm_policy_act_applies_intersection_adjustment():
     surrounding = [object()]
-    vehicle = SimpleNamespace(lidar=SimpleNamespace(get_surrounding_objects=lambda _: surrounding))
+    vehicle = SimpleNamespace(
+        lidar=SimpleNamespace(get_surrounding_objects=lambda _: surrounding),
+        position=np.asarray([0.0, 0.0], dtype=np.float64),
+        heading_theta=0.0,
+        on_yellow_continuous_line=False,
+        on_white_continuous_line=False,
+    )
+    current_lane = SimpleNamespace(
+        index=("A", "B", 0),
+        local_coordinates=lambda position: (0.0, 0.0),
+        heading_theta_at=lambda longitudinal: 0.0,
+    )
     policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
-    policy.routing_target_lane = "ref-lane"
+    policy.routing_target_lane = current_lane
+    policy.move_to_next_road = lambda: True
+    policy.lane_change_policy = lambda all_objects: (None, 12.0, current_lane)
+    policy.acceleration = lambda front_obj, dist_to_front: 0.5
     policy.intersection_regulator.adjust = lambda ego, all_objects, target_lane, idm_acc: -1.25
 
     action = policy.act()
 
-    assert action == [0.25, -1.25]
-    assert policy.action_info["action"] == [0.25, -1.25]
+    assert action == [("idm", current_lane), -1.25]
+    assert policy.action_info["action"] == [("idm", current_lane), -1.25]
 
 
 def test_expert_idm_policy_reset_clears_intersection_regulator_state():

@@ -310,7 +310,13 @@ class PGTrafficManager(BaseManager):
         Destory func, release resource
         :return: None
         """
-        self.clear_objects([v.id for v in self._traffic_vehicles])
+        spawned_objects = getattr(self.engine, "_spawned_objects", {})
+        active_vehicle_ids = [
+            v.id for v in self._traffic_vehicles
+            if v is not None and getattr(v, "id", None) in spawned_objects
+        ]
+        if active_vehicle_ids:
+            self.clear_objects(active_vehicle_ids)
         self._traffic_vehicles = []
         # current map
 
