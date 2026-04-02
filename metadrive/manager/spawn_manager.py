@@ -37,6 +37,11 @@ class SpawnManager(BaseManager):
         # Lazy init~
         super(SpawnManager, self).__init__()
         self.initialized = True
+        self._episode_spawn_seed = None
+        self._use_map_respawn_roads = (
+            self.engine.global_config.get("spawn_strategy") == "map_respawn_roads"
+            and self.engine.global_config.get("spawn_roads") is None
+        )
         self.num_agents = self.engine.global_config["num_agents"]
         self.exit_length = (self.engine.global_config["map_config"]["exit_length"] - FirstPGBlock.ENTRANCE_LENGTH)
         assert self.exit_length >= self.RESPAWN_REGION_LONGITUDE, (
@@ -54,11 +59,13 @@ class SpawnManager(BaseManager):
         self._init_agent_configs = agent_configs
 
         spawn_roads = self.engine.global_config["spawn_roads"]
-        agent_configs, safe_spawn_places = self._auto_fill_spawn_roads_randomly(spawn_roads)
-        self.available_agent_configs = agent_configs
-        self.safe_spawn_places = {place["identifier"]: place for place in safe_spawn_places}
-        self.spawn_roads = spawn_roads
-        self.need_update_spawn_places = True
+        if spawn_roads:
+            self.refresh_spawn_roads(spawn_roads)
+        else:
+            self.available_agent_configs = []
+            self.safe_spawn_places = {}
+            self.spawn_roads = []
+            self.need_update_spawn_places = True
 
     @staticmethod
     def get_not_randomize_vehicle_configs(configs):
@@ -70,6 +77,8 @@ class SpawnManager(BaseManager):
         return ret
 
     def reset(self):
+        self._refresh_spawn_roads_from_current_map_if_needed()
+        rng = np.random.RandomState(self._episode_spawn_seed) if self._episode_spawn_seed is not None else self.np_random
         # random assign spawn points
         num_agents = self.num_agents if self.num_agents is not None else len(self.available_agent_configs)
         assert len(self.available_agent_configs) > 0
@@ -77,19 +86,18 @@ class SpawnManager(BaseManager):
         if num_agents == -1:  # Infinite number of agents
             target_agents = list(range(len(self.available_agent_configs)))
         else:
-            target_agents = self.np_random.choice(
-                [i for i in range(len(self.available_agent_configs))], num_agents, replace=False
-            )
+            target_agents = self._sample_target_agents(rng, num_agents)
 
         # set the spawn road
         ret = {}
         if len(target_agents) > 1:
             for real_idx, idx in enumerate(target_agents):
                 v_config = self.available_agent_configs[idx]["config"]
-                v_config = self._randomize_position_in_slot(v_config)
+                v_config = self._randomize_position_in_slot(v_config, rng=rng)
                 ret["agent{}".format(real_idx)] = v_config
         else:
-            ret["agent0"] = self._randomize_position_in_slot(self.available_agent_configs[0]["config"])
+            selected_idx = int(target_agents[0])
+            ret["agent0"] = self._randomize_position_in_slot(self.available_agent_configs[selected_idx]["config"], rng=rng)
 
         # set the destination/spawn point and update target_v config
         agent_configs = {}
@@ -103,6 +111,48 @@ class SpawnManager(BaseManager):
             agent_configs[agent_id] = config
 
         self.engine.global_config["agent_configs"] = copy.deepcopy(agent_configs)
+        self._episode_spawn_seed = None
+
+    def _refresh_spawn_roads_from_current_map_if_needed(self):
+        if not self._use_map_respawn_roads:
+            return
+        current_map = getattr(self.engine, "current_map", None)
+        if current_map is None:
+            return
+        spawn_roads = self._collect_respawn_roads_from_map(current_map)
+        if not spawn_roads:
+            return
+        self.refresh_spawn_roads(spawn_roads)
+
+    @staticmethod
+    def _road_key_from_config(config):
+        lane_index = config["spawn_lane_index"]
+        return tuple(lane_index[:2])
+
+    def _sample_target_agents(self, rng, num_agents):
+        candidate_indices = list(range(len(self.available_agent_configs)))
+        if not self.engine.global_config.get("spawn_diversify_roads", False) or num_agents <= 1:
+            return list(rng.choice(candidate_indices, num_agents, replace=False))
+
+        road_to_indices = {}
+        for idx in candidate_indices:
+            road_key = self._road_key_from_config(self.available_agent_configs[idx]["config"])
+            road_to_indices.setdefault(road_key, []).append(idx)
+
+        selected = []
+        road_keys = list(road_to_indices.keys())
+        distinct_count = min(num_agents, len(road_keys))
+        if distinct_count > 0:
+            chosen_road_indices = list(rng.choice(list(range(len(road_keys))), distinct_count, replace=False))
+            chosen_road_keys = [road_keys[idx] for idx in chosen_road_indices]
+            for road_key in chosen_road_keys:
+                selected.append(int(rng.choice(road_to_indices[road_key], 1, replace=False)[0]))
+
+        if len(selected) < num_agents:
+            remaining = [idx for idx in candidate_indices if idx not in selected]
+            extra = list(rng.choice(remaining, num_agents - len(selected), replace=False))
+            selected.extend(int(idx) for idx in extra)
+        return selected
 
     @staticmethod
     def max_capacity(spawn_roads, exit_length, lane_num):
@@ -157,6 +207,30 @@ class SpawnManager(BaseManager):
                         safe_spawn_places.append(copy.deepcopy(agent_configs[-1]))
         return agent_configs, safe_spawn_places
 
+    @staticmethod
+    def _collect_respawn_roads_from_map(current_map):
+        roads = []
+        seen = set()
+        for block in getattr(current_map, "blocks", []) or []:
+            for road in getattr(block, "get_respawn_roads", lambda: [])() or []:
+                if hasattr(road, "start_node") and hasattr(road, "end_node"):
+                    key = (road.start_node, road.end_node, road.__class__)
+                else:
+                    key = id(road)
+                if key in seen:
+                    continue
+                seen.add(key)
+                roads.append(road)
+        return roads
+
+    def refresh_spawn_roads(self, spawn_roads):
+        agent_configs, safe_spawn_places = self._auto_fill_spawn_roads_randomly(spawn_roads)
+        self.available_agent_configs = agent_configs
+        self.safe_spawn_places = {place["identifier"]: place for place in safe_spawn_places}
+        self.spawn_roads = list(spawn_roads)
+        self.engine.global_config["spawn_roads"] = list(spawn_roads)
+        self.need_update_spawn_places = True
+
     def step(self):
         self.spawn_places_used = []
 
@@ -208,13 +282,17 @@ class SpawnManager(BaseManager):
                 self.spawn_places_used.append(bid)
         return ret
 
-    def _randomize_position_in_slot(self, target_vehicle_config):
+    def _randomize_position_in_slot(self, target_vehicle_config, rng=None):
+        rng = self.np_random if rng is None else rng
         vehicle_config = copy.deepcopy(target_vehicle_config)
         long = self.RESPAWN_REGION_LONGITUDE - self.MAX_VEHICLE_LENGTH
         lat = self.RESPAWN_REGION_LATERAL - self.MAX_VEHICLE_WIDTH
-        vehicle_config["spawn_longitude"] += self.np_random.uniform(-long / 2, long / 2)
-        vehicle_config["spawn_lateral"] += self.np_random.uniform(-lat / 2, lat / 2)
+        vehicle_config["spawn_longitude"] += rng.uniform(-long / 2, long / 2)
+        vehicle_config["spawn_lateral"] += rng.uniform(-lat / 2, lat / 2)
         return vehicle_config
+
+    def set_episode_spawn_seed(self, seed):
+        self._episode_spawn_seed = int(seed)
 
     def seed(self, random_seed):
         """this class is used to ranomly choose the spawn places, which will not be controlled by any seed"""

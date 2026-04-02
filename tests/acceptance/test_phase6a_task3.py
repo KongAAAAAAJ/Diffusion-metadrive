@@ -86,10 +86,11 @@ def test_closedloop_workers_zero_uses_serial_path(tmp_path):
     trainer.current_obs = obs
     try:
         rollouts = trainer.collect_group_samples(group_size=int(runtime["config"].get("group_size", 2)), obs=obs)
-        joint_groups, team_rewards, joint_profile = _build_joint_training_inputs(trainer, rollouts)
+        joint_groups, team_rewards, joint_profile, closedloop_crash_flags = _build_joint_training_inputs(trainer, rollouts)
         assert joint_groups is not None and team_rewards is not None
         assert np.isfinite(float(sum(team_rewards) / len(team_rewards)))
         assert joint_profile.get("group_count", 0.0) >= 1.0
+        assert closedloop_crash_flags is not None
         assert not hasattr(trainer, "_parallel_executor") or trainer._parallel_executor is None
     finally:
         runtime["env"].close()

@@ -13,7 +13,7 @@ STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess  # 选择数据处
 # *── Shared paths ────────────────────────────────────────────────────────────
 EXPERT_TYPE="${EXPERT_TYPE:-idm}"
 COLLECTION_MODE="${COLLECTION_MODE:-single}"  # 选择地图模式：single | fixed_hybrid | random_road | phase2_plan
-DATASET_NAME="${DATASET_NAME:-metaData_${EXPERT_TYPE}_${COLLECTION_MODE}}"
+DATASET_NAME="${DATASET_NAME:-metaData_strong_${EXPERT_TYPE}_${COLLECTION_MODE}}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
 
 # Derived paths (auto-chained between stages)
@@ -107,7 +107,8 @@ run_anchors() {
     NUM_ANCHORS="${NUM_ANCHORS:-8}"  # *
     ANCHOR_SEED="${ANCHOR_SEED:-0}"
 
-    "${PYTHON_BIN}" -m metadrive.exp_dataset.abstract_anchors \
+    # 使用默认聚类方法提取anchor
+    "${PYTHON_BIN}" -m metadrive.exp_dataset.abstract_anchors_default \
         --dataset-root "${COLLECT_OUTPUT}" \
         --output-path "${ANCHORS_OUTPUT}" \
         --trajectory-key "${TRAJECTORY_KEY}" \

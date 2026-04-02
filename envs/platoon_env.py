@@ -247,12 +247,16 @@ class PlatoonEnv(BaseMultiEnv):
 
     @property
     def action_space(self):
+        if self.config.get("control_mode", "physics") == "teleport":
+            return super().action_space
         single = gym.spaces.Box(low=-100.0, high=100.0, shape=(8, 3), dtype=np.float32)
         return gym.spaces.Dict({agent_id: single for agent_id in self._agent_ids})
 
     def reset(self):
+
         self._metrics.start_episode()
         obs, _ = super().reset()
+
         if "enable_idm_lane_change" in self._runtime_flags:
             self.config["enable_idm_lane_change"] = bool(self._runtime_flags["enable_idm_lane_change"])
             self.engine.global_config["enable_idm_lane_change"] = bool(self._runtime_flags["enable_idm_lane_change"])
@@ -263,6 +267,7 @@ class PlatoonEnv(BaseMultiEnv):
             agent_id: self._capture_progress_reference(agent_id) for agent_id in self._agent_ids
         }
         self._last_info = {}
+
         return self._augment_observations(obs)
 
     def _augment_observations(self, obs: Mapping[str, object]) -> dict[str, dict]:
@@ -291,6 +296,18 @@ class PlatoonEnv(BaseMultiEnv):
         return augmented
 
     def step(self, actions: Dict[str, np.ndarray]):
+        if self.config.get("control_mode", "physics") == "teleport":
+            obs, reward, terminated, truncated, info = super().step(actions)
+            info = self._build_info_dict("teleport", actions=actions, base_info=info)
+            terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
+            obs = self._augment_observations(obs)
+            self._metrics.update(info)
+            if terminated.get("__all__", False) or truncated.get("__all__", False):
+                self._metrics.end_episode()
+            if info:
+                self._last_info = info
+            return obs, reward, terminated, truncated, info
+
         control_mode = self._infer_control_mode(actions)
         if control_mode == "trajectory":
             low_level_actions = {
@@ -305,6 +322,8 @@ class PlatoonEnv(BaseMultiEnv):
         return self.low_level_step(low_level_actions, control_mode=control_mode)
 
     def _infer_control_mode(self, actions: Mapping[str, np.ndarray]) -> str:
+        if self.config.get("control_mode", "physics") == "teleport":
+            return "teleport"
         first_action = np.asarray(next(iter(actions.values())))
         if first_action.shape == (8, 3):
             return "trajectory"
@@ -402,7 +421,11 @@ class PlatoonEnv(BaseMultiEnv):
         active_ids = list(self.agents.keys())
         for agent_id in active_ids:
             agent_info = dict((base_info or {}).get(agent_id, {}))
-            current_action = np.asarray(actions.get(agent_id, np.zeros((2,), dtype=np.float32)), dtype=np.float32).reshape(2,)
+            raw_action = np.asarray(actions.get(agent_id, np.zeros((2,), dtype=np.float32)), dtype=np.float32)
+            if raw_action.shape == (2,):
+                current_action = raw_action
+            else:
+                current_action = np.zeros((2,), dtype=np.float32)
             previous_action = self._last_actions.get(agent_id, np.zeros((2,), dtype=np.float32))
             delta_steering = float(current_action[0] - previous_action[0])
             jerk = float(current_action[1] - previous_action[1])

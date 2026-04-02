@@ -16,54 +16,10 @@ from metadrive.utils.math import wrap_to_pi
 
 
 class ExpertIDMPolicy(IDMPolicy):
-    """Dataset-facing IDM variant with a preview-based lateral controller."""
-
-    HEADING_PID_KP = 0.88
-    HEADING_PID_KI = 0.0002
-    HEADING_PID_KD = 0.065
-    LATERAL_PID_KP = 0.85
-    LATERAL_PID_KI = 0.0002
-    LATERAL_PID_KD = 0.28
-
-    MIN_PREVIEW_DISTANCE = 3.2
-    MAX_PREVIEW_DISTANCE = 9.5
-    PREVIEW_TIME = 0.34
-    PREVIEW_HEADING_GAIN = 0.002
-    MAX_STEERING = 0.3149183697964353
+    """Dataset-facing IDM policy aligned with the background-traffic IDM."""
 
     def __init__(self, control_object, random_seed: int = 0):
         super().__init__(control_object=control_object, random_seed=random_seed)
-        self.enable_lane_change = False
-        self.heading_pid = PIDController(self.HEADING_PID_KP, self.HEADING_PID_KI, self.HEADING_PID_KD)
-        self.lateral_pid = PIDController(self.LATERAL_PID_KP, self.LATERAL_PID_KI, self.LATERAL_PID_KD)
-
-    def steering_control(self, target_lane) -> float:
-        ego_vehicle = self.control_object
-        if target_lane is None:
-            return 0.0
-
-        lane_length = float(getattr(target_lane, "length", 0.0))
-        current_long, lateral_error = target_lane.local_coordinates(ego_vehicle.position)
-        current_long = float(np.clip(current_long, 0.0, lane_length))
-
-        preview_distance = float(
-            np.clip(ego_vehicle.speed * self.PREVIEW_TIME, self.MIN_PREVIEW_DISTANCE, self.MAX_PREVIEW_DISTANCE)
-        )
-        preview_long = float(np.clip(current_long + preview_distance, 0.0, lane_length))
-
-        lane_heading_now = float(target_lane.heading_theta_at(current_long))
-        lane_heading_preview = float(target_lane.heading_theta_at(preview_long))
-        vehicle_heading = float(ego_vehicle.heading_theta)
-
-        preview_heading_error = wrap_to_pi(lane_heading_preview - vehicle_heading)
-        curvature_heading_error = wrap_to_pi(lane_heading_preview - lane_heading_now)
-
-        heading_term = self.heading_pid.get_result(-preview_heading_error)
-        lateral_term = self.lateral_pid.get_result(-float(lateral_error))
-        preview_term = self.PREVIEW_HEADING_GAIN * curvature_heading_error
-
-        steering = heading_term + lateral_term + preview_term
-        return float(np.clip(steering, -self.MAX_STEERING, self.MAX_STEERING))
 
 
 
@@ -125,17 +81,9 @@ def _build_standalone_policy(vehicle: MockVehicle) -> ExpertIDMPolicy:
     policy = ExpertIDMPolicy.__new__(ExpertIDMPolicy)
     policy.control_object = vehicle
     policy.action_info = {}
-    policy.heading_pid = PIDController(
-        ExpertIDMPolicy.HEADING_PID_KP,
-        ExpertIDMPolicy.HEADING_PID_KI,
-        ExpertIDMPolicy.HEADING_PID_KD,
-    )
-    policy.lateral_pid = PIDController(
-        ExpertIDMPolicy.LATERAL_PID_KP,
-        ExpertIDMPolicy.LATERAL_PID_KI,
-        ExpertIDMPolicy.LATERAL_PID_KD,
-    )
-    policy.enable_lane_change = False
+    policy.heading_pid = PIDController(1.7, 0.01, 3.5)
+    policy.lateral_pid = PIDController(0.3, 0.002, 0.05)
+    policy.enable_lane_change = True
     return policy
 
 

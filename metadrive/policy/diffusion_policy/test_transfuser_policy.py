@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import os
 from pathlib import Path
 import cv2
 import numpy as np
 import torch, time
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
+from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
 from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config, transfuser_config_to_dict
 from metadrive.policy.diffusion_policy.transfuser_policy import TransfuserPolicy
 
+MULTIMODAL_SELECTED_COLOR = "orange"
+MULTIMODAL_OTHER_COLOR = "#8FD3FF"
 
-def parse_args():
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Closed-loop evaluation for MetaDrive TransFuser.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the trained TransFuser checkpoint.")
     parser.add_argument("--model-size", type=str, default="auto")
     parser.add_argument("--episodes", type=int, default=1)
-    parser.add_argument("--render", type=bool, default=True)
+    parser.add_argument("--render", type=int, choices=(0, 1), default=0)
     parser.add_argument("--image-on-cuda", type=int, choices=(0, 1), default=0)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--target-speed-km-h", type=float, default=30.0)
@@ -29,7 +34,25 @@ def parse_args():
     parser.add_argument("--num-scenarios", type=int, default=1)
     parser.add_argument("--traffic-density", type=float, default=0.06)
     parser.add_argument("--plan-anchor-path", type=str, default="metadrive/exp_dataset/metadrive_anchors.npy")
-    return parser.parse_args()
+    parser.add_argument("--save-3d-video", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--save-2d-video", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--save-trajectory-plot", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--save-step-images", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--step-image-interval", type=int, default=1)
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/closed_loop",
+    )
+    parser.add_argument("--video-fps", type=int, default=10)
+    parser.add_argument("--topdown-camera-height", type=float, default=80.0)
+    return parser.parse_args(argv)
+
+
+def _normalize_visualization_args(args):
+    if args.save_3d_video and not args.render:
+        args.render = 1
+    return args
 
 
 def resolve_device(device: str) -> str:
@@ -61,6 +84,338 @@ def save_triplet_cameras(observation: dict, output_dir: Path, episode_idx: int, 
         cv2.imwrite(str(image_path), image_bgr)
 
 
+def _capture_3d_topdown_frame(env, camera_height: float) -> np.ndarray | None:
+    engine = getattr(env, "engine", None)
+    main_camera = getattr(engine, "main_camera", None)
+    if main_camera is None:
+        return None
+    agent_id = next(iter(getattr(env, "agents", {}).keys()), None)
+    if agent_id is None:
+        return None
+    ego_pos = env.agents[agent_id].position
+    frame = main_camera.perceive(
+        to_float=False,
+        new_parent_node=engine.origin,
+        position=(float(ego_pos[0]), float(ego_pos[1]), float(camera_height)),
+        hpr=(0, -90, 0),
+    )
+    if frame is not None and frame.ndim == 3 and frame.shape[2] > 3:
+        frame = frame[:, :, :3]
+    return frame
+
+
+def _capture_2d_topdown_frame(env, screen_size: int = 800, film_size: int = 3000) -> np.ndarray | None:
+    agent_id = next(iter(getattr(env, "agents", {}).keys()), None)
+    if agent_id is None:
+        return None
+    ego_pos = env.agents[agent_id].position
+    renderer = getattr(env, "top_down_renderer", None)
+    if renderer is not None:
+        renderer.position = (float(ego_pos[0]), float(ego_pos[1]))
+    frame = env.render(
+        mode="top_down",
+        window=False,
+        screen_size=(screen_size, screen_size),
+        film_size=(film_size, film_size),
+        target_agent_heading_up=False,
+        camera_position=(float(ego_pos[0]), float(ego_pos[1])),
+    )
+    if frame is None:
+        return None
+    frame_array = np.asarray(frame)
+    if frame_array.ndim == 3 and frame_array.shape[2] > 3:
+        frame_array = frame_array[:, :, :3]
+    if frame_array.ndim >= 2:
+        frame_array = frame_array.swapaxes(0, 1)
+    return frame_array
+
+
+def _get_primary_agent_id(env) -> str | None:
+    agents = getattr(env, "agents", {}) or {}
+    if "agent0" in agents:
+        return "agent0"
+    return next(iter(agents.keys()), None)
+
+
+def _extract_road_topology(env) -> list[np.ndarray]:
+    try:
+        road_network = env.engine.current_map.road_network
+        all_lanes = road_network.get_all_lanes()
+    except Exception:
+        return []
+
+    boundaries = []
+    for lane in all_lanes:
+        try:
+            lane_width = getattr(lane, "width", None)
+            if lane_width is None:
+                lane_width = lane.width_at(0)
+            half_width = float(lane_width) / 2.0
+            left = np.asarray(lane.get_polyline(interval=2, lateral=half_width), dtype=np.float64)
+            right = np.asarray(lane.get_polyline(interval=2, lateral=-half_width), dtype=np.float64)
+            if left.ndim == 2 and left.shape[0] >= 2:
+                boundaries.append(left)
+            if right.ndim == 2 and right.shape[0] >= 2:
+                boundaries.append(right)
+        except Exception:
+            continue
+    return boundaries
+
+
+def _record_step_visualization(
+    ego_before_step,
+    ego_xy_before_step: np.ndarray | None,
+    final_info: dict,
+    episode_length: int,
+    save_trajectory_plot: bool,
+    actual_positions: list[np.ndarray],
+    planned_trajectories: list[tuple[int, list[np.ndarray]]],
+    multimodal_trajectories: list[tuple[int, np.ndarray, int]],
+) -> None:
+    if ego_xy_before_step is not None:
+        actual_positions.append(np.asarray(ego_xy_before_step, dtype=np.float64))
+
+    if not save_trajectory_plot or ego_before_step is None:
+        return
+
+    predicted_traj = final_info.get("predicted_trajectory")
+    if predicted_traj is not None:
+        planned_world = []
+        for wp in np.asarray(predicted_traj):
+            world_xy = ego_before_step.convert_to_world_coordinates([float(wp[0]), float(wp[1])], ego_before_step.position)
+            planned_world.append(np.asarray(world_xy[:2], dtype=np.float64))
+        planned_trajectories.append((episode_length - 1, planned_world))
+
+    trajectory_candidates = final_info.get("trajectory_candidates")
+    mode_idx = final_info.get("trajectory_mode_idx")
+    if trajectory_candidates is None or mode_idx is None:
+        return
+
+    candidates_world = []
+    for candidate in np.asarray(trajectory_candidates):
+        candidate_world = []
+        for wp in np.asarray(candidate):
+            world_xy = ego_before_step.convert_to_world_coordinates(
+                [float(wp[0]), float(wp[1])],
+                ego_before_step.position,
+            )
+            candidate_world.append(np.asarray(world_xy[:2], dtype=np.float64))
+        candidates_world.append(candidate_world)
+    multimodal_trajectories.append(
+        (episode_length - 1, np.asarray(candidates_world, dtype=np.float64), int(mode_idx))
+    )
+
+
+def _write_video(video_path: str, frames: list[np.ndarray], fps: int) -> None:
+    if not frames:
+        return
+    import mediapy
+
+    os.makedirs(os.path.dirname(video_path), exist_ok=True)
+    mediapy.write_video(video_path, frames, fps=fps)
+
+
+def _save_step_image(
+    *,
+    final_info: dict,
+    config,
+    output_dir: Path,
+    episode_idx: int,
+    step_idx: int,
+    anchors: np.ndarray | None,
+    overlay_all_anchors: bool,
+    metadata_text: list[str] | None = None,
+) -> Path | None:
+    required_keys = ("camera_feature", "lidar_feature", "predicted_trajectory")
+    if any(final_info.get(key) is None for key in required_keys):
+        return None
+
+    image = render_closed_loop_prediction(
+        features={
+            "camera_feature": final_info["camera_feature"],
+            "lidar_feature": final_info["lidar_feature"],
+            "status_feature": final_info.get("status_feature"),
+            "ego_state": final_info.get("ego_state"),
+        },
+        predictions={
+            "trajectory": final_info["predicted_trajectory"],
+            "trajectory_mode_idx": final_info.get("trajectory_mode_idx"),
+            "trajectory_candidates": final_info.get("trajectory_candidates"),
+            "trajectory_mode_logits": final_info.get("trajectory_mode_logits"),
+        },
+        config=config,
+        anchors=anchors,
+        overlay_all_anchors=overlay_all_anchors,
+        metadata_text=metadata_text,
+    )
+    episode_dir = output_dir / "step_images" / f"episode_{episode_idx:03d}"
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    output_path = episode_dir / f"step_{step_idx:05d}.png"
+    cv2.imwrite(str(output_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    return output_path
+
+
+def _compute_plot_view_bounds(
+    actual_positions: list[np.ndarray],
+    planned_trajectories: list[tuple[int, list[np.ndarray]]],
+    multimodal_trajectories: list[tuple[int, np.ndarray, int]],
+    road_boundaries: list[np.ndarray] | None = None,
+    padding: float = 5.0,
+    road_margin: float = 4.0,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    points = []
+    for pos in actual_positions:
+        points.append(np.asarray(pos, dtype=np.float64))
+    for _, planned_world in planned_trajectories:
+        planned_array = np.asarray(planned_world, dtype=np.float64)
+        if planned_array.ndim == 2 and planned_array.shape[0] > 0:
+            points.extend(planned_array)
+    for _, candidates_world, _ in multimodal_trajectories:
+        candidates_array = np.asarray(candidates_world, dtype=np.float64)
+        if candidates_array.ndim == 3 and candidates_array.shape[0] > 0:
+            points.extend(candidates_array.reshape(-1, 2))
+
+    if not points:
+        return ((-padding, padding), (-padding, padding))
+
+    stacked = np.asarray(points, dtype=np.float64)
+    base_min_xy = stacked.min(axis=0)
+    base_max_xy = stacked.max(axis=0)
+
+    if road_boundaries:
+        boundary_points = []
+        search_min_xy = base_min_xy - float(road_margin)
+        search_max_xy = base_max_xy + float(road_margin)
+        for boundary in road_boundaries:
+            boundary_array = np.asarray(boundary, dtype=np.float64)
+            if boundary_array.ndim != 2 or boundary_array.shape[0] < 2:
+                continue
+            mask = np.logical_and.reduce(
+                (
+                    boundary_array[:, 0] >= search_min_xy[0],
+                    boundary_array[:, 0] <= search_max_xy[0],
+                    boundary_array[:, 1] >= search_min_xy[1],
+                    boundary_array[:, 1] <= search_max_xy[1],
+                )
+            )
+            if np.any(mask):
+                boundary_points.append(boundary_array[mask])
+        if boundary_points:
+            boundary_stacked = np.concatenate(boundary_points, axis=0)
+            stacked = np.concatenate([stacked, boundary_stacked], axis=0)
+
+    min_xy = stacked.min(axis=0) - float(padding)
+    max_xy = stacked.max(axis=0) + float(padding)
+    return (float(min_xy[0]), float(max_xy[0])), (float(min_xy[1]), float(max_xy[1]))
+
+
+def _save_trajectory_plot(
+    actual_positions: list[np.ndarray],
+    planned_trajectories: list[tuple[int, list[np.ndarray]]],
+    multimodal_trajectories: list[tuple[int, np.ndarray, int]],
+    road_boundaries: list[np.ndarray],
+    output_path: str,
+    episode_idx: int,
+    plot_interval: int = 10,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not actual_positions:
+        return
+
+    fig, ax = plt.subplots(1, 1, figsize=(14, 14))
+
+    for boundary in road_boundaries:
+        boundary_array = np.asarray(boundary, dtype=np.float64)
+        if boundary_array.ndim == 2 and boundary_array.shape[0] >= 2:
+            ax.plot(
+                boundary_array[:, 0],
+                boundary_array[:, 1],
+                "-",
+                color="#CCCCCC",
+                linewidth=0.8,
+                alpha=0.7,
+                zorder=1,
+            )
+
+    actual = np.asarray(actual_positions, dtype=np.float64)
+    ax.plot(actual[:, 0], actual[:, 1], "b-", linewidth=2.0, label="Actual", zorder=5)
+    ax.scatter(actual[0, 0], actual[0, 1], c="green", s=100, zorder=6, label="Start")
+    ax.scatter(actual[-1, 0], actual[-1, 1], c="red", s=100, zorder=6, label="End")
+
+    first_other_modes = True
+    first_selected_mode = True
+    for step_idx, candidates_world, best_mode_idx in multimodal_trajectories:
+        if step_idx % plot_interval != 0:
+            continue
+        origin_idx = min(max(int(step_idx), 0), len(actual_positions) - 1)
+        origin = np.asarray(actual_positions[origin_idx], dtype=np.float64)
+        candidates_array = np.asarray(candidates_world, dtype=np.float64)
+        if candidates_array.ndim != 3:
+            continue
+        for mode_i in range(candidates_array.shape[0]):
+            full_path = np.vstack([origin, candidates_array[mode_i]])
+            if mode_i == int(best_mode_idx):
+                ax.plot(
+                    full_path[:, 0],
+                    full_path[:, 1],
+                    "--",
+                    color=MULTIMODAL_SELECTED_COLOR,
+                    linewidth=1.0,
+                    alpha=0.8,
+                    zorder=4,
+                    label="Selected mode" if first_selected_mode else None,
+                )
+                first_selected_mode = False
+            else:
+                ax.plot(
+                    full_path[:, 0],
+                    full_path[:, 1],
+                    "--",
+                    color=MULTIMODAL_OTHER_COLOR,
+                    linewidth=1.0,
+                    alpha=0.35,
+                    zorder=3,
+                    label="Other modes" if first_other_modes else None,
+                )
+                first_other_modes = False
+
+    if not multimodal_trajectories:
+        for step_idx, planned_world in planned_trajectories:
+            if step_idx % plot_interval != 0:
+                continue
+            planned = np.asarray(planned_world, dtype=np.float64)
+            if planned.size == 0:
+                continue
+            origin_idx = min(max(int(step_idx), 0), len(actual_positions) - 1)
+            origin = np.asarray(actual_positions[origin_idx], dtype=np.float64)
+            full_path = np.vstack([origin, planned])
+            label = "Planned" if step_idx == 0 else None
+            ax.plot(full_path[:, 0], full_path[:, 1], "--", color=MULTIMODAL_SELECTED_COLOR, alpha=0.5, linewidth=1.0, label=label, zorder=4)
+
+    ax.set_title(f"Episode {episode_idx}: Multimodal Trajectories vs Actual (with Road Topology)")
+    ax.set_xlabel("X (world)")
+    ax.set_ylabel("Y (world)")
+    ax.set_aspect("equal", adjustable="box")
+    xlim, ylim = _compute_plot_view_bounds(
+        actual_positions,
+        planned_trajectories,
+        multimodal_trajectories,
+        road_boundaries=road_boundaries,
+    )
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def infer_model_size_from_checkpoint(checkpoint_path: Path) -> str:
 # 自动推断模型规模（small/base）
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -88,7 +443,7 @@ def build_env_config(args, resolved_model_size: str):
         transfuser_config.plan_anchor_path = args.plan_anchor_path
 
     return {
-        "use_render": args.render,
+        "use_render": bool(args.render),
         "num_agents": 1,
         "start_seed": args.start_seed,
         "num_scenarios": args.num_scenarios,
@@ -107,7 +462,7 @@ def build_env_config(args, resolved_model_size: str):
 
 
 def main():
-    args = parse_args()
+    args = _normalize_visualization_args(parse_args())
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -118,10 +473,24 @@ def main():
     print(f"[test] device={resolved_device}")
     print(f"[test] controller_type={args.controller_type}")
     print(f"[test] image_on_cuda={bool(args.image_on_cuda)}")
+    print(
+        f"[test] render={bool(args.render)} save_3d_video={bool(args.save_3d_video)} "
+        f"save_2d_video={bool(args.save_2d_video)} save_trajectory_plot={bool(args.save_trajectory_plot)} "
+        f"save_step_images={bool(args.save_step_images)}"
+    )
+    print(f"[test] output_dir={args.output_dir} video_fps={args.video_fps}")
     if args.save_camera_interval > 0:
         print(f"[test] save_camera_interval={args.save_camera_interval} camera_output_dir={args.camera_output_dir}")
 
-    env = DatasetCollectEnv(build_env_config(args, resolved_model_size))
+    env_config = build_env_config(args, resolved_model_size)
+    env = DatasetCollectEnv(env_config)
+    transfuser_config = build_transfuser_config(resolved_model_size)
+    if args.plan_anchor_path:
+        transfuser_config.plan_anchor_path = args.plan_anchor_path
+    anchors = None
+    anchor_path = Path(transfuser_config.plan_anchor_path)
+    if anchor_path.exists():
+        anchors = np.load(anchor_path)
     summary = {
         "success": 0,
         "crash": 0,
@@ -137,6 +506,7 @@ def main():
     try:
         for episode_idx in range(args.episodes):
             obs, info = env.reset()
+            primary_agent_id = _get_primary_agent_id(env)
             if bool(args.render) and hasattr(env, "switch_to_third_person_view"):
                 env.switch_to_third_person_view()
 
@@ -144,8 +514,19 @@ def main():
             episode_reward = 0.0
             episode_length = 0
             final_info = {}
+            episode_3d_frames = []
+            episode_2d_frames = []
+            actual_positions = []
+            planned_trajectories = []
+            multimodal_trajectories = []
+            road_boundaries = _extract_road_topology(env)
 
             while not done:
+                ego_before_step = env.agents.get(primary_agent_id) if primary_agent_id is not None else None
+                ego_xy_before_step = (
+                    np.asarray(ego_before_step.position[:2], dtype=np.float64)
+                    if ego_before_step is not None else None
+                )
                 # External actions are ignored when agent_policy is a closed-loop policy.
                 dummy_actions = {
                     agent_id: np.zeros(2, dtype=np.float32)
@@ -160,6 +541,26 @@ def main():
                 episode_length += 1
                 final_info = info.get(agent_id, {})
                 done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
+                _record_step_visualization(
+                    ego_before_step=ego_before_step,
+                    ego_xy_before_step=ego_xy_before_step,
+                    final_info=final_info,
+                    episode_length=episode_length,
+                    save_trajectory_plot=bool(args.save_trajectory_plot),
+                    actual_positions=actual_positions,
+                    planned_trajectories=planned_trajectories,
+                    multimodal_trajectories=multimodal_trajectories,
+                )
+
+                if args.save_3d_video:
+                    frame_3d = _capture_3d_topdown_frame(env, args.topdown_camera_height)
+                    if frame_3d is not None:
+                        episode_3d_frames.append(frame_3d)
+
+                if args.save_2d_video:
+                    frame_2d = _capture_2d_topdown_frame(env)
+                    if frame_2d is not None:
+                        episode_2d_frames.append(frame_2d)
 
                 if args.save_camera_interval > 0:
                     agent_obs = obs.get(agent_id)
@@ -170,6 +571,28 @@ def main():
                             episode_idx=episode_idx,
                             step_idx=episode_length,
                         )
+
+                if bool(args.save_step_images) and episode_length % max(int(args.step_image_interval), 1) == 0:
+                    controller_debug = final_info.get("controller_debug", {})
+                    metadata_text = [
+                        f"episode={episode_idx} step={episode_length}",
+                        f"reward={episode_reward:.2f}",
+                    ]
+                    if "steering" in controller_debug or "throttle" in controller_debug:
+                        metadata_text.append(
+                            f"steer={float(controller_debug.get('steering', 0.0)):+.3f} "
+                            f"throttle={float(controller_debug.get('throttle', 0.0)):+.3f}"
+                        )
+                    _save_step_image(
+                        final_info=final_info,
+                        config=transfuser_config,
+                        output_dir=Path(args.output_dir),
+                        episode_idx=episode_idx,
+                        step_idx=episode_length,
+                        anchors=anchors,
+                        overlay_all_anchors=True,
+                        metadata_text=metadata_text,
+                    )
 
                 controller_debug = final_info.get("controller_debug")
                 if controller_debug:
@@ -208,6 +631,28 @@ def main():
                 f"success={final_info.get('arrive_dest', False)} crash={final_info.get('crash', False)} "
                 f"out_of_road={final_info.get('out_of_road', False)}"
             )
+            output_dir = Path(args.output_dir)
+            if args.save_3d_video and episode_3d_frames:
+                _write_video(
+                    str(output_dir / "videos_3d" / f"episode_{episode_idx:03d}.mp4"),
+                    episode_3d_frames,
+                    fps=args.video_fps,
+                )
+            if args.save_2d_video and episode_2d_frames:
+                _write_video(
+                    str(output_dir / "videos_2d" / f"episode_{episode_idx:03d}.mp4"),
+                    episode_2d_frames,
+                    fps=args.video_fps,
+                )
+            if args.save_trajectory_plot and actual_positions:
+                _save_trajectory_plot(
+                    actual_positions,
+                    planned_trajectories,
+                    multimodal_trajectories,
+                    road_boundaries,
+                    str(output_dir / "trajectory_plots" / f"episode_{episode_idx:03d}.png"),
+                    episode_idx,
+                )
     finally:
         env.close()
 

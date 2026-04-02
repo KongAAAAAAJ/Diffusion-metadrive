@@ -22,19 +22,10 @@ PROCESSED_DIR_FIELDS = (
     "bev_semantic_map",
 )
 
-# DatasetCollectObservation stores vehicle state first, then navigation info.
-# For the TransFuser status branch we prefer a compact 8D vector that preserves
-# route intent instead of blindly truncating the prefix.
-DATASET_COLLECT_STATUS_INDICES = (
-    2,  # heading difference to current lane
-    3,  # speed
-    4,  # current steering
-    5,  # last steering action
-    6,  # last throttle/brake action
-    8,  # lateral lane offset
-    9,  # navigation checkpoint projection in heading direction
-    10, # navigation checkpoint projection in right-hand-side direction
-)
+# ego_state layout (19D): vehicle_state (9D) + navigation_info (10D)
+# [0] lateral_to_left, [1] lateral_to_right, [2] heading_diff, [3] speed,
+# [4] steering, [5] last_steering, [6] last_throttle, [7] yaw_rate,
+# [8] lateral_lane_offset, [9-13] navi_checkpoint_1, [14-18] navi_checkpoint_2
 
 
 # 枚举类
@@ -123,13 +114,8 @@ def stitch_three_cameras(
 def build_status_feature(ego_state: np.ndarray, config: TransfuserConfig) -> torch.Tensor:
     ego_state = _to_numpy(ego_state).astype(np.float32, copy=False)
     status = np.zeros(config.status_feature_dim, dtype=np.float32)
-    if ego_state.shape[0] > max(DATASET_COLLECT_STATUS_INDICES):
-        selected = ego_state[list(DATASET_COLLECT_STATUS_INDICES)]
-        take = min(config.status_feature_dim, selected.shape[0])
-        status[:take] = selected[:take]
-    else:
-        take = min(config.status_feature_dim, ego_state.shape[0])
-        status[:take] = ego_state[:take]
+    take = min(config.status_feature_dim, ego_state.shape[0])
+    status[:take] = ego_state[:take]
     return torch.from_numpy(status)
 
 

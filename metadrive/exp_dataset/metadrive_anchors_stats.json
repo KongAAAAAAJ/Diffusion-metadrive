@@ -1,0 +1,22 @@
+{
+  "total_samples": 40355,
+  "label_distribution": {
+    "CRUISE": 25182,
+    "FOLLOW": 4,
+    "DECELERATE": 1645,
+    "LANE_CHANGE_LEFT": 6143,
+    "LANE_CHANGE_RIGHT": 7381,
+    "TURN_LEFT": 0,
+    "TURN_RIGHT": 0
+  },
+  "anchor_count": 7,
+  "anchors_per_class": {
+    "CRUISE": 2,
+    "FOLLOW": 2,
+    "DECELERATE": 1,
+    "LANE_CHANGE_LEFT": 1,
+    "LANE_CHANGE_RIGHT": 1,
+    "TURN_LEFT": 0,
+    "TURN_RIGHT": 0
+  }
+}

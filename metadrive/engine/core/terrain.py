@@ -108,6 +108,7 @@ class Terrain(BaseObject, ABC):
         """
         Update terrain according to current map
         """
+
         if not self.use_mesh_terrain and self.plane_collision_terrain is None:
             # only generate once if plane terrain
             self.generate_plane_collision_terrain()
@@ -164,6 +165,11 @@ class Terrain(BaseObject, ABC):
                 self.heightfield_tex.setRamImage(heightfield_base)
                 # generate terrain visualization
                 self._generate_mesh_vis_terrain(self._terrain_size, self.heightfield_tex, self.semantic_tex)
+        
+        
+
+                        # !      
+        
         # reset position
         self.set_position(center_point)
         self.attach_to_world(self.engine.render, self.engine.physics_world)

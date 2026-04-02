@@ -1,3 +1,3 @@
-from .ma_grpo_trainer import MultiAgentGRPOTrainer
+"""Training package exports."""
 
-__all__ = ["MultiAgentGRPOTrainer"]
+__all__: list[str] = []

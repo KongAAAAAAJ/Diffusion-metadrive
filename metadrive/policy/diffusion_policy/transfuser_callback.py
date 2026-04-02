@@ -100,6 +100,19 @@ def dict_to_device(data: Dict[str, torch.Tensor], device: Union[torch.device, st
     return {key: value.to(device) for key, value in data.items()}
 
 
+def _tensor_to_numpy(value: Any) -> np.ndarray:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _camera_to_hwc(camera: Any) -> np.ndarray:
+    camera = _tensor_to_numpy(camera)
+    if camera.ndim == 3 and camera.shape[0] in (1, 3, 4) and camera.shape[-1] not in (1, 3, 4):
+        camera = np.transpose(camera, (1, 2, 0))
+    return camera
+
+
 def semantic_map_to_rgb(semantic_map: np.ndarray, color_map: Dict[int, tuple[int, int, int]]) -> np.ndarray:
     # 将语义分割标签图（整数类别图）转换为彩色 RGB 图像，便于可视化
     rgb_map = np.zeros((*semantic_map.shape, 3), dtype=np.uint8)
@@ -110,9 +123,9 @@ def semantic_map_to_rgb(semantic_map: np.ndarray, color_map: Dict[int, tuple[int
 
 def lidar_map_to_rgb(
     lidar_map: np.ndarray,
-    agent_states: np.ndarray,
-    pred_agent_states: np.ndarray,
-    trajectory: np.ndarray,
+    agent_states: Optional[np.ndarray],
+    pred_agent_states: Optional[np.ndarray],
+    trajectory: Optional[np.ndarray],
     pred_trajectory: np.ndarray,
     config: TransfuserConfig,
     anchor_trajectory: Optional[np.ndarray] = None,
@@ -131,6 +144,8 @@ def lidar_map_to_rgb(
     rgb_map = 255 - rgb_map[..., None].repeat(3, axis=-1)
 
     for color, boxes in ((gt_color, agent_states), (pred_color, pred_agent_states)):
+        if boxes is None:
+            continue
         for agent_state in boxes:
             x, y, heading, length, width_box = agent_state
             corners = np.array(
@@ -152,6 +167,8 @@ def lidar_map_to_rgb(
             cv2.polylines(rgb_map, [corners], isClosed=True, color=color, thickness=2)
 
     for color, traj in ((gt_color, trajectory), (pred_color, pred_trajectory)):
+        if traj is None:
+            continue
         points = coords_to_pixel(traj[:, :2])
         for x, y in points:
             cv2.circle(rgb_map, (y, x), point_size, color, -1)
@@ -170,15 +187,25 @@ def lidar_map_to_rgb(
     return rgb_map[::-1, ::-1]
 
 
-def render_open_loop_prediction(
-    features: Dict[str, torch.Tensor],
-    targets: Dict[str, torch.Tensor],
-    predictions: Dict[str, torch.Tensor],
+def _render_transfuser_prediction_panel(
+    *,
+    camera: np.ndarray,
+    lidar_map: np.ndarray,
+    pred_trajectory: np.ndarray,
     config: TransfuserConfig,
-    sample_idx: int = 0,
+    bev_current: Optional[np.ndarray] = None,
+    gt_trajectory: Optional[np.ndarray] = None,
+    gt_bev_semantic_map: Optional[np.ndarray] = None,
+    pred_bev_semantic_map: Optional[np.ndarray] = None,
+    gt_agent_states: Optional[np.ndarray] = None,
+    gt_agent_labels: Optional[np.ndarray] = None,
+    pred_agent_states: Optional[np.ndarray] = None,
+    pred_agent_labels: Optional[np.ndarray] = None,
+    mode_idx: Optional[int] = None,
     anchors: Optional[np.ndarray] = None,
     overlay_all_anchors: bool = False,
     metadata_text: Optional[list[str]] = None,
+    current_panel_label: str = "BEV Current",
 ) -> np.ndarray:
     bev_colors = {
         0: _hex_to_rgb(config.bev_background_color),
@@ -186,73 +213,96 @@ def render_open_loop_prediction(
         2: _hex_to_rgb(config.bev_semantic_classes[2][1]),
         3: _hex_to_rgb(config.bev_semantic_classes[3][1]),
     }
-    camera = features["camera_feature"][sample_idx].permute(1, 2, 0).numpy()
-    lidar_map = features["lidar_feature"][sample_idx].squeeze(0).numpy()
-    bev_gt = targets["bev_semantic_map"][sample_idx].numpy()
-    bev_pred = predictions["bev_semantic_map"][sample_idx].argmax(0).numpy()
-    agent_labels = targets["agent_labels"][sample_idx].numpy()
-    agent_states = targets["agent_states"][sample_idx].numpy()
-    pred_agent_labels = predictions["agent_labels"][sample_idx].sigmoid().numpy() > 0.5
-    pred_agent_states = predictions["agent_states"][sample_idx].numpy()
-    trajectory = targets["trajectory"][sample_idx].numpy()
-    pred_trajectory = predictions["trajectory"][sample_idx].numpy()
-    mode_idx = None
-    if "trajectory_mode_idx" in predictions:
-        mode_idx = int(predictions["trajectory_mode_idx"][sample_idx].item())
-
     plot = np.zeros((512, 1024, 3), dtype=np.uint8)
-    cam = np.clip(camera * 255.0, 0.0, 255.0).astype(np.uint8)
+    cam = np.clip(_camera_to_hwc(camera) * 255.0, 0.0, 255.0).astype(np.uint8)
     plot[:256, :1024] = add_panel_label(
         cv2.resize(cam, (1024, 256), interpolation=cv2.INTER_LINEAR), "Cameras"
     )
 
-    bev_gt_rgb = semantic_map_to_rgb(bev_gt, bev_colors)
-    bev_pred_rgb = semantic_map_to_rgb(bev_pred, bev_colors)
+    if gt_bev_semantic_map is not None:
+        bev_gt_rgb = semantic_map_to_rgb(_tensor_to_numpy(gt_bev_semantic_map), bev_colors)
+    else:
+        bev_gt_rgb = np.zeros((128, 256, 3), dtype=np.uint8)
+        bev_gt_rgb[:] = 12
     plot[256:, :256] = add_panel_label(
-        cv2.resize(bev_gt_rgb, (256, 256), interpolation=cv2.INTER_NEAREST), "BEV GT"
+        cv2.resize(bev_gt_rgb, (256, 256), interpolation=cv2.INTER_NEAREST),
+        "BEV GT" if gt_bev_semantic_map is not None else "BEV N/A",
     )
+
+    if pred_bev_semantic_map is not None:
+        bev_pred = _tensor_to_numpy(pred_bev_semantic_map)
+        if bev_pred.ndim == 3:
+            bev_pred = bev_pred.argmax(0)
+        bev_current_rgb = semantic_map_to_rgb(bev_pred, bev_colors)
+    elif bev_current is not None:
+        bev_current_rgb = semantic_map_to_rgb(_tensor_to_numpy(bev_current), bev_colors)
+    else:
+        bev_current_rgb = np.zeros((128, 256, 3), dtype=np.uint8)
+        bev_current_rgb[:] = 12
     plot[256:, 256:512] = add_panel_label(
-        cv2.resize(bev_pred_rgb, (256, 256), interpolation=cv2.INTER_NEAREST), "BEV Pred"
+        cv2.resize(bev_current_rgb, (256, 256), interpolation=cv2.INTER_NEAREST),
+        current_panel_label,
     )
 
     selected_anchor = None
     if anchors is not None and mode_idx is not None and 0 <= mode_idx < len(anchors):
         selected_anchor = anchors[mode_idx]
+
+    gt_boxes = None
+    if gt_agent_states is not None:
+        gt_boxes = _tensor_to_numpy(gt_agent_states)
+        if gt_agent_labels is not None:
+            gt_boxes = gt_boxes[_tensor_to_numpy(gt_agent_labels).astype(bool)]
+    pred_boxes = None
+    if pred_agent_states is not None:
+        pred_boxes = _tensor_to_numpy(pred_agent_states)
+        if pred_agent_labels is not None:
+            pred_boxes = pred_boxes[_tensor_to_numpy(pred_agent_labels).astype(bool)]
+
     lidar_rgb = lidar_map_to_rgb(
-        lidar_map,
-        agent_states[agent_labels],
-        pred_agent_states[pred_agent_labels],
-        trajectory,
-        pred_trajectory,
+        _tensor_to_numpy(lidar_map).squeeze(0),
+        gt_boxes,
+        pred_boxes,
+        None if gt_trajectory is None else _tensor_to_numpy(gt_trajectory),
+        _tensor_to_numpy(pred_trajectory),
         config,
         anchor_trajectory=selected_anchor,
         all_anchors=anchors if overlay_all_anchors else None,
     )
-    lidar_panel = add_panel_label(
-        cv2.resize(lidar_rgb, (256, 256), interpolation=cv2.INTER_NEAREST), "Lidar/Traj"
+    plot[256:, 512:768] = add_panel_label(
+        cv2.resize(lidar_rgb, (256, 256), interpolation=cv2.INTER_NEAREST),
+        "Lidar/Traj",
     )
-    plot[256:, 512:768] = lidar_panel
 
     anchor_panel = np.zeros((256, 256, 3), dtype=np.uint8)
     anchor_panel[:] = 12
     if selected_anchor is not None:
-        anchor_panel = cv2.resize(lidar_map_to_rgb(
-            np.zeros_like(lidar_map),
-            np.zeros((0, 5), dtype=np.float32),
-            np.zeros((0, 5), dtype=np.float32),
-            trajectory,
-            pred_trajectory,
-            config,
-            anchor_trajectory=selected_anchor,
-        ), (256, 256), interpolation=cv2.INTER_NEAREST)
-    anchor_panel = add_panel_label(anchor_panel, f"Anchor mode={mode_idx}" if mode_idx is not None else "Anchor")
+        anchor_panel = cv2.resize(
+            lidar_map_to_rgb(
+                np.zeros_like(_tensor_to_numpy(lidar_map).squeeze(0)),
+                None,
+                None,
+                None if gt_trajectory is None else _tensor_to_numpy(gt_trajectory),
+                _tensor_to_numpy(pred_trajectory),
+                config,
+                anchor_trajectory=selected_anchor,
+            ),
+            (256, 256),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    anchor_panel = add_panel_label(
+        anchor_panel,
+        f"Anchor mode={mode_idx}" if mode_idx is not None else "Anchor",
+    )
     plot[256:, 768:1024] = anchor_panel
 
     lines = [] if metadata_text is None else list(metadata_text)
-    if mode_idx is not None:
-        pred_final_y = float(pred_trajectory[-1, 1])
-        gt_final_y = float(trajectory[-1, 1])
+    pred_final_y = float(_tensor_to_numpy(pred_trajectory)[-1, 1])
+    if gt_trajectory is not None:
+        gt_final_y = float(_tensor_to_numpy(gt_trajectory)[-1, 1])
         lines.insert(0, f"mode={mode_idx} pred_y={pred_final_y:+.2f} gt_y={gt_final_y:+.2f}")
+    elif mode_idx is not None:
+        lines.insert(0, f"mode={mode_idx} pred_y={pred_final_y:+.2f}")
     if lines:
         line_height = 22
         overlay_height = 10 + line_height * len(lines)
@@ -270,6 +320,84 @@ def render_open_loop_prediction(
             )
 
     return plot
+
+
+def render_open_loop_prediction(
+    features: Dict[str, torch.Tensor],
+    targets: Dict[str, torch.Tensor],
+    predictions: Dict[str, torch.Tensor],
+    config: TransfuserConfig,
+    sample_idx: int = 0,
+    anchors: Optional[np.ndarray] = None,
+    overlay_all_anchors: bool = False,
+    metadata_text: Optional[list[str]] = None,
+) -> np.ndarray:
+    camera = features["camera_feature"][sample_idx].permute(1, 2, 0).numpy()
+    lidar_map = features["lidar_feature"][sample_idx].numpy()
+    bev_gt = targets["bev_semantic_map"][sample_idx].numpy()
+    bev_pred = predictions["bev_semantic_map"][sample_idx].argmax(0).numpy()
+    agent_labels = targets["agent_labels"][sample_idx].numpy()
+    agent_states = targets["agent_states"][sample_idx].numpy()
+    pred_agent_labels = predictions["agent_labels"][sample_idx].sigmoid().numpy() > 0.5
+    pred_agent_states = predictions["agent_states"][sample_idx].numpy()
+    trajectory = targets["trajectory"][sample_idx].numpy()
+    pred_trajectory = predictions["trajectory"][sample_idx].numpy()
+    mode_idx = None
+    if "trajectory_mode_idx" in predictions:
+        mode_idx = int(predictions["trajectory_mode_idx"][sample_idx].item())
+    return _render_transfuser_prediction_panel(
+        camera=camera,
+        lidar_map=lidar_map,
+        pred_trajectory=pred_trajectory,
+        config=config,
+        gt_trajectory=trajectory,
+        gt_bev_semantic_map=bev_gt,
+        pred_bev_semantic_map=bev_pred,
+        gt_agent_states=agent_states,
+        gt_agent_labels=agent_labels,
+        pred_agent_states=pred_agent_states,
+        pred_agent_labels=pred_agent_labels,
+        mode_idx=mode_idx,
+        anchors=anchors,
+        overlay_all_anchors=overlay_all_anchors,
+        metadata_text=metadata_text,
+        current_panel_label="BEV Pred",
+    )
+
+
+def render_closed_loop_prediction(
+    *,
+    features: Dict[str, Any],
+    predictions: Dict[str, Any],
+    config: TransfuserConfig,
+    anchors: Optional[np.ndarray] = None,
+    overlay_all_anchors: bool = False,
+    metadata_text: Optional[list[str]] = None,
+) -> np.ndarray:
+    mode_idx = predictions.get("trajectory_mode_idx")
+    if hasattr(mode_idx, "item"):
+        mode_idx = int(mode_idx.item())
+    elif mode_idx is not None:
+        mode_idx = int(mode_idx)
+    return _render_transfuser_prediction_panel(
+        camera=features["camera_feature"],
+        lidar_map=features["lidar_feature"],
+        pred_trajectory=predictions["trajectory"],
+        config=config,
+        bev_current=None,
+        gt_trajectory=None,
+        gt_bev_semantic_map=None,
+        pred_bev_semantic_map=None,
+        gt_agent_states=None,
+        gt_agent_labels=None,
+        pred_agent_states=None,
+        pred_agent_labels=None,
+        mode_idx=mode_idx,
+        anchors=anchors,
+        overlay_all_anchors=overlay_all_anchors,
+        metadata_text=metadata_text,
+        current_panel_label="BEV Current",
+    )
 
 
 def _hex_to_rgb(value: str) -> tuple[int, int, int]:

@@ -1,26 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_3/checkpoints/diffusion-epoch=97.ckpt}"
-EPISODES="${EPISODES:-3}"
-RENDER="${RENDER:-1}"
-CONTROLLER_TYPE="${CONTROLLER_TYPE:-stabilized}"
-PRINT_TRAJECTORY_DEBUG="${PRINT_TRAJECTORY_DEBUG:-1}"
-IMAGE_ON_CUDA="${IMAGE_ON_CUDA:-0}"
-SAVE_CAMERA_INTERVAL="${SAVE_CAMERA_INTERVAL:-0}"
-CAMERA_OUTPUT_DIR="${CAMERA_OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/closed_loop/cameras}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
-
-CMD=(
-"${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.test_transfuser_policy
-    --checkpoint "${CHECKPOINT_PATH}"
-    --episodes "${EPISODES}"
-    --render "${RENDER}"
-    --controller-type "${CONTROLLER_TYPE}"
-    --print-trajectory-debug "${PRINT_TRAJECTORY_DEBUG}"
-    --image-on-cuda "${IMAGE_ON_CUDA}"
-    --save-camera-interval "${SAVE_CAMERA_INTERVAL}"
-    --camera-output-dir "${CAMERA_OUTPUT_DIR}"
-)
-
-"${CMD[@]}"
+/home/kong/anaconda3/envs/meta_drive/bin/python -m metadrive.policy.diffusion_policy.test_transfuser_policy \
+  --checkpoint /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_4/checkpoints/diffusion-epoch=50.ckpt \
+  --episodes 5 \
+  --render 0 \
+  --controller-type stabilized \
+  --print-trajectory-debug 1 \
+  --image-on-cuda 0 \
+  --save-camera-interval 0 \
+  --camera-output-dir /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/cameras \
+  --save-3d-video 0 \
+  --save-2d-video 1 \
+  --save-trajectory-plot 1 \
+  --save-step-images 1 \
+  --step-image-interval 1 \
+  --output-dir /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed \
+  --video-fps 10 \
+  --topdown-camera-height 80.0

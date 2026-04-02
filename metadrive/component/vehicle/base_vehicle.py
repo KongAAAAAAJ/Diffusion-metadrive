@@ -874,6 +874,24 @@ class BaseVehicle(BaseObject, BaseVehicleState):
         super(BaseVehicle, self).set_position(position, height)
         self.last_position = self.position
 
+    def teleport_to(self, position, heading_theta, velocity_2d=None):
+        self.last_position = np.asarray(self.position, dtype=np.float32)
+        self.last_velocity = np.asarray(self.velocity, dtype=np.float32)
+        self.last_speed = self.speed
+        self.last_heading_dir = self.heading
+
+        self.set_position(position, height=self.HEIGHT / 2)
+        self.set_heading_theta(heading_theta)
+
+        self.body.clearForces()
+        if velocity_2d is None:
+            dt = float(self.engine.global_config.get("physics_world_step_size", 0.02))
+            dt *= float(self.engine.global_config.get("decision_repeat", 5))
+            delta = np.asarray(self.position, dtype=np.float32) - self.last_position
+            velocity_2d = delta / max(dt, 1e-6)
+        self.body.setLinearVelocity(Vec3(float(velocity_2d[0]), float(velocity_2d[1]), 0.0))
+        self.body.setAngularVelocity(Vec3(0.0, 0.0, 0.0))
+
     def get_state(self):
         """
         Fetch more information

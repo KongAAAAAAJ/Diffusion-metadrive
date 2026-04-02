@@ -47,7 +47,7 @@ class V2TransfuserModel(nn.Module):
 
         # usually, the BEV features are variable in size.
         self._bev_downscale = nn.Conv2d(self._backbone.num_features, config.tf_d_model, kernel_size=1)
-        self._status_encoding = nn.Linear(4 + 2 + 2, config.tf_d_model)  # *将状态信息（车速、加速度、航向角等）映射成与Transformer输入维度相同的特征
+        self._status_encoding = nn.Linear(config.status_feature_dim, config.tf_d_model)  # *将状态信息（19D ego_state + navi）映射成与Transformer输入维度相同的特征
 
         self._bev_semantic_head = nn.Sequential(
             nn.Conv2d(
@@ -145,6 +145,57 @@ class V2TransfuserModel(nn.Module):
         output: Dict[str, torch.Tensor] = {"bev_semantic_map": bev_semantic_map}
 
         trajectory = self._trajectory_head(trajectory_query,agents_query, cross_bev_feature,bev_spatial_shape,status_encoding[:, None],targets=targets,global_img=None)
+        output.update(trajectory)
+
+        agents = self._agent_head(agents_query)
+        output.update(agents)
+
+        return output
+
+    def infer_multimodal(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Torch module inference pass exposing selector-facing multimodal outputs."""
+
+        camera_feature: torch.Tensor = features["camera_feature"]
+        lidar_feature: torch.Tensor = features["lidar_feature"]
+        status_feature: torch.Tensor = features["status_feature"]
+        batch_size = status_feature.shape[0]
+
+        bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
+        cross_bev_feature = bev_feature_upscale
+        bev_spatial_shape = bev_feature_upscale.shape[2:]
+        concat_cross_bev_shape = bev_feature.shape[2:]
+        bev_feature = self._bev_downscale(bev_feature).flatten(-2, -1)
+        bev_feature = bev_feature.permute(0, 2, 1)
+        status_encoding = self._status_encoding(status_feature)
+
+        keyval = torch.concatenate([bev_feature, status_encoding[:, None]], dim=1)
+        keyval += self._keyval_embedding.weight[None, ...]
+
+        concat_cross_bev = keyval[:, :-1].permute(0, 2, 1).contiguous().view(
+            batch_size, -1, concat_cross_bev_shape[0], concat_cross_bev_shape[1]
+        )
+        concat_cross_bev = F.interpolate(concat_cross_bev, size=bev_spatial_shape, mode="bilinear", align_corners=False)
+        cross_bev_feature = torch.cat([concat_cross_bev, cross_bev_feature], dim=1)
+
+        cross_bev_feature = self.bev_proj(cross_bev_feature.flatten(-2, -1).permute(0, 2, 1))
+        cross_bev_feature = cross_bev_feature.permute(0, 2, 1).contiguous().view(
+            batch_size, -1, bev_spatial_shape[0], bev_spatial_shape[1]
+        )
+        query = self._query_embedding.weight[None, ...].repeat(batch_size, 1, 1)
+        query_out = self._tf_decoder(query, keyval)
+
+        bev_semantic_map = self._bev_semantic_head(bev_feature_upscale)
+        trajectory_query, agents_query = query_out.split(self._query_splits, dim=1)
+
+        output: Dict[str, torch.Tensor] = {"bev_semantic_map": bev_semantic_map}
+        trajectory = self._trajectory_head.infer_multimodal(
+            trajectory_query,
+            agents_query,
+            cross_bev_feature,
+            bev_spatial_shape,
+            status_encoding[:, None],
+            global_img=None,
+        )
         output.update(trajectory)
 
         agents = self._agent_head(agents_query)
@@ -353,7 +404,8 @@ class CustomTransformerDecoderLayer(nn.Module):
         # 4.8 modulate with time steps
         traj_feature = self.time_modulation(traj_feature, time_embed,global_cond=None,global_img=global_img)
         
-        # 4.9 predict the offset & heading
+        # 4.9 predict the offset & heading  
+        # *self.task_decoder预测的是噪声残差，即去噪轨迹点与加噪轨迹点的差值，最终轨迹点=加噪轨迹点+残差
         poses_reg, poses_cls = self.task_decoder(traj_feature) #bs,20,8,3; bs,20
         poses_reg[...,:2] = poses_reg[...,:2] + noisy_traj_points
         poses_reg[..., StateSE2Index.HEADING] = poses_reg[..., StateSE2Index.HEADING].tanh() * np.pi
@@ -385,7 +437,8 @@ class CustomTransformerDecoder(nn.Module):
                 ego_query, 
                 time_embed, 
                 status_encoding,
-                global_img=None):
+                global_img=None,
+                return_traj_feature: bool = False):
         poses_reg_list = []
         poses_cls_list = []
         traj_points = noisy_traj_points
@@ -394,6 +447,8 @@ class CustomTransformerDecoder(nn.Module):
             poses_reg_list.append(poses_reg)
             poses_cls_list.append(poses_cls)
             traj_points = poses_reg[...,:2].clone().detach()
+        if return_traj_feature:
+            return poses_reg_list, poses_cls_list, traj_feature
         return poses_reg_list, poses_cls_list
 
 class TrajectoryHead(nn.Module):
@@ -464,12 +519,42 @@ class TrajectoryHead(nn.Module):
         odo_info_fut_y = (odo_info_fut_y + 1)/2 * 46 - 20
         odo_info_fut_head = (odo_info_fut_head + 1)/2 * 3.9 - 2
         return torch.cat([odo_info_fut_x, odo_info_fut_y, odo_info_fut_head], dim=-1)
-    def forward(self, ego_query, agents_query, bev_feature,bev_spatial_shape,status_encoding, targets=None,global_img=None) -> Dict[str, torch.Tensor]:
+    def forward(
+        self,
+        ego_query,
+        agents_query,
+        bev_feature,
+        bev_spatial_shape,
+        status_encoding,
+        targets=None,
+        global_img=None,
+        return_candidates: bool = False,
+    ) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
         if self.training:
             return self.forward_train(ego_query, agents_query, bev_feature,bev_spatial_shape,status_encoding,targets,global_img)
         else:
-            return self.forward_test(ego_query, agents_query, bev_feature,bev_spatial_shape,status_encoding,global_img)
+            return self.forward_test(
+                ego_query,
+                agents_query,
+                bev_feature,
+                bev_spatial_shape,
+                status_encoding,
+                global_img,
+                return_candidates=return_candidates,
+            )
+
+    def infer_multimodal(self, ego_query, agents_query, bev_feature, bev_spatial_shape, status_encoding, global_img=None) -> Dict[str, torch.Tensor]:
+        """Return multimodal trajectory candidates before selector sampling."""
+        return self.forward_test(
+            ego_query,
+            agents_query,
+            bev_feature,
+            bev_spatial_shape,
+            status_encoding,
+            global_img,
+            return_candidates=True,
+        )
 
 
     def forward_train(self, ego_query,agents_query,bev_feature,bev_spatial_shape,status_encoding, targets=None,global_img=None) -> Dict[str, torch.Tensor]:
@@ -483,7 +568,7 @@ class TrajectoryHead(nn.Module):
             (bs,), device=device
         )
         noise = torch.randn(odo_info_fut.shape, device=device)
-        noisy_traj_points = self.diffusion_scheduler.add_noise(
+        noisy_traj_points = self.diffusion_scheduler.add_noise(     # 加噪轨迹点
             original_samples=odo_info_fut,
             noise=noise,
             timesteps=timesteps,
@@ -502,7 +587,7 @@ class TrajectoryHead(nn.Module):
         time_embed = time_embed.view(bs,1,-1)
 
 
-        # 4. begin the stacked decoder
+        # 4. begin the stacked decoder  预测去噪轨迹点
         poses_reg_list, poses_cls_list = self.diff_decoder(traj_feature, noisy_traj_points, bev_feature, bev_spatial_shape, agents_query, ego_query, time_embed, status_encoding,global_img)
 
         trajectory_loss_dict = {}
@@ -517,7 +602,16 @@ class TrajectoryHead(nn.Module):
         best_reg = torch.gather(poses_reg_list[-1], 1, mode_idx).squeeze(1)
         return {"trajectory": best_reg,"trajectory_loss":ret_traj_loss,"trajectory_loss_dict":trajectory_loss_dict}
 
-    def forward_test(self, ego_query,agents_query,bev_feature,bev_spatial_shape,status_encoding,global_img) -> Dict[str, torch.Tensor]:
+    def forward_test(
+        self,
+        ego_query,
+        agents_query,
+        bev_feature,
+        bev_spatial_shape,
+        status_encoding,
+        global_img,
+        return_candidates: bool = False,
+    ) -> Dict[str, torch.Tensor]:
         step_num = 2
         bs = ego_query.shape[0]
         device = ego_query.device
@@ -558,7 +652,31 @@ class TrajectoryHead(nn.Module):
             time_embed = time_embed.view(bs,1,-1)
 
             # 4. begin the stacked decoder
-            poses_reg_list, poses_cls_list = self.diff_decoder(traj_feature, noisy_traj_points, bev_feature, bev_spatial_shape, agents_query, ego_query, time_embed, status_encoding,global_img)
+            if return_candidates:
+                poses_reg_list, poses_cls_list, traj_feature = self.diff_decoder(
+                    traj_feature,
+                    noisy_traj_points,
+                    bev_feature,
+                    bev_spatial_shape,
+                    agents_query,
+                    ego_query,
+                    time_embed,
+                    status_encoding,
+                    global_img,
+                    return_traj_feature=True,
+                )
+            else:
+                poses_reg_list, poses_cls_list = self.diff_decoder(
+                    traj_feature,
+                    noisy_traj_points,
+                    bev_feature,
+                    bev_spatial_shape,
+                    agents_query,
+                    ego_query,
+                    time_embed,
+                    status_encoding,
+                    global_img,
+                )
             poses_reg = poses_reg_list[-1]
             poses_cls = poses_cls_list[-1]
             x_start = poses_reg[...,:2]
@@ -568,6 +686,8 @@ class TrajectoryHead(nn.Module):
                 timestep=k,
                 sample=img
             ).prev_sample
+
+        # 选择分类分数最高的模式作为最终预测结果
         best_mode_idx = poses_cls.argmax(dim=-1)
         mode_idx = best_mode_idx[...,None,None,None].repeat(1,1,self._num_poses,3)
         best_reg = torch.gather(poses_reg, 1, mode_idx).squeeze(1)
@@ -575,4 +695,12 @@ class TrajectoryHead(nn.Module):
             "trajectory": best_reg,
             "trajectory_mode_idx": best_mode_idx,
             "trajectory_mode_logits": poses_cls,
+            **(
+                {
+                    "trajectory_candidates": poses_reg,
+                    "trajectory_mode_embedding": traj_feature,
+                }
+                if return_candidates
+                else {}
+            ),
         }

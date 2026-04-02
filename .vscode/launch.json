@@ -10,14 +10,14 @@
         //     "console": "integratedTerminal"
         // },
         {
-            "name": "Test_diffPolicy",
+            "name": "Train",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/metadrive/policy/diffusion_policy/test_transfuser_policy.py",
+            "program": "${workspaceFolder}/train/train_platoon_rl.py",
             "console": "integratedTerminal",
-            "args": [
-                "--checkpoint", "outputs/diffusion/checkpoints/diffusion-epoch=98.ckpt"
-            ]
+            // "args": [
+            //     "--checkpoint", "outputs/diffusion/checkpoints/diffusion-epoch=98.ckpt"
+            // ]
         }
     ]
 }

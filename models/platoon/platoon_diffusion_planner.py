@@ -42,21 +42,31 @@ class PlatoonDiffusionPlanner(nn.Module):
             return value.unsqueeze(0)
         return value
 
-    def forward(self, batch: Mapping[str, Mapping[str, Tensor]]) -> Dict[str, Tensor]:
-        if not batch:
-            return {}
-
+    def _build_model_inputs(
+        self, batch: Mapping[str, Mapping[str, Tensor]]
+    ) -> tuple[list[str], Dict[str, Tensor], Dict[str, dict]]:
         agent_ids = list(batch.keys())
         camera = []
         lidar = []
         status = []
         relation = []
+        agent_contexts: Dict[str, dict] = {}
         for agent_id in agent_ids:
             sample = batch[agent_id]
-            camera.append(self._ensure_batch_dim(sample["camera"]))
-            lidar.append(self._ensure_batch_dim(sample["lidar"]))
-            status.append(self._ensure_batch_dim(sample["status"]))
-            relation.append(self._ensure_batch_dim(sample["formation_relation_state"]))
+            camera_tensor = self._ensure_batch_dim(sample["camera"])
+            lidar_tensor = self._ensure_batch_dim(sample["lidar"])
+            status_tensor = self._ensure_batch_dim(sample["status"])
+            relation_tensor = self._ensure_batch_dim(sample["formation_relation_state"])
+            camera.append(camera_tensor)
+            lidar.append(lidar_tensor)
+            status.append(status_tensor)
+            relation.append(relation_tensor)
+            agent_contexts[agent_id] = {
+                "camera": camera_tensor,
+                "lidar": lidar_tensor,
+                "status": status_tensor,
+                "formation_relation_state": relation_tensor,
+            }
 
         camera_feature = torch.cat(camera, dim=0).float()
         lidar_feature = torch.cat(lidar, dim=0).float()
@@ -70,12 +80,43 @@ class PlatoonDiffusionPlanner(nn.Module):
             "lidar_feature": lidar_feature,
             "status_feature": fused_status,
         }
+        return agent_ids, model_inputs, agent_contexts
+
+    def forward(self, batch: Mapping[str, Mapping[str, Tensor]]) -> Dict[str, Tensor]:
+        if not batch:
+            return {}
+        agent_ids, model_inputs, _ = self._build_model_inputs(batch)
         outputs = self._forward_model(model_inputs)
         trajectories = outputs["trajectory"]
         return {agent_id: trajectories[idx] for idx, agent_id in enumerate(agent_ids)}
 
-    def _forward_model(self, model_inputs: Mapping[str, Tensor]) -> Dict[str, Tensor]:
+    def forward_selector(self, batch: Mapping[str, Mapping[str, Tensor]]) -> Dict[str, Dict[str, Tensor]]:
+        if not batch:
+            return {}
+
+        agent_ids, model_inputs, _ = self._build_model_inputs(batch)
+        outputs = self._forward_model(model_inputs, return_multimodal=True)
+        ret: Dict[str, Dict[str, Tensor]] = {}
+        for idx, agent_id in enumerate(agent_ids):
+            ret[agent_id] = {
+                "trajectory": outputs["trajectory"][idx],
+                "trajectory_mode_idx": outputs["trajectory_mode_idx"][idx],
+                "trajectory_mode_logits": outputs["trajectory_mode_logits"][idx],
+                "trajectory_candidates": outputs["trajectory_candidates"][idx],
+                "trajectory_mode_embedding": outputs["trajectory_mode_embedding"][idx],
+            }
+        return ret
+
+    def freeze_for_selector(self) -> "PlatoonDiffusionPlanner":
+        self.eval()
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        return self
+
+    def _forward_model(self, model_inputs: Mapping[str, Tensor], return_multimodal: bool = False) -> Dict[str, Tensor]:
         if self.training:
+            if return_multimodal:
+                return self.model.infer_multimodal(model_inputs)
             return self.model(model_inputs)
 
         devices = []
@@ -85,6 +126,8 @@ class PlatoonDiffusionPlanner(nn.Module):
             torch.manual_seed(self.inference_seed)
             if devices:
                 torch.cuda.manual_seed_all(self.inference_seed)
+            if return_multimodal:
+                return self.model.infer_multimodal(model_inputs)
             return self.model(model_inputs)
 
     # ------------------------------------------------------------------

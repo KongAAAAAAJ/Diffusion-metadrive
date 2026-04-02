@@ -11,11 +11,15 @@ checkpoint_interval: 50
 ddim_steps: 4
 ddim_eta: 0.02
 advantage_discount_gamma: 0.8
+clip_eps: 0.2
+crash_advantage_penalty: -2.0
 
-beta_reg_max: 1.0
+beta_reg_max: 0.5
 beta_reg_min: 0.1
-beta_reg_warmup_frac: 0.3
-beta_reg_decay_frac: 0.4
+beta_reg_warmup_frac: 0.2
+beta_reg_decay_frac: 0.6
+beta_adapt_rate: 0.01
+kl_hard_limit: 50.0
 
 lambda_local: 0.7
 lambda_team: 0.3

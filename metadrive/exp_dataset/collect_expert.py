@@ -55,7 +55,9 @@ from metadrive.exp_dataset.trajectory_correction import (
     correct_trajectory_geometry,
 )
 from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
-from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy
+# from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy as Expert
+from metadrive.exp_dataset.hierarchical_expert import HierarchicalExpertIDMPolicy as Expert
+from metadrive.exp_dataset.hierarchical_expert.driving_style import DrivingStyleProfile
 from metadrive.policy.diffusion_policy.transfuser_features import BoundingBox2DIndex
 from metadrive.utils import Config
 from metadrive.exp_dataset.metadrive_dataset import split_shards
@@ -76,16 +78,24 @@ class ExpertCollectorConfig:
     expert_type: str = "ppo"  # idm | ppo
     target_samples: int = 100
     start_seed: int = 0
+    spawn_seed_offset: int = 100000
     samples_per_shard: int = 2048
+    resume: bool = False  # 数据集续采
 
     # Episode
     max_episode_steps: int = 1000  # 每个episode的最大步数
+
+    # Video
+    save_videos: bool = False
+    video_fps: int = 10
+    topdown_camera_height: float = 180.0
 
     # Trajectory supervision
     horizon_steps: int = 100       # minimum future context required per sample
     target_stride_steps: int = 5  # step interval between consecutive waypoints
     sample_stride_steps: int = 2  # sliding-window stride inside one episode
     trajectory_num_poses: int = 8 # number of future waypoints per sample
+    trajectory_dt: float = 0.1
     num_bounding_boxes: int = 16
     lidar_min_x: float = -32.0  # lidar的感知范围（相对于ego车坐标系）
     lidar_max_x: float = 32.0
@@ -131,6 +141,27 @@ def sample_traffic_density(rng: np.random.RandomState, config: ExpertCollectorCo
     return float(rng.uniform(config.traffic_density_min, config.traffic_density_max))
 
 
+def sample_episode_spawn_seed(rng: np.random.RandomState) -> int:
+    return int(rng.randint(0, 2**31 - 1))
+
+
+def build_episode_rngs(config: ExpertCollectorConfig) -> tuple[np.random.RandomState, np.random.RandomState]:
+    traffic_rng = np.random.RandomState(config.start_seed)
+    spawn_rng = np.random.RandomState(config.start_seed + config.spawn_seed_offset)
+    return traffic_rng, spawn_rng
+
+
+def fast_forward_episode_rngs(
+    traffic_rng: np.random.RandomState,
+    spawn_rng: np.random.RandomState,
+    config: ExpertCollectorConfig,
+    completed_episodes: int,
+) -> None:
+    for _ in range(int(completed_episodes)):
+        traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max)
+        spawn_rng.randint(0, 2**31 - 1)
+
+
 def describe_map_config(config: ExpertCollectorConfig) -> str:
     if bool(config.use_hybrid_map):
         return f"hybrid_fixed ({config.hybrid_map_sequence})"
@@ -157,6 +188,113 @@ def _to_jsonable(value):
     if callable(value):
         return getattr(value, "__name__", str(value))
     return str(value)
+
+
+def build_hierarchical_expert_policy(
+    vehicle,
+    random_seed: int,
+):
+    # Pass the default style explicitly so collection behavior does not drift with
+    # future constructor defaults inside HierarchicalExpertIDMPolicy.
+    return Expert(
+        vehicle,
+        random_seed=random_seed,
+        style_profile=DrivingStyleProfile(),
+    )
+
+
+DEFAULT_TOPDOWN_SCREEN_SIZE = 800
+DEFAULT_TOPDOWN_FILM_SIZE = 3000
+DEFAULT_TEXT_CORNER = "top_left"
+
+
+def build_topdown_render_kwargs(camera_position: tuple[float, float] | None = None) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "mode": "top_down",
+        "window": False,
+        "screen_size": (DEFAULT_TOPDOWN_SCREEN_SIZE, DEFAULT_TOPDOWN_SCREEN_SIZE),
+        "film_size": (DEFAULT_TOPDOWN_FILM_SIZE, DEFAULT_TOPDOWN_FILM_SIZE),
+        "target_agent_heading_up": False,
+    }
+    if camera_position is not None:
+        kwargs["camera_position"] = camera_position
+    return kwargs
+
+
+def get_primary_agent_id(env) -> str | None:
+    agents = getattr(env, "agents", {}) or {}
+    if "agent0" in agents:
+        return "agent0"
+    return next(iter(agents.keys()), None)
+
+
+def sync_topdown_camera_with_agent(env, agent_id: str | None) -> tuple[float, float] | None:
+    if agent_id is None:
+        return None
+    agents = getattr(env, "agents", {}) or {}
+    vehicle = agents.get(agent_id)
+    if vehicle is None:
+        return None
+    camera_position = (float(vehicle.position[0]), float(vehicle.position[1]))
+    renderer = getattr(env, "top_down_renderer", None)
+    if renderer is not None:
+        renderer.position = camera_position
+    return camera_position
+
+
+def compute_heading_up_rotation_deg(heading_rad: float) -> float:
+    return float(-np.rad2deg(float(heading_rad)) + 90.0)
+
+
+def rotate_frame_heading_up(frame_array: np.ndarray, heading_rad: float) -> np.ndarray:
+    import pygame
+
+    height, width = frame_array.shape[:2]
+    rotation_deg = compute_heading_up_rotation_deg(heading_rad)
+    source = pygame.surfarray.make_surface(frame_array.swapaxes(0, 1))
+    canvas_size = max(width, height) * 2
+    canvas = pygame.Surface((canvas_size, canvas_size))
+    canvas.fill((255, 255, 255))
+    canvas.blit(source, ((canvas_size - width) // 2, (canvas_size - height) // 2))
+    rotated = pygame.transform.rotozoom(canvas, rotation_deg, 1.0)
+    crop_x = max(rotated.get_width() // 2 - width // 2, 0)
+    crop_y = max(rotated.get_height() // 2 - height // 2, 0)
+    cropped = pygame.Surface((width, height))
+    cropped.fill((255, 255, 255))
+    cropped.blit(rotated, (0, 0), (crop_x, crop_y, width, height))
+    return pygame.surfarray.array3d(cropped).swapaxes(0, 1)
+
+
+def build_overlay_lines(episode_index: int, step_count: int) -> list[str]:
+    return [
+        "expert: collection",
+        f"episode: {episode_index}",
+        f"step: {step_count}",
+    ]
+
+
+def overlay_text_on_frame(frame_array: np.ndarray, lines: list[str], corner: str = DEFAULT_TEXT_CORNER) -> np.ndarray:
+    import pygame
+
+    if not lines:
+        return frame_array
+    height, width = frame_array.shape[:2]
+    surface = pygame.surfarray.make_surface(frame_array.swapaxes(0, 1))
+    if not pygame.font.get_init():
+        pygame.font.init()
+    font = pygame.font.SysFont("Arial", 24)
+    rendered = [font.render(line, True, (0, 0, 0)) for line in lines]
+    max_width = max(text.get_width() for text in rendered)
+    line_height = max(text.get_height() for text in rendered)
+    padding = 14
+    if corner == "top_right":
+        x = max(width - max_width - padding, padding)
+    else:
+        x = padding
+    y = padding
+    for idx, text_surface in enumerate(rendered):
+        surface.blit(text_surface, (x, y + idx * line_height))
+    return pygame.surfarray.array3d(surface).swapaxes(0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +658,18 @@ def build_episode_samples(
                 "trajectory_final_abs_lateral_before": np.asarray(correction_metrics["final_abs_lateral_before"], dtype=np.float32),
                 "trajectory_final_abs_lateral_after": np.asarray(correction_metrics["final_abs_lateral_after"], dtype=np.float32),
                 "ego_pose_world": current_frame["ego_pose_world"],
+                "reference_pose_world": current_frame["reference_pose_world"],
                 "action": current_frame["action"],
+                "ego_speed_km_h": np.asarray(current_frame["ego_speed_km_h"], dtype=np.float32),
+                "front_object_distance": np.asarray(current_frame["front_object_distance"], dtype=np.float32),
+                "front_object_speed_km_h": np.asarray(current_frame["front_object_speed_km_h"], dtype=np.float32),
+                "lane_index": np.asarray(current_frame["lane_index"], dtype=np.int16),
+                "reference_lane_index": np.asarray(current_frame["reference_lane_index"], dtype=np.int16),
+                "reference_longitudinal": np.asarray(current_frame["reference_longitudinal"], dtype=np.float32),
+                "reference_lateral": np.asarray(current_frame["reference_lateral"], dtype=np.float32),
+                "lane_width": np.asarray(current_frame["lane_width"], dtype=np.float32),
+                "current_ref_lane_count": np.asarray(current_frame["current_ref_lane_count"], dtype=np.int16),
+                "next_ref_lane_count": np.asarray(current_frame["next_ref_lane_count"], dtype=np.int16),
                 "traffic_density": td_arr,
             }
         )
@@ -539,6 +688,40 @@ def format_eta(seconds: float) -> str:
     if hours > 0:
         return f"{hours:d}h{minutes:02d}m{secs:02d}s"
     return f"{minutes:02d}m{secs:02d}s"
+
+
+def build_episode_video_path(video_dir: Path, episode_index: int) -> Path:
+    return video_dir / f"episode_{int(episode_index):06d}.mp4"
+
+
+def capture_episode_topdown_frame(env, episode_index: int, step_count: int) -> np.ndarray:
+    primary_agent_id = get_primary_agent_id(env)
+    camera_position = sync_topdown_camera_with_agent(env, primary_agent_id)
+    render_kwargs = build_topdown_render_kwargs(camera_position=camera_position)
+    if getattr(env, "top_down_renderer", None) is None:
+        frame = env.render(**render_kwargs)
+        sync_topdown_camera_with_agent(env, primary_agent_id)
+    else:
+        frame = env.render(**build_topdown_render_kwargs())
+
+    frame_array = np.asarray(frame)
+    if frame_array.ndim >= 2:
+        frame_array = frame_array.swapaxes(0, 1)
+    agents = getattr(env, "agents", {}) or {}
+    primary_agent = agents.get(primary_agent_id) if primary_agent_id is not None else None
+    if primary_agent is not None:
+        frame_array = rotate_frame_heading_up(frame_array, float(primary_agent.heading_theta))
+    return overlay_text_on_frame(frame_array, build_overlay_lines(episode_index, step_count))
+
+
+def write_episode_video(video_path: Path, frames: List[np.ndarray], fps: int) -> None:
+    if not frames:
+        return
+
+    import mediapy
+
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    mediapy.write_video(str(video_path), frames, fps=int(fps))
 
 
 def _iter_road_network_lanes(road_network) -> List:
@@ -763,6 +946,36 @@ def build_trajectory_mode_summary(mode_counts: Dict[str, int], total_samples: in
     }
 
 
+def detect_existing_state(shard_dir: Path, report_dir: Path) -> Dict[str, object]:
+    shard_paths = sorted(shard_dir.glob("shard_*.npz"))
+    manifest_path = report_dir / "manifest.json"
+
+    total_samples = 0
+    total_episodes = 0
+    mode_counts: Dict[str, int] = {}
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        total_samples = int(manifest.get("collected_samples", 0))
+        total_episodes = int(manifest.get("episodes", 0))
+        correction_summary = manifest.get("trajectory_correction", {}) or {}
+        raw_mode_counts = correction_summary.get("mode_counts", {}) or {}
+        mode_counts = {str(name): int(count) for name, count in raw_mode_counts.items()}
+    else:
+        for shard_path in shard_paths:
+            with np.load(shard_path, allow_pickle=False) as shard_data:
+                first_key = next(iter(shard_data.files), None)
+                if first_key is None:
+                    continue
+                total_samples += int(shard_data[first_key].shape[0])
+
+    return {
+        "shard_count": len(shard_paths),
+        "total_samples": total_samples,
+        "total_episodes": total_episodes,
+        "mode_counts": mode_counts,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Shard writer
 # ---------------------------------------------------------------------------
@@ -770,13 +983,13 @@ def build_trajectory_mode_summary(mode_counts: Dict[str, int], total_samples: in
 class ShardWriter:
     """Accumulates samples in memory and flushes to .npz shards once full."""
 
-    def __init__(self, output_dir: Path, samples_per_shard: int):
+    def __init__(self, output_dir: Path, samples_per_shard: int, start_shard_index: int = 0):
         self.output_dir = output_dir
         self.samples_per_shard = samples_per_shard
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.buffers: Dict[str, List[np.ndarray]] = defaultdict(list)
         self.buffer_size = 0
-        self.shard_index = 0
+        self.shard_index = start_shard_index
 
     def add_samples(self, samples: List[Dict[str, np.ndarray]]) -> int:
         if not samples:
@@ -819,8 +1032,12 @@ class ShardWriter:
 def rollout_episode(
     env: DatasetCollectEnv,
     config: ExpertCollectorConfig,
-) -> tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]] | None]:
+    episode_spawn_seed: int,
+    episode_index: int,
+) -> tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]] | None, List[np.ndarray]]:
     """Drive one episode with the selected expert; return raw frame list."""
+    if hasattr(env, "engine") and getattr(env.engine, "spawn_manager", None) is not None:
+        env.engine.spawn_manager.set_episode_spawn_seed(episode_spawn_seed)
     obs_dict, _ = env.reset()
     map_geometry = resolve_map_visualization_geometry(
         env=env,
@@ -830,6 +1047,7 @@ def rollout_episode(
     agent_id = list(obs_dict.keys())[0]  # single-agent env → always one key
 
     frames: List[Dict[str, np.ndarray]] = []
+    video_frames: List[np.ndarray] = []
     done = False
     step = 0
     idm_policy = None
@@ -853,12 +1071,23 @@ def rollout_episode(
                 obs["rgb_right"],
             )
         )
+        if bool(config.save_videos):
+            video_frames.append(
+                capture_episode_topdown_frame(
+                    env=env,
+                    episode_index=episode_index,
+                    step_count=step,
+                )
+            )
 
         if config.expert_type == "ppo":
             action = ppo_expert(vehicle, deterministic=True)
         elif config.expert_type == "idm":
             if idm_policy is None:
-                idm_policy = ExpertIDMPolicy(vehicle, random_seed=config.start_seed)
+                idm_policy = build_hierarchical_expert_policy(
+                    vehicle,
+                    random_seed=config.start_seed,
+                )
             action = idm_policy.act()
         else:
             raise ValueError(f"Unsupported expert_type: {config.expert_type}")
@@ -870,7 +1099,7 @@ def rollout_episode(
             done = True
         step += 1
 
-    return frames, map_geometry
+    return frames, map_geometry, video_frames
 
 
 # ---------------------------------------------------------------------------
@@ -886,7 +1115,13 @@ def write_manifest(
     split_summary: Dict,
     correction_summary: Dict,
     collection_wall_time_sec: float,
+    resume: bool = False,
 ) -> None:
+    manifest_path = report_dir / "manifest.json"
+    existing_manifest = {}
+    if resume and manifest_path.exists():
+        existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    previous_samples = int(existing_manifest.get("collected_samples", 0))
     manifest = {
         "dataset_name": config.dataset_name,
         "target_samples": config.target_samples,
@@ -903,8 +1138,14 @@ def write_manifest(
             k: (str(v) if isinstance(v, Path) else v)
             for k, v in asdict(config).items()
         },
+        "resume_history": existing_manifest.get("resume_history", []) + ([
+            {
+                "timestamp": time.strftime("%Y%m%d_%H%M%S"),
+                "added_samples": int(total_samples - previous_samples),
+            }
+        ] if resume else []),
     }
-    (report_dir / "manifest.json").write_text(
+    manifest_path.write_text(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
 
@@ -914,40 +1155,61 @@ def write_manifest(
 # ---------------------------------------------------------------------------
 
 def run_collection(config: ExpertCollectorConfig) -> None:
+
+    # 1. 初始化输出目录结构
     dataset_root = config.output_root / config.dataset_name
     shard_dir = dataset_root / "shards"
     report_dir = dataset_root / "reports"
     visualization_dir = report_dir / "trajectory_visualizations"
+    video_dir = report_dir / "videos"
     shard_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
     if bool(config.trajectory_visualization_enabled):
         visualization_dir.mkdir(parents=True, exist_ok=True)
+    if bool(config.save_videos):
+        video_dir.mkdir(parents=True, exist_ok=True)
 
-    rng = np.random.RandomState(config.start_seed)
-    writer = ShardWriter(shard_dir, config.samples_per_shard)
+    if config.resume:
+        existing = detect_existing_state(shard_dir, report_dir)
+        start_shard_index = int(existing["shard_count"])
+        total_samples = int(existing["total_samples"])
+        total_episodes = int(existing["total_episodes"])
+        mode_counts: Dict[str, int] = {mode.name.lower(): 0 for mode in TrajectoryMode}
+        for mode_name, count in dict(existing["mode_counts"]).items():
+            mode_counts[str(mode_name)] = int(count)
+        print(
+            f"[resume] detected {total_samples} samples, {total_episodes} episodes, {start_shard_index} shards"
+        )
+    else:
+        start_shard_index = 0
+        total_samples = 0
+        total_episodes = 0
+        mode_counts = {mode.name.lower(): 0 for mode in TrajectoryMode}
 
-    env = DatasetCollectEnv(
-        {
-            "use_render": False,
-            "num_scenarios": int(config.num_scenarios),
-            "image_on_cuda": True,
-            "use_hybrid_map": bool(config.use_hybrid_map),
-            "hybrid_map_sequence": config.hybrid_map_sequence,
-            "map": int(config.map_block_num),
-        }
-    )
+    traffic_rng, spawn_rng = build_episode_rngs(config)
+    fast_forward_episode_rngs(traffic_rng, spawn_rng, config, total_episodes)
+    writer = ShardWriter(shard_dir, config.samples_per_shard, start_shard_index=start_shard_index)
+
+    # 2. 创建环境实例（单环境单线程采集）
+    env_config = {
+        "use_render": False,
+        "num_scenarios": int(config.num_scenarios),
+        "image_on_cuda": True,
+        "use_hybrid_map": bool(config.use_hybrid_map),
+        "hybrid_map_sequence": config.hybrid_map_sequence,
+        "map": int(config.map_block_num),
+        "top_down_camera_initial_z": float(config.topdown_camera_height),
+    }
+    env = DatasetCollectEnv(env_config)
     map_geometry = None
 
-    # 保存环境参数配置
+    # 3. 保存环境参数配置
     config_path = dataset_root / "env_config.json"
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(_to_jsonable(env.config), f, indent=2, ensure_ascii=False)
 
-    total_samples = 0
-    total_episodes = 0
     total_env_steps = 0
     wall_start = time.perf_counter()
-    mode_counts: Dict[str, int] = {mode.name.lower(): 0 for mode in TrajectoryMode}
     correction_accumulator = {
         "mean_abs_lateral_before": 0.0,
         "mean_abs_lateral_after": 0.0,
@@ -958,25 +1220,42 @@ def run_collection(config: ExpertCollectorConfig) -> None:
 
     try:
         while total_samples < config.target_samples:
-            # Sample a new traffic density and inject it before reset so the
-            # traffic manager uses the updated value while the map stays fixed.
-            traffic_density = sample_traffic_density(rng, config)
+            # 4. 采集新一轮的交通密度并注入环境配置
+            traffic_density = sample_traffic_density(traffic_rng, config)
+            episode_spawn_seed = sample_episode_spawn_seed(spawn_rng)
             env.config["traffic_density"] = traffic_density
 
-            frames, episode_map_geometry = rollout_episode(env, config)
+            # 5. 驾驶一轮新 episode，得到原始帧列表和地图几何信息
+            episode_index = total_episodes + 1
+            frames, episode_map_geometry, video_frames = rollout_episode(
+                env,
+                config,
+                episode_spawn_seed,
+                episode_index=episode_index,
+            )
             map_geometry = resolve_map_visualization_geometry(
                 env=env,
                 visualization_enabled=bool(config.trajectory_visualization_enabled),
                 cached_geometry=(map_geometry if map_geometry is not None else episode_map_geometry),
             )
+
+            # 6. 从帧列表中构建训练样本（滑动窗口），并写入分片文件
             samples = build_episode_samples(
                 frames,
                 config,
                 traffic_density,
                 visualization_dir=visualization_dir if bool(config.trajectory_visualization_enabled) else None,
-                episode_index=total_episodes + 1,
+                episode_index=episode_index,
                 map_geometry=map_geometry,
             )
+            if bool(config.save_videos):
+                write_episode_video(
+                    build_episode_video_path(video_dir, episode_index),
+                    video_frames,
+                    fps=config.video_fps,
+                )
+
+            # 7. 更新统计信息并打印进度
             writer.add_samples(samples)
             total_samples += len(samples)
             total_episodes += 1
@@ -1006,6 +1285,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
 
     writer.close()
 
+    # 8. 最后写入 manifest 文件，包含数据集统计信息和配置参数
     collection_wall_time_sec = time.perf_counter() - wall_start
 
     split_summary = split_shards(
@@ -1036,6 +1316,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         split_summary,
         correction_summary,
         collection_wall_time_sec=collection_wall_time_sec,
+        resume=bool(config.resume),
     )
 
     print("Splits: " + ", ".join(f"{k}={len(v)} shards" for k, v in split_summary.items()))

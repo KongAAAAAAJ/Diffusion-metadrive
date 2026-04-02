@@ -15,6 +15,13 @@ def _as_bool(mapping: Mapping, key: str, default: bool = False) -> bool:
     return bool(mapping.get(key, default))
 
 
+def _clip_reward(value: float, config: Mapping, key: str = "reward_clip") -> float:
+    clip = _as_float(config, key, 0.0)
+    if clip <= 0.0:
+        return float(value)
+    return float(max(-clip, min(clip, value)))
+
+
 def compute_step_reward(info: dict, config: dict) -> float:
     info = info or {}
     config = config or {}
@@ -64,7 +71,7 @@ def compute_step_reward(info: dict, config: dict) -> float:
     if _as_bool(info, "out_of_road", False):
         reward = min(reward, -w_road)
 
-    return float(reward)
+    return _clip_reward(float(reward), config)
 
 
 def compute_trajectory_reward(step_infos: Iterable[dict], config: dict) -> float:
@@ -105,4 +112,5 @@ def compute_team_reward(per_agent_step_infos: Mapping[str, Iterable[dict]], conf
     formation_term = -(avg_formation_error / d_norm)
     safety_term = -collision_penalty * (crash_count / max(num_agents, 1))
     efficiency_term = avg_progress / delta_s_max
-    return float(w_formation * formation_term + w_safety * safety_term + w_efficiency * efficiency_term)
+    reward = w_formation * formation_term + w_safety * safety_term + w_efficiency * efficiency_term
+    return _clip_reward(float(reward), config)

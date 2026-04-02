@@ -122,7 +122,7 @@ class TransfuserPolicy(BasePolicy):
         }
 
         with torch.no_grad():
-            predictions = self._model(batched_features)
+            predictions = self._model.infer_multimodal(batched_features)
 
         trajectory = predictions["trajectory"][0].detach().cpu().numpy()
         self._update_trajectory_visualization(trajectory)
@@ -130,6 +130,13 @@ class TransfuserPolicy(BasePolicy):
         self.action_info["action"] = action
         self.action_info["predicted_trajectory"] = trajectory
         self.action_info["controller_debug"] = controller_debug
+        for feature_key in ("camera_feature", "lidar_feature", "status_feature", "ego_state"):
+            if feature_key in features:
+                self.action_info[feature_key] = features[feature_key].detach().cpu().numpy()
+        if "trajectory_candidates" in predictions:
+            self.action_info["trajectory_candidates"] = (
+                predictions["trajectory_candidates"][0].detach().cpu().numpy()
+            )
         if "trajectory_mode_idx" in predictions:
             self.action_info["trajectory_mode_idx"] = int(predictions["trajectory_mode_idx"][0].item())
         if "trajectory_mode_logits" in predictions:

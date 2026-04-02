@@ -3,7 +3,7 @@
 # run.sh — 两阶段训练流水线
 #
 # 阶段一：单车扩散 Policy 开环预训练（train_transfuser）
-# 阶段二：编队闭环强化微调（platoon-closedloop，MA-GRPO + ref-reg + 分层 advantage）
+# 阶段二：编队意图 selector 强化训练（RLlib MAPPO）
 #
 # 用法：
 #   bash scripts/run.sh                      # 完整流水线（阶段一 → 二）
@@ -27,17 +27,17 @@ PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 # ---------------------------------------------------------------------------
 # 流程控制
 # ---------------------------------------------------------------------------
-STAGE="${STAGE:-both}"   # 1 | 2 | both
+STAGE="${STAGE:-1}"   # 1 | 2 | both
 
 # ---------------------------------------------------------------------------
 # 阶段一：单车扩散 Policy 开环预训练
 # ---------------------------------------------------------------------------
 MODEL_SIZE="${MODEL_SIZE:-small}"
 EXPERT_NAME="${EXPERT_NAME:-idm}"
-DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaData_idm_single_preprocessed}"
+DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaData_strong_idm_single_preprocessed}"
 PLAN_ANCHOR_PATH="${PLAN_ANCHOR_PATH:-${REPO_ROOT}/metadrive/exp_dataset/anchors.npy}"
 STAGE1_OUTPUT_DIR="${STAGE1_OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion}"
-STAGE1_MAX_EPOCHS="${STAGE1_MAX_EPOCHS:-60}"  #
+STAGE1_MAX_EPOCHS="${STAGE1_MAX_EPOCHS:-80}"  #
 STAGE1_BATCH_SIZE="${STAGE1_BATCH_SIZE:-16}"
 STAGE1_NUM_WORKERS="${STAGE1_NUM_WORKERS:-8}"
 STAGE1_LR="${STAGE1_LR:-1e-4}"
@@ -49,11 +49,11 @@ STAGE1_PRECISION="${STAGE1_PRECISION:-auto}"
 # 若已有预训练 checkpoint，设置 SINGLE_CKPT 可直接跳过阶段一
 SINGLE_CKPT="${SINGLE_CKPT:-}"
 
-RL_CONFIG="${RL_CONFIG:-${REPO_ROOT}/configs/train/platoon_grpo_v2.yaml}"
+RL_CONFIG="${RL_CONFIG:-${REPO_ROOT}/configs/train/selector.yaml}"
 RL_NUM_AGENTS="${RL_NUM_AGENTS:-3}"
 RL_RENDER="${RL_RENDER:-0}"
-RL_STEPS="${RL_STEPS:-10000}"  # *
-RL_CKPT_DIR="${RL_CKPT_DIR:-}"
+RL_STEPS="${RL_STEPS:-10000}"  # total env steps
+RL_CKPT_DIR="${RL_CKPT_DIR:-}" 
 RL_LOG_DIR="${RL_LOG_DIR:-}"
 
 # ---------------------------------------------------------------------------
@@ -130,26 +130,22 @@ run_stage1() {
 # 阶段二：闭环强化微调
 # ---------------------------------------------------------------------------
 run_stage2() {
-    log_section "阶段二：编队闭环强化微调（platoon-closedloop，${RL_STEPS} steps）"
+    log_section "阶段二：编队意图 selector 强化训练（MAPPO，${RL_STEPS} env steps）"
     log_info "单车 checkpoint ：${SINGLE_CKPT}"
     log_info "训练配置        ：${RL_CONFIG}"
     log_info "编队车辆数      ：${RL_NUM_AGENTS}"
-    log_info "包含            ：ref-reg loss + intra-anchor advantage + 联合组 + ClosedLoopExecutor"
+    log_info "包含            ：冻结 planner + shared selector actor + centralized critic"
 
     local cmd=(
-        "${PYTHON_BIN}" -m train.train_platoon_rl
-        --mode platoon-closedloop
+        "${PYTHON_BIN}" -m train.train_selector
         --config "${RL_CONFIG}"
-        --steps "${RL_STEPS}"
-        --render "${RL_RENDER}"
-        --num-agents "${RL_NUM_AGENTS}"
-        --ckpt "${SINGLE_CKPT}"
+        --total-env-steps "${RL_STEPS}"
+        --pretrained-ckpt "${SINGLE_CKPT}"
     )
     if [[ -n "${RL_CKPT_DIR}" ]]; then
-        cmd+=(--checkpoint-dir "${RL_CKPT_DIR}")
-    fi
-    if [[ -n "${RL_LOG_DIR}" ]]; then
-        cmd+=(--log-dir "${RL_LOG_DIR}")
+        cmd+=(--output-root "$(dirname "$(dirname "${RL_CKPT_DIR}")")")
+    elif [[ -n "${RL_LOG_DIR}" ]]; then
+        cmd+=(--output-root "$(dirname "$(dirname "${RL_LOG_DIR}")")")
     fi
 
     "${cmd[@]}"
@@ -158,12 +154,12 @@ run_stage2() {
     if [[ -n "${RL_CKPT_DIR}" ]]; then
         log_info "checkpoints → ${RL_CKPT_DIR}"
     else
-        log_info "checkpoints → /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion_rl/run_x/checkpoints"
+        log_info "checkpoints → /media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/checkpoints"
     fi
     if [[ -n "${RL_LOG_DIR}" ]]; then
         log_info "TensorBoard → tensorboard --logdir ${RL_LOG_DIR}"
     else
-        log_info "TensorBoard → tensorboard --logdir /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion_rl/run_x/tb"
+        log_info "TensorBoard → tensorboard --logdir /media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/tb"
     fi
 }
 

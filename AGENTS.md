@@ -31,19 +31,25 @@
 
 ## 二、方法总路线
 
-**阶段一：单车扩散规划预训练** → **阶段二：编队闭环强化微调（升级版）**
+**阶段一：单车扩散规划预训练** → **阶段二：结构化候选池上的编队意图 selector 强化训练（RLlib MAPPO）** → **阶段三：条件化 trajectory refinement 局部细化**
 
 - 模型：复用 `V2TransfuserModel`（ResNet+Transformer BEV + DDIMScheduler）
-- 编队方案：3 车共享权重 + `RelationEncoder(MLP)` + `MA-GRPO(CTDE)`
+- 候选池：由单车行为基元与编队协作基元共同组成，避免仅依赖 k-means 压缩后的高频模式
+- 编队方案：3 车共享 frozen planner + shared selector actor + centralized critic
+- 细化方案：selector 后接条件化 trajectory refinement，仅做意图邻域内的局部连续修正
 - 控制层：LQR(纵向) + PD(横向)，封装在环境内部
 
-### Phase 5v2 升级要点（已实施）
+### 当前默认 RL 架构（Phase 6）
 
-| 升级项 | 原方案 | 升级后 |
-|--------|--------|--------|
-| 正则化 | IL loss（行为克隆） | ref-reg loss（BDPO-style x₀ 空间 L2，β 退火） |
-| Advantage | 单层全局归一化 | Intra-anchor per-anchor 归一化 + 分层 advantage |
-| 训练闭环 | 半闭环（surrogate reward） | 全闭环（联合组 + ClosedLoopExecutor） |
+| 模块 | 当前默认实现 |
+|------|--------------|
+| Planner | 冻结 `PlatoonDiffusionPlanner`，按车导出 `K` 条多模态候选轨迹和 `mode_embeddings` |
+| Candidate Pool | 组织为“单车行为基元 + 编队协作基元”双库，显式覆盖让行、压缩队形、协同汇入、局部脱队、重组恢复等协作意图 |
+| Policy | RLlib MAPPO shared selector actor，动作空间为 `Discrete(K)`，负责高层意图选择 |
+| Critic | centralized critic，仅消费 `global_state` |
+| Refiner | GRPO 闭环 trajectory refinement：对已选轨迹加截断噪声（t=8/1000）生成 G=4 条变体，经 10 步 DDIM 去噪得到 refined 候选，用 `get_state/set_state` 分支模拟闭环打分，组内标准化 advantage 后通过 policy gradient 更新 trajectory head 的 `diff_decoder` |
+| 环境包装 | `SelectorPlatoonEnv` 将 selector 的离散 intent 映射为 `{agent_id: np.ndarray(8,3)}` 轨迹动作；refinement 阶段在 step() 内对已选轨迹做 G 组分支 rollout 打分后执行最优 refined trajectory |
+| 训练入口 | `train/train_selector.py` |
 
 ---
 
@@ -57,21 +63,19 @@
 - 轨迹模式：`{agent_id: np.ndarray(8,3)}` → LQR+PD 内部转控制
 - 低层模式：`{agent_id: np.ndarray(2,)}` → 直接 steer/throttle
 
-### 奖励公式
+### 奖励公式（当前 selector MAPPO 默认配置）
 ```
 # 单车局部 reward
-r_t = 1.0·(Δs/Δs_max) + 0.5·(-formation_err/d_norm) + 0.3·(-safety_penalty)
-    + collision(-10) + road(-5) + 0.1·(-comfort)
+r_local = 0.8·(Δs/Δs_max) + 1.0·(-formation_err/d_norm) + 0.8·(-safety_penalty)
+        + collision(-10) + road(-5) + 0.05·(-comfort)
 
-# 联合 team reward（Phase 5v2 新增）
-r_team = w_formation·(-avg_formation_err/d_norm)
-       + w_safety·(-collision_penalty if any_crash else 0)
-       + w_efficiency·(avg_progress/delta_s_max)
+# 联合 team reward
+r_team = 1.0·(-avg_formation_err/d_norm)
+       + 1.5·(-team_collision_penalty)
+       + 0.2·(avg_progress/delta_s_max)
 
-# 分层 advantage
-A_final[i,k,g,t] = λ_local × γ^(T_d-t) × A_local[i,k,g]
-                 + λ_team  × γ^(T_d-t) × A_team[i,m]
-# 默认: λ_local=0.7, λ_team=0.3, γ=0.8
+# selector 最终 reward
+r_selector = 0.45·r_local + 0.55·r_team
 ```
 
 ---
@@ -96,44 +100,75 @@ P4 planner ─────────────────→ P5/5v2 trainer
 P5v2 checkpoints ───────────→ P6 evaluation
 ```
 
-**Phase 5v2 内部数据流**：
+**当前 Phase 6 selector 训练数据流**：
 ```
-collect_group_samples()           # sample G×M 轨迹 [G, M, 8, 3]
-  └──→ reward_per_anchor [G, M]   # 每 anchor 独立评估
-        └──→ compute_advantages() # per-anchor 归一化 → [G, M, step_num]
+env.reset()/env.step()
+  └──→ frozen PlatoonDiffusionPlanner.forward_selector()
+        └──→ trajectory_candidates [K, 8, 3] + mode_embeddings [K, D]
+              └──→ selector actor 采样离散 intent
+                    └──→ SelectorPlatoonEnv 将 intent 映射回轨迹动作
+                          └──→ PlatoonEnv 闭环执行
+                                └──→ compute_step_reward() + compute_team_reward()
+                                      └──→ RLlib MAPPO 更新 shared actor + centralized critic
+```
 
-select_top_k_candidates()         # 每车选 top-K 候选 (g, k)
-  └──→ build_joint_groups()       # 随机组合 M_joint 个联合组
-        └──→ ClosedLoopExecutor   # 闭环执行，get_state/set_state 恢复
-              └──→ compute_team_reward()   # formation + safety + efficiency
-                    └──→ compute_team_advantages() # [G, M, step_num], 稀疏分配
-                          └──→ compute_combined_advantages() # λ_local·A_local + λ_team·A_team
-                                └──→ compute_rl_loss() + compute_ref_reg_loss()
+**扩展版 selector + GRPO refinement 数据流**：
 ```
+env.reset()/env.step()
+  └──→ frozen PlatoonDiffusionPlanner.forward_selector()
+        └──→ K 条候选轨迹 + mode_embeddings
+              └──→ selector actor 采样离散 intent → τ_selected
+                    └──→ GRPO refinement（三车并行，互不感知对方 refinement 结果）
+                          ├── 截断噪声 t=8/1000 → G=4 条变体
+                          ├── 10 步 DDIM 去噪 → G 条 refined 轨迹
+                          ├── get_state/set_state 分支模拟 → G 个 reward
+                          ├── 组内标准化 advantage（正向 clamp + 安全约束）
+                          └── 执行 best refined trajectory
+                                └──→ step/team reward
+                                      ├──→ RLlib MAPPO 更新 selector（阶段 2）
+                                      └──→ GRPO policy gradient 更新 diff_decoder（阶段 3）
+```
+
+**Refinement 设计要点**：
+1. **单一意图内微调**：refinement 不改变 selector 已选意图的语义，仅在截断噪声（t=8，α≈0.992）范围内修正速度、曲率、间距、时序等几何细节，典型位移调整量 0.3~1.0m。
+2. **三车并行 refine**：各车独立 refine，不需要链式传递。车间 refinement 交叉影响为二阶小量（~0.03m/step），远小于 refinement 自身调整幅度（3~10% 偏差），不影响训练收敛。
+3. **分支模拟打分**：利用 `PlatoonEnv.get_state/set_state` 对 G 条变体做真闭环 rollout 打分，而非启发式 proxy，保证 reward 信号准确。
+4. **只解冻 diff_decoder**：backbone、encoder、selector 全冻结，仅 trajectory head 的 diff_decoder 参数有梯度，显存增量可控。
+5. **分阶段训练**：先 selector MAPPO 收敛 → 再冻结 selector 训练 refinement → 可选弱耦合联合微调。
+6. 候选池设计必须优先保证协作意图覆盖性，refinement 不能替代上游候选缺失。
 
 ---
 
 ## 五、训练模式
 
-| 模式 | 命令 | 启用功能 | 适用阶段 |
+| 入口 | 命令 | 启用功能 | 适用阶段 |
 |------|------|----------|----------|
-| `toy-single` | `--mode toy-single` | ref-reg + intra-anchor（无联合组） | 快速验证 |
-| `platoon` | `--mode platoon` | ref-reg + intra-anchor（无联合组） | 半闭环稳定性 |
-| `platoon-closedloop` | `--mode platoon-closedloop` | 全部升级（联合组 + 闭环执行） | 完整训练 |
+| `train_selector.py` | `--config ... --pretrained-ckpt ... --total-env-steps ...` | 冻结 planner + RLlib MAPPO selector 训练 | 默认训练 |
+| `scripts/test_platoon_rl_ckpt.py` | `--checkpoint ... --config ...` | selector checkpoint 评估 | 后续评估 |
 
-### 渐进式训练流程
+### 当前推荐训练流程
 ```bash
-# 阶段 1：toy 验证（< 5 分钟）
-python train/train_platoon_rl.py --mode toy-single --steps 5 --render 0
+# 阶段 1：单车扩散规划预训练
+bash scripts/run_diffusion_train.sh
 
-# 阶段 2：半闭环
-python train/train_platoon_rl.py \
-  --mode platoon --config configs/train/platoon_grpo_v2.yaml --steps 500 --render 0
+# 阶段 2：selector MAPPO smoke（320 env steps）
+python -m train.train_selector \
+  --config configs/train/platoon_mappo_smoke.yaml --pretrained-ckpt /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt --total-env-steps 320
 
-# 阶段 3：全闭环（完整升级）
-python train/train_platoon_rl.py \
-  --mode platoon-closedloop --config configs/train/platoon_grpo_v2.yaml --steps 500 --render 0
+# 阶段 3：selector MAPPO 正式训练（示例 8000 env steps）
+python -m train.train_selector \
+  --config configs/train/selector.yaml --pretrained-ckpt /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt --total-env-steps 8000
+
+# 阶段 4：冻结 selector，GRPO 训练 trajectory refinement（5000~10000 env steps）
+python -m train.train_selector \
+  --config configs/train/selector.yaml --pretrained-ckpt /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt --total-env-steps 5000
+
+# 阶段 5：selector + refinement 弱耦合联合微调（规划中）
+# python -m train.train_selector \
+#   --config configs/train/selector.yaml --pretrained-ckpt /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt --total-env-steps 3000
 ```
+
+`train/train_selector.py` 和 `scripts/run_marl_train.sh` 里的 `--total-env-steps`，以及 `scripts/run_train.sh` 里的 `RL_STEPS`，统一表示**总环境步数（total env steps）**，不是 RLlib training iteration。训练入口会按 `rollout_fragment_length × num_rollout_workers × num_envs_per_worker` 自动换算 iteration 数。
 
 ---
 
@@ -148,25 +183,26 @@ export PYTHONPATH="$PWD:$PYTHONPATH"
 ### 关键 import
 ```python
 from envs.platoon_env import PlatoonEnv
+from envs.selector_platoon_env import SelectorPlatoonEnv
 from models.platoon.platoon_diffusion_planner import PlatoonDiffusionPlanner
 from models.platoon.relation_encoder import RelationEncoder
 from models.platoon.weight_migration import migrate_single_to_platoon
+from models.selector.intent_selector import IntentSelectorActor, IntentSelectorCritic
+from models.platoon.trajectory_refiner import TrajectoryRefiner
 from models.diffusion.diffusion_rl_scheduler import DiffusionRLScheduler
-from train.ma_grpo_trainer import MultiAgentGRPOTrainer
-from train.closedloop_executor import ClosedLoopExecutor
-from train.joint_group import select_top_k_candidates, build_joint_groups, extract_joint_trajectories
-from evaluation.reward_terms import compute_trajectory_reward, compute_team_reward
+from train.train_selector import run_training
+from evaluation.reward_terms import compute_step_reward, compute_team_reward
 ```
 
 ### 默认路径
 | 用途 | 路径 |
 |------|------|
 | 数据集 | `$DATA_DIR` 默认 `/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets` |
-| 单车 checkpoint | `/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_3/checkpoints/diffusion-epoch=97.ckpt` |
-| 编队 checkpoint | `checkpoints/platoon_rl/` |
-| plan anchor | `metadrive/exp_dataset/metadrive_anchors_ppo.npy` |
-| 训练配置（v2） | `configs/train/platoon_grpo_v2.yaml` |
-| 训练日志 | `logs/platoon_rl/`、`logs/platoon_closedloop_rl/`、`logs/toy_single_rl/` |
+| 单车 checkpoint | `/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt` |
+| 编队 checkpoint | `/media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/checkpoints` |
+| plan anchor | `metadrive/exp_dataset/anchors.npy` |
+| 训练配置 | `configs/train/selector.yaml` / `configs/train/platoon_mappo_smoke.yaml` |
+| 训练日志 | `/media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/tb` |
 
 ### 参考代码库
 | 概念 | 路径 |
@@ -192,7 +228,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 | Headless | 必须支持 `use_render=False` |
 | 已知问题 | Panda3D 退出 segfault (139)，不影响逻辑 |
 
-显存预算：backbone frozen + gradient checkpointing ≤ 15GB；G=2, M=3 anchor 约 8~10GB
+显存预算：backbone frozen + gradient checkpointing ≤ 15GB；selector 阶段约 4.5GB；refinement 阶段（G=4 分支 + diff_decoder 梯度）约 10~12GB
 
 ---
 
@@ -203,10 +239,15 @@ Diffusion-metadrive/
 ├── AGENTS.md                              ← 本文件（精简索引）
 ├── configs/
 │   └── train/
-│       └── platoon_grpo_v2.yaml           ← 当前 RL 训练配置（ref-reg/分层adv/闭环/并行闭环）
+│       ├── selector.yaml                  ← selector MAPPO 正式训练配置
+│       ├── platoon_mappo_smoke.yaml       ← selector MAPPO 冒烟训练配置
+│       └── platoon_selector_refine.yaml   ← GRPO refinement 训练配置
 ├── docs/
 │   ├── phases/phase0~7.md                 ← 各 Phase 完整说明
-│   └── phases2/                           ← Phase 5v2 子任务说明
+│   ├── phases2/                           ← Phase 5v2 子任务说明
+│   └── phases6/
+│       ├── mappo_selector_plan.md         ← selector MAPPO 训练链设计
+│       └── grpo_refinement_plan.md        ← GRPO trajectory refinement 实现计划
 │       ├── overview.md                    ← 8 子任务总览
 │       ├── task1_ref_reg.md               ← 参考策略正则
 │       ├── task2_intra_anchor.md          ← Intra-anchor advantage
@@ -223,16 +264,17 @@ Diffusion-metadrive/
 │   └── reward_terms.py                    ← compute_trajectory_reward + compute_team_reward
 ├── models/
 │   ├── diffusion/
-│   │   └── diffusion_rl_scheduler.py      ← sample/replay/ref log_prob
-│   └── platoon/
-│       ├── platoon_diffusion_planner.py
-│       ├── relation_encoder.py
-│       └── weight_migration.py
+│   │   └── diffusion_rl_scheduler.py      ← sample/replay/ref log_prob（从 git 恢复）
+│   ├── platoon/
+│   │   ├── platoon_diffusion_planner.py
+│   │   ├── trajectory_refiner.py          ← GRPO refinement 封装（截断噪声 + DDIM + advantage）
+│   │   ├── relation_encoder.py
+│   │   └── weight_migration.py
+│   └── selector/                          ← intent selector actor/critic 与 RLlib adapter
 ├── train/
-│   ├── ma_grpo_trainer.py                 ← MultiAgentGRPOTrainer（含分层adv/ref-reg）
-│   ├── train_platoon_rl.py                ← 训练入口（toy-single/platoon/platoon-closedloop）
-│   ├── closedloop_executor.py             ← ClosedLoopExecutor（状态恢复式闭环执行）
-│   └── joint_group.py                     ← 联合组构建与轨迹提取
+│   ├── train_selector.py                  ← selector MAPPO 主训练入口
+│   ├── selector_callbacks.py              ← RLlib 自定义指标回调
+│   └── selector_callbacks.py              ← RLlib 自定义指标回调
 ├── tests/acceptance/
 │   ├── test_phase1_task{1~7}.py
 │   ├── test_phase2_task{1~4}.py
@@ -291,11 +333,13 @@ Diffusion-metadrive/
 4. 多模态 vs 去掉部分模态
 5. 危险工况训练 vs 无危险工况训练
 
-### Phase 5v2 消融实验（新增）
-- ref-reg loss vs IL loss（β 退火 vs 固定权重）
-- intra-anchor advantage vs 全局归一化
-- λ_team=0 vs λ_team=0.3（有无联合组信号）
-- 闭环执行 vs 半闭环（surrogate reward）
+### Phase 6 当前建议对照
+- frozen planner + selector MAPPO vs 从零训练多车 MAPPO
+- 真实 planner candidates vs 去掉 multimodal selector（单一 best-mode）
+- centralized critic vs 去中心化 critic
+- team-heavy reward (`lambda_team>lambda_local`) vs local-heavy reward
+- selector + GRPO refinement vs selector only（验证 refinement 增益）
+- GRPO refinement（G=4 组内比较）vs 直接执行已选轨迹（无 refinement baseline）
 
 ---
 
@@ -313,7 +357,8 @@ Diffusion-metadrive/
 - 端到端合作为什么优于分层
 - 扩散规划为什么适合危险工况编队
 - 开环到闭环的能力提升是否成立
-- **ref-reg vs IL**：正则化方式对 pre-trained policy 保留的影响
-- **intra-anchor GRPO**：多模态 anchor 的利用效率与 mode collapse 的关系
+- 冻结 planner + 训练 selector 是否比直接微调整条 diffusion policy 更稳定
+- 多模态 candidates + selector 是否真的带来更好的编队协同行为
+- GRPO 组内比较在意图内微调是否比直接执行 planner 候选更适配编队场景
 
 Codex 的所有实现都应服务于这条证据链。

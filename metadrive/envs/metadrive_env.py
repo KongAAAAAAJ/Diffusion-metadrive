@@ -38,6 +38,7 @@ METADRIVE_DEFAULT_CONFIG = dict(
     need_inverse_traffic=False,
     traffic_mode=TrafficMode.Trigger,  # "Respawn", "Trigger"
     random_traffic=False,  # Traffic is randomized at default.
+    enable_idm_lane_change=True,
 
     # 背景车标记配置，this will update the vehicle_config and set to traffic
     traffic_vehicle_config=dict(

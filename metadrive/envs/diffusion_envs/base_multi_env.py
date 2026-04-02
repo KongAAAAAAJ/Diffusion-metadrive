@@ -7,6 +7,7 @@ from metadrive.utils import Config
 from metadrive.manager.traffic_manager import TrafficMode
 from metadrive.engine.engine_utils import initialize_global_config
 from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config, transfuser_config_to_dict
+import numpy as np
 
 
 class BaseMultiEnv(MultiAgentMetaDrive):
@@ -27,12 +28,15 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 
                 horizon=2000,
                 force_seed_spawn_manager=True,  # 车辆生成点seed是否与全局seed绑定（可复现性）
+                spawn_strategy="map_respawn_roads",
+                spawn_diversify_roads=True,
+                spawn_roads=None,
                 use_render=True,
                 camera_height=30,  # [m] 观察视角高度
 
                 # traffic
                 traffic_density=0.06,
-                traffic_mode=TrafficMode.Trigger,  # "Respawn", "Trigger"
+                traffic_mode=TrafficMode.Respawn,  # Respawn, Trigger, Basic, Hybrid
                 random_traffic=True,
                 accident_prob=0.,  # 在reset()时，生成一个静态事故/施工场景的概率
 
@@ -51,13 +55,81 @@ class BaseMultiEnv(MultiAgentMetaDrive):
         )
         return config
 
+    def _collect_map_respawn_roads(self):
+        current_map = getattr(self, "current_map", None)
+        if current_map is None and hasattr(self, "engine"):
+            current_map = getattr(self.engine, "current_map", None)
+        if current_map is None:
+            return []
+
+        roads = []
+        seen = set()
+        for block in getattr(current_map, "blocks", []) or []:
+            for road in getattr(block, "get_respawn_roads", lambda: [])() or []:
+                if hasattr(road, "start_node") and hasattr(road, "end_node"):
+                    key = (road.start_node, road.end_node, road.__class__)
+                else:
+                    key = id(road)
+                if key in seen:
+                    continue
+                seen.add(key)
+                roads.append(road)
+        return roads
+
+    def _refresh_map_spawn_roads_if_needed(self):
+        if self.config.get("spawn_strategy") != "map_respawn_roads":
+            return
+        if self.config.get("spawn_roads") is not None:
+            return
+        if not hasattr(self, "engine"):
+            return
+        spawn_manager = getattr(self.engine, "spawn_manager", None)
+        if spawn_manager is None or not hasattr(spawn_manager, "refresh_spawn_roads"):
+            return
+        spawn_roads = self._collect_map_respawn_roads()
+        if not spawn_roads:
+            return
+        spawn_manager.refresh_spawn_roads(spawn_roads)
+
     def setup_engine(self):
         super(BaseMultiEnv, self).setup_engine()
         # 用 MAHybridPGMapManager 替换默认的 PGMapManager，
         # 在 use_hybrid_map=False 时其行为与 PGMapManager 完全一致。
         self.engine.update_manager("map_manager", MAHybridPGMapManager())
 
+    @staticmethod
+    def _get_candidate_drivable_lanes(vehicle):
+        navigation = getattr(vehicle, "navigation", None)
+        current_ref_lanes = getattr(navigation, "current_ref_lanes", None) or []
+        candidates = list(current_ref_lanes)
+        current_lane = getattr(vehicle, "lane", None)
+        if current_lane is not None:
+            candidates.append(current_lane)
 
+        lanes = []
+        seen = set()
+        for lane in candidates:
+            lane_id = id(lane)
+            if lane is None or lane_id in seen:
+                continue
+            seen.add(lane_id)
+            lanes.append(lane)
+        return lanes
+
+    def _is_out_of_road(self, vehicle):
+        if self.config.get("out_of_route_done", False) and getattr(vehicle, "out_of_route", False):
+            return True
+
+        candidate_lanes = self._get_candidate_drivable_lanes(vehicle)
+        if not candidate_lanes:
+            return not getattr(vehicle, "on_lane", False)
+
+        for point in getattr(vehicle, "bounding_box", []):
+            if any(lane.point_on_lane(point) for lane in candidate_lanes):
+                return False
+        return True
+
+# 与 BaseMultiEnv 行为完全相同，但使用 TopDownLidarStateObservation 作为 observation
 class TopDownStateMultiEnv(BaseMultiEnv):
     @staticmethod
     def default_config() -> Config:
@@ -71,7 +143,7 @@ class TopDownStateMultiEnv(BaseMultiEnv):
         return config
     
 
-# 用于数据收集的环境，observation包含ego_state、lidar、rgb等多模态信息
+# 与 BaseMultiEnv 行为完全相同，但使用多模态传感器作为 Obsercation，与 Transfuser 对齐
 class DatasetCollectEnv(BaseMultiEnv):
     def __init__(self, config=None):
         config = {} if config is None else dict(config)

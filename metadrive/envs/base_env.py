@@ -517,12 +517,14 @@ class BaseEnv(gym.Env):
         :param seed: The seed to set the env. It is actually the scenario index you intend to choose
         :return: None
         """
+
         if self.logger is None:
             self.logger = get_logger()
             log_level = self.config.get("log_level", logging.DEBUG if self.config.get("debug", False) else logging.INFO)
             set_log_level(log_level)
+
         self.lazy_init()  # it only works the first time when reset() is called to avoid the error when render
-        
+
         self._reset_global_seed(seed)
         
         if self.engine is None:
@@ -532,7 +534,9 @@ class BaseEnv(gym.Env):
                 "env.reset() to rescue this environment. However, a better and safer solution is to check the "
                 "singleton of MetaDrive and restart your program."
             )
+
         reset_info = self.engine.reset()
+
         self.reset_sensors()
         # render the scene
         self.engine.taskMgr.step()
