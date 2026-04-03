@@ -20,7 +20,7 @@ cd "${REPO_ROOT}"
   --dataset-name "${DATASET_NAME}" \
   --save-video true \
   --expert-type idm \
-  --start-seed 3 \
+  --start-seed 30 \
   --trajectory-correction-enabled true \
   --save-raw-trajectory true \
   --mode-classifier-version v1 \

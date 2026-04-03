@@ -17,6 +17,7 @@ from metadrive.policy.diffusion_policy.transfuser_agent import TransfuserAgent
 from metadrive.policy.diffusion_policy.transfuser_callback import render_open_loop_prediction
 from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig, build_transfuser_config
 from metadrive.policy.diffusion_policy.transfuser_features import MetaDriveTransfuserDataset
+from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
 from metadrive.policy.diffusion_policy.verify_transfuser_dataset import AUTO_DATASET_FORMAT, verify_dataset
 
 
@@ -352,6 +353,8 @@ def evaluate_open_loop(
 
 def main():
     args = parse_args()
+    output_root = Path(args.output_dir)
+    output_dir = create_numbered_run_dir(output_root)
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -388,7 +391,7 @@ def main():
         dataloader=dataloader,
         device=device,
         config=config,
-        output_dir=Path(args.output_dir),
+        output_dir=output_dir,
         save_images=bool(args.save_images),
         save_json=bool(args.save_json),
         save_trajectory_plots=bool(args.save_trajectory_plots),

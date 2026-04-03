@@ -2,18 +2,31 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import cv2
 import numpy as np
 import torch, time
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
+from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
 from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config, transfuser_config_to_dict
 from metadrive.policy.diffusion_policy.transfuser_policy import TransfuserPolicy
 
-MULTIMODAL_SELECTED_COLOR = "orange"
-MULTIMODAL_OTHER_COLOR = "#8FD3FF"
+MULTIMODAL_SELECTED_COLOR = "#C76B00"
+MULTIMODAL_OTHER_COLOR = "#1F6F8B"
+ROAD_BOUNDARY_COLOR = "#7A7A7A"
+ACTUAL_TRAJECTORY_COLOR = "#1D4ED8"
+
+
+@dataclass
+class StepTrajectoryPlotRecord:
+    step_idx: int
+    ego_position: np.ndarray
+    selected_trajectory: np.ndarray | None
+    multimodal_trajectories: np.ndarray | None
+    selected_mode_idx: int | None
 
 
 def parse_args(argv=None):
@@ -33,7 +46,7 @@ def parse_args(argv=None):
     parser.add_argument("--start-seed", type=int, default=0)
     parser.add_argument("--num-scenarios", type=int, default=1)
     parser.add_argument("--traffic-density", type=float, default=0.06)
-    parser.add_argument("--plan-anchor-path", type=str, default="metadrive/exp_dataset/metadrive_anchors.npy")
+    parser.add_argument("--plan-anchor-path", type=str, default="metadrive/exp_dataset/anchors.npy")
     parser.add_argument("--save-3d-video", type=int, choices=(0, 1), default=0)
     parser.add_argument("--save-2d-video", type=int, choices=(0, 1), default=1)
     parser.add_argument("--save-trajectory-plot", type=int, choices=(0, 1), default=1)
@@ -162,6 +175,122 @@ def _extract_road_topology(env) -> list[np.ndarray]:
     return boundaries
 
 
+def _collect_plot_points(
+    actual_positions: list[np.ndarray],
+    planned_trajectories: list[tuple[int, list[np.ndarray]]],
+    multimodal_trajectories: list[tuple[int, np.ndarray, int]],
+) -> np.ndarray:
+    points = []
+    for pos in actual_positions:
+        pos_array = np.asarray(pos, dtype=np.float64)
+        if pos_array.ndim == 1 and pos_array.shape[0] == 2:
+            points.append(pos_array.reshape(1, 2))
+        elif pos_array.ndim == 2 and pos_array.shape[1] == 2:
+            points.append(pos_array)
+    for _, planned_world in planned_trajectories:
+        planned_array = np.asarray(planned_world, dtype=np.float64)
+        if planned_array.ndim == 2 and planned_array.shape[0] > 0:
+            points.append(planned_array)
+    for _, candidates_world, _ in multimodal_trajectories:
+        candidates_array = np.asarray(candidates_world, dtype=np.float64)
+        if candidates_array.ndim == 3 and candidates_array.shape[0] > 0:
+            points.append(candidates_array.reshape(-1, 2))
+    if not points:
+        return np.empty((0, 2), dtype=np.float64)
+    return np.concatenate(points, axis=0)
+
+
+def _filter_road_boundaries_near_points(
+    road_boundaries: list[np.ndarray] | None,
+    points: np.ndarray,
+    road_margin: float = 6.0,
+) -> list[np.ndarray]:
+    if not road_boundaries:
+        return []
+    points_array = np.asarray(points, dtype=np.float64)
+    if points_array.ndim != 2 or points_array.shape[0] == 0:
+        return []
+
+    search_min_xy = points_array.min(axis=0) - float(road_margin)
+    search_max_xy = points_array.max(axis=0) + float(road_margin)
+    filtered_boundaries = []
+    for boundary in road_boundaries:
+        boundary_array = np.asarray(boundary, dtype=np.float64)
+        if boundary_array.ndim != 2 or boundary_array.shape[0] < 2:
+            continue
+        boundary_min_xy = boundary_array.min(axis=0)
+        boundary_max_xy = boundary_array.max(axis=0)
+        intersects = not (
+            boundary_max_xy[0] < search_min_xy[0]
+            or boundary_min_xy[0] > search_max_xy[0]
+            or boundary_max_xy[1] < search_min_xy[1]
+            or boundary_min_xy[1] > search_max_xy[1]
+        )
+        if intersects:
+            filtered_boundaries.append(boundary_array)
+    return filtered_boundaries
+
+
+def _draw_road_boundaries(ax, road_boundaries: list[np.ndarray]) -> None:
+    for boundary in road_boundaries:
+        boundary_array = np.asarray(boundary, dtype=np.float64)
+        if boundary_array.ndim == 2 and boundary_array.shape[0] >= 2:
+            ax.plot(
+                boundary_array[:, 0],
+                boundary_array[:, 1],
+                "-",
+                color=ROAD_BOUNDARY_COLOR,
+                linewidth=1.2,
+                alpha=0.85,
+                zorder=1,
+            )
+
+
+def _draw_multimodal_trajectories(
+    ax,
+    origin: np.ndarray,
+    candidates_world: np.ndarray,
+    selected_mode_idx: int | None,
+    *,
+    selected_label: str | None = None,
+    other_label: str | None = None,
+) -> None:
+    candidates_array = np.asarray(candidates_world, dtype=np.float64)
+    if candidates_array.ndim != 3:
+        return
+    origin_array = np.asarray(origin, dtype=np.float64)
+    for mode_i in range(candidates_array.shape[0]):
+        full_path = np.vstack([origin_array, candidates_array[mode_i]])
+        if selected_mode_idx is not None and mode_i == int(selected_mode_idx):
+            ax.plot(
+                full_path[:, 0],
+                full_path[:, 1],
+                "--",
+                color=MULTIMODAL_SELECTED_COLOR,
+                linewidth=2.6,
+                alpha=0.95,
+                zorder=4,
+                label=selected_label,
+            )
+            selected_label = None
+        else:
+            ax.plot(
+                full_path[:, 0],
+                full_path[:, 1],
+                "--",
+                color=MULTIMODAL_OTHER_COLOR,
+                linewidth=1.9,
+                alpha=0.65,
+                zorder=3,
+                label=other_label,
+            )
+            other_label = None
+
+
+def _build_step_trajectory_plot_path(output_dir: Path, episode_idx: int, step_idx: int) -> Path:
+    return output_dir / "step_trajectory_plots" / f"episode_{episode_idx:03d}" / f"step_{step_idx:05d}.png"
+
+
 def _record_step_visualization(
     ego_before_step,
     ego_xy_before_step: np.ndarray | None,
@@ -171,6 +300,7 @@ def _record_step_visualization(
     actual_positions: list[np.ndarray],
     planned_trajectories: list[tuple[int, list[np.ndarray]]],
     multimodal_trajectories: list[tuple[int, np.ndarray, int]],
+    step_plot_records: list[StepTrajectoryPlotRecord],
 ) -> None:
     if ego_xy_before_step is not None:
         actual_positions.append(np.asarray(ego_xy_before_step, dtype=np.float64))
@@ -179,30 +309,47 @@ def _record_step_visualization(
         return
 
     predicted_traj = final_info.get("predicted_trajectory")
+    selected_world_array = None
     if predicted_traj is not None:
         planned_world = []
         for wp in np.asarray(predicted_traj):
             world_xy = ego_before_step.convert_to_world_coordinates([float(wp[0]), float(wp[1])], ego_before_step.position)
             planned_world.append(np.asarray(world_xy[:2], dtype=np.float64))
         planned_trajectories.append((episode_length - 1, planned_world))
+        selected_world_array = np.asarray(planned_world, dtype=np.float64)
 
     trajectory_candidates = final_info.get("trajectory_candidates")
     mode_idx = final_info.get("trajectory_mode_idx")
-    if trajectory_candidates is None or mode_idx is None:
+    candidates_world_array = None
+    if trajectory_candidates is not None:
+        candidates_world = []
+        for candidate in np.asarray(trajectory_candidates):
+            candidate_world = []
+            for wp in np.asarray(candidate):
+                world_xy = ego_before_step.convert_to_world_coordinates(
+                    [float(wp[0]), float(wp[1])],
+                    ego_before_step.position,
+                )
+                candidate_world.append(np.asarray(world_xy[:2], dtype=np.float64))
+            candidates_world.append(candidate_world)
+        candidates_world_array = np.asarray(candidates_world, dtype=np.float64)
+
+    if selected_world_array is not None or candidates_world_array is not None:
+        step_plot_records.append(
+            StepTrajectoryPlotRecord(
+                step_idx=episode_length,
+                ego_position=np.asarray(ego_xy_before_step, dtype=np.float64),
+                selected_trajectory=selected_world_array,
+                multimodal_trajectories=candidates_world_array,
+                selected_mode_idx=(int(mode_idx) if mode_idx is not None else None),
+            )
+        )
+
+    if candidates_world_array is None or mode_idx is None:
         return
 
-    candidates_world = []
-    for candidate in np.asarray(trajectory_candidates):
-        candidate_world = []
-        for wp in np.asarray(candidate):
-            world_xy = ego_before_step.convert_to_world_coordinates(
-                [float(wp[0]), float(wp[1])],
-                ego_before_step.position,
-            )
-            candidate_world.append(np.asarray(world_xy[:2], dtype=np.float64))
-        candidates_world.append(candidate_world)
     multimodal_trajectories.append(
-        (episode_length - 1, np.asarray(candidates_world, dtype=np.float64), int(mode_idx))
+        (episode_length - 1, candidates_world_array, int(mode_idx))
     )
 
 
@@ -263,50 +410,95 @@ def _compute_plot_view_bounds(
     padding: float = 5.0,
     road_margin: float = 4.0,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
-    points = []
-    for pos in actual_positions:
-        points.append(np.asarray(pos, dtype=np.float64))
-    for _, planned_world in planned_trajectories:
-        planned_array = np.asarray(planned_world, dtype=np.float64)
-        if planned_array.ndim == 2 and planned_array.shape[0] > 0:
-            points.extend(planned_array)
-    for _, candidates_world, _ in multimodal_trajectories:
-        candidates_array = np.asarray(candidates_world, dtype=np.float64)
-        if candidates_array.ndim == 3 and candidates_array.shape[0] > 0:
-            points.extend(candidates_array.reshape(-1, 2))
-
-    if not points:
+    stacked = _collect_plot_points(actual_positions, planned_trajectories, multimodal_trajectories)
+    if stacked.size == 0:
         return ((-padding, padding), (-padding, padding))
 
-    stacked = np.asarray(points, dtype=np.float64)
-    base_min_xy = stacked.min(axis=0)
-    base_max_xy = stacked.max(axis=0)
-
-    if road_boundaries:
-        boundary_points = []
-        search_min_xy = base_min_xy - float(road_margin)
-        search_max_xy = base_max_xy + float(road_margin)
-        for boundary in road_boundaries:
-            boundary_array = np.asarray(boundary, dtype=np.float64)
-            if boundary_array.ndim != 2 or boundary_array.shape[0] < 2:
-                continue
-            mask = np.logical_and.reduce(
-                (
-                    boundary_array[:, 0] >= search_min_xy[0],
-                    boundary_array[:, 0] <= search_max_xy[0],
-                    boundary_array[:, 1] >= search_min_xy[1],
-                    boundary_array[:, 1] <= search_max_xy[1],
-                )
-            )
-            if np.any(mask):
-                boundary_points.append(boundary_array[mask])
-        if boundary_points:
-            boundary_stacked = np.concatenate(boundary_points, axis=0)
-            stacked = np.concatenate([stacked, boundary_stacked], axis=0)
+    nearby_boundaries = _filter_road_boundaries_near_points(road_boundaries, stacked, road_margin=road_margin)
+    if nearby_boundaries:
+        boundary_stacked = np.concatenate(nearby_boundaries, axis=0)
+        stacked = np.concatenate([stacked, boundary_stacked], axis=0)
 
     min_xy = stacked.min(axis=0) - float(padding)
     max_xy = stacked.max(axis=0) + float(padding)
     return (float(min_xy[0]), float(max_xy[0])), (float(min_xy[1]), float(max_xy[1]))
+
+
+def _save_step_trajectory_plot(
+    *,
+    step_record: StepTrajectoryPlotRecord,
+    road_boundaries: list[np.ndarray],
+    output_path: Path,
+    episode_idx: int,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    actual_positions = [np.asarray(step_record.ego_position, dtype=np.float64)]
+    planned_trajectories = []
+    multimodal_trajectories = []
+    if step_record.selected_trajectory is not None:
+        planned_trajectories.append((step_record.step_idx, np.asarray(step_record.selected_trajectory, dtype=np.float64)))
+    if step_record.multimodal_trajectories is not None:
+        multimodal_trajectories.append(
+            (
+                step_record.step_idx,
+                np.asarray(step_record.multimodal_trajectories, dtype=np.float64),
+                (-1 if step_record.selected_mode_idx is None else int(step_record.selected_mode_idx)),
+            )
+        )
+
+    trajectory_points = _collect_plot_points(actual_positions, planned_trajectories, multimodal_trajectories)
+    nearby_boundaries = _filter_road_boundaries_near_points(road_boundaries, trajectory_points, road_margin=8.0)
+    _draw_road_boundaries(ax, nearby_boundaries)
+    ego = np.asarray(step_record.ego_position, dtype=np.float64)
+    ax.scatter(ego[0], ego[1], c="green", s=90, zorder=6, label="Current ego")
+
+    if step_record.multimodal_trajectories is not None:
+        _draw_multimodal_trajectories(
+            ax,
+            origin=ego,
+            candidates_world=step_record.multimodal_trajectories,
+            selected_mode_idx=step_record.selected_mode_idx,
+            selected_label="Selected mode",
+            other_label="Other modes",
+        )
+    elif step_record.selected_trajectory is not None:
+        selected_path = np.vstack([ego, np.asarray(step_record.selected_trajectory, dtype=np.float64)])
+        ax.plot(
+            selected_path[:, 0],
+            selected_path[:, 1],
+            "--",
+            color=MULTIMODAL_SELECTED_COLOR,
+            linewidth=2.6,
+            alpha=0.95,
+            zorder=4,
+            label="Selected trajectory",
+        )
+
+    ax.set_title(f"Episode {episode_idx} Step {step_record.step_idx}: Local Trajectory Plan")
+    ax.set_xlabel("X (world)")
+    ax.set_ylabel("Y (world)")
+    ax.set_aspect("equal", adjustable="box")
+    xlim, ylim = _compute_plot_view_bounds(
+        actual_positions,
+        planned_trajectories,
+        multimodal_trajectories,
+        road_boundaries=road_boundaries,
+        padding=3.0,
+        road_margin=8.0,
+    )
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def _save_trajectory_plot(
@@ -327,22 +519,12 @@ def _save_trajectory_plot(
         return
 
     fig, ax = plt.subplots(1, 1, figsize=(14, 14))
-
-    for boundary in road_boundaries:
-        boundary_array = np.asarray(boundary, dtype=np.float64)
-        if boundary_array.ndim == 2 and boundary_array.shape[0] >= 2:
-            ax.plot(
-                boundary_array[:, 0],
-                boundary_array[:, 1],
-                "-",
-                color="#CCCCCC",
-                linewidth=0.8,
-                alpha=0.7,
-                zorder=1,
-            )
+    trajectory_points = _collect_plot_points(actual_positions, planned_trajectories, multimodal_trajectories)
+    nearby_boundaries = _filter_road_boundaries_near_points(road_boundaries, trajectory_points, road_margin=8.0)
+    _draw_road_boundaries(ax, nearby_boundaries)
 
     actual = np.asarray(actual_positions, dtype=np.float64)
-    ax.plot(actual[:, 0], actual[:, 1], "b-", linewidth=2.0, label="Actual", zorder=5)
+    ax.plot(actual[:, 0], actual[:, 1], "-", color=ACTUAL_TRAJECTORY_COLOR, linewidth=2.2, label="Actual", zorder=5)
     ax.scatter(actual[0, 0], actual[0, 1], c="green", s=100, zorder=6, label="Start")
     ax.scatter(actual[-1, 0], actual[-1, 1], c="red", s=100, zorder=6, label="End")
 
@@ -356,32 +538,16 @@ def _save_trajectory_plot(
         candidates_array = np.asarray(candidates_world, dtype=np.float64)
         if candidates_array.ndim != 3:
             continue
-        for mode_i in range(candidates_array.shape[0]):
-            full_path = np.vstack([origin, candidates_array[mode_i]])
-            if mode_i == int(best_mode_idx):
-                ax.plot(
-                    full_path[:, 0],
-                    full_path[:, 1],
-                    "--",
-                    color=MULTIMODAL_SELECTED_COLOR,
-                    linewidth=1.0,
-                    alpha=0.8,
-                    zorder=4,
-                    label="Selected mode" if first_selected_mode else None,
-                )
-                first_selected_mode = False
-            else:
-                ax.plot(
-                    full_path[:, 0],
-                    full_path[:, 1],
-                    "--",
-                    color=MULTIMODAL_OTHER_COLOR,
-                    linewidth=1.0,
-                    alpha=0.35,
-                    zorder=3,
-                    label="Other modes" if first_other_modes else None,
-                )
-                first_other_modes = False
+        _draw_multimodal_trajectories(
+            ax,
+            origin=origin,
+            candidates_world=candidates_array,
+            selected_mode_idx=int(best_mode_idx),
+            selected_label=("Selected mode" if first_selected_mode else None),
+            other_label=("Other modes" if first_other_modes else None),
+        )
+        first_selected_mode = False
+        first_other_modes = False
 
     if not multimodal_trajectories:
         for step_idx, planned_world in planned_trajectories:
@@ -394,7 +560,7 @@ def _save_trajectory_plot(
             origin = np.asarray(actual_positions[origin_idx], dtype=np.float64)
             full_path = np.vstack([origin, planned])
             label = "Planned" if step_idx == 0 else None
-            ax.plot(full_path[:, 0], full_path[:, 1], "--", color=MULTIMODAL_SELECTED_COLOR, alpha=0.5, linewidth=1.0, label=label, zorder=4)
+            ax.plot(full_path[:, 0], full_path[:, 1], "--", color=MULTIMODAL_SELECTED_COLOR, alpha=0.95, linewidth=2.2, label=label, zorder=4)
 
     ax.set_title(f"Episode {episode_idx}: Multimodal Trajectories vs Actual (with Road Topology)")
     ax.set_xlabel("X (world)")
@@ -404,7 +570,8 @@ def _save_trajectory_plot(
         actual_positions,
         planned_trajectories,
         multimodal_trajectories,
-        road_boundaries=road_boundaries,
+        road_boundaries=nearby_boundaries,
+        road_margin=8.0,
     )
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
@@ -463,6 +630,9 @@ def build_env_config(args, resolved_model_size: str):
 
 def main():
     args = _normalize_visualization_args(parse_args())
+    output_root = Path(args.output_dir)
+    run_output_dir = create_numbered_run_dir(output_root)
+    args.output_dir = str(run_output_dir)
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -519,6 +689,7 @@ def main():
             actual_positions = []
             planned_trajectories = []
             multimodal_trajectories = []
+            step_plot_records = []
             road_boundaries = _extract_road_topology(env)
 
             while not done:
@@ -550,6 +721,7 @@ def main():
                     actual_positions=actual_positions,
                     planned_trajectories=planned_trajectories,
                     multimodal_trajectories=multimodal_trajectories,
+                    step_plot_records=step_plot_records,
                 )
 
                 if args.save_3d_video:
@@ -653,6 +825,13 @@ def main():
                     str(output_dir / "trajectory_plots" / f"episode_{episode_idx:03d}.png"),
                     episode_idx,
                 )
+                for step_record in step_plot_records:
+                    _save_step_trajectory_plot(
+                        step_record=step_record,
+                        road_boundaries=road_boundaries,
+                        output_path=_build_step_trajectory_plot_path(output_dir, episode_idx, step_record.step_idx),
+                        episode_idx=episode_idx,
+                    )
     finally:
         env.close()
 

@@ -108,7 +108,10 @@ def stitch_three_cameras(
     right = _to_hwc_image(right_camera)
     stitched = np.concatenate([left, front, right], axis=1)
     resized = cv2.resize(stitched, (config.camera_width, config.camera_height), interpolation=cv2.INTER_LINEAR)
-    return torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
+    tensor = torch.from_numpy(resized).permute(2, 0, 1).float()
+    if resized.dtype == np.uint8:
+        tensor = tensor / 255.0
+    return tensor
 
 
 def build_status_feature(ego_state: np.ndarray, config: TransfuserConfig) -> torch.Tensor:

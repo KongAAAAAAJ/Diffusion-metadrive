@@ -191,6 +191,7 @@ class DatasetCollectObservation(TopDownLidarStateObservation):
         }
         for view_name, image in self._observe_rgb_views(vehicle).items():
             ret[view_name] = image
+        self.current_observation = ret
         return ret
 
     def save_camera_images(self, vehicle, output_dir, prefix="obs", save_topdown=False):

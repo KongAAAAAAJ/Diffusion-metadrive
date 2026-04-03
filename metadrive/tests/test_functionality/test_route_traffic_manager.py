@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from collections import namedtuple
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,17 @@ def _load_route_traffic_manager_module():
 
     custom_module.CustomTrafficManager = _CustomTrafficManager
     register("metadrive.envs.diffusion_envs.traffic_manager", custom_module)
+
+    traffic_module = types.ModuleType("metadrive.manager.traffic_manager")
+    traffic_module.BlockVehicles = namedtuple("block_vehicles", "trigger_road vehicles")
+    register("metadrive.manager.traffic_manager", traffic_module)
+
+    policy_package = types.ModuleType("metadrive.policy")
+    register("metadrive.policy", policy_package)
+
+    idm_policy_module = types.ModuleType("metadrive.policy.idm_policy")
+    idm_policy_module.IDMPolicy = type("IDMPolicy", (), {})
+    register("metadrive.policy.idm_policy", idm_policy_module)
 
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
@@ -148,3 +160,28 @@ def test_final_spawn_guard_blocks_candidate_that_overlaps_ego_zone():
 
     assert manager._passes_final_spawn_guard({"spawn_lane_index": ("A", "B", 0), "spawn_longitude": 22.0}) is False
     assert manager._passes_final_spawn_guard({"spawn_lane_index": ("A", "B", 0), "spawn_longitude": 40.0}) is True
+
+
+def test_spawn_traffic_vehicle_if_safe_can_skip_adding_vehicle_to_active_traffic_list():
+    module = _load_route_traffic_manager_module()
+    manager = module.RouteAwareTrafficManager()
+    manager.generate_seed = lambda: 7
+    manager._traffic_vehicles = []
+    manager._conflicts_with_ego_spawn = lambda config: False
+    manager._passes_final_spawn_guard = lambda config: True
+    spawned_vehicle = SimpleNamespace(id="veh_0", name="veh_0")
+    manager.spawn_object = lambda vehicle_type, vehicle_config: spawned_vehicle
+    manager.add_policy = lambda *args, **kwargs: None
+    manager.engine = SimpleNamespace(
+        spawn_manager=SimpleNamespace(ego_spawn_zones=[]),
+        global_config={"traffic_vehicle_config": {}},
+    )
+    vehicle = manager._spawn_traffic_vehicle_if_safe(
+        "stub_vehicle_type",
+        {"spawn_lane_index": ("A", "B", 0), "spawn_longitude": 0.0},
+        add_to_active_traffic=False,
+        policy_class=object,
+    )
+
+    assert vehicle is spawned_vehicle
+    assert manager._traffic_vehicles == []

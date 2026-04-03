@@ -220,7 +220,7 @@ class ExpertIDMConfig:
     heading_pid_kp: float = 1.7
     heading_pid_ki: float = 0.01
     heading_pid_kd: float = 3.5
-    lateral_pid_kp: float = 1 # 0.3
+    lateral_pid_kp: float = 0.3
     lateral_pid_ki: float = 0.002
     lateral_pid_kd: float = 0.05
 

@@ -27,7 +27,7 @@ class RouteAwareSpawnManager(SpawnManager):
                     continue
                 yield road
 
-    def _select_next_route_road(self, current_map, current_road, candidates):
+    def _select_next_route_road(self, current_map, current_road):
         for block in getattr(current_map, "blocks", [])[1:]:
             pre_socket = getattr(block, "pre_block_socket", None)
             pre_road = getattr(pre_socket, "positive_road", None)
@@ -40,7 +40,7 @@ class RouteAwareSpawnManager(SpawnManager):
             ]
             if block_candidates:
                 return sorted(block_candidates, key=_road_key)[0]
-        return sorted(candidates, key=_road_key)[0]
+        return None
 
     def get_main_route_spawn_roads(self, current_map):
         if current_map is None:
@@ -49,55 +49,28 @@ class RouteAwareSpawnManager(SpawnManager):
         start_node, end_node = tuple(
             self.engine.global_config.get("ego_spawn_route_start", self.DEFAULT_ROUTE_START)
         )
-        route_roads = []
-        blocks = list(getattr(current_map, "blocks", []) or [])
+        start_candidates = [
+            road for road in self._iter_positive_respawn_roads(current_map)
+            if _road_key(road) == (start_node, end_node)
+        ]
+        if not start_candidates:
+            return []
 
-        for block in blocks[1:]:
-            pre_socket = getattr(block, "pre_block_socket", None)
-            pre_road = getattr(pre_socket, "positive_road", None)
-            if pre_road is None:
-                continue
-            if hasattr(pre_road, "is_negative_road") and pre_road.is_negative_road():
-                continue
+        current_road = sorted(start_candidates, key=_road_key)[0]
+        route_roads = [current_road]
+        seen_road_keys = {_road_key(current_road)}
 
-            pre_key = _road_key(pre_road)
-            if not route_roads:
-                if pre_key != (start_node, end_node):
-                    continue
-                route_roads.append(pre_road)
-                continue
-
-            if pre_key == _road_key(route_roads[-1]):
-                continue
-            if pre_road.start_node != route_roads[-1].end_node:
+        while True:
+            next_road = self._select_next_route_road(current_map, current_road)
+            if next_road is None:
                 break
-            route_roads.append(pre_road)
-
-        if not route_roads:
-            start_candidates = [
-                road for road in self._iter_positive_respawn_roads(current_map)
-                if _road_key(road) == (start_node, end_node)
-            ]
-            if start_candidates:
-                route_roads.append(sorted(start_candidates, key=_road_key)[0])
-
-        if route_roads:
-            last_road = route_roads[-1]
-            for block in reversed(blocks[1:]):
-                pre_socket = getattr(block, "pre_block_socket", None)
-                pre_road = getattr(pre_socket, "positive_road", None)
-                if pre_road is None or _road_key(pre_road) != _road_key(last_road):
-                    continue
-                tail_candidates = [
-                    road for road in getattr(block, "get_respawn_roads", lambda: [])() or []
-                    if not (hasattr(road, "is_negative_road") and road.is_negative_road())
-                    and road.start_node == last_road.end_node
-                ]
-                if tail_candidates:
-                    tail_road = sorted(tail_candidates, key=_road_key)[0]
-                    if _road_key(tail_road) != _road_key(last_road):
-                        route_roads.append(tail_road)
+            next_key = _road_key(next_road)
+            if next_key in seen_road_keys:
                 break
+            route_roads.append(next_road)
+            seen_road_keys.add(next_key)
+            current_road = next_road
+
         return route_roads
 
     def _refresh_main_route_spawn_roads(self):

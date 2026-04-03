@@ -107,7 +107,13 @@ class RouteAwareTrafficManager(CustomTrafficManager):
                 return False
         return True
 
-    def _spawn_traffic_vehicle_if_safe(self, vehicle_type, traffic_v_config):
+    def _spawn_traffic_vehicle_if_safe(
+        self,
+        vehicle_type,
+        traffic_v_config,
+        add_to_active_traffic=True,
+        policy_class=None,
+    ):
         if self._conflicts_with_ego_spawn(traffic_v_config):
             return None
         if not self._passes_final_spawn_guard(traffic_v_config):
@@ -116,9 +122,12 @@ class RouteAwareTrafficManager(CustomTrafficManager):
         traffic_v_config = dict(traffic_v_config)
         traffic_v_config.update(self.engine.global_config["traffic_vehicle_config"])
         random_v = self.spawn_object(vehicle_type, vehicle_config=traffic_v_config)
-        from metadrive.policy.idm_policy import IDMPolicy
-        self.add_policy(random_v.id, IDMPolicy, random_v, self.generate_seed())
-        self._traffic_vehicles.append(random_v)
+        if policy_class is None:
+            from metadrive.policy.idm_policy import IDMPolicy
+            policy_class = IDMPolicy
+        self.add_policy(random_v.id, policy_class, random_v, self.generate_seed())
+        if add_to_active_traffic:
+            self._traffic_vehicles.append(random_v)
         return random_v
 
     def _create_basic_vehicles(self, map, traffic_density: float):
@@ -163,7 +172,11 @@ class RouteAwareTrafficManager(CustomTrafficManager):
             from metadrive.policy.idm_policy import IDMPolicy
             for v_config in selected:
                 vehicle_type = self.random_vehicle_type()
-                random_v = self._spawn_traffic_vehicle_if_safe(vehicle_type, v_config)
+                random_v = self._spawn_traffic_vehicle_if_safe(
+                    vehicle_type,
+                    v_config,
+                    add_to_active_traffic=False,
+                )
                 if random_v is not None:
                     vehicles_on_block.append(random_v.name)
 

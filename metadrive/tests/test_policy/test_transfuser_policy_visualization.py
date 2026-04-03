@@ -19,6 +19,7 @@ from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     _write_video,
     parse_args,
 )
+from metadrive.obs.diff_obs.top_down_state_obs_multi_channel import DatasetCollectObservation
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
 
 
@@ -253,11 +254,33 @@ def test_multimodal_plot_colors_match_requested_palette():
     assert MULTIMODAL_OTHER_COLOR == "#8FD3FF"
 
 
+def test_dataset_collect_observation_observe_caches_latest_observation():
+    observation = object.__new__(DatasetCollectObservation)
+    observation.state_observe = lambda vehicle: np.asarray([1.0, 2.0, 3.0], dtype=np.float32)
+    observation._split_lidar_observation = lambda vehicle: (
+        np.asarray([4.0, 5.0], dtype=np.float32),
+        np.asarray([6.0, 7.0], dtype=np.float32),
+    )
+    observation.topdown_obs = types.SimpleNamespace(observe=lambda vehicle: np.ones((4, 4, 3), dtype=np.float32))
+    observation._observe_rgb_views = lambda vehicle: {
+        "rgb_left": np.full((2, 2, 3), 0.1, dtype=np.float32),
+        "rgb_front": np.full((2, 2, 3), 0.2, dtype=np.float32),
+        "rgb_right": np.full((2, 2, 3), 0.3, dtype=np.float32),
+    }
+    observation.current_observation = None
+
+    ret = DatasetCollectObservation.observe(observation, vehicle=object())
+
+    assert observation.current_observation is ret
+    assert set(ret.keys()) == {"ego_state", "others_state", "lidar", "topdown", "rgb_left", "rgb_front", "rgb_right"}
+    assert np.allclose(ret["ego_state"], np.asarray([1.0, 2.0, 3.0], dtype=np.float32))
+
+
 def test_render_closed_loop_prediction_supports_missing_gt():
     features = {
         "camera_feature": np.zeros((3, 256, 768), dtype=np.float32),
         "lidar_feature": np.zeros((1, 256, 256), dtype=np.float32),
-        "status_feature": np.zeros((8,), dtype=np.float32),
+        "status_feature": np.zeros((19,), dtype=np.float32),
     }
     predictions = {
         "trajectory": np.zeros((8, 3), dtype=np.float32),
@@ -285,7 +308,7 @@ def test_save_step_image_writes_episode_step_png(tmp_path: Path):
     final_info = {
         "camera_feature": np.zeros((3, 256, 768), dtype=np.float32),
         "lidar_feature": np.zeros((1, 256, 256), dtype=np.float32),
-        "status_feature": np.zeros((8,), dtype=np.float32),
+        "status_feature": np.zeros((19,), dtype=np.float32),
         "predicted_trajectory": np.zeros((8, 3), dtype=np.float32),
         "trajectory_mode_idx": 1,
     }

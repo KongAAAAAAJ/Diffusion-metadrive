@@ -188,3 +188,226 @@ def test_reset_refreshes_spawn_roads_to_main_route_and_caches_spawn_zone():
     cached = manager.ego_spawn_zones
     assert len(cached) == 1
     assert cached[0]["road"] in {(">>", ">>>"), (">>>", "A")}
+
+
+def test_main_route_spawn_roads_follow_complex_block_successor_without_node_name_chain():
+    module = _load_route_spawn_manager_module()
+
+    class Road:
+        def __init__(self, start, end, negative=False):
+            self.start_node = start
+            self.end_node = end
+            self._negative = negative
+
+        def is_negative_road(self):
+            return self._negative
+
+    manager = module.RouteAwareSpawnManager()
+
+    start_road = Road(">>", ">>>")
+    road_ab = Road(">>>", "A")
+    road_inner = Road("A", "1X0_0_")
+    road_after = Road("1X0_0_", "1X0_1_")
+    manager.engine = SimpleNamespace(global_config={"ego_spawn_route_start": (">>", ">>>")})
+    manager.current_map = SimpleNamespace(
+        blocks=[
+            SimpleNamespace(get_respawn_roads=lambda: [start_road]),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=start_road),
+                get_respawn_roads=lambda: [road_ab],
+            ),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=road_ab),
+                get_respawn_roads=lambda: [road_inner],
+            ),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=road_after),
+                get_respawn_roads=lambda: [],
+            ),
+        ]
+    )
+
+    roads = manager.get_main_route_spawn_roads(manager.current_map)
+
+    assert [(road.start_node, road.end_node) for road in roads] == [
+        (">>", ">>>"),
+        (">>>", "A"),
+        ("A", "1X0_0_"),
+    ]
+
+
+def test_main_route_spawn_roads_pick_sorted_successor_when_multiple_candidates_exist():
+    module = _load_route_spawn_manager_module()
+
+    class Road:
+        def __init__(self, start, end, negative=False):
+            self.start_node = start
+            self.end_node = end
+            self._negative = negative
+
+        def is_negative_road(self):
+            return self._negative
+
+    manager = module.RouteAwareSpawnManager()
+
+    start_road = Road(">>", ">>>")
+    road_ab = Road(">>>", "A")
+    road_side = Road("A", "B_SIDE")
+    road_main = Road("A", "B_MAIN")
+    manager.engine = SimpleNamespace(global_config={"ego_spawn_route_start": (">>", ">>>")})
+    manager.current_map = SimpleNamespace(
+        blocks=[
+            SimpleNamespace(get_respawn_roads=lambda: [start_road]),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=start_road),
+                get_respawn_roads=lambda: [road_ab],
+            ),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=road_ab),
+                get_respawn_roads=lambda: [road_side, road_main],
+            ),
+        ]
+    )
+
+    roads = manager.get_main_route_spawn_roads(manager.current_map)
+
+    assert [(road.start_node, road.end_node) for road in roads] == [
+        (">>", ">>>"),
+        (">>>", "A"),
+        ("A", "B_MAIN"),
+    ]
+
+
+def test_main_route_spawn_roads_skip_unrelated_blocks_instead_of_breaking_chain():
+    module = _load_route_spawn_manager_module()
+
+    class Road:
+        def __init__(self, start, end, negative=False):
+            self.start_node = start
+            self.end_node = end
+            self._negative = negative
+
+        def is_negative_road(self):
+            return self._negative
+
+    manager = module.RouteAwareSpawnManager()
+
+    start_road = Road(">>", ">>>")
+    road_ab = Road(">>>", "A")
+    unrelated = Road("SIDE", "SIDE_NEXT")
+    road_bc = Road("A", "B")
+    manager.engine = SimpleNamespace(global_config={"ego_spawn_route_start": (">>", ">>>")})
+    manager.current_map = SimpleNamespace(
+        blocks=[
+            SimpleNamespace(get_respawn_roads=lambda: [start_road]),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=start_road),
+                get_respawn_roads=lambda: [road_ab],
+            ),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=unrelated),
+                get_respawn_roads=lambda: [],
+            ),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=road_ab),
+                get_respawn_roads=lambda: [road_bc],
+            ),
+        ]
+    )
+
+    roads = manager.get_main_route_spawn_roads(manager.current_map)
+
+    assert [(road.start_node, road.end_node) for road in roads] == [
+        (">>", ">>>"),
+        (">>>", "A"),
+        ("A", "B"),
+    ]
+
+
+def test_main_route_spawn_roads_stop_cleanly_when_no_forward_successor_exists():
+    module = _load_route_spawn_manager_module()
+
+    class Road:
+        def __init__(self, start, end, negative=False):
+            self.start_node = start
+            self.end_node = end
+            self._negative = negative
+
+        def is_negative_road(self):
+            return self._negative
+
+    manager = module.RouteAwareSpawnManager()
+
+    start_road = Road(">>", ">>>")
+    road_ab = Road(">>>", "A")
+    manager.engine = SimpleNamespace(global_config={"ego_spawn_route_start": (">>", ">>>")})
+    manager.current_map = SimpleNamespace(
+        blocks=[
+            SimpleNamespace(get_respawn_roads=lambda: [start_road]),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=start_road),
+                get_respawn_roads=lambda: [road_ab],
+            ),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=road_ab),
+                get_respawn_roads=lambda: [],
+            ),
+        ]
+    )
+
+    roads = manager.get_main_route_spawn_roads(manager.current_map)
+
+    assert [(road.start_node, road.end_node) for road in roads] == [
+        (">>", ">>>"),
+        (">>>", "A"),
+    ]
+
+
+def test_reset_with_multiple_episode_seeds_covers_multiple_main_route_roads():
+    module = _load_route_spawn_manager_module()
+
+    class Road:
+        def __init__(self, start, end, negative=False):
+            self.start_node = start
+            self.end_node = end
+            self._negative = negative
+
+        def is_negative_road(self):
+            return self._negative
+
+        def lane_index(self, lane_idx):
+            return (self.start_node, self.end_node, lane_idx)
+
+    manager = module.RouteAwareSpawnManager()
+    manager.engine = SimpleNamespace(global_config={"ego_spawn_route_start": (">>", ">>>")})
+    start_road = Road(">>", ">>>")
+    road_ab = Road(">>>", "A")
+    road_bc = Road("A", "B")
+    road_cd = Road("B", "C")
+    manager.current_map = SimpleNamespace(
+        blocks=[
+            SimpleNamespace(get_respawn_roads=lambda: [start_road]),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=start_road),
+                get_respawn_roads=lambda: [road_ab],
+            ),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=road_ab),
+                get_respawn_roads=lambda: [road_bc],
+            ),
+            SimpleNamespace(
+                pre_block_socket=SimpleNamespace(positive_road=road_bc),
+                get_respawn_roads=lambda: [road_cd],
+            ),
+        ]
+    )
+
+    seen_roads = set()
+    for seed in range(8):
+        manager.set_episode_spawn_seed(seed)
+        manager.reset()
+        spawn_lane_index = manager.engine.global_config["agent_configs"]["agent0"]["spawn_lane_index"]
+        seen_roads.add(tuple(spawn_lane_index[:2]))
+
+    assert len(seen_roads) >= 2
+    assert seen_roads.issubset({(">>", ">>>"), (">>>", "A"), ("A", "B"), ("B", "C")})

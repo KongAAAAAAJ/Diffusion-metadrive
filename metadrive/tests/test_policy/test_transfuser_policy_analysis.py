@@ -14,7 +14,7 @@ def test_build_status_feature_keeps_navigation_intent():
 
     status = build_status_feature(ego_state, config).numpy()
 
-    np.testing.assert_allclose(status, np.asarray([2, 3, 4, 5, 6, 8, 9, 10], dtype=np.float32))
+    np.testing.assert_allclose(status, ego_state)
 
 
 def test_compute_trajectory_control_stabilized_has_deadzone_for_small_bias():
@@ -80,30 +80,38 @@ def test_transfuser_policy_act_uses_multimodal_inference_and_exposes_candidates(
     )
 
     class FakeObs:
+        def __init__(self):
+            self.current_observation = {"obs": "cached-agent0"}
+
         def observe(self, control_object):
             return {"obs": control_object.name}
 
+    fake_obs = FakeObs()
     fake_engine = type(
         "Engine",
         (),
         {
-            "agent_manager": type("AgentManager", (), {"observations": {"agent0": FakeObs()}})(),
+            "agent_manager": type("AgentManager", (), {"observations": {"agent0": fake_obs}})(),
         },
     )()
     monkeypatch.setattr("metadrive.policy.base_policy.get_engine", lambda: fake_engine)
 
     fake_camera = torch.zeros((3, 256, 768), dtype=torch.float32)
     fake_lidar = torch.zeros((1, 256, 256), dtype=torch.float32)
-    fake_status = torch.zeros((8,), dtype=torch.float32)
+    fake_status = torch.zeros((19,), dtype=torch.float32)
     fake_ego_state = torch.zeros((19,), dtype=torch.float32)
     monkeypatch.setattr(
         "metadrive.policy.diffusion_policy.transfuser_policy.observation_to_features",
-        lambda observation, config: {
-            "camera_feature": fake_camera,
-            "lidar_feature": fake_lidar,
-            "status_feature": fake_status,
-            "ego_state": fake_ego_state,
-        },
+        lambda observation, config: (
+            {
+                "camera_feature": fake_camera,
+                "lidar_feature": fake_lidar,
+                "status_feature": fake_status,
+                "ego_state": fake_ego_state,
+            }
+            if observation == {"obs": "cached-agent0"}
+            else (_ for _ in ()).throw(AssertionError("policy should use cached observation"))
+        ),
     )
 
     class FakeModel:
@@ -131,5 +139,5 @@ def test_transfuser_policy_act_uses_multimodal_inference_and_exposes_candidates(
     assert policy.action_info["trajectory_mode_idx"] == 1
     assert policy.action_info["camera_feature"].shape == (3, 256, 768)
     assert policy.action_info["lidar_feature"].shape == (1, 256, 256)
-    assert policy.action_info["status_feature"].shape == (8,)
+    assert policy.action_info["status_feature"].shape == (19,)
     assert policy.action_info["ego_state"].shape == (19,)

@@ -114,7 +114,10 @@ class TransfuserPolicy(BasePolicy):
         self._clear_trajectory_visualization()
 
     def act(self, agent_id=None):
-        observation = self.engine.agent_manager.observations[self.control_object.name].observe(self.control_object)
+        observation_adapter = self.engine.agent_manager.observations[self.control_object.name]
+        observation = getattr(observation_adapter, "current_observation", None)
+        if observation is None:
+            observation = observation_adapter.observe(self.control_object)
         features = observation_to_features(observation, self._model_config)
         batched_features = {
             key: value.unsqueeze(0).to(self._device) if value.ndim > 0 else value.to(self._device)
