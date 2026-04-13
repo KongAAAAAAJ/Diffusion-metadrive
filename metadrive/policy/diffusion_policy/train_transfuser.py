@@ -118,11 +118,14 @@ def resolve_precision(precision: str) -> str:
 
 
 def create_next_run_dir(output_root: Path) -> Path:
-    existing_run_dirs = [
-        path for path in output_root.iterdir()
-        if path.is_dir() and RUN_DIR_PATTERN.match(path.name)
-    ] if output_root.exists() else []
-    run_dir = output_root / f"run_{len(existing_run_dirs) + 1}"
+    existing_nums = []
+    if output_root.exists():
+        for path in output_root.iterdir():
+            m = RUN_DIR_PATTERN.match(path.name)
+            if m and path.is_dir():
+                existing_nums.append(int(m.group(1)))
+    next_num = max(existing_nums) + 1 if existing_nums else 1
+    run_dir = output_root / f"run_{next_num}"
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 

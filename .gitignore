@@ -1,0 +1,21 @@
+# Ignore everything by default
+*
+
+# But keep directories, so Git can descend into them
+!*/
+
+# Keep source / script / docs
+!*.py
+!*.sh
+!*.md
+
+# Keep config / text
+!*.yaml
+!*.txt
+!*.json
+
+# Keep images
+!*.png
+
+# Keep gitignore itself
+!.gitignore

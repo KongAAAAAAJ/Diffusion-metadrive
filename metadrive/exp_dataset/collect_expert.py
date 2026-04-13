@@ -3,7 +3,7 @@
 Collect expert demonstration data from DatasetCollectEnv.
 
 Strategy: a single environment instance is created once with the default
-hybrid map (hybrid_map_sequence="SSXCOCSS", num_scenarios=1).  The map
+hybrid map (hybrid_map_blocks_config, num_scenarios=1).  The map
 is held fixed across all episodes; only the background traffic density is
 re-sampled in [traffic_density_min, traffic_density_max] before each reset,
 producing diverse traffic flow on the same road layout.
@@ -32,13 +32,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import matplotlib
 import numpy as np
@@ -46,7 +47,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from metadrive.component.vehicle.base_vehicle import BaseVehicle
-from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
+try:
+    from metadrive.envs.diffusion_envs.base_multi_env import (
+        DatasetCollectEnv,
+        ROUTE_PRESET_BLOCK_IDS,
+        DEFAULT_HYBRID_MAP_CONFIG,
+    )
+except ImportError:  # pragma: no cover - test stubs may only expose DatasetCollectEnv
+    from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
+    ROUTE_PRESET_BLOCK_IDS = {"mainline": (), "ramp_merge": ()}
+    DEFAULT_HYBRID_MAP_CONFIG = ()
 from metadrive.examples.ppo_expert import expert as ppo_expert
 from metadrive.exp_dataset.trajectory_correction import (
     TrajectoryCorrectionContext,
@@ -63,6 +73,12 @@ from metadrive.exp_dataset.expert_idm_policy import ExpertIDMConfig, ExpertIDMPo
 from metadrive.policy.diffusion_policy.transfuser_features import BoundingBox2DIndex
 from metadrive.utils import Config
 from metadrive.exp_dataset.metadrive_dataset import split_shards
+from metadrive.exp_dataset.route_definitions import (
+    DEFAULT_LOCAL_ROUTE_WEIGHTS,
+    ROUTE_BY_NAME,
+    get_required_preset,
+    get_route_blocks,
+)
 
 
 
@@ -71,6 +87,15 @@ from metadrive.exp_dataset.metadrive_dataset import split_shards
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class EpisodeSpec:
+    route_preset: str
+    local_route: str
+    traffic_density: float
+    spawn_seed: int
+    idm_variant: Optional[str] = None
 
 @dataclass
 class ExpertCollectorConfig:
@@ -90,7 +115,7 @@ class ExpertCollectorConfig:
     # Video
     save_videos: bool = False
     video_fps: int = 10
-    topdown_camera_height: float = 180.0
+    topdown_camera_height: float = 180.0            
 
     # Trajectory supervision
     horizon_steps: int = 100       # minimum future context required per sample
@@ -107,8 +132,14 @@ class ExpertCollectorConfig:
     # Traffic (map is fixed; only density varies)
     traffic_density_min: float = 0.1 # 0.06
     traffic_density_max: float = 0.2 # 0.08
+    local_route_weights: Dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_LOCAL_ROUTE_WEIGHTS)
+    )
+    idm_variant_weights: Dict[str, float] = field(default_factory=lambda: {"default": 1.0})
     use_hybrid_map: bool = True
-    hybrid_map_sequence: str = "SSXCOCSS"
+    hybrid_map_blocks_config: tuple[dict[str, object], ...] = field(
+        default_factory=lambda: tuple(dict(block) for block in DEFAULT_HYBRID_MAP_CONFIG)
+    )
     map_block_num: int = 5
     num_scenarios: int = 1
 
@@ -161,6 +192,67 @@ class ExpertCollectorConfig:
     expert_idm_lateral_pid_kd: float = ExpertIDMConfig.lateral_pid_kd
 
 
+IDM_VARIANT_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "default": {},
+    "conservative": {
+        "normal_speed_kmh": 25.0,
+        "time_wanted": 1.5,
+        "enable_lane_change": False,
+    },
+    "aggressive": {
+        "normal_speed_kmh": 38.0,
+        "time_wanted": 0.8,
+        "lane_change_freq": 30,
+    },
+}
+
+
+class EpisodeSpecSampler:
+    """Replaces separate traffic/spawn sampling with a structured episode spec."""
+
+    def __init__(self, config: ExpertCollectorConfig, rng: np.random.RandomState):
+        self._config = config
+        self._rng = rng
+        route_weights = {
+            str(name): float(weight)
+            for name, weight in dict(config.local_route_weights).items()
+            if float(weight) > 0.0
+        }
+        for route_name in route_weights:
+            if route_name not in ROUTE_BY_NAME:
+                raise ValueError(f"Unknown local_route: {route_name!r}")
+        total_route_weight = sum(route_weights.values())
+        if total_route_weight <= 0.0:
+            raise ValueError("local_route_weights must contain at least one positive weight")
+        self._local_routes = list(route_weights.keys())
+        self._local_route_probs = [
+            float(route_weights[route]) / float(total_route_weight) for route in self._local_routes
+        ]
+
+        idm_weights = dict(config.idm_variant_weights)
+        self._idm_variants = list(idm_weights.keys())
+        total_idm_weight = sum(idm_weights.values())
+        self._idm_probs = [float(idm_weights[name]) / float(total_idm_weight) for name in self._idm_variants]
+
+    def sample(self) -> EpisodeSpec:
+        local_route = str(self._rng.choice(self._local_routes, p=self._local_route_probs))
+        route = get_required_preset(local_route)
+        density = float(self._rng.uniform(self._config.traffic_density_min, self._config.traffic_density_max))
+        spawn_seed = int(self._rng.randint(0, 2**31 - 1))
+        idm_variant = str(self._rng.choice(self._idm_variants, p=self._idm_probs))
+        return EpisodeSpec(
+            route_preset=route,
+            local_route=local_route,
+            traffic_density=density,
+            spawn_seed=spawn_seed,
+            idm_variant=None if idm_variant == "default" else idm_variant,
+        )
+
+    def fast_forward(self, n_episodes: int):
+        for _ in range(int(n_episodes)):
+            self.sample()
+
+
 # ---------------------------------------------------------------------------
 # Traffic sampling
 # ---------------------------------------------------------------------------
@@ -173,26 +265,21 @@ def sample_episode_spawn_seed(rng: np.random.RandomState) -> int:
     return int(rng.randint(0, 2**31 - 1))
 
 
-def build_episode_rngs(config: ExpertCollectorConfig) -> tuple[np.random.RandomState, np.random.RandomState]:
-    traffic_rng = np.random.RandomState(config.start_seed)
-    spawn_rng = np.random.RandomState(config.start_seed + config.spawn_seed_offset)
-    return traffic_rng, spawn_rng
+def build_episode_rngs(config: ExpertCollectorConfig) -> np.random.RandomState:
+    return np.random.RandomState(config.start_seed)
 
 
 def fast_forward_episode_rngs(
-    traffic_rng: np.random.RandomState,
-    spawn_rng: np.random.RandomState,
+    rng: np.random.RandomState,
     config: ExpertCollectorConfig,
     completed_episodes: int,
 ) -> None:
-    for _ in range(int(completed_episodes)):
-        traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max)
-        spawn_rng.randint(0, 2**31 - 1)
+    EpisodeSpecSampler(config, rng).fast_forward(completed_episodes)
 
 
 def describe_map_config(config: ExpertCollectorConfig) -> str:
     if bool(config.use_hybrid_map):
-        return f"hybrid_fixed ({config.hybrid_map_sequence})"
+        return f"hybrid_fixed ({len(config.hybrid_map_blocks_config)} blocks)"
     return f"random_block_map (map={config.map_block_num}, num_scenarios={config.num_scenarios})"
 
 
@@ -674,6 +761,9 @@ def build_episode_samples(
     frames: List[Dict[str, np.ndarray]],
     config: ExpertCollectorConfig,
     traffic_density: float,
+    route_id: str = "mainline",
+    local_route: str = "unknown",
+    idm_variant: str = "default",
     visualization_dir: Path | None = None,
     episode_index: int = 0,
     map_geometry: List[Dict[str, np.ndarray]] | None = None,
@@ -750,6 +840,7 @@ def build_episode_samples(
             ),
         )
         trajectory_mode = classify_trajectory_mode(raw_trajectory, context)
+        trajectory_mode_value = int(getattr(trajectory_mode, "value", trajectory_mode))
         trajectory = raw_trajectory
         correction_metrics = {
             "strong_correction": 0.0,
@@ -783,7 +874,7 @@ def build_episode_samples(
                 "rgb": current_frame["rgb"],
                 "state_275": current_frame["state_275"],
                 "trajectory": trajectory,
-                "trajectory_mode": np.asarray(int(trajectory_mode), dtype=np.int8),
+                "trajectory_mode": np.asarray(trajectory_mode_value, dtype=np.int8),
                 "trajectory_correction_strength": np.asarray(correction_metrics["strong_correction"], dtype=np.float32),
                 "trajectory_mean_abs_lateral_before": np.asarray(correction_metrics["mean_abs_lateral_before"], dtype=np.float32),
                 "trajectory_mean_abs_lateral_after": np.asarray(correction_metrics["mean_abs_lateral_after"], dtype=np.float32),
@@ -810,6 +901,10 @@ def build_episode_samples(
                 "current_ref_lane_count": np.asarray(current_frame["current_ref_lane_count"], dtype=np.int16),
                 "next_ref_lane_count": np.asarray(current_frame["next_ref_lane_count"], dtype=np.int16),
                 "traffic_density": td_arr,
+                "route_id": route_id,
+                "local_route": local_route,
+                "idm_variant": idm_variant,
+                "episode_id": np.asarray(int(episode_index), dtype=np.int32),
                 "_sample_index": np.asarray(start_idx, dtype=np.int32),
                 "_current_pose": np.asarray(current_pose, dtype=np.float32),
                 "_trajectory_raw": np.asarray(raw_trajectory, dtype=np.float32),
@@ -1095,6 +1190,8 @@ def detect_existing_state(shard_dir: Path, report_dir: Path) -> Dict[str, object
     total_samples = 0
     total_episodes = 0
     mode_counts: Dict[str, int] = {}
+    route_counts: Dict[str, int] = {}
+    local_route_counts: Dict[str, int] = {}
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         total_samples = int(manifest.get("collected_samples", 0))
@@ -1102,6 +1199,10 @@ def detect_existing_state(shard_dir: Path, report_dir: Path) -> Dict[str, object
         correction_summary = manifest.get("trajectory_correction", {}) or {}
         raw_mode_counts = correction_summary.get("mode_counts", {}) or {}
         mode_counts = {str(name): int(count) for name, count in raw_mode_counts.items()}
+        raw_route_counts = manifest.get("route_distribution", {}) or {}
+        route_counts = {str(name): int(count) for name, count in raw_route_counts.items()}
+        raw_local_route_counts = manifest.get("local_route_distribution", {}) or {}
+        local_route_counts = {str(name): int(count) for name, count in raw_local_route_counts.items()}
     else:
         for shard_path in shard_paths:
             with np.load(shard_path, allow_pickle=False) as shard_data:
@@ -1115,6 +1216,8 @@ def detect_existing_state(shard_dir: Path, report_dir: Path) -> Dict[str, object
         "total_samples": total_samples,
         "total_episodes": total_episodes,
         "mode_counts": mode_counts,
+        "route_counts": route_counts,
+        "local_route_counts": local_route_counts,
     }
 
 
@@ -1176,6 +1279,7 @@ def rollout_episode(
     config: ExpertCollectorConfig,
     episode_spawn_seed: int,
     episode_index: int,
+    idm_config: ExpertIDMConfig | None = None,
 ) -> tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]] | None, List[np.ndarray]]:
     """Drive one episode with the selected expert; return raw frame list."""
     if hasattr(env, "engine") and getattr(env.engine, "spawn_manager", None) is not None:
@@ -1229,7 +1333,7 @@ def rollout_episode(
                 idm_policy = build_expert_policy(
                     vehicle,
                     random_seed=config.start_seed,
-                    idm_config=build_expert_idm_config(config),
+                    idm_config=idm_config if idm_config is not None else build_expert_idm_config(config),
                 )
             action = idm_policy.act()
         else:
@@ -1259,6 +1363,8 @@ def write_manifest(
     correction_summary: Dict,
     collection_wall_time_sec: float,
     filter_summary: Dict | None = None,
+    route_counts: Dict[str, int] | None = None,
+    local_route_counts: Dict[str, int] | None = None,
     resume: bool = False,
 ) -> None:
     manifest_path = report_dir / "manifest.json"
@@ -1275,6 +1381,8 @@ def write_manifest(
         "expert_type": config.expert_type,
         "map": describe_map_config(config),
         "traffic_density_range": [config.traffic_density_min, config.traffic_density_max],
+        "route_distribution": dict(route_counts or {}),
+        "local_route_distribution": dict(local_route_counts or {}),
         "collection_wall_time_sec": float(collection_wall_time_sec),
         "splits": {name: len(shards) for name, shards in split_summary.items()},
         "trajectory_correction": correction_summary,
@@ -1333,6 +1441,12 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         mode_counts: Dict[str, int] = {mode.name.lower(): 0 for mode in TrajectoryMode}
         for mode_name, count in dict(existing["mode_counts"]).items():
             mode_counts[str(mode_name)] = int(count)
+        route_counts: Dict[str, int] = defaultdict(int)
+        for route_name, count in dict(existing.get("route_counts", {})).items():
+            route_counts[str(route_name)] = int(count)
+        local_route_counts: Dict[str, int] = defaultdict(int)
+        for route_name, count in dict(existing.get("local_route_counts", {})).items():
+            local_route_counts[str(route_name)] = int(count)
         print(
             f"[resume] detected {total_samples} samples, {total_episodes} episodes, {start_shard_index} shards"
         )
@@ -1341,9 +1455,12 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         total_samples = 0
         total_episodes = 0
         mode_counts = {mode.name.lower(): 0 for mode in TrajectoryMode}
+        route_counts = defaultdict(int)
+        local_route_counts = defaultdict(int)
 
-    traffic_rng, spawn_rng = build_episode_rngs(config)
-    fast_forward_episode_rngs(traffic_rng, spawn_rng, config, total_episodes)
+    episode_rng = build_episode_rngs(config)
+    fast_forward_episode_rngs(episode_rng, config, total_episodes)
+    sampler = EpisodeSpecSampler(config, episode_rng)
     writer = ShardWriter(shard_dir, config.samples_per_shard, start_shard_index=start_shard_index)
     trajectory_filter = build_trajectory_filter_pipeline(config)
     filter_stats = {
@@ -1361,7 +1478,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         "num_scenarios": int(config.num_scenarios),
         "image_on_cuda": True,
         "use_hybrid_map": bool(config.use_hybrid_map),
-        "hybrid_map_sequence": config.hybrid_map_sequence,
+        "hybrid_map_blocks_config": [dict(block) for block in config.hybrid_map_blocks_config],
         "map": int(config.map_block_num),
         "top_down_camera_initial_z": float(config.topdown_camera_height),
     }
@@ -1385,18 +1502,32 @@ def run_collection(config: ExpertCollectorConfig) -> None:
 
     try:
         while total_samples < config.target_samples:
-            # 4. 采集新一轮的交通密度并注入环境配置
-            traffic_density = sample_traffic_density(traffic_rng, config)
-            episode_spawn_seed = sample_episode_spawn_seed(spawn_rng)
-            env.config["traffic_density"] = traffic_density
+            # 4. 采样一个结构化 episode spec 并注入环境配置
+            spec = sampler.sample()
+            env.config["traffic_density"] = spec.traffic_density
+            env.config["route_preset"] = spec.route_preset
+            env.config["local_route"] = spec.local_route
+            route_block_ids = list(get_route_blocks(spec.local_route))
+            env.config["ego_main_route_block_ids"] = route_block_ids
+            if hasattr(env, "engine") and getattr(env.engine, "global_config", None) is not None:
+                env.engine.global_config["traffic_density"] = spec.traffic_density
+                env.engine.global_config["route_preset"] = spec.route_preset
+                env.engine.global_config["local_route"] = spec.local_route
+                env.engine.global_config["ego_main_route_block_ids"] = route_block_ids
+
+            idm_config = build_expert_idm_config(config)
+            if spec.idm_variant is not None:
+                overrides = IDM_VARIANT_CONFIGS.get(spec.idm_variant, {})
+                idm_config = dataclasses.replace(idm_config, **overrides)
 
             # 5. 驾驶一轮新 episode，得到原始帧列表和地图几何信息
             episode_index = total_episodes + 1
             frames, episode_map_geometry, video_frames = rollout_episode(
                 env,
                 config,
-                episode_spawn_seed,
+                spec.spawn_seed,
                 episode_index=episode_index,
+                idm_config=idm_config,
             )
             map_geometry = resolve_map_visualization_geometry(
                 env=env,
@@ -1408,7 +1539,10 @@ def run_collection(config: ExpertCollectorConfig) -> None:
             samples = build_episode_samples(
                 frames,
                 config,
-                traffic_density,
+                spec.traffic_density,
+                route_id=spec.route_preset,
+                local_route=spec.local_route,
+                idm_variant=spec.idm_variant or "default",
                 visualization_dir=visualization_dir if bool(config.trajectory_visualization_enabled) else None,
                 episode_index=episode_index,
                 map_geometry=map_geometry,
@@ -1441,6 +1575,8 @@ def run_collection(config: ExpertCollectorConfig) -> None:
             total_samples += len(storable_samples)
             total_episodes += 1
             total_env_steps += len(frames)
+            route_counts[spec.route_preset] += len(storable_samples)
+            local_route_counts[spec.local_route] += len(storable_samples)
             for sample in storable_samples:
                 mode_name = trajectory_mode_name(int(sample["trajectory_mode"]))
                 mode_counts[mode_name] += 1
@@ -1458,7 +1594,8 @@ def run_collection(config: ExpertCollectorConfig) -> None:
 
             print(
                 f"[ep={total_episodes}] total_samples={total_samples}/{config.target_samples} "
-                f"density={traffic_density:.3f} frames={len(frames)} ep_samples={len(storable_samples)} "
+                f"local_route={spec.local_route} preset={spec.route_preset} density={spec.traffic_density:.3f} "
+                f"idm_variant={spec.idm_variant or 'default'} frames={len(frames)} ep_samples={len(storable_samples)} "
                 f"step/s={step_per_sec:.2f} sample/s={sample_per_sec:.2f} ETA={format_eta(eta_seconds)}"
             )
             if trajectory_filter is not None:
@@ -1516,6 +1653,8 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         split_summary,
         correction_summary,
         filter_summary=filter_summary,
+        route_counts=dict(route_counts),
+        local_route_counts=dict(local_route_counts),
         collection_wall_time_sec=collection_wall_time_sec,
         resume=bool(config.resume),
     )
@@ -1547,8 +1686,19 @@ def parse_args() -> ExpertCollectorConfig:
             opts["type"] = _coerce_bool
         elif isinstance(default, Path):
             opts["type"] = Path
+        elif isinstance(default, dict):
+            opts["type"] = lambda value: dict(json.loads(value))
         elif isinstance(default, tuple):
-            opts["type"] = lambda value: tuple(part.strip() for part in str(value).split(",") if part.strip())
+            def _parse_tuple(value):
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    return tuple(part.strip() for part in str(value).split(",") if part.strip())
+                if isinstance(parsed, list):
+                    return tuple(parsed)
+                return tuple(part.strip() for part in str(value).split(",") if part.strip())
+
+            opts["type"] = _parse_tuple
         else:
             opts["type"] = type(default)
         if f.name == "expert_type":

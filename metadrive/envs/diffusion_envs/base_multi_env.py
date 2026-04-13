@@ -3,7 +3,6 @@ from metadrive.envs.diffusion_envs.custom_hybrid_map import MAHybridPGMapManager
 from metadrive.obs.state_obs import LidarStateObservation
 from metadrive.obs.diff_obs.top_down_state_obs_multi_channel import TopDownLidarStateObservation, DatasetCollectObservation
 from metadrive.component.sensors.rgb_camera import RGBCamera
-from metadrive.component.pgblock.first_block import FirstPGBlock
 from metadrive.utils import Config
 from metadrive.manager.traffic_manager import TrafficMode
 from metadrive.engine.engine_utils import initialize_global_config
@@ -11,7 +10,99 @@ from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser
 import numpy as np
 
 
+# 主线固定路线：
+DEFAULT_MAIN_ROUTE_BLOCK_IDS = (
+    "s0",
+    "c0",
+    "c1",
+    "g0",
+    "s_main0",
+    "x0",
+    "s_main1",
+    "c2",
+    "g1",
+    "c3",
+    "merge0",
+    "s_main2",
+    "split0",
+    "c4",
+)
+
+DEFAULT_RAMP_MERGE_ROUTE_BLOCK_IDS = (
+    "s0",
+    "c0",
+    "c1",
+    "g0",
+    "s_ramp0",
+    "c0_ramp0",
+    "s_ramp1",
+    "c1_ramp0",
+    "h_ramp0",
+    "g1",
+    "c3",
+    "merge0",
+    "s_main2",
+    "split0",
+    "c4",
+)
+
+DEFAULT_ROUTE_PRESET = "ramp_merge"
+ROUTE_PRESET_BLOCK_IDS = {
+    "mainline": DEFAULT_MAIN_ROUTE_BLOCK_IDS,
+    "ramp_merge": DEFAULT_RAMP_MERGE_ROUTE_BLOCK_IDS,
+}
+
+
+DEFAULT_HYBRID_MAP_CONFIG = [
+    {"block_id": "s0", "id": "S", "parent_block_id": "root", "parent_socket_index": 0, "length": 300.0},
+    {"block_id": "c0", "id": "C", "parent_block_id": "s0", "parent_socket_index": 0, "length": 100.0, "radius": 40.0, "angle": 150.0, "dir": 1},
+    {"block_id": "c1", "id": "C", "parent_block_id": "c0", "parent_socket_index": 0, "length": 100.0, "radius": 40.0, "angle": 180.0, "dir": 0},
+    {"block_id": "g0", "id": "G", "parent_block_id": "c1", "parent_socket_index": 0, "length": 100.0, "extension_length": 30.0},
+    {"block_id": "s_main0", "id": "S", "parent_block_id": "g0", "parent_socket_index": 0, "length": 200.0},
+    {"block_id": "x0", "id": "X", "parent_block_id": "s_main0", "parent_socket_index": 0, "radius": 60.0, "change_lane_num": 0, "decrease_increase": 0},
+    {"block_id": "s_main1", "id": "S", "parent_block_id": "x0", "parent_socket_index": 0, "length": 150.0},
+    {"block_id": "c2", "id": "C", "parent_block_id": "s_main1", "parent_socket_index": 0, "length": 100.0, "radius": 55.0, "angle": 90.0, "dir": 1},
+    {"block_id": "g1", "id": "g", "parent_block_id": "c2", "parent_socket_index": 0, "length": 100.0, "extension_length": 80.0},
+    {"block_id": "c3", "id": "C", "parent_block_id": "g1", "parent_socket_index": 0, "length": 100.0, "radius": 35.0, "angle": 30.0, "dir": 1},
+    {"block_id": "merge0", "id": "y", "parent_block_id": "c3", "parent_socket_index": 0, "length": 100.0, "lane_num": 2},
+    {"block_id": "s_main2", "id": "S", "parent_block_id": "merge0", "parent_socket_index": 0, "length": 20.0},
+    {"block_id": "split0", "id": "Y", "parent_block_id": "s_main2", "parent_socket_index": 0, "length": 200.0, "lane_num": 2},
+    {"block_id": "c4", "id": "C", "parent_block_id": "split0", "parent_socket_index": 0, "length": 150.0, "radius": 45.0, "angle": 60.0, "dir": 1},
+    {"block_id": "s_ramp0", "id": "s", "parent_block_id": "g0", "parent_socket_index": 1, "length": 60.0},
+    {"block_id": "c0_ramp0", "id": "c", "parent_block_id": "s_ramp0", "parent_socket_index": 0, "length": 50.0, "radius": 50.0, "angle": 50.0, "dir": 1},
+    {"block_id": "s_ramp1", "id": "s", "parent_block_id": "c0_ramp0", "parent_socket_index": 0, "length": 60.0},
+    {"block_id": "c1_ramp0", "id": "c", "parent_block_id": "s_ramp1", "parent_socket_index": 0, "length": 50.0, "radius": 80.0, "angle": 130.0, "dir": 1},
+    {
+        "block_id": "h_ramp0",
+        "id": "H",
+        "parent_block_id": "c1_ramp0",
+        "parent_socket_index": 0,
+        "secondary_parent_block_id": "g1",
+        "secondary_parent_socket_index": 1,
+    },
+]
+
+
 class BaseMultiEnv(MultiAgentMetaDrive):
+    def __init__(self, config=None):
+        normalized_config = self._normalize_route_config(config)
+        super().__init__(normalized_config)
+
+    @classmethod
+    def _resolve_route_block_ids(cls, route_preset: str):
+        try:
+            return ROUTE_PRESET_BLOCK_IDS[route_preset]
+        except KeyError as exc:
+            valid = ", ".join(sorted(ROUTE_PRESET_BLOCK_IDS))
+            raise ValueError(f"Unknown route_preset '{route_preset}'. Expected one of: {valid}.") from exc
+
+    @classmethod
+    def _normalize_route_config(cls, config):
+        normalized = {} if config is None else dict(config)
+        if "route_preset" in normalized:
+            normalized["ego_main_route_block_ids"] = cls._resolve_route_block_ids(normalized["route_preset"])
+        return normalized
+
     @staticmethod
     def default_config() -> Config:
         config = MultiAgentMetaDrive.default_config()
@@ -24,13 +115,18 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 start_seed=1,
                 num_scenarios=1,      # 地图池大小，从(seed, seed+num_scenarios)中随机选取seed生成地图
                 map=5,      # 随机指定Block数量
-                use_hybrid_map=True,         # True → 使用 MAHybridMap(指定 block 类型序列)
-                hybrid_map_sequence="SSXCOCSS",    # block 序列字符串，如 "SXC"、"SSXCS"
+                use_hybrid_map=True,         # True → 使用 MAHybridMap(指定 block 配置列表)
+                hybrid_map_blocks_config=DEFAULT_HYBRID_MAP_CONFIG,  # block 配置列表
                 
                 horizon=2000,
                 force_seed_spawn_manager=True,  # 车辆生成点seed是否与全局seed绑定（可复现性）
                 ego_spawn_mode="main_route_only",
-                ego_spawn_route_start=(FirstPGBlock.NODE_2, FirstPGBlock.NODE_3),
+                route_preset=DEFAULT_ROUTE_PRESET,
+                # 手动指定 ego 走的主线（graph_block_id 顺序列表）。
+                # 起点 = 第一个 block_id 的第一条正向 respawn road，
+                # 终点 = 最后一个 block_id 的第一条正向 respawn road 的 end_node。
+                # 取代了原先从 socket 自动走到尽头的实现。
+                ego_main_route_block_ids=DEFAULT_MAIN_ROUTE_BLOCK_IDS,
                 ego_spawn_buffer_mode="traffic_gap",
                 ego_spawn_buffer_scale=1.0,
                 traffic_spawn_min_gap_ahead=12.0,
@@ -51,6 +147,7 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 num_agents=1,
                 vehicle_config=dict(
                     vehicle_model="xl",  # 卡车（需在 vehicle_config 子字典中指定才生效）
+                    destination=None,
                 ),
                 crash_done=True,  # agent碰撞后移除，所有agent都移除后，episode结束
                 out_of_road_done=True,

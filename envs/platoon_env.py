@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, Mapping, Optional
+import copy
 
 import numpy as np
 import torch
@@ -13,7 +14,7 @@ except Exception:  # pragma: no cover - fallback for older setups
 try:  # pragma: no cover - exercised only in real MetaDrive runtime
     from metadrive.component.sensors.rgb_camera import RGBCamera
     from metadrive.component.pgblock.first_block import FirstPGBlock
-    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
+    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv, DEFAULT_HYBRID_MAP_CONFIG
     from metadrive.obs.diff_obs.top_down_state_obs_multi_channel import DatasetCollectObservation
     from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
     from metadrive.policy.diffusion_policy.transfuser_features import observation_to_features
@@ -22,6 +23,7 @@ try:  # pragma: no cover - exercised only in real MetaDrive runtime
 except Exception as exc:  # pragma: no cover - import errors are surfaced at runtime
     RGBCamera = None  # type: ignore
     FirstPGBlock = None  # type: ignore
+    DEFAULT_HYBRID_MAP_CONFIG = ()  # type: ignore
     _METADRIVE_IMPORT_ERROR = exc
     BaseMultiEnv = object  # type: ignore
     DatasetCollectObservation = object  # type: ignore
@@ -84,7 +86,7 @@ class PlatoonEnvConfig:
         use_render: bool = False,
         allow_respawn: bool = False,
         use_hybrid_map: bool = True,
-        hybrid_map_sequence: str = "SSXCOCSS",
+        hybrid_map_blocks_config: Optional[list[dict[str, object]]] = None,
         num_scenarios: int = 1,
         traffic_density: float = 0.04,
         horizon: int = 1000,
@@ -100,7 +102,12 @@ class PlatoonEnvConfig:
         self.use_render = bool(use_render)
         self.allow_respawn = bool(allow_respawn)
         self.use_hybrid_map = bool(use_hybrid_map)
-        self.hybrid_map_sequence = str(hybrid_map_sequence)
+        if hybrid_map_blocks_config is None and self.use_hybrid_map:
+            self.hybrid_map_blocks_config = copy.deepcopy(list(DEFAULT_HYBRID_MAP_CONFIG))
+        elif hybrid_map_blocks_config is None:
+            self.hybrid_map_blocks_config = None
+        else:
+            self.hybrid_map_blocks_config = copy.deepcopy(hybrid_map_blocks_config)
         self.num_scenarios = int(num_scenarios)
         self.traffic_density = float(traffic_density)
         self.horizon = int(horizon)
@@ -157,7 +164,7 @@ class PlatoonEnv(BaseMultiEnv):
             "use_render",
             "allow_respawn",
             "use_hybrid_map",
-            "hybrid_map_sequence",
+            "hybrid_map_blocks_config",
             "num_scenarios",
             "traffic_density",
             "horizon",
@@ -178,7 +185,7 @@ class PlatoonEnv(BaseMultiEnv):
             "use_render",
             "allow_respawn",
             "use_hybrid_map",
-            "hybrid_map_sequence",
+            "hybrid_map_blocks_config",
             "num_scenarios",
             "traffic_density",
             "horizon",
@@ -213,14 +220,14 @@ class PlatoonEnv(BaseMultiEnv):
             }
             for i in range(self.platoon_config.num_agents)
         }
-        # BaseMultiEnv already defaults: use_hybrid_map=True, hybrid_map_sequence="SSXCOCSS",
+        # BaseMultiEnv already defaults: use_hybrid_map=True,
         # traffic_mode=TrafficMode.Trigger, agent_observation=LidarStateObservation.
         # Only override what differs from those defaults.
         return {
             "num_agents": self.platoon_config.num_agents,
             "allow_respawn": self.platoon_config.allow_respawn,
             "use_hybrid_map": self.platoon_config.use_hybrid_map,
-            "hybrid_map_sequence": self.platoon_config.hybrid_map_sequence,
+            "hybrid_map_blocks_config": self.platoon_config.hybrid_map_blocks_config,
             "num_scenarios": self.platoon_config.num_scenarios,
             "use_render": self.platoon_config.use_render,
             "traffic_density": self.platoon_config.traffic_density,

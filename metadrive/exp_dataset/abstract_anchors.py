@@ -15,7 +15,7 @@ from metadrive.exp_dataset.semantic_labeler import BehaviorMode, REQUIRED_LABEL_
 
 
 DEFAULT_DATASET_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaData_strong_idm_single")
-DEFAULT_NUM_ANCHORS = 9
+DEFAULT_NUM_ANCHORS = 20
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parent / "metadrive_anchors.npy"
 DEFAULT_FIGURE_PATH = Path(__file__).resolve().parent / "metadrive_anchors.png"
 DEFAULT_TRAJECTORY_KEY = "trajectory"

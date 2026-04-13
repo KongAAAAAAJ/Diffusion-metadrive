@@ -48,6 +48,12 @@ class V2TransfuserModel(nn.Module):
         # usually, the BEV features are variable in size.
         self._bev_downscale = nn.Conv2d(self._backbone.num_features, config.tf_d_model, kernel_size=1)
         self._status_encoding = nn.Linear(config.status_feature_dim, config.tf_d_model)  # *将状态信息（19D ego_state + navi）映射成与Transformer输入维度相同的特征
+        self._target_point_mlp = nn.Sequential(
+            nn.Linear(2, config.tf_d_model),
+            nn.ReLU(),
+            nn.Linear(config.tf_d_model, config.target_point_dim),
+            nn.ReLU(),
+        )
 
         self._bev_semantic_head = nn.Sequential(
             nn.Conv2d(
@@ -114,7 +120,13 @@ class V2TransfuserModel(nn.Module):
 
         # *单样本 shape=[19]，batch 后 shape=[B, 19]
         status_feature: torch.Tensor = features["status_feature"]  # *导航命令[left, straight, right, lane_follow/other] + 车速[vx,vy] + 加速度[ax,ay]
+        target_point: Optional[torch.Tensor] = features.get("target_point")
         batch_size = status_feature.shape[0]
+        target_point_embed = (
+            self._target_point_mlp(target_point)
+            if target_point is not None
+            else None
+        )
 
         bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)  # *bev_feature是下采样后的BEV特征(512*512)，
         cross_bev_feature = bev_feature_upscale
@@ -144,7 +156,16 @@ class V2TransfuserModel(nn.Module):
 
         output: Dict[str, torch.Tensor] = {"bev_semantic_map": bev_semantic_map}
 
-        trajectory = self._trajectory_head(trajectory_query,agents_query, cross_bev_feature,bev_spatial_shape,status_encoding[:, None],targets=targets,global_img=None)
+        trajectory = self._trajectory_head(
+            trajectory_query,
+            agents_query,
+            cross_bev_feature,
+            bev_spatial_shape,
+            status_encoding[:, None],
+            targets=targets,
+            global_img=None,
+            target_point_embed=target_point_embed,
+        )
         output.update(trajectory)
 
         agents = self._agent_head(agents_query)
@@ -158,7 +179,13 @@ class V2TransfuserModel(nn.Module):
         camera_feature: torch.Tensor = features["camera_feature"]
         lidar_feature: torch.Tensor = features["lidar_feature"]
         status_feature: torch.Tensor = features["status_feature"]
+        target_point: Optional[torch.Tensor] = features.get("target_point")
         batch_size = status_feature.shape[0]
+        target_point_embed = (
+            self._target_point_mlp(target_point)
+            if target_point is not None
+            else None
+        )
 
         bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
         cross_bev_feature = bev_feature_upscale
@@ -195,6 +222,7 @@ class V2TransfuserModel(nn.Module):
             bev_spatial_shape,
             status_encoding[:, None],
             global_img=None,
+            target_point_embed=target_point_embed,
         )
         output.update(trajectory)
 
@@ -252,18 +280,21 @@ class DiffMotionPlanningRefinementModule(nn.Module):
         embed_dims=256,
         ego_fut_ts=8,
         ego_fut_mode=20,
+        target_point_dim=0,
         if_zeroinit_reg=True,
     ):
         super(DiffMotionPlanningRefinementModule, self).__init__()
         self.embed_dims = embed_dims    # 特征嵌入的维度
         self.ego_fut_ts = ego_fut_ts    # 预测的未来时间步数 8
         self.ego_fut_mode = ego_fut_mode    # 预测的未来轨迹模式数 20
+        self.target_point_dim = target_point_dim
+        guided_dim = embed_dims + target_point_dim
         self.plan_cls_branch = nn.Sequential(
-            *linear_relu_ln(embed_dims, 1, 2),
+            *linear_relu_ln(embed_dims, 1, 2, input_dims=guided_dim),
             nn.Linear(embed_dims, 1),
         )
         self.plan_reg_branch = nn.Sequential(
-            nn.Linear(embed_dims, embed_dims),
+            nn.Linear(guided_dim, embed_dims),
             nn.ReLU(),
             nn.Linear(embed_dims, embed_dims),
             nn.ReLU(),
@@ -283,8 +314,14 @@ class DiffMotionPlanningRefinementModule(nn.Module):
     def forward(
         self,
         traj_feature,
+        target_point_embed=None,
     ):
         bs, ego_fut_mode, _ = traj_feature.shape
+        if self.target_point_dim > 0:
+            if target_point_embed is None:
+                target_point_embed = traj_feature.new_zeros((bs, self.target_point_dim))
+            target_point_embed = target_point_embed.unsqueeze(1).expand(-1, ego_fut_mode, -1)
+            traj_feature = torch.cat([traj_feature, target_point_embed], dim=-1)
 
         # 6. get final prediction
         traj_feature = traj_feature.view(bs, ego_fut_mode,-1)
@@ -377,6 +414,7 @@ class CustomTransformerDecoderLayer(nn.Module):
             embed_dims=config.tf_d_model,
             ego_fut_ts=num_poses,
             ego_fut_mode=config.ego_fut_mode,
+            target_point_dim=config.target_point_dim,
         )
 
     def forward(self, 
@@ -388,6 +426,7 @@ class CustomTransformerDecoderLayer(nn.Module):
                 ego_query, 
                 time_embed, 
                 status_encoding,
+                target_point_embed=None,
                 global_img=None):
         traj_feature = self.cross_bev_attention(traj_feature,noisy_traj_points,bev_feature,bev_spatial_shape)
         traj_feature = traj_feature + self.dropout(self.cross_agent_attention(traj_feature, agents_query,agents_query)[0])
@@ -406,7 +445,7 @@ class CustomTransformerDecoderLayer(nn.Module):
         
         # 4.9 predict the offset & heading  
         # *self.task_decoder预测的是噪声残差，即去噪轨迹点与加噪轨迹点的差值，最终轨迹点=加噪轨迹点+残差
-        poses_reg, poses_cls = self.task_decoder(traj_feature) #bs,20,8,3; bs,20
+        poses_reg, poses_cls = self.task_decoder(traj_feature, target_point_embed=target_point_embed) #bs,20,8,3; bs,20
         poses_reg[...,:2] = poses_reg[...,:2] + noisy_traj_points
         poses_reg[..., StateSE2Index.HEADING] = poses_reg[..., StateSE2Index.HEADING].tanh() * np.pi
 
@@ -437,13 +476,25 @@ class CustomTransformerDecoder(nn.Module):
                 ego_query, 
                 time_embed, 
                 status_encoding,
+                target_point_embed=None,
                 global_img=None,
                 return_traj_feature: bool = False):
         poses_reg_list = []
         poses_cls_list = []
         traj_points = noisy_traj_points
         for mod in self.layers:
-            poses_reg, poses_cls = mod(traj_feature, traj_points, bev_feature, bev_spatial_shape, agents_query, ego_query, time_embed, status_encoding,global_img)
+            poses_reg, poses_cls = mod(
+                traj_feature,
+                traj_points,
+                bev_feature,
+                bev_spatial_shape,
+                agents_query,
+                ego_query,
+                time_embed,
+                status_encoding,
+                target_point_embed,
+                global_img,
+            )
             poses_reg_list.append(poses_reg)
             poses_cls_list.append(poses_cls)
             traj_points = poses_reg[...,:2].clone().detach()
@@ -529,10 +580,20 @@ class TrajectoryHead(nn.Module):
         targets=None,
         global_img=None,
         return_candidates: bool = False,
+        target_point_embed=None,
     ) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
         if self.training:
-            return self.forward_train(ego_query, agents_query, bev_feature,bev_spatial_shape,status_encoding,targets,global_img)
+            return self.forward_train(
+                ego_query,
+                agents_query,
+                bev_feature,
+                bev_spatial_shape,
+                status_encoding,
+                targets,
+                global_img,
+                target_point_embed=target_point_embed,
+            )
         else:
             return self.forward_test(
                 ego_query,
@@ -542,9 +603,19 @@ class TrajectoryHead(nn.Module):
                 status_encoding,
                 global_img,
                 return_candidates=return_candidates,
+                target_point_embed=target_point_embed,
             )
 
-    def infer_multimodal(self, ego_query, agents_query, bev_feature, bev_spatial_shape, status_encoding, global_img=None) -> Dict[str, torch.Tensor]:
+    def infer_multimodal(
+        self,
+        ego_query,
+        agents_query,
+        bev_feature,
+        bev_spatial_shape,
+        status_encoding,
+        global_img=None,
+        target_point_embed=None,
+    ) -> Dict[str, torch.Tensor]:
         """Return multimodal trajectory candidates before selector sampling."""
         return self.forward_test(
             ego_query,
@@ -554,10 +625,21 @@ class TrajectoryHead(nn.Module):
             status_encoding,
             global_img,
             return_candidates=True,
+            target_point_embed=target_point_embed,
         )
 
 
-    def forward_train(self, ego_query,agents_query,bev_feature,bev_spatial_shape,status_encoding, targets=None,global_img=None) -> Dict[str, torch.Tensor]:
+    def forward_train(
+        self,
+        ego_query,
+        agents_query,
+        bev_feature,
+        bev_spatial_shape,
+        status_encoding,
+        targets=None,
+        global_img=None,
+        target_point_embed=None,
+    ) -> Dict[str, torch.Tensor]:
         bs = ego_query.shape[0]
         device = ego_query.device
         # 1. add truncated noise to the plan anchor
@@ -588,7 +670,18 @@ class TrajectoryHead(nn.Module):
 
 
         # 4. begin the stacked decoder  预测去噪轨迹点
-        poses_reg_list, poses_cls_list = self.diff_decoder(traj_feature, noisy_traj_points, bev_feature, bev_spatial_shape, agents_query, ego_query, time_embed, status_encoding,global_img)
+        poses_reg_list, poses_cls_list = self.diff_decoder(
+            traj_feature,
+            noisy_traj_points,
+            bev_feature,
+            bev_spatial_shape,
+            agents_query,
+            ego_query,
+            time_embed,
+            status_encoding,
+            target_point_embed,
+            global_img,
+        )
 
         trajectory_loss_dict = {}
         ret_traj_loss = 0
@@ -611,6 +704,7 @@ class TrajectoryHead(nn.Module):
         status_encoding,
         global_img,
         return_candidates: bool = False,
+        target_point_embed=None,
     ) -> Dict[str, torch.Tensor]:
         step_num = 2
         bs = ego_query.shape[0]
@@ -662,6 +756,7 @@ class TrajectoryHead(nn.Module):
                     ego_query,
                     time_embed,
                     status_encoding,
+                    target_point_embed,
                     global_img,
                     return_traj_feature=True,
                 )
@@ -675,6 +770,7 @@ class TrajectoryHead(nn.Module):
                     ego_query,
                     time_embed,
                     status_encoding,
+                    target_point_embed,
                     global_img,
                 )
             poses_reg = poses_reg_list[-1]

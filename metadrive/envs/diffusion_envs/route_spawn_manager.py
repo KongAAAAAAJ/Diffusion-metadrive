@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import List, Optional
 
-from metadrive.component.pgblock.first_block import FirstPGBlock
 from metadrive.manager.spawn_manager import SpawnManager
 
 
@@ -11,68 +10,119 @@ def _road_key(road) -> tuple[str, str]:
 
 
 class RouteAwareSpawnManager(SpawnManager):
-    """Spawn ego only on the forward main-route roads of the current map."""
+    """Spawn ego only on a **manually** specified main-route block chain.
 
-    DEFAULT_ROUTE_START = (FirstPGBlock.NODE_2, FirstPGBlock.NODE_3)
+    与之前的实现不同，这里不再做任何 socket 自动搜索 / auto-walk；
+    全部路由信息来自 global_config["ego_main_route_block_ids"]：一个
+    按顺序写死的 graph_block_id 列表（例如 s0 -> c0 -> ... -> c4）。
+    """
+
     DEFAULT_TRAFFIC_GAP = 10.0
 
     def __init__(self):
         super().__init__()
         self.ego_spawn_zones = []
 
-    def _iter_positive_respawn_roads(self, current_map) -> Iterable:
+    # ------------------------------------------------------------------
+    # 工具：block 查找 + 正向 respawn road 提取
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _get_block_by_graph_id(current_map, block_id):
+        if current_map is None or block_id is None:
+            return None
         for block in getattr(current_map, "blocks", []) or []:
-            for road in getattr(block, "get_respawn_roads", lambda: [])() or []:
-                if hasattr(road, "is_negative_road") and road.is_negative_road():
-                    continue
-                yield road
-
-    def _select_next_route_road(self, current_map, current_road):
-        for block in getattr(current_map, "blocks", [])[1:]:
-            pre_socket = getattr(block, "pre_block_socket", None)
-            pre_road = getattr(pre_socket, "positive_road", None)
-            if pre_road is None or _road_key(pre_road) != _road_key(current_road):
-                continue
-            block_candidates = [
-                road for road in getattr(block, "get_respawn_roads", lambda: [])() or []
-                if not (hasattr(road, "is_negative_road") and road.is_negative_road())
-                and road.start_node == current_road.end_node
-            ]
-            if block_candidates:
-                return sorted(block_candidates, key=_road_key)[0]
+            if getattr(block, "graph_block_id", None) == block_id:
+                return block
         return None
 
+    @classmethod
+    def _get_first_positive_respawn_road(cls, block):
+        if block is None:
+            return None
+        roads = [
+            road for road in getattr(block, "get_respawn_roads", lambda: [])() or []
+            if not (hasattr(road, "is_negative_road") and road.is_negative_road())
+        ]
+        if not roads:
+            return None
+        return sorted(roads, key=_road_key)[0]
+
+    @classmethod
+    def _get_first_positive_socket_road(cls, block):
+        if block is None:
+            return None
+        sockets = getattr(block, "get_socket_list", lambda: [])() or []
+        roads = [socket.positive_road for socket in sockets if getattr(socket, "positive_road", None) is not None]
+        if not roads:
+            sockets_dict = getattr(block, "_sockets", {}) or {}
+            roads = [
+                socket.positive_road
+                for socket in sockets_dict.values()
+                if getattr(socket, "positive_road", None) is not None
+            ]
+        if not roads:
+            return None
+        return sorted(roads, key=_road_key)[0]
+
+    @classmethod
+    def _get_first_positive_route_road(cls, block):
+        road = cls._get_first_positive_respawn_road(block)
+        if road is not None:
+            return road
+        return cls._get_first_positive_socket_road(block)
+
+    # ------------------------------------------------------------------
+    # 主线路由构造
+    # ------------------------------------------------------------------
+    def _get_configured_route_block_ids(self) -> List[str]:
+        raw = self.engine.global_config.get("ego_main_route_block_ids") or []
+        block_ids = [str(bid) for bid in raw if bid]
+        if not block_ids:
+            raise ValueError(
+                "ego_main_route_block_ids must be a non-empty list of graph_block_id strings."
+            )
+        return block_ids
+
     def get_main_route_spawn_roads(self, current_map):
+        """根据手动 block 链返回正向 route roads 列表。"""
         if current_map is None:
             return []
 
-        start_node, end_node = tuple(
-            self.engine.global_config.get("ego_spawn_route_start", self.DEFAULT_ROUTE_START)
-        )
-        start_candidates = [
-            road for road in self._iter_positive_respawn_roads(current_map)
-            if _road_key(road) == (start_node, end_node)
-        ]
-        if not start_candidates:
-            return []
-
-        current_road = sorted(start_candidates, key=_road_key)[0]
-        route_roads = [current_road]
-        seen_road_keys = {_road_key(current_road)}
-
-        while True:
-            next_road = self._select_next_route_road(current_map, current_road)
-            if next_road is None:
-                break
-            next_key = _road_key(next_road)
-            if next_key in seen_road_keys:
-                break
-            route_roads.append(next_road)
-            seen_road_keys.add(next_key)
-            current_road = next_road
-
+        block_ids = self._get_configured_route_block_ids()
+        route_roads = []
+        for block_id in block_ids:
+            block = self._get_block_by_graph_id(current_map, block_id)
+            if block is None:
+                raise ValueError(
+                    f"ego_main_route_block_ids references unknown graph_block_id: {block_id!r}"
+                )
+            road = self._get_first_positive_route_road(block)
+            if road is None:
+                raise ValueError(
+                    f"Block {block_id!r} has no positive route road; "
+                    "cannot be used in ego_main_route_block_ids."
+                )
+            route_roads.append(road)
         return route_roads
 
+    def _resolve_destination_node(self, current_map) -> Optional[str]:
+        """终点 = 手动 block 链最后一个 block 的首条正向 respawn road 的 end_node。"""
+        block_ids = self._get_configured_route_block_ids()
+        last_block = self._get_block_by_graph_id(current_map, block_ids[-1])
+        if last_block is None:
+            raise ValueError(
+                f"Destination block {block_ids[-1]!r} not found in current map."
+            )
+        road = self._get_first_positive_route_road(last_block)
+        if road is None:
+            raise ValueError(
+                f"Destination block {block_ids[-1]!r} has no positive route road."
+            )
+        return road.end_node
+
+    # ------------------------------------------------------------------
+    # SpawnManager overrides
+    # ------------------------------------------------------------------
     def _refresh_main_route_spawn_roads(self):
         current_map = getattr(self.engine, "current_map", None)
         if current_map is None and hasattr(self, "current_map"):
@@ -80,7 +130,10 @@ class RouteAwareSpawnManager(SpawnManager):
         route_roads = self.get_main_route_spawn_roads(current_map)
         if not route_roads:
             return
-        self.refresh_spawn_roads(route_roads)
+        # 只用链里的第一段作为 ego 的出生路段，后续路段仅作为路由参考，
+        # 但保留原行为（把整条链作为 spawn_roads 传入）以便 traffic manager
+        # 等消费者可以读取完整主线。
+        self.refresh_spawn_roads(route_roads[:1])
 
     def refresh_spawn_roads(self, spawn_roads):
         agent_configs, safe_spawn_places = self._auto_fill_spawn_roads_randomly(spawn_roads)
@@ -112,3 +165,12 @@ class RouteAwareSpawnManager(SpawnManager):
         self._refresh_main_route_spawn_roads()
         super().reset()
         self._cache_ego_spawn_zones()
+
+    def update_destination_for(self, agent_id, vehicle_config):
+        current_map = getattr(self.engine, "current_map", None)
+        destination = self._resolve_destination_node(current_map)
+        if destination is None:
+            return super().update_destination_for(agent_id, vehicle_config)
+        updated = dict(vehicle_config)
+        updated["destination"] = destination
+        return updated

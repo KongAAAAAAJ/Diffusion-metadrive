@@ -51,7 +51,7 @@ ENV_CONFIG_KEYS = {
     "traffic_density",
     "num_scenarios",
     "use_hybrid_map",
-    "hybrid_map_sequence",
+    "hybrid_map_blocks_config",
     "use_render",
     "observation_mode",
     "horizon",

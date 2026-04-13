@@ -185,3 +185,108 @@ def test_spawn_traffic_vehicle_if_safe_can_skip_adding_vehicle_to_active_traffic
 
     assert vehicle is spawned_vehicle
     assert manager._traffic_vehicles == []
+
+
+def test_spawn_traffic_vehicle_if_safe_injects_fixed_destination_from_spawn_manager():
+    module = _load_route_traffic_manager_module()
+    manager = module.RouteAwareTrafficManager()
+    manager.generate_seed = lambda: 7
+    manager._traffic_vehicles = []
+    manager._conflicts_with_ego_spawn = lambda config: False
+    manager._passes_final_spawn_guard = lambda config: True
+
+    captured = {}
+
+    def _spawn_object(vehicle_type, vehicle_config):
+        captured["config"] = dict(vehicle_config)
+        return SimpleNamespace(id="veh_0", name="veh_0")
+
+    manager.spawn_object = _spawn_object
+    manager.add_policy = lambda *args, **kwargs: None
+    manager.engine = SimpleNamespace(
+        spawn_manager=SimpleNamespace(
+            ego_spawn_zones=[],
+            update_destination_for=lambda agent_id, vehicle_config: dict(vehicle_config, destination="C4_END"),
+        ),
+        global_config={"traffic_vehicle_config": {}},
+    )
+
+    manager._spawn_traffic_vehicle_if_safe(
+        "stub_vehicle_type",
+        {"spawn_lane_index": ("A", "B", 0), "spawn_longitude": 0.0},
+        add_to_active_traffic=False,
+        policy_class=object,
+    )
+
+    assert captured["config"]["destination"] == "C4_END"
+
+
+def test_resolve_trigger_road_uses_first_route_block_own_positive_route_road():
+    module = _load_route_traffic_manager_module()
+    manager = module.RouteAwareTrafficManager()
+    manager.engine = SimpleNamespace(
+        global_config={"ego_main_route_block_ids": ("s0", "c0", "c4")},
+    )
+
+    route_road = SimpleNamespace(start_node=">>>", end_node="S0_END")
+    block = SimpleNamespace(
+        graph_block_id="s0",
+        get_respawn_roads=lambda: [route_road],
+        get_socket_list=lambda: [],
+        pre_block_socket=SimpleNamespace(positive_road=SimpleNamespace(start_node=">>", end_node=">>>")),
+    )
+
+    resolved = manager._resolve_trigger_road(block)
+
+    assert resolved is route_road
+
+
+def test_resolve_trigger_road_uses_pre_block_socket_for_non_first_route_blocks():
+    module = _load_route_traffic_manager_module()
+    manager = module.RouteAwareTrafficManager()
+    manager.engine = SimpleNamespace(
+        global_config={"ego_main_route_block_ids": ("s0", "c0", "c4")},
+    )
+
+    pre_socket_road = SimpleNamespace(start_node="S0_END", end_node="C0_ENTRY")
+    block = SimpleNamespace(
+        graph_block_id="c0",
+        get_respawn_roads=lambda: [],
+        get_socket_list=lambda: [],
+        pre_block_socket=SimpleNamespace(positive_road=pre_socket_road),
+    )
+
+    resolved = manager._resolve_trigger_road(block)
+
+    assert resolved is pre_socket_road
+
+
+def test_after_reset_force_activates_all_pending_trigger_vehicles():
+    module = _load_route_traffic_manager_module()
+    manager = module.RouteAwareTrafficManager()
+    manager._traffic_vehicles = []
+    manager.block_triggered_vehicles = [
+        SimpleNamespace(vehicles=["veh_a", "veh_b"]),
+        SimpleNamespace(vehicles=["veh_c"]),
+    ]
+    manager.get_objects = lambda names: {name: SimpleNamespace(name=name) for name in names}
+    manager.engine = SimpleNamespace(global_config={})
+
+    original_after_reset = module.CustomTrafficManager.after_reset if hasattr(module.CustomTrafficManager, "after_reset") else None
+    called = {"super_after_reset": 0}
+
+    def _fake_super_after_reset(self):
+        called["super_after_reset"] += 1
+
+    module.CustomTrafficManager.after_reset = _fake_super_after_reset
+    try:
+        manager.after_reset()
+    finally:
+        if original_after_reset is None:
+            delattr(module.CustomTrafficManager, "after_reset")
+        else:
+            module.CustomTrafficManager.after_reset = original_after_reset
+
+    assert called["super_after_reset"] == 1
+    assert manager.block_triggered_vehicles == []
+    assert [vehicle.name for vehicle in manager._traffic_vehicles] == ["veh_c", "veh_a", "veh_b"]

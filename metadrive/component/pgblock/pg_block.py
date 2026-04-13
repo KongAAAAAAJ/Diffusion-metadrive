@@ -15,7 +15,7 @@ from metadrive.constants import PGLineType
 
 logger = get_logger()
 
-
+# 接口对象
 class PGBlockSocket:
     """
     A pair of roads in reverse direction
@@ -26,6 +26,7 @@ class PGBlockSocket:
         self.positive_road = positive_road
         self.negative_road = negative_road if negative_road else None
         self.index = None
+        self.is_one_way = False
 
     def set_index(self, block_name: str, index: int):
         self.index = self.get_real_index(block_name, index)
@@ -198,6 +199,11 @@ class PGBlock(BaseBlock):
             "Socket can only be created from positive road"
         positive_road = Road(road.start_node, road.end_node)
         return PGBlockSocket(positive_road, -positive_road)
+
+    @staticmethod
+    def mark_socket_one_way(socket: PGBlockSocket) -> PGBlockSocket:
+        socket.is_one_way = True
+        return socket
 
     def get_socket_indices(self):
         ret = list(self._sockets.keys())

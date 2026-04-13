@@ -118,6 +118,8 @@ class TransfuserConfig:
     bev_upsample_factor: int = 2
 
     status_feature_dim: int = 19  # full ego_state (9D) + navigation info (10D)
+    target_point_dim: int = 32
+    target_point_min_forward_distance_m: float = 3.0
 
     weight_decay: float = 1e-4
     lr_steps: Tuple[int, ...] = (70,)

@@ -102,12 +102,13 @@ def test_transfuser_policy_act_uses_multimodal_inference_and_exposes_candidates(
     fake_ego_state = torch.zeros((19,), dtype=torch.float32)
     monkeypatch.setattr(
         "metadrive.policy.diffusion_policy.transfuser_policy.observation_to_features",
-        lambda observation, config: (
+        lambda observation, config, vehicle=None: (
             {
                 "camera_feature": fake_camera,
                 "lidar_feature": fake_lidar,
                 "status_feature": fake_status,
                 "ego_state": fake_ego_state,
+                "target_point": torch.tensor([3.0, 0.0], dtype=torch.float32),
             }
             if observation == {"obs": "cached-agent0"}
             else (_ for _ in ()).throw(AssertionError("policy should use cached observation"))
@@ -141,3 +142,4 @@ def test_transfuser_policy_act_uses_multimodal_inference_and_exposes_candidates(
     assert policy.action_info["lidar_feature"].shape == (1, 256, 256)
     assert policy.action_info["status_feature"].shape == (19,)
     assert policy.action_info["ego_state"].shape == (19,)
+    assert policy.action_info["target_point"].shape == (2,)

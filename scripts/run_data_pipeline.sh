@@ -15,6 +15,8 @@ EXPERT_TYPE="${EXPERT_TYPE:-idm}"
 COLLECTION_MODE="${COLLECTION_MODE:-single}"  # 选择地图模式：single | fixed_hybrid | random_road | phase2_plan
 DATASET_NAME="${DATASET_NAME:-metaIDM}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
+LOCAL_ROUTE_WEIGHTS=${LOCAL_ROUTE_WEIGHTS:-'{"R1_entry_straight": 1.0, "R2_entry_curve": 1.0, "R3_mainline_straight": 1.0, "R4_mainline_transition": 1.0, "R5_ramp_curve": 1.0, "R6_exit_to_ramp": 1.0, "R7_merge_core": 1.0, "R8_narrow_channel": 1.0, "R9_post_split_curve": 1.0}'}
+IDM_VARIANT_WEIGHTS=${IDM_VARIANT_WEIGHTS:-'{"default": 1.0}'}
 
 # Derived paths (auto-chained between stages)
 COLLECT_OUTPUT="${OUTPUT_ROOT}/${DATASET_NAME}"
@@ -32,7 +34,6 @@ run_collect() {
     LOW_TRAFFIC_DENSITY="${LOW_TRAFFIC_DENSITY:-0.08}"
     HIGH_TRAFFIC_DENSITY="${HIGH_TRAFFIC_DENSITY:-0.12}"
     USE_HYBRID_MAP="${USE_HYBRID_MAP:-1}"
-    HYBRID_MAP_SEQUENCE="${HYBRID_MAP_SEQUENCE:-SSXCOCSS}"
     MAP_BLOCK_NUM="${MAP_BLOCK_NUM:-5}"
     NUM_SCENARIOS="${NUM_SCENARIOS:-1}"
     TRAJECTORY_CORRECTION_ENABLED="${TRAJECTORY_CORRECTION_ENABLED:-1}"
@@ -47,8 +48,8 @@ run_collect() {
     mkdir -p "${OUTPUT_ROOT}"
 
     _collect_job() {
-        local use_hybrid_map="$1" hybrid_map_sequence="$2" map_block_num="$3"
-        local num_scenarios="$4" seed="$5" density_min="$6" density_max="$7"
+        local use_hybrid_map="$1" map_block_num="$2"
+        local num_scenarios="$3" seed="$4" density_min="$5" density_max="$6"
         local log_path="${OUTPUT_ROOT}/collect_command_${DATASET_NAME}.log"
         "${PYTHON_BIN}" -m metadrive.exp_dataset.collect_expert \
             --target-samples "${TARGET_SAMPLES}" \
@@ -66,8 +67,9 @@ run_collect() {
             --trajectory-visualization-lateral-margin "${TRAJECTORY_VISUALIZATION_LATERAL_MARGIN}" \
             --traffic-density-min "${density_min}" \
             --traffic-density-max "${density_max}" \
+            --local-route-weights "${LOCAL_ROUTE_WEIGHTS}" \
+            --idm-variant-weights "${IDM_VARIANT_WEIGHTS}" \
             --use-hybrid-map "${use_hybrid_map}" \
-            --hybrid-map-sequence "${hybrid_map_sequence}" \
             --map-block-num "${map_block_num}" \
             --num-scenarios "${num_scenarios}" \
             2>&1 | tee "${log_path}"
@@ -77,21 +79,21 @@ run_collect() {
 
     case "${COLLECTION_MODE}" in
         single)
-            _collect_job "${USE_HYBRID_MAP}" "${HYBRID_MAP_SEQUENCE}" "${MAP_BLOCK_NUM}" \
+            _collect_job "${USE_HYBRID_MAP}" "${MAP_BLOCK_NUM}" \
                 "${NUM_SCENARIOS}" "${START_SEED}" "${LOW_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
             ;;
         fixed_hybrid|phase2_plan)
             for seed in "${SEEDS[@]}"; do
-                _collect_job "1" "SSSSS"  "5" "1" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${LOW_TRAFFIC_DENSITY}"
-                _collect_job "1" "CCSCC"  "5" "1" "${seed}" "${HIGH_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
-                _collect_job "1" "SXSXS"  "5" "1" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
-                _collect_job "1" "SOSSO"  "5" "1" "${seed}" "${HIGH_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+                _collect_job "1" "5" "1" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${LOW_TRAFFIC_DENSITY}"
+                _collect_job "1" "5" "1" "${seed}" "${HIGH_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+                _collect_job "1" "5" "1" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+                _collect_job "1" "5" "1" "${seed}" "${HIGH_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
             done
             [[ "${COLLECTION_MODE}" == "fixed_hybrid" ]] && return 0
             ;;&
         random_road|phase2_plan)
             for seed in "${SEEDS[@]}"; do
-                _collect_job "0" "SSXCOCSS" "${MAP_BLOCK_NUM}" "10" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
+                _collect_job "0" "${MAP_BLOCK_NUM}" "10" "${seed}" "${LOW_TRAFFIC_DENSITY}" "${HIGH_TRAFFIC_DENSITY}"
             done
             ;;
         *)
@@ -104,7 +106,7 @@ run_collect() {
 run_anchors() {
     echo "=== [2/3] Anchor Extraction ==="
     TRAJECTORY_KEY="${TRAJECTORY_KEY:-trajectory}"
-    NUM_ANCHORS="${NUM_ANCHORS:-8}"  # *
+    NUM_ANCHORS="${NUM_ANCHORS:-20}"  # *
     ANCHOR_SEED="${ANCHOR_SEED:-0}"
 
     # 使用默认聚类方法提取anchor

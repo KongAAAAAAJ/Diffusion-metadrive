@@ -7,5 +7,5 @@ PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-"$SCRIPT_DIR/run_data_pipeline.sh"
+"$SCRIPT_DIR/run_data_preprocess.sh"
 "$SCRIPT_DIR/run_train.sh"

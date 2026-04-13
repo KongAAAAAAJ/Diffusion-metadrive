@@ -25,7 +25,7 @@ def test_none_hazard_scenario_keeps_default_behavior():
     env = PlatoonEnv({"use_render": False, "hazard_scenario": None})
     try:
         assert abs(float(env.config["traffic_density"]) - 0.04) < 1e-6
-        assert str(env.config["hybrid_map_sequence"]) == "SSXCOCSS"
+        assert env.config["hybrid_map_blocks_config"]
     finally:
         env.close()
 

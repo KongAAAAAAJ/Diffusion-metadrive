@@ -431,6 +431,27 @@ def test_expert_idm_policy_reset_clears_intersection_regulator_state():
     assert policy.action_info == {}
 
 
+def test_expert_idm_policy_set_idm_config_replaces_runtime_parameters():
+    vehicle = SimpleNamespace(lidar=SimpleNamespace(get_surrounding_objects=lambda _: []))
+    policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
+    new_config = expert_idm_policy.ExpertIDMConfig(
+        normal_speed_kmh=48.0,
+        enable_lane_change=False,
+        heading_pid_kp=2.8,
+        heading_pid_ki=0.2,
+        heading_pid_kd=5.2,
+    )
+
+    policy.set_idm_config(new_config)
+
+    assert policy.NORMAL_SPEED == 48.0
+    assert policy.target_speed == 48.0
+    assert policy.enable_lane_change is False
+    assert policy.heading_pid.k_p == 2.8
+    assert policy.heading_pid.k_i == 0.2
+    assert policy.heading_pid.k_d == 5.2
+
+
 def test_intersection_regulator_returns_idm_acc_without_conflict():
     regulator = expert_idm_policy.IntersectionSpeedRegulator()
     ego = SimpleNamespace(

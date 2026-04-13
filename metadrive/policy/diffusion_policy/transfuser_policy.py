@@ -118,7 +118,7 @@ class TransfuserPolicy(BasePolicy):
         observation = getattr(observation_adapter, "current_observation", None)
         if observation is None:
             observation = observation_adapter.observe(self.control_object)
-        features = observation_to_features(observation, self._model_config)
+        features = observation_to_features(observation, self._model_config, vehicle=self.control_object)
         batched_features = {
             key: value.unsqueeze(0).to(self._device) if value.ndim > 0 else value.to(self._device)
             for key, value in features.items()
@@ -133,7 +133,7 @@ class TransfuserPolicy(BasePolicy):
         self.action_info["action"] = action
         self.action_info["predicted_trajectory"] = trajectory
         self.action_info["controller_debug"] = controller_debug
-        for feature_key in ("camera_feature", "lidar_feature", "status_feature", "ego_state"):
+        for feature_key in ("camera_feature", "lidar_feature", "status_feature", "ego_state", "target_point"):
             if feature_key in features:
                 self.action_info[feature_key] = features[feature_key].detach().cpu().numpy()
         if "trajectory_candidates" in predictions:

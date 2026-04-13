@@ -80,7 +80,7 @@ class PGMap(BaseMap):
 
     def _config_generate(self, blocks_config: List, parent_node_path: NodePath, physics_world: PhysicsWorld):
         assert len(self.road_network.graph) == 0, "These Map is not empty, please create a new map to read config"
-        last_block = FirstPGBlock(
+        root_block = FirstPGBlock(
             global_network=self.road_network,
             lane_width=self._config.get(self.LANE_WIDTH, 3.5),
             lane_num=self._config.get(self.LANE_NUM, 2),
@@ -90,19 +90,113 @@ class PGMap(BaseMap):
             start_point=self._config.get("start_position", [0, 0]),
             ignore_intersection_checking=True
         )
-        self.blocks.append(last_block)
-        for block_index, b in enumerate(blocks_config[1:], 1):
-            block_type = self.engine.global_config["block_dist_config"].get_block(b.pop(self.BLOCK_ID))
-            pre_block_socket_index = b.pop(self.PRE_BLOCK_SOCKET_INDEX)
-            last_block = block_type(
-                block_index,
-                last_block.get_socket(pre_block_socket_index),
-                self.road_network,
-                random_seed=self.engine.global_random_seed,
-                ignore_intersection_checking=True
-            )
-            last_block.construct_from_config(b, parent_node_path, physics_world)
-            self.blocks.append(last_block)
+        root_block.graph_block_id = "root"
+        root_block.graph_parent_block_id = None
+        root_block.graph_parent_socket_index = None
+        self.blocks.append(root_block)
+
+        created_blocks = {"root": root_block}
+        used_parent_sockets = set()
+        for block_index, raw_block in enumerate(blocks_config, 1):
+            b = copy.deepcopy(raw_block)
+            block_graph_id = b.pop(self.GRAPH_BLOCK_ID)
+            if block_graph_id == "root":
+                raise ValueError("'root' is reserved for the implicit FirstPGBlock")
+            if block_graph_id in created_blocks:
+                raise ValueError(f"Duplicate block_id in map config: {block_graph_id}")
+
+            parent_block_id = b.pop(self.PARENT_BLOCK_ID)
+            if parent_block_id not in created_blocks:
+                raise ValueError(
+                    f"Unknown parent_block_id '{parent_block_id}' for block '{block_graph_id}'. "
+                    "Configs must be ordered parent-before-child."
+                )
+
+            parent_socket_index = b.pop(self.PARENT_SOCKET_INDEX)
+            if not isinstance(parent_socket_index, int):
+                raise ValueError(
+                    f"parent_socket_index must be int for block '{block_graph_id}', got {parent_socket_index!r}"
+                )
+
+            prospective_block_type_id = b[self.BLOCK_ID]
+            if prospective_block_type_id != "H" and (parent_block_id, parent_socket_index) in used_parent_sockets:
+                raise ValueError(
+                    f"Parent socket already occupied: parent_block_id='{parent_block_id}', "
+                    f"parent_socket_index={parent_socket_index}"
+                )
+
+            parent_block = created_blocks[parent_block_id]
+            block_type_id = b.pop(self.BLOCK_ID)
+            block_type = self.engine.global_config["block_dist_config"].get_block(block_type_id)
+            parent_socket = parent_block.get_socket(parent_socket_index)
+            if (
+                getattr(parent_socket, "is_one_way", False)
+                and not getattr(block_type, "IS_ONE_WAY_BLOCK", False)
+                and block_type_id != "H"
+            ):
+                raise ValueError(
+                    f"Cannot attach bidirectional block '{block_type.ID}' to one-way socket "
+                    f"of parent '{parent_block_id}' (socket {parent_socket_index})"
+                )
+            secondary_parent_block_id = b.pop(self.SECONDARY_PARENT_BLOCK_ID, None)
+            secondary_parent_socket_index = b.pop(self.SECONDARY_PARENT_SOCKET_INDEX, None)
+            if block_type_id == "H":
+                if secondary_parent_block_id is None or secondary_parent_socket_index is None:
+                    raise ValueError("ConnectStraight requires secondary_parent_block_id and secondary_parent_socket_index")
+                if secondary_parent_block_id not in created_blocks:
+                    raise ValueError(
+                        f"Unknown secondary_parent_block_id '{secondary_parent_block_id}' for block '{block_graph_id}'. "
+                        "Configs must be ordered parent-before-child."
+                    )
+                if not isinstance(secondary_parent_socket_index, int):
+                    raise ValueError(
+                        f"secondary_parent_socket_index must be int for block '{block_graph_id}', "
+                        f"got {secondary_parent_socket_index!r}"
+                    )
+                if parent_block_id == secondary_parent_block_id and parent_socket_index == secondary_parent_socket_index:
+                    raise ValueError("ConnectStraight requires two distinct parent sockets")
+                if (
+                    block_type_id != "H"
+                    and (secondary_parent_block_id, secondary_parent_socket_index) in used_parent_sockets
+                ):
+                    raise ValueError(
+                        f"Secondary parent socket already occupied: parent_block_id='{secondary_parent_block_id}', "
+                        f"parent_socket_index={secondary_parent_socket_index}"
+                    )
+                secondary_parent_block = created_blocks[secondary_parent_block_id]
+                secondary_parent_socket = secondary_parent_block.get_socket(secondary_parent_socket_index)
+                block = block_type(
+                    block_index,
+                    parent_socket,
+                    self.road_network,
+                    random_seed=self.engine.global_random_seed,
+                    secondary_pre_block_socket=secondary_parent_socket,
+                    ignore_intersection_checking=True
+                )
+            else:
+                if secondary_parent_block_id is not None or secondary_parent_socket_index is not None:
+                    raise ValueError(
+                        f"Only ConnectStraight may use secondary parent socket fields, got block '{block_type_id}'"
+                    )
+                block = block_type(
+                    block_index,
+                    parent_socket,
+                    self.road_network,
+                    random_seed=self.engine.global_random_seed,
+                    ignore_intersection_checking=True
+                )
+            block.graph_block_id = block_graph_id
+            block.graph_parent_block_id = parent_block_id
+            block.graph_parent_socket_index = parent_socket_index
+            if block_type_id == "H":
+                block.graph_secondary_parent_block_id = secondary_parent_block_id
+                block.graph_secondary_parent_socket_index = secondary_parent_socket_index
+            block.construct_from_config(b, parent_node_path, physics_world)
+            self.blocks.append(block)
+            created_blocks[block_graph_id] = block
+            used_parent_sockets.add((parent_block_id, parent_socket_index))
+            if block_type_id == "H":
+                used_parent_sockets.add((secondary_parent_block_id, secondary_parent_socket_index))
 
     @property
     def road_network_type(self):
@@ -112,10 +206,17 @@ class PGMap(BaseMap):
         assert self.blocks is not None and len(self.blocks) > 0, "Please generate Map before saving it"
         map_config = []
         for b in self.blocks:
+            if isinstance(b, FirstPGBlock):
+                continue
             b_config = b.get_config()
             json_config = b_config.get_serializable_dict()
+            json_config[self.GRAPH_BLOCK_ID] = getattr(b, "graph_block_id", b.name)
             json_config[self.BLOCK_ID] = b.ID
-            json_config[self.PRE_BLOCK_SOCKET_INDEX] = b.pre_block_socket_index
+            json_config[self.PARENT_BLOCK_ID] = getattr(b, "graph_parent_block_id", "root")
+            json_config[self.PARENT_SOCKET_INDEX] = getattr(b, "graph_parent_socket_index", 0)
+            if hasattr(b, "graph_secondary_parent_block_id"):
+                json_config[self.SECONDARY_PARENT_BLOCK_ID] = b.graph_secondary_parent_block_id
+                json_config[self.SECONDARY_PARENT_SOCKET_INDEX] = b.graph_secondary_parent_socket_index
             map_config.append(json_config)
 
         saved_data = copy.deepcopy({self.BLOCK_SEQUENCE: map_config, "map_config": self.config.copy()})

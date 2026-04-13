@@ -53,7 +53,6 @@ def test_parallel_lifecycle():
                 "num_scenarios": 1,
                 "horizon": 100,
                 "use_hybrid_map": True,
-                "hybrid_map_sequence": "SSXCOCSS",
             },
             reward_config={},
             num_workers=2,
@@ -106,7 +105,6 @@ def test_parallel_execution_functional():
         "num_scenarios": 1,
         "horizon": 100,
         "use_hybrid_map": True,
-        "hybrid_map_sequence": "SSXCOCSS",
     }
     env = PlatoonEnv(env_config)
     try:
@@ -139,7 +137,6 @@ def test_parallel_vs_serial_team_reward_close():
         "num_scenarios": 1,
         "horizon": 100,
         "use_hybrid_map": True,
-        "hybrid_map_sequence": "SSXCOCSS",
     }
     reward_config = yaml.safe_load(Path("configs/train/platoon_grpo_v2.yaml").read_text(encoding="utf-8"))["reward_config"]
     env = PlatoonEnv(env_config)

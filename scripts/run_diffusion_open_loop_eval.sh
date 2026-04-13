@@ -2,7 +2,7 @@
 set -euo pipefail
 
 /home/kong/anaconda3/envs/meta_drive/bin/python -m metadrive.policy.diffusion_policy.eval_transfuser_open_loop \
-    --checkpoint /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_5/checkpoints/diffusion-epoch=79.ckpt \
+    --checkpoint /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=60.ckpt \
     --dataset-root /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaIDM_pp \
     --dataset-format auto \
     --split val \

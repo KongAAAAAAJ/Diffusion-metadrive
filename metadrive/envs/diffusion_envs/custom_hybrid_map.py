@@ -1,64 +1,61 @@
 """
 MAHybridMap + MAHybridPGMapManager
 ===================================
-支持在 env config 中通过字符串/列表指定地图的 block 类型序列。
+支持在 env config 中通过 block 配置列表指定固定地图。
 
 Config 关键字（在 BaseMultiEnv.default_config() 中声明）：
-    use_hybrid_map      (bool)  : 是否启用指定序列地图，默认 False
-    hybrid_map_sequence (str | List[str]) :
-        block 类型序列，与 MetaDrive 的 map="SXC" 语法相同。
-        字符含义：I=FirstBlock, S=Straight, C=Curve, X=Intersection,
-                  T=T-Intersection, O=Roundabout, r=OnRamp, R=OffRamp,
-                  y=Merge, Y=Split, B=Bidirection, P=ParkingLot, $=Tollgate
-        示例："SC"  → Straight + Curve
-              "SXS" → Straight + Intersection + Straight
-
-使用方式：
-    env = BaseMultiEnv(dict(
-        use_hybrid_map=True,
-        hybrid_map_sequence="SXC",
-    ))
+    use_hybrid_map         (bool)  : 是否启用固定地图入口，默认 False
+    hybrid_map_blocks_config (List[dict] | None) :
+        按显式父节点 + 父 socket 的 block 图配置生成地图。
+        每项至少包含：
+            - block_id
+            - id
+            - parent_block_id
+            - parent_socket_index
+        对于 ConnectStraight(H) 还需要：
+            - secondary_parent_block_id
+            - secondary_parent_socket_index
+        其余字段按 block 类型附加，例如：
+            - Straight / OneWayStraight: length
+            - Curve / OneWayCurve: length, radius, angle, dir
+        其中 s/c 表示 one-way branch block，适合接在 FreeRamp 的匝道支路后；
+        H 表示连接两段 straight 断头路的双父特例 block。
 """
 
-from metadrive.component.algorithm.BIG import BigGenerateMethod, BIG
-from metadrive.component.algorithm.blocks_prob_dist import PGBlockDistConfig
+import copy
+
 from metadrive.component.map.pg_map import PGMap
 from metadrive.manager.pg_map_manager import PGMapManager
 
 
 class MAHybridMap(PGMap):
     """
-    PGMap 子类，按 global_config["hybrid_map_sequence"] 指定的 block 序列生成地图。
-    生成逻辑与 PGMap._big_generate() 相同，仅将 GENERATE_TYPE 强制设为
-    BigGenerateMethod.BLOCK_SEQUENCE。
+    PGMap 子类，固定走 PGMap._config_generate()。
     """
+
+    @staticmethod
+    def _normalize_blocks_config(blocks_config):
+        if not blocks_config:
+            return None
+
+        return [copy.deepcopy(dict(block)) for block in blocks_config]
 
     def _generate(self):
         parent_node_path = self.engine.worldNP
         physics_world = self.engine.physics_world
+        blocks_config = self._normalize_blocks_config(self.engine.global_config.get("hybrid_map_blocks_config"))
 
-        seq = self.engine.global_config.get("hybrid_map_sequence", "S")
+        if blocks_config is None:
+            raise ValueError("hybrid_map_blocks_config is required when use_hybrid_map=True")
 
-        big_map = BIG(
-            self._config.get(self.LANE_NUM, 2),
-            self._config.get(self.LANE_WIDTH, 3.5),
-            self.road_network,
-            parent_node_path,
-            physics_world,
-            exit_length=self._config.get("exit_length", 50),
-            random_seed=self.engine.global_random_seed,
-            block_dist_config=self.engine.global_config.get("block_dist_config", PGBlockDistConfig),
-        )
-        big_map.generate(BigGenerateMethod.BLOCK_SEQUENCE, seq)
-        self.blocks = big_map.blocks
-        big_map.destroy()
+        self._config_generate(blocks_config, parent_node_path, physics_world)
         self.road_network.after_init()
 
 
 class MAHybridPGMapManager(PGMapManager):
     """
     PGMapManager 子类：
-      - use_hybrid_map=True  → 每个 seed 生成 MAHybridMap（固定 block 序列）
+      - use_hybrid_map=True  → 每个 seed 生成 MAHybridMap（固定 block 配置列表）
       - use_hybrid_map=False → 完全走父类逻辑（与原 PGMapManager 行为一致）
     """
 

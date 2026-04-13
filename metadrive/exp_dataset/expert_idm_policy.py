@@ -260,6 +260,10 @@ class ExpertIDMPolicy(IDMPolicy):
             float(idm_config.lateral_pid_kd),
         )
 
+    def set_idm_config(self, idm_config: "ExpertIDMConfig") -> None:
+        self.idm_config = idm_config
+        self._apply_idm_config(idm_config)
+
     def _fallback_steering_lane(self, proposed_lane):
         current_lane = getattr(self.control_object, "lane", None)
         if current_lane is not None:

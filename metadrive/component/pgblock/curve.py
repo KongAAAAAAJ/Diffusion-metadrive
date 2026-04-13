@@ -88,3 +88,34 @@ class Curve(PGBlock):
         # common properties
         self.add_sockets(self.create_socket_from_positive_road(positive_road))
         return no_cross
+
+
+class OneWayCurve(Curve):
+    ID = "c"
+    IS_ONE_WAY_BLOCK = True
+
+    def __init__(
+        self,
+        block_index: int,
+        pre_block_socket,
+        global_network,
+        random_seed,
+        ignore_intersection_checking=False,
+        side_lane_line_type=None,
+        center_line_type=None,
+    ):
+        super().__init__(
+            block_index,
+            pre_block_socket,
+            global_network,
+            random_seed,
+            ignore_intersection_checking=ignore_intersection_checking,
+            remove_negative_lanes=True,
+            side_lane_line_type=side_lane_line_type,
+            center_line_type=center_line_type,
+        )
+
+    def _try_plug_into_previous_block(self) -> bool:
+        no_cross = super()._try_plug_into_previous_block()
+        self.get_socket(0).is_one_way = True
+        return no_cross

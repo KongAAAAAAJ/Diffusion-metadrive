@@ -11,6 +11,46 @@ from enum import Enum
 import numpy as np
 
 
+def _make_episode_spec(
+    route_preset="mainline",
+    local_route="R1_entry_straight",
+    traffic_density=0.1,
+    spawn_seed=1,
+    idm_variant=None,
+):
+    return collect_expert.EpisodeSpec(
+        route_preset=route_preset,
+        local_route=local_route,
+        traffic_density=traffic_density,
+        spawn_seed=spawn_seed,
+        idm_variant=idm_variant,
+    )
+
+
+class _StubEpisodeSpecSampler:
+    def __init__(self, specs):
+        self._specs = list(specs)
+
+    def __call__(self, config, rng):
+        outer = self
+
+        class _Sampler:
+            def __init__(self):
+                self._index = 0
+
+            def sample(self):
+                if self._index >= len(outer._specs):
+                    return outer._specs[-1]
+                spec = outer._specs[self._index]
+                self._index += 1
+                return spec
+
+            def fast_forward(self, n_episodes):
+                self._index = min(len(outer._specs), self._index + int(n_episodes))
+
+        return _Sampler()
+
+
 def _load_module():
     class _StubConfig(dict):
         pass
@@ -142,6 +182,17 @@ def _load_module():
     for module in injected_module_names:
         sys.modules[module.__name__] = module
 
+    route_definitions_path = Path(__file__).resolve().parents[1] / "route_definitions.py"
+    route_definitions_spec = importlib.util.spec_from_file_location(
+        "metadrive.exp_dataset.route_definitions",
+        route_definitions_path,
+    )
+    route_definitions_module = importlib.util.module_from_spec(route_definitions_spec)
+    assert route_definitions_spec is not None
+    assert route_definitions_spec.loader is not None
+    sys.modules[route_definitions_spec.name] = route_definitions_module
+    route_definitions_spec.loader.exec_module(route_definitions_module)
+
     module_path = Path(__file__).resolve().parents[1] / "collect_expert.py"
     spec = importlib.util.spec_from_file_location("collect_expert", module_path)
     module = importlib.util.module_from_spec(spec)
@@ -151,6 +202,7 @@ def _load_module():
     spec.loader.exec_module(module)
     for injected in injected_module_names:
         sys.modules.pop(injected.__name__, None)
+    sys.modules.pop(route_definitions_spec.name, None)
     return module
 
 
@@ -227,49 +279,227 @@ def test_build_episode_samples_includes_future_reference_metadata(monkeypatch):
     np.testing.assert_allclose(sample["future_lane_width"], np.asarray([4.1, 4.2, 4.3], dtype=np.float32))
 
 
-def test_build_episode_rngs_uses_independent_streams():
+def test_build_episode_samples_tags_route_and_local_route():
+    config = ExpertCollectorConfig(
+        expert_type="idm",
+        horizon_steps=8,
+        target_stride_steps=1,
+        sample_stride_steps=1,
+        trajectory_num_poses=3,
+    )
+    frames = []
+    for idx in range(9):
+        frames.append(
+            {
+                "ego_state": np.asarray([idx], dtype=np.float32),
+                "other_states": np.asarray([idx], dtype=np.float32),
+                "lidar": np.asarray([idx], dtype=np.float32),
+                "bev_raster": np.zeros((1, 1, 1), dtype=np.uint8),
+                "bev_semantic_map": np.zeros((1, 1, 1), dtype=np.uint8),
+                "agent_states": np.zeros((1, 1), dtype=np.float32),
+                "agent_labels": np.zeros((1,), dtype=np.int64),
+                "left_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "front_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "right_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "rgb": np.zeros((1, 1, 3), dtype=np.uint8),
+                "state_275": np.zeros((275,), dtype=np.float32),
+                "ego_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "reference_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "action": np.asarray([0.0, 0.0], dtype=np.float32),
+                "ego_speed_km_h": np.asarray(10.0, dtype=np.float32),
+                "front_object_distance": np.asarray(100.0, dtype=np.float32),
+                "front_object_speed_km_h": np.asarray(5.0, dtype=np.float32),
+                "lane_index": np.asarray(0, dtype=np.int16),
+                "reference_lane_index": np.asarray(0, dtype=np.int16),
+                "reference_longitudinal": np.asarray(float(idx), dtype=np.float32),
+                "reference_lateral": np.asarray(0.0, dtype=np.float32),
+                "lane_width": np.asarray(4.0, dtype=np.float32),
+                "current_ref_lane_count": np.asarray(1, dtype=np.int16),
+                "next_ref_lane_count": np.asarray(1, dtype=np.int16),
+            }
+        )
+
+    samples = collect_expert.build_episode_samples(
+        frames,
+        config,
+        traffic_density=0.2,
+        route_id="ramp_merge",
+        local_route="R7_merge_core",
+    )
+
+    assert samples
+    assert samples[0]["route_id"] == "ramp_merge"
+    assert samples[0]["local_route"] == "R7_merge_core"
+
+
+def test_build_episode_samples_tags_episode_id():
+    config = ExpertCollectorConfig(
+        expert_type="idm",
+        horizon_steps=8,
+        target_stride_steps=1,
+        sample_stride_steps=1,
+        trajectory_num_poses=3,
+    )
+    frames = []
+    for idx in range(9):
+        frames.append(
+            {
+                "ego_state": np.asarray([idx], dtype=np.float32),
+                "other_states": np.asarray([idx], dtype=np.float32),
+                "lidar": np.asarray([idx], dtype=np.float32),
+                "bev_raster": np.zeros((1, 1, 1), dtype=np.uint8),
+                "bev_semantic_map": np.zeros((1, 1, 1), dtype=np.uint8),
+                "agent_states": np.zeros((1, 1), dtype=np.float32),
+                "agent_labels": np.zeros((1,), dtype=np.int64),
+                "left_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "front_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "right_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "rgb": np.zeros((1, 1, 3), dtype=np.uint8),
+                "state_275": np.zeros((275,), dtype=np.float32),
+                "ego_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "reference_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "action": np.asarray([0.0, 0.0], dtype=np.float32),
+                "ego_speed_km_h": np.asarray(10.0, dtype=np.float32),
+                "front_object_distance": np.asarray(100.0, dtype=np.float32),
+                "front_object_speed_km_h": np.asarray(5.0, dtype=np.float32),
+                "lane_index": np.asarray(0, dtype=np.int16),
+                "reference_lane_index": np.asarray(0, dtype=np.int16),
+                "reference_longitudinal": np.asarray(float(idx), dtype=np.float32),
+                "reference_lateral": np.asarray(0.0, dtype=np.float32),
+                "lane_width": np.asarray(4.0, dtype=np.float32),
+                "current_ref_lane_count": np.asarray(1, dtype=np.int16),
+                "next_ref_lane_count": np.asarray(1, dtype=np.int16),
+            }
+        )
+
+    samples = collect_expert.build_episode_samples(
+        frames,
+        config,
+        traffic_density=0.2,
+        route_id="mainline",
+        local_route="R1_entry_straight",
+        episode_index=17,
+    )
+
+    assert samples
+    assert samples[0]["episode_id"] == 17
+
+
+def test_build_episode_samples_tags_idm_variant():
+    config = ExpertCollectorConfig(
+        expert_type="idm",
+        horizon_steps=8,
+        target_stride_steps=1,
+        sample_stride_steps=1,
+        trajectory_num_poses=3,
+    )
+    frames = []
+    for idx in range(9):
+        frames.append(
+            {
+                "ego_state": np.asarray([idx], dtype=np.float32),
+                "other_states": np.asarray([idx], dtype=np.float32),
+                "lidar": np.asarray([idx], dtype=np.float32),
+                "bev_raster": np.zeros((1, 1, 1), dtype=np.uint8),
+                "bev_semantic_map": np.zeros((1, 1, 1), dtype=np.uint8),
+                "agent_states": np.zeros((1, 1), dtype=np.float32),
+                "agent_labels": np.zeros((1,), dtype=np.int64),
+                "left_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "front_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "right_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "rgb": np.zeros((1, 1, 3), dtype=np.uint8),
+                "state_275": np.zeros((275,), dtype=np.float32),
+                "ego_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "reference_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "action": np.asarray([0.0, 0.0], dtype=np.float32),
+                "ego_speed_km_h": np.asarray(10.0, dtype=np.float32),
+                "front_object_distance": np.asarray(100.0, dtype=np.float32),
+                "front_object_speed_km_h": np.asarray(5.0, dtype=np.float32),
+                "lane_index": np.asarray(0, dtype=np.int16),
+                "reference_lane_index": np.asarray(0, dtype=np.int16),
+                "reference_longitudinal": np.asarray(float(idx), dtype=np.float32),
+                "reference_lateral": np.asarray(0.0, dtype=np.float32),
+                "lane_width": np.asarray(4.0, dtype=np.float32),
+                "current_ref_lane_count": np.asarray(1, dtype=np.int16),
+                "next_ref_lane_count": np.asarray(1, dtype=np.int16),
+            }
+        )
+
+    samples = collect_expert.build_episode_samples(
+        frames,
+        config,
+        traffic_density=0.2,
+        route_id="mainline",
+        local_route="R1_entry_straight",
+        idm_variant="aggressive",
+    )
+
+    assert samples
+    assert samples[0]["idm_variant"] == "aggressive"
+
+
+def test_build_episode_rngs_uses_single_episode_rng():
     config = ExpertCollectorConfig(start_seed=11, spawn_seed_offset=100000)
 
-    traffic_rng, spawn_rng = collect_expert.build_episode_rngs(config)
+    episode_rng = collect_expert.build_episode_rngs(config)
 
-    traffic_values = [
-        float(traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max))
-        for _ in range(3)
+    sampled = [int(episode_rng.randint(0, 2**31 - 1)) for _ in range(3)]
+
+    expected_rng = np.random.RandomState(config.start_seed)
+    expected = [int(expected_rng.randint(0, 2**31 - 1)) for _ in range(3)]
+
+    assert sampled == expected
+
+
+def test_episode_spec_sampler_uses_single_rng_for_route_density_spawn_and_idm_variant():
+    config = ExpertCollectorConfig(
+        start_seed=5,
+        local_route_weights={"R1_entry_straight": 0.7, "R5_ramp_curve": 0.3},
+        idm_variant_weights={"default": 0.2, "aggressive": 0.8},
+    )
+    episode_rng = collect_expert.build_episode_rngs(config)
+    sampler = collect_expert.EpisodeSpecSampler(config, episode_rng)
+
+    sampled = [sampler.sample() for _ in range(3)]
+
+    expected_rng = np.random.RandomState(config.start_seed)
+    expected = []
+    for _ in range(3):
+        local_route = expected_rng.choice(["R1_entry_straight", "R5_ramp_curve"], p=[0.7, 0.3])
+        density = float(expected_rng.uniform(config.traffic_density_min, config.traffic_density_max))
+        spawn_seed = int(expected_rng.randint(0, 2**31 - 1))
+        idm_variant = expected_rng.choice(["default", "aggressive"], p=[0.2, 0.8])
+        route = "mainline" if local_route == "R1_entry_straight" else "ramp_merge"
+        expected.append((route, local_route, density, spawn_seed, None if idm_variant == "default" else idm_variant))
+
+    actual = [
+        (spec.route_preset, spec.local_route, spec.traffic_density, spec.spawn_seed, spec.idm_variant)
+        for spec in sampled
     ]
-    spawn_values = [int(spawn_rng.randint(0, 2**31 - 1)) for _ in range(3)]
-
-    expected_traffic_rng = np.random.RandomState(config.start_seed)
-    expected_spawn_rng = np.random.RandomState(config.start_seed + config.spawn_seed_offset)
-    expected_traffic = [
-        float(expected_traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max))
-        for _ in range(3)
-    ]
-    expected_spawn = [int(expected_spawn_rng.randint(0, 2**31 - 1)) for _ in range(3)]
-
-    assert traffic_values == expected_traffic
-    assert spawn_values == expected_spawn
+    assert actual == expected
 
 
-def test_fast_forward_episode_rngs_advances_traffic_and_spawn_streams_independently():
-    config = ExpertCollectorConfig(start_seed=5, spawn_seed_offset=100000)
-    traffic_rng, spawn_rng = collect_expert.build_episode_rngs(config)
+def test_fast_forward_episode_rngs_advances_episode_spec_sampler():
+    config = ExpertCollectorConfig(
+        start_seed=5,
+        local_route_weights={"R1_entry_straight": 0.5, "R5_ramp_curve": 0.5},
+        idm_variant_weights={"default": 0.5, "conservative": 0.5},
+    )
+    episode_rng = collect_expert.build_episode_rngs(config)
 
-    collect_expert.fast_forward_episode_rngs(traffic_rng, spawn_rng, config, completed_episodes=2)
+    collect_expert.fast_forward_episode_rngs(episode_rng, config, completed_episodes=2)
+    sampler = collect_expert.EpisodeSpecSampler(config, episode_rng)
+    next_spec = sampler.sample()
 
-    next_density = float(traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max))
-    next_spawn_seed = int(collect_expert.sample_episode_spawn_seed(spawn_rng))
+    expected_rng = np.random.RandomState(config.start_seed)
+    expected_sampler = collect_expert.EpisodeSpecSampler(config, expected_rng)
+    expected_sampler.fast_forward(2)
+    expected_next = expected_sampler.sample()
 
-    expected_traffic_rng = np.random.RandomState(config.start_seed)
-    expected_spawn_rng = np.random.RandomState(config.start_seed + config.spawn_seed_offset)
-    for _ in range(2):
-        expected_traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max)
-        expected_spawn_rng.randint(0, 2**31 - 1)
-
-    expected_density = float(expected_traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max))
-    expected_spawn_seed = int(expected_spawn_rng.randint(0, 2**31 - 1))
-
-    assert next_density == expected_density
-    assert next_spawn_seed == expected_spawn_seed
+    assert next_spec == expected_next
 
 
 def test_rollout_episode_sets_spawn_seed_before_reset(monkeypatch):
@@ -322,6 +552,68 @@ def test_rollout_episode_sets_spawn_seed_before_reset(monkeypatch):
     assert frames == [{"frame": 1}]
     assert map_geometry is None
     assert video_frames == []
+
+
+def test_rollout_episode_passes_custom_idm_config_to_build_expert_policy(monkeypatch):
+    recorded = {"idm_config": None}
+
+    class DummySpawnManager:
+        def set_episode_spawn_seed(self, seed):
+            return None
+
+    class DummyVehicle:
+        position = np.asarray([0.0, 0.0], dtype=np.float32)
+        heading_theta = 0.0
+
+    class DummyPolicy:
+        def act(self):
+            return np.zeros((2,), dtype=np.float32)
+
+    class DummyEnv:
+        def __init__(self):
+            self.engine = type("Engine", (), {"spawn_manager": DummySpawnManager()})()
+            self.agents = {"agent0": DummyVehicle()}
+
+        def reset(self):
+            return (
+                {
+                    "agent0": {
+                        "ego_state": np.zeros((1,), dtype=np.float32),
+                        "others_state": np.zeros((1,), dtype=np.float32),
+                        "lidar": np.zeros((1,), dtype=np.float32),
+                        "topdown": np.zeros((1, 1, 1), dtype=np.float32),
+                        "rgb_left": np.zeros((1, 1, 3), dtype=np.float32),
+                        "rgb_front": np.zeros((1, 1, 3), dtype=np.float32),
+                        "rgb_right": np.zeros((1, 1, 3), dtype=np.float32),
+                    }
+                },
+                {},
+            )
+
+        def step(self, actions):
+            return {}, {}, {"__all__": True}, {"__all__": False}, {}
+
+    def fake_build_expert_policy(vehicle, random_seed, idm_config=None):
+        recorded["idm_config"] = idm_config
+        return DummyPolicy()
+
+    monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
+    monkeypatch.setattr(collect_expert, "build_frame", lambda *args, **kwargs: {"frame": 1})
+    monkeypatch.setattr(collect_expert, "build_expert_policy", fake_build_expert_policy)
+
+    custom_idm_config = collect_expert.ExpertIDMConfig(normal_speed_kmh=41.0)
+    frames, map_geometry, video_frames = collect_expert.rollout_episode(
+        DummyEnv(),
+        ExpertCollectorConfig(expert_type="idm", max_episode_steps=1),
+        episode_spawn_seed=1,
+        episode_index=1,
+        idm_config=custom_idm_config,
+    )
+
+    assert frames == [{"frame": 1}]
+    assert map_geometry is None
+    assert video_frames == []
+    assert recorded["idm_config"] is custom_idm_config
 
 
 def test_rollout_episode_collects_video_frames_when_enabled(monkeypatch):
@@ -606,9 +898,40 @@ def test_write_manifest_appends_resume_history(tmp_path):
     assert manifest["trajectory_filter"]["enabled"] is True
 
 
+def test_write_manifest_includes_route_distribution(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    report_dir = dataset_root / "reports"
+    report_dir.mkdir(parents=True)
+
+    config = ExpertCollectorConfig(
+        output_root=tmp_path,
+        dataset_name="dataset",
+        local_route_weights={"R1_entry_straight": 0.5, "R5_ramp_curve": 0.5},
+    )
+    write_manifest(
+        config=config,
+        dataset_root=dataset_root,
+        report_dir=report_dir,
+        total_samples=16,
+        total_episodes=4,
+        split_summary={"train": ["shard_000000.npz"], "val": [], "test": []},
+        correction_summary={"mode_counts": {"keep_lane": 16}},
+        filter_summary={"enabled": True, "accepted": 16, "rejected": 0},
+        collection_wall_time_sec=1.5,
+        route_counts={"mainline": 10, "ramp_merge": 6},
+        local_route_counts={"R1_entry_straight": 9, "R5_ramp_curve": 7},
+        resume=False,
+    )
+
+    manifest = json.loads((report_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["route_distribution"] == {"mainline": 10, "ramp_merge": 6}
+    assert manifest["local_route_distribution"] == {"R1_entry_straight": 9, "R5_ramp_curve": 7}
+
+
 def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monkeypatch, tmp_path):
-    sampled_densities: list[float] = []
-    sampled_spawn_seeds: list[int] = []
+    sampled_specs: list[collect_expert.EpisodeSpec] = []
+    applied_route_block_ids: list[tuple[str, ...]] = []
 
     class DummyEnv:
         def __init__(self, config):
@@ -616,7 +939,10 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
             self.engine = type(
                 "Engine",
                 (),
-                {"spawn_manager": type("SpawnManager", (), {"set_episode_spawn_seed": lambda self, seed: sampled_spawn_seeds.append(int(seed))})()},
+                {
+                    "spawn_manager": type("SpawnManager", (), {"set_episode_spawn_seed": lambda self, seed: None})(),
+                    "global_config": {},
+                },
             )()
 
         def close(self):
@@ -639,13 +965,17 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
         def close(self):
             return 0
 
-    def fake_sample_traffic_density(rng, config):
-        value = float(rng.uniform(config.traffic_density_min, config.traffic_density_max))
-        sampled_densities.append(value)
-        return value
-
-    def fake_rollout_episode(env, config, episode_spawn_seed, episode_index):
-        sampled_spawn_seeds.append(int(episode_spawn_seed))
+    def fake_rollout_episode(env, config, episode_spawn_seed, episode_index, idm_config=None):
+        sampled_specs.append(
+            collect_expert.EpisodeSpec(
+                route_preset=str(env.config.get("route_preset")),
+                local_route=str(env.config.get("local_route")),
+                traffic_density=float(env.config.get("traffic_density")),
+                spawn_seed=int(episode_spawn_seed),
+                idm_variant=None,
+            )
+        )
+        applied_route_block_ids.append(tuple(env.config.get("ego_main_route_block_ids", ())))
         return ([{"frame": 1}], None, [])
 
     def fake_build_episode_samples(*args, **kwargs):
@@ -672,6 +1002,8 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
         correction_summary,
         collection_wall_time_sec,
         filter_summary=None,
+        route_counts=None,
+        local_route_counts=None,
         resume=False,
     ):
         written_manifest.update(
@@ -684,6 +1016,8 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
                 "split_summary": split_summary,
                 "correction_summary": correction_summary,
                 "filter_summary": filter_summary,
+                "route_counts": route_counts,
+                "local_route_counts": local_route_counts,
                 "collection_wall_time_sec": collection_wall_time_sec,
                 "resume": resume,
             }
@@ -691,12 +1025,20 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
 
     monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
     monkeypatch.setattr(collect_expert, "ShardWriter", DummyWriter)
-    monkeypatch.setattr(collect_expert, "sample_traffic_density", fake_sample_traffic_density)
     monkeypatch.setattr(collect_expert, "rollout_episode", fake_rollout_episode)
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(collect_expert, "build_episode_samples", fake_build_episode_samples)
     monkeypatch.setattr(collect_expert, "split_shards", lambda **kwargs: {"train": [], "val": [], "test": []})
     monkeypatch.setattr(collect_expert, "write_manifest", fake_write_manifest)
+    monkeypatch.setattr(
+        collect_expert,
+        "get_route_blocks",
+        lambda route_name: {
+            "R1_entry_straight": ("s0",),
+            "R5_ramp_curve": ("s_ramp0", "c0_ramp0"),
+            "R9_post_split_curve": ("c4",),
+        }[route_name],
+    )
     monkeypatch.setattr(
         collect_expert,
         "detect_existing_state",
@@ -705,6 +1047,8 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
             "total_samples": 5,
             "total_episodes": 2,
             "mode_counts": {"keep_lane": 5},
+            "route_counts": {"mainline": 5},
+            "local_route_counts": {"R1_entry_straight": 5},
         },
     )
 
@@ -720,24 +1064,25 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
 
     run_collection(config)
 
-    expected_traffic_rng = np.random.RandomState(config.start_seed)
-    expected_spawn_rng = np.random.RandomState(config.start_seed + config.spawn_seed_offset)
-    for _ in range(2):
-        expected_traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max)
-        expected_spawn_rng.randint(0, 2**31 - 1)
-    expected_next_density = float(expected_traffic_rng.uniform(config.traffic_density_min, config.traffic_density_max))
-    expected_next_spawn_seed = int(expected_spawn_rng.randint(0, 2**31 - 1))
+    expected_rng = np.random.RandomState(config.start_seed)
+    expected_sampler = collect_expert.EpisodeSpecSampler(config, expected_rng)
+    expected_sampler.fast_forward(2)
+    expected_next_spec = expected_sampler.sample()
 
     assert DummyWriter.last_instance is not None
     assert DummyWriter.last_instance.start_shard_index == 4
-    assert sampled_densities == [expected_next_density]
-    assert sampled_spawn_seeds == [expected_next_spawn_seed]
+    assert [(spec.route_preset, spec.local_route, spec.traffic_density, spec.spawn_seed) for spec in sampled_specs] == [
+        (expected_next_spec.route_preset, expected_next_spec.local_route, expected_next_spec.traffic_density, expected_next_spec.spawn_seed)
+    ]
+    assert applied_route_block_ids == [tuple(collect_expert.get_route_blocks(expected_next_spec.local_route))]
     assert written_manifest["total_samples"] == 6
     assert written_manifest["total_episodes"] == 3
     assert written_manifest["resume"] is True
     assert written_manifest["correction_summary"]["mode_counts"]["keep_lane"] == 6
     assert written_manifest["filter_summary"]["accepted"] == 1
     assert written_manifest["filter_summary"]["rejected"] == 0
+    assert written_manifest["route_counts"]["mainline"] >= 5
+    assert written_manifest["local_route_counts"]["R1_entry_straight"] >= 5
     assert build_trajectory_mode_summary(written_manifest["correction_summary"]["mode_counts"], 6)["keep_lane"]["count"] == 6
 
 
@@ -745,6 +1090,7 @@ def test_run_collection_filters_rejected_samples_before_writer(monkeypatch, tmp_
     class DummyEnv:
         def __init__(self, config):
             self.config = dict(config)
+            self.engine = type("Engine", (), {"global_config": {}})()
 
         def close(self):
             return None
@@ -783,9 +1129,16 @@ def test_run_collection_filters_rejected_samples_before_writer(monkeypatch, tmp_
 
     monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
     monkeypatch.setattr(collect_expert, "ShardWriter", DummyWriter)
-    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
-    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
-    monkeypatch.setattr(collect_expert, "rollout_episode", lambda env, config, episode_spawn_seed, episode_index: ([{"frame": 1}], None, []))
+    monkeypatch.setattr(
+        collect_expert,
+        "EpisodeSpecSampler",
+        _StubEpisodeSpecSampler([_make_episode_spec(traffic_density=0.1, spawn_seed=1)]),
+    )
+    monkeypatch.setattr(
+        collect_expert,
+        "rollout_episode",
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, []),
+    )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(
         collect_expert,
@@ -820,6 +1173,7 @@ def test_run_collection_saves_qual_and_unqual_visualizations(monkeypatch, tmp_pa
     class DummyEnv:
         def __init__(self, config):
             self.config = dict(config)
+            self.engine = type("Engine", (), {"global_config": {}})()
 
         def close(self):
             return None
@@ -848,9 +1202,16 @@ def test_run_collection_saves_qual_and_unqual_visualizations(monkeypatch, tmp_pa
 
     monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
     monkeypatch.setattr(collect_expert, "ShardWriter", lambda *args, **kwargs: DummyWriter())
-    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
-    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
-    monkeypatch.setattr(collect_expert, "rollout_episode", lambda env, config, episode_spawn_seed, episode_index: ([{"frame": 1}], None, []))
+    monkeypatch.setattr(
+        collect_expert,
+        "EpisodeSpecSampler",
+        _StubEpisodeSpecSampler([_make_episode_spec(traffic_density=0.1, spawn_seed=1)]),
+    )
+    monkeypatch.setattr(
+        collect_expert,
+        "rollout_episode",
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, []),
+    )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: [])
     monkeypatch.setattr(
         collect_expert,
@@ -912,6 +1273,7 @@ def test_run_collection_does_not_save_filter_visualizations_when_disabled(monkey
     class DummyEnv:
         def __init__(self, config):
             self.config = dict(config)
+            self.engine = type("Engine", (), {"global_config": {}})()
 
         def close(self):
             return None
@@ -940,9 +1302,16 @@ def test_run_collection_does_not_save_filter_visualizations_when_disabled(monkey
 
     monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
     monkeypatch.setattr(collect_expert, "ShardWriter", lambda *args, **kwargs: DummyWriter())
-    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
-    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
-    monkeypatch.setattr(collect_expert, "rollout_episode", lambda env, config, episode_spawn_seed, episode_index: ([{"frame": 1}], None, []))
+    monkeypatch.setattr(
+        collect_expert,
+        "EpisodeSpecSampler",
+        _StubEpisodeSpecSampler([_make_episode_spec(traffic_density=0.1, spawn_seed=1)]),
+    )
+    monkeypatch.setattr(
+        collect_expert,
+        "rollout_episode",
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, []),
+    )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: [])
     monkeypatch.setattr(
         collect_expert,
@@ -1006,15 +1375,23 @@ def test_run_collection_uses_standard_physics_env_config(monkeypatch, tmp_path):
         def __init__(self, config):
             captured["env_config"] = dict(config)
             self.config = dict(config)
+            self.engine = type("Engine", (), {"global_config": {}})()
 
         def close(self):
             return None
 
     monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
     monkeypatch.setattr(collect_expert, "ShardWriter", lambda *args, **kwargs: type("W", (), {"add_samples": lambda self, samples: 0, "close": lambda self: 0})())
-    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
-    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
-    monkeypatch.setattr(collect_expert, "rollout_episode", lambda env, config, episode_spawn_seed, episode_index: ([], None, []))
+    monkeypatch.setattr(
+        collect_expert,
+        "EpisodeSpecSampler",
+        _StubEpisodeSpecSampler([_make_episode_spec(traffic_density=0.1, spawn_seed=1)]),
+    )
+    monkeypatch.setattr(
+        collect_expert,
+        "rollout_episode",
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([], None, []),
+    )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(collect_expert, "build_episode_samples", lambda *args, **kwargs: [])
     monkeypatch.setattr(collect_expert, "split_shards", lambda **kwargs: {"train": [], "val": [], "test": []})
@@ -1040,6 +1417,7 @@ def test_run_collection_writes_episode_videos_when_enabled(monkeypatch, tmp_path
     class DummyEnv:
         def __init__(self, config):
             self.config = dict(config)
+            self.engine = type("Engine", (), {"global_config": {}})()
 
         def close(self):
             return None
@@ -1053,12 +1431,15 @@ def test_run_collection_writes_episode_videos_when_enabled(monkeypatch, tmp_path
 
     monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
     monkeypatch.setattr(collect_expert, "ShardWriter", lambda *args, **kwargs: DummyWriter())
-    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
-    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
+    monkeypatch.setattr(
+        collect_expert,
+        "EpisodeSpecSampler",
+        _StubEpisodeSpecSampler([_make_episode_spec(traffic_density=0.1, spawn_seed=1)]),
+    )
     monkeypatch.setattr(
         collect_expert,
         "rollout_episode",
-        lambda env, config, episode_spawn_seed, episode_index: ([{"frame": 1}], None, [np.zeros((2, 2, 3), dtype=np.uint8)]),
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, [np.zeros((2, 2, 3), dtype=np.uint8)]),
     )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(
@@ -1106,6 +1487,7 @@ def test_run_collection_does_not_write_episode_videos_when_disabled(monkeypatch,
     class DummyEnv:
         def __init__(self, config):
             self.config = dict(config)
+            self.engine = type("Engine", (), {"global_config": {}})()
 
         def close(self):
             return None
@@ -1119,12 +1501,15 @@ def test_run_collection_does_not_write_episode_videos_when_disabled(monkeypatch,
 
     monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
     monkeypatch.setattr(collect_expert, "ShardWriter", lambda *args, **kwargs: DummyWriter())
-    monkeypatch.setattr(collect_expert, "sample_traffic_density", lambda rng, config: 0.1)
-    monkeypatch.setattr(collect_expert, "sample_episode_spawn_seed", lambda rng: 1)
+    monkeypatch.setattr(
+        collect_expert,
+        "EpisodeSpecSampler",
+        _StubEpisodeSpecSampler([_make_episode_spec(traffic_density=0.1, spawn_seed=1)]),
+    )
     monkeypatch.setattr(
         collect_expert,
         "rollout_episode",
-        lambda env, config, episode_spawn_seed, episode_index: ([{"frame": 1}], None, [np.zeros((2, 2, 3), dtype=np.uint8)]),
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, [np.zeros((2, 2, 3), dtype=np.uint8)]),
     )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(

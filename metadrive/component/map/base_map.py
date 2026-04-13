@@ -27,6 +27,11 @@ class BaseMap(BaseRunnable, ABC):
     LANE_WIDTH_RAND_RANGE = "lane_width_rand_range"
     LANE_NUM = "lane_num"
     BLOCK_ID = "id"
+    GRAPH_BLOCK_ID = "block_id"
+    PARENT_BLOCK_ID = "parent_block_id"
+    PARENT_SOCKET_INDEX = "parent_socket_index"
+    SECONDARY_PARENT_BLOCK_ID = "secondary_parent_block_id"
+    SECONDARY_PARENT_SOCKET_INDEX = "secondary_parent_socket_index"
     BLOCK_SEQUENCE = "block_sequence"
     PRE_BLOCK_SOCKET_INDEX = "pre_block_socket_index"
 

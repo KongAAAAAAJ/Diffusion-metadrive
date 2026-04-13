@@ -12,6 +12,39 @@ MAX_VEHICLE_WIDTH = 2.5
 class RouteAwareTrafficManager(CustomTrafficManager):
     """Traffic manager that avoids spawning background cars near the ego spawn zone."""
 
+    @staticmethod
+    def _get_first_positive_route_road(block):
+        if block is None:
+            return None
+        roads = [
+            road for road in getattr(block, "get_respawn_roads", lambda: [])() or []
+            if not (hasattr(road, "is_negative_road") and road.is_negative_road())
+        ]
+        if roads:
+            return sorted(roads, key=lambda road: (road.start_node, road.end_node))[0]
+        sockets = getattr(block, "get_socket_list", lambda: [])() or []
+        socket_roads = [socket.positive_road for socket in sockets if getattr(socket, "positive_road", None) is not None]
+        if not socket_roads:
+            return None
+        return sorted(socket_roads, key=lambda road: (road.start_node, road.end_node))[0]
+
+    def _resolve_trigger_road(self, block):
+        route_block_ids = [str(block_id) for block_id in self.engine.global_config.get("ego_main_route_block_ids", ()) if block_id]
+        first_route_block_id = route_block_ids[0] if route_block_ids else None
+        if getattr(block, "graph_block_id", None) == first_route_block_id:
+            route_road = self._get_first_positive_route_road(block)
+            if route_road is not None:
+                return route_road
+        pre_block_socket = getattr(block, "pre_block_socket", None)
+        return getattr(pre_block_socket, "positive_road", None)
+
+    def _apply_fixed_destination(self, vehicle_config):
+        spawn_manager = getattr(self.engine, "spawn_manager", None)
+        if spawn_manager is None or not hasattr(spawn_manager, "update_destination_for"):
+            return vehicle_config
+        updated = spawn_manager.update_destination_for("traffic", dict(vehicle_config))
+        return updated if updated is not None else vehicle_config
+
     def _iter_ego_spawn_zones(self):
         spawn_manager = getattr(self.engine, "spawn_manager", None)
         return list(getattr(spawn_manager, "ego_spawn_zones", []) or [])
@@ -120,6 +153,8 @@ class RouteAwareTrafficManager(CustomTrafficManager):
             return None
 
         traffic_v_config = dict(traffic_v_config)
+        if not traffic_v_config.get("destination", None):
+            traffic_v_config = self._apply_fixed_destination(traffic_v_config)
         traffic_v_config.update(self.engine.global_config["traffic_vehicle_config"])
         random_v = self.spawn_object(vehicle_type, vehicle_config=traffic_v_config)
         if policy_class is None:
@@ -180,13 +215,32 @@ class RouteAwareTrafficManager(CustomTrafficManager):
                 if random_v is not None:
                     vehicles_on_block.append(random_v.name)
 
-            trigger_road = block.pre_block_socket.positive_road
+            trigger_road = self._resolve_trigger_road(block)
+            if trigger_road is None:
+                continue
             from metadrive.manager.traffic_manager import BlockVehicles
             block_vehicles = BlockVehicles(trigger_road=trigger_road, vehicles=vehicles_on_block)
 
             self.block_triggered_vehicles.append(block_vehicles)
             vehicle_num += len(vehicles_on_block)
         self.block_triggered_vehicles.reverse()
+
+    def _force_activate_all_pending_blocks(self):
+        """Immediately move all trigger-pending vehicles into active traffic.
+
+        In Hybrid/Trigger mode the base class defers vehicles until ego crosses
+        each block's trigger_road.  When ego spawns mid-map (any local route
+        other than the map entry) those trigger roads are never crossed, so
+        vehicles stay stationary forever.  Calling this after reset ensures
+        every vehicle is live from step 0 regardless of ego's spawn position.
+        """
+        while self.block_triggered_vehicles:
+            block_vehicles = self.block_triggered_vehicles.pop()
+            self._traffic_vehicles += list(self.get_objects(block_vehicles.vehicles).values())
+
+    def after_reset(self):
+        super().after_reset()
+        self._force_activate_all_pending_blocks()
 
     def after_step(self, *args, **kwargs):
         v_to_remove = []

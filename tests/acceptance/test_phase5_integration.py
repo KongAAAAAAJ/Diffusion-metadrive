@@ -32,7 +32,6 @@ def _make_env() -> PlatoonEnv:
             "traffic_density": 0.04,
             "num_scenarios": 1,
             "use_hybrid_map": True,
-            "hybrid_map_sequence": "SSXCOCSS",
         }
     )
 

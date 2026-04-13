@@ -346,7 +346,7 @@ def main(argv=None):
             "traffic_density": float(config.get("traffic_density", 0.04)),
             "horizon": int(config.get("horizon", 100)),
             "use_hybrid_map": bool(config.get("use_hybrid_map", True)),
-            "hybrid_map_sequence": str(config.get("hybrid_map_sequence", "SSXCOCSS")),
+            "hybrid_map_blocks_config": config.get("hybrid_map_blocks_config"),
             "hazard_scenario": config.get("hazard_scenario"),
             "planner_device": str(config.get("planner_device", "cpu")),
         },

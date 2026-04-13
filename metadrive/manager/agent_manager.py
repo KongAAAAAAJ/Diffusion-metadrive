@@ -111,12 +111,25 @@ class VehicleAgentManager(BaseAgentManager):
     def random_spawn_lane_in_single_agent(self):
         if not self.engine.global_config["is_multi_agent"] and \
                 self.engine.global_config.get("random_spawn_lane_index", False) and self.engine.current_map is not None:
-            spawn_road_start = self.engine.global_config["agent_configs"][DEFAULT_AGENT]["spawn_lane_index"][0]
-            spawn_road_end = self.engine.global_config["agent_configs"][DEFAULT_AGENT]["spawn_lane_index"][1]
-            index = self.np_random.randint(self.engine.current_map.config["lane_num"])
+            lane_index = tuple(self.engine.global_config["agent_configs"][DEFAULT_AGENT]["spawn_lane_index"])
+            spawn_road_start = lane_index[0]
+            spawn_road_end = lane_index[1]
+            lane_count = self._get_spawn_road_lane_count(spawn_road_start, spawn_road_end)
+            if lane_count <= 0:
+                return
+            index = self.np_random.randint(lane_count)
             self.engine.global_config["agent_configs"][DEFAULT_AGENT]["spawn_lane_index"] = (
                 spawn_road_start, spawn_road_end, index
             )
+
+    def _get_spawn_road_lane_count(self, start_node, end_node):
+        road_network = getattr(self.engine.current_map, "road_network", None)
+        graph = getattr(road_network, "graph", None)
+        try:
+            lanes = graph[start_node][end_node]
+        except Exception:
+            return 0
+        return len(lanes) if lanes is not None else 0
 
     def _finish(self, agent_name, ignore_delay_done=False):
         """

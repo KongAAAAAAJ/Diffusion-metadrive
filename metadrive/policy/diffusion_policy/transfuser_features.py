@@ -1,4 +1,5 @@
 from enum import IntEnum
+import math
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
@@ -16,6 +17,7 @@ PROCESSED_DIR_FIELDS = (
     "lidar_feature",
     "status_feature",
     "ego_state",
+    "target_point",
     "trajectory",
     "agent_states",
     "agent_labels",
@@ -122,6 +124,121 @@ def build_status_feature(ego_state: np.ndarray, config: TransfuserConfig) -> tor
     return torch.from_numpy(status)
 
 
+def _world_pose_to_local_xy(current_pose: np.ndarray, future_pose: np.ndarray) -> np.ndarray:
+    current_pose = _to_numpy(current_pose).astype(np.float32, copy=False)
+    future_pose = _to_numpy(future_pose).astype(np.float32, copy=False)
+    dx = float(future_pose[0] - current_pose[0])
+    dy = float(future_pose[1] - current_pose[1])
+    heading = float(current_pose[2])
+    cos_h = math.cos(heading)
+    sin_h = math.sin(heading)
+    return np.asarray(
+        [
+            cos_h * dx + sin_h * dy,
+            -sin_h * dx + cos_h * dy,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _vehicle_pose_to_array(vehicle) -> np.ndarray:
+    return np.asarray(
+        [float(vehicle.position[0]), float(vehicle.position[1]), float(vehicle.heading_theta)],
+        dtype=np.float32,
+    )
+
+
+def _zero_target_point() -> torch.Tensor:
+    return torch.zeros((2,), dtype=torch.float32)
+
+
+def _target_progress_distance(config: TransfuserConfig, speed_mps: float) -> float:
+    horizon_s = 4.0
+    return float(max(speed_mps * horizon_s, config.target_point_min_forward_distance_m))
+
+
+def _interpolate_local_target(local_points_xy: np.ndarray, target_distance: float) -> np.ndarray:
+    local_points_xy = np.asarray(local_points_xy, dtype=np.float32)
+    if local_points_xy.size == 0:
+        return np.zeros((2,), dtype=np.float32)
+    if local_points_xy.shape[0] == 1:
+        return local_points_xy[0].astype(np.float32, copy=False)
+
+    segment_lengths = np.linalg.norm(np.diff(local_points_xy, axis=0), axis=1)
+    cumulative = np.concatenate(
+        [np.zeros((1,), dtype=np.float32), np.cumsum(segment_lengths, dtype=np.float32)],
+        axis=0,
+    )
+    if target_distance <= 0.0:
+        return local_points_xy[0].astype(np.float32, copy=False)
+    if target_distance >= float(cumulative[-1]):
+        return local_points_xy[-1].astype(np.float32, copy=False)
+
+    segment_idx = int(np.searchsorted(cumulative, target_distance, side="right") - 1)
+    segment_idx = max(0, min(segment_idx, local_points_xy.shape[0] - 2))
+    segment_start = float(cumulative[segment_idx])
+    segment_length = float(segment_lengths[segment_idx])
+    if segment_length <= 1e-6:
+        return local_points_xy[segment_idx + 1].astype(np.float32, copy=False)
+    ratio = float((target_distance - segment_start) / segment_length)
+    start = local_points_xy[segment_idx]
+    end = local_points_xy[segment_idx + 1]
+    return (start + ratio * (end - start)).astype(np.float32, copy=False)
+
+
+def compute_target_point(vehicle, config: TransfuserConfig) -> torch.Tensor:
+    if vehicle is None:
+        return _zero_target_point()
+    navigation = getattr(vehicle, "navigation", None)
+    current_ref_lanes = getattr(navigation, "current_ref_lanes", None) if navigation is not None else None
+    if not current_ref_lanes:
+        return _zero_target_point()
+    current_lane = current_ref_lanes[0]
+    if current_lane is None:
+        return _zero_target_point()
+
+    s_ego, _ = current_lane.local_coordinates(vehicle.position)
+    speed_mps = float(getattr(vehicle, "speed_km_h", 0.0)) / 3.6
+    delta_s = _target_progress_distance(config, speed_mps)
+    s_target = min(float(s_ego) + delta_s, float(current_lane.length))
+    target_world = np.asarray(current_lane.position(s_target, 0.0), dtype=np.float32)
+    current_pose = _vehicle_pose_to_array(vehicle)
+    return torch.from_numpy(_world_pose_to_local_xy(current_pose, np.asarray([target_world[0], target_world[1], 0.0], dtype=np.float32)))
+
+
+def compute_target_point_from_sample(sample: Dict[str, np.ndarray], config: TransfuserConfig) -> torch.Tensor:
+    if "reference_pose_world" not in sample or "future_reference_pose_world" not in sample:
+        return _zero_target_point()
+
+    current_pose = _to_numpy(sample["reference_pose_world"]).astype(np.float32, copy=False)
+    future_reference = _to_numpy(sample["future_reference_pose_world"]).astype(np.float32, copy=False)
+    if future_reference.ndim != 2 or future_reference.shape[0] == 0:
+        return _zero_target_point()
+
+    current_lane_index = int(_to_numpy(sample.get("reference_lane_index", np.asarray(-1, dtype=np.int16))).reshape(-1)[0])
+    future_lane_index = sample.get("future_reference_lane_index")
+    if future_lane_index is not None:
+        future_lane_index = _to_numpy(future_lane_index).astype(np.int64, copy=False).reshape(-1)
+        same_lane_mask = future_lane_index == current_lane_index
+        if same_lane_mask.any():
+            future_reference = future_reference[same_lane_mask]
+        else:
+            future_reference = future_reference[:1]
+
+    local_points_xy = np.stack(
+        [_world_pose_to_local_xy(current_pose, pose) for pose in future_reference],
+        axis=0,
+    ).astype(np.float32, copy=False)
+    local_points_xy = np.concatenate(
+        [np.zeros((1, 2), dtype=np.float32), local_points_xy],
+        axis=0,
+    )
+    speed_mps = float(_to_numpy(sample.get("ego_speed_km_h", np.asarray(0.0, dtype=np.float32))).reshape(-1)[0]) / 3.6
+    delta_s = _target_progress_distance(config, speed_mps)
+    target_point = _interpolate_local_target(local_points_xy, delta_s)
+    return torch.from_numpy(target_point)
+
+
 # !这里与 TransFuser 原论文中的 BEV 处理方式不同!
 def lidar_to_histogram(
     lidar: np.ndarray,
@@ -219,6 +336,7 @@ def sample_to_features_targets(sample: Dict[str, np.ndarray], config: Transfuser
         "lidar_feature": lidar_to_histogram(sample["lidar"], config),
         "status_feature": build_status_feature(sample["ego_state"], config),
         "ego_state": torch.from_numpy(_to_numpy(sample["ego_state"]).astype(np.float32, copy=False)),
+        "target_point": compute_target_point_from_sample(sample, config),
     }
     agent_states, agent_labels = normalize_agent_targets(
         sample["agent_states"], sample["agent_labels"], config
@@ -240,6 +358,9 @@ def processed_sample_to_features_targets(sample: Dict[str, np.ndarray]):
         "lidar_feature": torch.from_numpy(_to_numpy(sample["lidar_feature"]).astype(np.float32, copy=True)),
         "status_feature": torch.from_numpy(_to_numpy(sample["status_feature"]).astype(np.float32, copy=True)),
         "ego_state": torch.from_numpy(_to_numpy(sample["ego_state"]).astype(np.float32, copy=True)),
+        "target_point": torch.from_numpy(_to_numpy(sample["target_point"]).astype(np.float32, copy=True))
+        if "target_point" in sample
+        else _zero_target_point(),
     }
     targets = {
         "trajectory": torch.from_numpy(_to_numpy(sample["trajectory"]).astype(np.float32, copy=True)),
@@ -250,7 +371,11 @@ def processed_sample_to_features_targets(sample: Dict[str, np.ndarray]):
     return features, targets
 
 
-def observation_to_features(observation: Dict[str, np.ndarray], config: TransfuserConfig) -> Dict[str, torch.Tensor]:
+def observation_to_features(
+    observation: Dict[str, np.ndarray],
+    config: TransfuserConfig,
+    vehicle=None,
+) -> Dict[str, torch.Tensor]:
     return {
         "camera_feature": stitch_three_cameras(
             observation["rgb_left"], observation["rgb_front"], observation["rgb_right"], config
@@ -258,6 +383,7 @@ def observation_to_features(observation: Dict[str, np.ndarray], config: Transfus
         "lidar_feature": lidar_to_histogram(observation["lidar"], config),
         "status_feature": build_status_feature(observation["ego_state"], config),
         "ego_state": torch.from_numpy(_to_numpy(observation["ego_state"]).astype(np.float32, copy=False)),
+        "target_point": compute_target_point(vehicle, config) if vehicle is not None else _zero_target_point(),
     }
 
 

@@ -8,7 +8,7 @@ import numpy as np
 
 
 DEFAULT_DATASET_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaData_strong_idm_single")
-DEFAULT_NUM_ANCHORS = 8
+DEFAULT_NUM_ANCHORS = 20
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parent / f"anchors.npy"
 DEFAULT_FIGURE_PATH = Path(__file__).resolve().parent / f"anchors.png"
 DEFAULT_TRAJECTORY_KEY = "trajectory"
