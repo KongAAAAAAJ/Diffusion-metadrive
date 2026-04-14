@@ -15,7 +15,16 @@ EXPERT_TYPE="${EXPERT_TYPE:-idm}"
 COLLECTION_MODE="${COLLECTION_MODE:-single}"  # 选择地图模式：single | fixed_hybrid | random_road | phase2_plan
 DATASET_NAME="${DATASET_NAME:-metaIDM}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
-LOCAL_ROUTE_WEIGHTS=${LOCAL_ROUTE_WEIGHTS:-'{"R1_entry_straight": 1.0, "R2_entry_curve": 1.0, "R3_mainline_straight": 1.0, "R4_mainline_transition": 1.0, "R5_ramp_curve": 1.0, "R6_exit_to_ramp": 1.0, "R7_merge_core": 1.0, "R8_narrow_channel": 1.0, "R9_post_split_curve": 1.0}'}
+SCENARIO_WEIGHTS=${SCENARIO_WEIGHTS:-'{
+    "S1_free_cruise_straight": 1.0, 
+    "S2_free_cruise_curve": 1.0, 
+    "S3_straight_following": 1.0, 
+    "S4_curve_following": 1.0, 
+    "S5_hard_brake_lead": 1.0, 
+    "S6_background_merge_in": 1.0, 
+    "S7_ego_merge_from_ramp": 1.0, 
+    "S8_ego_exit_to_ramp": 1.0, 
+    "S9_narrow_channel_negotiation": 1.0}'}
 IDM_VARIANT_WEIGHTS=${IDM_VARIANT_WEIGHTS:-'{"default": 1.0}'}
 
 # Derived paths (auto-chained between stages)
@@ -67,7 +76,7 @@ run_collect() {
             --trajectory-visualization-lateral-margin "${TRAJECTORY_VISUALIZATION_LATERAL_MARGIN}" \
             --traffic-density-min "${density_min}" \
             --traffic-density-max "${density_max}" \
-            --local-route-weights "${LOCAL_ROUTE_WEIGHTS}" \
+            --scenario-weights "${SCENARIO_WEIGHTS}" \
             --idm-variant-weights "${IDM_VARIANT_WEIGHTS}" \
             --use-hybrid-map "${use_hybrid_map}" \
             --map-block-num "${map_block_num}" \

@@ -174,6 +174,13 @@ def draw_top_down_trajectory(
 
 
 class TopDownRenderer:
+    EGO_LABEL_BG = (255, 247, 237)
+    EGO_LABEL_FG = (154, 52, 18)
+    EGO_LABEL_BORDER = (251, 146, 60)
+    WARNING_LABEL_BG = (254, 226, 226)
+    WARNING_LABEL_FG = (185, 28, 28)
+    WARNING_LABEL_BORDER = (220, 38, 38)
+
     def __init__(
         self,
         film_size=(2000, 2000),  # draw map in size = film_size/scaling. By default, it is set to 400m
@@ -268,6 +275,7 @@ class TopDownRenderer:
 
         self.screen_record = screen_record
         self._screen_frames = []
+        self._latest_objects = {}
         self.pygame_font = None
         self.map = self.engine.current_map
         self.stack_frames = deque(maxlen=num_stack)
@@ -341,6 +349,7 @@ class TopDownRenderer:
 
         # Record current target vehicle
         objects = self.engine.get_objects(lambda obj: not is_map_related_instance(obj))
+        self._latest_objects = objects
         this_frame_objects = self._append_frame_objects(objects)
         self.history_objects.append(this_frame_objects)
 
@@ -440,6 +449,88 @@ class TopDownRenderer:
                 )
             )
         return frame_objects
+
+    @classmethod
+    def _draw_tracked_agent_highlight(cls, surface, tracked_vehicle, screen_position=None, heading_theta=None) -> None:
+        if tracked_vehicle is None:
+            return
+        if screen_position is None:
+            if not surface.is_visible(tracked_vehicle.position):
+                return
+            center = np.asarray(surface.pos2pix(tracked_vehicle.position[0], tracked_vehicle.position[1]), dtype=np.int32)
+        else:
+            center = np.asarray(screen_position, dtype=np.int32)
+        label_offset = np.asarray([10, -12], dtype=np.int32)
+        label_anchor = center + label_offset
+
+        if not pygame.font.get_init():
+            pygame.font.init()
+        if ObjectGraphics.font is None:
+            ObjectGraphics.font = pygame.font.Font(None, 16)
+        text_surface = ObjectGraphics.font.render("EGO", True, cls.EGO_LABEL_FG, cls.EGO_LABEL_BG)
+        original_rect = text_surface.get_rect()
+        
+        # Keep text horizontal by applying reverse rotation when target_agent_heading_up=True
+        if heading_theta is not None:
+            # Calculate reverse rotation angle to keep text horizontal
+            angle = -np.rad2deg(heading_theta) + 90.0
+            # Rotate the text surface
+            text_surface = pygame.transform.rotate(text_surface, angle)
+            # Get the new rect after rotation
+            rotated_rect = text_surface.get_rect()
+            # Create text rect centered at label_anchor using the rotated surface size
+            text_rect = rotated_rect.copy()
+            text_rect.center = (int(label_anchor[0]), int(label_anchor[1]))
+        else:
+            # No rotation, use original rect
+            text_rect = original_rect.copy()
+            text_rect.center = (int(label_anchor[0]), int(label_anchor[1]))
+        
+        padded_rect = text_rect.inflate(8, 4)
+        pygame.draw.rect(surface, cls.EGO_LABEL_BG, padded_rect, border_radius=6)
+        pygame.draw.rect(surface, cls.EGO_LABEL_BORDER, padded_rect, width=1, border_radius=6)
+        surface.blit(text_surface, text_rect)
+
+    @classmethod
+    def _draw_warning_marker(cls, surface, tracked_vehicle, screen_position=None, heading_theta=None) -> None:
+        if tracked_vehicle is None:
+            return
+        if screen_position is None:
+            if not surface.is_visible(tracked_vehicle.position):
+                return
+            center = np.asarray(surface.pos2pix(tracked_vehicle.position[0], tracked_vehicle.position[1]), dtype=np.int32)
+        else:
+            center = np.asarray(screen_position, dtype=np.int32)
+        label_offset = np.asarray([10, -12], dtype=np.int32)
+        label_anchor = center + label_offset
+
+        if not pygame.font.get_init():
+            pygame.font.init()
+        if ObjectGraphics.font is None:
+            ObjectGraphics.font = pygame.font.Font(None, 18)
+        text_surface = ObjectGraphics.font.render("!", True, cls.WARNING_LABEL_FG, cls.WARNING_LABEL_BG)
+        original_rect = text_surface.get_rect()
+        
+        # Keep text horizontal by applying reverse rotation when target_agent_heading_up=True
+        if heading_theta is not None:
+            # Calculate reverse rotation angle to keep text horizontal
+            angle = -np.rad2deg(heading_theta) + 90.0
+            # Rotate the text surface
+            text_surface = pygame.transform.rotate(text_surface, angle)
+            # Get the new rect after rotation
+            rotated_rect = text_surface.get_rect()
+            # Create text rect centered at label_anchor using the rotated surface size
+            text_rect = rotated_rect.copy()
+            text_rect.center = (int(label_anchor[0]), int(label_anchor[1]))
+        else:
+            # No rotation, use original rect
+            text_rect = original_rect.copy()
+            text_rect.center = (int(label_anchor[0]), int(label_anchor[1]))
+        
+        padded_rect = text_rect.inflate(10, 6)
+        pygame.draw.rect(surface, cls.WARNING_LABEL_BG, padded_rect, border_radius=8)
+        pygame.draw.rect(surface, cls.WARNING_LABEL_BORDER, padded_rect, width=1, border_radius=8)
+        surface.blit(text_surface, text_rect)
 
     def _draw(self, *args, **kwargs):
         """
@@ -564,6 +655,21 @@ class TopDownRenderer:
                 )
             )
 
+        ego_screen_position = self._world_to_screen_position(
+            self.current_track_agent.position,
+            off if not self.target_agent_heading_up else None,
+        ) if self.current_track_agent is not None else None
+        if ego_screen_position is not None:
+            # Pass heading_theta when target_agent_heading_up is enabled to keep text horizontal
+            heading_theta = self.current_track_agent.heading_theta if self.target_agent_heading_up else None
+            self._draw_tracked_agent_highlight(
+                self._screen_canvas,
+                self.current_track_agent,
+                screen_position=ego_screen_position,
+                heading_theta=heading_theta,
+            )
+        self._draw_warning_markers(off if not self.target_agent_heading_up else None)
+
         if self.show_agent_name:
             raise ValueError("This function is broken")
             # FIXME check this later
@@ -585,6 +691,42 @@ class TopDownRenderer:
                         dest=(new_position[0] - img.get_width() / 2, new_position[1] - img.get_height() / 2),
                         # special_flags=pygame.BLEND_RGBA_MULT
                     )
+
+    def _draw_warning_markers(self, off) -> None:
+        for vehicle in (self._latest_objects or {}).values():
+            if getattr(vehicle, "scenario_warning_marker", None) != "!":
+                continue
+            screen_position = self._world_to_screen_position(vehicle.position, off)
+            if screen_position is None:
+                continue
+            # Pass heading_theta when target_agent_heading_up is enabled to keep text horizontal
+            heading_theta = self.current_track_agent.heading_theta if self.target_agent_heading_up else None
+            self._draw_warning_marker(self._screen_canvas, vehicle, screen_position=screen_position, heading_theta=heading_theta)
+
+    def _world_to_screen_position(self, position, off):
+        frame_pos = np.asarray(self._frame_canvas.pos2pix(position[0], position[1]), dtype=np.float32)
+        if not self.target_agent_heading_up:
+            if off is None:
+                return frame_pos
+            return frame_pos - np.asarray([off[0], off[1]], dtype=np.float32)
+
+        tracked = self.current_track_agent
+        if tracked is None:
+            return None
+        tracked_pos = np.asarray(self._frame_canvas.pos2pix(*tracked.position), dtype=np.float32)
+        screen_center = np.asarray(self._screen_canvas.get_size(), dtype=np.float32) / 2.0
+        rel = frame_pos - tracked_pos
+        rotation = np.deg2rad(-np.rad2deg(tracked.heading_theta) + 90.0)
+        cos_theta = np.cos(rotation)
+        sin_theta = np.sin(rotation)
+        rotated = np.asarray(
+            [
+                cos_theta * rel[0] - sin_theta * rel[1],
+                sin_theta * rel[0] + cos_theta * rel[1],
+            ],
+            dtype=np.float32,
+        )
+        return screen_center + rotated
 
     def _handle_event(self) -> None:
         """

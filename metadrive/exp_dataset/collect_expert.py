@@ -79,6 +79,14 @@ from metadrive.exp_dataset.route_definitions import (
     get_required_preset,
     get_route_blocks,
 )
+from metadrive.exp_dataset.scenario_definitions import (
+    DEFAULT_SCENARIO_WEIGHTS,
+    SCENARIO_BY_ID,
+    SCENARIO_EXPERT_OVERRIDES,
+    get_scenario_definition,
+)
+from metadrive.exp_dataset.local_traffic_spawner import LocalTrafficSpawner
+from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
 
 
 
@@ -91,6 +99,7 @@ from metadrive.exp_dataset.route_definitions import (
 
 @dataclass
 class EpisodeSpec:
+    scenario_id: str
     route_preset: str
     local_route: str
     traffic_density: float
@@ -104,6 +113,7 @@ class ExpertCollectorConfig:
     dataset_name: str = "metadrive_ppo_data"
     expert_type: str = "ppo"  # idm | ppo
     target_samples: int = 100
+    max_episodes: int = 0
     start_seed: int = 0
     spawn_seed_offset: int = 100000
     samples_per_shard: int = 2048
@@ -115,7 +125,8 @@ class ExpertCollectorConfig:
     # Video
     save_videos: bool = False
     video_fps: int = 10
-    topdown_camera_height: float = 180.0            
+    topdown_camera_height: float = 180.0
+    topdown_heading_up: bool = False              # Enable camera rotation with ego vehicle heading
 
     # Trajectory supervision
     horizon_steps: int = 100       # minimum future context required per sample
@@ -132,6 +143,9 @@ class ExpertCollectorConfig:
     # Traffic (map is fixed; only density varies)
     traffic_density_min: float = 0.1 # 0.06
     traffic_density_max: float = 0.2 # 0.08
+    scenario_weights: Dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_SCENARIO_WEIGHTS)
+    )
     local_route_weights: Dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_LOCAL_ROUTE_WEIGHTS)
     )
@@ -221,12 +235,23 @@ class EpisodeSpecSampler:
         for route_name in route_weights:
             if route_name not in ROUTE_BY_NAME:
                 raise ValueError(f"Unknown local_route: {route_name!r}")
-        total_route_weight = sum(route_weights.values())
-        if total_route_weight <= 0.0:
-            raise ValueError("local_route_weights must contain at least one positive weight")
-        self._local_routes = list(route_weights.keys())
-        self._local_route_probs = [
-            float(route_weights[route]) / float(total_route_weight) for route in self._local_routes
+        self._route_weights = route_weights
+
+        scenario_weights = {
+            str(name): float(weight)
+            for name, weight in dict(config.scenario_weights).items()
+            if float(weight) > 0.0
+        }
+        for scenario_id in scenario_weights:
+            if scenario_id not in SCENARIO_BY_ID:
+                raise ValueError(f"Unknown scenario_id: {scenario_id!r}")
+        total_scenario_weight = sum(scenario_weights.values())
+        if total_scenario_weight <= 0.0:
+            raise ValueError("scenario_weights must contain at least one positive weight")
+        self._scenarios = list(scenario_weights.keys())
+        self._scenario_probs = [
+            float(scenario_weights[scenario_id]) / float(total_scenario_weight)
+            for scenario_id in self._scenarios
         ]
 
         idm_weights = dict(config.idm_variant_weights)
@@ -235,12 +260,27 @@ class EpisodeSpecSampler:
         self._idm_probs = [float(idm_weights[name]) / float(total_idm_weight) for name in self._idm_variants]
 
     def sample(self) -> EpisodeSpec:
-        local_route = str(self._rng.choice(self._local_routes, p=self._local_route_probs))
+        scenario_id = str(self._rng.choice(self._scenarios, p=self._scenario_probs))
+        scenario = get_scenario_definition(scenario_id)
+        local_route_candidates = [
+            route_name
+            for route_name in scenario.allowed_local_routes
+            if self._route_weights.get(route_name, 0.0) > 0.0
+        ]
+        if not local_route_candidates:
+            local_route_candidates = list(scenario.allowed_local_routes)
+        local_route_weights = np.asarray(
+            [self._route_weights.get(route_name, 1.0) for route_name in local_route_candidates],
+            dtype=np.float64,
+        )
+        local_route_probs = local_route_weights / np.sum(local_route_weights)
+        local_route = str(self._rng.choice(local_route_candidates, p=local_route_probs))
         route = get_required_preset(local_route)
         density = float(self._rng.uniform(self._config.traffic_density_min, self._config.traffic_density_max))
         spawn_seed = int(self._rng.randint(0, 2**31 - 1))
         idm_variant = str(self._rng.choice(self._idm_variants, p=self._idm_probs))
         return EpisodeSpec(
+            scenario_id=scenario_id,
             route_preset=route,
             local_route=local_route,
             traffic_density=density,
@@ -340,6 +380,20 @@ def build_expert_idm_config(config: ExpertCollectorConfig) -> ExpertIDMConfig:
     )
 
 
+def apply_idm_overrides(idm_config: ExpertIDMConfig, overrides: Dict[str, Any]) -> ExpertIDMConfig:
+    if not overrides:
+        return idm_config
+    if dataclasses.is_dataclass(idm_config):
+        return dataclasses.replace(idm_config, **overrides)
+    current_values = {
+        key: getattr(idm_config, key)
+        for key in vars(idm_config).keys()
+        if hasattr(idm_config, key)
+    }
+    current_values.update(overrides)
+    return type(idm_config)(**current_values)
+
+
 def build_trajectory_filter_pipeline(config: ExpertCollectorConfig) -> TrajectoryFilterPipeline | None:
     if not bool(config.trajectory_filter_enabled):
         return None
@@ -430,13 +484,13 @@ DEFAULT_TOPDOWN_FILM_SIZE = 3000
 DEFAULT_TEXT_CORNER = "top_left"
 
 
-def build_topdown_render_kwargs(camera_position: tuple[float, float] | None = None) -> dict[str, object]:
+def build_topdown_render_kwargs(camera_position: tuple[float, float] | None = None, heading_up: bool = False) -> dict[str, object]:
     kwargs: dict[str, object] = {
         "mode": "top_down",
         "window": False,
         "screen_size": (DEFAULT_TOPDOWN_SCREEN_SIZE, DEFAULT_TOPDOWN_SCREEN_SIZE),
         "film_size": (DEFAULT_TOPDOWN_FILM_SIZE, DEFAULT_TOPDOWN_FILM_SIZE),
-        "target_agent_heading_up": False,
+        "target_agent_heading_up": heading_up,
     }
     if camera_position is not None:
         kwargs["camera_position"] = camera_position
@@ -763,6 +817,7 @@ def build_episode_samples(
     traffic_density: float,
     route_id: str = "mainline",
     local_route: str = "unknown",
+    scenario_id: str = "unknown",
     idm_variant: str = "default",
     visualization_dir: Path | None = None,
     episode_index: int = 0,
@@ -903,6 +958,7 @@ def build_episode_samples(
                 "traffic_density": td_arr,
                 "route_id": route_id,
                 "local_route": local_route,
+                "scenario_id": scenario_id,
                 "idm_variant": idm_variant,
                 "episode_id": np.asarray(int(episode_index), dtype=np.int32),
                 "_sample_index": np.asarray(start_idx, dtype=np.int32),
@@ -927,19 +983,21 @@ def format_eta(seconds: float) -> str:
     return f"{minutes:02d}m{secs:02d}s"
 
 
-def build_episode_video_path(video_dir: Path, episode_index: int) -> Path:
+def build_episode_video_path(video_dir: Path, episode_index: int, scenario_id: str | None = None) -> Path:
+    if scenario_id:
+        return video_dir / str(scenario_id) / f"episode_{int(episode_index):06d}.mp4"
     return video_dir / f"episode_{int(episode_index):06d}.mp4"
 
 
-def capture_episode_topdown_frame(env, episode_index: int, step_count: int) -> np.ndarray:
+def capture_episode_topdown_frame(env, episode_index: int, step_count: int, heading_up: bool = False) -> np.ndarray:
     primary_agent_id = get_primary_agent_id(env)
     camera_position = sync_topdown_camera_with_agent(env, primary_agent_id)
-    render_kwargs = build_topdown_render_kwargs(camera_position=camera_position)
+    render_kwargs = build_topdown_render_kwargs(camera_position=camera_position, heading_up=heading_up)
     if getattr(env, "top_down_renderer", None) is None:
         frame = env.render(**render_kwargs)
         sync_topdown_camera_with_agent(env, primary_agent_id)
     else:
-        frame = env.render(**build_topdown_render_kwargs())
+        frame = env.render(**build_topdown_render_kwargs(heading_up=heading_up))
 
     frame_array = np.asarray(frame)
     if frame_array.ndim >= 2:
@@ -1192,6 +1250,7 @@ def detect_existing_state(shard_dir: Path, report_dir: Path) -> Dict[str, object
     mode_counts: Dict[str, int] = {}
     route_counts: Dict[str, int] = {}
     local_route_counts: Dict[str, int] = {}
+    scenario_counts: Dict[str, int] = {}
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         total_samples = int(manifest.get("collected_samples", 0))
@@ -1203,6 +1262,8 @@ def detect_existing_state(shard_dir: Path, report_dir: Path) -> Dict[str, object
         route_counts = {str(name): int(count) for name, count in raw_route_counts.items()}
         raw_local_route_counts = manifest.get("local_route_distribution", {}) or {}
         local_route_counts = {str(name): int(count) for name, count in raw_local_route_counts.items()}
+        raw_scenario_counts = manifest.get("scenario_distribution", {}) or {}
+        scenario_counts = {str(name): int(count) for name, count in raw_scenario_counts.items()}
     else:
         for shard_path in shard_paths:
             with np.load(shard_path, allow_pickle=False) as shard_data:
@@ -1218,6 +1279,7 @@ def detect_existing_state(shard_dir: Path, report_dir: Path) -> Dict[str, object
         "mode_counts": mode_counts,
         "route_counts": route_counts,
         "local_route_counts": local_route_counts,
+        "scenario_counts": scenario_counts,
     }
 
 
@@ -1280,7 +1342,8 @@ def rollout_episode(
     episode_spawn_seed: int,
     episode_index: int,
     idm_config: ExpertIDMConfig | None = None,
-) -> tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]] | None, List[np.ndarray]]:
+    local_route: str = "",
+) -> tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]] | None, List[np.ndarray], int]:
     """Drive one episode with the selected expert; return raw frame list."""
     if hasattr(env, "engine") and getattr(env.engine, "spawn_manager", None) is not None:
         env.engine.spawn_manager.set_episode_spawn_seed(episode_spawn_seed)
@@ -1291,6 +1354,24 @@ def rollout_episode(
         cached_geometry=None,
     )
     agent_id = list(obs_dict.keys())[0]  # single-agent env → always one key
+    env_config = getattr(env, "config", {}) or {}
+    scenario_id = str(env_config.get("scenario_id", ""))
+    local_route = str(env_config.get("local_route", ""))
+    scenario_orchestrator = None
+    if scenario_id and scenario_id in SCENARIO_BY_ID and local_route:
+        scenario_orchestrator = ScenarioOrchestrator(get_scenario_definition(scenario_id), local_route)
+        scenario_orchestrator.reset(env, agent_id)
+    vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
+    base_traffic_count = 0
+    if vehicle is not None and local_route:
+        spawner = LocalTrafficSpawner()
+        base_traffic_count = spawner.spawn_base_traffic(
+            env,
+            vehicle,
+            local_route,
+            traffic_density=float((getattr(env, "config", {}) or {}).get("traffic_density", 0.10)),
+            rng=np.random.RandomState(int(episode_spawn_seed) ^ 0xBEEF),
+        )
 
     frames: List[Dict[str, np.ndarray]] = []
     video_frames: List[np.ndarray] = []
@@ -1299,6 +1380,8 @@ def rollout_episode(
     idm_policy = None
 
     while not done and step <= config.max_episode_steps:
+        if scenario_orchestrator is not None:
+            scenario_orchestrator.before_step(env, agent_id, step)
         vehicle = env.agents.get(agent_id)
         if vehicle is None:
             break  # agent was removed (crash / out-of-road)
@@ -1323,6 +1406,7 @@ def rollout_episode(
                     env=env,
                     episode_index=episode_index,
                     step_count=step,
+                    heading_up=config.topdown_heading_up,
                 )
             )
 
@@ -1346,7 +1430,22 @@ def rollout_episode(
             done = True
         step += 1
 
-    return frames, map_geometry, video_frames
+    if scenario_orchestrator is not None:
+        setattr(env, "_last_scenario_summary", scenario_orchestrator.get_episode_summary())
+    else:
+        setattr(
+            env,
+            "_last_scenario_summary",
+            {
+                "scenario_id": scenario_id or "unknown",
+                "scenario_triggered": False,
+                "scenario_realized": False,
+                "scenario_trigger_step": None,
+                "scenario_realized_step": None,
+                "scenario_notes": [],
+            },
+        )
+    return frames, map_geometry, video_frames, base_traffic_count
 
 
 # ---------------------------------------------------------------------------
@@ -1365,6 +1464,7 @@ def write_manifest(
     filter_summary: Dict | None = None,
     route_counts: Dict[str, int] | None = None,
     local_route_counts: Dict[str, int] | None = None,
+    scenario_counts: Dict[str, int] | None = None,
     resume: bool = False,
 ) -> None:
     manifest_path = report_dir / "manifest.json"
@@ -1383,6 +1483,7 @@ def write_manifest(
         "traffic_density_range": [config.traffic_density_min, config.traffic_density_max],
         "route_distribution": dict(route_counts or {}),
         "local_route_distribution": dict(local_route_counts or {}),
+        "scenario_distribution": dict(scenario_counts or {}),
         "collection_wall_time_sec": float(collection_wall_time_sec),
         "splits": {name: len(shards) for name, shards in split_summary.items()},
         "trajectory_correction": correction_summary,
@@ -1447,6 +1548,9 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         local_route_counts: Dict[str, int] = defaultdict(int)
         for route_name, count in dict(existing.get("local_route_counts", {})).items():
             local_route_counts[str(route_name)] = int(count)
+        scenario_counts: Dict[str, int] = defaultdict(int)
+        for scenario_name, count in dict(existing.get("scenario_counts", {})).items():
+            scenario_counts[str(scenario_name)] = int(count)
         print(
             f"[resume] detected {total_samples} samples, {total_episodes} episodes, {start_shard_index} shards"
         )
@@ -1457,6 +1561,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         mode_counts = {mode.name.lower(): 0 for mode in TrajectoryMode}
         route_counts = defaultdict(int)
         local_route_counts = defaultdict(int)
+        scenario_counts = defaultdict(int)
 
     episode_rng = build_episode_rngs(config)
     fast_forward_episode_rngs(episode_rng, config, total_episodes)
@@ -1501,33 +1606,45 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     }
 
     try:
-        while total_samples < config.target_samples:
+        while total_samples < config.target_samples and (
+            int(config.max_episodes) <= 0 or total_episodes < int(config.max_episodes)
+        ):
             # 4. 采样一个结构化 episode spec 并注入环境配置
             spec = sampler.sample()
-            env.config["traffic_density"] = spec.traffic_density
+            effective_density = LocalTrafficSpawner.get_effective_traffic_density(
+                spec.local_route, spec.traffic_density
+            )
+            env.config["traffic_density"] = effective_density
             env.config["route_preset"] = spec.route_preset
             env.config["local_route"] = spec.local_route
+            env.config["scenario_id"] = spec.scenario_id
             route_block_ids = list(get_route_blocks(spec.local_route))
             env.config["ego_main_route_block_ids"] = route_block_ids
             if hasattr(env, "engine") and getattr(env.engine, "global_config", None) is not None:
-                env.engine.global_config["traffic_density"] = spec.traffic_density
+                env.engine.global_config["traffic_density"] = effective_density
                 env.engine.global_config["route_preset"] = spec.route_preset
                 env.engine.global_config["local_route"] = spec.local_route
+                env.engine.global_config["scenario_id"] = spec.scenario_id
                 env.engine.global_config["ego_main_route_block_ids"] = route_block_ids
 
             idm_config = build_expert_idm_config(config)
+            scenario_overrides = SCENARIO_EXPERT_OVERRIDES.get(spec.scenario_id, {})
+            if scenario_overrides:
+                idm_config = apply_idm_overrides(idm_config, scenario_overrides)
             if spec.idm_variant is not None:
-                overrides = IDM_VARIANT_CONFIGS.get(spec.idm_variant, {})
-                idm_config = dataclasses.replace(idm_config, **overrides)
+                variant_overrides = IDM_VARIANT_CONFIGS.get(spec.idm_variant, {})
+                if variant_overrides:
+                    idm_config = apply_idm_overrides(idm_config, variant_overrides)
 
             # 5. 驾驶一轮新 episode，得到原始帧列表和地图几何信息
             episode_index = total_episodes + 1
-            frames, episode_map_geometry, video_frames = rollout_episode(
+            frames, episode_map_geometry, video_frames, base_traffic_count = rollout_episode(
                 env,
                 config,
                 spec.spawn_seed,
                 episode_index=episode_index,
                 idm_config=idm_config,
+                local_route=spec.local_route,
             )
             map_geometry = resolve_map_visualization_geometry(
                 env=env,
@@ -1542,6 +1659,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
                 spec.traffic_density,
                 route_id=spec.route_preset,
                 local_route=spec.local_route,
+                scenario_id=spec.scenario_id,
                 idm_variant=spec.idm_variant or "default",
                 visualization_dir=visualization_dir if bool(config.trajectory_visualization_enabled) else None,
                 episode_index=episode_index,
@@ -1549,7 +1667,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
             )
             if bool(config.save_videos):
                 write_episode_video(
-                    build_episode_video_path(video_dir, episode_index),
+                    build_episode_video_path(video_dir, episode_index, scenario_id=spec.scenario_id),
                     video_frames,
                     fps=config.video_fps,
                 )
@@ -1577,6 +1695,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
             total_env_steps += len(frames)
             route_counts[spec.route_preset] += len(storable_samples)
             local_route_counts[spec.local_route] += len(storable_samples)
+            scenario_counts[spec.scenario_id] += len(storable_samples)
             for sample in storable_samples:
                 mode_name = trajectory_mode_name(int(sample["trajectory_mode"]))
                 mode_counts[mode_name] += 1
@@ -1594,9 +1713,9 @@ def run_collection(config: ExpertCollectorConfig) -> None:
 
             print(
                 f"[ep={total_episodes}] total_samples={total_samples}/{config.target_samples} "
-                f"local_route={spec.local_route} preset={spec.route_preset} density={spec.traffic_density:.3f} "
+                f"scenario={spec.scenario_id} local_route={spec.local_route} preset={spec.route_preset} density={spec.traffic_density:.3f} "
                 f"idm_variant={spec.idm_variant or 'default'} frames={len(frames)} ep_samples={len(storable_samples)} "
-                f"step/s={step_per_sec:.2f} sample/s={sample_per_sec:.2f} ETA={format_eta(eta_seconds)}"
+                f"base_traffic={base_traffic_count} step/s={step_per_sec:.2f} sample/s={sample_per_sec:.2f} ETA={format_eta(eta_seconds)}"
             )
             if trajectory_filter is not None:
                 reject_rate = filter_stats["rejected"] / max(int(filter_stats["total_checked"]), 1)
@@ -1655,6 +1774,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         filter_summary=filter_summary,
         route_counts=dict(route_counts),
         local_route_counts=dict(local_route_counts),
+        scenario_counts=dict(scenario_counts),
         collection_wall_time_sec=collection_wall_time_sec,
         resume=bool(config.resume),
     )

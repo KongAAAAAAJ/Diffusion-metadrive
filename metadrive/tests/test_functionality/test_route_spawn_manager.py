@@ -297,3 +297,107 @@ def test_update_destination_for_falls_back_to_positive_socket_when_respawn_road_
     updated = manager.update_destination_for("agent0", {"spawn_lane_index": ("A", "B", 0)})
 
     assert updated["destination"] == "C4_END"
+
+
+def test_get_main_route_spawn_roads_prefers_first_positive_block_network_road_over_socket():
+    module = _load_route_spawn_manager_module()
+    manager = module.RouteAwareSpawnManager()
+
+    first_lane = SimpleNamespace(index=("A", "B", 0))
+    later_lane = SimpleNamespace(index=("B", "C", 0))
+    current_map = _make_map([
+        SimpleNamespace(
+            graph_block_id="x0",
+            get_respawn_roads=lambda: [],
+            get_socket_list=lambda: [SimpleNamespace(positive_road=_Road("B", "C"))],
+            block_network=SimpleNamespace(get_positive_lanes=lambda: [[first_lane], [later_lane]]),
+        ),
+    ])
+    manager.engine = SimpleNamespace(
+        global_config={"ego_main_route_block_ids": ("x0",)},
+        current_map=current_map,
+    )
+
+    roads = manager.get_main_route_spawn_roads(current_map)
+
+    assert [(r.start_node, r.end_node) for r in roads] == [("A", "B")]
+
+
+def test_update_destination_for_uses_last_positive_block_network_road():
+    module = _load_route_spawn_manager_module()
+    manager = module.RouteAwareSpawnManager()
+
+    first_lane = SimpleNamespace(index=("A", "B", 0))
+    last_lane = SimpleNamespace(index=("B", "C", 0))
+    current_map = _make_map([
+        SimpleNamespace(
+            graph_block_id="x0",
+            get_respawn_roads=lambda: [],
+            get_socket_list=lambda: [SimpleNamespace(positive_road=_Road("C", "D"))],
+            block_network=SimpleNamespace(get_positive_lanes=lambda: [[first_lane], [last_lane]]),
+        ),
+    ])
+    manager.engine = SimpleNamespace(
+        global_config={"ego_main_route_block_ids": ("x0",)},
+        current_map=current_map,
+    )
+
+    updated = manager.update_destination_for("agent0", {"spawn_lane_index": ("A", "B", 0)})
+
+    assert updated["destination"] == "C"
+
+
+def test_reset_applies_rightmost_spawn_lane_preference_for_s6_and_s8():
+    module = _load_route_spawn_manager_module()
+    manager = module.RouteAwareSpawnManager()
+
+    road = _Road("ROOT_END", "G0_END")
+    current_map = SimpleNamespace(
+        blocks=[_make_block("g0", [road])],
+        road_network=SimpleNamespace(graph={"ROOT_END": {"G0_END": [object(), object(), object()]}}),
+    )
+    manager.engine = SimpleNamespace(
+        global_config={
+            "ego_main_route_block_ids": ("g0",),
+            "ego_spawn_buffer_scale": 1.0,
+            "scenario_id": "S8_ego_exit_to_ramp",
+        },
+        current_map=current_map,
+    )
+    manager.current_map = current_map
+
+    manager.set_episode_spawn_seed(0)
+    manager.reset()
+
+    lane_index = manager.engine.global_config["agent_configs"]["agent0"]["spawn_lane_index"]
+    assert lane_index == ("ROOT_END", "G0_END", 2)
+
+
+def test_reset_applies_probabilistic_spawn_lane_for_s9():
+    module = _load_route_spawn_manager_module()
+    manager = module.RouteAwareSpawnManager()
+    manager.np_random = np.random.RandomState(0)
+
+    road = _Road("ROOT_END", "MERGE_END")
+    current_map = SimpleNamespace(
+        blocks=[_make_block("merge0", [road])],
+        road_network=SimpleNamespace(graph={"ROOT_END": {"MERGE_END": [object(), object(), object()]}}),
+    )
+    manager.engine = SimpleNamespace(
+        global_config={
+            "ego_main_route_block_ids": ("merge0",),
+            "ego_spawn_buffer_scale": 1.0,
+            "scenario_id": "S9_narrow_channel_negotiation",
+        },
+        current_map=current_map,
+    )
+    manager.current_map = current_map
+
+    seen = []
+    for _ in range(20):
+        manager.reset()
+        seen.append(manager.engine.global_config["agent_configs"]["agent0"]["spawn_lane_index"][2])
+
+    assert set(seen).issubset({0, 1, 2})
+    assert 1 in seen
+    assert 2 in seen

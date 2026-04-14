@@ -50,6 +50,11 @@ def _load_module():
 
     idm_module = ModuleType("metadrive.policy.idm_policy")
 
+    class FrontBackObjects:
+        @staticmethod
+        def get_find_front_back_objs(objs, lane, position, max_distance):
+            return SimpleNamespace(front_object=lambda: None, front_min_distance=lambda: max_distance)
+
     class IDMPolicy:
         MAX_STEERING_ANGLE = 1.0
         DISTANCE_WANTED = 10.0
@@ -86,6 +91,7 @@ def _load_module():
             self.action_info.clear()
 
     idm_module.IDMPolicy = IDMPolicy
+    idm_module.FrontBackObjects = FrontBackObjects
 
     math_module = ModuleType("metadrive.utils.math")
     math_module.wrap_to_pi = lambda value: value
@@ -417,6 +423,47 @@ def test_expert_idm_policy_act_applies_intersection_adjustment():
 
     assert action == [("idm", current_lane), -1.25]
     assert policy.action_info["action"] == [("idm", current_lane), -1.25]
+
+
+def test_expert_idm_policy_falls_back_to_front_vehicle_lookup_when_lane_change_path_fails():
+    lead_vehicle = SimpleNamespace(speed_km_h=28.0)
+    surrounding_objects = SimpleNamespace(
+        front_object=lambda: lead_vehicle,
+        front_min_distance=lambda: 18.0,
+    )
+
+    class _FrontBackObjects:
+        @staticmethod
+        def get_find_front_back_objs(objs, lane, position, max_distance):
+            return surrounding_objects
+
+    expert_idm_policy.FrontBackObjects = _FrontBackObjects
+
+    vehicle = SimpleNamespace(
+        lidar=SimpleNamespace(get_surrounding_objects=lambda _: [lead_vehicle]),
+        position=np.asarray([0.0, 0.0], dtype=np.float64),
+        heading_theta=0.0,
+        on_yellow_continuous_line=False,
+        on_white_continuous_line=False,
+    )
+    current_lane = SimpleNamespace(
+        index=("A", "B", 0),
+        local_coordinates=lambda position: (0.0, 0.0),
+        heading_theta_at=lambda longitudinal: 0.0,
+    )
+    policy = expert_idm_policy.ExpertIDMPolicy(control_object=vehicle, random_seed=0)
+    policy.routing_target_lane = current_lane
+    policy.move_to_next_road = lambda: True
+    policy.lane_change_policy = lambda all_objects: (_ for _ in ()).throw(RuntimeError("lane change failed"))
+    policy.acceleration = lambda front_obj, dist_to_front: 0.25 if front_obj is lead_vehicle and dist_to_front == 18.0 else -9.0
+    policy.intersection_regulator.adjust = lambda ego, all_objects, target_lane, idm_acc: idm_acc
+
+    action = policy.act()
+
+    assert action == [("idm", current_lane), 0.25]
+    assert policy.action_info["front_object_detected"] is True
+    assert policy.action_info["front_object_distance"] == 18.0
+    assert policy.action_info["front_lookup_fallback_used"] is True
 
 
 def test_expert_idm_policy_reset_clears_intersection_regulator_state():

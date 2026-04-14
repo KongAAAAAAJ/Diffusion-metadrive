@@ -138,6 +138,21 @@ class RouteAwareTrafficManager(CustomTrafficManager):
             ) / 2.0
             if longitudinal_overlap and lateral_overlap:
                 return False
+
+        for traffic_vehicle in getattr(self, "_traffic_vehicles", []) or []:
+            traffic_position = getattr(traffic_vehicle, "position", None)
+            if traffic_position is None:
+                continue
+            existing_length = float(getattr(traffic_vehicle, "LENGTH", traffic_length) or traffic_length)
+            existing_width = float(getattr(traffic_vehicle, "WIDTH", traffic_width) or traffic_width)
+            longitudinal_overlap = abs(float(candidate_position[0]) - float(traffic_position[0])) < (
+                traffic_length + existing_length
+            ) / 2.0
+            lateral_overlap = abs(float(candidate_position[1]) - float(traffic_position[1])) < (
+                traffic_width + existing_width
+            ) / 2.0
+            if longitudinal_overlap and lateral_overlap:
+                return False
         return True
 
     def _spawn_traffic_vehicle_if_safe(
@@ -238,6 +253,29 @@ class RouteAwareTrafficManager(CustomTrafficManager):
             block_vehicles = self.block_triggered_vehicles.pop()
             self._traffic_vehicles += list(self.get_objects(block_vehicles.vehicles).values())
 
+    def _get_all_route_lanes(self):
+        current_map = getattr(self.engine, "current_map", None)
+        if current_map is None:
+            return []
+        route_block_ids = {
+            str(block_id) for block_id in self.engine.global_config.get("ego_main_route_block_ids", ()) if block_id
+        }
+        if not route_block_ids:
+            return []
+        lanes = []
+        seen = set()
+        for block in getattr(current_map, "blocks", []) or []:
+            if getattr(block, "graph_block_id", None) not in route_block_ids:
+                continue
+            for lane_group in getattr(block, "get_respawn_lanes", lambda: [])() or []:
+                for lane in lane_group or []:
+                    lane_index = getattr(lane, "index", None)
+                    if lane_index in seen:
+                        continue
+                    seen.add(lane_index)
+                    lanes.append(lane)
+        return lanes
+
     def after_reset(self):
         super().after_reset()
         self._force_activate_all_pending_blocks()
@@ -255,7 +293,9 @@ class RouteAwareTrafficManager(CustomTrafficManager):
             self._traffic_vehicles.remove(v)
 
             if self.mode in {"respawn", "hybrid"}:
-                lane = self.respawn_lanes[self.np_random.randint(0, len(self.respawn_lanes))]
+                all_route_lanes = self._get_all_route_lanes()
+                respawn_pool = all_route_lanes if all_route_lanes else self.respawn_lanes
+                lane = respawn_pool[self.np_random.randint(0, len(respawn_pool))]
                 lane_idx = lane.index
                 long = self.np_random.rand() * lane.length / 2
                 traffic_v_config = {"spawn_lane_index": lane_idx, "spawn_longitude": long}

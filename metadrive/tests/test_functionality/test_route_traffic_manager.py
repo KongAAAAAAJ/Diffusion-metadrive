@@ -290,3 +290,85 @@ def test_after_reset_force_activates_all_pending_trigger_vehicles():
     assert called["super_after_reset"] == 1
     assert manager.block_triggered_vehicles == []
     assert [vehicle.name for vehicle in manager._traffic_vehicles] == ["veh_c", "veh_a", "veh_b"]
+
+
+def test_after_step_respawn_prefers_all_route_lanes_when_available():
+    module = _load_route_traffic_manager_module()
+    manager = module.RouteAwareTrafficManager()
+
+    route_lane = SimpleNamespace(index=("R", "S", 0), length=100.0)
+    fallback_lane = SimpleNamespace(index=("A", "B", 0), length=50.0)
+    removed = SimpleNamespace(on_lane=False, id="veh_0", after_step=lambda: None)
+    manager._traffic_vehicles = [removed]
+    manager.respawn_lanes = [fallback_lane]
+    manager.mode = "hybrid"
+    manager.np_random = SimpleNamespace(randint=lambda low, high: 0, rand=lambda: 0.2)
+    manager.clear_objects = lambda ids: None
+
+    captured = {}
+
+    def _spawn(vehicle_type, config):
+        captured["vehicle_type"] = vehicle_type
+        captured["config"] = dict(config)
+
+    manager._spawn_traffic_vehicle_if_safe = _spawn
+    manager._get_all_route_lanes = lambda: [route_lane]
+    manager.engine = SimpleNamespace(global_config={}, current_map=None)
+
+    manager.after_step()
+
+    assert captured["vehicle_type"] is SimpleNamespace
+    assert captured["config"]["spawn_lane_index"] == ("R", "S", 0)
+
+
+def test_get_all_route_lanes_flattens_respawn_lane_groups():
+    module = _load_route_traffic_manager_module()
+    manager = module.RouteAwareTrafficManager()
+    lane_a = SimpleNamespace(index=("A", "B", 0))
+    lane_b = SimpleNamespace(index=("A", "B", 1))
+    route_block = SimpleNamespace(
+        graph_block_id="r0",
+        get_respawn_lanes=lambda: [[lane_a, lane_b]],
+    )
+    other_block = SimpleNamespace(
+        graph_block_id="x0",
+        get_respawn_lanes=lambda: [[SimpleNamespace(index=("X", "Y", 0))]],
+    )
+    manager.engine = SimpleNamespace(
+        global_config={"ego_main_route_block_ids": ("r0",)},
+        current_map=SimpleNamespace(blocks=[route_block, other_block]),
+    )
+
+    lanes = manager._get_all_route_lanes()
+
+    assert [lane.index for lane in lanes] == [("A", "B", 0), ("A", "B", 1)]
+
+
+def test_final_spawn_guard_blocks_candidate_that_overlaps_existing_traffic_vehicle():
+    module = _load_route_traffic_manager_module()
+    manager = module.RouteAwareTrafficManager()
+    lane = SimpleNamespace(
+        width=3.5,
+        position=lambda longitudinal, lateral: (float(longitudinal), float(lateral)),
+    )
+    manager._traffic_vehicles = [
+        SimpleNamespace(
+            position=(22.0, 0.0),
+            LENGTH=4.5,
+            WIDTH=1.85,
+        )
+    ]
+    manager.engine = SimpleNamespace(
+        current_map=SimpleNamespace(
+            road_network=SimpleNamespace(
+                get_lane=lambda lane_index: lane,
+            )
+        ),
+        spawn_manager=SimpleNamespace(ego_spawn_zones=[]),
+        global_config={
+            "vehicle_config": {"vehicle_model": "default"},
+            "traffic_vehicle_config": {"vehicle_model": "default"},
+        },
+    )
+
+    assert manager._passes_final_spawn_guard({"spawn_lane_index": ("A", "B", 0), "spawn_longitude": 22.0}) is False

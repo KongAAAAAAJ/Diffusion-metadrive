@@ -11,7 +11,7 @@ from metadrive.component.lane.point_lane import PointLane
 from metadrive.component.lane.straight_lane import StraightLane
 from metadrive.component.pgblock.create_pg_block_utils import create_bend_straight
 from metadrive.component.vehicle.PID_controller import PIDController
-from metadrive.policy.idm_policy import IDMPolicy
+from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
 from metadrive.utils.math import wrap_to_pi
 
 
@@ -223,6 +223,10 @@ class ExpertIDMConfig:
     lateral_pid_kp: float = 0.3
     lateral_pid_ki: float = 0.002
     lateral_pid_kd: float = 0.05
+    # When True, skip the continuous-line crossing check so the expert can
+    # execute navigation-required lane changes (e.g., S8 ramp exit) even
+    # when the G-block's deceleration lane boundary is a continuous line.
+    ignore_continuous_line_check: bool = False
 
 
 class ExpertIDMPolicy(IDMPolicy):
@@ -298,12 +302,13 @@ class ExpertIDMPolicy(IDMPolicy):
         current_lane = self._fallback_steering_lane(target_lane)
         if target_lane is None or current_lane is None or target_lane is current_lane:
             return False
-        if bool(getattr(self.control_object, "on_yellow_continuous_line", False)) or bool(
-            getattr(self.control_object, "on_white_continuous_line", False)
-        ):
-            return True
         if self._lane_is_opposite_by_index(current_lane, target_lane):
             return True
+        if not getattr(self.idm_config, "ignore_continuous_line_check", False):
+            if bool(getattr(self.control_object, "on_yellow_continuous_line", False)) or bool(
+                getattr(self.control_object, "on_white_continuous_line", False)
+            ):
+                return True
         current_heading = self._lane_heading_at_vehicle_position(current_lane)
         target_heading = self._lane_heading_at_vehicle_position(target_lane)
         if current_heading is None or target_heading is None:
@@ -315,26 +320,57 @@ class ExpertIDMPolicy(IDMPolicy):
             return self._fallback_steering_lane(target_lane)
         return target_lane
 
+    def _lookup_front_vehicle(self, all_objects, steering_target_lane):
+        fallback_lane = self._fallback_steering_lane(steering_target_lane)
+        if fallback_lane is None:
+            return None, 5.0, steering_target_lane
+        surrounding_objects = FrontBackObjects.get_find_front_back_objs(
+            all_objects,
+            fallback_lane,
+            self.control_object.position,
+            max_distance=self.MAX_LONG_DIST,
+        )
+        return surrounding_objects.front_object(), surrounding_objects.front_min_distance(), fallback_lane
+
+    @staticmethod
+    def _front_object_speed_km_h(front_object) -> float | None:
+        if front_object is None:
+            return None
+        if hasattr(front_object, "speed_km_h"):
+            try:
+                return float(front_object.speed_km_h)
+            except Exception:
+                return None
+        if hasattr(front_object, "speed"):
+            try:
+                return float(front_object.speed) * 3.6
+            except Exception:
+                return None
+        return None
+
     def act(self, *args, **kwargs):
         all_objects = self.control_object.lidar.get_surrounding_objects(self.control_object)
+        front_lookup_fallback_used = False
         try:
             success = self.move_to_next_road()
             if success and self.enable_lane_change:
                 acc_front_obj, acc_front_dist, steering_target_lane = self.lane_change_policy(all_objects)
             else:
-                surrounding_objects = FrontBackObjects.get_find_front_back_objs(
+                acc_front_obj, acc_front_dist, steering_target_lane = self._lookup_front_vehicle(
                     all_objects,
                     self.routing_target_lane,
-                    self.control_object.position,
-                    max_distance=self.MAX_LONG_DIST,
                 )
-                acc_front_obj = surrounding_objects.front_object()
-                acc_front_dist = surrounding_objects.front_min_distance()
-                steering_target_lane = self.routing_target_lane
         except Exception:
-            acc_front_obj = None
-            acc_front_dist = 5
-            steering_target_lane = self.routing_target_lane
+            front_lookup_fallback_used = True
+            try:
+                acc_front_obj, acc_front_dist, steering_target_lane = self._lookup_front_vehicle(
+                    all_objects,
+                    self.routing_target_lane,
+                )
+            except Exception:
+                acc_front_obj = None
+                acc_front_dist = 5
+                steering_target_lane = self.routing_target_lane
 
         steering_target_lane = self._guard_steering_target_lane(steering_target_lane)
         steering = self.steering_control(steering_target_lane)
@@ -347,6 +383,10 @@ class ExpertIDMPolicy(IDMPolicy):
             target_lane=steering_target_lane,
             idm_acc=action[1],
         )
+        self.action_info["front_object_detected"] = bool(acc_front_obj is not None)
+        self.action_info["front_object_distance"] = float(acc_front_dist) if acc_front_dist is not None else None
+        self.action_info["front_object_speed_km_h"] = self._front_object_speed_km_h(acc_front_obj)
+        self.action_info["front_lookup_fallback_used"] = bool(front_lookup_fallback_used)
         self.action_info["action"] = action
         return action
 

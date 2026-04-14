@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+import numpy as np
+
 from metadrive.manager.spawn_manager import SpawnManager
+from metadrive.exp_dataset.scenario_definitions import SCENARIO_BY_ID
+
+
+class _RouteRoadRef:
+    def __init__(self, start_node: str, end_node: str):
+        self.start_node = start_node
+        self.end_node = end_node
+
+    def lane_index(self, lane_idx: int):
+        return (self.start_node, self.end_node, lane_idx)
 
 
 def _road_key(road) -> tuple[str, str]:
@@ -36,6 +48,36 @@ class RouteAwareSpawnManager(SpawnManager):
         return None
 
     @classmethod
+    def _get_first_positive_block_network_road(cls, block):
+        if block is None:
+            return None
+        lane_groups = getattr(getattr(block, "block_network", None), "get_positive_lanes", lambda: [])() or []
+        for lane_group in lane_groups:
+            if not lane_group:
+                continue
+            lane = lane_group[0]
+            lane_index = getattr(lane, "index", None)
+            if lane_index is None:
+                continue
+            return _RouteRoadRef(lane_index[0], lane_index[1])
+        return None
+
+    @classmethod
+    def _get_last_positive_block_network_road(cls, block):
+        if block is None:
+            return None
+        lane_groups = getattr(getattr(block, "block_network", None), "get_positive_lanes", lambda: [])() or []
+        for lane_group in reversed(lane_groups):
+            if not lane_group:
+                continue
+            lane = lane_group[0]
+            lane_index = getattr(lane, "index", None)
+            if lane_index is None:
+                continue
+            return _RouteRoadRef(lane_index[0], lane_index[1])
+        return None
+
+    @classmethod
     def _get_first_positive_respawn_road(cls, block):
         if block is None:
             return None
@@ -66,6 +108,9 @@ class RouteAwareSpawnManager(SpawnManager):
 
     @classmethod
     def _get_first_positive_route_road(cls, block):
+        road = cls._get_first_positive_block_network_road(block)
+        if road is not None:
+            return road
         road = cls._get_first_positive_respawn_road(block)
         if road is not None:
             return road
@@ -113,7 +158,11 @@ class RouteAwareSpawnManager(SpawnManager):
             raise ValueError(
                 f"Destination block {block_ids[-1]!r} not found in current map."
             )
-        road = self._get_first_positive_route_road(last_block)
+        road = self._get_last_positive_block_network_road(last_block)
+        if road is None:
+            road = self._get_first_positive_respawn_road(last_block)
+        if road is None:
+            road = self._get_first_positive_socket_road(last_block)
         if road is None:
             raise ValueError(
                 f"Destination block {block_ids[-1]!r} has no positive route road."
@@ -134,6 +183,59 @@ class RouteAwareSpawnManager(SpawnManager):
         # 但保留原行为（把整条链作为 spawn_roads 传入）以便 traffic manager
         # 等消费者可以读取完整主线。
         self.refresh_spawn_roads(route_roads[:1])
+
+    def _get_road_lane_num(self, road) -> int:
+        """Return the actual number of lanes for *road* from the current map.
+
+        `self.lane_num` is fixed at the value of ``map_config["lane_num"]`` (the
+        mainline lane count) and is therefore wrong for single-lane ramp roads
+        (OneWayStraight / OneWayCurve blocks).  Looking up the actual count from
+        the road-network graph prevents IndexError when ego is spawned on a
+        one-lane ramp.
+        """
+        current_map = getattr(self.engine, "current_map", None)
+        if current_map is not None:
+            try:
+                lanes = current_map.road_network.graph[road.start_node][road.end_node]
+                return len(lanes)
+            except (KeyError, AttributeError, TypeError):
+                pass
+        return self.lane_num
+
+    def _auto_fill_spawn_roads_randomly(self, spawn_roads):
+        """Like the base implementation but uses the road's actual lane count."""
+        import math
+        from metadrive.component.pgblock.first_block import FirstPGBlock
+        from metadrive.utils import Config
+
+        num_slots = int(math.floor(self.exit_length / self.RESPAWN_REGION_LONGITUDE))
+        interval = self.exit_length / num_slots
+        self._longitude_spawn_interval = interval
+
+        agent_configs = []
+        safe_spawn_places = []
+        for road in spawn_roads:
+            road_lane_num = self._get_road_lane_num(road)
+            for lane_idx in range(road_lane_num):
+                for j in range(num_slots):
+                    long = 1 / 2 * self.RESPAWN_REGION_LONGITUDE + j * self.RESPAWN_REGION_LONGITUDE
+                    lane_tuple = road.lane_index(lane_idx)
+                    agent_configs.append(
+                        Config(
+                            dict(
+                                identifier="|".join((str(s) for s in lane_tuple + (j,))),
+                                config={
+                                    "spawn_lane_index": lane_tuple,
+                                    "spawn_longitude": long,
+                                    "spawn_lateral": 0,
+                                },
+                            ),
+                            unchangeable=True,
+                        )
+                    )
+                    if j == 0:
+                        safe_spawn_places.append(agent_configs[-1])
+        return agent_configs, safe_spawn_places
 
     def refresh_spawn_roads(self, spawn_roads):
         agent_configs, safe_spawn_places = self._auto_fill_spawn_roads_randomly(spawn_roads)
@@ -164,7 +266,76 @@ class RouteAwareSpawnManager(SpawnManager):
     def reset(self):
         self._refresh_main_route_spawn_roads()
         super().reset()
+        self._apply_spawn_lane_preference()
         self._cache_ego_spawn_zones()
+
+    def _get_spawn_lane_preference(self) -> str | None:
+        scenario_id = self.engine.global_config.get("scenario_id")
+        if not scenario_id:
+            return None
+        scenario = SCENARIO_BY_ID.get(str(scenario_id))
+        if scenario is None:
+            return None
+        return scenario.ego_spawn_lane_preference
+
+    def _get_spawn_lane_probabilities(self) -> dict[str, float] | None:
+        scenario_id = self.engine.global_config.get("scenario_id")
+        if not scenario_id:
+            return None
+        scenario = SCENARIO_BY_ID.get(str(scenario_id))
+        if scenario is None:
+            return None
+        return scenario.ego_spawn_lane_probabilities
+
+    @staticmethod
+    def _resolve_named_lane_index(lane_count: int, lane_label: str) -> int:
+        if lane_count <= 0:
+            return 0
+        if lane_label == "rightmost":
+            return lane_count - 1
+        if lane_label == "leftmost":
+            return 0
+        if lane_label == "middle":
+            return min(max(int(round((lane_count - 1) / 2.0)), 0), lane_count - 1)
+        return lane_count - 1
+
+    def _apply_spawn_lane_preference(self) -> None:
+        preference = self._get_spawn_lane_preference()
+        probabilities = self._get_spawn_lane_probabilities()
+        current_map = getattr(self.engine, "current_map", None)
+        road_network = getattr(current_map, "road_network", None)
+        if road_network is None:
+            return
+        agent_configs = self.engine.global_config.get("agent_configs", {}) or {}
+        for config in agent_configs.values():
+            lane_index = tuple(config.get("spawn_lane_index", ()))
+            if len(lane_index) != 3:
+                continue
+            try:
+                lanes = road_network.graph[lane_index[0]][lane_index[1]]
+            except (AttributeError, KeyError, TypeError):
+                continue
+            if not lanes:
+                continue
+            if probabilities:
+                lane_labels = []
+                weights = []
+                for lane_label, weight in probabilities.items():
+                    if float(weight) <= 0.0:
+                        continue
+                    lane_labels.append(str(lane_label))
+                    weights.append(float(weight))
+                if lane_labels:
+                    probs = np.asarray(weights, dtype=np.float64)
+                    probs = probs / np.sum(probs)
+                    sampled_label = str(self.np_random.choice(lane_labels, p=probs))
+                    preferred_lane_idx = self._resolve_named_lane_index(len(lanes), sampled_label)
+                    config["spawn_lane_index"] = (lane_index[0], lane_index[1], preferred_lane_idx)
+                    continue
+            if preference not in {"rightmost", "leftmost"}:
+                continue
+            preferred_lane_idx = len(lanes) - 1 if preference == "rightmost" else 0
+            config["spawn_lane_index"] = (lane_index[0], lane_index[1], preferred_lane_idx)
 
     def update_destination_for(self, agent_id, vehicle_config):
         current_map = getattr(self.engine, "current_map", None)

@@ -18,9 +18,11 @@ class RouteDefinition:
 ROUTE_DEFINITIONS: Tuple[RouteDefinition, ...] = (
     RouteDefinition("R1_entry_straight", ("s0",), "straight", "mainline", "入口直道段"),
     RouteDefinition("R2_entry_curve", ("c0", "c1"), "curve", "mainline", "入口弯道段"),
-    RouteDefinition("R3_mainline_straight", ("s_main0", "s_main1"), "straight", "mainline", "主线直道段"),
-    RouteDefinition("R4_mainline_transition", ("s_main0", "x0", "s_main1"), "transition", "mainline", "主线右偏过渡段"),
+    RouteDefinition("R3_mainline_straight", ("s_main0",), "straight", "mainline", "主线前段直道"),
+    RouteDefinition("R3_post_transition_straight", ("s_main1",), "straight", "mainline", "主线后段直道"),
+    RouteDefinition("R4_mainline_transition", ("x0",), "transition", "mainline", "主线右偏过渡段"),
     RouteDefinition("R5_ramp_curve", ("s_ramp0", "c0_ramp0", "s_ramp1", "c1_ramp0"), "curve", "ramp_merge", "匝道弯道段"),
+    RouteDefinition("R6_mainline_merge_approach", ("c2", "g1", "c3"), "merge", "mainline", "主线并入干扰观察段"),
     RouteDefinition("R6_exit_to_ramp", ("g0", "s_ramp0", "c0_ramp0"), "exit", "ramp_merge", "主线驶离/汇出段"),
     RouteDefinition("R7_merge_core", ("h_ramp0", "g1", "c3"), "merge", "ramp_merge", "匝道汇入主线核心段"),
     RouteDefinition("R8_narrow_channel", ("c3", "merge0", "s_main2", "split0"), "constrained", "mainline", "合流-分流受限通道段"),

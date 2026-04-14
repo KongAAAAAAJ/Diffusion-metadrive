@@ -17,6 +17,7 @@ def _make_episode_spec(
     traffic_density=0.1,
     spawn_seed=1,
     idm_variant=None,
+    scenario_id="S1_free_cruise_straight",
 ):
     return collect_expert.EpisodeSpec(
         route_preset=route_preset,
@@ -24,6 +25,7 @@ def _make_episode_spec(
         traffic_density=traffic_density,
         spawn_seed=spawn_seed,
         idm_variant=idm_variant,
+        scenario_id=scenario_id,
     )
 
 
@@ -52,6 +54,13 @@ class _StubEpisodeSpecSampler:
 
 
 def _load_module():
+    metadrive_package = ModuleType("metadrive")
+    metadrive_package.__path__ = []
+    exp_dataset_package = ModuleType("metadrive.exp_dataset")
+    exp_dataset_package.__path__ = []
+    sys.modules.setdefault("metadrive", metadrive_package)
+    sys.modules.setdefault("metadrive.exp_dataset", exp_dataset_package)
+
     class _StubConfig(dict):
         pass
 
@@ -167,6 +176,25 @@ def _load_module():
     trajectory_filter_module.OutOfRoadByReferenceLaneRule = _StubOutOfRoadByReferenceLaneRule
     trajectory_filter_module.TrajectoryFilterPipeline = _StubTrajectoryFilterPipeline
 
+    scenario_orchestrator_module = ModuleType("metadrive.exp_dataset.scenario_orchestrator")
+    scenario_orchestrator_module.ScenarioOrchestrator = type(
+        "ScenarioOrchestrator",
+        (),
+        {
+            "__init__": lambda self, definition, local_route: None,
+            "reset": lambda self, env, agent_id: None,
+            "before_step": lambda self, env, agent_id, step_count: None,
+            "get_episode_summary": lambda self: {
+                "scenario_id": "unknown",
+                "scenario_triggered": False,
+                "scenario_realized": False,
+                "scenario_trigger_step": None,
+                "scenario_realized_step": None,
+                "scenario_notes": [],
+            },
+        },
+    )
+
     injected_module_names = [
         expert_idm_module,
         base_vehicle_module,
@@ -178,6 +206,7 @@ def _load_module():
         utils_module,
         dataset_module,
         trajectory_filter_module,
+        scenario_orchestrator_module,
     ]
     for module in injected_module_names:
         sys.modules[module.__name__] = module
@@ -193,6 +222,28 @@ def _load_module():
     sys.modules[route_definitions_spec.name] = route_definitions_module
     route_definitions_spec.loader.exec_module(route_definitions_module)
 
+    scenario_definitions_path = Path(__file__).resolve().parents[1] / "scenario_definitions.py"
+    scenario_definitions_spec = importlib.util.spec_from_file_location(
+        "metadrive.exp_dataset.scenario_definitions",
+        scenario_definitions_path,
+    )
+    scenario_definitions_module = importlib.util.module_from_spec(scenario_definitions_spec)
+    assert scenario_definitions_spec is not None
+    assert scenario_definitions_spec.loader is not None
+    sys.modules[scenario_definitions_spec.name] = scenario_definitions_module
+    scenario_definitions_spec.loader.exec_module(scenario_definitions_module)
+
+    local_traffic_spawner_path = Path(__file__).resolve().parents[1] / "local_traffic_spawner.py"
+    local_traffic_spawner_spec = importlib.util.spec_from_file_location(
+        "metadrive.exp_dataset.local_traffic_spawner",
+        local_traffic_spawner_path,
+    )
+    local_traffic_spawner_module = importlib.util.module_from_spec(local_traffic_spawner_spec)
+    assert local_traffic_spawner_spec is not None
+    assert local_traffic_spawner_spec.loader is not None
+    sys.modules[local_traffic_spawner_spec.name] = local_traffic_spawner_module
+    local_traffic_spawner_spec.loader.exec_module(local_traffic_spawner_module)
+
     module_path = Path(__file__).resolve().parents[1] / "collect_expert.py"
     spec = importlib.util.spec_from_file_location("collect_expert", module_path)
     module = importlib.util.module_from_spec(spec)
@@ -203,6 +254,8 @@ def _load_module():
     for injected in injected_module_names:
         sys.modules.pop(injected.__name__, None)
     sys.modules.pop(route_definitions_spec.name, None)
+    sys.modules.pop(scenario_definitions_spec.name, None)
+    sys.modules.pop(local_traffic_spawner_spec.name, None)
     return module
 
 
@@ -333,6 +386,60 @@ def test_build_episode_samples_tags_route_and_local_route():
     assert samples[0]["local_route"] == "R7_merge_core"
 
 
+def test_build_episode_samples_tags_scenario_id():
+    config = ExpertCollectorConfig(
+        expert_type="idm",
+        horizon_steps=8,
+        target_stride_steps=1,
+        sample_stride_steps=1,
+        trajectory_num_poses=3,
+    )
+    frames = []
+    for idx in range(9):
+        frames.append(
+            {
+                "ego_state": np.asarray([idx], dtype=np.float32),
+                "other_states": np.asarray([idx], dtype=np.float32),
+                "lidar": np.asarray([idx], dtype=np.float32),
+                "bev_raster": np.zeros((1, 1, 1), dtype=np.uint8),
+                "bev_semantic_map": np.zeros((1, 1, 1), dtype=np.uint8),
+                "agent_states": np.zeros((1, 1), dtype=np.float32),
+                "agent_labels": np.zeros((1,), dtype=np.int64),
+                "left_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "front_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "right_camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "camera": np.zeros((1, 1, 3), dtype=np.uint8),
+                "rgb": np.zeros((1, 1, 3), dtype=np.uint8),
+                "state_275": np.zeros((275,), dtype=np.float32),
+                "ego_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "reference_pose_world": np.asarray([float(idx), 0.0, 0.0], dtype=np.float32),
+                "action": np.asarray([0.0, 0.0], dtype=np.float32),
+                "ego_speed_km_h": np.asarray(10.0, dtype=np.float32),
+                "front_object_distance": np.asarray(100.0, dtype=np.float32),
+                "front_object_speed_km_h": np.asarray(5.0, dtype=np.float32),
+                "lane_index": np.asarray(0, dtype=np.int16),
+                "reference_lane_index": np.asarray(0, dtype=np.int16),
+                "reference_longitudinal": np.asarray(float(idx), dtype=np.float32),
+                "reference_lateral": np.asarray(0.0, dtype=np.float32),
+                "lane_width": np.asarray(4.0, dtype=np.float32),
+                "current_ref_lane_count": np.asarray(1, dtype=np.int16),
+                "next_ref_lane_count": np.asarray(1, dtype=np.int16),
+            }
+        )
+
+    samples = collect_expert.build_episode_samples(
+        frames,
+        config,
+        traffic_density=0.2,
+        route_id="mainline",
+        local_route="R1_entry_straight",
+        scenario_id="S3_straight_following",
+    )
+
+    assert samples
+    assert samples[0]["scenario_id"] == "S3_straight_following"
+
+
 def test_build_episode_samples_tags_episode_id():
     config = ExpertCollectorConfig(
         expert_type="idm",
@@ -454,10 +561,20 @@ def test_build_episode_rngs_uses_single_episode_rng():
     assert sampled == expected
 
 
-def test_episode_spec_sampler_uses_single_rng_for_route_density_spawn_and_idm_variant():
+def test_episode_spec_sampler_uses_single_rng_for_scenario_route_density_spawn_and_idm_variant():
     config = ExpertCollectorConfig(
         start_seed=5,
-        local_route_weights={"R1_entry_straight": 0.7, "R5_ramp_curve": 0.3},
+        scenario_weights={
+            "S1_free_cruise_straight": 0.7,
+            "S2_free_cruise_curve": 0.3,
+        },
+        local_route_weights={
+            "R1_entry_straight": 1.0,
+            "R2_entry_curve": 1.0,
+            "R3_mainline_straight": 1.0,
+            "R5_ramp_curve": 1.0,
+            "R9_post_split_curve": 1.0,
+        },
         idm_variant_weights={"default": 0.2, "aggressive": 0.8},
     )
     episode_rng = collect_expert.build_episode_rngs(config)
@@ -468,15 +585,38 @@ def test_episode_spec_sampler_uses_single_rng_for_route_density_spawn_and_idm_va
     expected_rng = np.random.RandomState(config.start_seed)
     expected = []
     for _ in range(3):
-        local_route = expected_rng.choice(["R1_entry_straight", "R5_ramp_curve"], p=[0.7, 0.3])
+        scenario_id = expected_rng.choice(
+            ["S1_free_cruise_straight", "S2_free_cruise_curve"],
+            p=[0.7, 0.3],
+        )
+        if scenario_id == "S1_free_cruise_straight":
+            local_route = expected_rng.choice(["R1_entry_straight", "R3_mainline_straight"], p=[0.5, 0.5])
+        else:
+            local_route = expected_rng.choice(["R2_entry_curve", "R5_ramp_curve", "R9_post_split_curve"], p=[1 / 3, 1 / 3, 1 / 3])
         density = float(expected_rng.uniform(config.traffic_density_min, config.traffic_density_max))
         spawn_seed = int(expected_rng.randint(0, 2**31 - 1))
         idm_variant = expected_rng.choice(["default", "aggressive"], p=[0.2, 0.8])
-        route = "mainline" if local_route == "R1_entry_straight" else "ramp_merge"
-        expected.append((route, local_route, density, spawn_seed, None if idm_variant == "default" else idm_variant))
+        route = collect_expert.get_required_preset(local_route)
+        expected.append(
+            (
+                scenario_id,
+                route,
+                local_route,
+                density,
+                spawn_seed,
+                None if idm_variant == "default" else idm_variant,
+            )
+        )
 
     actual = [
-        (spec.route_preset, spec.local_route, spec.traffic_density, spec.spawn_seed, spec.idm_variant)
+        (
+            spec.scenario_id,
+            spec.route_preset,
+            spec.local_route,
+            spec.traffic_density,
+            spec.spawn_seed,
+            spec.idm_variant,
+        )
         for spec in sampled
     ]
     assert actual == expected
@@ -541,7 +681,7 @@ def test_rollout_episode_sets_spawn_seed_before_reset(monkeypatch):
     monkeypatch.setattr(collect_expert, "build_frame", lambda *args, **kwargs: {"frame": 1})
     monkeypatch.setattr(collect_expert, "ppo_expert", lambda *args, **kwargs: np.zeros((2,), dtype=np.float32))
 
-    frames, map_geometry, video_frames = collect_expert.rollout_episode(
+    frames, map_geometry, video_frames, base_traffic_count = collect_expert.rollout_episode(
         DummyEnv(),
         ExpertCollectorConfig(expert_type="ppo", max_episode_steps=1),
         episode_spawn_seed=42,
@@ -552,6 +692,7 @@ def test_rollout_episode_sets_spawn_seed_before_reset(monkeypatch):
     assert frames == [{"frame": 1}]
     assert map_geometry is None
     assert video_frames == []
+    assert base_traffic_count == 0
 
 
 def test_rollout_episode_passes_custom_idm_config_to_build_expert_policy(monkeypatch):
@@ -602,7 +743,7 @@ def test_rollout_episode_passes_custom_idm_config_to_build_expert_policy(monkeyp
     monkeypatch.setattr(collect_expert, "build_expert_policy", fake_build_expert_policy)
 
     custom_idm_config = collect_expert.ExpertIDMConfig(normal_speed_kmh=41.0)
-    frames, map_geometry, video_frames = collect_expert.rollout_episode(
+    frames, map_geometry, video_frames, base_traffic_count = collect_expert.rollout_episode(
         DummyEnv(),
         ExpertCollectorConfig(expert_type="idm", max_episode_steps=1),
         episode_spawn_seed=1,
@@ -613,6 +754,7 @@ def test_rollout_episode_passes_custom_idm_config_to_build_expert_policy(monkeyp
     assert frames == [{"frame": 1}]
     assert map_geometry is None
     assert video_frames == []
+    assert base_traffic_count == 0
     assert recorded["idm_config"] is custom_idm_config
 
 
@@ -663,7 +805,7 @@ def test_rollout_episode_collects_video_frames_when_enabled(monkeypatch):
         ),
     )
 
-    frames, map_geometry, video_frames = collect_expert.rollout_episode(
+    frames, map_geometry, video_frames, base_traffic_count = collect_expert.rollout_episode(
         DummyEnv(),
         ExpertCollectorConfig(expert_type="ppo", max_episode_steps=1, save_videos=True),
         episode_spawn_seed=42,
@@ -674,6 +816,7 @@ def test_rollout_episode_collects_video_frames_when_enabled(monkeypatch):
     assert map_geometry is None
     assert len(video_frames) == 1
     assert captured["count"] == 1
+    assert base_traffic_count == 0
 
 
 def test_rollout_episode_skips_video_capture_when_disabled(monkeypatch):
@@ -723,7 +866,7 @@ def test_rollout_episode_skips_video_capture_when_disabled(monkeypatch):
         ),
     )
 
-    frames, map_geometry, video_frames = collect_expert.rollout_episode(
+    frames, map_geometry, video_frames, base_traffic_count = collect_expert.rollout_episode(
         DummyEnv(),
         ExpertCollectorConfig(expert_type="ppo", max_episode_steps=1, save_videos=False),
         episode_spawn_seed=42,
@@ -734,6 +877,78 @@ def test_rollout_episode_skips_video_capture_when_disabled(monkeypatch):
     assert map_geometry is None
     assert video_frames == []
     assert captured["count"] == 0
+    assert base_traffic_count == 0
+
+
+def test_rollout_episode_spawns_base_traffic_when_local_route_present(monkeypatch):
+    recorded = {"calls": []}
+
+    class DummySpawnManager:
+        def set_episode_spawn_seed(self, seed):
+            return None
+
+    class DummyVehicle:
+        position = np.asarray([0.0, 0.0], dtype=np.float32)
+        heading_theta = 0.0
+
+    class DummySpawner:
+        def spawn_base_traffic(self, env, ego_vehicle, local_route, traffic_density, rng):
+            recorded["calls"].append(
+                {
+                    "env": env,
+                    "ego_vehicle": ego_vehicle,
+                    "local_route": local_route,
+                    "traffic_density": traffic_density,
+                    "sample": float(rng.rand()),
+                }
+            )
+            return 3
+
+    class DummyEnv:
+        def __init__(self):
+            self.config = {"local_route": "R5_ramp_curve", "traffic_density": 0.12}
+            self.engine = type("Engine", (), {"spawn_manager": DummySpawnManager()})()
+            self.agents = {"agent0": DummyVehicle()}
+
+        def reset(self):
+            return (
+                {
+                    "agent0": {
+                        "ego_state": np.zeros((1,), dtype=np.float32),
+                        "others_state": np.zeros((1,), dtype=np.float32),
+                        "lidar": np.zeros((1,), dtype=np.float32),
+                        "topdown": np.zeros((1, 1, 1), dtype=np.float32),
+                        "rgb_left": np.zeros((1, 1, 3), dtype=np.float32),
+                        "rgb_front": np.zeros((1, 1, 3), dtype=np.float32),
+                        "rgb_right": np.zeros((1, 1, 3), dtype=np.float32),
+                    }
+                },
+                {},
+            )
+
+        def step(self, actions):
+            return {}, {}, {"__all__": True}, {"__all__": False}, {}
+
+    monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
+    monkeypatch.setattr(collect_expert, "build_frame", lambda *args, **kwargs: {"frame": 1})
+    monkeypatch.setattr(collect_expert, "ppo_expert", lambda *args, **kwargs: np.zeros((2,), dtype=np.float32))
+    monkeypatch.setattr(collect_expert, "LocalTrafficSpawner", DummySpawner)
+
+    frames, map_geometry, video_frames, base_traffic_count = collect_expert.rollout_episode(
+        DummyEnv(),
+        ExpertCollectorConfig(expert_type="ppo", max_episode_steps=1),
+        episode_spawn_seed=7,
+        episode_index=1,
+        local_route="R5_ramp_curve",
+    )
+
+    assert frames == [{"frame": 1}]
+    assert map_geometry is None
+    assert video_frames == []
+    assert base_traffic_count == 3
+    assert len(recorded["calls"]) == 1
+    assert recorded["calls"][0]["local_route"] == "R5_ramp_curve"
+    assert recorded["calls"][0]["traffic_density"] == 0.12
 
 
 def test_build_expert_policy_passes_vehicle_seed_and_idm_config():
@@ -793,6 +1008,20 @@ def test_build_expert_idm_config_uses_collector_config_overrides():
     assert built.lateral_pid_kp == 0.44
     assert built.lateral_pid_ki == 0.006
     assert built.lateral_pid_kd == 0.07
+
+
+def test_scenario_expert_overrides_apply_before_idm_variant():
+    config = collect_expert.ExpertCollectorConfig()
+
+    idm_config = collect_expert.build_expert_idm_config(config)
+    scenario_overrides = collect_expert.SCENARIO_EXPERT_OVERRIDES["S4_curve_following"]
+    idm_config = collect_expert.apply_idm_overrides(idm_config, scenario_overrides)
+    variant_overrides = collect_expert.IDM_VARIANT_CONFIGS["aggressive"]
+    idm_config = collect_expert.apply_idm_overrides(idm_config, variant_overrides)
+
+    assert idm_config.time_wanted == 0.8
+    assert idm_config.enable_lane_change is False
+    assert idm_config.normal_speed_kmh == 38.0
 
 
 def test_parse_args_defaults_save_videos_to_false(monkeypatch):
@@ -929,6 +1158,36 @@ def test_write_manifest_includes_route_distribution(tmp_path):
     assert manifest["local_route_distribution"] == {"R1_entry_straight": 9, "R5_ramp_curve": 7}
 
 
+def test_write_manifest_includes_scenario_distribution(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    report_dir = dataset_root / "reports"
+    report_dir.mkdir(parents=True)
+
+    config = ExpertCollectorConfig(output_root=tmp_path, dataset_name="dataset")
+    write_manifest(
+        config=config,
+        dataset_root=dataset_root,
+        report_dir=report_dir,
+        total_samples=16,
+        total_episodes=4,
+        split_summary={"train": ["shard_000000.npz"], "val": [], "test": []},
+        correction_summary={"mode_counts": {"keep_lane": 16}},
+        filter_summary={"enabled": True, "accepted": 16, "rejected": 0},
+        collection_wall_time_sec=1.5,
+        route_counts={"mainline": 10, "ramp_merge": 6},
+        local_route_counts={"R1_entry_straight": 9, "R5_ramp_curve": 7},
+        scenario_counts={"S1_free_cruise_straight": 9, "S7_ego_merge_from_ramp": 7},
+        resume=False,
+    )
+
+    manifest = json.loads((report_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["scenario_distribution"] == {
+        "S1_free_cruise_straight": 9,
+        "S7_ego_merge_from_ramp": 7,
+    }
+
+
 def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monkeypatch, tmp_path):
     sampled_specs: list[collect_expert.EpisodeSpec] = []
     applied_route_block_ids: list[tuple[str, ...]] = []
@@ -965,9 +1224,10 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
         def close(self):
             return 0
 
-    def fake_rollout_episode(env, config, episode_spawn_seed, episode_index, idm_config=None):
+    def fake_rollout_episode(env, config, episode_spawn_seed, episode_index, idm_config=None, local_route=""):
         sampled_specs.append(
             collect_expert.EpisodeSpec(
+                scenario_id=str(env.config.get("scenario_id")),
                 route_preset=str(env.config.get("route_preset")),
                 local_route=str(env.config.get("local_route")),
                 traffic_density=float(env.config.get("traffic_density")),
@@ -976,7 +1236,7 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
             )
         )
         applied_route_block_ids.append(tuple(env.config.get("ego_main_route_block_ids", ())))
-        return ([{"frame": 1}], None, [])
+        return ([{"frame": 1}], None, [], 2)
 
     def fake_build_episode_samples(*args, **kwargs):
         return [
@@ -1004,6 +1264,7 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
         filter_summary=None,
         route_counts=None,
         local_route_counts=None,
+        scenario_counts=None,
         resume=False,
     ):
         written_manifest.update(
@@ -1018,6 +1279,7 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
                 "filter_summary": filter_summary,
                 "route_counts": route_counts,
                 "local_route_counts": local_route_counts,
+                "scenario_counts": scenario_counts,
                 "collection_wall_time_sec": collection_wall_time_sec,
                 "resume": resume,
             }
@@ -1035,6 +1297,7 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
         "get_route_blocks",
         lambda route_name: {
             "R1_entry_straight": ("s0",),
+            "R3_mainline_straight": ("s_main0",),
             "R5_ramp_curve": ("s_ramp0", "c0_ramp0"),
             "R9_post_split_curve": ("c4",),
         }[route_name],
@@ -1049,6 +1312,7 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
             "mode_counts": {"keep_lane": 5},
             "route_counts": {"mainline": 5},
             "local_route_counts": {"R1_entry_straight": 5},
+            "scenario_counts": {"S1_free_cruise_straight": 5},
         },
     )
 
@@ -1083,6 +1347,7 @@ def test_run_collection_resume_fast_forwards_rng_and_reuses_existing_counts(monk
     assert written_manifest["filter_summary"]["rejected"] == 0
     assert written_manifest["route_counts"]["mainline"] >= 5
     assert written_manifest["local_route_counts"]["R1_entry_straight"] >= 5
+    assert written_manifest["scenario_counts"]["S1_free_cruise_straight"] >= 5
     assert build_trajectory_mode_summary(written_manifest["correction_summary"]["mode_counts"], 6)["keep_lane"]["count"] == 6
 
 
@@ -1137,7 +1402,7 @@ def test_run_collection_filters_rejected_samples_before_writer(monkeypatch, tmp_
     monkeypatch.setattr(
         collect_expert,
         "rollout_episode",
-        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, []),
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None, local_route="": ([{"frame": 1}], None, [], 0),
     )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(
@@ -1210,7 +1475,7 @@ def test_run_collection_saves_qual_and_unqual_visualizations(monkeypatch, tmp_pa
     monkeypatch.setattr(
         collect_expert,
         "rollout_episode",
-        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, []),
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None, local_route="": ([{"frame": 1}], None, [], 0),
     )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: [])
     monkeypatch.setattr(
@@ -1310,7 +1575,7 @@ def test_run_collection_does_not_save_filter_visualizations_when_disabled(monkey
     monkeypatch.setattr(
         collect_expert,
         "rollout_episode",
-        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, []),
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None, local_route="": ([{"frame": 1}], None, [], 0),
     )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: [])
     monkeypatch.setattr(
@@ -1390,7 +1655,7 @@ def test_run_collection_uses_standard_physics_env_config(monkeypatch, tmp_path):
     monkeypatch.setattr(
         collect_expert,
         "rollout_episode",
-        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([], None, []),
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None, local_route="": ([], None, [], 0),
     )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(collect_expert, "build_episode_samples", lambda *args, **kwargs: [])
@@ -1439,7 +1704,7 @@ def test_run_collection_writes_episode_videos_when_enabled(monkeypatch, tmp_path
     monkeypatch.setattr(
         collect_expert,
         "rollout_episode",
-        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, [np.zeros((2, 2, 3), dtype=np.uint8)]),
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None, local_route="": ([{"frame": 1}], None, [np.zeros((2, 2, 3), dtype=np.uint8)], 0),
     )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(
@@ -1476,9 +1741,113 @@ def test_run_collection_writes_episode_videos_when_enabled(monkeypatch, tmp_path
 
     assert len(captured["paths"]) == 1
     video_path, frame_count, fps = captured["paths"][0]
-    assert str(video_path).endswith("reports/videos/episode_000001.mp4")
+    assert str(video_path).endswith("reports/videos/S1_free_cruise_straight/episode_000001.mp4")
     assert frame_count == 1
     assert fps == 12
+
+
+def test_build_episode_video_path_uses_scenario_subdirectory():
+    path = collect_expert.build_episode_video_path(
+        Path("/tmp/videos"),
+        3,
+        scenario_id="S7_ego_merge_from_ramp",
+    )
+
+    assert path == Path("/tmp/videos/S7_ego_merge_from_ramp/episode_000003.mp4")
+
+
+def test_parse_args_reads_max_episodes(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "collect_expert.py",
+            "--target-samples",
+            "50",
+            "--max-episodes",
+            "3",
+        ],
+    )
+
+    config = parse_args()
+
+    assert config.target_samples == 50
+    assert config.max_episodes == 3
+
+
+def test_run_collection_stops_when_max_episodes_is_reached(monkeypatch, tmp_path):
+    class DummyEnv:
+        def __init__(self, config):
+            self.config = dict(config)
+            self.engine = type("Engine", (), {"global_config": {}})()
+
+        def close(self):
+            return None
+
+    class DummyWriter:
+        def add_samples(self, samples):
+            return len(samples)
+
+        def close(self):
+            return 0
+
+    sampled_specs = [
+        _make_episode_spec(traffic_density=0.1, spawn_seed=1),
+        _make_episode_spec(traffic_density=0.2, spawn_seed=2, scenario_id="S3_straight_following"),
+    ]
+    rollout_calls = []
+    manifest_capture = {}
+
+    monkeypatch.setattr(collect_expert, "DatasetCollectEnv", DummyEnv)
+    monkeypatch.setattr(collect_expert, "ShardWriter", lambda *args, **kwargs: DummyWriter())
+    monkeypatch.setattr(collect_expert, "EpisodeSpecSampler", _StubEpisodeSpecSampler(sampled_specs))
+    monkeypatch.setattr(
+        collect_expert,
+        "rollout_episode",
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None, local_route="": (
+            rollout_calls.append((episode_spawn_seed, episode_index)) or [{"frame": episode_index}],
+            None,
+            [],
+            0,
+        ),
+    )
+    monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
+    monkeypatch.setattr(
+        collect_expert,
+        "build_episode_samples",
+        lambda *args, **kwargs: [
+            {
+                "trajectory_mode": np.asarray(0, dtype=np.int64),
+                "trajectory_mean_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_mean_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_before": np.asarray(0.0, dtype=np.float32),
+                "trajectory_final_abs_lateral_after": np.asarray(0.0, dtype=np.float32),
+                "trajectory_correction_strength": np.asarray(0.0, dtype=np.float32),
+            }
+        ],
+    )
+    monkeypatch.setattr(collect_expert, "split_shards", lambda **kwargs: {"train": [], "val": [], "test": []})
+    monkeypatch.setattr(
+        collect_expert,
+        "write_manifest",
+        lambda *args, **kwargs: manifest_capture.update(
+            total_samples=kwargs.get("total_samples", args[3] if len(args) > 3 else None),
+            total_episodes=kwargs.get("total_episodes", args[4] if len(args) > 4 else None),
+        ),
+    )
+
+    run_collection(
+        ExpertCollectorConfig(
+            output_root=tmp_path,
+            dataset_name="max_episode_dataset",
+            target_samples=50,
+            max_episodes=1,
+        )
+    )
+
+    assert rollout_calls == [(1, 1)]
+    assert manifest_capture["total_episodes"] == 1
+    assert manifest_capture["total_samples"] == 1
 
 
 def test_run_collection_does_not_write_episode_videos_when_disabled(monkeypatch, tmp_path):
@@ -1509,7 +1878,7 @@ def test_run_collection_does_not_write_episode_videos_when_disabled(monkeypatch,
     monkeypatch.setattr(
         collect_expert,
         "rollout_episode",
-        lambda env, config, episode_spawn_seed, episode_index, idm_config=None: ([{"frame": 1}], None, [np.zeros((2, 2, 3), dtype=np.uint8)]),
+        lambda env, config, episode_spawn_seed, episode_index, idm_config=None, local_route="": ([{"frame": 1}], None, [np.zeros((2, 2, 3), dtype=np.uint8)], 0),
     )
     monkeypatch.setattr(collect_expert, "resolve_map_visualization_geometry", lambda **kwargs: None)
     monkeypatch.setattr(

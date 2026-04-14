@@ -4,6 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -24,6 +25,7 @@ def _write_shard(
     name: str,
     include_local_route: bool,
     episode_ids: np.ndarray | None = None,
+    scenario_ids: list[str] | None = None,
 ) -> None:
     shard_dir = dataset_root / "shards"
     shard_dir.mkdir(parents=True, exist_ok=True)
@@ -43,6 +45,8 @@ def _write_shard(
         payload["local_route"] = _encode_strings(["R1_entry_straight", "R7_merge_core"])
     if episode_ids is not None:
         payload["episode_id"] = np.asarray(episode_ids, dtype=np.int32)
+    if scenario_ids is not None:
+        payload["scenario_id"] = _encode_strings(scenario_ids)
     np.savez_compressed(shard_dir / name, **payload)
 
 
@@ -79,6 +83,24 @@ def test_verify_phase1_outputs_heatmap_counts_and_per_route_plots(tmp_path: Path
     assert (output_dir / "fig2_route_counts.png").is_file()
     assert (output_dir / "per_route" / "R1_entry_straight" / "traj_000000.png").is_file()
     assert (output_dir / "per_route" / "R7_merge_core" / "traj_000001.png").is_file()
+
+
+def test_verify_phase1_outputs_per_scenario_plots(tmp_path: Path):
+    dataset_root = tmp_path / "dataset"
+    output_dir = tmp_path / "output"
+    _write_shard(
+        dataset_root,
+        "shard_000000.npz",
+        include_local_route=True,
+        scenario_ids=["S1_free_cruise_straight", "S7_ego_merge_from_ramp"],
+    )
+
+    data = verify_phase1.load_dataset(dataset_root)
+    saved_counts = verify_phase1.save_per_scenario_trajectories(data, output_dir, max_traj_plots=10)
+
+    assert saved_counts == {"S1_free_cruise_straight": 1, "S7_ego_merge_from_ramp": 1}
+    assert (output_dir / "per_scenario" / "S1_free_cruise_straight" / "traj_000000.png").is_file()
+    assert (output_dir / "per_scenario" / "S7_ego_merge_from_ramp" / "traj_000001.png").is_file()
 
 
 def test_save_route_counts_prefers_episode_counts_when_episode_id_is_available(tmp_path: Path):
@@ -129,3 +151,48 @@ def test_save_route_counts_falls_back_to_sample_counts_without_episode_id(tmp_pa
     route_counts = verify_phase1.save_route_counts(data, manifest=None, output_dir=output_dir)
 
     assert route_counts == {"R1_entry_straight": 1, "R7_merge_core": 1}
+
+
+def test_load_dataset_includes_scenario_id_and_save_scenario_counts(tmp_path: Path):
+    dataset_root = tmp_path / "dataset"
+    output_dir = tmp_path / "output"
+    _write_shard(
+        dataset_root,
+        "shard_000000.npz",
+        include_local_route=True,
+        episode_ids=np.asarray([10, 20], dtype=np.int32),
+        scenario_ids=["S1_free_cruise_straight", "S7_ego_merge_from_ramp"],
+    )
+
+    data = verify_phase1.load_dataset(dataset_root)
+    scenario_counts = verify_phase1.save_scenario_counts(data, manifest=None, output_dir=output_dir)
+
+    assert data["scenario_id"].tolist() == ["S1_free_cruise_straight", "S7_ego_merge_from_ramp"]
+    assert scenario_counts == {"S1_free_cruise_straight": 1, "S7_ego_merge_from_ramp": 1}
+    assert (output_dir / "fig3_scenario_counts.png").is_file()
+
+
+def test_save_scenario_route_matrix(tmp_path: Path):
+    dataset_root = tmp_path / "dataset"
+    output_dir = tmp_path / "output"
+    _write_shard(
+        dataset_root,
+        "shard_000000.npz",
+        include_local_route=True,
+        episode_ids=np.asarray([10, 10], dtype=np.int32),
+        scenario_ids=["S1_free_cruise_straight", "S1_free_cruise_straight"],
+    )
+
+    data = verify_phase1.load_dataset(dataset_root)
+    verify_phase1.save_scenario_route_matrix(data, output_dir=output_dir)
+
+    assert (output_dir / "fig4_scenario_route_matrix.png").is_file()
+
+
+def test_draw_ego_marker_adds_styled_marker_and_label():
+    fig, ax = plt.subplots(figsize=(4, 4))
+    artists = verify_phase1.draw_ego_marker(ax, np.asarray([1.0, 2.0], dtype=np.float32), label="ego")
+
+    assert len(artists) == 3
+    assert ax.texts[-1].get_text() == "ego"
+    plt.close(fig)
