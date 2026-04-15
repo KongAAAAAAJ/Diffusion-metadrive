@@ -8,6 +8,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch, time
+from metadrive.exp_dataset.route_definitions import get_required_preset, get_route_blocks
+from metadrive.exp_dataset.scenario_definitions import SCENARIO_BY_ID, get_scenario_definition
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
 from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
@@ -27,6 +29,14 @@ class StepTrajectoryPlotRecord:
     selected_trajectory: np.ndarray | None
     multimodal_trajectories: np.ndarray | None
     selected_mode_idx: int | None
+
+
+@dataclass(frozen=True)
+class ScenarioRouteSelection:
+    scenario_id: str
+    local_route: str
+    route_preset: str
+    ego_main_route_block_ids: tuple[str, ...]
 
 
 def parse_args(argv=None):
@@ -52,6 +62,12 @@ def parse_args(argv=None):
     parser.add_argument("--save-trajectory-plot", type=int, choices=(0, 1), default=1)
     parser.add_argument("--save-step-images", type=int, choices=(0, 1), default=0)
     parser.add_argument("--step-image-interval", type=int, default=1)
+    parser.add_argument(
+        "--scenario-id",
+        type=str,
+        default="S1_free_cruise_straight",
+        help="Scenario id to evaluate. The script samples one allowed local route per episode.",
+    )
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -628,6 +644,47 @@ def build_env_config(args, resolved_model_size: str):
     }
 
 
+def _resolve_episode_scenario_route(scenario_id: str, rng: np.random.RandomState) -> ScenarioRouteSelection:
+    if scenario_id not in SCENARIO_BY_ID:
+        valid_ids = ", ".join(sorted(SCENARIO_BY_ID))
+        raise ValueError(f"Unknown scenario_id '{scenario_id}'. Valid scenarios: {valid_ids}")
+
+    scenario = get_scenario_definition(scenario_id)
+    allowed_routes = tuple(scenario.allowed_local_routes)
+    if not allowed_routes:
+        raise ValueError(f"Scenario '{scenario_id}' has no allowed local routes.")
+
+    if len(allowed_routes) == 1:
+        local_route = allowed_routes[0]
+    else:
+        local_route = str(rng.choice(allowed_routes))
+
+    route_blocks = tuple(get_route_blocks(local_route))
+    if not route_blocks:
+        raise ValueError(f"Local route '{local_route}' for scenario '{scenario_id}' resolved to no blocks.")
+
+    return ScenarioRouteSelection(
+        scenario_id=scenario_id,
+        local_route=local_route,
+        route_preset=get_required_preset(local_route),
+        ego_main_route_block_ids=route_blocks,
+    )
+
+
+def _apply_episode_route_config(env, selection: ScenarioRouteSelection) -> None:
+    updates = {
+        "scenario_id": selection.scenario_id,
+        "local_route": selection.local_route,
+        "route_preset": selection.route_preset,
+        "ego_main_route_block_ids": list(selection.ego_main_route_block_ids),
+    }
+    env.config.update(updates)
+    engine = getattr(env, "engine", None)
+    global_config = getattr(engine, "global_config", None)
+    if global_config is not None:
+        global_config.update(updates)
+
+
 def main():
     args = _normalize_visualization_args(parse_args())
     output_root = Path(args.output_dir)
@@ -672,9 +729,19 @@ def main():
         "steering": [],
         "mode_idx": [],
     }
+    episode_route_rng = np.random.RandomState(args.start_seed)
 
     try:
         for episode_idx in range(args.episodes):
+            selection = _resolve_episode_scenario_route(args.scenario_id, episode_route_rng)
+            _apply_episode_route_config(env, selection)
+            print(
+                f"[scenario episode={episode_idx}] "
+                f"scenario_id={selection.scenario_id} "
+                f"local_route={selection.local_route} "
+                f"route_preset={selection.route_preset} "
+                f"ego_main_route_block_ids={list(selection.ego_main_route_block_ids)}"
+            )
             obs, info = env.reset()
             primary_agent_id = _get_primary_agent_id(env)
             if bool(args.render) and hasattr(env, "switch_to_third_person_view"):

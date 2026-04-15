@@ -77,6 +77,7 @@ def test_only_s1_to_s9_scenarios_remain():
 
 def test_s9_uses_probabilistic_spawn_lane_and_keeps_lane_change_enabled():
     s9 = SCENARIO_BY_ID["S9_narrow_channel_negotiation"]
+    assert get_route_blocks("R8_narrow_channel") == ("merge0", "s_main2", "split0")
     assert s9.ego_spawn_lane_preference is None
     assert s9.ego_spawn_lane_probabilities == {
         "rightmost": 0.4,

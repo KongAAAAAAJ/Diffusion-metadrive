@@ -1,20 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-/home/kong/anaconda3/envs/meta_drive/bin/python -m metadrive.policy.diffusion_policy.test_transfuser_policy \
-  --checkpoint /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=60.ckpt \
-  --episodes 5 \
-  --render 0 \
-  --controller-type stabilized \
-  --print-trajectory-debug 1 \
-  --image-on-cuda 0 \
-  --save-camera-interval 0 \
-  --camera-output-dir /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed/cameras \
-  --save-3d-video 0 \
-  --save-2d-video 1 \
-  --save-trajectory-plot 1 \
-  --save-step-images 1 \
-  --step-image-interval 1 \
-  --output-dir /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed \
-  --video-fps 10 \
-  --topdown-camera-height 80.0
+PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_7/checkpoints/diffusion-epoch=46.ckpt}"
+SCENARIO_ID="${SCENARIO_ID:-S9_narrow_channel_negotiation}"
+EPISODES="${EPISODES:-5}"
+RENDER="${RENDER:-0}"
+CONTROLLER_TYPE="${CONTROLLER_TYPE:-stabilized}"
+PRINT_TRAJECTORY_DEBUG="${PRINT_TRAJECTORY_DEBUG:-1}"
+IMAGE_ON_CUDA="${IMAGE_ON_CUDA:-0}"
+SAVE_CAMERA_INTERVAL="${SAVE_CAMERA_INTERVAL:-0}"
+CAMERA_OUTPUT_DIR="${CAMERA_OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed/cameras}"
+SAVE_3D_VIDEO="${SAVE_3D_VIDEO:-0}"
+SAVE_2D_VIDEO="${SAVE_2D_VIDEO:-1}"
+SAVE_TRAJECTORY_PLOT="${SAVE_TRAJECTORY_PLOT:-1}"
+SAVE_STEP_IMAGES="${SAVE_STEP_IMAGES:-1}"
+STEP_IMAGE_INTERVAL="${STEP_IMAGE_INTERVAL:-1}"
+OUTPUT_DIR="${OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed}"
+VIDEO_FPS="${VIDEO_FPS:-10}"
+TOPDOWN_CAMERA_HEIGHT="${TOPDOWN_CAMERA_HEIGHT:-80.0}"
+
+"${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.test_transfuser_policy \
+  --checkpoint "${CHECKPOINT_PATH}" \
+  --scenario-id "${SCENARIO_ID}" \
+  --episodes "${EPISODES}" \
+  --render "${RENDER}" \
+  --controller-type "${CONTROLLER_TYPE}" \
+  --print-trajectory-debug "${PRINT_TRAJECTORY_DEBUG}" \
+  --image-on-cuda "${IMAGE_ON_CUDA}" \
+  --save-camera-interval "${SAVE_CAMERA_INTERVAL}" \
+  --camera-output-dir "${CAMERA_OUTPUT_DIR}" \
+  --save-3d-video "${SAVE_3D_VIDEO}" \
+  --save-2d-video "${SAVE_2D_VIDEO}" \
+  --save-trajectory-plot "${SAVE_TRAJECTORY_PLOT}" \
+  --save-step-images "${SAVE_STEP_IMAGES}" \
+  --step-image-interval "${STEP_IMAGE_INTERVAL}" \
+  --output-dir "${OUTPUT_DIR}" \
+  --video-fps "${VIDEO_FPS}" \
+  --topdown-camera-height "${TOPDOWN_CAMERA_HEIGHT}"

@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-SCENARIO_ID="${1:-S9_narrow_channel_negotiation}"
+SCENARIO_ID="${1:-S5_hard_brake_lead}"
 NUM_EPISODES="${2:-3}"
 HEADING_UP="false"
 

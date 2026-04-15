@@ -111,6 +111,8 @@ class VehicleAgentManager(BaseAgentManager):
     def random_spawn_lane_in_single_agent(self):
         if not self.engine.global_config["is_multi_agent"] and \
                 self.engine.global_config.get("random_spawn_lane_index", False) and self.engine.current_map is not None:
+            if self._scenario_controls_spawn_lane():
+                return
             lane_index = tuple(self.engine.global_config["agent_configs"][DEFAULT_AGENT]["spawn_lane_index"])
             spawn_road_start = lane_index[0]
             spawn_road_end = lane_index[1]
@@ -121,6 +123,19 @@ class VehicleAgentManager(BaseAgentManager):
             self.engine.global_config["agent_configs"][DEFAULT_AGENT]["spawn_lane_index"] = (
                 spawn_road_start, spawn_road_end, index
             )
+
+    def _scenario_controls_spawn_lane(self):
+        scenario_id = self.engine.global_config.get("scenario_id")
+        if not scenario_id:
+            return False
+        try:
+            from metadrive.exp_dataset.scenario_definitions import SCENARIO_BY_ID
+        except Exception:
+            return False
+        scenario = SCENARIO_BY_ID.get(str(scenario_id))
+        if scenario is None:
+            return False
+        return bool(getattr(scenario, "ego_spawn_lane_preference", None) or getattr(scenario, "ego_spawn_lane_probabilities", None))
 
     def _get_spawn_road_lane_count(self, start_node, end_node):
         road_network = getattr(self.engine.current_map, "road_network", None)

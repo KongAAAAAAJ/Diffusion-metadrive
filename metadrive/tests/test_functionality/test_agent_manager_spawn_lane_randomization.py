@@ -66,6 +66,10 @@ def _load_agent_manager_module():
     replay_module.ReplayTrafficParticipantPolicy = type("ReplayTrafficParticipantPolicy", (), {})
     register("metadrive.policy.replay_policy", replay_module)
 
+    scenario_module = types.ModuleType("metadrive.exp_dataset.scenario_definitions")
+    scenario_module.SCENARIO_BY_ID = {}
+    register("metadrive.exp_dataset.scenario_definitions", scenario_module)
+
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
@@ -122,3 +126,38 @@ def test_random_spawn_lane_in_single_agent_still_randomizes_on_multilane_roads()
     lane_index = manager.engine.global_config["agent_configs"]["agent0"]["spawn_lane_index"]
     assert lane_index[:2] == ("A", "B")
     assert lane_index[2] in {0, 1, 2}
+
+
+def test_random_spawn_lane_in_single_agent_respects_scenario_spawn_lane_configuration():
+    module = _load_agent_manager_module()
+    scenario_module = types.ModuleType("metadrive.exp_dataset.scenario_definitions")
+    scenario_module.SCENARIO_BY_ID = {
+        "S9_narrow_channel_negotiation": SimpleNamespace(
+            ego_spawn_lane_preference=None,
+            ego_spawn_lane_probabilities={"rightmost": 0.4, "middle": 0.4, "leftmost": 0.2},
+        )
+    }
+    previous = sys.modules.get("metadrive.exp_dataset.scenario_definitions")
+    sys.modules["metadrive.exp_dataset.scenario_definitions"] = scenario_module
+    manager = module.VehicleAgentManager.__new__(module.VehicleAgentManager)
+    manager.np_random = np.random.RandomState(1)
+    manager.engine = SimpleNamespace(
+        global_config={
+            "is_multi_agent": False,
+            "random_spawn_lane_index": True,
+            "scenario_id": "S9_narrow_channel_negotiation",
+            "agent_configs": {"agent0": {"spawn_lane_index": ("A", "B", 2)}},
+        },
+        current_map=SimpleNamespace(
+            config={"lane_num": 3},
+            road_network=SimpleNamespace(graph={"A": {"B": [object(), object(), object()]}}),
+        ),
+    )
+    try:
+        manager.random_spawn_lane_in_single_agent()
+        assert manager.engine.global_config["agent_configs"]["agent0"]["spawn_lane_index"] == ("A", "B", 2)
+    finally:
+        if previous is None:
+            sys.modules.pop("metadrive.exp_dataset.scenario_definitions", None)
+        else:
+            sys.modules["metadrive.exp_dataset.scenario_definitions"] = previous

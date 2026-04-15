@@ -33,10 +33,12 @@ def test_run_diffusion_test_script_passes_explicit_render_flag():
         "run_diffusion_test.sh",
         PYTHON_BIN="/bin/echo",
         CHECKPOINT_PATH="dummy.ckpt",
+        SCENARIO_ID="S6_background_merge_in",
         RENDER="1",
         EPISODES="2",
     )
 
+    assert "--scenario-id S6_background_merge_in" in stdout
     assert "--render 1" in stdout
     assert "--episodes 2" in stdout
 

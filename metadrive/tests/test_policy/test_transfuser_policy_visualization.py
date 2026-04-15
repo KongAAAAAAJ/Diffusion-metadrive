@@ -4,15 +4,20 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     MULTIMODAL_OTHER_COLOR,
     MULTIMODAL_SELECTED_COLOR,
+    SCENARIO_BY_ID,
+    ScenarioRouteSelection,
     _capture_2d_topdown_frame,
     _capture_3d_topdown_frame,
+    _apply_episode_route_config,
     _compute_plot_view_bounds,
     _extract_road_topology,
     _record_step_visualization,
+    _resolve_episode_scenario_route,
     _save_step_image,
     _normalize_visualization_args,
     _save_trajectory_plot,
@@ -27,6 +32,7 @@ def test_parse_args_defaults_enable_headless_2d_outputs():
     args = parse_args(["--checkpoint", "dummy.ckpt"])
 
     assert args.render == 0
+    assert args.scenario_id == "S1_free_cruise_straight"
     assert args.save_3d_video == 0
     assert args.save_2d_video == 1
     assert args.save_trajectory_plot == 1
@@ -42,6 +48,42 @@ def test_normalize_visualization_args_enables_render_for_3d_video():
     normalized = _normalize_visualization_args(args)
 
     assert normalized.render == 1
+
+
+def test_resolve_episode_scenario_route_uses_allowed_routes_only():
+    rng = np.random.RandomState(7)
+
+    selection = _resolve_episode_scenario_route("S5_hard_brake_lead", rng)
+
+    assert selection.scenario_id == "S5_hard_brake_lead"
+    assert selection.local_route in SCENARIO_BY_ID["S5_hard_brake_lead"].allowed_local_routes
+    assert len(selection.ego_main_route_block_ids) >= 1
+
+
+def test_resolve_episode_scenario_route_rejects_unknown_scenario():
+    with pytest.raises(ValueError, match="Unknown scenario_id"):
+        _resolve_episode_scenario_route("S404_missing", np.random.RandomState(0))
+
+
+def test_apply_episode_route_config_updates_env_and_engine_global_config():
+    env = types.SimpleNamespace(
+        config={},
+        engine=types.SimpleNamespace(global_config={}),
+    )
+    selection = ScenarioRouteSelection(
+        scenario_id="S8_ego_exit_to_ramp",
+        local_route="R6_exit_to_ramp",
+        route_preset="ramp_merge",
+        ego_main_route_block_ids=("g0", "s_ramp0", "c0_ramp0"),
+    )
+
+    _apply_episode_route_config(env, selection)
+
+    assert env.config["scenario_id"] == "S8_ego_exit_to_ramp"
+    assert env.config["local_route"] == "R6_exit_to_ramp"
+    assert env.config["route_preset"] == "ramp_merge"
+    assert env.config["ego_main_route_block_ids"] == ["g0", "s_ramp0", "c0_ramp0"]
+    assert env.engine.global_config["scenario_id"] == "S8_ego_exit_to_ramp"
 
 
 def test_capture_3d_topdown_frame_returns_rgb_and_tracks_ego():
