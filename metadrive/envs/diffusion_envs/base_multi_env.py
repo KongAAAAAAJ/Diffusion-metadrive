@@ -7,6 +7,7 @@ from metadrive.utils import Config
 from metadrive.manager.traffic_manager import TrafficMode
 from metadrive.engine.engine_utils import initialize_global_config
 from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config, transfuser_config_to_dict
+from metadrive.exp_dataset.route_definitions import get_route_blocks, get_required_preset, ROUTE_BY_NAME
 import numpy as np
 
 
@@ -99,7 +100,12 @@ class BaseMultiEnv(MultiAgentMetaDrive):
     @classmethod
     def _normalize_route_config(cls, config):
         normalized = {} if config is None else dict(config)
-        if "route_preset" in normalized:
+        # local_route takes highest precedence: auto-derive blocks and preset
+        local_route = normalized.get("local_route")
+        if local_route and local_route in ROUTE_BY_NAME:
+            normalized["ego_main_route_block_ids"] = get_route_blocks(local_route)
+            normalized.setdefault("route_preset", get_required_preset(local_route))
+        elif "route_preset" in normalized:
             normalized["ego_main_route_block_ids"] = cls._resolve_route_block_ids(normalized["route_preset"])
         return normalized
 
@@ -117,11 +123,15 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 map=5,      # 随机指定Block数量
                 use_hybrid_map=True,         # True → 使用 MAHybridMap(指定 block 配置列表)
                 hybrid_map_blocks_config=DEFAULT_HYBRID_MAP_CONFIG,  # block 配置列表
-                
+
                 horizon=2000,
                 force_seed_spawn_manager=True,  # 车辆生成点seed是否与全局seed绑定（可复现性）
                 ego_spawn_mode="main_route_only",
                 route_preset=DEFAULT_ROUTE_PRESET,
+                # 片段式路线 (scenario_id / local_route)
+                # 设置 local_route 后，ego_main_route_block_ids 和 route_preset 自动推导
+                scenario_id=None,   # e.g. "S5_hard_brake_lead"
+                local_route=None,   # e.g. "R3_mainline_straight"
                 # 手动指定 ego 走的主线（graph_block_id 顺序列表）。
                 # 起点 = 第一个 block_id 的第一条正向 respawn road，
                 # 终点 = 最后一个 block_id 的第一条正向 respawn road 的 end_node。

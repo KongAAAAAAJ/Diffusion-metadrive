@@ -67,6 +67,22 @@ def test_run_diffusion_test_script_supports_periodic_camera_saves():
     assert "--camera-output-dir /tmp/closed_loop_cameras" in stdout
 
 
+def test_preview_scenario_script_supports_mode_generate():
+    stdout = _run_script(
+        "preview_scenario.sh",
+        PYTHON_BIN="/bin/echo",
+        OUTPUT_ROOT="/tmp/scenario_preview",
+        MANIFEST_PATH="/tmp/does_not_exist.json",
+        SCENARIO_ID="S8_ego_exit_to_ramp",
+        NUM_EPISODES="1",
+        MODE_GENERATE="1",
+        MODE_FRAME_LIMIT="5",
+    )
+
+    assert "--mode-generate-enabled true" in stdout
+    assert "--mode-generate-frame-limit 5" in stdout
+
+
 def test_run_dataset_collect_script_uses_single_output_root():
     stdout = _run_script(
         "run_dataset_collect.sh",
@@ -103,6 +119,37 @@ def test_run_dataset_collect_script_supports_trajectory_visualization():
     assert "--trajectory-visualization-lateral-margin 12" in stdout
 
 
+def test_run_data_pipeline_script_supports_k_means_anchor_method():
+    stdout = _run_script(
+        "run_data_pipeline.sh",
+        PYTHON_BIN="/bin/echo",
+        STAGE="anchors",
+        ANCHOR_METHOD="k_means",
+        OUTPUT_ROOT="/tmp/datasets",
+        DATASET_NAME="metaIDM_test",
+    )
+
+    assert "ANCHOR_METHOD=k_means" in stdout
+    assert "abstract_anchors_default" in stdout
+    assert "--dataset-root /tmp/datasets/metaIDM_test" in stdout
+
+
+def test_run_data_pipeline_script_supports_dynamic_anchor_method():
+    stdout = _run_script(
+        "run_data_pipeline.sh",
+        PYTHON_BIN="/bin/echo",
+        STAGE="anchors",
+        ANCHOR_METHOD="dynamic",
+        OUTPUT_ROOT="/tmp/datasets",
+        DATASET_NAME="metaIDM_test",
+    )
+
+    assert "ANCHOR_METHOD=dynamic" in stdout
+    assert "Dynamic anchors use mode-generator trajectories from the dataset/live context." in stdout
+    assert "Skipping static anchor extraction; no anchors.npy will be generated in dynamic mode." in stdout
+    assert "abstract_anchors_default" not in stdout
+
+
 def test_run_abstract_anchors_script_supports_trajectory_key():
     stdout = _run_script(
         "run_abstract_anchors.sh",
@@ -126,6 +173,30 @@ def test_run_diffusion_preprocess_and_train_defaults_match_readme_contract():
     assert "--dataset-format auto" in train_stdout
 
 
+def test_run_diffusion_train_script_skips_plan_anchor_in_dynamic_mode():
+    stdout = _run_script(
+        "run_diffusion_train.sh",
+        PYTHON_BIN="/bin/echo",
+        ANCHOR_METHOD="dynamic",
+        TRAJECTORY_REG_DECODER_TYPE="gru",
+    )
+
+    assert "--anchor-method dynamic" in stdout
+    assert "--plan-anchor-path" not in stdout
+    assert "--trajectory-reg-decoder-type gru" in stdout
+
+
+def test_run_diffusion_train_script_keeps_plan_anchor_in_k_means_mode():
+    stdout = _run_script(
+        "run_diffusion_train.sh",
+        PYTHON_BIN="/bin/echo",
+        ANCHOR_METHOD="k_means",
+    )
+
+    assert "--anchor-method k_means" in stdout
+    assert "--plan-anchor-path metadrive/exp_dataset/anchors.npy" in stdout
+
+
 def test_run_diffusion_convert_camera_layout_is_legacy_but_invocable():
     stdout = _run_script("run_diffusion_convert_camera_layout.sh", PYTHON_BIN="/bin/echo")
 
@@ -143,9 +214,56 @@ def test_run_diffusion_open_loop_eval_script_invocable():
 
     assert "eval_transfuser_open_loop" in stdout
     assert "--split val" in stdout
-    assert "--mode-focus 7" in stdout
     assert "--save-trajectory-plots 1" in stdout
     assert "--save-csv 1" in stdout
+
+
+def test_run_diffusion_open_loop_eval_skips_plan_anchor_in_dynamic_mode():
+    stdout = _run_script(
+        "run_diffusion_open_loop_eval.sh",
+        PYTHON_BIN="/bin/echo",
+        CHECKPOINT_PATH="dummy.ckpt",
+        ANCHOR_METHOD="dynamic",
+        TRAJECTORY_REG_DECODER_TYPE="gru",
+    )
+
+    assert "--anchor-method dynamic" in stdout
+    assert "--plan-anchor-path" not in stdout
+    assert "--trajectory-reg-decoder-type gru" in stdout
+
+
+def test_run_diffusion_test_script_supports_gru_decoder_type():
+    stdout = _run_script(
+        "run_diffusion_test.sh",
+        PYTHON_BIN="/bin/echo",
+        CHECKPOINT_PATH="dummy.ckpt",
+        TRAJECTORY_REG_DECODER_TYPE="gru",
+    )
+
+    assert "--trajectory-reg-decoder-type gru" in stdout
+
+
+def test_diffusion_scripts_share_visible_reg_decoder_comment_template():
+    expected_comment = '# REG decoder: set TRAJECTORY_REG_DECODER_TYPE to "mlp" or "gru".'
+    for script_name in (
+        "run_diffusion_train.sh",
+        "run_diffusion_open_loop_eval.sh",
+        "run_diffusion_test.sh",
+    ):
+        content = (SCRIPTS_DIR / script_name).read_text(encoding="utf-8")
+        assert expected_comment in content
+
+
+def test_run_diffusion_open_loop_eval_keeps_plan_anchor_in_k_means_mode():
+    stdout = _run_script(
+        "run_diffusion_open_loop_eval.sh",
+        PYTHON_BIN="/bin/echo",
+        CHECKPOINT_PATH="dummy.ckpt",
+        ANCHOR_METHOD="k_means",
+    )
+
+    assert "--anchor-method k_means" in stdout
+    assert "--plan-anchor-path" in stdout
 
 
 def test_test_transfuser_policy_wrapper_delegates_to_main_script():

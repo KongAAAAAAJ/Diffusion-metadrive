@@ -32,6 +32,12 @@ class ScenarioDefinition:
     ego_spawn_lane_probabilities: Dict[str, float] | None
     expert_recipe: str
     description: str
+    # 若 True，数据采集时将 episode 帧裁剪到换道事件附近（换道前 window_before 帧 + 换道后 window_after 帧）
+    trim_to_lane_change: bool = False
+    trim_window_before: int = 60   # frames before lane-index change
+    trim_window_after: int = 60    # frames after lane-index change completes
+    # 若设置，覆盖全局采样的 traffic_density（用于换道场景等需要稀疏交通的场合）
+    override_traffic_density: float | None = None
 
     @property
     def allowed_route_presets(self) -> Tuple[str, ...]:
@@ -239,6 +245,61 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         expert_recipe="保守通过",
         description="合流-分流窄通道博弈",
     ),
+    ScenarioDefinition(
+        code="S10",
+        scenario_id="S10_straight_lane_change",
+        # 与 S1/S3 共享直道 local_route；R3_post_transition_straight 较短，trigger 窗口收窄
+        allowed_local_routes=("R1_entry_straight", "R3_mainline_straight", "R3_post_transition_straight"),
+        trigger_by_local_route={
+            "R1_entry_straight":             TriggerSpec("s0",      80.0, 180.0),
+            "R3_mainline_straight":          TriggerSpec("s_main0", 30.0, 130.0),
+            "R3_post_transition_straight":   TriggerSpec("s_main1", 20.0,  90.0),
+        },
+        traffic_recipes=(
+            RecipeSpec(
+                "ensure_lead_vehicle",
+                {
+                    # 在 ego 前方 12 m 插入一辆速度极慢的车辆，迫使 ego 换道绕行
+                    "distance_m": 12.0,
+                    "target_speed_kmh": 8.0,
+                },
+            ),
+        ),
+        ego_spawn_lane_preference=None,
+        ego_spawn_lane_probabilities=None,
+        expert_recipe="激进换道",
+        description="直道前方低速车插入，ego 主动换道绕行",
+        trim_to_lane_change=True,
+        trim_window_before=60,
+        trim_window_after=60,
+        override_traffic_density=0.03,
+    ),
+    ScenarioDefinition(
+        code="S11",
+        scenario_id="S11_curve_lane_change",
+        # 与 S2/S4 共享弯道 local_route；R5_ramp_curve 为单车道匝道，排除
+        allowed_local_routes=("R2_entry_curve",),
+        trigger_by_local_route={
+            "R2_entry_curve": TriggerSpec("c0", 15.0, 100.0),
+        },
+        traffic_recipes=(
+            RecipeSpec(
+                "ensure_lead_vehicle",
+                {
+                    "distance_m": 12.0,
+                    "target_speed_kmh": 8.0,
+                },
+            ),
+        ),
+        ego_spawn_lane_preference=None,
+        ego_spawn_lane_probabilities=None,
+        expert_recipe="弯道换道",
+        description="弯道前方低速车插入，ego 主动换道绕行",
+        trim_to_lane_change=True,
+        trim_window_before=60,
+        trim_window_after=60,
+        override_traffic_density=0.03,
+    ),
 )
 
 
@@ -285,6 +346,20 @@ SCENARIO_EXPERT_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "normal_speed_kmh": 20.0,
         "time_wanted": 1.5,
         "enable_lane_change": True,
+    },
+    "S10_straight_lane_change": {
+        # 高频换道检查 + 较短安全距离要求，使 ego 能在慢车出现后迅速切换到相邻车道
+        "enable_lane_change": True,
+        "lane_change_freq": 15,
+        "safe_lane_change_distance": 10.0,
+        "time_wanted": 1.0,
+    },
+    "S11_curve_lane_change": {
+        "enable_lane_change": True,
+        "lane_change_freq": 15,
+        "safe_lane_change_distance": 10.0,
+        "normal_speed_kmh": 22.0,   # 弯道保守速度
+        "time_wanted": 1.0,
     },
 }
 SCENARIO_TO_ROUTES: Dict[str, Tuple[str, ...]] = {

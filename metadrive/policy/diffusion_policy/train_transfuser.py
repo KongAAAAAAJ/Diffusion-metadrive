@@ -57,7 +57,7 @@ def validate_runtime_paths(config: TransfuserConfig) -> None:
         )
     if not any(shard_dir.iterdir()):
         raise FileNotFoundError(f"No shard files found under: {shard_dir}")
-    if not plan_anchor_path.exists():
+    if not config.use_dynamic_anchors and not plan_anchor_path.exists():
         raise FileNotFoundError(f"Plan anchor file not found: {plan_anchor_path}")
 
     train_split = split_dir / f"{config.train_split}.txt"
@@ -71,7 +71,11 @@ def validate_runtime_paths(config: TransfuserConfig) -> None:
 
     print(f"[train] dataset_root={dataset_root}")
     print(f"[train] train_shards={train_count} val_shards={val_count}")
-    print(f"[train] plan_anchor_path={plan_anchor_path}")
+    print(f"[train] anchor_method={'dynamic' if config.use_dynamic_anchors else 'k_means'}")
+    if config.use_dynamic_anchors:
+        print(f"[train] plan_anchor_path={plan_anchor_path} (optional in dynamic mode)")
+    else:
+        print(f"[train] plan_anchor_path={plan_anchor_path}")
 
 
 def verify_runtime_dataset(
@@ -135,6 +139,8 @@ def parse_args():
     parser.add_argument("--model-size", type=str, default="small")  # “small” or “base”，决定模型规模
     parser.add_argument("--dataset-root", type=str, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--plan-anchor-path", type=str, default=DEFAULT_PLAN_ANCHOR_PATH)
+    parser.add_argument("--anchor-method", type=str, choices=("k_means", "dynamic"), default="dynamic")
+    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default="mlp")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--persistent-workers", type=int, default=1)  # worker 进程复用，会多占内存
@@ -162,6 +168,8 @@ def main():
     config_overrides = dict(
         dataset_root=args.dataset_root or TransfuserConfig().dataset_root,
         plan_anchor_path=args.plan_anchor_path or TransfuserConfig().plan_anchor_path,
+        use_dynamic_anchors=(args.anchor_method == "dynamic"),
+        trajectory_reg_decoder_type=args.trajectory_reg_decoder_type,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         persistent_workers=bool(args.persistent_workers),
@@ -196,6 +204,7 @@ def main():
     print(
         "[train] runtime "
         f"precision={resolved_precision} camera=({config.camera_height}, {config.camera_width}) "
+        f"trajectory_reg_decoder_type={config.trajectory_reg_decoder_type} "
         f"check_val_every_n_epoch={config.check_val_every_n_epoch} "
         f"val_visualization_interval={config.val_visualization_interval} "
         f"enable_val_visualization={config.enable_val_visualization}"

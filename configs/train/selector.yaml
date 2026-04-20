@@ -1,13 +1,12 @@
 pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt
 anchor_path: metadrive/exp_dataset/anchors.npy
 model_size: small
-ego_fut_mode: 8
+ego_fut_mode: 10
 num_agents: 3
-num_modes: 8  # anchor数量
+num_modes: 10  # mode slot数量，与 transfuser_config.py 的 NUM_MODE_SLOTS 保持一致
 traffic_density: 0.08
 num_scenarios: 1
 use_hybrid_map: true
-hybrid_map_sequence: SSXCOCSS
 use_render: false
 observation_mode: multimodal
 planner_device: cuda

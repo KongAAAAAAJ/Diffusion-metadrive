@@ -5,11 +5,13 @@ from collections import Counter
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from typing import Callable
 import cv2
 import numpy as np
 import torch, time
 from metadrive.exp_dataset.route_definitions import get_required_preset, get_route_blocks
 from metadrive.exp_dataset.scenario_definitions import SCENARIO_BY_ID, get_scenario_definition
+from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
 from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
@@ -29,6 +31,12 @@ class StepTrajectoryPlotRecord:
     selected_trajectory: np.ndarray | None
     multimodal_trajectories: np.ndarray | None
     selected_mode_idx: int | None
+    dynamic_anchor_trajectories: np.ndarray | None = None
+    target_point_world: np.ndarray | None = None
+    topdown_frame: np.ndarray | None = None
+    world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None
+    ego_speed_km_h: float | None = None
+    ego_acceleration: float | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +65,7 @@ def parse_args(argv=None):
     parser.add_argument("--num-scenarios", type=int, default=1)
     parser.add_argument("--traffic-density", type=float, default=0.06)
     parser.add_argument("--plan-anchor-path", type=str, default="metadrive/exp_dataset/anchors.npy")
+    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default="mlp")
     parser.add_argument("--save-3d-video", type=int, choices=(0, 1), default=0)
     parser.add_argument("--save-2d-video", type=int, choices=(0, 1), default=1)
     parser.add_argument("--save-trajectory-plot", type=int, choices=(0, 1), default=1)
@@ -154,8 +163,6 @@ def _capture_2d_topdown_frame(env, screen_size: int = 800, film_size: int = 3000
     frame_array = np.asarray(frame)
     if frame_array.ndim == 3 and frame_array.shape[2] > 3:
         frame_array = frame_array[:, :, :3]
-    if frame_array.ndim >= 2:
-        frame_array = frame_array.swapaxes(0, 1)
     return frame_array
 
 
@@ -303,21 +310,113 @@ def _draw_multimodal_trajectories(
             other_label = None
 
 
+def _build_topdown_world_to_screen_projector(env, frame: np.ndarray) -> Callable[[np.ndarray], np.ndarray] | None:
+    renderer = getattr(env, "top_down_renderer", None)
+    if renderer is None or frame is None:
+        return None
+
+    screen_size = (int(frame.shape[1]), int(frame.shape[0]))
+    reference_world = None
+    current_track_agent = getattr(renderer, "current_track_agent", None)
+    if current_track_agent is not None:
+        reference_world = np.asarray(getattr(current_track_agent, "position", (0.0, 0.0))[:2], dtype=np.float32)
+    elif getattr(renderer, "position", None) is not None:
+        reference_world = np.asarray(renderer.position[:2], dtype=np.float32)
+    else:
+        reference_world = np.zeros(2, dtype=np.float32)
+
+    def _project_live(world_point_xy: np.ndarray) -> np.ndarray:
+        point = np.asarray(world_point_xy, dtype=np.float32)
+        off = None
+        if not bool(getattr(renderer, "target_agent_heading_up", False)):
+            field = renderer._screen_canvas.get_size()
+            if getattr(renderer, "position", None) is not None or getattr(renderer, "current_track_agent", None) is not None:
+                if getattr(renderer, "center_on_map", False):
+                    frame_canvas_size = renderer._frame_canvas.get_size()
+                    position = (frame_canvas_size[0] / 2, frame_canvas_size[1] / 2)
+                else:
+                    cam_pos = getattr(renderer, "position", None) or tuple(
+                        getattr(renderer.current_track_agent, "position", (0.0, 0.0))
+                    )
+                    position = renderer._frame_canvas.pos2pix(*cam_pos)
+            else:
+                position = (field[0] / 2, field[1] / 2)
+            off = (position[0] - field[0] / 2, position[1] - field[1] / 2)
+        projected = np.asarray(renderer._world_to_screen_position(point, off), dtype=np.float32)
+        if screen_size != tuple(renderer._screen_canvas.get_size()):
+            scale_x = float(screen_size[0]) / float(renderer._screen_canvas.get_size()[0])
+            scale_y = float(screen_size[1]) / float(renderer._screen_canvas.get_size()[1])
+            projected = np.asarray([projected[0] * scale_x, projected[1] * scale_y], dtype=np.float32)
+        return projected
+
+    origin_screen = _project_live(reference_world)
+    unit_x_screen = _project_live(reference_world + np.asarray([1.0, 0.0], dtype=np.float32))
+    unit_y_screen = _project_live(reference_world + np.asarray([0.0, 1.0], dtype=np.float32))
+    basis_x = unit_x_screen - origin_screen
+    basis_y = unit_y_screen - origin_screen
+
+    def _project(world_point: np.ndarray) -> np.ndarray:
+        point = np.asarray(world_point, dtype=np.float32)
+        delta = point[:2] - reference_world
+        return np.asarray(
+            origin_screen + delta[0] * basis_x + delta[1] * basis_y,
+            dtype=np.float32,
+        )
+
+    return _project
+
+
+def _capture_step_plot_render_context(
+    env,
+    enabled: bool,
+) -> tuple[np.ndarray | None, Callable[[np.ndarray], np.ndarray] | None]:
+    if not enabled:
+        return None, None
+    frame = _capture_2d_topdown_frame(env)
+    if frame is None:
+        return None, None
+    return frame, _build_topdown_world_to_screen_projector(env, frame)
+
+
 def _build_step_trajectory_plot_path(output_dir: Path, episode_idx: int, step_idx: int) -> Path:
     return output_dir / "step_trajectory_plots" / f"episode_{episode_idx:03d}" / f"step_{step_idx:05d}.png"
+
+
+def _local_xy_to_world_xy(
+    local_xy: np.ndarray,
+    ego_world_position: np.ndarray,
+    ego_heading_rad: float,
+) -> np.ndarray:
+    local_xy = np.asarray(local_xy, dtype=np.float64).reshape(-1)
+    ego_world_position = np.asarray(ego_world_position, dtype=np.float64).reshape(-1)
+    cos_h = float(np.cos(float(ego_heading_rad)))
+    sin_h = float(np.sin(float(ego_heading_rad)))
+    return np.asarray(
+        [
+            ego_world_position[0] + cos_h * local_xy[0] - sin_h * local_xy[1],
+            ego_world_position[1] + sin_h * local_xy[0] + cos_h * local_xy[1],
+        ],
+        dtype=np.float64,
+    )
 
 
 def _record_step_visualization(
     ego_before_step,
     ego_xy_before_step: np.ndarray | None,
+    ego_heading_before_step: float | None,
     final_info: dict,
     episode_length: int,
     save_trajectory_plot: bool,
     actual_positions: list[np.ndarray],
     planned_trajectories: list[tuple[int, list[np.ndarray]]],
     multimodal_trajectories: list[tuple[int, np.ndarray, int]],
-    step_plot_records: list[StepTrajectoryPlotRecord],
+    step_plot_records: list[StepTrajectoryPlotRecord] | None = None,
+    topdown_frame: np.ndarray | None = None,
+    world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None,
+    ego_accel_mps2: float | None = None,
 ) -> None:
+    if step_plot_records is None:
+        step_plot_records = []
     if ego_xy_before_step is not None:
         actual_positions.append(np.asarray(ego_xy_before_step, dtype=np.float64))
 
@@ -329,8 +428,13 @@ def _record_step_visualization(
     if predicted_traj is not None:
         planned_world = []
         for wp in np.asarray(predicted_traj):
-            world_xy = ego_before_step.convert_to_world_coordinates([float(wp[0]), float(wp[1])], ego_before_step.position)
-            planned_world.append(np.asarray(world_xy[:2], dtype=np.float64))
+            planned_world.append(
+                _local_xy_to_world_xy(
+                    np.asarray([float(wp[0]), float(wp[1])], dtype=np.float64),
+                    ego_xy_before_step,
+                    float(ego_heading_before_step),
+                )
+            )
         planned_trajectories.append((episode_length - 1, planned_world))
         selected_world_array = np.asarray(planned_world, dtype=np.float64)
 
@@ -342,15 +446,46 @@ def _record_step_visualization(
         for candidate in np.asarray(trajectory_candidates):
             candidate_world = []
             for wp in np.asarray(candidate):
-                world_xy = ego_before_step.convert_to_world_coordinates(
-                    [float(wp[0]), float(wp[1])],
-                    ego_before_step.position,
+                candidate_world.append(
+                    _local_xy_to_world_xy(
+                        np.asarray([float(wp[0]), float(wp[1])], dtype=np.float64),
+                        ego_xy_before_step,
+                        float(ego_heading_before_step),
+                    )
                 )
-                candidate_world.append(np.asarray(world_xy[:2], dtype=np.float64))
             candidates_world.append(candidate_world)
         candidates_world_array = np.asarray(candidates_world, dtype=np.float64)
 
+    dynamic_anchor_candidates = final_info.get("coarse_trajectories")
+    dynamic_anchor_world_array = None
+    if dynamic_anchor_candidates is not None:
+        anchor_world = []
+        for candidate in np.asarray(dynamic_anchor_candidates):
+            candidate_world = []
+            for wp in np.asarray(candidate):
+                candidate_world.append(
+                    _local_xy_to_world_xy(
+                        np.asarray([float(wp[0]), float(wp[1])], dtype=np.float64),
+                        ego_xy_before_step,
+                        float(ego_heading_before_step),
+                    )
+                )
+            anchor_world.append(candidate_world)
+        dynamic_anchor_world_array = np.asarray(anchor_world, dtype=np.float64)
+
+    target_point = final_info.get("target_point")
+    target_point_world = None
+    if target_point is not None:
+        target_point_xy = np.asarray(target_point, dtype=np.float64).reshape(-1)
+        if target_point_xy.size >= 2:
+            target_point_world = _local_xy_to_world_xy(
+                np.asarray([float(target_point_xy[0]), float(target_point_xy[1])], dtype=np.float64),
+                ego_xy_before_step,
+                float(ego_heading_before_step),
+            )
+
     if selected_world_array is not None or candidates_world_array is not None:
+        _ego_speed = float(getattr(ego_before_step, "speed_km_h", 0.0)) if ego_before_step is not None else None
         step_plot_records.append(
             StepTrajectoryPlotRecord(
                 step_idx=episode_length,
@@ -358,6 +493,12 @@ def _record_step_visualization(
                 selected_trajectory=selected_world_array,
                 multimodal_trajectories=candidates_world_array,
                 selected_mode_idx=(int(mode_idx) if mode_idx is not None else None),
+                dynamic_anchor_trajectories=dynamic_anchor_world_array,
+                target_point_world=target_point_world,
+                topdown_frame=(None if topdown_frame is None else np.asarray(topdown_frame, dtype=np.uint8).copy()),
+                world_to_screen_projector=world_to_screen_projector,
+                ego_speed_km_h=_ego_speed,
+                ego_acceleration=ego_accel_mps2,
             )
         )
 
@@ -447,74 +588,132 @@ def _save_step_trajectory_plot(
     output_path: Path,
     episode_idx: int,
 ) -> None:
-    import matplotlib
+    if step_record.topdown_frame is None or step_record.world_to_screen_projector is None:
+        return
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-    actual_positions = [np.asarray(step_record.ego_position, dtype=np.float64)]
-    planned_trajectories = []
-    multimodal_trajectories = []
-    if step_record.selected_trajectory is not None:
-        planned_trajectories.append((step_record.step_idx, np.asarray(step_record.selected_trajectory, dtype=np.float64)))
-    if step_record.multimodal_trajectories is not None:
-        multimodal_trajectories.append(
-            (
-                step_record.step_idx,
-                np.asarray(step_record.multimodal_trajectories, dtype=np.float64),
-                (-1 if step_record.selected_mode_idx is None else int(step_record.selected_mode_idx)),
-            )
-        )
-
-    trajectory_points = _collect_plot_points(actual_positions, planned_trajectories, multimodal_trajectories)
-    nearby_boundaries = _filter_road_boundaries_near_points(road_boundaries, trajectory_points, road_margin=8.0)
-    _draw_road_boundaries(ax, nearby_boundaries)
+    canvas = np.asarray(step_record.topdown_frame, dtype=np.uint8).copy()
     ego = np.asarray(step_record.ego_position, dtype=np.float64)
-    ax.scatter(ego[0], ego[1], c="green", s=90, zorder=6, label="Current ego")
+    projector = step_record.world_to_screen_projector
 
-    if step_record.multimodal_trajectories is not None:
-        _draw_multimodal_trajectories(
-            ax,
-            origin=ego,
-            candidates_world=step_record.multimodal_trajectories,
-            selected_mode_idx=step_record.selected_mode_idx,
-            selected_label="Selected mode",
-            other_label="Other modes",
+    # ── 1. Zoom: crop the canvas to 1/4 area (1/2 side length) centred on ego ──
+    ego_screen = np.round(projector(ego)).astype(np.int32)
+    h_full, w_full = canvas.shape[:2]
+    crop_w = w_full // 2
+    crop_h = h_full // 2
+    cx, cy = int(ego_screen[0]), int(ego_screen[1])
+    x0 = max(0, min(cx - crop_w // 2, w_full - crop_w))
+    y0 = max(0, min(cy - crop_h // 2, h_full - crop_h))
+    canvas = canvas[y0:y0 + crop_h, x0:x0 + crop_w].copy()
+    canvas = cv2.resize(canvas, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
+    scale_x = float(w_full) / float(crop_w)
+    scale_y = float(h_full) / float(crop_h)
+
+    def _proj_zoomed(world_point: np.ndarray) -> np.ndarray:
+        """Project world → zoomed canvas pixel."""
+        sp = projector(np.asarray(world_point, dtype=np.float32))
+        return np.asarray(
+            [(sp[0] - x0) * scale_x, (sp[1] - y0) * scale_y],
+            dtype=np.float32,
         )
+
+    def _draw_world_polyline(world_points: np.ndarray, color: tuple[int, int, int], thickness: int, alpha: float = 1.0):
+        world_points = np.asarray(world_points, dtype=np.float64)
+        if world_points.ndim != 2 or world_points.shape[0] < 2:
+            return
+        screen_xy = np.asarray([_proj_zoomed(p) for p in world_points], dtype=np.float32)
+        polyline = np.round(screen_xy).astype(np.int32).reshape(-1, 1, 2)
+        if alpha >= 0.999:
+            cv2.polylines(canvas, [polyline], False, color, thickness, lineType=cv2.LINE_AA)
+            return
+        overlay = canvas.copy()
+        cv2.polylines(overlay, [polyline], False, color, thickness, lineType=cv2.LINE_AA)
+        cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0.0, dst=canvas)
+
+    if step_record.dynamic_anchor_trajectories is not None:
+        for anchor in np.asarray(step_record.dynamic_anchor_trajectories, dtype=np.float64):
+            full_path = np.vstack([ego, anchor])
+            _draw_world_polyline(full_path, (205, 214, 244), 2, alpha=0.7)
+
+    # ── 2. Draw non-selected modes first, selected mode last (on top) ──────────
+    selected_mode_idx = step_record.selected_mode_idx
+    if step_record.multimodal_trajectories is not None:
+        candidates_array = np.asarray(step_record.multimodal_trajectories, dtype=np.float64)
+        # Pass 1: non-selected modes
+        for mode_i in range(candidates_array.shape[0]):
+            if selected_mode_idx is not None and mode_i == int(selected_mode_idx):
+                continue
+            full_path = np.vstack([ego, candidates_array[mode_i]])
+            _draw_world_polyline(full_path, (111, 179, 206), 2, alpha=0.72)
+        # Pass 2: selected mode drawn last → always on top
+        if selected_mode_idx is not None and selected_mode_idx < candidates_array.shape[0]:
+            full_path = np.vstack([ego, candidates_array[int(selected_mode_idx)]])
+            _draw_world_polyline(full_path, (242, 153, 74), 4, alpha=1.0)
     elif step_record.selected_trajectory is not None:
         selected_path = np.vstack([ego, np.asarray(step_record.selected_trajectory, dtype=np.float64)])
-        ax.plot(
-            selected_path[:, 0],
-            selected_path[:, 1],
-            "--",
-            color=MULTIMODAL_SELECTED_COLOR,
-            linewidth=2.6,
-            alpha=0.95,
-            zorder=4,
-            label="Selected trajectory",
+        _draw_world_polyline(selected_path, (242, 153, 74), 4, alpha=1.0)
+
+    # Ego dot (draw after trajectories so it's always on top)
+    ego_zoomed = np.round(_proj_zoomed(ego)).astype(np.int32)
+    cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, (70, 190, 90), thickness=-1, lineType=cv2.LINE_AA)
+    cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, (30, 140, 50), thickness=1, lineType=cv2.LINE_AA)
+
+    if step_record.target_point_world is not None:
+        target_xy = np.round(_proj_zoomed(np.asarray(step_record.target_point_world, dtype=np.float64))).astype(np.int32)
+        cv2.circle(
+            canvas,
+            tuple(int(v) for v in target_xy),
+            5,
+            (0, 0, 220),
+            thickness=-1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.circle(
+            canvas,
+            tuple(int(v) for v in target_xy),
+            5,
+            (0, 0, 160),
+            thickness=1,
+            lineType=cv2.LINE_AA,
         )
 
-    ax.set_title(f"Episode {episode_idx} Step {step_record.step_idx}: Local Trajectory Plan")
-    ax.set_xlabel("X (world)")
-    ax.set_ylabel("Y (world)")
-    ax.set_aspect("equal", adjustable="box")
-    xlim, ylim = _compute_plot_view_bounds(
-        actual_positions,
-        planned_trajectories,
-        multimodal_trajectories,
-        road_boundaries=road_boundaries,
-        padding=3.0,
-        road_margin=8.0,
+    # ── 3. Info box with selected mode name ────────────────────────────────────
+    try:
+        from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
+        mode_name = MODE_SLOTS[int(selected_mode_idx)].name if selected_mode_idx is not None else "N/A"
+    except Exception:
+        mode_name = f"mode_{selected_mode_idx}" if selected_mode_idx is not None else "N/A"
+
+    box_x1, box_y1, box_x2, box_y2 = 10, 10, 420, 128
+    cv2.rectangle(canvas, (box_x1, box_y1), (box_x2, box_y2), (247, 248, 250), thickness=-1)
+    cv2.rectangle(canvas, (box_x1, box_y1), (box_x2, box_y2), (210, 214, 220), thickness=1)
+    cv2.putText(
+        canvas,
+        f"Episode {episode_idx}  Step {step_record.step_idx}",
+        (20, 30),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (25, 25, 25), 1, cv2.LINE_AA,
     )
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
-    ax.legend(loc="upper left", fontsize=9)
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
+    # ── 3a. Selected mode label (orange, prominent) ───
+    cv2.putText(
+        canvas,
+        f"mode: {mode_name}",
+        (20, 52),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 100, 20), 2, cv2.LINE_AA,
+    )
+    # ── 3b. Speed and acceleration ───
+    _speed_str = f"{step_record.ego_speed_km_h:.1f} km/h" if step_record.ego_speed_km_h is not None else "-- km/h"
+    _accel_str = f"{step_record.ego_acceleration:+.2f} m/s\u00b2" if step_record.ego_acceleration is not None else "-- m/s\u00b2"
+    cv2.putText(
+        canvas,
+        f"speed: {_speed_str}  accel: {_accel_str}",
+        (20, 72),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.44, (40, 40, 120), 1, cv2.LINE_AA,
+    )
+    cv2.putText(canvas, "selected: orange", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (242, 153, 74), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "others: teal", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (111, 179, 206), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "anchors: light blue", (160, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (140, 150, 210), 1, cv2.LINE_AA)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
+    cv2.imwrite(str(output_path), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
 
 
 def _save_trajectory_plot(
@@ -621,7 +820,10 @@ def infer_model_size_from_checkpoint(checkpoint_path: Path) -> str:
 
 
 def build_env_config(args, resolved_model_size: str):
-    transfuser_config = build_transfuser_config(resolved_model_size)
+    transfuser_config = build_transfuser_config(
+        resolved_model_size,
+        trajectory_reg_decoder_type=args.trajectory_reg_decoder_type,
+    )
     if args.plan_anchor_path:
         transfuser_config.plan_anchor_path = args.plan_anchor_path
 
@@ -711,7 +913,10 @@ def main():
 
     env_config = build_env_config(args, resolved_model_size)
     env = DatasetCollectEnv(env_config)
-    transfuser_config = build_transfuser_config(resolved_model_size)
+    transfuser_config = build_transfuser_config(
+        resolved_model_size,
+        trajectory_reg_decoder_type=args.trajectory_reg_decoder_type,
+    )
     if args.plan_anchor_path:
         transfuser_config.plan_anchor_path = args.plan_anchor_path
     anchors = None
@@ -747,6 +952,17 @@ def main():
             if bool(args.render) and hasattr(env, "switch_to_third_person_view"):
                 env.switch_to_third_person_view()
 
+            # Initialise ScenarioOrchestrator to replay traffic recipes (lead vehicles,
+            # hard brakes, background vehicle injections) that were active during training.
+            _scenario_orchestrator = None
+            try:
+                _scenario_def = get_scenario_definition(selection.scenario_id)
+                if _scenario_def.traffic_recipes:
+                    _scenario_orchestrator = ScenarioOrchestrator(_scenario_def, selection.local_route)
+                    _scenario_orchestrator.reset(env, primary_agent_id or "default_agent")
+            except Exception:
+                _scenario_orchestrator = None
+
             done = False
             episode_reward = 0.0
             episode_length = 0
@@ -758,12 +974,36 @@ def main():
             multimodal_trajectories = []
             step_plot_records = []
             road_boundaries = _extract_road_topology(env)
+            _prev_ego_speed_km_h: float | None = None
 
             while not done:
+                # Fire scenario recipes (vehicle injection / speed override) each step,
+                # matching the behaviour of the expert data collection loop.
+                if _scenario_orchestrator is not None:
+                    _scenario_orchestrator.before_step(env, primary_agent_id or "default_agent", episode_length)
                 ego_before_step = env.agents.get(primary_agent_id) if primary_agent_id is not None else None
                 ego_xy_before_step = (
                     np.asarray(ego_before_step.position[:2], dtype=np.float64)
                     if ego_before_step is not None else None
+                )
+                ego_heading_before_step = (
+                    float(getattr(ego_before_step, "heading_theta", 0.0))
+                    if ego_before_step is not None else None
+                )
+                _cur_ego_speed_km_h = (
+                    float(getattr(ego_before_step, "speed_km_h", 0.0))
+                    if ego_before_step is not None else None
+                )
+                _step_dt = 0.1  # physics_world_step_size(0.02) * decision_repeat(5)
+                _ego_accel_mps2 = (
+                    (_cur_ego_speed_km_h - _prev_ego_speed_km_h) / 3.6 / _step_dt
+                    if (_cur_ego_speed_km_h is not None and _prev_ego_speed_km_h is not None)
+                    else None
+                )
+                _prev_ego_speed_km_h = _cur_ego_speed_km_h
+                step_plot_frame, step_plot_projector = _capture_step_plot_render_context(
+                    env,
+                    bool(args.save_trajectory_plot),
                 )
                 # External actions are ignored when agent_policy is a closed-loop policy.
                 dummy_actions = {
@@ -779,9 +1019,22 @@ def main():
                 episode_length += 1
                 final_info = info.get(agent_id, {})
                 done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
+
+                if args.save_3d_video:
+                    frame_3d = _capture_3d_topdown_frame(env, args.topdown_camera_height)
+                    if frame_3d is not None:
+                        episode_3d_frames.append(frame_3d)
+
+                frame_2d = None
+                if args.save_2d_video:
+                    frame_2d = _capture_2d_topdown_frame(env)
+                    if frame_2d is not None:
+                        episode_2d_frames.append(frame_2d)
+
                 _record_step_visualization(
                     ego_before_step=ego_before_step,
                     ego_xy_before_step=ego_xy_before_step,
+                    ego_heading_before_step=ego_heading_before_step,
                     final_info=final_info,
                     episode_length=episode_length,
                     save_trajectory_plot=bool(args.save_trajectory_plot),
@@ -789,17 +1042,10 @@ def main():
                     planned_trajectories=planned_trajectories,
                     multimodal_trajectories=multimodal_trajectories,
                     step_plot_records=step_plot_records,
+                    topdown_frame=step_plot_frame,
+                    world_to_screen_projector=step_plot_projector,
+                    ego_accel_mps2=_ego_accel_mps2,
                 )
-
-                if args.save_3d_video:
-                    frame_3d = _capture_3d_topdown_frame(env, args.topdown_camera_height)
-                    if frame_3d is not None:
-                        episode_3d_frames.append(frame_3d)
-
-                if args.save_2d_video:
-                    frame_2d = _capture_2d_topdown_frame(env)
-                    if frame_2d is not None:
-                        episode_2d_frames.append(frame_2d)
 
                 if args.save_camera_interval > 0:
                     agent_obs = obs.get(agent_id)

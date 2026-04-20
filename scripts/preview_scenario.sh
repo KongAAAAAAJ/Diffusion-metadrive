@@ -11,17 +11,32 @@
 
 set -euo pipefail
 
-SCENARIO_ID="${1:-S5_hard_brake_lead}"
-NUM_EPISODES="${2:-3}"
+SCENARIO_ID="${1:-${SCENARIO_ID:-S4_curve_following}}"
+if [[ $# -gt 0 && "${1:-}" != --* ]]; then
+    shift
+fi
+NUM_EPISODES="${1:-${NUM_EPISODES:-3}}"
+if [[ $# -gt 0 && "${1:-}" != --* ]]; then
+    shift
+fi
 HEADING_UP="false"
+MODE_GENERATE="${MODE_GENERATE:-0}"
+MODE_FRAME_LIMIT="${MODE_FRAME_LIMIT:--1}"
 
 # Parse optional arguments
-shift 2 || true
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --heading-up)
             HEADING_UP="true"
             shift
+            ;;
+        --mode-generate)
+            MODE_GENERATE="1"
+            shift
+            ;;
+        --mode-frame-limit)
+            MODE_FRAME_LIMIT="${2:?missing value for --mode-frame-limit}"
+            shift 2
             ;;
         *)
             echo "Unknown option: $1"
@@ -30,13 +45,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-PYTHON_BIN="/home/kong/anaconda3/envs/meta_drive/bin/python"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT_ROOT="/media/kong/Elements_SE/Diffusion_Data/outputs/scenario/scenario_preview"
+PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/scenario/scenario_preview}"
 DATASET_NAME="${SCENARIO_ID}"
 DATASET_ROOT="${OUTPUT_ROOT}/${DATASET_NAME}"
 VIDEO_DIR="${DATASET_ROOT}/reports/videos/${SCENARIO_ID}"
+MODE_DIR="${DATASET_ROOT}/reports/mode_generate/${SCENARIO_ID}"
 MANIFEST_PATH="${DATASET_ROOT}/reports/manifest.json"
+DRY_RUN="false"
+if [[ "$(basename "${PYTHON_BIN}")" == "echo" ]]; then
+    DRY_RUN="true"
+fi
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 cd "${REPO_ROOT}"
@@ -88,7 +108,7 @@ while true; do
         --dataset-name "${DATASET_NAME}" \
         --save-videos true \
         --expert-type idm \
-        --start-seed 28 \
+        --start-seed 59 \
         --trajectory-correction-enabled true \
         --save-raw-trajectory false \
         --mode-classifier-version v1 \
@@ -99,9 +119,20 @@ while true; do
         --use-hybrid-map true \
         --map-block-num 5 \
         --num-scenarios 1 \
-        --topdown-heading-up "${HEADING_UP}"
+        --topdown-heading-up "${HEADING_UP}" \
+        --mode-generate-enabled 1 \
+        --mode-generate-frame-limit "${MODE_FRAME_LIMIT}"
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        break
+    fi
 done
 
 echo ""
 echo "=== Videos saved to: ${VIDEO_DIR} ==="
 ls -lh "${VIDEO_DIR}" 2>/dev/null || echo "(no videos found — check logs above)"
+if [[ "${MODE_GENERATE}" == "1" ]]; then
+    echo ""
+    echo "=== Mode overlays saved to: ${MODE_DIR} ==="
+    ls -lh "${MODE_DIR}" 2>/dev/null || echo "(no mode overlays found — check logs above)"
+fi

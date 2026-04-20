@@ -78,21 +78,29 @@ class ScenarioOrchestrator:
         if front_vehicle is not None:
             self._lead_vehicle_name = getattr(front_vehicle, "name", None)
             self._mark_realized(step_count, "lead_present")
-            return True
-        distance_m = float(params.get("distance_m", 20.0))
-        target_speed_kmh = float(params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0)))
-        spawned = self._spawn_on_reference(
-            env,
-            ego_vehicle,
-            reference_kind="ego_lane",
-            spawn_longitude_offset=distance_m,
-            target_speed_kmh=target_speed_kmh,
-        )
-        if spawned is None:
-            self.summary.notes.append("lead_spawn_failed")
-            return False
-        self._lead_vehicle_name = getattr(spawned, "name", None)
-        self._mark_realized(step_count, "lead_spawned")
+        else:
+            distance_m = float(params.get("distance_m", 20.0))
+            target_speed_kmh = float(params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0)))
+            spawned = self._spawn_on_reference(
+                env,
+                ego_vehicle,
+                reference_kind="ego_lane",
+                spawn_longitude_offset=distance_m,
+                target_speed_kmh=target_speed_kmh,
+            )
+            if spawned is None:
+                self.summary.notes.append("lead_spawn_failed")
+                return False
+            self._lead_vehicle_name = getattr(spawned, "name", None)
+            self._mark_realized(step_count, "lead_spawned")
+        # Register a persistent speed profile so _apply_speed_profiles keeps the
+        # warning marker (!) visible on the slow lead vehicle throughout the episode.
+        if self._lead_vehicle_name is not None:
+            target_speed_kmh = float(params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0)))
+            self._speed_profiles[self._lead_vehicle_name] = {
+                "remaining_steps": float("inf"),   # never expires — marker lasts the whole episode
+                "target_speed_kmh": target_speed_kmh,
+            }
         return True
 
     def _handle_hard_brake_lead(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:

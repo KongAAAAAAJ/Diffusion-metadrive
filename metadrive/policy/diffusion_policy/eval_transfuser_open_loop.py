@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from metadrive.policy.diffusion_policy.mode_definitions import get_mode_slot
 from metadrive.policy.diffusion_policy.transfuser_agent import TransfuserAgent
 from metadrive.policy.diffusion_policy.transfuser_callback import render_open_loop_prediction
 from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig, build_transfuser_config
@@ -46,8 +47,9 @@ def parse_args():
     parser.add_argument("--save-csv", type=int, choices=(0, 1), default=1)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--plan-anchor-path", type=str, default=DEFAULT_PLAN_ANCHOR_PATH)
+    parser.add_argument("--anchor-method", type=str, choices=("k_means", "dynamic"), default="dynamic")
+    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default="mlp")
     parser.add_argument("--overlay-all-anchors", type=int, choices=(0, 1), default=1)
-    parser.add_argument("--mode-focus", type=int, default=7)
     parser.add_argument("--verify-dataset-before-eval", type=int, choices=(0, 1), default=1)
     return parser.parse_args()
 
@@ -83,13 +85,50 @@ def _to_device(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str
     return {key: value.to(device) for key, value in batch.items()}
 
 
+def _build_even_scenario_subset_indices(
+    sample_metadata: List[Dict[str, object]],
+    num_samples: int,
+) -> List[int]:
+    if num_samples <= 0 or num_samples >= len(sample_metadata):
+        return list(range(len(sample_metadata)))
+
+    scenario_to_indices = defaultdict(list)
+    for dataset_idx, metadata in enumerate(sample_metadata):
+        scenario_id = str(metadata.get("scenario_id") or "unknown")
+        scenario_to_indices[scenario_id].append(dataset_idx)
+
+    ordered_scenarios = sorted(scenario_to_indices)
+    if not ordered_scenarios:
+        return list(range(min(num_samples, len(sample_metadata))))
+
+    selected = []
+    round_idx = 0
+    while len(selected) < num_samples:
+        made_progress = False
+        for scenario_id in ordered_scenarios:
+            scenario_indices = scenario_to_indices[scenario_id]
+            if round_idx < len(scenario_indices):
+                selected.append(scenario_indices[round_idx])
+                made_progress = True
+                if len(selected) >= num_samples:
+                    break
+        if not made_progress:
+            break
+        round_idx += 1
+    return selected
+
+
 def build_eval_dataloader(config: TransfuserConfig, split: str, num_samples: int, num_workers: int) -> tuple[MetaDriveTransfuserDataset, DataLoader]:
     dataset = MetaDriveTransfuserDataset(
         config.dataset_root,
         config,
         split=split,
-        max_samples=(num_samples if num_samples > 0 else None),
+        max_samples=None,
     )
+    if num_samples > 0:
+        sample_metadata = [dataset.get_sample_metadata(idx) for idx in range(len(dataset))]
+        selected_indices = _build_even_scenario_subset_indices(sample_metadata, num_samples)
+        dataset._index = [dataset._index[idx] for idx in selected_indices]
     dataloader = DataLoader(
         dataset,
         batch_size=max(1, config.batch_size),
@@ -107,23 +146,92 @@ def compute_ade_fde(pred_traj: np.ndarray, gt_traj: np.ndarray) -> tuple[float, 
     return float(l2.mean()), float(l2[-1])
 
 
+def _predict_open_loop(model, features_device, targets_device):
+    infer_multimodal = getattr(model, "infer_multimodal", None)
+    if callable(infer_multimodal):
+        return infer_multimodal(features_device)
+
+    inner_model = getattr(model, "_transfuser_model", None)
+    if inner_model is not None:
+        inner_infer_multimodal = getattr(inner_model, "infer_multimodal", None)
+        if callable(inner_infer_multimodal):
+            return inner_infer_multimodal(features_device)
+
+    return model(features_device, targets_device)
+
+
+def _mode_name(mode_idx: Optional[int]) -> Optional[str]:
+    if mode_idx is None:
+        return None
+    try:
+        return get_mode_slot(int(mode_idx)).name
+    except Exception:
+        return f"MODE_{int(mode_idx)}"
+
+
+def _resolve_gt_mode_idx(metadata: Dict[str, object]) -> Optional[int]:
+    for key in ("hierarchical_mode_label", "trajectory_mode"):
+        value = metadata.get(key)
+        if value is not None:
+            return int(value)
+    return None
+
+
 def save_trajectory_comparison_plot(
     pred_traj: np.ndarray,
     gt_traj: np.ndarray,
     output_path: Path,
     sample_index: int,
-    mode_idx: Optional[int],
+    pred_mode_idx: Optional[int],
+    gt_mode_idx: Optional[int],
+    pred_mode_name: Optional[str],
+    gt_mode_name: Optional[str],
     ade: float,
     fde: float,
+    target_point: Optional[np.ndarray] = None,
+    trajectory_candidates: Optional[np.ndarray] = None,
 ) -> None:
     pred_xy = np.asarray(pred_traj[:, :2], dtype=np.float64)
     gt_xy = np.asarray(gt_traj[:, :2], dtype=np.float64)
-    plt.figure(figsize=(5, 2))
+    plt.figure(figsize=(6, 3))
     plt.plot(gt_xy[:, 0], gt_xy[:, 1], marker="o", linewidth=2, label="GT")
+    if trajectory_candidates is not None:
+        candidates = np.asarray(trajectory_candidates, dtype=np.float64)
+        if candidates.ndim == 3:
+            first_other_label = True
+            for mode_i, candidate in enumerate(candidates):
+                candidate_xy = np.asarray(candidate[:, :2], dtype=np.float64)
+                if pred_mode_idx is not None and int(mode_i) == int(pred_mode_idx):
+                    continue
+                plt.plot(
+                    candidate_xy[:, 0],
+                    candidate_xy[:, 1],
+                    marker="o",
+                    linewidth=1.4,
+                    color="#8FD3FF",
+                    alpha=0.55,
+                    label="Other modes" if first_other_label else None,
+                )
+                first_other_label = False
     plt.plot(pred_xy[:, 0], pred_xy[:, 1], marker="o", linewidth=2, label="Pred")
+    if target_point is not None:
+        target_point = np.asarray(target_point, dtype=np.float64).reshape(-1)
+        if target_point.size >= 2:
+            plt.scatter(
+                [float(target_point[0])],
+                [float(target_point[1])],
+                marker="*",
+                s=120,
+                color="#c77d00",
+                label="Target Point",
+                zorder=5,
+            )
     plt.xlabel("x")
     plt.ylabel("y")
-    plt.title(f"sample={sample_index} mode={mode_idx} ADE={ade:.3f} FDE={fde:.3f}")
+    plt.title(
+        f"sample={sample_index} pred={pred_mode_idx}:{pred_mode_name} "
+        f"gt={gt_mode_idx}:{gt_mode_name}\nADE={ade:.3f} FDE={fde:.3f}"
+    )
     plt.axis("equal")
     plt.grid(True, alpha=0.3)
     plt.legend()
@@ -188,6 +296,11 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
             "mode_hist": {},
             "mode_final_y_mean": {},
             "trajectory_mode_hist": {},
+            "pred_mode_hist": {},
+            "gt_mode_hist": {},
+            "mode_accuracy": 0.0,
+            "mode_match_count": 0,
+            "mode_total_count": 0,
         }
     traj_l1 = np.asarray([record["trajectory_l1"] for record in records], dtype=np.float64)
     final_l2 = np.asarray([record["trajectory_final_l2"] for record in records], dtype=np.float64)
@@ -196,12 +309,29 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
     signed_y = np.asarray([record["signed_final_y_error"] for record in records], dtype=np.float64)
     pred_y = np.asarray([record["pred_final_xy"][1] for record in records], dtype=np.float64)
     gt_y = np.asarray([record["gt_final_xy"][1] for record in records], dtype=np.float64)
-    mode_hist = Counter(int(record["mode_idx"]) for record in records if record["mode_idx"] is not None)
+    def _pred_mode(record: Dict) -> Optional[int]:
+        value = record.get("pred_mode_idx", record.get("mode_idx"))
+        return None if value is None else int(value)
+
+    def _gt_mode(record: Dict) -> Optional[int]:
+        value = record.get("gt_mode_idx", record.get("trajectory_mode"))
+        return None if value is None else int(value)
+
+    mode_hist = Counter(_pred_mode(record) for record in records if _pred_mode(record) is not None)
+    gt_mode_hist = Counter(_gt_mode(record) for record in records if _gt_mode(record) is not None)
     trajectory_mode_hist = Counter(int(record["trajectory_mode"]) for record in records if record.get("trajectory_mode") is not None)
     mode_y = defaultdict(list)
+    mode_match_count = 0
+    mode_total_count = 0
     for record in records:
-        if record["mode_idx"] is not None:
-            mode_y[int(record["mode_idx"])].append(float(record["pred_final_xy"][1]))
+        pred_mode_idx = _pred_mode(record)
+        gt_mode_idx = _gt_mode(record)
+        if pred_mode_idx is not None:
+            mode_y[int(pred_mode_idx)].append(float(record["pred_final_xy"][1]))
+        if gt_mode_idx is not None and pred_mode_idx is not None:
+            mode_total_count += 1
+            if int(gt_mode_idx) == int(pred_mode_idx):
+                mode_match_count += 1
     return {
         "num_samples": len(records),
         "trajectory_l1": float(traj_l1.mean()),
@@ -215,6 +345,11 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
         "mode_hist": {str(key): int(value) for key, value in sorted(mode_hist.items())},
         "mode_final_y_mean": {str(key): float(np.mean(value)) for key, value in sorted(mode_y.items())},
         "trajectory_mode_hist": {str(key): int(value) for key, value in sorted(trajectory_mode_hist.items())},
+        "pred_mode_hist": {str(key): int(value) for key, value in sorted(mode_hist.items())},
+        "gt_mode_hist": {str(key): int(value) for key, value in sorted(gt_mode_hist.items())},
+        "mode_accuracy": float(mode_match_count / mode_total_count) if mode_total_count > 0 else 0.0,
+        "mode_match_count": int(mode_match_count),
+        "mode_total_count": int(mode_total_count),
     }
 
 
@@ -230,20 +365,17 @@ def evaluate_open_loop(
     save_trajectory_plots: bool,
     save_csv: bool,
     overlay_all_anchors: bool,
-    mode_focus: int,
 ) -> Dict[str, object]:
     image_dir = output_dir / "images"
-    mode_dir = output_dir / f"mode_{mode_focus}"
     trajectory_plot_dir = output_dir / "trajectory_plots"
     if save_images:
         image_dir.mkdir(parents=True, exist_ok=True)
-        mode_dir.mkdir(parents=True, exist_ok=True)
     if save_trajectory_plots:
         trajectory_plot_dir.mkdir(parents=True, exist_ok=True)
 
     anchors = None
     anchor_path = Path(config.plan_anchor_path)
-    if anchor_path.exists():
+    if not config.use_dynamic_anchors and anchor_path.exists():
         anchors = np.load(anchor_path)
 
     records: List[Dict] = []
@@ -255,7 +387,7 @@ def evaluate_open_loop(
         features_device = _to_device(features, device)
         targets_device = _to_device(targets, device)
         with torch.no_grad():
-            predictions = model(features_device, targets_device)
+            predictions = _predict_open_loop(model, features_device, targets_device)
         predictions_cpu = {key: value.detach().cpu() for key, value in predictions.items()}
         features_cpu = {key: value.detach().cpu() for key, value in features.items()}
         targets_cpu = {key: value.detach().cpu() for key, value in targets.items()}
@@ -264,10 +396,10 @@ def evaluate_open_loop(
             metadata = dataset.get_sample_metadata(global_index)
             pred_traj = predictions_cpu["trajectory"][in_batch_idx].numpy()
             gt_traj = targets_cpu["trajectory"][in_batch_idx].numpy()
-            mode_idx = None
+            pred_mode_idx = None
             topk_mode_logits = []
             if "trajectory_mode_idx" in predictions_cpu:
-                mode_idx = int(predictions_cpu["trajectory_mode_idx"][in_batch_idx].item())
+                pred_mode_idx = int(predictions_cpu["trajectory_mode_idx"][in_batch_idx].item())
             if "trajectory_mode_logits" in predictions_cpu:
                 logits = predictions_cpu["trajectory_mode_logits"][in_batch_idx].numpy()
                 topk_indices = np.argsort(logits)[::-1][: min(3, logits.shape[0])]
@@ -276,10 +408,24 @@ def evaluate_open_loop(
                     for idx in topk_indices
                 ]
             ade, fde = compute_ade_fde(pred_traj, gt_traj)
+            gt_mode_idx = _resolve_gt_mode_idx(metadata)
+            pred_mode_name = _mode_name(pred_mode_idx)
+            gt_mode_name = _mode_name(gt_mode_idx)
+            trajectory_candidates = None
+            if "trajectory_candidates" in predictions_cpu:
+                trajectory_candidates = predictions_cpu["trajectory_candidates"][in_batch_idx].numpy()
+            target_point = features_cpu.get("target_point")
+            target_point_xy = None
+            if target_point is not None:
+                target_point_xy = target_point[in_batch_idx].numpy()
 
             record = {
                 **metadata,
-                "mode_idx": mode_idx,
+                "mode_idx": pred_mode_idx,
+                "pred_mode_idx": pred_mode_idx,
+                "gt_mode_idx": gt_mode_idx,
+                "pred_mode_name": pred_mode_name,
+                "gt_mode_name": gt_mode_name,
                 "trajectory_mode": metadata.get("trajectory_mode"),
                 "pred_final_xy": [float(pred_traj[-1, 0]), float(pred_traj[-1, 1])],
                 "gt_final_xy": [float(gt_traj[-1, 0]), float(gt_traj[-1, 1])],
@@ -295,15 +441,23 @@ def evaluate_open_loop(
             records.append(record)
 
             if save_trajectory_plots:
-                plot_name = f"{metadata['sample_index']:05d}_mode{mode_idx if mode_idx is not None else 'na'}_traj.png"
+                plot_name = (
+                    f"{metadata['sample_index']:05d}_mode"
+                    f"{pred_mode_idx if pred_mode_idx is not None else 'na'}_traj.png"
+                )
                 save_trajectory_comparison_plot(
                     pred_traj=pred_traj,
                     gt_traj=gt_traj,
                     output_path=trajectory_plot_dir / plot_name,
                     sample_index=metadata["sample_index"],
-                    mode_idx=mode_idx,
+                    pred_mode_idx=pred_mode_idx,
+                    gt_mode_idx=gt_mode_idx,
+                    pred_mode_name=pred_mode_name,
+                    gt_mode_name=gt_mode_name,
                     ade=ade,
                     fde=fde,
+                    target_point=target_point_xy,
+                    trajectory_candidates=trajectory_candidates,
                 )
 
             if save_images:
@@ -312,6 +466,7 @@ def evaluate_open_loop(
                 single_predictions = {key: value[in_batch_idx:in_batch_idx + 1] for key, value in predictions_cpu.items()}
                 metadata_text = [
                     f"sample={metadata['sample_index']} shard={metadata['shard_name']} local={metadata['local_index']}",
+                    f"pred_mode={pred_mode_idx}:{pred_mode_name} gt_mode={gt_mode_idx}:{gt_mode_name}",
                     f"y_err={record['signed_final_y_error']:+.3f} l1={record['trajectory_l1']:.3f} final_l2={record['trajectory_final_l2']:.3f}",
                 ]
                 image = render_open_loop_prediction(
@@ -324,10 +479,8 @@ def evaluate_open_loop(
                     overlay_all_anchors=overlay_all_anchors,
                     metadata_text=metadata_text,
                 )
-                image_name = f"{metadata['sample_index']:05d}_mode{mode_idx if mode_idx is not None else 'na'}.png"
+                image_name = f"{metadata['sample_index']:05d}_mode{pred_mode_idx if pred_mode_idx is not None else 'na'}.png"
                 cv2.imwrite(str(image_dir / image_name), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
-                if mode_idx == mode_focus:
-                    cv2.imwrite(str(mode_dir / image_name), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
             global_index += 1
         print(f"[open_loop] processed_batches={batch_idx + 1} processed_samples={global_index}")
 
@@ -363,6 +516,8 @@ def main():
         resolved_model_size,
         dataset_root=args.dataset_root or TransfuserConfig().dataset_root,
         plan_anchor_path=args.plan_anchor_path or TransfuserConfig().plan_anchor_path,
+        use_dynamic_anchors=(args.anchor_method == "dynamic"),
+        trajectory_reg_decoder_type=args.trajectory_reg_decoder_type,
         batch_size=args.batch_size,
         cache_shards_in_memory=False,
     )
@@ -397,7 +552,6 @@ def main():
         save_trajectory_plots=bool(args.save_trajectory_plots),
         save_csv=bool(args.save_csv),
         overlay_all_anchors=bool(args.overlay_all_anchors),
-        mode_focus=args.mode_focus,
     )
     print(f"[open_loop] summary={summary['metrics']}")
     print(f"[open_loop] output_dir={summary['output_dir']}")

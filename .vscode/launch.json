@@ -10,10 +10,10 @@
         //     "console": "integratedTerminal"
         // },
         {
-            "name": "Train",
+            "name": "Expert",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/train/train_platoon_rl.py",
+            "program": "${workspaceFolder}/metadrive/exp_dataset/collect_expert.py",
             "console": "integratedTerminal",
             // "args": [
             //     "--checkpoint", "outputs/diffusion/checkpoints/diffusion-epoch=98.ckpt"

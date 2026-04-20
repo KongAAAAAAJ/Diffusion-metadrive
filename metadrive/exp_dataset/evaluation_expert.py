@@ -381,8 +381,6 @@ def _capture_topdown_frame(env, expert_name: str, episode_index: int, step_count
     else:
         frame = env.render(**build_topdown_render_kwargs(expert_name, episode_index, step_count))
     frame_array = np.asarray(frame)
-    if frame_array.ndim >= 2:
-        frame_array = frame_array.swapaxes(0, 1)
     agents = getattr(env, "agents", {}) or {}
     primary_agent = agents.get(primary_agent_id) if primary_agent_id is not None else None
     if primary_agent is not None:

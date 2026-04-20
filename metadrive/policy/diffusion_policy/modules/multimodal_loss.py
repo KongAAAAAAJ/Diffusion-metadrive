@@ -121,22 +121,41 @@ class LossComputer(nn.Module):
         # self.focal_loss = FocalLoss(use_sigmoid=True, gamma=2.0, alpha=0.25, reduction='mean', loss_weight=1.0, activated=False)
         self.cls_loss_weight = config.trajectory_cls_weight
         self.reg_loss_weight = config.trajectory_reg_weight
-    def forward(self, poses_reg, poses_cls, targets, plan_anchor):
+    def forward(self, poses_reg, poses_cls, targets, plan_anchor, mode_valid_mask=None):
         """
-        pred_traj: (bs, 20, 8, 3)
-        pred_cls: (bs, 20)
-        plan_anchor: (bs,20, 8, 2)
+        poses_reg: (bs, num_mode, 8, 3)
+        poses_cls: (bs, num_mode)
+        plan_anchor: (bs, num_mode, 8, 2)
         targets['trajectory']: (bs, 8, 3)
+        mode_valid_mask: (bs, num_mode) bool, optional — invalid slots excluded from GT assignment and cls gradient
         """
         bs, num_mode, ts, d = poses_reg.shape
         target_traj = targets["trajectory"]
-        dist = torch.linalg.norm(target_traj.unsqueeze(1)[...,:2] - plan_anchor, dim=-1)
-        dist = dist.mean(dim=-1)
-        mode_idx = torch.argmin(dist, dim=-1)
+        dist = torch.linalg.norm(target_traj.unsqueeze(1)[...,:2] - plan_anchor[...,:2], dim=-1)
+        dist = dist.mean(dim=-1)  # (bs, num_mode)
+
+        # GT mode assignment: only among valid slots
+        dist_for_assign = dist.clone()
+        if mode_valid_mask is not None:
+            dist_for_assign = dist_for_assign.masked_fill(~mode_valid_mask, float('inf'))
+        mode_idx = torch.argmin(dist_for_assign, dim=-1)
+
+        hierarchical_mode_label = targets.get("hierarchical_mode_label")
+        if hierarchical_mode_label is not None:
+            hierarchical_mode_label = hierarchical_mode_label.to(device=poses_cls.device, dtype=torch.long).view(-1)
+            valid_gt_mode = torch.logical_and(hierarchical_mode_label >= 0, hierarchical_mode_label < num_mode)
+            if mode_valid_mask is not None:
+                gt_mode_mask = torch.zeros_like(valid_gt_mode, dtype=torch.bool)
+                valid_indices = valid_gt_mode.nonzero(as_tuple=False).view(-1)
+                if valid_indices.numel() > 0:
+                    gt_mode_mask[valid_indices] = mode_valid_mask[valid_indices, hierarchical_mode_label[valid_indices]]
+                valid_gt_mode = torch.logical_and(valid_gt_mode, gt_mode_mask)
+            mode_idx = torch.where(valid_gt_mode, hierarchical_mode_label, mode_idx)
+
         cls_target = mode_idx
-        mode_idx = mode_idx[...,None,None,None].repeat(1,1,ts,d)
-        best_reg = torch.gather(poses_reg, 1, mode_idx).squeeze(1)
-        # import ipdb; ipdb.set_trace()
+        mode_idx_gather = mode_idx[...,None,None,None].repeat(1,1,ts,d)
+        best_reg = torch.gather(poses_reg, 1, mode_idx_gather).squeeze(1)
+
         # Calculate cls loss using focal loss
         target_classes_onehot = torch.zeros([bs, num_mode],
                                             dtype=poses_cls.dtype,
@@ -144,11 +163,13 @@ class LossComputer(nn.Module):
                                             device=poses_cls.device)
         target_classes_onehot.scatter_(1, cls_target.unsqueeze(1), 1)
 
-        # Use py_sigmoid_focal_loss function for focal loss calculation
+        # Zero gradient for invalid slots via per-slot weight
+        cls_weight = mode_valid_mask.float() if mode_valid_mask is not None else None
+
         loss_cls = self.cls_loss_weight * py_sigmoid_focal_loss(
             poses_cls,
             target_classes_onehot,
-            weight=None,
+            weight=cls_weight,
             gamma=2.0,
             alpha=0.25,
             reduction='mean',
@@ -157,7 +178,5 @@ class LossComputer(nn.Module):
 
         # Calculate regression loss
         reg_loss = self.reg_loss_weight * F.l1_loss(best_reg, target_traj)
-        # import ipdb; ipdb.set_trace()
-        # Combine classification and regression losses
         ret_loss = loss_cls + reg_loss
         return ret_loss

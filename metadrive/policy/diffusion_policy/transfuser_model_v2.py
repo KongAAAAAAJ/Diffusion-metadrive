@@ -156,6 +156,9 @@ class V2TransfuserModel(nn.Module):
 
         output: Dict[str, torch.Tensor] = {"bev_semantic_map": bev_semantic_map}
 
+        coarse_trajectories = features.get("coarse_trajectories")
+        mode_valid_mask = features.get("mode_valid_mask")
+
         trajectory = self._trajectory_head(
             trajectory_query,
             agents_query,
@@ -165,6 +168,8 @@ class V2TransfuserModel(nn.Module):
             targets=targets,
             global_img=None,
             target_point_embed=target_point_embed,
+            coarse_trajectories=coarse_trajectories,
+            mode_valid_mask=mode_valid_mask,
         )
         output.update(trajectory)
 
@@ -215,6 +220,10 @@ class V2TransfuserModel(nn.Module):
         trajectory_query, agents_query = query_out.split(self._query_splits, dim=1)
 
         output: Dict[str, torch.Tensor] = {"bev_semantic_map": bev_semantic_map}
+
+        coarse_trajectories = features.get("coarse_trajectories")
+        mode_valid_mask = features.get("mode_valid_mask")
+
         trajectory = self._trajectory_head.infer_multimodal(
             trajectory_query,
             agents_query,
@@ -223,6 +232,8 @@ class V2TransfuserModel(nn.Module):
             status_encoding[:, None],
             global_img=None,
             target_point_embed=target_point_embed,
+            coarse_trajectories=coarse_trajectories,
+            mode_valid_mask=mode_valid_mask,
         )
         output.update(trajectory)
 
@@ -282,32 +293,51 @@ class DiffMotionPlanningRefinementModule(nn.Module):
         ego_fut_mode=20,
         target_point_dim=0,
         if_zeroinit_reg=True,
+        trajectory_reg_decoder_type="mlp",
+        trajectory_gru_hidden_dim=None,
+        trajectory_gru_use_mode_embedding=False,
     ):
         super(DiffMotionPlanningRefinementModule, self).__init__()
         self.embed_dims = embed_dims    # 特征嵌入的维度
         self.ego_fut_ts = ego_fut_ts    # 预测的未来时间步数 8
         self.ego_fut_mode = ego_fut_mode    # 预测的未来轨迹模式数 20
         self.target_point_dim = target_point_dim
+        self.trajectory_reg_decoder_type = trajectory_reg_decoder_type
+        self.trajectory_gru_hidden_dim = trajectory_gru_hidden_dim or embed_dims
+        self.trajectory_gru_use_mode_embedding = trajectory_gru_use_mode_embedding
         guided_dim = embed_dims + target_point_dim
         self.plan_cls_branch = nn.Sequential(
             *linear_relu_ln(embed_dims, 1, 2, input_dims=guided_dim),
             nn.Linear(embed_dims, 1),
         )
-        self.plan_reg_branch = nn.Sequential(
-            nn.Linear(guided_dim, embed_dims),
-            nn.ReLU(),
-            nn.Linear(embed_dims, embed_dims),
-            nn.ReLU(),
-            nn.Linear(embed_dims, ego_fut_ts * 3),
-        )
+        if self.trajectory_reg_decoder_type == "mlp":
+            self.plan_reg_branch = nn.Sequential(
+                nn.Linear(guided_dim, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, ego_fut_ts * 3),
+            )
+        elif self.trajectory_reg_decoder_type == "gru":
+            gru_input_dim = 2 + 3 + target_point_dim
+            self.hidden_init = nn.Linear(embed_dims, self.trajectory_gru_hidden_dim)
+            self.reg_gru_cell = nn.GRUCell(gru_input_dim, self.trajectory_gru_hidden_dim)
+            self.delta_head = nn.Linear(self.trajectory_gru_hidden_dim, 3)
+        else:
+            raise ValueError(
+                f"Unsupported trajectory_reg_decoder_type: {self.trajectory_reg_decoder_type!r}"
+            )
         self.if_zeroinit_reg = False
 
         self.init_weight()
 
     def init_weight(self):
-        if self.if_zeroinit_reg:
+        if self.if_zeroinit_reg and self.trajectory_reg_decoder_type == "mlp":
             nn.init.constant_(self.plan_reg_branch[-1].weight, 0)
             nn.init.constant_(self.plan_reg_branch[-1].bias, 0)
+        if self.if_zeroinit_reg and self.trajectory_reg_decoder_type == "gru":
+            nn.init.constant_(self.delta_head.weight, 0)
+            nn.init.constant_(self.delta_head.bias, 0)
 
         bias_init = bias_init_with_prob(0.01)
         nn.init.constant_(self.plan_cls_branch[-1].bias, bias_init)
@@ -315,8 +345,10 @@ class DiffMotionPlanningRefinementModule(nn.Module):
         self,
         traj_feature,
         target_point_embed=None,
+        noisy_traj_points=None,
     ):
         bs, ego_fut_mode, _ = traj_feature.shape
+        base_traj_feature = traj_feature
         if self.target_point_dim > 0:
             if target_point_embed is None:
                 target_point_embed = traj_feature.new_zeros((bs, self.target_point_dim))
@@ -326,10 +358,49 @@ class DiffMotionPlanningRefinementModule(nn.Module):
         # 6. get final prediction
         traj_feature = traj_feature.view(bs, ego_fut_mode,-1)
         plan_cls = self.plan_cls_branch(traj_feature).squeeze(-1)  # *轨迹分类分支，输出每个模式的概率
-        traj_delta = self.plan_reg_branch(traj_feature)  # *轨迹回归分支，输出每个模式的轨迹
-        plan_reg = traj_delta.reshape(bs,ego_fut_mode, self.ego_fut_ts, 3)
+        if self.trajectory_reg_decoder_type == "mlp":
+            traj_delta = self.plan_reg_branch(traj_feature)  # *轨迹回归分支，输出每个模式的轨迹
+            plan_reg = traj_delta.reshape(bs, ego_fut_mode, self.ego_fut_ts, 3)
+        else:
+            if noisy_traj_points is None:
+                raise ValueError("noisy_traj_points must be provided when trajectory_reg_decoder_type='gru'")
+            plan_reg = self._forward_gru(
+                traj_feature=base_traj_feature,
+                noisy_traj_points=noisy_traj_points,
+                target_point_embed=target_point_embed,
+            )
 
         return plan_reg, plan_cls
+
+    def _forward_gru(
+        self,
+        traj_feature,
+        noisy_traj_points,
+        target_point_embed=None,
+    ):
+        bs, ego_fut_mode, _ = traj_feature.shape
+        hidden = self.hidden_init(traj_feature.reshape(bs * ego_fut_mode, -1))
+        if target_point_embed is None or self.target_point_dim <= 0:
+            target_point_flat = hidden.new_zeros((bs * ego_fut_mode, 0))
+        else:
+            target_point_flat = target_point_embed.reshape(bs * ego_fut_mode, -1)
+
+        anchors = noisy_traj_points.reshape(bs * ego_fut_mode, self.ego_fut_ts, 2)
+        prev_point = noisy_traj_points.new_zeros((bs * ego_fut_mode, 3))
+        deltas = []
+        for t in range(self.ego_fut_ts):
+            anchor_t = anchors[:, t, :]
+            gru_input = [anchor_t, prev_point]
+            if target_point_flat.shape[-1] > 0:
+                gru_input.append(target_point_flat)
+            gru_input = torch.cat(gru_input, dim=-1)
+            hidden = self.reg_gru_cell(gru_input, hidden)
+            delta_t = self.delta_head(hidden)
+            current_point = torch.cat([anchor_t + delta_t[:, :2], delta_t[:, 2:3]], dim=-1)
+            prev_point = current_point
+            deltas.append(delta_t.unsqueeze(1))
+
+        return torch.cat(deltas, dim=1).reshape(bs, ego_fut_mode, self.ego_fut_ts, 3)
 
 class ModulationLayer(nn.Module):
 
@@ -415,6 +486,9 @@ class CustomTransformerDecoderLayer(nn.Module):
             ego_fut_ts=num_poses,
             ego_fut_mode=config.ego_fut_mode,
             target_point_dim=config.target_point_dim,
+            trajectory_reg_decoder_type=config.trajectory_reg_decoder_type,
+            trajectory_gru_hidden_dim=config.trajectory_gru_hidden_dim,
+            trajectory_gru_use_mode_embedding=config.trajectory_gru_use_mode_embedding,
         )
 
     def forward(self, 
@@ -445,7 +519,11 @@ class CustomTransformerDecoderLayer(nn.Module):
         
         # 4.9 predict the offset & heading  
         # *self.task_decoder预测的是噪声残差，即去噪轨迹点与加噪轨迹点的差值，最终轨迹点=加噪轨迹点+残差
-        poses_reg, poses_cls = self.task_decoder(traj_feature, target_point_embed=target_point_embed) #bs,20,8,3; bs,20
+        poses_reg, poses_cls = self.task_decoder(
+            traj_feature,
+            target_point_embed=target_point_embed,
+            noisy_traj_points=noisy_traj_points,
+        ) #bs,20,8,3; bs,20
         poses_reg[...,:2] = poses_reg[...,:2] + noisy_traj_points
         poses_reg[..., StateSE2Index.HEADING] = poses_reg[..., StateSE2Index.HEADING].tanh() * np.pi
 
@@ -519,6 +597,7 @@ class TrajectoryHead(nn.Module):
         self._d_ffn = d_ffn
         self.diff_loss_weight = 2.0
         self.ego_fut_mode = config.ego_fut_mode
+        self.use_dynamic_anchors = config.use_dynamic_anchors
 
         self.diffusion_scheduler = DDIMScheduler(
             num_train_timesteps=1000,
@@ -526,7 +605,15 @@ class TrajectoryHead(nn.Module):
             prediction_type="sample",
         )
 
-        plan_anchor = np.load(plan_anchor_path)[:self.ego_fut_mode]
+        if self.use_dynamic_anchors and not plan_anchor_path:
+            plan_anchor = np.zeros((self.ego_fut_mode, num_poses, 2), dtype=np.float32)
+        elif self.use_dynamic_anchors:
+            try:
+                plan_anchor = np.load(plan_anchor_path)[:self.ego_fut_mode]
+            except FileNotFoundError:
+                plan_anchor = np.zeros((self.ego_fut_mode, num_poses, 2), dtype=np.float32)
+        else:
+            plan_anchor = np.load(plan_anchor_path)[:self.ego_fut_mode]
 
         self.plan_anchor = nn.Parameter(
             torch.tensor(plan_anchor, dtype=torch.float32),
@@ -570,6 +657,19 @@ class TrajectoryHead(nn.Module):
         odo_info_fut_y = (odo_info_fut_y + 1)/2 * 46 - 20
         odo_info_fut_head = (odo_info_fut_head + 1)/2 * 3.9 - 2
         return torch.cat([odo_info_fut_x, odo_info_fut_y, odo_info_fut_head], dim=-1)
+
+    def _get_anchors(
+        self, bs: int, device: torch.device, coarse_trajectories: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Return (bs, ego_fut_mode, T, 2) anchor tensor.
+
+        Uses dynamic coarse_trajectories when use_dynamic_anchors=True and they are provided;
+        otherwise falls back to the frozen plan_anchor parameter.
+        """
+        if self.use_dynamic_anchors and coarse_trajectories is not None:
+            return coarse_trajectories.to(device=device, dtype=torch.float32)
+        return self.plan_anchor.unsqueeze(0).expand(bs, -1, -1, -1)
+
     def forward(
         self,
         ego_query,
@@ -581,6 +681,8 @@ class TrajectoryHead(nn.Module):
         global_img=None,
         return_candidates: bool = False,
         target_point_embed=None,
+        coarse_trajectories=None,
+        mode_valid_mask=None,
     ) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
         if self.training:
@@ -593,6 +695,8 @@ class TrajectoryHead(nn.Module):
                 targets,
                 global_img,
                 target_point_embed=target_point_embed,
+                coarse_trajectories=coarse_trajectories,
+                mode_valid_mask=mode_valid_mask,
             )
         else:
             return self.forward_test(
@@ -604,6 +708,8 @@ class TrajectoryHead(nn.Module):
                 global_img,
                 return_candidates=return_candidates,
                 target_point_embed=target_point_embed,
+                coarse_trajectories=coarse_trajectories,
+                mode_valid_mask=mode_valid_mask,
             )
 
     def infer_multimodal(
@@ -615,6 +721,8 @@ class TrajectoryHead(nn.Module):
         status_encoding,
         global_img=None,
         target_point_embed=None,
+        coarse_trajectories=None,
+        mode_valid_mask=None,
     ) -> Dict[str, torch.Tensor]:
         """Return multimodal trajectory candidates before selector sampling."""
         return self.forward_test(
@@ -626,6 +734,8 @@ class TrajectoryHead(nn.Module):
             global_img,
             return_candidates=True,
             target_point_embed=target_point_embed,
+            coarse_trajectories=coarse_trajectories,
+            mode_valid_mask=mode_valid_mask,
         )
 
 
@@ -639,11 +749,13 @@ class TrajectoryHead(nn.Module):
         targets=None,
         global_img=None,
         target_point_embed=None,
+        coarse_trajectories=None,
+        mode_valid_mask=None,
     ) -> Dict[str, torch.Tensor]:
         bs = ego_query.shape[0]
         device = ego_query.device
-        # 1. add truncated noise to the plan anchor
-        plan_anchor = self.plan_anchor.unsqueeze(0).repeat(bs,1,1,1)
+        # 1. add truncated noise to the plan anchor (or dynamic coarse trajectories)
+        plan_anchor = self._get_anchors(bs, device, coarse_trajectories)
         odo_info_fut = self.norm_odo(plan_anchor)
         timesteps = torch.randint(
             0, 50,
@@ -686,7 +798,8 @@ class TrajectoryHead(nn.Module):
         trajectory_loss_dict = {}
         ret_traj_loss = 0
         for idx, (poses_reg, poses_cls) in enumerate(zip(poses_reg_list, poses_cls_list)):
-            trajectory_loss = self.loss_computer(poses_reg, poses_cls, targets, plan_anchor)
+            trajectory_loss = self.loss_computer(poses_reg, poses_cls, targets, plan_anchor,
+                                                 mode_valid_mask=mode_valid_mask)
             trajectory_loss_dict[f"trajectory_loss_{idx}"] = trajectory_loss
             ret_traj_loss += trajectory_loss
 
@@ -705,6 +818,8 @@ class TrajectoryHead(nn.Module):
         global_img,
         return_candidates: bool = False,
         target_point_embed=None,
+        coarse_trajectories=None,
+        mode_valid_mask=None,
     ) -> Dict[str, torch.Tensor]:
         step_num = 2
         bs = ego_query.shape[0]
@@ -714,9 +829,8 @@ class TrajectoryHead(nn.Module):
         roll_timesteps = (np.arange(0, step_num) * step_ratio).round()[::-1].copy().astype(np.int64)
         roll_timesteps = torch.from_numpy(roll_timesteps).to(device)
 
-
-        # 1. add truncated noise to the plan anchor
-        plan_anchor = self.plan_anchor.unsqueeze(0).repeat(bs,1,1,1)
+        # 1. add truncated noise to the plan anchor (or dynamic coarse trajectories)
+        plan_anchor = self._get_anchors(bs, device, coarse_trajectories)
         img = self.norm_odo(plan_anchor)
         noise = torch.randn(img.shape, device=device)
         trunc_timesteps = torch.ones((bs,), device=device, dtype=torch.long) * 8
@@ -783,8 +897,12 @@ class TrajectoryHead(nn.Module):
                 sample=img
             ).prev_sample
 
-        # 选择分类分数最高的模式作为最终预测结果
-        best_mode_idx = poses_cls.argmax(dim=-1)
+        # 选择分类分数最高的模式作为最终预测结果（对 invalid slot 屏蔽）
+        if mode_valid_mask is not None:
+            masked_cls = poses_cls.masked_fill(~mode_valid_mask.to(device=poses_cls.device), float('-inf'))
+            best_mode_idx = masked_cls.argmax(dim=-1)
+        else:
+            best_mode_idx = poses_cls.argmax(dim=-1)
         mode_idx = best_mode_idx[...,None,None,None].repeat(1,1,self._num_poses,3)
         best_reg = torch.gather(poses_reg, 1, mode_idx).squeeze(1)
         return {

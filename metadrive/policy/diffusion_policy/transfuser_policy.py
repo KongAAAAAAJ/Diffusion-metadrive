@@ -8,7 +8,10 @@ import torch
 
 from metadrive.policy.base_policy import BasePolicy
 from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig, TrajectorySampling
-from metadrive.policy.diffusion_policy.transfuser_features import observation_to_features
+from metadrive.policy.diffusion_policy.transfuser_features import (
+    LaneDecision,
+    observation_to_features,
+)
 from metadrive.policy.diffusion_policy.transfuser_model_v2 import V2TransfuserModel
 
 
@@ -29,6 +32,26 @@ def _wrap_to_pi(angle: float) -> float:
     return float(np.arctan2(np.sin(angle), np.cos(angle)))
 
 
+def _trajectory_reference_speed_sequence_km_h(
+    trajectory: np.ndarray,
+    interval_s: float = 0.5,
+) -> np.ndarray:
+    trajectory = np.asarray(trajectory, dtype=np.float32)
+    if trajectory.ndim != 2 or trajectory.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float32)
+    if trajectory.shape[0] == 1:
+        return np.zeros((1,), dtype=np.float32)
+
+    interval_s = max(float(interval_s), 1e-3)
+    segment_distances = np.linalg.norm(np.diff(trajectory[:, :2], axis=0), axis=1)
+    segment_speeds_mps = segment_distances / interval_s
+    speed_sequence_mps = np.concatenate(
+        [segment_speeds_mps, segment_speeds_mps[-1:].copy()],
+        axis=0,
+    )
+    return (speed_sequence_mps * 3.6).astype(np.float32, copy=False)
+
+
 def compute_trajectory_control(
     trajectory: np.ndarray,
     lookahead_index: int,
@@ -37,6 +60,7 @@ def compute_trajectory_control(
     controller_type: str = "stabilized",
 ) -> tuple[np.ndarray, Dict[str, float]]:
     trajectory = np.asarray(trajectory, dtype=np.float32)
+    reference_speed_sequence_km_h = _trajectory_reference_speed_sequence_km_h(trajectory)
     if trajectory.ndim != 2 or trajectory.shape[0] == 0:
         action = np.asarray([0.0, 0.0], dtype=np.float32)
         return action, {
@@ -47,6 +71,8 @@ def compute_trajectory_control(
             "waypoint_heading": 0.0,
             "steering": 0.0,
             "throttle": 0.0,
+            "trajectory_target_speed_km_h": 0.0,
+            "target_speed_km_h": float(target_speed_km_h),
             "speed_error": float(target_speed_km_h - current_speed_km_h),
         }
 
@@ -69,7 +95,13 @@ def compute_trajectory_control(
         steering_pre_clip = speed_scale * (0.85 * steering_angle + 0.35 * wrapped_heading)
 
     steering = float(np.clip(steering_pre_clip, -1.0, 1.0))
-    speed_error = float(target_speed_km_h - current_speed_km_h)
+    trajectory_target_speed_km_h = (
+        float(reference_speed_sequence_km_h[min(valid_idx, len(reference_speed_sequence_km_h) - 1)])
+        if len(reference_speed_sequence_km_h) > 0
+        else 0.0
+    )
+    effective_target_speed_km_h = min(float(target_speed_km_h), trajectory_target_speed_km_h)
+    speed_error = float(effective_target_speed_km_h - current_speed_km_h)
     throttle = float(np.clip(speed_error / 10.0, -1.0, 1.0))
     action = np.asarray([steering, throttle], dtype=np.float32)
     debug = {
@@ -83,6 +115,8 @@ def compute_trajectory_control(
         "steering_pre_clip": float(steering_pre_clip),
         "steering": steering,
         "throttle": throttle,
+        "trajectory_target_speed_km_h": float(trajectory_target_speed_km_h),
+        "target_speed_km_h": float(effective_target_speed_km_h),
         "speed_error": speed_error,
     }
     return action, debug
@@ -113,12 +147,117 @@ class TransfuserPolicy(BasePolicy):
         super().reset()
         self._clear_trajectory_visualization()
 
+    def _build_mode_features(self) -> Dict[str, torch.Tensor]:
+        """Build coarse_trajectories and mode_valid_mask from the live vehicle state."""
+        from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
+        from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
+        from metadrive.policy.diffusion_policy.mode_definitions import NUM_MODE_SLOTS
+        try:
+            current_map = getattr(getattr(self.control_object, "engine", None), "current_map", None)
+            ctx = build_mode_context_from_vehicle(self.control_object, current_map=current_map)
+            gen = ModeTrajectoryGenerator(
+                keep_lane_high_speed_mps=self._model_config.mode_keep_high_speed_mps,
+                keep_lane_medium_speed_mps=self._model_config.mode_keep_medium_speed_mps,
+                keep_lane_low_speed_mps=self._model_config.mode_keep_low_speed_mps,
+                emergency_decel_mps2=self._model_config.mode_emergency_decel_mps2,
+            )
+            out = gen.generate(ctx)
+            return {
+                "coarse_trajectories": torch.from_numpy(out.coarse_trajectories),  # (10, 8, 2)
+                "mode_valid_mask": torch.from_numpy(out.mode_valid_mask),           # (10,) bool
+            }
+        except Exception:
+            return {
+                "coarse_trajectories": torch.zeros((NUM_MODE_SLOTS, 8, 2), dtype=torch.float32),
+                "mode_valid_mask": torch.zeros((NUM_MODE_SLOTS,), dtype=torch.bool),
+            }
+
+    def _decide_lane_decision(self) -> LaneDecision:
+        """Use an IDM-based oracle to decide the lane change direction BEFORE model inference.
+
+        target_point is external conditioning for the diffusion model — it must NOT be
+        derived from the model's own output.  This oracle is a placeholder; a dedicated
+        decision module can replace it later.
+
+        MetaDrive lane ordinals: index 0 = leftmost, higher = further right.
+        Left overtake has higher priority (mirrors IDMPolicy.lane_change_policy).
+        """
+        try:
+            from metadrive.policy.idm_policy import FrontBackObjects
+
+            vehicle = self.control_object
+            current_lanes = vehicle.navigation.current_ref_lanes
+            routing_lane = vehicle.lane
+            all_objects = vehicle.lidar.get_surrounding_objects(vehicle)
+
+            MAX_LONG_DIST = 30
+            SAFE_LANE_CHANGE_DISTANCE = 15
+            LANE_CHANGE_SPEED_INCREASE = 10
+            MAX_SPEED = 100.0
+
+            surrounding = FrontBackObjects.get_find_front_back_objs(
+                all_objects, routing_lane, vehicle.position, MAX_LONG_DIST, current_lanes
+            )
+
+            front_speed = (
+                surrounding.front_object().speed_km_h
+                if surrounding.has_front_object()
+                else MAX_SPEED
+            )
+
+            # Only consider lane change when there IS a slow front vehicle.
+            if not surrounding.has_front_object():
+                return LaneDecision.KEEP
+
+            # Left lane: lower index (index - 1)
+            left_front_speed = None
+            if (
+                surrounding.left_lane_exist()
+                and surrounding.left_front_min_distance() > SAFE_LANE_CHANGE_DISTANCE
+                and surrounding.left_back_min_distance() > SAFE_LANE_CHANGE_DISTANCE
+            ):
+                left_front_speed = (
+                    surrounding.left_front_object().speed_km_h
+                    if surrounding.has_left_front_object()
+                    else MAX_SPEED
+                )
+
+            # Right lane: higher index (index + 1)
+            right_front_speed = None
+            if (
+                surrounding.right_lane_exist()
+                and surrounding.right_front_min_distance() > SAFE_LANE_CHANGE_DISTANCE
+                and surrounding.right_back_min_distance() > SAFE_LANE_CHANGE_DISTANCE
+            ):
+                right_front_speed = (
+                    surrounding.right_front_object().speed_km_h
+                    if surrounding.has_right_front_object()
+                    else MAX_SPEED
+                )
+
+            # Left has higher priority
+            if left_front_speed is not None and left_front_speed - front_speed > LANE_CHANGE_SPEED_INCREASE:
+                return LaneDecision.CHANGE_LEFT
+            if right_front_speed is not None and right_front_speed - front_speed > LANE_CHANGE_SPEED_INCREASE:
+                return LaneDecision.CHANGE_RIGHT
+        except Exception:
+            pass
+        return LaneDecision.KEEP
+
     def act(self, agent_id=None):
+        # lane_decision is external conditioning — decide BEFORE model inference so
+        # that target_point (which depends on lane_decision) is fed as model input.
+        lane_decision = self._decide_lane_decision()
+
         observation_adapter = self.engine.agent_manager.observations[self.control_object.name]
         observation = getattr(observation_adapter, "current_observation", None)
         if observation is None:
             observation = observation_adapter.observe(self.control_object)
-        features = observation_to_features(observation, self._model_config, vehicle=self.control_object)
+        features = observation_to_features(
+            observation, self._model_config, vehicle=self.control_object, lane_decision=lane_decision
+        )
+        features["lane_decision"] = torch.tensor(int(lane_decision), dtype=torch.int8)
+        features.update(self._build_mode_features())
         batched_features = {
             key: value.unsqueeze(0).to(self._device) if value.ndim > 0 else value.to(self._device)
             for key, value in features.items()
@@ -133,9 +272,15 @@ class TransfuserPolicy(BasePolicy):
         self.action_info["action"] = action
         self.action_info["predicted_trajectory"] = trajectory
         self.action_info["controller_debug"] = controller_debug
-        for feature_key in ("camera_feature", "lidar_feature", "status_feature", "ego_state", "target_point"):
+        self.action_info["lane_decision"] = int(lane_decision)
+        for feature_key in ("camera_feature", "lidar_feature", "status_feature", "ego_state", "target_point", "lane_decision"):
             if feature_key in features:
-                self.action_info[feature_key] = features[feature_key].detach().cpu().numpy()
+                val = features[feature_key]
+                self.action_info[feature_key] = val.detach().cpu().numpy() if isinstance(val, torch.Tensor) else val
+        for mode_feature_key in ("coarse_trajectories", "mode_valid_mask"):
+            if mode_feature_key in features:
+                val = features[mode_feature_key]
+                self.action_info[mode_feature_key] = val.detach().cpu().numpy() if isinstance(val, torch.Tensor) else val
         if "trajectory_candidates" in predictions:
             self.action_info["trajectory_candidates"] = (
                 predictions["trajectory_candidates"][0].detach().cpu().numpy()
@@ -170,6 +315,24 @@ class TransfuserPolicy(BasePolicy):
                 cleaned_state_dict[key[len("agent._transfuser_model."):]] = value
             else:
                 cleaned_state_dict[key] = value
+        # Drop keys whose shape no longer matches the current model (e.g. plan_anchor
+        # when ego_fut_mode changed from 7→10 in the hierarchical-anchor upgrade).
+        # With use_dynamic_anchors=True, plan_anchor is only a fallback and can safely
+        # retain its randomly-initialised value when the checkpoint shape differs.
+        model_state = self._model.state_dict()
+        mismatched_keys = [
+            k for k, v in cleaned_state_dict.items()
+            if k in model_state and v.shape != model_state[k].shape
+        ]
+        if mismatched_keys:
+            import warnings
+            warnings.warn(
+                f"Dropping {len(mismatched_keys)} checkpoint key(s) due to shape mismatch "
+                f"(will use model-init values): {mismatched_keys}",
+                stacklevel=2,
+            )
+            for k in mismatched_keys:
+                del cleaned_state_dict[k]
         try:
             self._model.load_state_dict(cleaned_state_dict, strict=False)
         except RuntimeError as exc:

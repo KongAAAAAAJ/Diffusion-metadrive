@@ -332,6 +332,110 @@ class ExpertIDMPolicy(IDMPolicy):
         )
         return surrounding_objects.front_object(), surrounding_objects.front_min_distance(), fallback_lane
 
+    def _find_exit_approach_lane(self) -> "Any | None":
+        """Find the parallel deceleration/service lane for a ramp-exit scenario.
+
+        When the ego is on the rightmost ref lane of a G-block (or similar
+        diverge block) and the next ref lanes are fewer (indicating a required
+        exit), the standard IDM cannot move further right because the service
+        lane (deceleration lane) is a *separate road* rather than an adjacent
+        lane index.  This method detects that situation and returns the approach
+        lane so that the steering controller can track it directly, allowing the
+        vehicle to merge into the service road long before the junction node.
+
+        The approach lane is identified by finding a road in the network that:
+        1. Ends at the same node as the routing_target_lane (they share the
+           diverge/junction point B).
+        2. Ends at a physical position that is closer to the start of the next
+           ref lane than the routing_target_lane's end position is.
+
+        Returns the best approach lane, or None if no such lane is found or the
+        lateral gap is already small enough.
+        """
+        nav = getattr(self.control_object, "navigation", None)
+        if nav is None:
+            return None
+        current_ref_lanes = getattr(nav, "current_ref_lanes", None) or []
+        next_ref_lanes = getattr(nav, "next_ref_lanes", None)
+        if not current_ref_lanes or next_ref_lanes is None:
+            return None
+
+        # Only activate when there is a lane reduction (exit required).
+        if len(current_ref_lanes) <= len(next_ref_lanes):
+            return None
+
+        routing_target = self.routing_target_lane
+        if routing_target is None:
+            return None
+
+        # Only activate when the vehicle is already on the rightmost ref lane.
+        rt_index = getattr(routing_target, "index", None)
+        if rt_index is None:
+            return None
+        if int(rt_index[-1]) != len(current_ref_lanes) - 1:
+            return None
+
+        road_network = getattr(getattr(nav, "map", None), "road_network", None)
+        if road_network is None:
+            return None
+
+        # Physical end position of routing_target_lane (where the IDM currently
+        # aims to arrive at node B).
+        try:
+            rt_end_pos = np.asarray(
+                routing_target.position(float(getattr(routing_target, "length", 0.0)), 0.0),
+                dtype=np.float64,
+            )
+        except Exception:
+            return None
+
+        # Physical start position of the first next ref lane (where we actually
+        # need to be after node B to smoothly enter the ramp).
+        try:
+            next_start_pos = np.asarray(next_ref_lanes[0].position(0.0, 0.0), dtype=np.float64)
+        except Exception:
+            return None
+
+        # If the physical gap is already small (< 1.5 m), no approach lane needed.
+        gap = float(np.linalg.norm(next_start_pos - rt_end_pos))
+        if gap < 1.5:
+            return None
+
+        # Search all roads in the network that end at the same junction node B.
+        rt_end_node = str(rt_index[1])
+        graph = getattr(road_network, "graph", {})
+        best_lane = None
+        # Candidate must end closer to next_start_pos than the current routing
+        # lane does (require at least 10% improvement).
+        best_dist = gap * 0.9
+
+        for from_node, to_dict in graph.items():
+            if rt_end_node not in to_dict:
+                continue
+            end_lanes = to_dict[rt_end_node]
+            if not end_lanes:
+                continue
+            for lane in end_lanes:
+                lane_idx = getattr(lane, "index", None)
+                if lane_idx is None:
+                    continue
+                # Skip roads on the same road as routing_target (same start-node).
+                if str(lane_idx[0]) == str(rt_index[0]):
+                    continue
+                try:
+                    lane_end_pos = np.asarray(
+                        lane.position(float(getattr(lane, "length", 0.0)), 0.0),
+                        dtype=np.float64,
+                    )
+                    dist = float(np.linalg.norm(lane_end_pos - next_start_pos))
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_lane = lane
+                except Exception:
+                    continue
+
+        return best_lane
+
     @staticmethod
     def _front_object_speed_km_h(front_object) -> float | None:
         if front_object is None:
@@ -373,6 +477,18 @@ class ExpertIDMPolicy(IDMPolicy):
                 steering_target_lane = self.routing_target_lane
 
         steering_target_lane = self._guard_steering_target_lane(steering_target_lane)
+
+        # For ramp-exit scenarios (e.g. S8): when the vehicle is on the
+        # rightmost main-highway lane of a G-block and the exit service lane is
+        # a parallel road (not an adjacent lane index), override the steering
+        # target with the deceleration/service lane found by
+        # _find_exit_approach_lane.  This makes the expert start merging EARLY
+        # rather than waiting until the physical junction node.
+        approach_lane = self._find_exit_approach_lane()
+        if approach_lane is not None:
+            approach_lane = self._guard_steering_target_lane(approach_lane)
+            steering_target_lane = approach_lane
+
         steering = self.steering_control(steering_target_lane)
         acc = self.acceleration(acc_front_obj, acc_front_dist)
         action = [steering, acc]
@@ -388,6 +504,21 @@ class ExpertIDMPolicy(IDMPolicy):
         self.action_info["front_object_speed_km_h"] = self._front_object_speed_km_h(acc_front_obj)
         self.action_info["front_lookup_fallback_used"] = bool(front_lookup_fallback_used)
         self.action_info["action"] = action
+        # Record the lateral lane-change decision so that the data collector can
+        # attach it to each frame and use it for direct expert-decision-based mode
+        # labeling instead of geometric L2 matching against coarse trajectories.
+        try:
+            _stl_idx = getattr(steering_target_lane, "index", None)
+            _rtl_idx = getattr(self.routing_target_lane, "index", None)
+            if _stl_idx is not None and _rtl_idx is not None:
+                _lat_diff = int(_stl_idx[2]) - int(_rtl_idx[2])
+            else:
+                _lat_diff = 0
+        except Exception:
+            _lat_diff = 0
+        # Clamp to -1/0/1: left=−1, keep=0, right=+1
+        self.action_info["lateral_decision"] = int(max(-1, min(1, _lat_diff)))
+        self.action_info["target_speed_km_h"] = float(self.target_speed)
         return action
 
     def reset(self):

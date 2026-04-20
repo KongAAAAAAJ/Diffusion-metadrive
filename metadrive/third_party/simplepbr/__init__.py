@@ -201,7 +201,8 @@ class Pipeline:
         if name in pbr_vars and prev_value != value:
             self._recompile_pbr()
         elif name == 'exposure':
-            self.tonemap_quad.set_shader_input('exposure', self.exposure)
+            if self.tonemap_quad is not None:
+                self.tonemap_quad.set_shader_input('exposure', self.exposure)
         elif name == 'msaa_samples':
             self._setup_tonemapping()
         elif name == 'render_node' and prev_value != value:
@@ -263,15 +264,28 @@ class Pipeline:
                 caster.set_shadow_buffer_size((0, 0))
                 caster.set_shadow_buffer_size(sbuff_size)
 
+        scene_tex = p3d.Texture()
+        scene_tex.set_format(p3d.Texture.F_rgba16)
+        scene_tex.set_component_type(p3d.Texture.T_float)
+        self.tonemap_quad = None
+
         fbprops = p3d.FrameBufferProperties()
         fbprops.float_color = True
         # fbprops.set_rgba_bits(16, 16, 16, 16)
         fbprops.set_depth_bits(24)
-        fbprops.set_multisamples(self.msaa_samples)
-        scene_tex = p3d.Texture()
-        scene_tex.set_format(p3d.Texture.F_rgba16)
-        scene_tex.set_component_type(p3d.Texture.T_float)
-        self.tonemap_quad = self.manager.render_scene_into(colortex=scene_tex, fbprops=fbprops)
+
+        multisample_candidates = [self.msaa_samples]
+        if self.msaa_samples != 0:
+            multisample_candidates.append(0)
+        for multisamples in multisample_candidates:
+            fbprops.set_multisamples(multisamples)
+            tonemap_quad = self.manager.render_scene_into(colortex=scene_tex, fbprops=fbprops)
+            if tonemap_quad is not None:
+                self.tonemap_quad = tonemap_quad
+                break
+
+        if self.tonemap_quad is None:
+            raise RuntimeError("simplepbr failed to create tonemap quad for the current window/buffer")
 
         defines = {}
         if self.use_330:
@@ -314,7 +328,8 @@ class Pipeline:
             assert not shader.get_error_flag()
 
         check_node_shader(self.render_node)
-        check_node_shader(self.tonemap_quad)
+        if self.tonemap_quad is not None:
+            check_node_shader(self.tonemap_quad)
 
 
 def init(**kwargs):

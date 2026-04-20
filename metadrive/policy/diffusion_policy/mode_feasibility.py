@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Iterable
+
+import numpy as np
+
+from metadrive.policy.diffusion_policy.mode_context import ModeContext
+from metadrive.policy.diffusion_policy.mode_definitions import BehaviorType, MODE_SLOTS, NUM_MODE_SLOTS
+
+
+@dataclass
+class ModeFeasibilityResult:
+    geometric_valid_mask: np.ndarray
+    traffic_valid_mask: np.ndarray
+
+    @property
+    def valid_mask(self) -> np.ndarray:
+        return np.logical_and(self.geometric_valid_mask, self.traffic_valid_mask)
+
+
+class GeometricFeasibilityChecker:
+    def evaluate(self, ctx: ModeContext) -> np.ndarray:
+        mask = np.ones((NUM_MODE_SLOTS,), dtype=bool)
+        for slot in MODE_SLOTS:
+            if slot.behavior_type != BehaviorType.LANE_CHANGE:
+                continue
+            if slot.lateral_direction == "left" and not (ctx.has_left_adjacent or ctx.has_left_branch):
+                mask[slot.index] = False
+            if slot.lateral_direction == "right" and not (ctx.has_right_adjacent or ctx.has_right_branch):
+                mask[slot.index] = False
+        return mask
+
+
+class TrafficFeasibilityChecker:
+    def __init__(
+        self,
+        lane_change_min_gap_m: float = 12.0,
+        keep_lane_medium_front_window_m: float = 45.0,
+    ) -> None:
+        self.lane_change_min_gap_m = float(lane_change_min_gap_m)
+        self.keep_lane_medium_front_window_m = float(keep_lane_medium_front_window_m)
+
+    def evaluate(self, ctx: ModeContext, geometric_mask: np.ndarray | None = None) -> np.ndarray:
+        mask = np.ones((NUM_MODE_SLOTS,), dtype=bool)
+        if geometric_mask is not None:
+            mask = np.logical_and(mask, geometric_mask)
+
+        front_distance = float(ctx.front_object_distance)
+        has_front_vehicle = front_distance >= 0.0 and front_distance <= self.keep_lane_medium_front_window_m
+        if not has_front_vehicle:
+            mask[1] = False
+
+        left_gap = float(ctx.left_lane_gap)
+        right_gap = float(ctx.right_lane_gap)
+        for slot in MODE_SLOTS:
+            if slot.behavior_type != BehaviorType.LANE_CHANGE:
+                continue
+            if slot.lateral_direction == "left" and left_gap >= 0.0 and left_gap < self.lane_change_min_gap_m:
+                mask[slot.index] = False
+            if slot.lateral_direction == "right" and right_gap >= 0.0 and right_gap < self.lane_change_min_gap_m:
+                mask[slot.index] = False
+        return mask
+
+
+def build_mode_valid_mask(
+    ctx: ModeContext,
+    geometric_checker: GeometricFeasibilityChecker | None = None,
+    traffic_checker: TrafficFeasibilityChecker | None = None,
+) -> ModeFeasibilityResult:
+    geometric_checker = geometric_checker or GeometricFeasibilityChecker()
+    traffic_checker = traffic_checker or TrafficFeasibilityChecker()
+    geometric_valid_mask = geometric_checker.evaluate(ctx)
+    traffic_valid_mask = traffic_checker.evaluate(ctx, geometric_valid_mask)
+    return ModeFeasibilityResult(
+        geometric_valid_mask=geometric_valid_mask,
+        traffic_valid_mask=traffic_valid_mask,
+    )
+
+
+def valid_mode_names(mask: np.ndarray) -> Iterable[str]:
+    for slot, is_valid in zip(MODE_SLOTS, mask):
+        if bool(is_valid):
+            yield slot.name
+
+
+def mask_to_dict(mask: np.ndarray) -> Dict[str, bool]:
+    return {slot.name: bool(mask[slot.index]) for slot in MODE_SLOTS}

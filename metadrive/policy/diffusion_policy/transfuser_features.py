@@ -2,7 +2,7 @@ from enum import IntEnum
 import math
 import json
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 import zipfile
 
 import cv2
@@ -24,6 +24,13 @@ PROCESSED_DIR_FIELDS = (
     "bev_semantic_map",
 )
 
+METADATA_PASSTHROUGH_FIELDS = (
+    "scenario_id",
+    "local_route",
+    "hierarchical_mode_label",
+    "trajectory_mode",
+)
+
 # ego_state layout (19D): vehicle_state (9D) + navigation_info (10D)
 # [0] lateral_to_left, [1] lateral_to_right, [2] heading_diff, [3] speed,
 # [4] steering, [5] last_steering, [6] last_throttle, [7] yaw_rate,
@@ -31,6 +38,13 @@ PROCESSED_DIR_FIELDS = (
 
 
 # 枚举类
+class LaneDecision(IntEnum):
+    """High-level lane-change decision used to select the target-point lane."""
+    KEEP         = 0
+    CHANGE_LEFT  = 1
+    CHANGE_RIGHT = 2
+
+
 class BoundingBox2DIndex(IntEnum):
     _X = 0
     _Y = 1
@@ -152,9 +166,529 @@ def _zero_target_point() -> torch.Tensor:
     return torch.zeros((2,), dtype=torch.float32)
 
 
+def _gt_trajectory_endpoint_from_sample(sample: Dict[str, np.ndarray]) -> torch.Tensor:
+    trajectory = _to_numpy(sample.get("trajectory", np.zeros((0, 3), dtype=np.float32))).astype(np.float32, copy=False)
+    if trajectory.ndim != 2 or trajectory.shape[0] == 0 or trajectory.shape[1] < 2:
+        return _zero_target_point()
+    return torch.from_numpy(trajectory[-1, :2].astype(np.float32, copy=False))
+
+
+def _derive_lane_decision_from_mode_idx(mode_idx: int) -> "LaneDecision":
+    """Map a selected MODE_SLOTS index to a LaneDecision.
+
+    MODE_SLOTS layout (10 slots):
+        0-2  KEEP_LANE        → KEEP
+        3-5  LANE_CHANGE_LEFT → CHANGE_LEFT
+        6-8  LANE_CHANGE_RIGHT→ CHANGE_RIGHT
+        9    EMERGENCY_STOP   → KEEP
+    """
+    if 3 <= mode_idx <= 5:
+        return LaneDecision.CHANGE_LEFT
+    if 6 <= mode_idx <= 8:
+        return LaneDecision.CHANGE_RIGHT
+    return LaneDecision.KEEP
+
+
+def _derive_lane_decision_from_reference_transitions(
+    prev_reference_lane_index: int,
+    current_reference_lane_index: int,
+) -> "LaneDecision":
+    """Determine LaneDecision from consecutive reference_lane_index values.
+
+    MetaDrive lane ordinals: index 0 = leftmost, higher index = further right.
+    (IDMPolicy confirms: left change = index-1 = decrease, right change = index+1 = increase)
+    Both indices must be valid (>= 0) to detect a change; -1 means unknown.
+    """
+    if prev_reference_lane_index < 0 or current_reference_lane_index < 0:
+        return LaneDecision.KEEP
+    if current_reference_lane_index < prev_reference_lane_index:
+        return LaneDecision.CHANGE_LEFT
+    if current_reference_lane_index > prev_reference_lane_index:
+        return LaneDecision.CHANGE_RIGHT
+    return LaneDecision.KEEP
+
+
 def _target_progress_distance(config: TransfuserConfig, speed_mps: float) -> float:
-    horizon_s = 4.0
+    horizon_s = float(config.target_point_prediction_horizon_s)
     return float(max(speed_mps * horizon_s, config.target_point_min_forward_distance_m))
+
+
+def _build_mode_context_for_target_point(vehicle):
+    from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
+
+    current_map = getattr(getattr(vehicle, "engine", None), "current_map", None)
+    return build_mode_context_from_vehicle(vehicle, current_map=current_map)
+
+
+# Maximum lateral offset (metres) from lane centre before we snap to a closer lane.
+_MAX_LATERAL_OFFSET_M: float = 2.0
+
+
+def _find_nearest_lane_on_road(vehicle, lane_index, road_network) -> Optional[tuple]:
+    """Find the lane on the same road segment that is closest to *vehicle*.
+
+    Returns the lane object, or ``None`` if no better candidate exists.
+    """
+    if lane_index is None or road_network is None:
+        return None
+    try:
+        road_lanes = road_network.graph[lane_index[0]][lane_index[1]]
+    except (KeyError, TypeError):
+        return None
+    if not road_lanes:
+        return None
+
+    ego_pos = np.asarray(vehicle.position[:2], dtype=np.float32)
+    ego_heading = float(getattr(vehicle, "heading_theta", 0.0))
+    best_lane = None
+    best_abs_lat: float = float("inf")
+
+    for lane in road_lanes:
+        if not hasattr(lane, "local_coordinates"):
+            continue
+        try:
+            s, lat = lane.local_coordinates(ego_pos)
+        except Exception:
+            continue
+        # Reject lanes where ego is out of longitudinal range.
+        lane_len = float(getattr(lane, "length", 0.0))
+        if s < -2.0 or s > lane_len + 2.0:
+            continue
+        # Reject opposite-direction lanes.
+        if hasattr(lane, "heading_theta_at"):
+            try:
+                lane_h = float(lane.heading_theta_at(max(0.0, min(s, lane_len))))
+                h_diff = math.atan2(math.sin(lane_h - ego_heading), math.cos(lane_h - ego_heading))
+                if abs(h_diff) > math.pi / 2.0:
+                    continue
+            except Exception:
+                pass
+        abs_lat = abs(float(lat))
+        if abs_lat < best_abs_lat:
+            best_abs_lat = abs_lat
+            best_lane = lane
+
+    return best_lane
+
+
+def _build_live_target_lane_polyline(
+    vehicle,
+    lane_decision: "LaneDecision",
+) -> Optional[np.ndarray]:
+    """Prefer the live lane geometry over ModeContext's cached/sampled polyline.
+
+    ModeContext is still useful as a fallback, but closed-loop target-point
+    guidance should follow the actual lane objects whenever available.  This
+    keeps the target point on the real lane centerline even if a cached
+    polyline becomes stale around lane transitions or curved connectors.
+    """
+    navigation = getattr(vehicle, "navigation", None)
+    current_ref_lanes = getattr(navigation, "current_ref_lanes", None) if navigation is not None else None
+    next_ref_lanes = getattr(navigation, "next_ref_lanes", None) if navigation is not None else None
+    current_lane = getattr(vehicle, "lane", None)
+    if current_lane is None and current_ref_lanes:
+        current_lane = current_ref_lanes[0]
+    if current_lane is None:
+        return None
+
+    target_lane = current_lane
+    current_map = getattr(getattr(vehicle, "engine", None), "current_map", None)
+    road_network = getattr(current_map, "road_network", None) if current_map is not None else None
+    lane_index = getattr(current_lane, "index", None) or getattr(vehicle, "lane_index", None)
+    if current_map is None or road_network is None or lane_index is None:
+        return None
+
+    # --- Snap to nearest lane when ego drifts far from assigned lane ---------
+    if hasattr(target_lane, "local_coordinates"):
+        try:
+            _, _lat = target_lane.local_coordinates(vehicle.position)
+            if abs(float(_lat)) > _MAX_LATERAL_OFFSET_M:
+                better = _find_nearest_lane_on_road(vehicle, lane_index, road_network)
+                if better is not None:
+                    target_lane = better
+                    lane_index = getattr(better, "index", lane_index)
+        except Exception:
+            pass
+
+    if lane_decision != LaneDecision.KEEP and lane_index is not None and road_network is not None:
+        try:
+            road_lanes = road_network.graph[lane_index[0]][lane_index[1]]
+            lane_id = int(lane_index[2])
+            if lane_decision == LaneDecision.CHANGE_LEFT and lane_id - 1 >= 0:
+                target_lane = road_lanes[lane_id - 1]
+            elif lane_decision == LaneDecision.CHANGE_RIGHT and lane_id + 1 < len(road_lanes):
+                target_lane = road_lanes[lane_id + 1]
+            else:
+                return None
+        except Exception:
+            return None
+
+    try:
+        from metadrive.policy.diffusion_policy.mode_context import (
+            _get_route_roads,
+            _resolve_candidate_next_lanes,
+            _sample_route_ahead_polyline_from_vehicle_position,
+        )
+    except Exception:
+        return None
+
+    # --- Lane heading sanity check -------------------------------------------
+    # If target_lane runs in the OPPOSITE direction to ego (e.g. ego has been
+    # pushed onto the oncoming lane after a collision), the polyline will point
+    # backward in ego-local frame.  Detect this before sampling.
+    ego_heading = float(getattr(vehicle, "heading_theta", 0.0))
+    try:
+        from metadrive.policy.diffusion_policy.mode_context import _lane_start_longitudinal
+        _start_s = _lane_start_longitudinal(target_lane, np.asarray(vehicle.position, dtype=np.float32))
+        if hasattr(target_lane, "heading_theta_at"):
+            lane_heading_at_ego = float(target_lane.heading_theta_at(_start_s))
+            heading_diff = math.atan2(
+                math.sin(lane_heading_at_ego - ego_heading),
+                math.cos(lane_heading_at_ego - ego_heading),
+            )
+            if abs(heading_diff) > math.pi / 2.0:
+                return None  # lane is pointing the wrong direction
+    except Exception:
+        pass
+
+    route_roads = _get_route_roads(current_map, ())
+    try:
+        # Use topology-based successor resolution instead of blindly reusing
+        # navigation.next_ref_lanes.  Around transitions/curves, the latter can
+        # correspond to a different nearby lane and pull the target point away
+        # from the actual lane centerline.
+        candidate_next_lanes = _resolve_candidate_next_lanes(
+            target_lane,
+            current_map,
+            next_ref_lanes if lane_decision == LaneDecision.KEEP else None,
+            route_roads,
+        )
+        world_polyline = _sample_route_ahead_polyline_from_vehicle_position(
+            target_lane,
+            np.asarray(vehicle.position, dtype=np.float32),
+            candidate_next_lanes,
+            current_map=current_map,
+        )
+    except Exception:
+        return None
+
+    if world_polyline is None or np.asarray(world_polyline).size == 0:
+        return None
+    current_pose = _vehicle_pose_to_array(vehicle)
+    local_polyline = np.asarray(
+        [
+            _world_pose_to_local_xy(
+                current_pose,
+                np.asarray([float(point[0]), float(point[1]), 0.0], dtype=np.float32),
+            )
+            for point in np.asarray(world_polyline, dtype=np.float32)
+        ],
+        dtype=np.float32,
+    )
+
+    # --- Polyline forward check -----------------------------------------------
+    # Check that points further along the polyline (skipping the first, which
+    # can sit right at ego) actually lie ahead of ego (+x in local frame).
+    # If the sampled lane is going backwards (all local-x < 0), it means the
+    # lane geometry or heading check above was insufficient — reject this polyline
+    # so compute_target_point falls back to the ModeContext polyline.
+    if local_polyline.shape[0] >= 2:
+        check_slice = local_polyline[1:min(6, local_polyline.shape[0])]
+        if float(check_slice[:, 0].mean()) < 0.0:
+            return None
+
+    return local_polyline
+
+
+def _simulate_reachable_distance(
+    speed_mps: float,
+    horizon_s: float,
+    max_accel_mps2: float,
+    max_jerk_mps3: float,
+    dt: float = 0.1,
+) -> float:
+    horizon_s = max(float(horizon_s), 0.0)
+    speed = max(float(speed_mps), 0.0)
+    accel = 0.0
+    distance = 0.0
+    elapsed = 0.0
+    max_accel = max(float(max_accel_mps2), 0.0)
+    max_jerk = max(float(max_jerk_mps3), 0.0)
+    if horizon_s <= 0.0:
+        return 0.0
+    while elapsed < horizon_s - 1e-8:
+        step = min(float(dt), horizon_s - elapsed)
+        if max_jerk > 0.0:
+            accel = min(max_accel, accel + max_jerk * step)
+        else:
+            accel = max_accel
+        distance += speed * step + 0.5 * accel * step * step
+        speed = max(0.0, speed + accel * step)
+        elapsed += step
+    return float(distance)
+
+
+def _get_target_lane_polyline(ctx: Any, lane_decision: "LaneDecision") -> Optional[np.ndarray]:
+    if ctx is None:
+        return None
+    if lane_decision == LaneDecision.CHANGE_LEFT and getattr(ctx, "has_left_adjacent", False):
+        poly = getattr(ctx, "left_lane_polyline", None)
+        if poly is not None:
+            return np.asarray(poly, dtype=np.float32)
+    if lane_decision == LaneDecision.CHANGE_RIGHT and getattr(ctx, "has_right_adjacent", False):
+        poly = getattr(ctx, "right_lane_polyline", None)
+        if poly is not None:
+            return np.asarray(poly, dtype=np.float32)
+    poly = getattr(ctx, "current_lane_polyline", None)
+    if poly is None:
+        return None
+    return np.asarray(poly, dtype=np.float32)
+
+
+def _predict_world_position(obj: Any, horizon_s: float, use_constant_accel: bool) -> np.ndarray:
+    position = np.asarray(getattr(obj, "position", np.zeros((2,), dtype=np.float32)), dtype=np.float32)
+    speed_mps = float(getattr(obj, "speed_km_h", 0.0)) / 3.6
+    accel_mps2 = min(float(getattr(obj, "acceleration", 0.0)), 0.0) if use_constant_accel else 0.0
+    heading = float(getattr(obj, "heading_theta", 0.0))
+    direction = np.asarray([math.cos(heading), math.sin(heading)], dtype=np.float32)
+    longitudinal = speed_mps * horizon_s + 0.5 * accel_mps2 * horizon_s * horizon_s
+    return position + direction * float(longitudinal)
+
+
+def _expert_idm_target_progress_distance(
+    vehicle,
+    front_obj: Any,
+    front_distance_m: float,
+    config: TransfuserConfig,
+) -> float:
+    """Estimate a forward target distance from the expert IDM longitudinal rule.
+
+    This is a closed-loop/live-only guidance signal.  It uses the same front
+    object and relative-motion ingredients as the expert IDM longitudinal
+    controller, then converts the resulting acceleration tendency into a
+    4-second forward progress estimate.
+    """
+    from metadrive.policy.idm_policy import IDMPolicy
+
+    ego_speed_mps = max(float(getattr(vehicle, "speed_km_h", 0.0)) / 3.6, 0.0)
+    target_speed_mps = float(IDMPolicy.NORMAL_SPEED) / 3.6
+    if target_speed_mps <= 1e-3:
+        return 0.0
+
+    accel = float(IDMPolicy.ACC_FACTOR) * (
+        1.0 - np.power(max(ego_speed_mps, 0.0) / target_speed_mps, float(IDMPolicy.DELTA))
+    )
+    if front_obj is not None and np.isfinite(float(front_distance_m)) and front_distance_m > 1e-3:
+        front_speed_mps = max(float(getattr(front_obj, "speed_km_h", 0.0)) / 3.6, 0.0)
+        desired_gap = float(IDMPolicy.DISTANCE_WANTED)
+        desired_gap += ego_speed_mps * float(IDMPolicy.TIME_WANTED)
+        ab = max(float(IDMPolicy.ACC_FACTOR) * float(-IDMPolicy.DEACC_FACTOR), 1e-3)
+        closing_speed = ego_speed_mps - front_speed_mps
+        desired_gap += ego_speed_mps * closing_speed / (2.0 * math.sqrt(ab))
+        desired_gap = max(float(IDMPolicy.DISTANCE_WANTED), desired_gap)
+        accel -= float(IDMPolicy.ACC_FACTOR) * np.square(desired_gap / max(float(front_distance_m), 1e-3))
+
+    horizon_s = float(config.target_point_prediction_horizon_s)
+    progress = ego_speed_mps * horizon_s + 0.5 * accel * horizon_s * horizon_s
+    return max(0.0, float(progress))
+
+
+def _get_object_extent_radius(obj: Any, buffer_m: float) -> float:
+    length = float(getattr(obj, "LENGTH", getattr(obj, "length", 4.5)))
+    width = float(getattr(obj, "WIDTH", getattr(obj, "width", 2.0)))
+    return 0.5 * float(max(length, width)) + float(buffer_m)
+
+
+def _polyline_arc_distance_to_point(local_polyline: Optional[np.ndarray], local_point: np.ndarray) -> float:
+    if local_polyline is None:
+        return float("inf")
+    polyline = np.asarray(local_polyline, dtype=np.float32)
+    if polyline.ndim != 2 or polyline.shape[0] == 0:
+        return float("inf")
+    point = np.asarray(local_point, dtype=np.float32).reshape(1, 2)
+    cumulative = np.concatenate(
+        [np.zeros((1,), dtype=np.float32), np.cumsum(np.linalg.norm(np.diff(polyline, axis=0), axis=1), dtype=np.float32)],
+        axis=0,
+    )
+    closest_idx = int(np.argmin(np.linalg.norm(polyline - point, axis=1)))
+    return float(cumulative[closest_idx])
+
+
+def _find_front_back_objects_for_target_lane(
+    vehicle,
+    lane_decision: "LaneDecision",
+    mode_context=None,
+):
+    try:
+        from metadrive.policy.idm_policy import FrontBackObjects
+    except Exception:
+        return None
+
+    lidar = getattr(vehicle, "lidar", None)
+    current_lane = getattr(vehicle, "lane", None)
+    navigation = getattr(vehicle, "navigation", None)
+    ref_lanes = getattr(navigation, "current_ref_lanes", None) if navigation is not None else None
+    if lidar is None or current_lane is None:
+        return None
+    try:
+        objects = lidar.get_surrounding_objects(vehicle)
+    except Exception:
+        return None
+    if not ref_lanes or current_lane not in ref_lanes:
+        return FrontBackObjects.get_find_front_back_objs_single_lane(objects, current_lane, vehicle.position, max_distance=80)
+
+    try:
+        current_idx = ref_lanes.index(current_lane)
+    except ValueError:
+        current_idx = int(getattr(current_lane, "index", (None, None, 0))[-1])
+    target_idx = current_idx
+    if lane_decision == LaneDecision.CHANGE_LEFT:
+        target_idx = max(0, current_idx - 1)
+    elif lane_decision == LaneDecision.CHANGE_RIGHT:
+        target_idx = min(len(ref_lanes) - 1, current_idx + 1)
+    target_lane = ref_lanes[target_idx]
+    return FrontBackObjects.get_find_front_back_objs(objects, target_lane, vehicle.position, max_distance=80, ref_lanes=ref_lanes)
+
+
+def _front_safe_distance_limit(
+    vehicle,
+    front_obj: Any,
+    config: TransfuserConfig,
+    target_polyline: Optional[np.ndarray] = None,
+) -> float:
+    if front_obj is None:
+        return float("inf")
+    front_pos = np.asarray(
+        getattr(front_obj, "position", np.zeros((2,), dtype=np.float32)),
+        dtype=np.float32,
+    )
+    current_pose = _vehicle_pose_to_array(vehicle)
+    front_local = _world_pose_to_local_xy(
+        current_pose,
+        np.asarray([front_pos[0], front_pos[1], 0.0], dtype=np.float32),
+    )
+    front_radius = _get_object_extent_radius(front_obj, buffer_m=0.0)
+    front_distance = _polyline_arc_distance_to_point(target_polyline, front_local)
+    if not np.isfinite(front_distance):
+        front_distance = float(front_local[0])
+    front_speed_mps = float(getattr(front_obj, "speed_km_h", 0.0)) / 3.6
+    front_accel_mps2 = 0.0
+    if bool(getattr(config, "target_point_vehicle_prediction_use_constant_accel", True)):
+        front_accel_mps2 = min(float(getattr(front_obj, "acceleration", 0.0)), 0.0)
+    horizon_s = float(config.target_point_prediction_horizon_s)
+    future_progress = max(0.0, front_speed_mps * horizon_s + 0.5 * front_accel_mps2 * horizon_s * horizon_s)
+    safe_front_distance = float(front_distance) + float(future_progress)
+    return max(0.0, safe_front_distance - float(config.target_point_front_safe_gap_m) - front_radius)
+
+
+def _non_front_overlap_distance_limit(
+    vehicle,
+    target_polyline: Optional[np.ndarray],
+    config: TransfuserConfig,
+    front_obj: Any = None,
+) -> float:
+    if target_polyline is None or target_polyline.ndim != 2 or target_polyline.shape[0] == 0:
+        return float("inf")
+    lidar = getattr(vehicle, "lidar", None)
+    if lidar is None:
+        return float("inf")
+    try:
+        surrounding_objects = lidar.get_surrounding_objects(vehicle)
+    except Exception:
+        return float("inf")
+    if not surrounding_objects:
+        return float("inf")
+
+    ego_radius = _get_object_extent_radius(vehicle, buffer_m=float(config.target_point_non_front_overlap_buffer_m))
+    current_pose = _vehicle_pose_to_array(vehicle)
+    navigation = getattr(vehicle, "navigation", None)
+    try:
+        lane_half_width = 0.5 * float(navigation.get_current_lane_width())
+    except Exception:
+        current_lane = getattr(vehicle, "lane", None)
+        lane_half_width = 0.5 * float(current_lane.width_at(0.0)) if current_lane is not None and hasattr(current_lane, "width_at") else 1.75
+    lane_corridor_threshold = max(1.25, lane_half_width * 0.9)
+    min_limit = float("inf")
+    for obj in surrounding_objects:
+        if obj is None or obj is front_obj or obj is vehicle:
+            continue
+        # Use current object position rather than straight-line predicted future
+        # position.  In curved road sections, straight-line prediction places
+        # objects off the curve, causing false polyline overlap detections that
+        # incorrectly shrink overlap_safe to near-zero.
+        obj_pos = np.asarray(
+            getattr(obj, "position", np.zeros((2,), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        predicted_local = _world_pose_to_local_xy(
+            current_pose,
+            np.asarray([obj_pos[0], obj_pos[1], 0.0], dtype=np.float32),
+        )
+        # Skip objects that are at or behind ego in the local frame.  A vehicle
+        # that is currently colliding with ego (predicted_local[0] ≈ 0 or < 0)
+        # appears at the polyline origin, which would incorrectly force
+        # overlap_safe → 0 and collapse the target_point onto ego.
+        if float(predicted_local[0]) <= 0.0:
+            continue
+        extent_radius = ego_radius + _get_object_extent_radius(obj, buffer_m=0.0)
+        distances = np.linalg.norm(target_polyline - predicted_local.reshape(1, 2), axis=1)
+        if float(np.min(distances)) > lane_corridor_threshold:
+            continue
+        inside = np.nonzero(distances <= extent_radius)[0]
+        if inside.size == 0:
+            continue
+        first_idx = max(int(inside[0]) - 1, 0)
+        cumulative = np.concatenate(
+            [np.zeros((1,), dtype=np.float32), np.cumsum(np.linalg.norm(np.diff(target_polyline, axis=0), axis=1), dtype=np.float32)],
+            axis=0,
+        )
+        min_limit = min(min_limit, float(cumulative[first_idx]))
+    return float(min_limit)
+
+
+def _bounded_target_progress_distance(
+    vehicle,
+    config: TransfuserConfig,
+    target_polyline: Optional[np.ndarray],
+    lane_decision: "LaneDecision",
+    mode_context=None,
+) -> float:
+    speed_mps = float(getattr(vehicle, "speed_km_h", 0.0)) / 3.6
+    reachable = _simulate_reachable_distance(
+        speed_mps=speed_mps,
+        horizon_s=float(config.target_point_prediction_horizon_s),
+        max_accel_mps2=float(config.target_point_max_reachable_accel_mps2),
+        max_jerk_mps3=float(config.target_point_max_reachable_jerk_mps3),
+    )
+    front_back = _find_front_back_objects_for_target_lane(vehicle, lane_decision, mode_context=mode_context)
+    front_obj = front_back.front_object() if front_back is not None and front_back.has_front_object() else None
+    front_distance = (
+        float(front_back.front_min_distance())
+        if front_back is not None and front_back.has_front_object() and front_back.front_min_distance() is not None
+        else float("inf")
+    )
+    longitudinal_progress = (
+        _expert_idm_target_progress_distance(
+            vehicle,
+            front_obj,
+            front_distance,
+            config,
+        )
+    )
+    front_safe = _front_safe_distance_limit(vehicle, front_obj, config, target_polyline=target_polyline)
+    overlap_safe = _non_front_overlap_distance_limit(vehicle, target_polyline, config, front_obj=front_obj)
+    target_distance = min(float(longitudinal_progress), float(reachable), float(front_safe), float(overlap_safe))
+    min_dist = float(config.target_point_min_forward_distance_m)
+    # Apply the minimum-forward-distance floor when the path ahead is not
+    # physically blocked by an imminent obstacle:
+    #   (a) no front vehicle at all, or
+    #   (b) front vehicle is at or behind ego (collision / overlap: front_distance ≤ 0),
+    #       meaning it cannot actually block forward progress from here.
+    # In either case, collapsing the target_point onto ego is never useful.
+    apply_floor = front_obj is None or float(front_distance) <= 0.0
+    if apply_floor:
+        return max(min_dist, float(target_distance))
+    return max(0.0, float(target_distance))
 
 
 def _interpolate_local_target(local_points_xy: np.ndarray, target_distance: float) -> np.ndarray:
@@ -186,57 +720,157 @@ def _interpolate_local_target(local_points_xy: np.ndarray, target_distance: floa
     return (start + ratio * (end - start)).astype(np.float32, copy=False)
 
 
-def compute_target_point(vehicle, config: TransfuserConfig) -> torch.Tensor:
+def _densify_polyline(local_points_xy: np.ndarray, max_segment_length: float = 0.25) -> np.ndarray:
+    local_points_xy = np.asarray(local_points_xy, dtype=np.float32)
+    if local_points_xy.ndim != 2 or local_points_xy.shape[0] <= 1:
+        return local_points_xy
+    dense_points = [local_points_xy[0]]
+    max_segment_length = max(float(max_segment_length), 1e-3)
+    for start, end in zip(local_points_xy[:-1], local_points_xy[1:]):
+        segment = end - start
+        length = float(np.linalg.norm(segment))
+        if length <= max_segment_length:
+            dense_points.append(end)
+            continue
+        num_subsegments = int(np.ceil(length / max_segment_length))
+        for step_idx in range(1, num_subsegments + 1):
+            ratio = float(step_idx) / float(num_subsegments)
+            dense_points.append((start + ratio * segment).astype(np.float32, copy=False))
+    return np.asarray(dense_points, dtype=np.float32)
+
+
+def compute_target_point(
+    vehicle,
+    config: TransfuserConfig,
+    lane_decision: "LaneDecision" = LaneDecision.KEEP,
+) -> torch.Tensor:
     if vehicle is None:
         return _zero_target_point()
+
+    # Use ModeContext to get polylines that chain across lane boundaries.
+    # This ensures the target point continues into the next road segment when
+    # ego is near the end of the current lane.
+    try:
+        ctx = _build_mode_context_for_target_point(vehicle)
+    except Exception:
+        ctx = None
+
+    target_polyline = _build_live_target_lane_polyline(vehicle, lane_decision)
+    if target_polyline is None:
+        target_polyline = _get_target_lane_polyline(ctx, lane_decision)
+    # Validate that the polyline actually points ahead of ego in local frame.
+    # A backward-facing polyline (mean x of points [1..5] < 0) means the lane
+    # assignment is wrong (e.g. ego on opposite-direction lane after a collision).
+    if target_polyline is not None and target_polyline.shape[0] >= 2:
+        check_slice = target_polyline[1:min(6, target_polyline.shape[0])]
+        if float(check_slice[:, 0].mean()) < 0.0:
+            target_polyline = None
+    if target_polyline is not None and target_polyline.shape[0] > 0:
+        target_polyline = _densify_polyline(target_polyline, max_segment_length=0.25)
+        delta_s = _bounded_target_progress_distance(vehicle, config, target_polyline, lane_decision, mode_context=ctx)
+        return torch.from_numpy(_interpolate_local_target(target_polyline, delta_s))
+
+    # Last-resort fallback: single-lane clamped computation.
+    current_lane = getattr(vehicle, "lane", None)
     navigation = getattr(vehicle, "navigation", None)
     current_ref_lanes = getattr(navigation, "current_ref_lanes", None) if navigation is not None else None
-    if not current_ref_lanes:
-        return _zero_target_point()
-    current_lane = current_ref_lanes[0]
+    if current_lane is None:
+        if not current_ref_lanes:
+            return _zero_target_point()
+        current_lane = current_ref_lanes[0]
     if current_lane is None:
         return _zero_target_point()
-
+    # If vehicle.lane is wrong-facing (e.g. ego pushed onto oncoming lane),
+    # prefer the navigation's ref lane which is always on the correct route.
+    try:
+        _ego_heading = float(getattr(vehicle, "heading_theta", 0.0))
+        if hasattr(current_lane, "local_coordinates") and hasattr(current_lane, "heading_theta_at"):
+            _s_chk = float(current_lane.local_coordinates(vehicle.position)[0])
+            _lane_h = float(current_lane.heading_theta_at(_s_chk))
+            _hdiff = math.atan2(math.sin(_lane_h - _ego_heading), math.cos(_lane_h - _ego_heading))
+            if abs(_hdiff) > math.pi / 2.0 and current_ref_lanes:
+                current_lane = current_ref_lanes[0]
+    except Exception:
+        pass
+    # Snap to nearest lane when ego has drifted far from its assigned lane.
+    _fb_road_network = getattr(
+        getattr(getattr(vehicle, "engine", None), "current_map", None),
+        "road_network", None,
+    )
+    _fb_lane_index = getattr(current_lane, "index", None)
+    if _fb_road_network is not None and _fb_lane_index is not None:
+        try:
+            _, _fb_lat = current_lane.local_coordinates(vehicle.position)
+            if abs(float(_fb_lat)) > _MAX_LATERAL_OFFSET_M:
+                _fb_better = _find_nearest_lane_on_road(vehicle, _fb_lane_index, _fb_road_network)
+                if _fb_better is not None:
+                    current_lane = _fb_better
+        except Exception:
+            pass
     s_ego, _ = current_lane.local_coordinates(vehicle.position)
     speed_mps = float(getattr(vehicle, "speed_km_h", 0.0)) / 3.6
-    delta_s = _target_progress_distance(config, speed_mps)
+    delta_s = _simulate_reachable_distance(
+        speed_mps=speed_mps,
+        horizon_s=float(config.target_point_prediction_horizon_s),
+        max_accel_mps2=float(config.target_point_max_reachable_accel_mps2),
+        max_jerk_mps3=float(config.target_point_max_reachable_jerk_mps3),
+    )
     s_target = min(float(s_ego) + delta_s, float(current_lane.length))
     target_world = np.asarray(current_lane.position(s_target, 0.0), dtype=np.float32)
     current_pose = _vehicle_pose_to_array(vehicle)
     return torch.from_numpy(_world_pose_to_local_xy(current_pose, np.asarray([target_world[0], target_world[1], 0.0], dtype=np.float32)))
 
 
-def compute_target_point_from_sample(sample: Dict[str, np.ndarray], config: TransfuserConfig) -> torch.Tensor:
+def compute_target_point_from_sample(
+    sample: Dict[str, np.ndarray],
+    config: TransfuserConfig,
+    lane_decision: "LaneDecision" = LaneDecision.KEEP,
+) -> torch.Tensor:
+    trajectory = _to_numpy(sample.get("trajectory", np.zeros((0, 3), dtype=np.float32))).astype(np.float32, copy=False)
+    if trajectory.ndim == 2 and trajectory.shape[0] > 0 and trajectory.shape[1] >= 2:
+        return _gt_trajectory_endpoint_from_sample(sample)
+
+    speed_mps = float(_to_numpy(sample.get("ego_speed_km_h", np.asarray(0.0, dtype=np.float32))).reshape(-1)[0]) / 3.6
+    delta_s = _target_progress_distance(config, speed_mps)
+
+    if lane_decision != LaneDecision.KEEP:
+        # Use the adjacent-lane polyline stored in the sample (already ego-local XY).
+        if lane_decision == LaneDecision.CHANGE_LEFT:
+            has_adj = bool(_to_numpy(sample.get("has_left_adjacent", np.asarray(0, dtype=np.int8))).reshape(-1)[0])
+            poly_key = "left_lane_polyline"
+        else:
+            has_adj = bool(_to_numpy(sample.get("has_right_adjacent", np.asarray(0, dtype=np.int8))).reshape(-1)[0])
+            poly_key = "right_lane_polyline"
+
+        if has_adj and poly_key in sample:
+            adj_poly = _to_numpy(sample[poly_key]).astype(np.float32, copy=False)
+            if adj_poly.ndim == 2 and adj_poly.shape[0] > 0 and np.any(adj_poly):
+                # adj_poly starts at ego's longitudinal position on the adjacent lane —
+                # interpolate directly (no (0,0) prepend) so the target is ahead on adjacent lane.
+                return torch.from_numpy(_interpolate_local_target(adj_poly, delta_s))
+        # Fallthrough to current-lane if adjacent lane is unavailable
+
+    # Prefer stored current_lane_polyline (ego-local, chains across lane boundaries).
+    if "current_lane_polyline" in sample:
+        cur_poly = _to_numpy(sample["current_lane_polyline"]).astype(np.float32, copy=False)
+        if cur_poly.ndim == 2 and cur_poly.shape[0] > 0 and np.any(cur_poly):
+            return torch.from_numpy(_interpolate_local_target(cur_poly, delta_s))
+
+    # Fallback: use future_reference_pose_world without lane-index filtering so the
+    # target can extend into the next road segment when ego is near the lane end.
     if "reference_pose_world" not in sample or "future_reference_pose_world" not in sample:
         return _zero_target_point()
-
     current_pose = _to_numpy(sample["reference_pose_world"]).astype(np.float32, copy=False)
     future_reference = _to_numpy(sample["future_reference_pose_world"]).astype(np.float32, copy=False)
     if future_reference.ndim != 2 or future_reference.shape[0] == 0:
         return _zero_target_point()
 
-    current_lane_index = int(_to_numpy(sample.get("reference_lane_index", np.asarray(-1, dtype=np.int16))).reshape(-1)[0])
-    future_lane_index = sample.get("future_reference_lane_index")
-    if future_lane_index is not None:
-        future_lane_index = _to_numpy(future_lane_index).astype(np.int64, copy=False).reshape(-1)
-        same_lane_mask = future_lane_index == current_lane_index
-        if same_lane_mask.any():
-            future_reference = future_reference[same_lane_mask]
-        else:
-            future_reference = future_reference[:1]
-
     local_points_xy = np.stack(
         [_world_pose_to_local_xy(current_pose, pose) for pose in future_reference],
         axis=0,
     ).astype(np.float32, copy=False)
-    local_points_xy = np.concatenate(
-        [np.zeros((1, 2), dtype=np.float32), local_points_xy],
-        axis=0,
-    )
-    speed_mps = float(_to_numpy(sample.get("ego_speed_km_h", np.asarray(0.0, dtype=np.float32))).reshape(-1)[0]) / 3.6
-    delta_s = _target_progress_distance(config, speed_mps)
-    target_point = _interpolate_local_target(local_points_xy, delta_s)
-    return torch.from_numpy(target_point)
+    local_points_xy = np.concatenate([np.zeros((1, 2), dtype=np.float32), local_points_xy], axis=0)
+    return torch.from_numpy(_interpolate_local_target(local_points_xy, delta_s))
 
 
 # !这里与 TransFuser 原论文中的 BEV 处理方式不同!
@@ -326,9 +960,50 @@ def normalize_agent_targets(
     return torch.from_numpy(agent_states), torch.from_numpy(agent_labels)  # ?是否按照距离 ego 最近排序?
 
 
-def sample_to_features_targets(sample: Dict[str, np.ndarray], config: TransfuserConfig):
+def _build_mode_features(sample: Dict[str, np.ndarray], config: TransfuserConfig) -> Dict[str, torch.Tensor]:
+    """Generate coarse_trajectories and mode_valid_mask from sample polyline fields.
+
+    Returns a dict with keys 'coarse_trajectories' (10,8,2) and 'mode_valid_mask' (10,).
+    Falls back to zeros/False if generation fails.
+    """
+    from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_sample
+    from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
+    from metadrive.policy.diffusion_policy.mode_definitions import NUM_MODE_SLOTS
+    try:
+        ctx = build_mode_context_from_sample(sample)
+        gen = ModeTrajectoryGenerator(
+            keep_lane_high_speed_mps=config.mode_keep_high_speed_mps,
+            keep_lane_medium_speed_mps=config.mode_keep_medium_speed_mps,
+            keep_lane_low_speed_mps=config.mode_keep_low_speed_mps,
+            emergency_decel_mps2=config.mode_emergency_decel_mps2,
+        )
+        out = gen.generate(ctx)
+        return {
+            "coarse_trajectories": torch.from_numpy(out.coarse_trajectories),  # (10, 8, 2)
+            "mode_valid_mask": torch.from_numpy(out.mode_valid_mask),           # (10,) bool
+        }
+    except Exception:
+        return {
+            "coarse_trajectories": torch.zeros((NUM_MODE_SLOTS, 8, 2), dtype=torch.float32),
+            "mode_valid_mask": torch.zeros((NUM_MODE_SLOTS,), dtype=torch.bool),
+        }
+
+
+def sample_to_features_targets(
+    sample: Dict[str, np.ndarray],
+    config: TransfuserConfig,
+    prev_reference_lane_index: int = -1,
+):
     if "camera_feature" in sample and "lidar_feature" in sample and "status_feature" in sample:
         return processed_sample_to_features_targets(sample)
+
+    # Derive lane decision from the transition between the previous and current frame's
+    # reference_lane_index.  This determines which lane's centerline is used for target_point.
+    current_ref_lane_idx = int(
+        _to_numpy(sample.get("reference_lane_index", np.asarray(-1, dtype=np.int16))).reshape(-1)[0]
+    )
+    lane_decision = _derive_lane_decision_from_reference_transitions(prev_reference_lane_index, current_ref_lane_idx)
+
     features = {
         "camera_feature": stitch_three_cameras(
             sample["left_camera"], sample["front_camera"], sample["right_camera"], config
@@ -336,8 +1011,10 @@ def sample_to_features_targets(sample: Dict[str, np.ndarray], config: Transfuser
         "lidar_feature": lidar_to_histogram(sample["lidar"], config),
         "status_feature": build_status_feature(sample["ego_state"], config),
         "ego_state": torch.from_numpy(_to_numpy(sample["ego_state"]).astype(np.float32, copy=False)),
-        "target_point": compute_target_point_from_sample(sample, config),
+        "target_point": compute_target_point_from_sample(sample, config, lane_decision),
+        "lane_decision": torch.tensor(int(lane_decision), dtype=torch.int8),
     }
+    features.update(_build_mode_features(sample, config))
     agent_states, agent_labels = normalize_agent_targets(
         sample["agent_states"], sample["agent_labels"], config
     )
@@ -349,6 +1026,17 @@ def sample_to_features_targets(sample: Dict[str, np.ndarray], config: Transfuser
         if "bev_semantic_map" in sample
         else bev_raster_to_target(sample["bev_raster"], config),
     }
+    # Hierarchical mode label from GT trajectory + coarse trajectories
+    try:
+        from metadrive.policy.diffusion_policy.mode_labeler import label_hierarchical_mode
+        gt_xy = _to_numpy(sample["trajectory"]).astype(np.float32)[:, :2]
+        coarse = features["coarse_trajectories"].numpy()
+        mask = features["mode_valid_mask"].numpy()
+        targets["hierarchical_mode_label"] = torch.tensor(
+            label_hierarchical_mode(gt_xy, coarse, mask), dtype=torch.int8
+        )
+    except Exception:
+        pass
     return features, targets
 
 
@@ -368,6 +1056,11 @@ def processed_sample_to_features_targets(sample: Dict[str, np.ndarray]):
         "agent_labels": torch.from_numpy(_to_numpy(sample["agent_labels"]).astype(bool, copy=True)),
         "bev_semantic_map": torch.from_numpy(_to_numpy(sample["bev_semantic_map"]).astype(np.int64, copy=True)),
     }
+    if "hierarchical_mode_label" in sample:
+        targets["hierarchical_mode_label"] = torch.tensor(
+            int(_to_numpy(sample["hierarchical_mode_label"]).reshape(-1)[0]),
+            dtype=torch.int64,
+        )
     return features, targets
 
 
@@ -375,6 +1068,7 @@ def observation_to_features(
     observation: Dict[str, np.ndarray],
     config: TransfuserConfig,
     vehicle=None,
+    lane_decision: "LaneDecision" = LaneDecision.KEEP,
 ) -> Dict[str, torch.Tensor]:
     return {
         "camera_feature": stitch_three_cameras(
@@ -383,7 +1077,10 @@ def observation_to_features(
         "lidar_feature": lidar_to_histogram(observation["lidar"], config),
         "status_feature": build_status_feature(observation["ego_state"], config),
         "ego_state": torch.from_numpy(_to_numpy(observation["ego_state"]).astype(np.float32, copy=False)),
-        "target_point": compute_target_point(vehicle, config) if vehicle is not None else _zero_target_point(),
+        # Live closed-loop target-point guidance follows the expert/navigation lane
+        # geometry only.  It should not be shifted onto an adjacent lane by the
+        # current lane-decision / mode semantics.
+        "target_point": compute_target_point(vehicle, config, LaneDecision.KEEP) if vehicle is not None else _zero_target_point(),
     }
 
 
@@ -487,10 +1184,20 @@ class MetaDriveTransfuserDataset(Dataset):
             "local_index": int(sample_idx),
         }
         shard = self._load_shard(shard_idx)
-        if "trajectory_mode" in shard:
-            value = np.asarray(shard["trajectory_mode"][sample_idx]).reshape(-1)
-            if value.size > 0:
-                metadata["trajectory_mode"] = int(value[0])
+        for field_name in METADATA_PASSTHROUGH_FIELDS:
+            if field_name not in shard:
+                continue
+            value = np.asarray(shard[field_name][sample_idx]).reshape(-1)
+            if value.size == 0:
+                continue
+            scalar = value[0]
+            if field_name in ("trajectory_mode", "hierarchical_mode_label"):
+                metadata[field_name] = int(scalar)
+                continue
+            if isinstance(scalar, bytes):
+                metadata[field_name] = scalar.decode("utf-8")
+            else:
+                metadata[field_name] = str(scalar)
         return metadata
 
     # 用于按索引获取一个样本的特征和目标
@@ -498,7 +1205,15 @@ class MetaDriveTransfuserDataset(Dataset):
         shard_idx, sample_idx = self._index[idx]
         shard = self._load_shard(shard_idx)
         sample = {key: shard[key][sample_idx] for key in shard.keys()}
-        return sample_to_features_targets(sample, self.config)
+        # Provide the previous frame's reference_lane_index so sample_to_features_targets
+        # can derive lane_decision from the transition.  Use -1 at episode boundaries.
+        prev_ref_lane_idx = -1
+        if sample_idx > 0 and "reference_lane_index" in shard:
+            try:
+                prev_ref_lane_idx = int(np.asarray(shard["reference_lane_index"][sample_idx - 1]).reshape(-1)[0])
+            except Exception:
+                prev_ref_lane_idx = -1
+        return sample_to_features_targets(sample, self.config, prev_reference_lane_index=prev_ref_lane_idx)
 
     def _load_shard(self, shard_idx: int) -> Dict[str, np.ndarray]:
         if self._cache_all_shards:

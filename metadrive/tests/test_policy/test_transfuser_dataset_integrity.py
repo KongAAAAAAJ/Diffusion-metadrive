@@ -293,3 +293,20 @@ def test_dataset_metadata_exposes_optional_trajectory_mode(tmp_path: Path):
     metadata = dataset.get_sample_metadata(1)
 
     assert metadata["trajectory_mode"] == 4
+
+
+def test_dataset_metadata_exposes_scenario_and_local_route(tmp_path: Path):
+    dataset_root = tmp_path / "raw_dataset"
+    shard_name = "shard_000112.npz"
+    payload = _raw_payload(num_samples=2)
+    payload["scenario_id"] = np.asarray(["S1_free_cruise_straight", "S6_background_merge_in"])
+    payload["local_route"] = np.asarray(["R1_entry_straight", "R6_mainline_merge_approach"])
+    _write_npz(dataset_root / "shards" / shard_name, payload)
+    _write_split(dataset_root, "train", [shard_name])
+
+    dataset = MetaDriveTransfuserDataset(dataset_root, build_transfuser_config("small"), split="train")
+
+    metadata = dataset.get_sample_metadata(1)
+
+    assert metadata["scenario_id"] == "S6_background_merge_in"
+    assert metadata["local_route"] == "R6_mainline_merge_approach"

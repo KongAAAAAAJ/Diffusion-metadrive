@@ -29,6 +29,9 @@ PROCESSED_FIELDS = (
     "bev_semantic_map",
 )
 OPTIONAL_PASSTHROUGH_FIELDS = (
+    "scenario_id",
+    "local_route",
+    "hierarchical_mode_label",
     "trajectory_mode",
     "trajectory_raw",
     "trajectory_correction_strength",
@@ -37,6 +40,30 @@ OPTIONAL_PASSTHROUGH_FIELDS = (
     "trajectory_final_abs_lateral_before",
     "trajectory_final_abs_lateral_after",
 )
+
+
+def _resolve_split_shard_name(raw_name: str, available_shards: Dict[str, Path]) -> str:
+    normalized = raw_name.strip()
+    if not normalized:
+        raise ValueError("Split shard name must not be empty.")
+
+    direct_keys = [normalized, Path(normalized).stem]
+    for key in direct_keys:
+        if key in available_shards:
+            return available_shards[key].name
+
+    stem = Path(normalized).stem
+    if stem.startswith("shard_"):
+        suffix = stem[len("shard_"):]
+        if suffix.isdigit():
+            numeric_suffix = int(suffix)
+            for key, path in available_shards.items():
+                key_stem = Path(key).stem
+                if key_stem.startswith("shard_") and key_stem[len("shard_"):].isdigit():
+                    if int(key_stem[len("shard_"):]) == numeric_suffix:
+                        return path.name
+
+    return normalized
 
 
 def parse_args():
@@ -141,6 +168,7 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
 
     num_samples = int(shard["trajectory"].shape[0])
     processed = {field: [] for field in PROCESSED_FIELDS}
+    hierarchical_mode_labels = []
 
     for sample_idx in range(num_samples):
         sample = {key: shard[key][sample_idx] for key in shard.keys()}
@@ -154,8 +182,12 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
         processed["agent_states"].append(tensor_to_numpy(targets["agent_states"]).astype(np.float32))
         processed["agent_labels"].append(tensor_to_numpy(targets["agent_labels"]).astype(bool))
         processed["bev_semantic_map"].append(tensor_to_numpy(targets["bev_semantic_map"]).astype(np.uint8))
+        if "hierarchical_mode_label" in targets:
+            hierarchical_mode_labels.append(int(tensor_to_numpy(targets["hierarchical_mode_label"]).reshape(-1)[0]))
 
     payload = {key: np.stack(values, axis=0) for key, values in processed.items()}
+    if hierarchical_mode_labels:
+        payload["hierarchical_mode_label"] = np.asarray(hierarchical_mode_labels, dtype=np.int8)
     for field in OPTIONAL_PASSTHROUGH_FIELDS:
         if field in shard:
             payload[field] = np.asarray(shard[field])
@@ -202,10 +234,18 @@ def _write_output_splits(input_root: Path, output_root: Path, output_format: str
         return
     output_split_dir = output_root / "splits"
     output_split_dir.mkdir(parents=True, exist_ok=True)
+    available_input_shards = {}
+    for shard_path in sorted((input_root / "shards").glob("*.npz")):
+        available_input_shards[shard_path.name] = shard_path
+        available_input_shards[shard_path.stem] = shard_path
     for split_path in sorted(split_dir.glob("*.txt")):
-        shard_names = [line.strip() for line in split_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if output_format == OUTPUT_FORMAT_DIR:
-            shard_names = [Path(name).stem for name in shard_names]
+        shard_names = []
+        for raw_name in split_path.read_text(encoding="utf-8").splitlines():
+            if not raw_name.strip():
+                continue
+            resolved_input_name = _resolve_split_shard_name(raw_name, available_input_shards)
+            normalized_output_name = output_shard_path(output_root, resolved_input_name, output_format).name
+            shard_names.append(normalized_output_name)
         (output_split_dir / split_path.name).write_text("\n".join(shard_names) + "\n", encoding="utf-8")
 
 

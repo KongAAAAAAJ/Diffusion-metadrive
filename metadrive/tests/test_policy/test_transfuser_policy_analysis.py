@@ -64,6 +64,52 @@ def test_compute_trajectory_control_preserves_left_right_sign():
     assert left_debug["waypoint_y"] < 0.0
 
 
+def test_compute_trajectory_control_uses_waypoint_spacing_for_reference_speed():
+    trajectory = np.asarray(
+        [
+            [0.25, 0.0, 0.0],
+            [0.50, 0.0, 0.0],
+            [0.75, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    action, debug = compute_trajectory_control(
+        trajectory=trajectory,
+        lookahead_index=1,
+        current_speed_km_h=10.0,
+        target_speed_km_h=30.0,
+        controller_type="stabilized",
+    )
+
+    assert np.isclose(debug["trajectory_target_speed_km_h"], 1.8, atol=1e-3)
+    assert debug["speed_error"] < 0.0
+    assert action[1] < 0.0
+
+
+def test_compute_trajectory_control_short_stop_like_trajectory_brakes_hard():
+    trajectory = np.asarray(
+        [
+            [0.05, 0.0, 0.0],
+            [0.08, 0.0, 0.0],
+            [0.10, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    action, debug = compute_trajectory_control(
+        trajectory=trajectory,
+        lookahead_index=1,
+        current_speed_km_h=29.6,
+        target_speed_km_h=30.0,
+        controller_type="stabilized",
+    )
+
+    assert debug["trajectory_target_speed_km_h"] < 1.0
+    assert debug["speed_error"] < -20.0
+    assert action[1] < -0.9
+
+
 def test_transfuser_policy_act_uses_multimodal_inference_and_exposes_candidates(monkeypatch):
     policy = object.__new__(TransfuserPolicy)
     policy._device = torch.device("cpu")

@@ -542,3 +542,111 @@ def test_intersection_regulator_detects_crossing_conflict_and_brakes():
 
     assert adjusted < 0.0
     assert adjusted < 0.4
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for _find_exit_approach_lane (S8 ramp-exit fix)
+# ---------------------------------------------------------------------------
+
+def _make_fake_lane(from_node, to_node, lane_id, end_x, end_y, length=60.0):
+    """Return a SimpleNamespace lane with minimal position()/index support."""
+    return SimpleNamespace(
+        index=(from_node, to_node, lane_id),
+        length=float(length),
+        position=lambda longitudinal, lateral, _ex=end_x, _ey=end_y, _len=length: np.asarray(
+            [_ex - (_len - float(longitudinal)), _ey + float(lateral)], dtype=np.float64
+        ),
+    )
+
+
+def _make_fake_policy_for_exit_test():
+    """Build a minimal ExpertIDMPolicy-like object for _find_exit_approach_lane."""
+    PolicyClass = expert_idm_policy.ExpertIDMPolicy
+
+    # 3 main highway lanes A→B (lat 0, -4, -8)
+    hw_lanes = [_make_fake_lane("A", "B", i, 60.0, -i * 4.0) for i in range(3)]
+    # 1 ramp lane B→C (starts at x=60, y=-12)
+    ramp_lane = _make_fake_lane("B", "C", 0, 120.0, -12.0)
+    # Deacc lane N1→B (ends at x=60, y=-12, same position as ramp_lane start)
+    deacc_lane = _make_fake_lane("N1", "B", 0, 60.0, -12.0, length=45.0)
+
+    graph = {
+        "A": {"B": hw_lanes},
+        "N1": {"B": [deacc_lane]},
+        "B": {"C": [ramp_lane]},
+    }
+    road_network = SimpleNamespace(graph=graph)
+    nav = SimpleNamespace(
+        current_ref_lanes=hw_lanes,
+        next_ref_lanes=[ramp_lane],
+        map=SimpleNamespace(road_network=road_network),
+    )
+    vehicle = SimpleNamespace(
+        position=np.asarray([30.0, -8.0], dtype=np.float64),
+        navigation=nav,
+    )
+
+    policy = object.__new__(PolicyClass)
+    policy.control_object = vehicle
+    # routing_target_lane = rightmost main highway lane (index 2)
+    policy.routing_target_lane = hw_lanes[2]
+    return policy, deacc_lane
+
+
+def test_find_exit_approach_lane_returns_deacc_lane_when_gap_exists():
+    """_find_exit_approach_lane should find the deacc lane (N1→B) when
+    routing_target_lane (A→B, lane 2) ends 4 m from the ramp lane start."""
+    policy, expected_deacc_lane = _make_fake_policy_for_exit_test()
+
+    result = policy._find_exit_approach_lane()
+
+    assert result is not None, "Expected approach lane to be found (deacc lane N1→B)"
+    assert result is expected_deacc_lane, (
+        f"Expected deacc lane (N1→B), got index {getattr(getattr(result, 'index', None), '__repr__', str)(result.index if hasattr(result, 'index') else result)}"
+    )
+
+
+def test_find_exit_approach_lane_returns_none_when_no_gap():
+    """_find_exit_approach_lane should return None when routing_target_lane
+    ends close to the next ref lane start (no gap)."""
+    PolicyClass = expert_idm_policy.ExpertIDMPolicy
+
+    # Main route: A→B (1 lane), next: B→C (1 lane) — both aligned at (60, 0)
+    hw_lane = _make_fake_lane("A", "B", 0, 60.0, 0.0)
+    next_lane = _make_fake_lane("B", "C", 0, 120.0, 0.0)
+
+    nav = SimpleNamespace(
+        current_ref_lanes=[hw_lane],
+        next_ref_lanes=[next_lane],
+        map=SimpleNamespace(road_network=SimpleNamespace(graph={"A": {"B": [hw_lane]}, "B": {"C": [next_lane]}})),
+    )
+    vehicle = SimpleNamespace(position=np.asarray([30.0, 0.0]), navigation=nav)
+    policy = object.__new__(PolicyClass)
+    policy.control_object = vehicle
+    policy.routing_target_lane = hw_lane
+
+    result = policy._find_exit_approach_lane()
+
+    assert result is None, "Expected None when routing_target and next lane are aligned"
+
+
+def test_find_exit_approach_lane_returns_none_when_not_on_rightmost():
+    """_find_exit_approach_lane should return None if not on the rightmost lane."""
+    PolicyClass = expert_idm_policy.ExpertIDMPolicy
+    hw_lanes = [_make_fake_lane("A", "B", i, 60.0, -i * 4.0) for i in range(3)]
+    ramp_lane = _make_fake_lane("B", "C", 0, 120.0, -12.0)
+
+    nav = SimpleNamespace(
+        current_ref_lanes=hw_lanes,
+        next_ref_lanes=[ramp_lane],
+        map=SimpleNamespace(road_network=SimpleNamespace(graph={})),
+    )
+    vehicle = SimpleNamespace(position=np.asarray([30.0, 0.0]), navigation=nav)
+    policy = object.__new__(PolicyClass)
+    policy.control_object = vehicle
+    # Vehicle on lane 1 (middle), not rightmost (lane 2)
+    policy.routing_target_lane = hw_lanes[1]
+
+    result = policy._find_exit_approach_lane()
+
+    assert result is None, "Expected None when not on the rightmost lane"

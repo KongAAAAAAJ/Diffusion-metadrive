@@ -45,6 +45,7 @@ import matplotlib
 import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import cv2
 
 from metadrive.component.vehicle.base_vehicle import BaseVehicle
 try:
@@ -87,6 +88,14 @@ from metadrive.exp_dataset.scenario_definitions import (
 )
 from metadrive.exp_dataset.local_traffic_spawner import LocalTrafficSpawner
 from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
+from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_sample, build_mode_context_from_vehicle
+from metadrive.policy.diffusion_policy.mode_labeler import label_hierarchical_mode, label_mode_from_expert_decision
+from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
+from metadrive.policy.diffusion_policy.mode_visualization import (
+    ModeOverlayRenderContext,
+    overlay_mode_trajectories_on_frame,
+    pick_recommended_mode,
+)
 
 
 
@@ -125,8 +134,13 @@ class ExpertCollectorConfig:
     # Video
     save_videos: bool = False
     video_fps: int = 10
-    topdown_camera_height: float = 180.0
+    topdown_camera_height: float = 30.0  # 180
     topdown_heading_up: bool = False              # Enable camera rotation with ego vehicle heading
+    mode_generate_enabled: bool = False
+    mode_generate_output_dir: Optional[Path] = None
+    mode_generate_save_every_step: bool = True
+    mode_generate_frame_limit: int = -1
+    mode_generate_include_invalid: bool = True
 
     # Trajectory supervision
     horizon_steps: int = 100       # minimum future context required per sample
@@ -221,6 +235,26 @@ IDM_VARIANT_CONFIGS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _cuda_image_available() -> bool:
+    """Best-effort detection for CUDA image path support.
+
+    Offscreen preview/collection should gracefully fall back to CPU image buffers
+    when the CUDA runtime is importable but no actual CUDA-capable device exists.
+    """
+    try:
+        from cuda import cudart
+    except Exception:
+        return False
+
+    try:
+        err, count = cudart.cudaGetDeviceCount()
+        if err != cudart.cudaError_t.cudaSuccess:
+            return False
+        return int(count) > 0
+    except Exception:
+        return False
+
+
 class EpisodeSpecSampler:
     """Replaces separate traffic/spawn sampling with a structured episode spec."""
 
@@ -277,6 +311,10 @@ class EpisodeSpecSampler:
         local_route = str(self._rng.choice(local_route_candidates, p=local_route_probs))
         route = get_required_preset(local_route)
         density = float(self._rng.uniform(self._config.traffic_density_min, self._config.traffic_density_max))
+        # Per-scenario density override: use the smaller of sampled and override values
+        _scene_override_density = getattr(get_scenario_definition(scenario_id), "override_traffic_density", None)
+        if _scene_override_density is not None:
+            density = min(density, float(_scene_override_density))
         spawn_seed = int(self._rng.randint(0, 2**31 - 1))
         idm_variant = str(self._rng.choice(self._idm_variants, p=self._idm_probs))
         return EpisodeSpec(
@@ -717,6 +755,22 @@ def extract_agent_targets(vehicle, config: ExpertCollectorConfig) -> tuple[np.nd
 
 # ?用于? 将 BEV 多通道图像转为单通道的语义分割标签图
 # 返回一个二维整型数组，每个像素的值表示其语义类别（0=背景，1=道路，2=交通，3=自车轨迹）。
+def _polyline_to_fixed(polyline: Optional[np.ndarray], num_points: int = 20) -> np.ndarray:
+    """Convert a variable-length polyline (N, 2) to a fixed-size (num_points, 2) array.
+
+    If polyline is None or empty → zero array.
+    If shorter than num_points → last point is repeated.
+    If longer → first num_points rows are taken.
+    """
+    if polyline is None or len(polyline) == 0:
+        return np.zeros((num_points, 2), dtype=np.float32)
+    arr = np.asarray(polyline, dtype=np.float32)
+    if len(arr) >= num_points:
+        return arr[:num_points]
+    pad = np.tile(arr[-1:], (num_points - len(arr), 1))
+    return np.concatenate([arr, pad], axis=0)
+
+
 def build_bev_semantic_map(bev_raster: np.ndarray) -> np.ndarray:
     road = bev_raster[0] > 0
     ego_history = bev_raster[1] > 0 if bev_raster.shape[0] > 1 else np.zeros_like(road)
@@ -773,6 +827,27 @@ def build_frame(
     front_object_distance, front_object_speed_km_h = _extract_front_object_state(vehicle, reference_lane)
     current_ref_lanes = getattr(vehicle.navigation, "current_ref_lanes", None)
     next_ref_lanes = getattr(vehicle.navigation, "next_ref_lanes", None)
+
+    # --- Mode polyline fields ---
+    _current_map = getattr(getattr(vehicle, "engine", None), "current_map", None)
+    try:
+        _mode_ctx = build_mode_context_from_vehicle(vehicle, current_map=_current_map)
+        _cur_pl  = _polyline_to_fixed(_mode_ctx.current_lane_polyline)
+        _left_pl = _polyline_to_fixed(_mode_ctx.left_lane_polyline)
+        _right_pl = _polyline_to_fixed(_mode_ctx.right_lane_polyline)
+        _lbr_pl  = _polyline_to_fixed(_mode_ctx.left_branch_polyline)
+        _rbr_pl  = _polyline_to_fixed(_mode_ctx.right_branch_polyline)
+        _has_left_adj  = bool(_mode_ctx.has_left_adjacent)
+        _has_right_adj = bool(_mode_ctx.has_right_adjacent)
+        _has_left_br   = bool(_mode_ctx.has_left_branch)
+        _has_right_br  = bool(_mode_ctx.has_right_branch)
+        _left_gap  = float(_mode_ctx.left_lane_gap)
+        _right_gap = float(_mode_ctx.right_lane_gap)
+    except Exception:
+        _cur_pl = _left_pl = _right_pl = _lbr_pl = _rbr_pl = np.zeros((20, 2), dtype=np.float32)
+        _has_left_adj = _has_right_adj = _has_left_br = _has_right_br = False
+        _left_gap = _right_gap = -1.0
+
     return {
         "ego_state": ego_state,
         "other_states": other_states,
@@ -804,7 +879,101 @@ def build_frame(
         "front_object_distance": np.asarray(-1.0 if front_object_distance is None else front_object_distance, dtype=np.float32),
         "front_object_speed_km_h": np.asarray(-1.0 if front_object_speed_km_h is None else front_object_speed_km_h, dtype=np.float32),
         "ego_speed_km_h": np.asarray(float(vehicle.speed_km_h), dtype=np.float32),
+        # Mode polyline fields
+        "current_lane_polyline": _cur_pl,
+        "left_lane_polyline":    _left_pl,
+        "right_lane_polyline":   _right_pl,
+        "left_branch_polyline":  _lbr_pl,
+        "right_branch_polyline": _rbr_pl,
+        "has_left_adjacent":  np.asarray(int(_has_left_adj),  dtype=np.int8),
+        "has_right_adjacent": np.asarray(int(_has_right_adj), dtype=np.int8),
+        "has_left_branch":    np.asarray(int(_has_left_br),   dtype=np.int8),
+        "has_right_branch":   np.asarray(int(_has_right_br),  dtype=np.int8),
+        "left_lane_gap":  np.asarray(_left_gap,  dtype=np.float32),
+        "right_lane_gap": np.asarray(_right_gap, dtype=np.float32),
     }
+
+
+# ---------------------------------------------------------------------------
+# Lane-change trim helper
+# ---------------------------------------------------------------------------
+
+def trim_frames_to_lane_change(
+    frames: List[Dict[str, np.ndarray]],
+    window_before: int = 60,
+    window_after: int = 60,
+    rng: "np.random.Generator | None" = None,
+) -> "tuple[List[Dict[str, np.ndarray]], int, int] | None":
+    """Return a trimmed sub-sequence centred on ONE randomly-chosen lane-change event.
+
+    Algorithm
+    ---------
+    1. Scan ``reference_lane_index`` for all transitions where a valid lane
+       index changes to a different valid lane index.  Each transition is
+       recorded as a ``(change_start, change_end)`` pair.
+    2. If no transition is found, return **None** → signals a failed episode.
+    3. Otherwise pick one event uniformly at random (using ``rng`` if supplied,
+       otherwise ``np.random.default_rng()``).
+    4. Return ``(frames[slice_start:slice_end], slice_start, slice_end)`` where
+       ``slice_start = max(0, change_start - window_before)`` and
+       ``slice_end   = min(len(frames), change_end + window_after)``.
+
+    Returns
+    -------
+    (trimmed_frames, slice_start, slice_end) | None
+        3-tuple with the trimmed frame list and the half-open slice bounds
+        [slice_start, slice_end) into the original ``frames`` list (matching
+        the per-step file indices saved to disk), or ``None`` when no lane
+        change occurred.
+    """
+    if not frames:
+        return None
+
+    indices = [int(f["reference_lane_index"]) for f in frames]
+
+    # Collect all (change_start, change_end) events.
+    # A "lane-change event" starts at the first frame with a new valid lane
+    # index and ends at the last consecutive frame still on that new lane.
+    events: List[tuple] = []
+    i = 0
+    n = len(indices)
+    while i < n:
+        if indices[i] < 0:
+            i += 1
+            continue
+        current_lane = indices[i]
+        # Scan forward for a transition
+        j = i + 1
+        while j < n and (indices[j] < 0 or indices[j] == current_lane):
+            j += 1
+        if j >= n:
+            break  # reached end without a new lane
+        new_lane = indices[j]
+        change_start = j
+        # Find the last frame still on new_lane (before the next transition)
+        change_end = j
+        k = j + 1
+        while k < n:
+            if indices[k] >= 0:
+                if indices[k] == new_lane:
+                    change_end = k
+                else:
+                    break
+            k += 1
+        events.append((change_start, change_end))
+        # Continue scanning from change_end + 1 for further lane changes
+        i = change_end + 1
+
+    if not events:
+        return None  # no lane change — episode is invalid for this scenario
+
+    # Pick one event at random
+    _rng = rng if rng is not None else np.random.default_rng()
+    chosen_start, chosen_end = events[int(_rng.integers(len(events)))]
+
+    slice_start = max(0, chosen_start - window_before)
+    slice_end = min(n, chosen_end + window_after)
+    return frames[slice_start:slice_end], slice_start, slice_end
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +1002,7 @@ def build_episode_samples(
     )
     last_offset = future_offsets[-1]
     td_arr = np.asarray(traffic_density, dtype=np.float32)
+    _mode_gen = ModeTrajectoryGenerator()
 
     samples: List[Dict[str, np.ndarray]] = []
     for start_idx in range(0, frame_count - config.horizon_steps, config.sample_stride_steps):
@@ -964,8 +1134,58 @@ def build_episode_samples(
                 "_sample_index": np.asarray(start_idx, dtype=np.int32),
                 "_current_pose": np.asarray(current_pose, dtype=np.float32),
                 "_trajectory_raw": np.asarray(raw_trajectory, dtype=np.float32),
+                # Mode polyline fields (passed through from frame)
+                "current_lane_polyline": current_frame["current_lane_polyline"],
+                "left_lane_polyline":    current_frame["left_lane_polyline"],
+                "right_lane_polyline":   current_frame["right_lane_polyline"],
+                "left_branch_polyline":  current_frame["left_branch_polyline"],
+                "right_branch_polyline": current_frame["right_branch_polyline"],
+                "has_left_adjacent":  current_frame["has_left_adjacent"],
+                "has_right_adjacent": current_frame["has_right_adjacent"],
+                "has_left_branch":    current_frame["has_left_branch"],
+                "has_right_branch":   current_frame["has_right_branch"],
+                "left_lane_gap":  current_frame["left_lane_gap"],
+                "right_lane_gap": current_frame["right_lane_gap"],
             }
         )
+        # Generate coarse trajectories + mode label from the just-appended sample.
+        # Priority: use the expert IDM's recorded lateral decision when available
+        # (avoids geometric L2 matching which mislabels keep-lane in curved roads).
+        # Fallback: L2 matching against coarse trajectories.
+        try:
+            _ctx = build_mode_context_from_sample(samples[-1])
+            _mode_out = _mode_gen.generate(_ctx)
+            samples[-1]["coarse_trajectories"] = _mode_out.coarse_trajectories   # (10, 8, 2)
+            samples[-1]["mode_valid_mask"] = _mode_out.mode_valid_mask            # (10,) bool
+
+            _has_expert_decision = "expert_lateral_decision" in current_frame
+            if _has_expert_decision:
+                # Lateral direction: from expert IDM decision (no curve bias).
+                # Speed profile: L2 distance within the lateral group.
+                samples[-1]["hierarchical_mode_label"] = np.asarray(
+                    label_mode_from_expert_decision(
+                        lateral_decision=int(current_frame["expert_lateral_decision"]),
+                        gt_trajectory=trajectory[:, :2],
+                        coarse_trajectories=_mode_out.coarse_trajectories,
+                        mode_valid_mask=_mode_out.mode_valid_mask,
+                    ),
+                    dtype=np.int8,
+                )
+            else:
+                # Fallback for non-IDM experts (e.g. PPO) or old data without expert_lateral_decision
+                samples[-1]["hierarchical_mode_label"] = np.asarray(
+                    label_hierarchical_mode(
+                        trajectory[:, :2],
+                        _mode_out.coarse_trajectories,
+                        _mode_out.mode_valid_mask,
+                    ),
+                    dtype=np.int8,
+                )
+        except Exception:
+            samples[-1]["coarse_trajectories"] = np.zeros((10, 8, 2), dtype=np.float32)
+            samples[-1]["mode_valid_mask"] = np.zeros((10,), dtype=bool)
+            samples[-1]["hierarchical_mode_label"] = np.asarray(0, dtype=np.int8)
+
         if bool(config.save_raw_trajectory):
             samples[-1]["trajectory_raw"] = raw_trajectory
 
@@ -1000,13 +1220,99 @@ def capture_episode_topdown_frame(env, episode_index: int, step_count: int, head
         frame = env.render(**build_topdown_render_kwargs(heading_up=heading_up))
 
     frame_array = np.asarray(frame)
-    if frame_array.ndim >= 2:
-        frame_array = frame_array.swapaxes(0, 1)
-    agents = getattr(env, "agents", {}) or {}
-    primary_agent = agents.get(primary_agent_id) if primary_agent_id is not None else None
-    if primary_agent is not None:
-        frame_array = rotate_frame_heading_up(frame_array, float(primary_agent.heading_theta))
     return overlay_text_on_frame(frame_array, build_overlay_lines(episode_index, step_count))
+
+
+def _build_mode_generate_frame_path(
+    mode_output_dir: Path,
+    scenario_id: str,
+    episode_index: int,
+    step_count: int,
+) -> Path:
+    return mode_output_dir / scenario_id / f"episode_{int(episode_index):06d}" / f"frame_{int(step_count):06d}.png"
+
+
+def _save_mode_overlay_frame(
+    output_path: Path,
+    frame: np.ndarray,
+    env,
+    vehicle,
+    scenario_id: str,
+    local_route: str,
+    route_block_ids: List[str],
+    heading_up: bool,
+    include_invalid: bool,
+) -> None:
+    current_map = getattr(env, "current_map", None)
+    mode_context = build_mode_context_from_vehicle(
+        vehicle,
+        current_map=current_map,
+        scenario_id=scenario_id,
+        local_route=local_route,
+        ego_main_route_block_ids=route_block_ids,
+    )
+    generator = ModeTrajectoryGenerator()
+    output = generator.generate(mode_context)
+    primary_agent_id = get_primary_agent_id(env)
+    camera_position = sync_topdown_camera_with_agent(env, primary_agent_id) or (
+        float(vehicle.position[0]),
+        float(vehicle.position[1]),
+    )
+    renderer = getattr(env, "top_down_renderer", None)
+    screen_size = (int(frame.shape[1]), int(frame.shape[0]))
+    scaling = float(getattr(renderer, "scaling", 5.0))
+
+    def _project_world_point(world_point: np.ndarray) -> np.ndarray:
+        point = np.asarray(world_point, dtype=np.float32)
+        if renderer is None:
+            return np.asarray(
+                [
+                    screen_size[0] / 2.0 + (point[0] - float(camera_position[0])) * scaling,
+                    screen_size[1] / 2.0 - (point[1] - float(camera_position[1])) * scaling,
+                ],
+                dtype=np.float32,
+            )
+        off = None
+        if not bool(getattr(renderer, "target_agent_heading_up", False)):
+            field = renderer._screen_canvas.get_size()
+            if getattr(renderer, "position", None) is not None or getattr(renderer, "current_track_agent", None) is not None:
+                if getattr(renderer, "center_on_map", False):
+                    frame_canvas_size = renderer._frame_canvas.get_size()
+                    position = (frame_canvas_size[0] / 2, frame_canvas_size[1] / 2)
+                else:
+                    cam_pos = getattr(renderer, "position", None) or tuple(getattr(renderer.current_track_agent, "position", (0.0, 0.0)))
+                    position = renderer._frame_canvas.pos2pix(*cam_pos)
+            else:
+                position = (field[0] / 2, field[1] / 2)
+            off = (position[0] - field[0] / 2, position[1] - field[1] / 2)
+        return np.asarray(renderer._world_to_screen_position(point, off), dtype=np.float32)
+
+    render_context = ModeOverlayRenderContext(
+        frame=np.asarray(frame, dtype=np.uint8),
+        ego_world_position=np.asarray(vehicle.position, dtype=np.float32)[:2],
+        ego_heading_rad=float(vehicle.heading_theta),
+        camera_position=(float(camera_position[0]), float(camera_position[1])),
+        heading_up=bool(heading_up),
+        screen_size=screen_size,
+        scaling=scaling,
+        scenario_id=str(scenario_id),
+        local_route=str(local_route),
+        front_object_distance=float(mode_context.front_object_distance),
+        left_lane_gap=float(mode_context.left_lane_gap),
+        right_lane_gap=float(mode_context.right_lane_gap),
+        has_left_branch=bool(mode_context.has_left_branch),
+        has_right_branch=bool(mode_context.has_right_branch),
+        recommended_mode_index=pick_recommended_mode(output.mode_valid_mask),
+        world_to_screen_projector=_project_world_point,
+    )
+    overlay = overlay_mode_trajectories_on_frame(
+        render_context,
+        output.coarse_trajectories,
+        output.mode_valid_mask,
+        include_invalid=bool(include_invalid),
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
 
 
 def write_episode_video(video_path: Path, frames: List[np.ndarray], fps: int) -> None:
@@ -1379,6 +1685,8 @@ def rollout_episode(
     step = 0
     idm_policy = None
 
+    route_block_ids = [str(block_id) for block_id in ((getattr(env, "config", {}) or {}).get("ego_main_route_block_ids") or [])]
+
     while not done and step <= config.max_episode_steps:
         if scenario_orchestrator is not None:
             scenario_orchestrator.before_step(env, agent_id, step)
@@ -1409,6 +1717,28 @@ def rollout_episode(
                     heading_up=config.topdown_heading_up,
                 )
             )
+        if bool(config.mode_generate_enabled) and bool(config.mode_generate_save_every_step):
+            mode_limit = int(config.mode_generate_frame_limit)
+            if mode_limit < 0 or step < mode_limit:
+                topdown_frame = video_frames[-1] if video_frames else capture_episode_topdown_frame(
+                    env=env,
+                    episode_index=episode_index,
+                    step_count=step,
+                    heading_up=config.topdown_heading_up,
+                )
+                mode_output_dir = config.mode_generate_output_dir
+                if mode_output_dir is not None:
+                    _save_mode_overlay_frame(
+                        _build_mode_generate_frame_path(mode_output_dir, scenario_id or "unknown", episode_index, step),
+                        topdown_frame,
+                        env,
+                        vehicle,
+                        scenario_id or "unknown",
+                        local_route,
+                        route_block_ids,
+                        config.topdown_heading_up,
+                        config.mode_generate_include_invalid,
+                    )
 
         if config.expert_type == "ppo":
             action = ppo_expert(vehicle, deterministic=True)
@@ -1420,6 +1750,18 @@ def rollout_episode(
                     idm_config=idm_config if idm_config is not None else build_expert_idm_config(config),
                 )
             action = idm_policy.act()
+            # Attach the IDM's lane-change decision to the frame we just built.
+            # lateral_decision: -1=CHANGE_LEFT, 0=KEEP, +1=CHANGE_RIGHT (clamped).
+            # target_speed_km_h: IDM's planned speed (NORMAL_SPEED or CREEP_SPEED).
+            # These are used later by label_mode_from_expert_decision() to assign
+            # hierarchical_mode_label without geometric L2 trajectory matching.
+            frames[-1]["expert_lateral_decision"] = np.asarray(
+                int(idm_policy.action_info.get("lateral_decision", 0)), dtype=np.int8
+            )
+            frames[-1]["expert_target_speed_km_h"] = np.asarray(
+                float(idm_policy.action_info.get("target_speed_km_h", idm_policy.NORMAL_SPEED)),
+                dtype=np.float32,
+            )
         else:
             raise ValueError(f"Unsupported expert_type: {config.expert_type}")
         obs_dict, _, terminated, truncated, _ = env.step({agent_id: action})
@@ -1526,6 +1868,7 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     qual_visualization_dir = visualization_dir / "qual"
     unqual_visualization_dir = visualization_dir / "unqual"
     video_dir = report_dir / "videos"
+    mode_generate_dir = report_dir / "mode_generate"
     shard_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
     if bool(config.trajectory_visualization_enabled):
@@ -1533,6 +1876,10 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         unqual_visualization_dir.mkdir(parents=True, exist_ok=True)
     if bool(config.save_videos):
         video_dir.mkdir(parents=True, exist_ok=True)
+    if bool(config.mode_generate_enabled):
+        mode_generate_dir.mkdir(parents=True, exist_ok=True)
+        if config.mode_generate_output_dir is None:
+            config.mode_generate_output_dir = mode_generate_dir
 
     if config.resume:
         existing = detect_existing_state(shard_dir, report_dir)
@@ -1578,10 +1925,11 @@ def run_collection(config: ExpertCollectorConfig) -> None:
     }
 
     # 2. 创建环境实例（单环境单线程采集）
+    image_on_cuda = _cuda_image_available()
     env_config = {
         "use_render": False,
         "num_scenarios": int(config.num_scenarios),
-        "image_on_cuda": True,
+        "image_on_cuda": image_on_cuda,
         "use_hybrid_map": bool(config.use_hybrid_map),
         "hybrid_map_blocks_config": [dict(block) for block in config.hybrid_map_blocks_config],
         "map": int(config.map_block_num),
@@ -1651,6 +1999,42 @@ def run_collection(config: ExpertCollectorConfig) -> None:
                 visualization_enabled=bool(config.trajectory_visualization_enabled),
                 cached_geometry=(map_geometry if map_geometry is not None else episode_map_geometry),
             )
+
+            # 5b. 换道场景裁剪：将帧序列缩短至换道事件附近，减少 keep-lane 样本比例
+            _scenario_def = SCENARIO_BY_ID.get(spec.scenario_id)
+            if _scenario_def is not None and getattr(_scenario_def, "trim_to_lane_change", False):
+                _trim_result = trim_frames_to_lane_change(
+                    frames,
+                    window_before=int(_scenario_def.trim_window_before),
+                    window_after=int(_scenario_def.trim_window_after),
+                )
+                if _trim_result is None:
+                    # No lane change occurred → discard this episode
+                    total_episodes += 1
+                    print(
+                        f"[ep={total_episodes}] SKIP (no lane change) "
+                        f"scenario={spec.scenario_id} local_route={spec.local_route} "
+                        f"frames={len(frames)}"
+                    )
+                    # Clean up all mode_generate frames already written for this episode
+                    if bool(config.mode_generate_enabled) and config.mode_generate_output_dir is not None:
+                        _ep_dir = Path(config.mode_generate_output_dir) / spec.scenario_id / f"episode_{int(episode_index):06d}"
+                        if _ep_dir.exists():
+                            import shutil as _shutil
+                            _shutil.rmtree(_ep_dir, ignore_errors=True)
+                    continue
+                frames, _trim_slice_start, _trim_slice_end = _trim_result
+                # Delete mode_generate frames for steps outside [slice_start, slice_end)
+                if bool(config.mode_generate_enabled) and config.mode_generate_output_dir is not None:
+                    _ep_dir = Path(config.mode_generate_output_dir) / spec.scenario_id / f"episode_{int(episode_index):06d}"
+                    if _ep_dir.exists():
+                        for _png in list(_ep_dir.glob("frame_*.png")):
+                            try:
+                                _step_num = int(_png.stem.split("_")[1])
+                            except (IndexError, ValueError):
+                                continue
+                            if _step_num < _trim_slice_start or _step_num >= _trim_slice_end:
+                                _png.unlink(missing_ok=True)
 
             # 6. 从帧列表中构建训练样本（滑动窗口），并写入分片文件
             samples = build_episode_samples(
@@ -1806,6 +2190,8 @@ def parse_args() -> ExpertCollectorConfig:
             opts["type"] = _coerce_bool
         elif isinstance(default, Path):
             opts["type"] = Path
+        elif default is None and f.name.endswith("_dir"):
+            opts["type"] = Path
         elif isinstance(default, dict):
             opts["type"] = lambda value: dict(json.loads(value))
         elif isinstance(default, tuple):
@@ -1829,4 +2215,21 @@ def parse_args() -> ExpertCollectorConfig:
 
 
 if __name__ == "__main__":
-    run_collection(parse_args())
+    args = parse_args()
+
+    # scenarion_id = "S7_ego_merge_from_ramp"
+
+    # args.target_samples = 500
+    # args.save_videos = True
+    # args.dataset_name = scenarion_id
+    # args.start_seed = 59
+    # args.trajectory_correction_enabled = True
+    # args.mode_classifier_version = "v1"
+    # args.traffic_density_min = 0.08
+    # args.traffic_density_max = 0.12
+    # args.scenario_weights = {scenarion_id: 1.0}
+    # args.topdown_heading_up = True
+    # args.mode_generate_enabled = True
+    # args.mode_generate_frame_limit = 20
+
+    run_collection(args)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -11,12 +12,18 @@ from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     MULTIMODAL_SELECTED_COLOR,
     SCENARIO_BY_ID,
     ScenarioRouteSelection,
+    StepTrajectoryPlotRecord,
+    _local_xy_to_world_xy,
     _capture_2d_topdown_frame,
     _capture_3d_topdown_frame,
+    _capture_step_plot_render_context,
     _apply_episode_route_config,
+    _build_step_trajectory_plot_path,
+    _build_topdown_world_to_screen_projector,
     _compute_plot_view_bounds,
     _extract_road_topology,
     _record_step_visualization,
+    _save_step_trajectory_plot,
     _resolve_episode_scenario_route,
     _save_step_image,
     _normalize_visualization_args,
@@ -132,7 +139,7 @@ def test_capture_2d_topdown_frame_swaps_surfarray_axes():
 
     frame = _capture_2d_topdown_frame(FakeEnv(), screen_size=512, film_size=2048)
 
-    assert frame.shape == (6, 4, 3)
+    assert frame.shape == (4, 6, 3)
     assert render_calls["mode"] == "top_down"
     assert render_calls["window"] is False
     assert render_calls["screen_size"] == (512, 512)
@@ -155,9 +162,7 @@ def test_capture_2d_topdown_frame_returns_none_without_active_agent():
 def test_record_step_visualization_uses_cached_ego_when_active_agent_is_gone():
     class FakeEgo:
         position = np.asarray([10.0, 20.0], dtype=np.float64)
-
-        def convert_to_world_coordinates(self, waypoint, position):
-            return np.asarray([position[0] + waypoint[0], position[1] + waypoint[1]], dtype=np.float64)
+        heading_theta = 0.0
 
     actual_positions = []
     planned_trajectories = []
@@ -174,6 +179,7 @@ def test_record_step_visualization_uses_cached_ego_when_active_agent_is_gone():
     _record_step_visualization(
         ego_before_step=FakeEgo(),
         ego_xy_before_step=np.asarray([10.0, 20.0], dtype=np.float64),
+        ego_heading_before_step=0.0,
         final_info=final_info,
         episode_length=1,
         save_trajectory_plot=True,
@@ -192,9 +198,7 @@ def test_record_step_visualization_uses_cached_ego_when_active_agent_is_gone():
 def test_record_step_visualization_collects_multimodal_candidates():
     class FakeEgo:
         position = np.asarray([5.0, 6.0], dtype=np.float64)
-
-        def convert_to_world_coordinates(self, waypoint, position):
-            return np.asarray([position[0] + waypoint[0], position[1] + waypoint[1]], dtype=np.float64)
+        heading_theta = 0.0
 
     multimodal_trajectories = []
     final_info = {
@@ -211,6 +215,7 @@ def test_record_step_visualization_collects_multimodal_candidates():
     _record_step_visualization(
         ego_before_step=FakeEgo(),
         ego_xy_before_step=np.asarray([5.0, 6.0], dtype=np.float64),
+        ego_heading_before_step=0.0,
         final_info=final_info,
         episode_length=3,
         save_trajectory_plot=True,
@@ -224,6 +229,189 @@ def test_record_step_visualization_collects_multimodal_candidates():
     candidates_world = multimodal_trajectories[0][1]
     assert candidates_world.shape == (2, 2, 2)
     assert np.allclose(candidates_world[0, 0], np.asarray([6.0, 6.0], dtype=np.float64))
+
+
+def test_record_step_visualization_collects_dynamic_anchor_and_target_point():
+    class FakeEgo:
+        position = np.asarray([5.0, 6.0], dtype=np.float64)
+        heading_theta = 0.0
+
+    step_plot_records = []
+    final_info = {
+        "predicted_trajectory": np.asarray([[[1.0, 0.0, 0.0], [2.0, 0.5, 0.0]]], dtype=np.float32).reshape(2, 3),
+        "coarse_trajectories": np.asarray(
+            [
+                [[1.0, 0.0], [2.0, 0.0]],
+                [[1.0, 1.0], [2.0, 1.0]],
+            ],
+            dtype=np.float32,
+        ),
+        "target_point": np.asarray([3.0, 0.5], dtype=np.float32),
+    }
+
+    _record_step_visualization(
+        ego_before_step=FakeEgo(),
+        ego_xy_before_step=np.asarray([5.0, 6.0], dtype=np.float64),
+        ego_heading_before_step=0.0,
+        final_info=final_info,
+        episode_length=3,
+        save_trajectory_plot=True,
+        actual_positions=[],
+        planned_trajectories=[],
+        multimodal_trajectories=[],
+        step_plot_records=step_plot_records,
+        topdown_frame=np.zeros((80, 80, 3), dtype=np.uint8),
+        world_to_screen_projector=lambda point: np.asarray(point[:2], dtype=np.float32),
+    )
+
+    assert len(step_plot_records) == 1
+    record = step_plot_records[0]
+    assert record.dynamic_anchor_trajectories is not None
+    assert record.dynamic_anchor_trajectories.shape == (2, 2, 2)
+    assert np.allclose(record.target_point_world, np.asarray([8.0, 6.5], dtype=np.float64))
+    assert record.topdown_frame is not None
+
+
+def test_local_xy_to_world_xy_uses_pose_snapshot_instead_of_mutable_vehicle_state():
+    world = _local_xy_to_world_xy(
+        np.asarray([2.0, 0.0], dtype=np.float64),
+        np.asarray([10.0, 5.0], dtype=np.float64),
+        np.pi / 2,
+    )
+
+    assert np.allclose(world, np.asarray([10.0, 7.0], dtype=np.float64), atol=1e-6)
+
+
+def test_build_topdown_world_to_screen_projector_uses_renderer_projection():
+    class FakeCanvas:
+        def get_size(self):
+            return (100, 100)
+
+    class FakeFrameCanvas(FakeCanvas):
+        def pos2pix(self, x, y):
+            return (x * 10.0, y * 10.0)
+
+    class FakeRenderer:
+        target_agent_heading_up = False
+        center_on_map = False
+        position = (1.0, 2.0)
+        current_track_agent = None
+        _screen_canvas = FakeCanvas()
+        _frame_canvas = FakeFrameCanvas()
+
+        def _world_to_screen_position(self, point, off):
+            assert off is not None
+            return np.asarray([point[0] * 2.0, point[1] * 3.0], dtype=np.float32)
+
+    env = types.SimpleNamespace(top_down_renderer=FakeRenderer())
+    projector = _build_topdown_world_to_screen_projector(env, np.zeros((100, 100, 3), dtype=np.uint8))
+
+    projected = projector(np.asarray([4.0, 5.0], dtype=np.float32))
+
+    assert np.allclose(projected, np.asarray([8.0, 15.0], dtype=np.float32))
+
+
+def test_build_topdown_world_to_screen_projector_freezes_renderer_state():
+    class FakeCanvas:
+        def get_size(self):
+            return (100, 100)
+
+    class FakeFrameCanvas(FakeCanvas):
+        def pos2pix(self, x, y):
+            return (x * 10.0, y * 10.0)
+
+    class FakeRenderer:
+        target_agent_heading_up = False
+        center_on_map = False
+        position = (1.0, 2.0)
+        current_track_agent = None
+        _screen_canvas = FakeCanvas()
+        _frame_canvas = FakeFrameCanvas()
+
+        def _world_to_screen_position(self, point, off):
+            return np.asarray([point[0] * 2.0, point[1] * 3.0], dtype=np.float32)
+
+    renderer = FakeRenderer()
+    env = types.SimpleNamespace(top_down_renderer=renderer)
+    projector = _build_topdown_world_to_screen_projector(env, np.zeros((100, 100, 3), dtype=np.uint8))
+
+    renderer.position = (100.0, 200.0)
+    renderer._world_to_screen_position = lambda point, off: np.asarray([999.0, 999.0], dtype=np.float32)
+    projected = projector(np.asarray([4.0, 5.0], dtype=np.float32))
+
+    assert np.allclose(projected, np.asarray([8.0, 15.0], dtype=np.float32))
+
+
+def test_capture_step_plot_render_context_uses_same_pre_step_frame_for_projection(monkeypatch):
+    fake_frame = np.full((64, 64, 3), 11, dtype=np.uint8)
+    fake_projector = object()
+    calls = []
+
+    def _fake_capture(env):
+        calls.append(("capture", env))
+        return fake_frame
+
+    def _fake_projector_builder(env, frame):
+        calls.append(("projector", env, frame.copy()))
+        return fake_projector
+
+    monkeypatch.setattr(
+        "metadrive.policy.diffusion_policy.test_transfuser_policy._capture_2d_topdown_frame",
+        _fake_capture,
+    )
+    monkeypatch.setattr(
+        "metadrive.policy.diffusion_policy.test_transfuser_policy._build_topdown_world_to_screen_projector",
+        _fake_projector_builder,
+    )
+
+    env = object()
+    frame, projector = _capture_step_plot_render_context(env, enabled=True)
+
+    assert frame is fake_frame
+    assert projector is fake_projector
+    assert calls[0] == ("capture", env)
+    assert calls[1][0] == "projector"
+    assert calls[1][1] is env
+    assert np.array_equal(calls[1][2], fake_frame)
+
+
+def test_save_step_trajectory_plot_writes_topdown_overlay_png(tmp_path: Path):
+    output_path = _build_step_trajectory_plot_path(tmp_path, episode_idx=0, step_idx=3)
+    step_record = StepTrajectoryPlotRecord(
+        step_idx=3,
+        ego_position=np.asarray([10.0, 10.0], dtype=np.float64),
+        selected_trajectory=np.asarray([[20.0, 10.0], [30.0, 12.0]], dtype=np.float64),
+        multimodal_trajectories=np.asarray(
+            [
+                [[20.0, 10.0], [30.0, 12.0]],
+                [[18.0, 12.0], [28.0, 16.0]],
+            ],
+            dtype=np.float64,
+        ),
+        selected_mode_idx=0,
+        dynamic_anchor_trajectories=np.asarray(
+            [
+                [[18.0, 10.0], [28.0, 10.0]],
+                [[18.0, 9.0], [28.0, 9.5]],
+            ],
+            dtype=np.float64,
+        ),
+        target_point_world=np.asarray([34.0, 14.0], dtype=np.float64),
+        topdown_frame=np.zeros((120, 120, 3), dtype=np.uint8),
+        world_to_screen_projector=lambda point: np.asarray([point[0], point[1]], dtype=np.float32),
+    )
+
+    _save_step_trajectory_plot(
+        step_record=step_record,
+        road_boundaries=[],
+        output_path=output_path,
+        episode_idx=0,
+    )
+
+    assert output_path.exists()
+    image = cv2.imread(str(output_path))
+    assert image is not None
+    assert image.sum() > 0
 
 
 def test_extract_road_topology_returns_lane_boundaries():

@@ -32,7 +32,7 @@ mkdir -p "${REPORT_DIR}"
     --trajectory-visualization-lateral-margin 10 \
     --traffic-density-min 0.08 \
     --traffic-density-max 0.12 \
-    --scenario-weights '{"S1_free_cruise_straight": 1.0, "S2_free_cruise_curve": 1.0, "S3_straight_following": 1.0, "S4_curve_following": 1.0, "S5_hard_brake_lead": 1.0, "S6_background_merge_in": 1.0, "S7_ego_merge_from_ramp": 1.0, "S8_ego_exit_to_ramp": 1.0, "S9_narrow_channel_negotiation": 1.0}' \
+    --scenario-weights '{"S1_free_cruise_straight": 1.0, "S2_free_cruise_curve": 1.0, "S3_straight_following": 1.0, "S4_curve_following": 1.0, "S5_hard_brake_lead": 1.0, "S6_background_merge_in": 1.0, "S7_ego_merge_from_ramp": 1.0, "S8_ego_exit_to_ramp": 1.0, "S9_narrow_channel_negotiation": 1.0, "S10_straight_lane_change": 1.0, "S11_curve_lane_change": 1.0}' \
     --use-hybrid-map true \
     --map-block-num 5 \
     --num-scenarios 1 \

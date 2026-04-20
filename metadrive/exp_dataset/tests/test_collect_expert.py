@@ -946,6 +946,27 @@ def test_rollout_episode_spawns_base_traffic_when_local_route_present(monkeypatc
     assert map_geometry is None
     assert video_frames == []
     assert base_traffic_count == 3
+
+
+def test_capture_episode_topdown_frame_preserves_topdown_image_axes(monkeypatch):
+    rendered = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+
+    class DummyEnv:
+        top_down_renderer = None
+
+        def render(self, **kwargs):
+            return rendered.copy()
+
+    monkeypatch.setattr(collect_expert, "get_primary_agent_id", lambda env: "agent0")
+    monkeypatch.setattr(collect_expert, "sync_topdown_camera_with_agent", lambda env, agent_id: (0.0, 0.0))
+    monkeypatch.setattr(collect_expert, "build_topdown_render_kwargs", lambda **kwargs: {"mode": "top_down"})
+    monkeypatch.setattr(collect_expert, "overlay_text_on_frame", lambda frame, lines: frame)
+    monkeypatch.setattr(collect_expert, "build_overlay_lines", lambda episode_index, step_count: [])
+
+    frame = collect_expert.capture_episode_topdown_frame(DummyEnv(), episode_index=1, step_count=2, heading_up=False)
+
+    assert frame.shape == rendered.shape
+    np.testing.assert_array_equal(frame, rendered)
     assert len(recorded["calls"]) == 1
     assert recorded["calls"][0]["local_route"] == "R5_ramp_curve"
     assert recorded["calls"][0]["traffic_density"] == 0.12
@@ -1773,6 +1794,28 @@ def test_parse_args_reads_max_episodes(monkeypatch):
 
     assert config.target_samples == 50
     assert config.max_episodes == 3
+
+
+def test_parse_args_reads_mode_generate_flags(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "collect_expert.py",
+            "--mode-generate-enabled",
+            "true",
+            "--mode-generate-frame-limit",
+            "12",
+            "--mode-generate-include-invalid",
+            "false",
+        ],
+    )
+
+    config = parse_args()
+
+    assert config.mode_generate_enabled is True
+    assert config.mode_generate_frame_limit == 12
+    assert config.mode_generate_include_invalid is False
 
 
 def test_run_collection_stops_when_max_episodes_is_reached(monkeypatch, tmp_path):

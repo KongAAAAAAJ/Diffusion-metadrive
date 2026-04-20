@@ -97,6 +97,8 @@ class PlatoonEnvConfig:
         vehicle_length_m: float = 5.74,
         formation_error_threshold: float = 2.0,
         observation_mode: str = "lidar_state",
+        scenario_id: Optional[str] = None,
+        local_route: Optional[str] = None,
     ) -> None:
         self.num_agents = int(num_agents)
         self.use_render = bool(use_render)
@@ -118,6 +120,8 @@ class PlatoonEnvConfig:
         self.vehicle_length_m = float(vehicle_length_m)
         self.formation_error_threshold = float(formation_error_threshold)
         self.observation_mode = str(observation_mode)
+        self.scenario_id = scenario_id
+        self.local_route = local_route
 
 
 class PlatoonEnv(BaseMultiEnv):
@@ -139,6 +143,8 @@ class PlatoonEnv(BaseMultiEnv):
         self._last_actions: dict[str, np.ndarray] = {}
         self._last_progress_refs: dict[str, tuple[object, float, np.ndarray]] = {}
         self._multimodal_config = build_transfuser_config("base")
+        self._scenario_orchestrator = None
+        self._scenario_step_count = 0
         super().__init__(config=self._build_metadrive_config())
 
     @classmethod
@@ -155,6 +161,11 @@ class PlatoonEnv(BaseMultiEnv):
         scenario_config = get_hazard_scenario_config(scenario_name)
         if scenario_config is not None:
             resolved.update(dict(scenario_config.get("env_overrides", {})))
+            # Propagate scenario_id / local_route from hazard config only when the
+            # caller has not already set them explicitly.
+            for field in ("scenario_id", "local_route"):
+                if resolved.get(field) is None and scenario_config.get(field) is not None:
+                    resolved[field] = scenario_config[field]
         return resolved
 
     @staticmethod
@@ -175,6 +186,8 @@ class PlatoonEnv(BaseMultiEnv):
             "vehicle_length_m",
             "formation_error_threshold",
             "observation_mode",
+            "scenario_id",
+            "local_route",
         }
         return {key: config[key] for key in keys if key in config}
 
@@ -196,8 +209,10 @@ class PlatoonEnv(BaseMultiEnv):
             "vehicle_length_m",
             "formation_error_threshold",
             "observation_mode",
+            # scenario_id / local_route are intentionally excluded here so they pass
+            # through to the MetaDrive config via _build_metadrive_config explicitly.
         }
-        runtime_only_keys = {"enable_idm_lane_change", "hazard_scenario"}
+        runtime_only_keys = {"enable_idm_lane_change", "hazard_scenario", "scenario_id", "local_route"}
         return {key: value for key, value in config.items() if key not in platoon_keys and key not in runtime_only_keys}
 
     @staticmethod
@@ -223,7 +238,7 @@ class PlatoonEnv(BaseMultiEnv):
         # BaseMultiEnv already defaults: use_hybrid_map=True,
         # traffic_mode=TrafficMode.Trigger, agent_observation=LidarStateObservation.
         # Only override what differs from those defaults.
-        return {
+        cfg = {
             "num_agents": self.platoon_config.num_agents,
             "allow_respawn": self.platoon_config.allow_respawn,
             "use_hybrid_map": self.platoon_config.use_hybrid_map,
@@ -240,6 +255,13 @@ class PlatoonEnv(BaseMultiEnv):
             **self._build_observation_config(),
             **self._env_overrides,
         }
+        # Pass scenario_id / local_route to MetaDrive; base_multi_env._normalize_route_config
+        # will derive ego_main_route_block_ids and route_preset from local_route automatically.
+        if self.platoon_config.scenario_id is not None:
+            cfg["scenario_id"] = self.platoon_config.scenario_id
+        if self.platoon_config.local_route is not None:
+            cfg["local_route"] = self.platoon_config.local_route
+        return cfg
 
     def _build_observation_config(self) -> dict[str, object]:
         if self.platoon_config.observation_mode != "multimodal":
@@ -259,14 +281,92 @@ class PlatoonEnv(BaseMultiEnv):
         single = gym.spaces.Box(low=-100.0, high=100.0, shape=(8, 3), dtype=np.float32)
         return gym.spaces.Dict({agent_id: single for agent_id in self._agent_ids})
 
-    def reset(self):
+    def _reposition_platoon_on_route(self) -> None:
+        """Teleport the platoon onto the first road of the configured local_route.
 
+        This is needed when local_route points to a segment other than the map entry
+        (e.g. R3_mainline_straight starts at s_main0, not FirstPGBlock.NODE_1).
+        The vehicles are initially spawned at NODE_1/NODE_2 (the safe default), then
+        immediately repositioned after reset() so the episode starts in the correct
+        road segment.
+        """
+        if not self.platoon_config.local_route:
+            return
+        spawn_manager = getattr(self.engine, "spawn_manager", None)
+        current_map = getattr(self.engine, "current_map", None)
+        if spawn_manager is None or current_map is None:
+            return
+        try:
+            route_roads = spawn_manager.get_main_route_spawn_roads(current_map)
+        except Exception:
+            return
+        if not route_roads:
+            return
+        road = route_roads[0]
+        try:
+            lanes = current_map.road_network.graph[road.start_node][road.end_node]
+        except (KeyError, AttributeError, TypeError):
+            return
+        if not lanes:
+            return
+
+        speed_m_s = self.platoon_config.initial_speed_km_h / 3.6
+        gap_m = self._desired_center_spacing_m()
+        lead_long = 20.0
+        for i, agent_id in enumerate(self._agent_ids):
+            vehicle = self.agents.get(agent_id)
+            if vehicle is None:
+                continue
+            long = max(lead_long - i * gap_m, 2.0)
+            lane_idx = 0
+            lane = lanes[lane_idx]
+            pos = lane.position(long, 0.0)
+            heading = lane.heading_theta_at(long)
+            vehicle.set_position(pos)
+            vehicle.set_heading_theta(heading)
+            # Re-apply initial speed along lane heading
+            vehicle.set_velocity(
+                (speed_m_s * np.cos(heading), speed_m_s * np.sin(heading)),
+                in_local_frame=False,
+            )
+
+    def _setup_scenario_orchestrator(self) -> None:
+        """Initialise ScenarioOrchestrator when scenario_id + local_route are both set."""
+        self._scenario_orchestrator = None
+        self._scenario_step_count = 0
+        scenario_id = self.platoon_config.scenario_id
+        local_route = self.platoon_config.local_route
+        if not scenario_id or not local_route:
+            return
+        try:
+            from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
+            from metadrive.exp_dataset.scenario_definitions import get_scenario_definition, SCENARIO_BY_ID
+            if scenario_id not in SCENARIO_BY_ID:
+                return
+            defn = get_scenario_definition(scenario_id)
+            if local_route not in defn.trigger_by_local_route:
+                return
+            self._scenario_orchestrator = ScenarioOrchestrator(defn, local_route)
+            # Use the lead vehicle (agent0) as the trigger reference
+            lead_agent_id = self._agent_ids[0]
+            self._scenario_orchestrator.reset(self, lead_agent_id)
+        except Exception:
+            self._scenario_orchestrator = None
+
+    def reset(self):
         self._metrics.start_episode()
         obs, _ = super().reset()
 
         if "enable_idm_lane_change" in self._runtime_flags:
             self.config["enable_idm_lane_change"] = bool(self._runtime_flags["enable_idm_lane_change"])
             self.engine.global_config["enable_idm_lane_change"] = bool(self._runtime_flags["enable_idm_lane_change"])
+
+        # Teleport to route segment if local_route is set
+        self._reposition_platoon_on_route()
+
+        # Initialise scenario orchestrator (hazard injection)
+        self._setup_scenario_orchestrator()
+
         self._last_actions = {
             agent_id: np.zeros((2,), dtype=np.float32) for agent_id in self._agent_ids
         }
@@ -339,6 +439,12 @@ class PlatoonEnv(BaseMultiEnv):
         raise ValueError(f"Unsupported action shape for PlatoonEnv: {first_action.shape}")
 
     def low_level_step(self, actions: Dict[str, np.ndarray], control_mode: str = "low_level"):
+        # Tick ScenarioOrchestrator before the physics step (mirrors collect_expert behaviour)
+        if getattr(self, "_scenario_orchestrator", None) is not None:
+            lead_agent_id = self._agent_ids[0]
+            self._scenario_step_count = getattr(self, "_scenario_step_count", 0) + 1
+            self._scenario_orchestrator.before_step(self, lead_agent_id, self._scenario_step_count)
+
         obs, reward, terminated, truncated, info = super().step(actions)
         info = self._build_info_dict(control_mode, actions=actions, base_info=info)
         terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)

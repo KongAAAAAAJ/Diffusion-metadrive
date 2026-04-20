@@ -2,8 +2,9 @@
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_7/checkpoints/diffusion-epoch=46.ckpt}"
-SCENARIO_ID="${SCENARIO_ID:-S9_narrow_channel_negotiation}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_12/checkpoints/diffusion-epoch=43.ckpt}"
+TRAJECTORY_REG_DECODER_TYPE="${TRAJECTORY_REG_DECODER_TYPE:-gru}"  # mlp | gru
+SCENARIO_ID="${SCENARIO_ID:-S4_curve_following}"
 EPISODES="${EPISODES:-5}"
 RENDER="${RENDER:-0}"
 CONTROLLER_TYPE="${CONTROLLER_TYPE:-stabilized}"
@@ -37,4 +38,5 @@ TOPDOWN_CAMERA_HEIGHT="${TOPDOWN_CAMERA_HEIGHT:-80.0}"
   --step-image-interval "${STEP_IMAGE_INTERVAL}" \
   --output-dir "${OUTPUT_DIR}" \
   --video-fps "${VIDEO_FPS}" \
-  --topdown-camera-height "${TOPDOWN_CAMERA_HEIGHT}"
+  --topdown-camera-height "${TOPDOWN_CAMERA_HEIGHT}" \
+  --trajectory-reg-decoder-type "${TRAJECTORY_REG_DECODER_TYPE}"

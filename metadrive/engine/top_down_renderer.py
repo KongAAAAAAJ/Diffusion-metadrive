@@ -721,8 +721,8 @@ class TopDownRenderer:
         sin_theta = np.sin(rotation)
         rotated = np.asarray(
             [
-                cos_theta * rel[0] - sin_theta * rel[1],
-                sin_theta * rel[0] + cos_theta * rel[1],
+                cos_theta * rel[0] + sin_theta * rel[1],
+                -sin_theta * rel[0] + cos_theta * rel[1],
             ],
             dtype=np.float32,
         )

@@ -85,8 +85,19 @@ class TransfuserConfig:
     tf_dropout: float = 0.0
 
     num_bounding_boxes: int = 16
-    ego_fut_mode: int = 8
+    ego_fut_mode: int = 10
     trajectory_decoder_layers: int = 1
+    trajectory_reg_decoder_type: str = "mlp"
+    trajectory_gru_hidden_dim: Optional[int] = None
+    trajectory_gru_use_mode_embedding: bool = False
+
+    # dynamic anchor / mode config
+    use_dynamic_anchors: bool = True
+    mode_keep_high_speed_mps: float = 13.0    # ~47 km/h
+    mode_keep_medium_speed_mps: float = 8.0   # ~29 km/h
+    mode_keep_low_speed_mps: float = 3.0      # ~11 km/h
+    mode_emergency_decel_mps2: float = 4.5
+    mode_lane_change_min_gap_m: float = 12.0
 
     # loss weights
     trajectory_weight: float = 12.0
@@ -120,6 +131,12 @@ class TransfuserConfig:
     status_feature_dim: int = 19  # full ego_state (9D) + navigation info (10D)
     target_point_dim: int = 32
     target_point_min_forward_distance_m: float = 3.0
+    target_point_prediction_horizon_s: float = 4.0
+    target_point_max_reachable_accel_mps2: float = 1.5
+    target_point_max_reachable_jerk_mps3: float = 2.0
+    target_point_front_safe_gap_m: float = 10.0
+    target_point_non_front_overlap_buffer_m: float = 1.0
+    target_point_vehicle_prediction_use_constant_accel: bool = True
 
     weight_decay: float = 1e-4
     lr_steps: Tuple[int, ...] = (70,)
@@ -163,6 +180,12 @@ class TransfuserConfig:
         self.img_horz_anchors = self.camera_width // 32
         self.lidar_vert_anchors = self.lidar_resolution_height // 32
         self.lidar_horz_anchors = self.lidar_resolution_width // 32
+        if self.trajectory_reg_decoder_type not in ("mlp", "gru"):
+            raise ValueError(
+                f"trajectory_reg_decoder_type must be 'mlp' or 'gru', got {self.trajectory_reg_decoder_type!r}"
+            )
+        if self.trajectory_gru_hidden_dim is None:
+            self.trajectory_gru_hidden_dim = self.tf_d_model
 
 
 def build_transfuser_config(model_size: str = "small", **overrides) -> TransfuserConfig:
@@ -182,7 +205,7 @@ def build_transfuser_config(model_size: str = "small", **overrides) -> Transfuse
             n_layer=1,
             n_head=4,
             num_bounding_boxes=16,
-            ego_fut_mode=8,
+            ego_fut_mode=10,
             trajectory_decoder_layers=1,
             bev_features_channels=32,
         ),

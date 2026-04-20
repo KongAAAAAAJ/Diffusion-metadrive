@@ -39,9 +39,11 @@ def migrate_single_to_platoon(ckpt_path: str, model: PlatoonDiffusionPlanner) ->
     model.model.load_state_dict(compatible, strict=False)
 
     if "_status_encoding.weight" in single_state:
+        single_w = single_state["_status_encoding.weight"]
+        single_dim = single_w.shape[1]  # single-vehicle status dim (e.g. 19)
         with torch.no_grad():
-            nn.init.kaiming_uniform_(model.model._status_encoding.weight[:, 8:], a=5 ** 0.5)
-            model.model._status_encoding.weight[:, :8].copy_(single_state["_status_encoding.weight"])
+            nn.init.kaiming_uniform_(model.model._status_encoding.weight[:, single_dim:], a=5 ** 0.5)
+            model.model._status_encoding.weight[:, :single_dim].copy_(single_w)
             if "_status_encoding.bias" in single_state:
                 model.model._status_encoding.bias.copy_(single_state["_status_encoding.bias"])
 
