@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 # ── Stage selector ──────────────────────────────────────────────────────────
-STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess  # 选择数据处理阶段
+STAGE="${STAGE:-preprocess}"  # all | collect | anchors | preprocess  # 选择数据处理阶段
 
 # *── Shared paths ────────────────────────────────────────────────────────────
 EXPERT_TYPE="${EXPERT_TYPE:-idm}"

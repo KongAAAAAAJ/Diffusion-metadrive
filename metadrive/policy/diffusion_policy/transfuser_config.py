@@ -107,6 +107,10 @@ class TransfuserConfig:
     agent_class_weight: float = 10.0
     agent_box_weight: float = 1.0
     bev_semantic_weight: float = 14.0
+    topology_weight: float = 8.0
+    lane_direction_weight: float = 1.0
+    corridor_weight: float = 0.2
+    corridor_half_width_m: float = 0.2
     use_ema: bool = False
 
     # !BEV 语义映射分类

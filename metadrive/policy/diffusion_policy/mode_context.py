@@ -412,9 +412,22 @@ def _resolve_candidate_next_lanes(
     next_ref_lanes: Sequence[Any] | None,
     route_roads: Sequence[Any],
 ) -> Sequence[Any] | None:
-    if next_ref_lanes:
+    topology_successors = _resolve_terminal_route_successor_lanes(lane, current_map, route_roads)
+    if not next_ref_lanes:
+        return topology_successors
+    if not topology_successors:
         return next_ref_lanes
-    return _resolve_terminal_route_successor_lanes(lane, current_map, route_roads)
+
+    merged_lanes: list[Any] = []
+    seen_indices: set[Any] = set()
+    for candidate_lane in list(next_ref_lanes) + list(topology_successors):
+        lane_index = getattr(candidate_lane, "index", None)
+        key = tuple(lane_index) if lane_index is not None else id(candidate_lane)
+        if key in seen_indices:
+            continue
+        seen_indices.add(key)
+        merged_lanes.append(candidate_lane)
+    return merged_lanes
 
 
 def _get_first_positive_road_from_block(block: Any) -> Any | None:

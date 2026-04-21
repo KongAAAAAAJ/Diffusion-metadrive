@@ -33,6 +33,7 @@ class StepTrajectoryPlotRecord:
     selected_mode_idx: int | None
     dynamic_anchor_trajectories: np.ndarray | None = None
     target_point_world: np.ndarray | None = None
+    topology_polyline_world: np.ndarray | None = None
     topdown_frame: np.ndarray | None = None
     world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None
     ego_speed_km_h: float | None = None
@@ -84,6 +85,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--video-fps", type=int, default=10)
     parser.add_argument("--topdown-camera-height", type=float, default=80.0)
+    parser.add_argument("--show-topology-polyline", type=int, choices=(0, 1), default=0)
     return parser.parse_args(argv)
 
 
@@ -484,6 +486,23 @@ def _record_step_visualization(
                 float(ego_heading_before_step),
             )
 
+    topology_polyline = final_info.get("topology_polyline")
+    topology_polyline_world = None
+    if topology_polyline is not None:
+        topo_xy = np.asarray(topology_polyline, dtype=np.float64)
+        if topo_xy.ndim == 2 and topo_xy.shape[0] > 0 and topo_xy.shape[1] >= 2:
+            topology_polyline_world = np.asarray(
+                [
+                    _local_xy_to_world_xy(
+                        np.asarray([float(point[0]), float(point[1])], dtype=np.float64),
+                        ego_xy_before_step,
+                        float(ego_heading_before_step),
+                    )
+                    for point in topo_xy
+                ],
+                dtype=np.float64,
+            )
+
     if selected_world_array is not None or candidates_world_array is not None:
         _ego_speed = float(getattr(ego_before_step, "speed_km_h", 0.0)) if ego_before_step is not None else None
         step_plot_records.append(
@@ -495,6 +514,7 @@ def _record_step_visualization(
                 selected_mode_idx=(int(mode_idx) if mode_idx is not None else None),
                 dynamic_anchor_trajectories=dynamic_anchor_world_array,
                 target_point_world=target_point_world,
+                topology_polyline_world=topology_polyline_world,
                 topdown_frame=(None if topdown_frame is None else np.asarray(topdown_frame, dtype=np.uint8).copy()),
                 world_to_screen_projector=world_to_screen_projector,
                 ego_speed_km_h=_ego_speed,
@@ -587,6 +607,7 @@ def _save_step_trajectory_plot(
     road_boundaries: list[np.ndarray],
     output_path: Path,
     episode_idx: int,
+    show_topology_polyline: bool = False,
 ) -> None:
     if step_record.topdown_frame is None or step_record.world_to_screen_projector is None:
         return
@@ -633,6 +654,11 @@ def _save_step_trajectory_plot(
         for anchor in np.asarray(step_record.dynamic_anchor_trajectories, dtype=np.float64):
             full_path = np.vstack([ego, anchor])
             _draw_world_polyline(full_path, (205, 214, 244), 2, alpha=0.7)
+
+    if show_topology_polyline and step_record.topology_polyline_world is not None:
+        topology_world = np.asarray(step_record.topology_polyline_world, dtype=np.float64)
+        if topology_world.ndim == 2 and topology_world.shape[0] >= 2:
+            _draw_world_polyline(topology_world, (176, 132, 255), 2, alpha=0.9)
 
     # ── 2. Draw non-selected modes first, selected mode last (on top) ──────────
     selected_mode_idx = step_record.selected_mode_idx
@@ -711,6 +737,8 @@ def _save_step_trajectory_plot(
     cv2.putText(canvas, "selected: orange", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (242, 153, 74), 1, cv2.LINE_AA)
     cv2.putText(canvas, "others: teal", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (111, 179, 206), 1, cv2.LINE_AA)
     cv2.putText(canvas, "anchors: light blue", (160, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (140, 150, 210), 1, cv2.LINE_AA)
+    if show_topology_polyline:
+        cv2.putText(canvas, "topology: purple", (290, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (176, 132, 255), 1, cv2.LINE_AA)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
@@ -1144,6 +1172,7 @@ def main():
                         road_boundaries=road_boundaries,
                         output_path=_build_step_trajectory_plot_path(output_dir, episode_idx, step_record.step_idx),
                         episode_idx=episode_idx,
+                        show_topology_polyline=bool(args.show_topology_polyline),
                     )
     finally:
         env.close()

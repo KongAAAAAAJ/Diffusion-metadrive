@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional, Tuple
 from scipy.optimize import linear_sum_assignment
 
 import torch
@@ -6,6 +6,112 @@ import torch.nn.functional as F
 
 from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig
 from metadrive.policy.diffusion_policy.transfuser_features import BoundingBox2DIndex
+
+
+def _zero_like_loss(predictions: Dict[str, torch.Tensor]) -> torch.Tensor:
+    reference = predictions.get("trajectory")
+    if reference is None:
+        return torch.tensor(0.0, dtype=torch.float32)
+    return reference.new_zeros(())
+
+
+def _select_topology_supervised_trajectory(
+    predictions: Dict[str, torch.Tensor],
+    targets: Dict[str, torch.Tensor],
+) -> Optional[torch.Tensor]:
+    trajectory = predictions.get("trajectory")
+    candidates = predictions.get("trajectory_candidates_train")
+    mode_labels = targets.get("hierarchical_mode_label")
+    if trajectory is None:
+        return None
+    if candidates is None or mode_labels is None:
+        return trajectory
+
+    mode_labels = mode_labels.to(device=candidates.device, dtype=torch.long).view(-1)
+    batch_size = candidates.shape[0]
+    valid_mask = torch.logical_and(mode_labels >= 0, mode_labels < candidates.shape[1])
+    if mode_labels.shape[0] != batch_size:
+        return trajectory
+    safe_labels = mode_labels.clamp(min=0, max=candidates.shape[1] - 1)
+    gather_idx = safe_labels[:, None, None, None].expand(-1, 1, candidates.shape[2], candidates.shape[3])
+    gathered = torch.gather(candidates, 1, gather_idx).squeeze(1)
+    if torch.all(valid_mask):
+        return gathered
+    trajectory = trajectory.to(device=gathered.device, dtype=gathered.dtype)
+    valid_mask = valid_mask[:, None, None]
+    return torch.where(valid_mask, gathered, trajectory)
+
+
+def _nearest_polyline_segment_metrics(
+    points_xy: torch.Tensor,
+    topology_polyline: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    seg_start = topology_polyline[:, :-1, :]
+    seg_end = topology_polyline[:, 1:, :]
+    seg_vec = seg_end - seg_start
+    seg_len_sq = (seg_vec * seg_vec).sum(dim=-1)
+    valid_seg_mask = seg_len_sq > 1e-6
+
+    point_expanded = points_xy[:, :, None, :]
+    start_expanded = seg_start[:, None, :, :]
+    vec_expanded = seg_vec[:, None, :, :]
+    len_sq_expanded = seg_len_sq[:, None, :]
+
+    projection = ((point_expanded - start_expanded) * vec_expanded).sum(dim=-1) / len_sq_expanded.clamp_min(1e-6)
+    projection = projection.clamp(0.0, 1.0)
+    closest = start_expanded + projection[..., None] * vec_expanded
+    distances = torch.linalg.norm(point_expanded - closest, dim=-1)
+    distances = torch.where(valid_seg_mask[:, None, :], distances, torch.full_like(distances, float("inf")))
+
+    nearest_idx = distances.argmin(dim=-1)
+    batch_idx = torch.arange(points_xy.shape[0], device=points_xy.device)[:, None]
+    closest_distance = distances[batch_idx, torch.arange(points_xy.shape[1], device=points_xy.device)[None, :], nearest_idx]
+    nearest_tangent = seg_vec[batch_idx, nearest_idx]
+    nearest_tangent = F.normalize(nearest_tangent, dim=-1, eps=1e-6)
+    has_valid_segment = valid_seg_mask.any(dim=-1, keepdim=True).expand(-1, points_xy.shape[1])
+    return closest_distance, nearest_tangent, has_valid_segment
+
+
+def _topology_consistency_loss(
+    predictions: Dict[str, torch.Tensor],
+    targets: Dict[str, torch.Tensor],
+    config: TransfuserConfig,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    topology_polyline = targets.get("topology_polyline")
+    trajectory = _select_topology_supervised_trajectory(predictions, targets)
+    if topology_polyline is None or trajectory is None:
+        zero = _zero_like_loss(predictions)
+        return zero, zero, zero
+
+    topology_polyline = topology_polyline.to(device=trajectory.device, dtype=trajectory.dtype)
+    trajectory_xy = trajectory[..., :2]
+    if topology_polyline.ndim != 3 or topology_polyline.shape[1] < 2:
+        zero = _zero_like_loss(predictions)
+        return zero, zero, zero
+
+    point_distances, nearest_tangent, point_valid_mask = _nearest_polyline_segment_metrics(trajectory_xy, topology_polyline)
+    corridor_penalty = F.relu(point_distances - float(config.corridor_half_width_m))
+    if torch.any(point_valid_mask):
+        corridor_loss = corridor_penalty[point_valid_mask].mean()
+    else:
+        corridor_loss = _zero_like_loss(predictions)
+
+    trajectory_dirs = trajectory_xy[:, 1:, :] - trajectory_xy[:, :-1, :]
+    dir_norm = torch.linalg.norm(trajectory_dirs, dim=-1)
+    dir_valid_mask = torch.logical_and(point_valid_mask[:, :-1], dir_norm > 1e-6)
+    normalized_dirs = F.normalize(trajectory_dirs, dim=-1, eps=1e-6)
+    cosine = (normalized_dirs * nearest_tangent[:, :-1, :]).sum(dim=-1).clamp(-1.0, 1.0)
+    lane_direction_penalty = 1.0 - cosine
+    if torch.any(dir_valid_mask):
+        lane_direction_loss = lane_direction_penalty[dir_valid_mask].mean()
+    else:
+        lane_direction_loss = _zero_like_loss(predictions)
+
+    topology_loss = float(config.topology_weight) * (
+        float(config.lane_direction_weight) * lane_direction_loss
+        + float(config.corridor_weight) * corridor_loss
+    )
+    return topology_loss, lane_direction_loss, corridor_loss
 
 
 def transfuser_loss(
@@ -31,12 +137,18 @@ def transfuser_loss(
         diffusion_loss = predictions['diffusion_loss']
     else:
         diffusion_loss = 0
+    topology_loss, lane_direction_loss, corridor_loss = _topology_consistency_loss(
+        predictions=predictions,
+        targets=targets,
+        config=config,
+    )
     loss = (
         config.trajectory_weight * trajectory_loss
         + config.diff_loss_weight * diffusion_loss
         + config.agent_class_weight * agent_class_loss
         + config.agent_box_weight * agent_box_loss
         + config.bev_semantic_weight * bev_semantic_loss
+        + topology_loss
     )
     loss_dict = {
         'loss': loss,
@@ -44,7 +156,10 @@ def transfuser_loss(
         'diffusion_loss': config.diff_loss_weight*diffusion_loss,
         'agent_class_loss': config.agent_class_weight*agent_class_loss,
         'agent_box_loss': config.agent_box_weight*agent_box_loss,
-        'bev_semantic_loss': config.bev_semantic_weight*bev_semantic_loss
+        'bev_semantic_loss': config.bev_semantic_weight*bev_semantic_loss,
+        'topology_loss': topology_loss,
+        'lane_direction_loss': float(config.topology_weight) * float(config.lane_direction_weight) * lane_direction_loss,
+        'corridor_loss': float(config.topology_weight) * float(config.corridor_weight) * corridor_loss,
     }
     if "trajectory_loss_dict" in predictions:
         trajectory_loss_dict = predictions["trajectory_loss_dict"]

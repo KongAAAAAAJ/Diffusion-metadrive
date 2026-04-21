@@ -27,7 +27,7 @@ PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 # ---------------------------------------------------------------------------
 # 流程控制
 # ---------------------------------------------------------------------------
-STAGE="${STAGE:-both}"   # 1 | 2 | both
+STAGE="${STAGE:-1}"   # 1 | 2 | both
 
 # ---------------------------------------------------------------------------
 # 阶段一：单车扩散 Policy 开环预训练
@@ -39,7 +39,7 @@ DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_d
 ANCHOR_METHOD="${ANCHOR_METHOD:-dynamic}"
 PLAN_ANCHOR_PATH="${PLAN_ANCHOR_PATH:-${REPO_ROOT}/metadrive/exp_dataset/anchors.npy}"
 STAGE1_OUTPUT_DIR="${STAGE1_OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion}"
-STAGE1_MAX_EPOCHS="${STAGE1_MAX_EPOCHS:-60}"  # *
+STAGE1_MAX_EPOCHS="${STAGE1_MAX_EPOCHS:-40}"  # *
 STAGE1_BATCH_SIZE="${STAGE1_BATCH_SIZE:-16}"
 STAGE1_NUM_WORKERS="${STAGE1_NUM_WORKERS:-8}"
 STAGE1_LR="${STAGE1_LR:-1e-4}"

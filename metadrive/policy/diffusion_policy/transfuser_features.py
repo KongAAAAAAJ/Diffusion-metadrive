@@ -18,6 +18,7 @@ PROCESSED_DIR_FIELDS = (
     "status_feature",
     "ego_state",
     "target_point",
+    "topology_polyline",
     "trajectory",
     "agent_states",
     "agent_labels",
@@ -220,57 +221,6 @@ def _build_mode_context_for_target_point(vehicle):
     return build_mode_context_from_vehicle(vehicle, current_map=current_map)
 
 
-# Maximum lateral offset (metres) from lane centre before we snap to a closer lane.
-_MAX_LATERAL_OFFSET_M: float = 2.0
-
-
-def _find_nearest_lane_on_road(vehicle, lane_index, road_network) -> Optional[tuple]:
-    """Find the lane on the same road segment that is closest to *vehicle*.
-
-    Returns the lane object, or ``None`` if no better candidate exists.
-    """
-    if lane_index is None or road_network is None:
-        return None
-    try:
-        road_lanes = road_network.graph[lane_index[0]][lane_index[1]]
-    except (KeyError, TypeError):
-        return None
-    if not road_lanes:
-        return None
-
-    ego_pos = np.asarray(vehicle.position[:2], dtype=np.float32)
-    ego_heading = float(getattr(vehicle, "heading_theta", 0.0))
-    best_lane = None
-    best_abs_lat: float = float("inf")
-
-    for lane in road_lanes:
-        if not hasattr(lane, "local_coordinates"):
-            continue
-        try:
-            s, lat = lane.local_coordinates(ego_pos)
-        except Exception:
-            continue
-        # Reject lanes where ego is out of longitudinal range.
-        lane_len = float(getattr(lane, "length", 0.0))
-        if s < -2.0 or s > lane_len + 2.0:
-            continue
-        # Reject opposite-direction lanes.
-        if hasattr(lane, "heading_theta_at"):
-            try:
-                lane_h = float(lane.heading_theta_at(max(0.0, min(s, lane_len))))
-                h_diff = math.atan2(math.sin(lane_h - ego_heading), math.cos(lane_h - ego_heading))
-                if abs(h_diff) > math.pi / 2.0:
-                    continue
-            except Exception:
-                pass
-        abs_lat = abs(float(lat))
-        if abs_lat < best_abs_lat:
-            best_abs_lat = abs_lat
-            best_lane = lane
-
-    return best_lane
-
-
 def _build_live_target_lane_polyline(
     vehicle,
     lane_decision: "LaneDecision",
@@ -297,19 +247,6 @@ def _build_live_target_lane_polyline(
     lane_index = getattr(current_lane, "index", None) or getattr(vehicle, "lane_index", None)
     if current_map is None or road_network is None or lane_index is None:
         return None
-
-    # --- Snap to nearest lane when ego drifts far from assigned lane ---------
-    if hasattr(target_lane, "local_coordinates"):
-        try:
-            _, _lat = target_lane.local_coordinates(vehicle.position)
-            if abs(float(_lat)) > _MAX_LATERAL_OFFSET_M:
-                better = _find_nearest_lane_on_road(vehicle, lane_index, road_network)
-                if better is not None:
-                    target_lane = better
-                    lane_index = getattr(better, "index", lane_index)
-        except Exception:
-            pass
-
     if lane_decision != LaneDecision.KEEP and lane_index is not None and road_network is not None:
         try:
             road_lanes = road_network.graph[lane_index[0]][lane_index[1]]
@@ -792,21 +729,6 @@ def compute_target_point(
                 current_lane = current_ref_lanes[0]
     except Exception:
         pass
-    # Snap to nearest lane when ego has drifted far from its assigned lane.
-    _fb_road_network = getattr(
-        getattr(getattr(vehicle, "engine", None), "current_map", None),
-        "road_network", None,
-    )
-    _fb_lane_index = getattr(current_lane, "index", None)
-    if _fb_road_network is not None and _fb_lane_index is not None:
-        try:
-            _, _fb_lat = current_lane.local_coordinates(vehicle.position)
-            if abs(float(_fb_lat)) > _MAX_LATERAL_OFFSET_M:
-                _fb_better = _find_nearest_lane_on_road(vehicle, _fb_lane_index, _fb_road_network)
-                if _fb_better is not None:
-                    current_lane = _fb_better
-        except Exception:
-            pass
     s_ego, _ = current_lane.local_coordinates(vehicle.position)
     speed_mps = float(getattr(vehicle, "speed_km_h", 0.0)) / 3.6
     delta_s = _simulate_reachable_distance(
@@ -871,6 +793,51 @@ def compute_target_point_from_sample(
     ).astype(np.float32, copy=False)
     local_points_xy = np.concatenate([np.zeros((1, 2), dtype=np.float32), local_points_xy], axis=0)
     return torch.from_numpy(_interpolate_local_target(local_points_xy, delta_s))
+
+
+def _build_topology_polyline_from_sample(
+    sample: Dict[str, np.ndarray],
+    lane_decision: "LaneDecision",
+) -> torch.Tensor:
+    current_poly = _to_numpy(sample.get("current_lane_polyline", np.zeros((0, 2), dtype=np.float32))).astype(
+        np.float32, copy=False
+    )
+    selected_poly = current_poly
+    if lane_decision == LaneDecision.CHANGE_LEFT:
+        left_poly = _to_numpy(sample.get("left_lane_polyline", np.zeros((0, 2), dtype=np.float32))).astype(
+            np.float32, copy=False
+        )
+        if left_poly.ndim == 2 and left_poly.shape[0] > 0 and np.any(left_poly):
+            selected_poly = left_poly
+    elif lane_decision == LaneDecision.CHANGE_RIGHT:
+        right_poly = _to_numpy(sample.get("right_lane_polyline", np.zeros((0, 2), dtype=np.float32))).astype(
+            np.float32, copy=False
+        )
+        if right_poly.ndim == 2 and right_poly.shape[0] > 0 and np.any(right_poly):
+            selected_poly = right_poly
+
+    if selected_poly.ndim == 2 and selected_poly.shape[0] > 0 and selected_poly.shape[1] == 2:
+        return torch.from_numpy(selected_poly.astype(np.float32, copy=False))
+    if current_poly.ndim == 2 and current_poly.shape[0] > 0 and current_poly.shape[1] == 2:
+        return torch.from_numpy(current_poly.astype(np.float32, copy=False))
+    return torch.from_numpy(_build_fallback_current_lane_polyline(sample).astype(np.float32, copy=False))
+
+
+def _build_topology_polyline_from_live_vehicle(
+    vehicle,
+    lane_decision: "LaneDecision",
+) -> torch.Tensor:
+    live_polyline = _build_live_target_lane_polyline(vehicle, lane_decision)
+    if live_polyline is not None:
+        return torch.from_numpy(np.asarray(live_polyline, dtype=np.float32))
+
+    ctx = _build_mode_context_for_target_point(vehicle)
+    selected_poly = _get_target_lane_polyline(ctx, lane_decision)
+    if selected_poly is None:
+        selected_poly = getattr(ctx, "current_lane_polyline", None)
+    if selected_poly is None:
+        return torch.zeros((0, 2), dtype=torch.float32)
+    return torch.from_numpy(np.asarray(selected_poly, dtype=np.float32))
 
 
 # !这里与 TransFuser 原论文中的 BEV 处理方式不同!
@@ -1020,6 +987,7 @@ def sample_to_features_targets(
     )
     targets = {
         "trajectory": torch.from_numpy(_to_numpy(sample["trajectory"]).astype(np.float32, copy=False)),
+        "topology_polyline": _build_topology_polyline_from_sample(sample, lane_decision),
         "agent_states": agent_states,
         "agent_labels": agent_labels,
         "bev_semantic_map": semantic_map_to_target(sample["bev_semantic_map"], config)
@@ -1056,6 +1024,10 @@ def processed_sample_to_features_targets(sample: Dict[str, np.ndarray]):
         "agent_labels": torch.from_numpy(_to_numpy(sample["agent_labels"]).astype(bool, copy=True)),
         "bev_semantic_map": torch.from_numpy(_to_numpy(sample["bev_semantic_map"]).astype(np.int64, copy=True)),
     }
+    if "topology_polyline" in sample:
+        targets["topology_polyline"] = torch.from_numpy(
+            _to_numpy(sample["topology_polyline"]).astype(np.float32, copy=True)
+        )
     if "hierarchical_mode_label" in sample:
         targets["hierarchical_mode_label"] = torch.tensor(
             int(_to_numpy(sample["hierarchical_mode_label"]).reshape(-1)[0]),
@@ -1081,6 +1053,11 @@ def observation_to_features(
         # geometry only.  It should not be shifted onto an adjacent lane by the
         # current lane-decision / mode semantics.
         "target_point": compute_target_point(vehicle, config, LaneDecision.KEEP) if vehicle is not None else _zero_target_point(),
+        "topology_polyline": (
+            _build_topology_polyline_from_live_vehicle(vehicle, LaneDecision.KEEP)
+            if vehicle is not None
+            else torch.zeros((0, 2), dtype=torch.float32)
+        ),
     }
 
 

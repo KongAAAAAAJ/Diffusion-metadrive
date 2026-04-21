@@ -11,7 +11,7 @@ TRAJECTORY_REG_DECODER_TYPE="${TRAJECTORY_REG_DECODER_TYPE:-gru}"  # mlp | gru
 DATA_ROOT="${DATA_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
 DATASET_NAME="${DATASET_NAME:-metaIDM}"
 PREPROCESSED_ROOT="${PREPROCESSED_ROOT:-${DATA_ROOT}/${DATASET_NAME}_pp}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_12/checkpoints/diffusion-epoch=43.ckpt}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_13/checkpoints/diffusion-epoch=25.ckpt}"
 PLAN_ANCHOR_PATH="${PLAN_ANCHOR_PATH:-${REPO_ROOT}/metadrive/exp_dataset/anchors.npy}"
 OUTPUT_DIR="${OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/open}"
 

@@ -301,6 +301,10 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
             "mode_accuracy": 0.0,
             "mode_match_count": 0,
             "mode_total_count": 0,
+            "lateral_accuracy": 0.0,
+            "lateral_match_count": 0,
+            "per_slot_accuracy": {},
+            "mode_confusion": {},
         }
     traj_l1 = np.asarray([record["trajectory_l1"] for record in records], dtype=np.float64)
     final_l2 = np.asarray([record["trajectory_final_l2"] for record in records], dtype=np.float64)
@@ -321,17 +325,73 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
     gt_mode_hist = Counter(_gt_mode(record) for record in records if _gt_mode(record) is not None)
     trajectory_mode_hist = Counter(int(record["trajectory_mode"]) for record in records if record.get("trajectory_mode") is not None)
     mode_y = defaultdict(list)
+
+    # Mode accuracy accumulators
     mode_match_count = 0
     mode_total_count = 0
+    lateral_match_count = 0   # correct lateral group (KEEP/LEFT/RIGHT), ignoring speed level
+    lateral_total_count = 0
+    per_slot_correct: Counter = Counter()   # gt_slot → correct predictions
+    per_slot_total: Counter = Counter()     # gt_slot → total predictions
+    confusion: dict = defaultdict(Counter)  # confusion[gt_slot][pred_slot] += 1
+
+    def _lateral_group(slot: int) -> str:
+        """Map slot index to lateral group name."""
+        if 0 <= slot <= 2:
+            return "KEEP"
+        if 3 <= slot <= 5:
+            return "LEFT"
+        if 6 <= slot <= 8:
+            return "RIGHT"
+        return "OTHER"  # slot 9 EMERGENCY_STOP
+
     for record in records:
         pred_mode_idx = _pred_mode(record)
         gt_mode_idx = _gt_mode(record)
         if pred_mode_idx is not None:
             mode_y[int(pred_mode_idx)].append(float(record["pred_final_xy"][1]))
         if gt_mode_idx is not None and pred_mode_idx is not None:
+            g, p = int(gt_mode_idx), int(pred_mode_idx)
             mode_total_count += 1
-            if int(gt_mode_idx) == int(pred_mode_idx):
+            lateral_total_count += 1
+            confusion[g][p] += 1
+            per_slot_total[g] += 1
+            if g == p:
                 mode_match_count += 1
+                per_slot_correct[g] += 1
+            if _lateral_group(g) == _lateral_group(p):
+                lateral_match_count += 1
+
+    # Per-slot accuracy (only slots that appear in GT)
+    per_slot_accuracy: dict = {}
+    for slot in sorted(per_slot_total.keys()):
+        total = per_slot_total[slot]
+        correct = per_slot_correct.get(slot, 0)
+        try:
+            slot_name = get_mode_slot(slot).name
+        except Exception:
+            slot_name = f"MODE_{slot}"
+        per_slot_accuracy[slot_name] = {
+            "accuracy": float(correct / total) if total > 0 else 0.0,
+            "correct": int(correct),
+            "total": int(total),
+        }
+
+    # Confusion matrix: gt_name → {pred_name: count}
+    confusion_named: dict = {}
+    for gt_slot, pred_counter in sorted(confusion.items()):
+        try:
+            gt_name = get_mode_slot(gt_slot).name
+        except Exception:
+            gt_name = f"MODE_{gt_slot}"
+        confusion_named[gt_name] = {}
+        for pred_slot, cnt in sorted(pred_counter.items()):
+            try:
+                pred_name = get_mode_slot(pred_slot).name
+            except Exception:
+                pred_name = f"MODE_{pred_slot}"
+            confusion_named[gt_name][pred_name] = int(cnt)
+
     return {
         "num_samples": len(records),
         "trajectory_l1": float(traj_l1.mean()),
@@ -347,9 +407,14 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
         "trajectory_mode_hist": {str(key): int(value) for key, value in sorted(trajectory_mode_hist.items())},
         "pred_mode_hist": {str(key): int(value) for key, value in sorted(mode_hist.items())},
         "gt_mode_hist": {str(key): int(value) for key, value in sorted(gt_mode_hist.items())},
+        # ── Mode accuracy metrics ──────────────────────────────────────────────
         "mode_accuracy": float(mode_match_count / mode_total_count) if mode_total_count > 0 else 0.0,
         "mode_match_count": int(mode_match_count),
         "mode_total_count": int(mode_total_count),
+        "lateral_accuracy": float(lateral_match_count / lateral_total_count) if lateral_total_count > 0 else 0.0,
+        "lateral_match_count": int(lateral_match_count),
+        "per_slot_accuracy": per_slot_accuracy,
+        "mode_confusion": confusion_named,
     }
 
 
@@ -491,9 +556,26 @@ def evaluate_open_loop(
         "split": dataset.split,
         "num_samples": len(records),
         "metrics": metrics,
+        # ── Top-level shortcut fields for quick inspection ───────────────────
+        "mode_accuracy": metrics["mode_accuracy"],
+        "lateral_accuracy": metrics["lateral_accuracy"],
+        "mode_match_count": metrics["mode_match_count"],
+        "mode_total_count": metrics["mode_total_count"],
+        "per_slot_accuracy": metrics["per_slot_accuracy"],
+        "mode_confusion": metrics["mode_confusion"],
         "mode_hist": metrics["mode_hist"],
         "output_dir": str(output_dir),
     }
+    # Print mode accuracy summary to stdout for quick inspection
+    print(
+        f"[open_loop] mode_accuracy={metrics['mode_accuracy']:.4f} "
+        f"({metrics['mode_match_count']}/{metrics['mode_total_count']})  "
+        f"lateral_accuracy={metrics['lateral_accuracy']:.4f}"
+    )
+    print("[open_loop] per_slot_accuracy:")
+    for slot_name, acc_info in metrics["per_slot_accuracy"].items():
+        print(f"  {slot_name}: {acc_info['accuracy']:.4f} ({acc_info['correct']}/{acc_info['total']})")
+
     if save_json:
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "open_loop_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

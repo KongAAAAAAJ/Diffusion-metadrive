@@ -47,6 +47,7 @@ def test_parse_args_defaults_enable_headless_2d_outputs():
     assert args.step_image_interval == 1
     assert args.video_fps == 10
     assert args.topdown_camera_height == 80.0
+    assert args.show_topology_polyline == 0
 
 
 def test_normalize_visualization_args_enables_render_for_3d_video():
@@ -247,6 +248,10 @@ def test_record_step_visualization_collects_dynamic_anchor_and_target_point():
             dtype=np.float32,
         ),
         "target_point": np.asarray([3.0, 0.5], dtype=np.float32),
+        "topology_polyline": np.asarray(
+            [[0.0, 0.0], [1.0, 0.5], [2.0, 1.0]],
+            dtype=np.float32,
+        ),
     }
 
     _record_step_visualization(
@@ -269,6 +274,11 @@ def test_record_step_visualization_collects_dynamic_anchor_and_target_point():
     assert record.dynamic_anchor_trajectories is not None
     assert record.dynamic_anchor_trajectories.shape == (2, 2, 2)
     assert np.allclose(record.target_point_world, np.asarray([8.0, 6.5], dtype=np.float64))
+    assert record.topology_polyline_world is not None
+    assert np.allclose(
+        record.topology_polyline_world,
+        np.asarray([[5.0, 6.0], [6.0, 6.5], [7.0, 7.0]], dtype=np.float64),
+    )
     assert record.topdown_frame is not None
 
 
@@ -397,6 +407,7 @@ def test_save_step_trajectory_plot_writes_topdown_overlay_png(tmp_path: Path):
             dtype=np.float64,
         ),
         target_point_world=np.asarray([34.0, 14.0], dtype=np.float64),
+        topology_polyline_world=np.asarray([[10.0, 10.0], [20.0, 14.0], [30.0, 18.0]], dtype=np.float64),
         topdown_frame=np.zeros((120, 120, 3), dtype=np.uint8),
         world_to_screen_projector=lambda point: np.asarray([point[0], point[1]], dtype=np.float32),
     )
@@ -406,12 +417,63 @@ def test_save_step_trajectory_plot_writes_topdown_overlay_png(tmp_path: Path):
         road_boundaries=[],
         output_path=output_path,
         episode_idx=0,
+        show_topology_polyline=True,
     )
 
     assert output_path.exists()
     image = cv2.imread(str(output_path))
     assert image is not None
     assert image.sum() > 0
+
+
+def test_save_step_trajectory_plot_only_draws_topology_polyline_when_enabled(tmp_path: Path):
+    hidden_path = _build_step_trajectory_plot_path(tmp_path / "hidden", episode_idx=0, step_idx=1)
+    shown_path = _build_step_trajectory_plot_path(tmp_path / "shown", episode_idx=0, step_idx=1)
+    step_record = StepTrajectoryPlotRecord(
+        step_idx=1,
+        ego_position=np.asarray([10.0, 10.0], dtype=np.float64),
+        selected_trajectory=np.asarray([[20.0, 10.0], [30.0, 10.0]], dtype=np.float64),
+        multimodal_trajectories=None,
+        selected_mode_idx=0,
+        dynamic_anchor_trajectories=None,
+        target_point_world=None,
+        topology_polyline_world=np.asarray([[10.0, 10.0], [20.0, 20.0], [30.0, 20.0]], dtype=np.float64),
+        topdown_frame=np.zeros((120, 120, 3), dtype=np.uint8),
+        world_to_screen_projector=lambda point: np.asarray([point[0], point[1]], dtype=np.float32),
+    )
+    recorded_texts = []
+    original_put_text = cv2.putText
+
+    def _tracking_put_text(*args, **kwargs):
+        if len(args) >= 2:
+            recorded_texts.append(args[1])
+        return original_put_text(*args, **kwargs)
+
+    cv2.putText = _tracking_put_text
+    try:
+        _save_step_trajectory_plot(
+            step_record=step_record,
+            road_boundaries=[],
+            output_path=hidden_path,
+            episode_idx=0,
+            show_topology_polyline=False,
+        )
+        hidden_texts = list(recorded_texts)
+        recorded_texts.clear()
+
+        _save_step_trajectory_plot(
+            step_record=step_record,
+            road_boundaries=[],
+            output_path=shown_path,
+            episode_idx=0,
+            show_topology_polyline=True,
+        )
+        shown_texts = list(recorded_texts)
+    finally:
+        cv2.putText = original_put_text
+
+    assert "topology: purple" not in hidden_texts
+    assert "topology: purple" in shown_texts
 
 
 def test_extract_road_topology_returns_lane_boundaries():

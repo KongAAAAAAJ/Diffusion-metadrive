@@ -243,6 +243,17 @@ def test_run_diffusion_test_script_supports_gru_decoder_type():
     assert "--trajectory-reg-decoder-type gru" in stdout
 
 
+def test_run_diffusion_test_script_supports_topology_polyline_overlay_flag():
+    stdout = _run_script(
+        "run_diffusion_test.sh",
+        PYTHON_BIN="/bin/echo",
+        CHECKPOINT_PATH="dummy.ckpt",
+        SHOW_TOPOLOGY_POLYLINE="1",
+    )
+
+    assert "--show-topology-polyline 1" in stdout
+
+
 def test_diffusion_scripts_share_visible_reg_decoder_comment_template():
     expected_comment = '# REG decoder: set TRAJECTORY_REG_DECODER_TYPE to "mlp" or "gru".'
     for script_name in (

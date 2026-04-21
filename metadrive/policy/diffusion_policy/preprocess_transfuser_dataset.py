@@ -23,6 +23,7 @@ PROCESSED_FIELDS = (
     "status_feature",
     "ego_state",
     "target_point",
+    "topology_polyline",
     "trajectory",
     "agent_states",
     "agent_labels",
@@ -178,6 +179,7 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
         processed["status_feature"].append(tensor_to_numpy(features["status_feature"]).astype(np.float32))
         processed["ego_state"].append(tensor_to_numpy(features["ego_state"]).astype(np.float32))
         processed["target_point"].append(tensor_to_numpy(features["target_point"]).astype(np.float32))
+        processed["topology_polyline"].append(tensor_to_numpy(targets["topology_polyline"]).astype(np.float32))
         processed["trajectory"].append(tensor_to_numpy(targets["trajectory"]).astype(np.float32))
         processed["agent_states"].append(tensor_to_numpy(targets["agent_states"]).astype(np.float32))
         processed["agent_labels"].append(tensor_to_numpy(targets["agent_labels"]).astype(bool))

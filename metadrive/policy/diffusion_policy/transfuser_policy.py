@@ -273,7 +273,15 @@ class TransfuserPolicy(BasePolicy):
         self.action_info["predicted_trajectory"] = trajectory
         self.action_info["controller_debug"] = controller_debug
         self.action_info["lane_decision"] = int(lane_decision)
-        for feature_key in ("camera_feature", "lidar_feature", "status_feature", "ego_state", "target_point", "lane_decision"):
+        for feature_key in (
+            "camera_feature",
+            "lidar_feature",
+            "status_feature",
+            "ego_state",
+            "target_point",
+            "topology_polyline",
+            "lane_decision",
+        ):
             if feature_key in features:
                 val = features[feature_key]
                 self.action_info[feature_key] = val.detach().cpu().numpy() if isinstance(val, torch.Tensor) else val

@@ -8,6 +8,8 @@ from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser
 import metadrive.policy.diffusion_policy.transfuser_features as transfuser_features
 from metadrive.policy.diffusion_policy.transfuser_features import (
     LaneDecision,
+    _build_live_target_lane_polyline,
+    _build_topology_polyline_from_live_vehicle,
     compute_target_point,
     compute_target_point_from_sample,
     observation_to_features,
@@ -342,6 +344,69 @@ def test_observation_to_features_target_point_uses_live_expert_lane_decision(mon
     assert calls == [LaneDecision.KEEP]
 
 
+def test_observation_to_features_topology_polyline_uses_keep_lane_geometry(monkeypatch):
+    config = build_transfuser_config("small")
+    lane = _FakeLane(length=50.0, lane_index=("s", "e", 1))
+    vehicle = _FakeVehicle(lane, position=[0.0, 0.0], heading_theta=0.0, speed_km_h=18.0)
+    observation = {
+        "rgb_left": np.zeros((4, 4, 3), dtype=np.uint8),
+        "rgb_front": np.zeros((4, 4, 3), dtype=np.uint8),
+        "rgb_right": np.zeros((4, 4, 3), dtype=np.uint8),
+        "lidar": np.zeros((32,), dtype=np.float32),
+        "ego_state": np.zeros((19,), dtype=np.float32),
+    }
+    calls = []
+
+    monkeypatch.setattr(
+        transfuser_features,
+        "_build_topology_polyline_from_live_vehicle",
+        lambda vehicle_arg, lane_decision: calls.append(lane_decision) or torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        raising=False,
+    )
+
+    features = observation_to_features(
+        observation,
+        config,
+        vehicle=vehicle,
+        lane_decision=LaneDecision.CHANGE_LEFT,
+    )
+
+    np.testing.assert_allclose(features["topology_polyline"].numpy(), np.asarray([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+    assert calls == [LaneDecision.KEEP]
+
+
+def test_build_topology_polyline_from_live_vehicle_prefers_live_target_lane_geometry(monkeypatch):
+    lane = _FakeLane(length=50.0, lane_index=("s", "e", 1))
+    vehicle = _FakeVehicle(lane, position=[0.0, 0.0], heading_theta=0.0, speed_km_h=18.0)
+    live_polyline = np.asarray([[0.0, 0.0], [2.0, 0.0], [4.0, 0.0]], dtype=np.float32)
+
+    monkeypatch.setattr(
+        transfuser_features,
+        "_build_live_target_lane_polyline",
+        lambda vehicle_arg, lane_decision: live_polyline,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        transfuser_features,
+        "_build_mode_context_for_target_point",
+        lambda vehicle_arg: SimpleNamespace(
+            current_lane_polyline=np.asarray([[0.0, 0.0], [2.0, -2.0], [4.0, -4.0]], dtype=np.float32),
+            left_lane_polyline=None,
+            right_lane_polyline=None,
+            has_left_adjacent=False,
+            has_right_adjacent=False,
+        ),
+        raising=False,
+    )
+
+    topology_polyline = _build_topology_polyline_from_live_vehicle(vehicle, LaneDecision.KEEP).numpy()
+
+    np.testing.assert_allclose(topology_polyline, live_polyline)
+
+
 def test_compute_target_point_uses_expert_longitudinal_result_for_slow_front_vehicle(monkeypatch):
     config = build_transfuser_config(
         "small",
@@ -569,6 +634,26 @@ def test_compute_target_point_keep_lane_ignores_stale_outer_next_ref_lane(monkey
 
     np.testing.assert_allclose(target_point[1], 0.0, atol=1e-5)
     assert float(target_point[0]) >= 2.0
+
+
+def test_build_live_target_lane_polyline_keep_lane_ignores_stale_outer_next_ref_lane():
+    current_lane = _FakeLane(length=10.0, lateral_offset=0.0, lane_index=("a", "b", 0))
+    correct_next_lane = _FakeLane(length=40.0, lateral_offset=0.0, lane_index=("b", "c", 0))
+    stale_outer_lane = _FakeLane(length=40.0, lateral_offset=3.5, lane_index=("b", "c", 1))
+    current_map = _FakeMap({"a": {"b": [current_lane]}, "b": {"c": [correct_next_lane, stale_outer_lane]}})
+    vehicle = _FakeVehicle(
+        current_lane,
+        position=[8.0, 0.0],
+        heading_theta=0.0,
+        speed_km_h=18.0,
+        next_ref_lanes=[stale_outer_lane],
+    )
+    vehicle.engine = SimpleNamespace(current_map=current_map)
+
+    polyline = _build_live_target_lane_polyline(vehicle, LaneDecision.KEEP)
+
+    assert polyline is not None
+    assert float(polyline[min(5, polyline.shape[0] - 1), 1]) == 0.0
 
 
 def test_compute_target_point_ignores_adjacent_lane_vehicle_for_no_front_progress(monkeypatch):

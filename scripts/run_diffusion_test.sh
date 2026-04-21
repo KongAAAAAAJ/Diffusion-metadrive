@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_12/checkpoints/diffusion-epoch=43.ckpt}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_13/checkpoints/diffusion-epoch=25.ckpt}"
 TRAJECTORY_REG_DECODER_TYPE="${TRAJECTORY_REG_DECODER_TYPE:-gru}"  # mlp | gru
 SCENARIO_ID="${SCENARIO_ID:-S4_curve_following}"
 EPISODES="${EPISODES:-5}"
@@ -20,6 +20,7 @@ STEP_IMAGE_INTERVAL="${STEP_IMAGE_INTERVAL:-1}"
 OUTPUT_DIR="${OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed}"
 VIDEO_FPS="${VIDEO_FPS:-10}"
 TOPDOWN_CAMERA_HEIGHT="${TOPDOWN_CAMERA_HEIGHT:-80.0}"
+SHOW_TOPOLOGY_POLYLINE="${SHOW_TOPOLOGY_POLYLINE:-1}"
 
 "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.test_transfuser_policy \
   --checkpoint "${CHECKPOINT_PATH}" \
@@ -39,4 +40,5 @@ TOPDOWN_CAMERA_HEIGHT="${TOPDOWN_CAMERA_HEIGHT:-80.0}"
   --output-dir "${OUTPUT_DIR}" \
   --video-fps "${VIDEO_FPS}" \
   --topdown-camera-height "${TOPDOWN_CAMERA_HEIGHT}" \
+  --show-topology-polyline "${SHOW_TOPOLOGY_POLYLINE}" \
   --trajectory-reg-decoder-type "${TRAJECTORY_REG_DECODER_TYPE}"
