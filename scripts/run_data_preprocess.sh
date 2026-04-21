@@ -13,6 +13,7 @@ DATASET_NAME="${DATASET_NAME:-metaIDM_test}"
 INPUT_ROOT="${INPUT_ROOT:-${DATA_ROOT}/${DATASET_NAME}}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${DATA_ROOT}/${DATASET_NAME}_pp}"
 MODEL_SIZE="${MODEL_SIZE:-small}"
+MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-dir}"
 OVERWRITE="${OVERWRITE:-1}"
 SKIP_EXISTING="${SKIP_EXISTING:-0}"
@@ -21,6 +22,7 @@ SKIP_EXISTING="${SKIP_EXISTING:-0}"
     --input-root "${INPUT_ROOT}" \
     --output-root "${OUTPUT_ROOT}" \
     --output-format "${OUTPUT_FORMAT}" \
+    --model-config-path "${MODEL_CONFIG_PATH}" \
     --model-size "${MODEL_SIZE}" \
     --skip-existing "${SKIP_EXISTING}" \
     $([[ "${OVERWRITE}" == "1" ]] && printf '%s' "--overwrite")

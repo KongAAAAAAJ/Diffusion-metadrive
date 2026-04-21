@@ -149,7 +149,7 @@ def parse_args():
     parser.add_argument("--plan-anchor-path", type=str, default=None)
     parser.add_argument("--anchor-method", type=str, choices=("k_means", "dynamic"), default=None)
     parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default=None)
-    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line"), default=None)
+    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line", "multi_point"), default=None)
     parser.add_argument("--target-line-num-points", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=8)
@@ -215,6 +215,14 @@ def main():
     resolved_precision = resolve_precision(config.precision)
     print(f"[train] model_config_path={args.model_config_path}")
     print(f"[train] model_size={config.model_size}")
+    print(
+        "[train] mode_counts="
+        f"{config.mode_keep_lane_count}/"
+        f"{config.mode_lane_change_left_count}/"
+        f"{config.mode_lane_change_right_count}/"
+        f"{config.mode_emergency_stop_count} "
+        f"ego_fut_mode={config.ego_fut_mode}"
+    )
     print(
         "[train] dataloader "
         f"batch_size={config.batch_size} num_workers={config.num_workers} "

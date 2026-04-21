@@ -47,6 +47,7 @@ done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
+MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/scenario/scenario_preview}"
 DATASET_NAME="${SCENARIO_ID}"
 DATASET_ROOT="${OUTPUT_ROOT}/${DATASET_NAME}"
@@ -106,6 +107,7 @@ while true; do
         --target-samples "${next_target_samples}" \
         --output-root "${OUTPUT_ROOT}" \
         --dataset-name "${DATASET_NAME}" \
+        --model-config-path "${MODEL_CONFIG_PATH}" \
         --save-videos true \
         --expert-type idm \
         --start-seed 59 \

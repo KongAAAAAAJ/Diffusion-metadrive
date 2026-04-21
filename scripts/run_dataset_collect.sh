@@ -3,6 +3,7 @@ set -euo pipefail
 
 PYTHON_BIN="/home/kong/anaconda3/envs/meta_drive/bin/python"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
 OUTPUT_ROOT="/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets"
 DATASET_NAME="metaIDM_test"
 DATASET_ROOT="${OUTPUT_ROOT}/${DATASET_NAME}"
@@ -19,6 +20,7 @@ mkdir -p "${REPORT_DIR}"
     --target-samples 2000 \
     --output-root "${OUTPUT_ROOT}" \
     --dataset-name "${DATASET_NAME}" \
+    --model-config-path "${MODEL_CONFIG_PATH}" \
     --save-videos true \
     --expert-type idm \
     --start-seed 3 \

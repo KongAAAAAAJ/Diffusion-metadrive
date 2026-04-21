@@ -6,6 +6,8 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import yaml
 
+from metadrive.policy.diffusion_policy.mode_definitions import mode_slot_count
+
 
 @dataclass
 class TrajectorySampling:
@@ -94,6 +96,10 @@ class TransfuserConfig:
 
     # dynamic anchor / mode config
     use_dynamic_anchors: bool = True
+    mode_keep_lane_count: int = 3
+    mode_lane_change_left_count: int = 3
+    mode_lane_change_right_count: int = 3
+    mode_emergency_stop_count: int = 1
     mode_keep_high_speed_mps: float = 13.0    # ~47 km/h
     mode_keep_medium_speed_mps: float = 8.0   # ~29 km/h
     mode_keep_low_speed_mps: float = 3.0      # ~11 km/h
@@ -191,11 +197,22 @@ class TransfuserConfig:
             raise ValueError(
                 f"trajectory_reg_decoder_type must be 'mlp' or 'gru', got {self.trajectory_reg_decoder_type!r}"
             )
-        if self.target_guidance_type not in ("point", "line"):
+        if self.target_guidance_type not in ("point", "line", "multi_point"):
             raise ValueError(
-                f"target_guidance_type must be 'point' or 'line', got {self.target_guidance_type!r}"
+                f"target_guidance_type must be 'point', 'line', or 'multi_point', got {self.target_guidance_type!r}"
             )
         self.target_line_num_points = max(1, int(self.target_line_num_points))
+        self.mode_keep_lane_count = max(1, int(self.mode_keep_lane_count))
+        self.mode_lane_change_left_count = max(1, int(self.mode_lane_change_left_count))
+        self.mode_lane_change_right_count = max(1, int(self.mode_lane_change_right_count))
+        self.mode_emergency_stop_count = max(1, int(self.mode_emergency_stop_count))
+        if self.use_dynamic_anchors:
+            self.ego_fut_mode = mode_slot_count(
+                self.mode_keep_lane_count,
+                self.mode_lane_change_left_count,
+                self.mode_lane_change_right_count,
+                self.mode_emergency_stop_count,
+            )
         if self.trajectory_gru_hidden_dim is None:
             self.trajectory_gru_hidden_dim = self.tf_d_model
 
@@ -285,6 +302,10 @@ def diffusion_model_config_to_overrides(model_config: Dict[str, Any]) -> Dict[st
         "trajectory_reg_decoder_type",
         "target_guidance_type",
         "target_line_num_points",
+        "mode_keep_lane_count",
+        "mode_lane_change_left_count",
+        "mode_lane_change_right_count",
+        "mode_emergency_stop_count",
     ):
         if key in model_config:
             overrides[key] = model_config[key]

@@ -151,7 +151,19 @@ class TransfuserPolicy(BasePolicy):
         """Build coarse_trajectories and mode_valid_mask from the live vehicle state."""
         from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
         from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
-        from metadrive.policy.diffusion_policy.mode_definitions import NUM_MODE_SLOTS
+        from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots, mode_slot_count
+        mode_slots = build_mode_slots(
+            keep_lane_count=self._model_config.mode_keep_lane_count,
+            lane_change_left_count=self._model_config.mode_lane_change_left_count,
+            lane_change_right_count=self._model_config.mode_lane_change_right_count,
+            emergency_stop_count=self._model_config.mode_emergency_stop_count,
+        )
+        num_slots = mode_slot_count(
+            self._model_config.mode_keep_lane_count,
+            self._model_config.mode_lane_change_left_count,
+            self._model_config.mode_lane_change_right_count,
+            self._model_config.mode_emergency_stop_count,
+        )
         try:
             current_map = getattr(getattr(self.control_object, "engine", None), "current_map", None)
             ctx = build_mode_context_from_vehicle(self.control_object, current_map=current_map)
@@ -160,16 +172,21 @@ class TransfuserPolicy(BasePolicy):
                 keep_lane_medium_speed_mps=self._model_config.mode_keep_medium_speed_mps,
                 keep_lane_low_speed_mps=self._model_config.mode_keep_low_speed_mps,
                 emergency_decel_mps2=self._model_config.mode_emergency_decel_mps2,
+                keep_lane_level_count=self._model_config.mode_keep_lane_count,
+                lane_change_left_level_count=self._model_config.mode_lane_change_left_count,
+                lane_change_right_level_count=self._model_config.mode_lane_change_right_count,
+                emergency_stop_level_count=self._model_config.mode_emergency_stop_count,
+                mode_slots=mode_slots,
             )
             out = gen.generate(ctx)
             return {
-                "coarse_trajectories": torch.from_numpy(out.coarse_trajectories),  # (10, 8, 2)
-                "mode_valid_mask": torch.from_numpy(out.mode_valid_mask),           # (10,) bool
+                "coarse_trajectories": torch.from_numpy(out.coarse_trajectories),
+                "mode_valid_mask": torch.from_numpy(out.mode_valid_mask),
             }
         except Exception:
             return {
-                "coarse_trajectories": torch.zeros((NUM_MODE_SLOTS, 8, 2), dtype=torch.float32),
-                "mode_valid_mask": torch.zeros((NUM_MODE_SLOTS,), dtype=torch.bool),
+                "coarse_trajectories": torch.zeros((num_slots, 8, 2), dtype=torch.float32),
+                "mode_valid_mask": torch.zeros((num_slots,), dtype=torch.bool),
             }
 
     def _decide_lane_decision(self) -> LaneDecision:
@@ -290,6 +307,16 @@ class TransfuserPolicy(BasePolicy):
             if mode_feature_key in features:
                 val = features[mode_feature_key]
                 self.action_info[mode_feature_key] = val.detach().cpu().numpy() if isinstance(val, torch.Tensor) else val
+        from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots
+        self.action_info["mode_slot_names"] = [
+            slot.name
+            for slot in build_mode_slots(
+                keep_lane_count=self._model_config.mode_keep_lane_count,
+                lane_change_left_count=self._model_config.mode_lane_change_left_count,
+                lane_change_right_count=self._model_config.mode_lane_change_right_count,
+                emergency_stop_count=self._model_config.mode_emergency_stop_count,
+            )
+        ]
         if "trajectory_candidates" in predictions:
             self.action_info["trajectory_candidates"] = (
                 predictions["trajectory_candidates"][0].detach().cpu().numpy()

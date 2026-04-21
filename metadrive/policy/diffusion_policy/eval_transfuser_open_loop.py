@@ -5,7 +5,7 @@ import csv
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import cv2
 import matplotlib
@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from metadrive.policy.diffusion_policy.mode_definitions import get_mode_slot
+from metadrive.policy.diffusion_policy.mode_definitions import ModeSlot, build_mode_slots, get_mode_slot
 from metadrive.policy.diffusion_policy.transfuser_agent import TransfuserAgent
 from metadrive.policy.diffusion_policy.transfuser_callback import render_open_loop_prediction
 from metadrive.policy.diffusion_policy.transfuser_config import (
@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument("--plan-anchor-path", type=str, default=None)
     parser.add_argument("--anchor-method", type=str, choices=("k_means", "dynamic"), default=None)
     parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default=None)
-    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line"), default=None)
+    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line", "multi_point"), default=None)
     parser.add_argument("--target-line-num-points", type=int, default=None)
     parser.add_argument("--overlay-all-anchors", type=int, choices=(0, 1), default=1)
     parser.add_argument("--verify-dataset-before-eval", type=int, choices=(0, 1), default=1)
@@ -291,7 +291,7 @@ def write_open_loop_csv(records: List[Dict], output_path: Path) -> None:
             )
 
 
-def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
+def summarize_open_loop_records(records: List[Dict], mode_slots: Sequence[ModeSlot] | None = None) -> Dict[str, object]:
     if not records:
         return {
             "num_samples": 0,
@@ -347,6 +347,18 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
 
     def _lateral_group(slot: int) -> str:
         """Map slot index to lateral group name."""
+        if mode_slots is not None:
+            try:
+                slot_def = get_mode_slot(int(slot), mode_slots)
+            except Exception:
+                return "OTHER"
+            if slot_def.lateral_direction == "left":
+                return "LEFT"
+            if slot_def.lateral_direction == "right":
+                return "RIGHT"
+            if slot_def.semantic_group == "KEEP_LANE":
+                return "KEEP"
+            return "OTHER"
         if 0 <= slot <= 2:
             return "KEEP"
         if 3 <= slot <= 5:
@@ -378,7 +390,7 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
         total = per_slot_total[slot]
         correct = per_slot_correct.get(slot, 0)
         try:
-            slot_name = get_mode_slot(slot).name
+            slot_name = get_mode_slot(slot, mode_slots).name
         except Exception:
             slot_name = f"MODE_{slot}"
         per_slot_accuracy[slot_name] = {
@@ -391,13 +403,13 @@ def summarize_open_loop_records(records: List[Dict]) -> Dict[str, object]:
     confusion_named: dict = {}
     for gt_slot, pred_counter in sorted(confusion.items()):
         try:
-            gt_name = get_mode_slot(gt_slot).name
+            gt_name = get_mode_slot(gt_slot, mode_slots).name
         except Exception:
             gt_name = f"MODE_{gt_slot}"
         confusion_named[gt_name] = {}
         for pred_slot, cnt in sorted(pred_counter.items()):
             try:
-                pred_name = get_mode_slot(pred_slot).name
+                pred_name = get_mode_slot(pred_slot, mode_slots).name
             except Exception:
                 pred_name = f"MODE_{pred_slot}"
             confusion_named[gt_name][pred_name] = int(cnt)
@@ -559,7 +571,15 @@ def evaluate_open_loop(
             global_index += 1
         print(f"[open_loop] processed_batches={batch_idx + 1} processed_samples={global_index}")
 
-    metrics = summarize_open_loop_records(records)
+    metrics = summarize_open_loop_records(
+        records,
+        build_mode_slots(
+            keep_lane_count=config.mode_keep_lane_count,
+            lane_change_left_count=config.mode_lane_change_left_count,
+            lane_change_right_count=config.mode_lane_change_right_count,
+            emergency_stop_count=config.mode_emergency_stop_count,
+        ),
+    )
     summary = {
         "checkpoint": getattr(model, "_checkpoint_path", None),
         "dataset_root": str(dataset.dataset_root),
@@ -625,6 +645,14 @@ def main():
     config = build_transfuser_config(
         resolved_model_size,
         **config_overrides,
+    )
+    print(
+        "[open_loop] mode_counts="
+        f"{config.mode_keep_lane_count}/"
+        f"{config.mode_lane_change_left_count}/"
+        f"{config.mode_lane_change_right_count}/"
+        f"{config.mode_emergency_stop_count} "
+        f"ego_fut_mode={config.ego_fut_mode}"
     )
     device = resolve_device(args.device)
     if bool(args.verify_dataset_before_eval):

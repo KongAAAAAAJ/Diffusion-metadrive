@@ -92,6 +92,7 @@ run_collect_once() {
         --target-samples "${TARGET_SAMPLES}" \
         --output-root "${OUTPUT_ROOT}" \
         --dataset-name "${DATASET_NAME}" \
+        --model-config-path "${MODEL_CONFIG_PATH}" \
         --expert-type "${EXPERT_TYPE}" \
         --start-seed "${seed}" \
         --trajectory-correction-enabled "${TRAJECTORY_CORRECTION_ENABLED}" \

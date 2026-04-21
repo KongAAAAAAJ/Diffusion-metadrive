@@ -1,8 +1,13 @@
 # Single-vehicle diffusion model/runtime parameters shared by train, eval, test, and preprocess scripts.
-# Switch back to point guidance by setting target_guidance_type: point.
+# target_guidance_type: point | line | multi_point.
+# multi_point uses each mode anchor endpoint as that mode's local guidance point.
 model_size: small
 anchor_method: dynamic  # dynamic | k_means
 plan_anchor_path: metadrive/exp_dataset/anchors.npy
 trajectory_reg_decoder_type: gru  # mlp | gru
-target_guidance_type: point  # point | line  # !line效果差，不使用，后续删掉
-target_line_num_points: 8
+target_guidance_type: multi_point  # point | # !line删掉 | multi_point
+target_line_num_points: 8  # 对应line类型的target_guidance，表示每条线使用多少个点进行表示
+mode_keep_lane_count: 5
+mode_lane_change_left_count: 5
+mode_lane_change_right_count: 5
+mode_emergency_stop_count: 1

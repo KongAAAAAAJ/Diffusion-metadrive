@@ -23,6 +23,7 @@ from metadrive.policy.diffusion_policy.transfuser_config import (
     resolve_model_config_value,
     transfuser_config_to_dict,
 )
+from metadrive.policy.diffusion_policy.mode_visualization import mode_color
 from metadrive.policy.diffusion_policy.transfuser_policy import TransfuserPolicy
 
 MULTIMODAL_SELECTED_COLOR = "#C76B00"
@@ -30,6 +31,61 @@ MULTIMODAL_OTHER_COLOR = "#1F6F8B"
 ROAD_BOUNDARY_COLOR = "#7A7A7A"
 ACTUAL_TRAJECTORY_COLOR = "#1D4ED8"
 DEFAULT_MODEL_CONFIG_PATH = "configs/diffusion/model.yaml"
+
+PAPER_SELECTED_TRAJ_COLOR = (0, 94, 213)  # Okabe-Ito vermillion in BGR
+PAPER_OTHER_TRAJ_COLOR = (178, 114, 86)  # sky blue
+PAPER_ANCHOR_COLOR = (226, 210, 190)  # desaturated blue-gray
+PAPER_TARGET_POINT_COLOR = (86, 180, 230)  # orange/yellow
+PAPER_TARGET_LINE_COLOR = (115, 158, 0)  # bluish green
+PAPER_TOPOLOGY_COLOR = (204, 121, 167)  # reddish purple
+PAPER_MULTI_POINT_COLOR = (204, 121, 167)
+PAPER_MULTI_POINT_SELECTED_COLOR = (92, 61, 142)  # deep purple
+PAPER_EGO_FILL_COLOR = (115, 158, 0)
+PAPER_EGO_EDGE_COLOR = (70, 110, 0)
+PAPER_INVALID_MODE_COLOR = (170, 170, 170)
+
+
+def _level_fraction_from_name(mode_name: str, mode_slot_names: list[str]) -> float:
+    prefix = mode_name.rsplit("_", 1)[0]
+    group_names = [name for name in mode_slot_names if name.startswith(prefix + "_")]
+    try:
+        level_index = int(mode_name.rsplit("_", 1)[1])
+    except Exception:
+        return 1.0
+    if len(group_names) <= 1:
+        return 1.0
+    return 1.0 - float(level_index) / float(len(group_names) - 1)
+
+
+def _plot_color_for_mode_index(mode_index: int, mode_slot_names: list[str] | None = None) -> tuple[int, int, int]:
+    names = mode_slot_names or []
+    mode_name = names[int(mode_index)] if 0 <= int(mode_index) < len(names) else ""
+    if mode_name:
+        base = mode_color(mode_name)
+        if base != (255, 255, 255):
+            return base
+        fraction = _level_fraction_from_name(mode_name, names)
+        if mode_name.startswith("KEEP_LANE_LEVEL_"):
+            return (245, int(120 + 80 * fraction), 11)
+        if mode_name.startswith("LANE_CHANGE_LEFT_LEVEL_"):
+            return (22, int(120 + 100 * fraction), 74)
+        if mode_name.startswith("LANE_CHANGE_RIGHT_LEVEL_"):
+            return (13, int(130 + 100 * fraction), 136)
+
+    # Stable fallback for old records that do not carry mode names.
+    palette = (
+        (245, 158, 11),
+        (234, 88, 12),
+        (217, 70, 239),
+        (22, 163, 74),
+        (34, 197, 94),
+        (134, 239, 172),
+        (13, 148, 136),
+        (16, 185, 129),
+        (153, 246, 228),
+        (239, 68, 68),
+    )
+    return palette[int(mode_index) % len(palette)]
 
 
 @dataclass
@@ -39,7 +95,10 @@ class StepTrajectoryPlotRecord:
     selected_trajectory: np.ndarray | None
     multimodal_trajectories: np.ndarray | None
     selected_mode_idx: int | None
+    mode_slot_names: list[str] | None = None
+    mode_valid_mask: np.ndarray | None = None
     dynamic_anchor_trajectories: np.ndarray | None = None
+    multi_point_world: np.ndarray | None = None
     target_point_world: np.ndarray | None = None
     target_line_world: np.ndarray | None = None
     topology_polyline_world: np.ndarray | None = None
@@ -104,7 +163,7 @@ def parse_args(argv=None):
     parser.add_argument("--traffic-density", type=float, default=0.06)
     parser.add_argument("--plan-anchor-path", type=str, default=None)
     parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default=None)
-    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line"), default=None)
+    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line", "multi_point"), default=None)
     parser.add_argument("--target-line-num-points", type=int, default=None)
     parser.add_argument("--save-3d-video", type=int, choices=(0, 1), default=0)
     parser.add_argument("--save-2d-video", type=int, choices=(0, 1), default=1)
@@ -642,6 +701,7 @@ def _record_step_visualization(
 
     dynamic_anchor_candidates = final_info.get("coarse_trajectories")
     dynamic_anchor_world_array = None
+    multi_point_world_array = None
     if dynamic_anchor_candidates is not None:
         anchor_world = []
         for candidate in np.asarray(dynamic_anchor_candidates):
@@ -656,6 +716,8 @@ def _record_step_visualization(
                 )
             anchor_world.append(candidate_world)
         dynamic_anchor_world_array = np.asarray(anchor_world, dtype=np.float64)
+        if dynamic_anchor_world_array.ndim == 3 and dynamic_anchor_world_array.shape[1] > 0:
+            multi_point_world_array = dynamic_anchor_world_array[:, -1, :2].copy()
 
     target_point = final_info.get("target_point")
     target_point_world = None
@@ -711,7 +773,14 @@ def _record_step_visualization(
                 selected_trajectory=selected_world_array,
                 multimodal_trajectories=candidates_world_array,
                 selected_mode_idx=(int(mode_idx) if mode_idx is not None else None),
+                mode_slot_names=list(final_info.get("mode_slot_names", [])) if final_info.get("mode_slot_names") else None,
+                mode_valid_mask=(
+                    np.asarray(final_info.get("mode_valid_mask"), dtype=bool)
+                    if final_info.get("mode_valid_mask") is not None
+                    else None
+                ),
                 dynamic_anchor_trajectories=dynamic_anchor_world_array,
+                multi_point_world=multi_point_world_array,
                 target_point_world=target_point_world,
                 target_line_world=target_line_world,
                 topology_polyline_world=topology_polyline_world,
@@ -851,14 +920,25 @@ def _save_step_trajectory_plot(
         cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0.0, dst=canvas)
 
     if step_record.dynamic_anchor_trajectories is not None:
-        for anchor in np.asarray(step_record.dynamic_anchor_trajectories, dtype=np.float64):
+        valid_mask = (
+            np.asarray(step_record.mode_valid_mask, dtype=bool)
+            if step_record.mode_valid_mask is not None
+            else None
+        )
+        for mode_i, anchor in enumerate(np.asarray(step_record.dynamic_anchor_trajectories, dtype=np.float64)):
             full_path = np.vstack([ego, anchor])
-            _draw_world_polyline(full_path, (205, 214, 244), 2, alpha=0.7)
+            is_valid = valid_mask is None or mode_i >= len(valid_mask) or bool(valid_mask[mode_i])
+            anchor_color = (
+                _plot_color_for_mode_index(mode_i, step_record.mode_slot_names)
+                if is_valid
+                else PAPER_INVALID_MODE_COLOR
+            )
+            _draw_world_polyline(full_path, anchor_color, 1, alpha=0.24 if is_valid else 0.16)
 
     if show_topology_polyline and step_record.topology_polyline_world is not None:
         topology_world = np.asarray(step_record.topology_polyline_world, dtype=np.float64)
         if topology_world.ndim == 2 and topology_world.shape[0] >= 2:
-            _draw_world_polyline(topology_world, (176, 132, 255), 2, alpha=0.9)
+            _draw_world_polyline(topology_world, PAPER_TOPOLOGY_COLOR, 2, alpha=0.74)
 
     # ── 2. Draw non-selected modes first, selected mode last (on top) ──────────
     selected_mode_idx = step_record.selected_mode_idx
@@ -869,19 +949,21 @@ def _save_step_trajectory_plot(
             if selected_mode_idx is not None and mode_i == int(selected_mode_idx):
                 continue
             full_path = np.vstack([ego, candidates_array[mode_i]])
-            _draw_world_polyline(full_path, (111, 179, 206), 2, alpha=0.72)
+            mode_color_i = _plot_color_for_mode_index(mode_i, step_record.mode_slot_names)
+            _draw_world_polyline(full_path, mode_color_i, 2, alpha=0.62)
         # Pass 2: selected mode drawn last → always on top
         if selected_mode_idx is not None and selected_mode_idx < candidates_array.shape[0]:
             full_path = np.vstack([ego, candidates_array[int(selected_mode_idx)]])
-            _draw_world_polyline(full_path, (242, 153, 74), 4, alpha=1.0)
+            selected_color = _plot_color_for_mode_index(int(selected_mode_idx), step_record.mode_slot_names)
+            _draw_world_polyline(full_path, selected_color, 4, alpha=0.98)
     elif step_record.selected_trajectory is not None:
         selected_path = np.vstack([ego, np.asarray(step_record.selected_trajectory, dtype=np.float64)])
-        _draw_world_polyline(selected_path, (242, 153, 74), 4, alpha=1.0)
+        _draw_world_polyline(selected_path, PAPER_SELECTED_TRAJ_COLOR, 4, alpha=0.96)
 
     # Ego dot (draw after trajectories so it's always on top)
     ego_zoomed = np.round(_proj_zoomed(ego)).astype(np.int32)
-    cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, (70, 190, 90), thickness=-1, lineType=cv2.LINE_AA)
-    cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, (30, 140, 50), thickness=1, lineType=cv2.LINE_AA)
+    cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, PAPER_EGO_FILL_COLOR, thickness=-1, lineType=cv2.LINE_AA)
+    cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, PAPER_EGO_EDGE_COLOR, thickness=1, lineType=cv2.LINE_AA)
 
     if step_record.target_line_world is not None:
         target_line_world = np.asarray(step_record.target_line_world, dtype=np.float64)
@@ -892,10 +974,43 @@ def _save_step_trajectory_plot(
                     canvas,
                     tuple(int(v) for v in line_xy),
                     3,
-                    (45, 165, 45),
+                    PAPER_TARGET_LINE_COLOR,
                     thickness=-1,
                     lineType=cv2.LINE_AA,
                 )
+
+    if step_record.multi_point_world is not None:
+        multi_points = np.asarray(step_record.multi_point_world, dtype=np.float64)
+        if multi_points.ndim == 2 and multi_points.shape[0] >= 1:
+            for mode_i, multi_point in enumerate(multi_points):
+                point_xy = np.round(_proj_zoomed(multi_point)).astype(np.int32)
+                is_selected = selected_mode_idx is not None and mode_i == int(selected_mode_idx)
+                if is_selected:
+                    cv2.circle(
+                        canvas,
+                        tuple(int(v) for v in point_xy),
+                        7,
+                        PAPER_MULTI_POINT_SELECTED_COLOR,
+                        thickness=-1,
+                        lineType=cv2.LINE_AA,
+                    )
+                    cv2.circle(
+                        canvas,
+                        tuple(int(v) for v in point_xy),
+                        8,
+                        (35, 35, 35),
+                        thickness=1,
+                        lineType=cv2.LINE_AA,
+                    )
+                else:
+                    cv2.circle(
+                        canvas,
+                        tuple(int(v) for v in point_xy),
+                        3,
+                        PAPER_MULTI_POINT_COLOR,
+                        thickness=-1,
+                        lineType=cv2.LINE_AA,
+                    )
 
     if step_record.target_point_world is not None:
         target_xy = np.round(_proj_zoomed(np.asarray(step_record.target_point_world, dtype=np.float64))).astype(np.int32)
@@ -903,7 +1018,7 @@ def _save_step_trajectory_plot(
             canvas,
             tuple(int(v) for v in target_xy),
             5,
-            (0, 0, 220),
+            PAPER_TARGET_POINT_COLOR,
             thickness=-1,
             lineType=cv2.LINE_AA,
         )
@@ -911,20 +1026,32 @@ def _save_step_trajectory_plot(
             canvas,
             tuple(int(v) for v in target_xy),
             5,
-            (0, 0, 160),
+            (45, 90, 140),
             thickness=1,
             lineType=cv2.LINE_AA,
         )
 
     # ── 3. Info box with selected mode name ────────────────────────────────────
-    try:
-        from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
-        mode_name = MODE_SLOTS[int(selected_mode_idx)].name if selected_mode_idx is not None else "N/A"
-    except Exception:
-        mode_name = f"mode_{selected_mode_idx}" if selected_mode_idx is not None else "N/A"
+    if selected_mode_idx is None:
+        mode_name = "N/A"
+    elif step_record.mode_slot_names and 0 <= int(selected_mode_idx) < len(step_record.mode_slot_names):
+        mode_name = step_record.mode_slot_names[int(selected_mode_idx)]
+    else:
+        try:
+            from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
+            mode_name = MODE_SLOTS[int(selected_mode_idx)].name
+        except Exception:
+            mode_name = f"mode_{selected_mode_idx}"
+    mode_name_color = (
+        _plot_color_for_mode_index(int(selected_mode_idx), step_record.mode_slot_names)
+        if selected_mode_idx is not None
+        else PAPER_SELECTED_TRAJ_COLOR
+    )
 
-    box_x1, box_y1, box_x2, box_y2 = 10, 10, 420, 146
-    cv2.rectangle(canvas, (box_x1, box_y1), (box_x2, box_y2), (247, 248, 250), thickness=-1)
+    box_x1, box_y1, box_x2, box_y2 = 10, 10, 430, 164
+    overlay = canvas.copy()
+    cv2.rectangle(overlay, (box_x1, box_y1), (box_x2, box_y2), (250, 250, 250), thickness=-1)
+    cv2.addWeighted(overlay, 0.88, canvas, 0.12, 0.0, dst=canvas)
     cv2.rectangle(canvas, (box_x1, box_y1), (box_x2, box_y2), (210, 214, 220), thickness=1)
     cv2.putText(
         canvas,
@@ -937,7 +1064,7 @@ def _save_step_trajectory_plot(
         canvas,
         f"mode: {mode_name}",
         (20, 52),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 100, 20), 2, cv2.LINE_AA,
+        cv2.FONT_HERSHEY_SIMPLEX, 0.52, mode_name_color, 2, cv2.LINE_AA,
     )
     # ── 3b. Speed and acceleration ───
     _speed_str = f"{step_record.ego_speed_km_h:.1f} km/h" if step_record.ego_speed_km_h is not None else "-- km/h"
@@ -948,12 +1075,13 @@ def _save_step_trajectory_plot(
         (20, 72),
         cv2.FONT_HERSHEY_SIMPLEX, 0.44, (40, 40, 120), 1, cv2.LINE_AA,
     )
-    cv2.putText(canvas, "selected: orange", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (242, 153, 74), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "others: teal", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (111, 179, 206), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "anchors: light blue", (160, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (140, 150, 210), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "target line: green", (20, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (60, 190, 60), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "selected: mode color", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (40, 40, 40), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "others: mode colors", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (40, 40, 40), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "anchors: same colors, faint", (178, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (90, 90, 90), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "target line: green", (20, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TARGET_LINE_COLOR, 1, cv2.LINE_AA)
     if show_topology_polyline:
-        cv2.putText(canvas, "topology: purple", (180, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (176, 132, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "topology: purple", (180, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TOPOLOGY_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "multi-point: purple", (20, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_MULTI_POINT_SELECTED_COLOR, 1, cv2.LINE_AA)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
@@ -1379,6 +1507,14 @@ def main():
     transfuser_config = build_transfuser_config(
         resolved_model_size,
         **_model_overrides_from_args(args, model_config),
+    )
+    print(
+        "[test] mode_counts="
+        f"{transfuser_config.mode_keep_lane_count}/"
+        f"{transfuser_config.mode_lane_change_left_count}/"
+        f"{transfuser_config.mode_lane_change_right_count}/"
+        f"{transfuser_config.mode_emergency_stop_count} "
+        f"ego_fut_mode={transfuser_config.ego_fut_mode}"
     )
     anchors = None
     anchor_path = Path(transfuser_config.plan_anchor_path)

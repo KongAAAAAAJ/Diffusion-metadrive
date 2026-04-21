@@ -6,7 +6,7 @@ from typing import Callable, Iterable, Sequence
 import cv2
 import numpy as np
 
-from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS, ModeSlot
+from metadrive.policy.diffusion_policy.mode_definitions import BehaviorType, MODE_SLOTS, ModeSlot
 
 
 _COLOR_BY_MODE_NAME = {
@@ -23,6 +23,24 @@ _COLOR_BY_MODE_NAME = {
 }
 _INVALID_COLOR = (170, 170, 170)
 _RECOMMENDED_COLOR = (255, 255, 255)
+
+
+def mode_color(slot: ModeSlot | str) -> tuple[int, int, int]:
+    if isinstance(slot, str):
+        if slot in _COLOR_BY_MODE_NAME:
+            return _COLOR_BY_MODE_NAME[slot]
+        if slot == "EMERGENCY_STOP" or slot.startswith("EMERGENCY_STOP_LEVEL_"):
+            return (239, 68, 68)
+        return (255, 255, 255)
+    if slot.name in _COLOR_BY_MODE_NAME:
+        return _COLOR_BY_MODE_NAME[slot.name]
+    if slot.semantic_group == "KEEP_LANE":
+        return (245, int(120 + 80 * slot.level_fraction), 11)
+    if slot.lateral_direction == "left":
+        return (22, int(120 + 100 * slot.level_fraction), 74)
+    if slot.lateral_direction == "right":
+        return (13, int(130 + 100 * slot.level_fraction), 136)
+    return (239, 68, 68)
 
 
 @dataclass
@@ -43,6 +61,7 @@ class ModeOverlayRenderContext:
     has_right_branch: bool
     recommended_mode_index: int | None = None
     world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None
+    mode_slots: Sequence[ModeSlot] | None = None
 
 
 def _mode_short_name(slot: ModeSlot) -> str:
@@ -58,14 +77,32 @@ def _mode_short_name(slot: ModeSlot) -> str:
         "LANE_CHANGE_RIGHT_LOW": "LC_R_L",
         "EMERGENCY_STOP": "STOP",
     }
-    return mapping.get(slot.name, slot.name)
+    if slot.name in mapping:
+        return mapping[slot.name]
+    if slot.semantic_group == "KEEP_LANE":
+        return f"KL_{slot.level_index}"
+    if slot.lateral_direction == "left":
+        return f"LC_L_{slot.level_index}"
+    if slot.lateral_direction == "right":
+        return f"LC_R_{slot.level_index}"
+    if slot.semantic_group == "EMERGENCY_STOP":
+        return "STOP"
+    return slot.name
 
 
-def pick_recommended_mode(valid_mask: np.ndarray) -> int | None:
-    priority = (4, 7, 3, 6, 5, 8, 1, 0, 2, 9)
-    for index in priority:
-        if index < len(valid_mask) and bool(valid_mask[index]):
-            return int(index)
+def pick_recommended_mode(valid_mask: np.ndarray, mode_slots: Sequence[ModeSlot] | None = None) -> int | None:
+    slots = MODE_SLOTS if mode_slots is None else tuple(mode_slots)
+    grouped_priority = (
+        [s.index for s in slots if s.behavior_type == BehaviorType.LANE_CHANGE and 0.3 <= s.level_fraction <= 0.8],
+        [s.index for s in slots if s.behavior_type == BehaviorType.LANE_CHANGE],
+        [s.index for s in slots if s.semantic_group == "KEEP_LANE" and 0.3 <= s.level_fraction <= 0.8],
+        [s.index for s in slots if s.semantic_group == "KEEP_LANE"],
+        [s.index for s in slots if s.semantic_group == "EMERGENCY_STOP"],
+    )
+    for group in grouped_priority:
+        for index in group:
+            if index < len(valid_mask) and bool(valid_mask[index]):
+                return int(index)
     return None
 
 
@@ -125,10 +162,12 @@ def _world_to_screen(
 
 
 def _draw_mode_table(image: np.ndarray, valid_mask: np.ndarray, render_context: ModeOverlayRenderContext) -> None:
+    slots = MODE_SLOTS if render_context.mode_slots is None else tuple(render_context.mode_slots)
     x = 14
     y = 20
-    cv2.rectangle(image, (8, 8), (355, 222), (247, 248, 250), thickness=-1)
-    cv2.rectangle(image, (8, 8), (355, 222), (210, 214, 220), thickness=1)
+    table_height = min(760, 78 + 16 * len(slots))
+    cv2.rectangle(image, (8, 8), (380, table_height), (247, 248, 250), thickness=-1)
+    cv2.rectangle(image, (8, 8), (380, table_height), (210, 214, 220), thickness=1)
     cv2.putText(
         image,
         f"{render_context.scenario_id} | {render_context.local_route}",
@@ -150,10 +189,10 @@ def _draw_mode_table(image: np.ndarray, valid_mask: np.ndarray, render_context: 
     branch_text = f"left_branch={int(render_context.has_left_branch)} right_branch={int(render_context.has_right_branch)}"
     cv2.putText(image, branch_text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (55, 55, 55), 1, cv2.LINE_AA)
     y += 18
-    for slot in MODE_SLOTS:
+    for slot in slots:
         is_valid = bool(valid_mask[slot.index])
         state = "valid" if is_valid else "invalid"
-        color = _INVALID_COLOR if not is_valid else _COLOR_BY_MODE_NAME.get(slot.name, (255, 255, 255))
+        color = _INVALID_COLOR if not is_valid else mode_color(slot)
         cv2.putText(
             image,
             f"{slot.index}: {slot.name} [{slot.speed_profile.name}] {state}",
@@ -174,7 +213,8 @@ def overlay_mode_trajectories_on_frame(
     include_invalid: bool = True,
 ) -> np.ndarray:
     image = np.asarray(render_context.frame).copy()
-    for slot, trajectory_xy in zip(MODE_SLOTS, np.asarray(coarse_trajectories, dtype=np.float32)):
+    slots = MODE_SLOTS if render_context.mode_slots is None else tuple(render_context.mode_slots)
+    for slot, trajectory_xy in zip(slots, np.asarray(coarse_trajectories, dtype=np.float32)):
         is_valid = bool(mode_valid_mask[slot.index])
         if not is_valid and not include_invalid:
             continue
@@ -205,7 +245,7 @@ def overlay_mode_trajectories_on_frame(
                 render_context.ego_heading_rad,
             )
         polyline = np.round(screen_xy).astype(np.int32).reshape(-1, 1, 2)
-        color = _COLOR_BY_MODE_NAME.get(slot.name, (255, 255, 255))
+        color = mode_color(slot)
         if not is_valid:
             color = _INVALID_COLOR
         thickness = 3 if render_context.recommended_mode_index == slot.index else 2

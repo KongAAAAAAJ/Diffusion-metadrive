@@ -30,6 +30,8 @@ PROCESSED_FIELDS = (
     "target_point",
     "target_line",
     "topology_polyline",
+    "coarse_trajectories",
+    "mode_valid_mask",
     "trajectory",
     "agent_states",
     "agent_labels",
@@ -189,6 +191,8 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
         processed["target_point"].append(tensor_to_numpy(features["target_point"]).astype(np.float32))
         processed["target_line"].append(tensor_to_numpy(features["target_line"]).astype(np.float32))
         processed["topology_polyline"].append(tensor_to_numpy(targets["topology_polyline"]).astype(np.float32))
+        processed["coarse_trajectories"].append(tensor_to_numpy(features["coarse_trajectories"]).astype(np.float32))
+        processed["mode_valid_mask"].append(tensor_to_numpy(features["mode_valid_mask"]).astype(bool))
         processed["trajectory"].append(tensor_to_numpy(targets["trajectory"]).astype(np.float32))
         processed["agent_states"].append(tensor_to_numpy(targets["agent_states"]).astype(np.float32))
         processed["agent_labels"].append(tensor_to_numpy(targets["agent_labels"]).astype(bool))

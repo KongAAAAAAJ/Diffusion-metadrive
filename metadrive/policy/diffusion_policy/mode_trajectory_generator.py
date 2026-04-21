@@ -14,10 +14,9 @@ from metadrive.policy.diffusion_policy.mode_feasibility import (
 )
 from metadrive.policy.diffusion_policy.mode_definitions import (
     BehaviorType,
-    MODE_SLOTS,
     ModeSlot,
-    NUM_MODE_SLOTS,
     SpeedProfile,
+    build_mode_slots,
 )
 
 
@@ -73,14 +72,6 @@ def _quintic_blend(progress: np.ndarray) -> np.ndarray:
     return (10.0 * p**3 - 15.0 * p**4 + 6.0 * p**5).astype(np.float32)
 
 
-def _count_slots(behavior_type: BehaviorType, lateral_direction: str | None = None) -> int:
-    return sum(
-        1
-        for slot in MODE_SLOTS
-        if slot.behavior_type == behavior_type and (lateral_direction is None or slot.lateral_direction == lateral_direction)
-    )
-
-
 @dataclass
 class ModeTrajectoryOutput:
     coarse_trajectories: np.ndarray
@@ -103,6 +94,8 @@ class ModeTrajectoryGenerator:
         keep_lane_level_count: int = 3,
         lane_change_left_level_count: int = 3,
         lane_change_right_level_count: int = 3,
+        emergency_stop_level_count: int = 1,
+        mode_slots: Optional[Sequence[ModeSlot]] = None,
         collision_prediction_enabled: bool = True,
         collision_check_clearance_m: float = 0.8,
         ego_collision_radius_m: float = 2.6,
@@ -120,18 +113,31 @@ class ModeTrajectoryGenerator:
         self.keep_lane_level_count = int(keep_lane_level_count)
         self.lane_change_left_level_count = int(lane_change_left_level_count)
         self.lane_change_right_level_count = int(lane_change_right_level_count)
+        self.emergency_stop_level_count = int(emergency_stop_level_count)
+        self.mode_slots = tuple(
+            mode_slots
+            if mode_slots is not None
+            else build_mode_slots(
+                keep_lane_count=self.keep_lane_level_count,
+                lane_change_left_count=self.lane_change_left_level_count,
+                lane_change_right_count=self.lane_change_right_level_count,
+                emergency_stop_count=self.emergency_stop_level_count,
+            )
+        )
+        self.num_mode_slots = len(self.mode_slots)
         self.collision_prediction_enabled = bool(collision_prediction_enabled)
         self.collision_check_clearance_m = float(collision_check_clearance_m)
         self.ego_collision_radius_m = float(ego_collision_radius_m)
         self.collision_speed_scale_candidates = tuple(float(scale) for scale in collision_speed_scale_candidates)
         self.geometric_checker = geometric_checker or GeometricFeasibilityChecker()
         self.traffic_checker = traffic_checker or TrafficFeasibilityChecker()
-        if self.keep_lane_level_count != _count_slots(BehaviorType.KEEP_LANE) - 1:
-            raise ValueError("keep_lane_level_count must match KEEP_LANE slot count excluding EMERGENCY_STOP")
-        if self.lane_change_left_level_count != _count_slots(BehaviorType.LANE_CHANGE, "left"):
-            raise ValueError("lane_change_left_level_count must match left lane-change slot count")
-        if self.lane_change_right_level_count != _count_slots(BehaviorType.LANE_CHANGE, "right"):
-            raise ValueError("lane_change_right_level_count must match right lane-change slot count")
+
+    def _interpolated_speed(self, ctx: ModeContext, slot: ModeSlot) -> float:
+        ego_speed = max(float(ctx.ego_speed_mps), 0.0)
+        low = min(ego_speed, self.keep_lane_low_speed_mps)
+        high = max(ego_speed, self.keep_lane_high_speed_mps)
+        speed = low + float(slot.level_fraction) * (high - low)
+        return max(float(speed), 0.0)
 
     def _desired_speed(self, ctx: ModeContext, slot: ModeSlot) -> float:
         ego_speed = max(float(ctx.ego_speed_mps), 0.0)
@@ -144,6 +150,8 @@ class ModeTrajectoryGenerator:
             return max(min(ego_speed, self.keep_lane_medium_speed_mps), 1.0)
         if slot.behavior_type == BehaviorType.KEEP_LANE and slot.name == "KEEP_LANE_LOW":
             return min(ego_speed, self.keep_lane_low_speed_mps)
+        if slot.name.startswith("KEEP_LANE_LEVEL_") or slot.name.startswith("LANE_CHANGE_LEFT_LEVEL_") or slot.name.startswith("LANE_CHANGE_RIGHT_LEVEL_"):
+            return self._interpolated_speed(ctx, slot)
         if slot.speed_profile == SpeedProfile.HIGH:
             return max(ego_speed, self.keep_lane_high_speed_mps)
         if slot.speed_profile == SpeedProfile.MEDIUM:
@@ -201,14 +209,14 @@ class ModeTrajectoryGenerator:
         return True
 
     def _generate_slot_trajectory(self, ctx: ModeContext, slot: ModeSlot, speed_mps: float) -> np.ndarray | None:
-        if slot.behavior_type == BehaviorType.KEEP_LANE and slot.name.startswith("KEEP_LANE"):
+        if slot.semantic_group == "KEEP_LANE":
             return self._generate_keep_lane(ctx, speed_mps)
         if slot.behavior_type == BehaviorType.LANE_CHANGE:
             target_polyline = self._lane_change_target(ctx, slot)
             if target_polyline is None:
                 return None
             return self._generate_lane_change(ctx, target_polyline, speed_mps)
-        if slot.name == "EMERGENCY_STOP":
+        if slot.semantic_group == "EMERGENCY_STOP":
             return self._generate_emergency_stop(ctx)
         return None
 
@@ -219,9 +227,9 @@ class ModeTrajectoryGenerator:
         # are subject to collision checking — when the ego drives fast toward
         # a close front vehicle the trajectory would overlap, so those modes
         # should become invalid to nudge the planner toward deceleration.
-        if slot.behavior_type == BehaviorType.KEEP_LANE:
+        if slot.semantic_group == "KEEP_LANE":
             trajectory = self._generate_slot_trajectory(ctx, slot, base_speed_mps)
-            if slot.name in ("KEEP_LANE_HIGH", "KEEP_LANE_MEDIUM"):
+            if slot.level_fraction > 0.0:
                 if trajectory is not None and not self._is_collision_free(ctx, trajectory):
                     return None
             return trajectory
@@ -235,12 +243,12 @@ class ModeTrajectoryGenerator:
         return None
 
     def generate(self, ctx: ModeContext) -> ModeTrajectoryOutput:
-        feasibility = build_mode_valid_mask(ctx, self.geometric_checker, self.traffic_checker)
+        feasibility = build_mode_valid_mask(ctx, self.geometric_checker, self.traffic_checker, self.mode_slots)
         valid_mask = feasibility.valid_mask.copy()
-        coarse = np.zeros((NUM_MODE_SLOTS, self.horizon_steps, 2), dtype=np.float32)
+        coarse = np.zeros((self.num_mode_slots, self.horizon_steps, 2), dtype=np.float32)
 
-        for slot in MODE_SLOTS:
-            if not bool(valid_mask[slot.index]) and slot.name != "EMERGENCY_STOP":
+        for slot in self.mode_slots:
+            if not bool(valid_mask[slot.index]) and slot.semantic_group != "EMERGENCY_STOP":
                 continue
             trajectory = self._generate_collision_aware_trajectory(ctx, slot, self._desired_speed(ctx, slot))
             if trajectory is None:
@@ -248,7 +256,9 @@ class ModeTrajectoryGenerator:
                 continue
             coarse[slot.index] = trajectory
 
-        valid_mask[9] = True
+        for slot in self.mode_slots:
+            if slot.semantic_group == "EMERGENCY_STOP":
+                valid_mask[slot.index] = True
 
         coarse[~valid_mask] = 0.0
         return ModeTrajectoryOutput(coarse_trajectories=coarse, mode_valid_mask=valid_mask.astype(bool))

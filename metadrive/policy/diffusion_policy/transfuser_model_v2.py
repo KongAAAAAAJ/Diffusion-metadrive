@@ -116,6 +116,20 @@ class V2TransfuserModel(nn.Module):
 
 
     def _encode_target_guidance(self, features: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
+        if self._config.target_guidance_type == "multi_point":
+            coarse_trajectories: Optional[torch.Tensor] = features.get("coarse_trajectories")
+            if coarse_trajectories is None:
+                batch_size = features["status_feature"].shape[0]
+                anchor_points = self._trajectory_head.plan_anchor.to(
+                    device=features["status_feature"].device,
+                    dtype=features["status_feature"].dtype,
+                )
+                coarse_trajectories = anchor_points.unsqueeze(0).expand(batch_size, -1, -1, -1)
+            endpoints = coarse_trajectories[..., -1, :2]
+            bs, num_mode, _ = endpoints.shape
+            endpoint_embed = self._target_point_mlp(endpoints.reshape(bs * num_mode, 2))
+            return endpoint_embed.reshape(bs, num_mode, -1)
+
         if self._config.target_guidance_type == "line":
             target_line: Optional[torch.Tensor] = features.get("target_line")
             if target_line is None:
@@ -376,8 +390,17 @@ class DiffMotionPlanningRefinementModule(nn.Module):
         base_traj_feature = traj_feature
         if self.target_point_dim > 0:
             if target_point_embed is None:
-                target_point_embed = traj_feature.new_zeros((bs, self.target_point_dim))
-            target_point_embed = target_point_embed.unsqueeze(1).expand(-1, ego_fut_mode, -1)
+                target_point_embed = traj_feature.new_zeros((bs, ego_fut_mode, self.target_point_dim))
+            elif target_point_embed.ndim == 2:
+                target_point_embed = target_point_embed.unsqueeze(1).expand(-1, ego_fut_mode, -1)
+            elif target_point_embed.ndim == 3:
+                if target_point_embed.shape[1] != ego_fut_mode:
+                    raise ValueError(
+                        "Per-mode target guidance must have the same mode count as traj_feature: "
+                        f"got {target_point_embed.shape[1]} vs {ego_fut_mode}"
+                    )
+            else:
+                raise ValueError(f"Unsupported target_point_embed shape: {tuple(target_point_embed.shape)}")
             traj_feature = torch.cat([traj_feature, target_point_embed], dim=-1)
 
         # 6. get final prediction

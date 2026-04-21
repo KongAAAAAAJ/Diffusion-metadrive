@@ -20,6 +20,8 @@ PROCESSED_DIR_FIELDS = (
     "target_point",
     "target_line",
     "topology_polyline",
+    "coarse_trajectories",
+    "mode_valid_mask",
     "trajectory",
     "agent_states",
     "agent_labels",
@@ -199,17 +201,16 @@ def _gt_trajectory_endpoint_from_sample(sample: Dict[str, np.ndarray]) -> torch.
 
 
 def _derive_lane_decision_from_mode_idx(mode_idx: int) -> "LaneDecision":
-    """Map a selected MODE_SLOTS index to a LaneDecision.
+    """Map a selected mode slot index to a LaneDecision."""
+    from metadrive.policy.diffusion_policy.mode_definitions import get_mode_slot
 
-    MODE_SLOTS layout (10 slots):
-        0-2  KEEP_LANE        → KEEP
-        3-5  LANE_CHANGE_LEFT → CHANGE_LEFT
-        6-8  LANE_CHANGE_RIGHT→ CHANGE_RIGHT
-        9    EMERGENCY_STOP   → KEEP
-    """
-    if 3 <= mode_idx <= 5:
+    try:
+        slot = get_mode_slot(int(mode_idx))
+    except Exception:
+        return LaneDecision.KEEP
+    if slot.lateral_direction == "left":
         return LaneDecision.CHANGE_LEFT
-    if 6 <= mode_idx <= 8:
+    if slot.lateral_direction == "right":
         return LaneDecision.CHANGE_RIGHT
     return LaneDecision.KEEP
 
@@ -1034,12 +1035,18 @@ def normalize_agent_targets(
 def _build_mode_features(sample: Dict[str, np.ndarray], config: TransfuserConfig) -> Dict[str, torch.Tensor]:
     """Generate coarse_trajectories and mode_valid_mask from sample polyline fields.
 
-    Returns a dict with keys 'coarse_trajectories' (10,8,2) and 'mode_valid_mask' (10,).
+    Returns dynamic mode coarse trajectories and validity mask.
     Falls back to zeros/False if generation fails.
     """
     from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_sample
     from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
-    from metadrive.policy.diffusion_policy.mode_definitions import NUM_MODE_SLOTS
+    from metadrive.policy.diffusion_policy.mode_definitions import mode_slot_count
+    num_slots = mode_slot_count(
+        config.mode_keep_lane_count,
+        config.mode_lane_change_left_count,
+        config.mode_lane_change_right_count,
+        config.mode_emergency_stop_count,
+    )
     try:
         ctx = build_mode_context_from_sample(sample)
         gen = ModeTrajectoryGenerator(
@@ -1047,16 +1054,20 @@ def _build_mode_features(sample: Dict[str, np.ndarray], config: TransfuserConfig
             keep_lane_medium_speed_mps=config.mode_keep_medium_speed_mps,
             keep_lane_low_speed_mps=config.mode_keep_low_speed_mps,
             emergency_decel_mps2=config.mode_emergency_decel_mps2,
+            keep_lane_level_count=config.mode_keep_lane_count,
+            lane_change_left_level_count=config.mode_lane_change_left_count,
+            lane_change_right_level_count=config.mode_lane_change_right_count,
+            emergency_stop_level_count=config.mode_emergency_stop_count,
         )
         out = gen.generate(ctx)
         return {
-            "coarse_trajectories": torch.from_numpy(out.coarse_trajectories),  # (10, 8, 2)
-            "mode_valid_mask": torch.from_numpy(out.mode_valid_mask),           # (10,) bool
+            "coarse_trajectories": torch.from_numpy(out.coarse_trajectories),
+            "mode_valid_mask": torch.from_numpy(out.mode_valid_mask),
         }
     except Exception:
         return {
-            "coarse_trajectories": torch.zeros((NUM_MODE_SLOTS, 8, 2), dtype=torch.float32),
-            "mode_valid_mask": torch.zeros((NUM_MODE_SLOTS,), dtype=torch.bool),
+            "coarse_trajectories": torch.zeros((num_slots, 8, 2), dtype=torch.float32),
+            "mode_valid_mask": torch.zeros((num_slots,), dtype=torch.bool),
         }
 
 
@@ -1139,6 +1150,14 @@ def processed_sample_to_features_targets(
         "target_point": target_point,
         "target_line": target_line,
     }
+    if "coarse_trajectories" in sample:
+        features["coarse_trajectories"] = torch.from_numpy(
+            _to_numpy(sample["coarse_trajectories"]).astype(np.float32, copy=True)
+        )
+    if "mode_valid_mask" in sample:
+        features["mode_valid_mask"] = torch.from_numpy(
+            _to_numpy(sample["mode_valid_mask"]).astype(bool, copy=True)
+        )
     targets = {
         "trajectory": torch.from_numpy(_to_numpy(sample["trajectory"]).astype(np.float32, copy=True)),
         "agent_states": torch.from_numpy(_to_numpy(sample["agent_states"]).astype(np.float32, copy=True)),

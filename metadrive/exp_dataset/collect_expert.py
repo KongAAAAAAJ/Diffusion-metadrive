@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import json
 import math
 import time
@@ -96,6 +97,12 @@ from metadrive.policy.diffusion_policy.mode_visualization import (
     overlay_mode_trajectories_on_frame,
     pick_recommended_mode,
 )
+from metadrive.policy.diffusion_policy.transfuser_config import (
+    build_transfuser_config,
+    diffusion_model_config_to_overrides,
+    load_diffusion_model_config,
+    resolve_model_config_value,
+)
 
 
 
@@ -127,6 +134,7 @@ class ExpertCollectorConfig:
     spawn_seed_offset: int = 100000
     samples_per_shard: int = 2048
     resume: bool = False  # 数据集续采
+    model_config_path: Path = Path("configs/diffusion/model.yaml")
 
     # Episode
     max_episode_steps: int = 1000  # 每个episode的最大步数
@@ -980,6 +988,31 @@ def trim_frames_to_lane_change(
 # Sample construction (sliding window over one episode)
 # ---------------------------------------------------------------------------
 
+
+@functools.lru_cache(maxsize=8)
+def _load_transfuser_config_for_collection(model_config_path: str):
+    model_config = load_diffusion_model_config(model_config_path)
+    model_size = resolve_model_config_value(None, model_config, "model_size", "small")
+    return build_transfuser_config(
+        model_size,
+        **diffusion_model_config_to_overrides(model_config),
+    )
+
+
+def _build_mode_trajectory_generator(config: ExpertCollectorConfig) -> ModeTrajectoryGenerator:
+    transfuser_config = _load_transfuser_config_for_collection(str(config.model_config_path))
+    return ModeTrajectoryGenerator(
+        keep_lane_high_speed_mps=transfuser_config.mode_keep_high_speed_mps,
+        keep_lane_medium_speed_mps=transfuser_config.mode_keep_medium_speed_mps,
+        keep_lane_low_speed_mps=transfuser_config.mode_keep_low_speed_mps,
+        emergency_decel_mps2=transfuser_config.mode_emergency_decel_mps2,
+        keep_lane_level_count=transfuser_config.mode_keep_lane_count,
+        lane_change_left_level_count=transfuser_config.mode_lane_change_left_count,
+        lane_change_right_level_count=transfuser_config.mode_lane_change_right_count,
+        emergency_stop_level_count=transfuser_config.mode_emergency_stop_count,
+    )
+
+
 def build_episode_samples(
     frames: List[Dict[str, np.ndarray]],
     config: ExpertCollectorConfig,
@@ -1002,7 +1035,7 @@ def build_episode_samples(
     )
     last_offset = future_offsets[-1]
     td_arr = np.asarray(traffic_density, dtype=np.float32)
-    _mode_gen = ModeTrajectoryGenerator()
+    _mode_gen = _build_mode_trajectory_generator(config)
 
     samples: List[Dict[str, np.ndarray]] = []
     for start_idx in range(0, frame_count - config.horizon_steps, config.sample_stride_steps):
@@ -1155,8 +1188,8 @@ def build_episode_samples(
         try:
             _ctx = build_mode_context_from_sample(samples[-1])
             _mode_out = _mode_gen.generate(_ctx)
-            samples[-1]["coarse_trajectories"] = _mode_out.coarse_trajectories   # (10, 8, 2)
-            samples[-1]["mode_valid_mask"] = _mode_out.mode_valid_mask            # (10,) bool
+            samples[-1]["coarse_trajectories"] = _mode_out.coarse_trajectories
+            samples[-1]["mode_valid_mask"] = _mode_out.mode_valid_mask
 
             _has_expert_decision = "expert_lateral_decision" in current_frame
             if _has_expert_decision:
@@ -1168,6 +1201,7 @@ def build_episode_samples(
                         gt_trajectory=trajectory[:, :2],
                         coarse_trajectories=_mode_out.coarse_trajectories,
                         mode_valid_mask=_mode_out.mode_valid_mask,
+                        mode_slots=_mode_gen.mode_slots,
                     ),
                     dtype=np.int8,
                 )
@@ -1182,8 +1216,8 @@ def build_episode_samples(
                     dtype=np.int8,
                 )
         except Exception:
-            samples[-1]["coarse_trajectories"] = np.zeros((10, 8, 2), dtype=np.float32)
-            samples[-1]["mode_valid_mask"] = np.zeros((10,), dtype=bool)
+            samples[-1]["coarse_trajectories"] = np.zeros((_mode_gen.num_mode_slots, 8, 2), dtype=np.float32)
+            samples[-1]["mode_valid_mask"] = np.zeros((_mode_gen.num_mode_slots,), dtype=bool)
             samples[-1]["hierarchical_mode_label"] = np.asarray(0, dtype=np.int8)
 
         if bool(config.save_raw_trajectory):
@@ -1237,6 +1271,7 @@ def _save_mode_overlay_frame(
     frame: np.ndarray,
     env,
     vehicle,
+    config: ExpertCollectorConfig,
     scenario_id: str,
     local_route: str,
     route_block_ids: List[str],
@@ -1251,7 +1286,7 @@ def _save_mode_overlay_frame(
         local_route=local_route,
         ego_main_route_block_ids=route_block_ids,
     )
-    generator = ModeTrajectoryGenerator()
+    generator = _build_mode_trajectory_generator(config)
     output = generator.generate(mode_context)
     primary_agent_id = get_primary_agent_id(env)
     camera_position = sync_topdown_camera_with_agent(env, primary_agent_id) or (
@@ -1302,8 +1337,9 @@ def _save_mode_overlay_frame(
         right_lane_gap=float(mode_context.right_lane_gap),
         has_left_branch=bool(mode_context.has_left_branch),
         has_right_branch=bool(mode_context.has_right_branch),
-        recommended_mode_index=pick_recommended_mode(output.mode_valid_mask),
+        recommended_mode_index=pick_recommended_mode(output.mode_valid_mask, generator.mode_slots),
         world_to_screen_projector=_project_world_point,
+        mode_slots=generator.mode_slots,
     )
     overlay = overlay_mode_trajectories_on_frame(
         render_context,
@@ -1733,6 +1769,7 @@ def rollout_episode(
                         topdown_frame,
                         env,
                         vehicle,
+                        config,
                         scenario_id or "unknown",
                         local_route,
                         route_block_ids,
@@ -1880,6 +1917,16 @@ def run_collection(config: ExpertCollectorConfig) -> None:
         mode_generate_dir.mkdir(parents=True, exist_ok=True)
         if config.mode_generate_output_dir is None:
             config.mode_generate_output_dir = mode_generate_dir
+    _mode_cfg = _load_transfuser_config_for_collection(str(config.model_config_path))
+    print(
+        "[collect] model_config_path="
+        f"{config.model_config_path} mode_counts="
+        f"{_mode_cfg.mode_keep_lane_count}/"
+        f"{_mode_cfg.mode_lane_change_left_count}/"
+        f"{_mode_cfg.mode_lane_change_right_count}/"
+        f"{_mode_cfg.mode_emergency_stop_count} "
+        f"ego_fut_mode={_mode_cfg.ego_fut_mode}"
+    )
 
     if config.resume:
         existing = detect_existing_state(shard_dir, report_dir)
