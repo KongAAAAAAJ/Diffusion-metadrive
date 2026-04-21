@@ -18,6 +18,7 @@ PROCESSED_DIR_FIELDS = (
     "status_feature",
     "ego_state",
     "target_point",
+    "target_line",
     "topology_polyline",
     "trajectory",
     "agent_states",
@@ -165,6 +166,29 @@ def _vehicle_pose_to_array(vehicle) -> np.ndarray:
 
 def _zero_target_point() -> torch.Tensor:
     return torch.zeros((2,), dtype=torch.float32)
+
+
+def _target_line_num_points(config: Optional[TransfuserConfig] = None) -> int:
+    if config is None:
+        return int(TransfuserConfig().target_line_num_points)
+    return max(1, int(getattr(config, "target_line_num_points", TransfuserConfig().target_line_num_points)))
+
+
+def _linear_target_line(target_point: np.ndarray, config: Optional[TransfuserConfig] = None) -> np.ndarray:
+    target_point = _to_numpy(target_point).astype(np.float32, copy=False).reshape(-1)
+    if target_point.shape[0] < 2:
+        target_point = np.zeros((2,), dtype=np.float32)
+    else:
+        target_point = target_point[:2]
+    num_points = _target_line_num_points(config)
+    if num_points == 1:
+        return target_point.reshape(1, 2).astype(np.float32, copy=False)
+    ratios = np.linspace(0.0, 1.0, num_points, dtype=np.float32)[:, None]
+    return (ratios * target_point[None, :]).astype(np.float32, copy=False)
+
+
+def _zero_target_line(config: Optional[TransfuserConfig] = None) -> torch.Tensor:
+    return torch.zeros((_target_line_num_points(config), 2), dtype=torch.float32)
 
 
 def _gt_trajectory_endpoint_from_sample(sample: Dict[str, np.ndarray]) -> torch.Tensor:
@@ -657,6 +681,86 @@ def _interpolate_local_target(local_points_xy: np.ndarray, target_distance: floa
     return (start + ratio * (end - start)).astype(np.float32, copy=False)
 
 
+def _polyline_arc_lengths(local_points_xy: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    local_points_xy = np.asarray(local_points_xy, dtype=np.float32)
+    if local_points_xy.ndim != 2 or local_points_xy.shape[0] < 2 or local_points_xy.shape[1] < 2:
+        return None
+    segment_lengths = np.linalg.norm(np.diff(local_points_xy[:, :2], axis=0), axis=1).astype(np.float32)
+    cumulative = np.concatenate(
+        [np.zeros((1,), dtype=np.float32), np.cumsum(segment_lengths, dtype=np.float32)],
+        axis=0,
+    )
+    if float(cumulative[-1]) <= 1e-6:
+        return None
+    return segment_lengths, cumulative
+
+
+def _project_point_to_polyline_arc_length(point_xy: np.ndarray, local_points_xy: np.ndarray) -> Optional[float]:
+    arc_data = _polyline_arc_lengths(local_points_xy)
+    if arc_data is None:
+        return None
+    segment_lengths, cumulative = arc_data
+    point_xy = _to_numpy(point_xy).astype(np.float32, copy=False).reshape(-1)
+    if point_xy.shape[0] < 2:
+        return None
+    point_xy = point_xy[:2]
+
+    best_s = 0.0
+    best_dist_sq = float("inf")
+    for idx, (start, end) in enumerate(zip(local_points_xy[:-1, :2], local_points_xy[1:, :2])):
+        seg = end - start
+        seg_len_sq = float(np.dot(seg, seg))
+        if seg_len_sq <= 1e-12:
+            continue
+        ratio = float(np.dot(point_xy - start, seg) / seg_len_sq)
+        ratio = max(0.0, min(1.0, ratio))
+        projected = start + ratio * seg
+        dist_sq = float(np.dot(point_xy - projected, point_xy - projected))
+        if dist_sq < best_dist_sq:
+            best_dist_sq = dist_sq
+            best_s = float(cumulative[idx]) + ratio * float(segment_lengths[idx])
+    if not np.isfinite(best_dist_sq):
+        return None
+    return best_s
+
+
+def _build_target_line_from_polyline(
+    target_polyline: np.ndarray,
+    target_point: np.ndarray,
+    config: Optional[TransfuserConfig] = None,
+) -> np.ndarray:
+    """Sample local guidance points on target lane from ego projection to target point projection."""
+    target_polyline = _to_numpy(target_polyline).astype(np.float32, copy=False)
+    target_point = _to_numpy(target_point).astype(np.float32, copy=False).reshape(-1)
+    if target_point.shape[0] < 2:
+        target_point = np.zeros((2,), dtype=np.float32)
+    else:
+        target_point = target_point[:2]
+
+    arc_data = _polyline_arc_lengths(target_polyline)
+    if arc_data is None:
+        return _linear_target_line(target_point, config)
+
+    s0 = _project_point_to_polyline_arc_length(np.zeros((2,), dtype=np.float32), target_polyline)
+    s1 = _project_point_to_polyline_arc_length(target_point, target_polyline)
+    if s0 is None or s1 is None:
+        return _linear_target_line(target_point, config)
+    s1 = max(float(s0), float(s1))
+
+    sample_s = np.linspace(float(s0), float(s1), _target_line_num_points(config), dtype=np.float32)
+    return np.stack([_interpolate_local_target(target_polyline[:, :2], float(s)) for s in sample_s], axis=0).astype(
+        np.float32, copy=False
+    )
+
+
+def _build_target_line(
+    target_polyline: np.ndarray,
+    target_point: torch.Tensor,
+    config: Optional[TransfuserConfig] = None,
+) -> torch.Tensor:
+    return torch.from_numpy(_build_target_line_from_polyline(target_polyline, _to_numpy(target_point), config))
+
+
 def _densify_polyline(local_points_xy: np.ndarray, max_segment_length: float = 0.25) -> np.ndarray:
     local_points_xy = np.asarray(local_points_xy, dtype=np.float32)
     if local_points_xy.ndim != 2 or local_points_xy.shape[0] <= 1:
@@ -962,7 +1066,7 @@ def sample_to_features_targets(
     prev_reference_lane_index: int = -1,
 ):
     if "camera_feature" in sample and "lidar_feature" in sample and "status_feature" in sample:
-        return processed_sample_to_features_targets(sample)
+        return processed_sample_to_features_targets(sample, config)
 
     # Derive lane decision from the transition between the previous and current frame's
     # reference_lane_index.  This determines which lane's centerline is used for target_point.
@@ -971,6 +1075,8 @@ def sample_to_features_targets(
     )
     lane_decision = _derive_lane_decision_from_reference_transitions(prev_reference_lane_index, current_ref_lane_idx)
 
+    target_point = compute_target_point_from_sample(sample, config, lane_decision)
+    topology_polyline = _build_topology_polyline_from_sample(sample, lane_decision)
     features = {
         "camera_feature": stitch_three_cameras(
             sample["left_camera"], sample["front_camera"], sample["right_camera"], config
@@ -978,7 +1084,8 @@ def sample_to_features_targets(
         "lidar_feature": lidar_to_histogram(sample["lidar"], config),
         "status_feature": build_status_feature(sample["ego_state"], config),
         "ego_state": torch.from_numpy(_to_numpy(sample["ego_state"]).astype(np.float32, copy=False)),
-        "target_point": compute_target_point_from_sample(sample, config, lane_decision),
+        "target_point": target_point,
+        "target_line": _build_target_line(topology_polyline.numpy(), target_point, config),
         "lane_decision": torch.tensor(int(lane_decision), dtype=torch.int8),
     }
     features.update(_build_mode_features(sample, config))
@@ -987,7 +1094,7 @@ def sample_to_features_targets(
     )
     targets = {
         "trajectory": torch.from_numpy(_to_numpy(sample["trajectory"]).astype(np.float32, copy=False)),
-        "topology_polyline": _build_topology_polyline_from_sample(sample, lane_decision),
+        "topology_polyline": topology_polyline,
         "agent_states": agent_states,
         "agent_labels": agent_labels,
         "bev_semantic_map": semantic_map_to_target(sample["bev_semantic_map"], config)
@@ -1008,15 +1115,29 @@ def sample_to_features_targets(
     return features, targets
 
 
-def processed_sample_to_features_targets(sample: Dict[str, np.ndarray]):
+def processed_sample_to_features_targets(
+    sample: Dict[str, np.ndarray],
+    config: Optional[TransfuserConfig] = None,
+):
+    target_point = (
+        torch.from_numpy(_to_numpy(sample["target_point"]).astype(np.float32, copy=True))
+        if "target_point" in sample
+        else _zero_target_point()
+    )
+    if "target_line" in sample:
+        target_line = torch.from_numpy(_to_numpy(sample["target_line"]).astype(np.float32, copy=True))
+    elif "topology_polyline" in sample:
+        target_line = _build_target_line(_to_numpy(sample["topology_polyline"]), target_point, config)
+    else:
+        target_line = torch.from_numpy(_linear_target_line(_to_numpy(target_point), config))
+
     features = {
         "camera_feature": torch.from_numpy(_to_numpy(sample["camera_feature"]).astype(np.float32, copy=True)),
         "lidar_feature": torch.from_numpy(_to_numpy(sample["lidar_feature"]).astype(np.float32, copy=True)),
         "status_feature": torch.from_numpy(_to_numpy(sample["status_feature"]).astype(np.float32, copy=True)),
         "ego_state": torch.from_numpy(_to_numpy(sample["ego_state"]).astype(np.float32, copy=True)),
-        "target_point": torch.from_numpy(_to_numpy(sample["target_point"]).astype(np.float32, copy=True))
-        if "target_point" in sample
-        else _zero_target_point(),
+        "target_point": target_point,
+        "target_line": target_line,
     }
     targets = {
         "trajectory": torch.from_numpy(_to_numpy(sample["trajectory"]).astype(np.float32, copy=True)),
@@ -1042,6 +1163,12 @@ def observation_to_features(
     vehicle=None,
     lane_decision: "LaneDecision" = LaneDecision.KEEP,
 ) -> Dict[str, torch.Tensor]:
+    target_point = compute_target_point(vehicle, config, LaneDecision.KEEP) if vehicle is not None else _zero_target_point()
+    topology_polyline = (
+        _build_topology_polyline_from_live_vehicle(vehicle, LaneDecision.KEEP)
+        if vehicle is not None
+        else torch.zeros((0, 2), dtype=torch.float32)
+    )
     return {
         "camera_feature": stitch_three_cameras(
             observation["rgb_left"], observation["rgb_front"], observation["rgb_right"], config
@@ -1052,12 +1179,9 @@ def observation_to_features(
         # Live closed-loop target-point guidance follows the expert/navigation lane
         # geometry only.  It should not be shifted onto an adjacent lane by the
         # current lane-decision / mode semantics.
-        "target_point": compute_target_point(vehicle, config, LaneDecision.KEEP) if vehicle is not None else _zero_target_point(),
-        "topology_polyline": (
-            _build_topology_polyline_from_live_vehicle(vehicle, LaneDecision.KEEP)
-            if vehicle is not None
-            else torch.zeros((0, 2), dtype=torch.float32)
-        ),
+        "target_point": target_point,
+        "target_line": _build_target_line(topology_polyline.numpy(), target_point, config),
+        "topology_polyline": topology_polyline,
     }
 
 
@@ -1257,6 +1381,8 @@ class MetaDriveTransfuserDataset(Dataset):
             for key in fields:
                 field_path = shard_path / f"{key}.npy"
                 if not field_path.exists():
+                    if key == "target_line":
+                        continue
                     raise FileNotFoundError(f"Processed shard field not found: {field_path}")
                 array = np.load(field_path, mmap_mode=mmap_mode, allow_pickle=False)
                 shard[key] = np.asarray(array) if mmap_mode is None else array

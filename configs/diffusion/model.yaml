@@ -1,0 +1,8 @@
+# Single-vehicle diffusion model/runtime parameters shared by train, eval, test, and preprocess scripts.
+# Switch back to point guidance by setting target_guidance_type: point.
+model_size: small
+anchor_method: dynamic  # dynamic | k_means
+plan_anchor_path: metadrive/exp_dataset/anchors.npy
+trajectory_reg_decoder_type: gru  # mlp | gru
+target_guidance_type: point  # point | line  # !line效果差，不使用，后续删掉
+target_line_num_points: 8

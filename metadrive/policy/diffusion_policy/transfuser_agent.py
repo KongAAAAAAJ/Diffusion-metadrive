@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+import warnings
 
 import pytorch_lightning as pl
 import torch
@@ -41,6 +42,19 @@ class TransfuserAgent(pl.LightningModule):
         checkpoint = torch.load(self._checkpoint_path, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint)
         state_dict = {k.replace("agent.", ""): v for k, v in state_dict.items()}
+        model_state = self.state_dict()
+        mismatched_keys = [
+            key for key, value in state_dict.items()
+            if key in model_state and getattr(value, "shape", None) != model_state[key].shape
+        ]
+        if mismatched_keys:
+            warnings.warn(
+                f"Dropping {len(mismatched_keys)} checkpoint key(s) due to shape mismatch "
+                f"(will use model-init values): {mismatched_keys}",
+                stacklevel=2,
+            )
+            for key in mismatched_keys:
+                del state_dict[key]
         self.load_state_dict(state_dict, strict=False)
 
     def forward(self, features: Dict[str, torch.Tensor], targets: Optional[Dict[str, torch.Tensor]] = None):

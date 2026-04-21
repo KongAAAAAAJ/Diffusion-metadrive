@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 from typing import Callable
@@ -15,13 +16,20 @@ from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
 from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config, transfuser_config_to_dict
+from metadrive.policy.diffusion_policy.transfuser_config import (
+    build_transfuser_config,
+    diffusion_model_config_to_overrides,
+    load_diffusion_model_config,
+    resolve_model_config_value,
+    transfuser_config_to_dict,
+)
 from metadrive.policy.diffusion_policy.transfuser_policy import TransfuserPolicy
 
 MULTIMODAL_SELECTED_COLOR = "#C76B00"
 MULTIMODAL_OTHER_COLOR = "#1F6F8B"
 ROAD_BOUNDARY_COLOR = "#7A7A7A"
 ACTUAL_TRAJECTORY_COLOR = "#1D4ED8"
+DEFAULT_MODEL_CONFIG_PATH = "configs/diffusion/model.yaml"
 
 
 @dataclass
@@ -33,11 +41,39 @@ class StepTrajectoryPlotRecord:
     selected_mode_idx: int | None
     dynamic_anchor_trajectories: np.ndarray | None = None
     target_point_world: np.ndarray | None = None
+    target_line_world: np.ndarray | None = None
     topology_polyline_world: np.ndarray | None = None
     topdown_frame: np.ndarray | None = None
     world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None
     ego_speed_km_h: float | None = None
     ego_acceleration: float | None = None
+
+
+@dataclass
+class ControlErrorRecord:
+    episode_idx: int
+    step_idx: int
+    actual_local_x: float
+    actual_local_y: float
+    reference_local_x: float
+    reference_local_y: float
+    actual_world_x: float
+    actual_world_y: float
+    reference_world_x: float
+    reference_world_y: float
+    longitudinal_error_m: float
+    lateral_error_m: float
+    abs_longitudinal_error_m: float
+    abs_lateral_error_m: float
+    speed_error_km_h: float | None = None
+    target_speed_km_h: float | None = None
+    trajectory_target_speed_km_h: float | None = None
+    speed_km_h: float | None = None
+    acceleration_mps2: float | None = None
+    steering: float | None = None
+    throttle: float | None = None
+    lookahead_y: float | None = None
+    lookahead_heading: float | None = None
 
 
 @dataclass(frozen=True)
@@ -51,7 +87,8 @@ class ScenarioRouteSelection:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Closed-loop evaluation for MetaDrive TransFuser.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the trained TransFuser checkpoint.")
-    parser.add_argument("--model-size", type=str, default="auto")
+    parser.add_argument("--model-config-path", type=str, default=DEFAULT_MODEL_CONFIG_PATH)
+    parser.add_argument("--model-size", type=str, default=None)
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--render", type=int, choices=(0, 1), default=0)
     parser.add_argument("--image-on-cuda", type=int, choices=(0, 1), default=0)
@@ -65,8 +102,10 @@ def parse_args(argv=None):
     parser.add_argument("--start-seed", type=int, default=0)
     parser.add_argument("--num-scenarios", type=int, default=1)
     parser.add_argument("--traffic-density", type=float, default=0.06)
-    parser.add_argument("--plan-anchor-path", type=str, default="metadrive/exp_dataset/anchors.npy")
-    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default="mlp")
+    parser.add_argument("--plan-anchor-path", type=str, default=None)
+    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default=None)
+    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line"), default=None)
+    parser.add_argument("--target-line-num-points", type=int, default=None)
     parser.add_argument("--save-3d-video", type=int, choices=(0, 1), default=0)
     parser.add_argument("--save-2d-video", type=int, choices=(0, 1), default=1)
     parser.add_argument("--save-trajectory-plot", type=int, choices=(0, 1), default=1)
@@ -402,6 +441,149 @@ def _local_xy_to_world_xy(
     )
 
 
+def _world_xy_to_local_xy(
+    world_xy: np.ndarray,
+    ego_world_position: np.ndarray,
+    ego_heading_rad: float,
+) -> np.ndarray:
+    world_xy = np.asarray(world_xy, dtype=np.float64).reshape(-1)
+    ego_world_position = np.asarray(ego_world_position, dtype=np.float64).reshape(-1)
+    delta = world_xy[:2] - ego_world_position[:2]
+    cos_h = float(np.cos(float(ego_heading_rad)))
+    sin_h = float(np.sin(float(ego_heading_rad)))
+    return np.asarray(
+        [
+            cos_h * delta[0] + sin_h * delta[1],
+            -sin_h * delta[0] + cos_h * delta[1],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _interpolate_reference_point_from_trajectory(
+    trajectory: np.ndarray,
+    elapsed_s: float,
+    waypoint_interval_s: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return the time-aligned reference point and local tangent for one control step."""
+    traj = np.asarray(trajectory, dtype=np.float64)
+    if traj.ndim != 2 or traj.shape[0] == 0 or traj.shape[1] < 2:
+        return None
+
+    points = np.vstack([np.zeros((1, 2), dtype=np.float64), traj[:, :2]])
+    waypoint_interval_s = max(float(waypoint_interval_s), 1e-6)
+    elapsed_s = max(float(elapsed_s), 0.0)
+    segment_float = elapsed_s / waypoint_interval_s
+    segment_idx = int(np.floor(segment_float))
+    alpha = float(segment_float - segment_idx)
+    segment_idx = min(max(segment_idx, 0), points.shape[0] - 2)
+    if segment_idx == points.shape[0] - 2:
+        alpha = min(alpha, 1.0)
+
+    start = points[segment_idx]
+    end = points[segment_idx + 1]
+    segment = end - start
+    seg_norm = float(np.linalg.norm(segment))
+    if seg_norm < 1e-6:
+        tangent = np.asarray([1.0, 0.0], dtype=np.float64)
+    else:
+        tangent = segment / seg_norm
+    reference = start + alpha * segment
+    return reference.astype(np.float64, copy=False), tangent.astype(np.float64, copy=False)
+
+
+def _compute_control_error_record(
+    *,
+    episode_idx: int,
+    step_idx: int,
+    ego_xy_before_step: np.ndarray | None,
+    ego_heading_before_step: float | None,
+    ego_xy_after_step: np.ndarray | None,
+    final_info: dict,
+    step_dt_s: float,
+    ego_speed_km_h: float | None,
+    ego_accel_mps2: float | None,
+) -> ControlErrorRecord | None:
+    if ego_xy_before_step is None or ego_heading_before_step is None or ego_xy_after_step is None:
+        return None
+    predicted_traj = final_info.get("predicted_trajectory")
+    reference = _interpolate_reference_point_from_trajectory(predicted_traj, elapsed_s=step_dt_s)
+    if reference is None:
+        return None
+
+    reference_xy, tangent = reference
+    actual_local = _world_xy_to_local_xy(
+        np.asarray(ego_xy_after_step, dtype=np.float64),
+        np.asarray(ego_xy_before_step, dtype=np.float64),
+        float(ego_heading_before_step),
+    )
+    reference_world = _local_xy_to_world_xy(
+        reference_xy,
+        np.asarray(ego_xy_before_step, dtype=np.float64),
+        float(ego_heading_before_step),
+    )
+    error_vec = actual_local - reference_xy
+    longitudinal_error = float(np.dot(error_vec, tangent))
+    lateral_error = float(tangent[0] * error_vec[1] - tangent[1] * error_vec[0])
+    controller_debug = final_info.get("controller_debug", {}) or {}
+    return ControlErrorRecord(
+        episode_idx=int(episode_idx),
+        step_idx=int(step_idx),
+        actual_local_x=float(actual_local[0]),
+        actual_local_y=float(actual_local[1]),
+        reference_local_x=float(reference_xy[0]),
+        reference_local_y=float(reference_xy[1]),
+        actual_world_x=float(np.asarray(ego_xy_after_step, dtype=np.float64).reshape(-1)[0]),
+        actual_world_y=float(np.asarray(ego_xy_after_step, dtype=np.float64).reshape(-1)[1]),
+        reference_world_x=float(reference_world[0]),
+        reference_world_y=float(reference_world[1]),
+        longitudinal_error_m=longitudinal_error,
+        lateral_error_m=lateral_error,
+        abs_longitudinal_error_m=abs(longitudinal_error),
+        abs_lateral_error_m=abs(lateral_error),
+        speed_error_km_h=(
+            float(controller_debug["speed_error"])
+            if "speed_error" in controller_debug and controller_debug.get("speed_error") is not None
+            else None
+        ),
+        target_speed_km_h=(
+            float(controller_debug["target_speed_km_h"])
+            if "target_speed_km_h" in controller_debug and controller_debug.get("target_speed_km_h") is not None
+            else None
+        ),
+        trajectory_target_speed_km_h=(
+            float(controller_debug["trajectory_target_speed_km_h"])
+            if (
+                "trajectory_target_speed_km_h" in controller_debug
+                and controller_debug.get("trajectory_target_speed_km_h") is not None
+            )
+            else None
+        ),
+        speed_km_h=(None if ego_speed_km_h is None else float(ego_speed_km_h)),
+        acceleration_mps2=(None if ego_accel_mps2 is None else float(ego_accel_mps2)),
+        steering=(
+            float(controller_debug["steering"])
+            if "steering" in controller_debug and controller_debug.get("steering") is not None
+            else None
+        ),
+        throttle=(
+            float(controller_debug["throttle"])
+            if "throttle" in controller_debug and controller_debug.get("throttle") is not None
+            else None
+        ),
+        lookahead_y=(
+            float(controller_debug["waypoint_y"])
+            if "waypoint_y" in controller_debug and controller_debug.get("waypoint_y") is not None
+            else None
+        ),
+        lookahead_heading=(
+            float(controller_debug["waypoint_heading"])
+            if "waypoint_heading" in controller_debug and controller_debug.get("waypoint_heading") is not None
+            else None
+        ),
+    )
+
+
 def _record_step_visualization(
     ego_before_step,
     ego_xy_before_step: np.ndarray | None,
@@ -486,6 +668,23 @@ def _record_step_visualization(
                 float(ego_heading_before_step),
             )
 
+    target_line = final_info.get("target_line")
+    target_line_world = None
+    if target_line is not None:
+        target_line_xy = np.asarray(target_line, dtype=np.float64)
+        if target_line_xy.ndim == 2 and target_line_xy.shape[0] > 0 and target_line_xy.shape[1] >= 2:
+            target_line_world = np.asarray(
+                [
+                    _local_xy_to_world_xy(
+                        np.asarray([float(point[0]), float(point[1])], dtype=np.float64),
+                        ego_xy_before_step,
+                        float(ego_heading_before_step),
+                    )
+                    for point in target_line_xy
+                ],
+                dtype=np.float64,
+            )
+
     topology_polyline = final_info.get("topology_polyline")
     topology_polyline_world = None
     if topology_polyline is not None:
@@ -514,6 +713,7 @@ def _record_step_visualization(
                 selected_mode_idx=(int(mode_idx) if mode_idx is not None else None),
                 dynamic_anchor_trajectories=dynamic_anchor_world_array,
                 target_point_world=target_point_world,
+                target_line_world=target_line_world,
                 topology_polyline_world=topology_polyline_world,
                 topdown_frame=(None if topdown_frame is None else np.asarray(topdown_frame, dtype=np.uint8).copy()),
                 world_to_screen_projector=world_to_screen_projector,
@@ -683,6 +883,20 @@ def _save_step_trajectory_plot(
     cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, (70, 190, 90), thickness=-1, lineType=cv2.LINE_AA)
     cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, (30, 140, 50), thickness=1, lineType=cv2.LINE_AA)
 
+    if step_record.target_line_world is not None:
+        target_line_world = np.asarray(step_record.target_line_world, dtype=np.float64)
+        if target_line_world.ndim == 2 and target_line_world.shape[0] >= 1:
+            for target_line_point in target_line_world:
+                line_xy = np.round(_proj_zoomed(target_line_point)).astype(np.int32)
+                cv2.circle(
+                    canvas,
+                    tuple(int(v) for v in line_xy),
+                    3,
+                    (45, 165, 45),
+                    thickness=-1,
+                    lineType=cv2.LINE_AA,
+                )
+
     if step_record.target_point_world is not None:
         target_xy = np.round(_proj_zoomed(np.asarray(step_record.target_point_world, dtype=np.float64))).astype(np.int32)
         cv2.circle(
@@ -709,7 +923,7 @@ def _save_step_trajectory_plot(
     except Exception:
         mode_name = f"mode_{selected_mode_idx}" if selected_mode_idx is not None else "N/A"
 
-    box_x1, box_y1, box_x2, box_y2 = 10, 10, 420, 128
+    box_x1, box_y1, box_x2, box_y2 = 10, 10, 420, 146
     cv2.rectangle(canvas, (box_x1, box_y1), (box_x2, box_y2), (247, 248, 250), thickness=-1)
     cv2.rectangle(canvas, (box_x1, box_y1), (box_x2, box_y2), (210, 214, 220), thickness=1)
     cv2.putText(
@@ -737,8 +951,9 @@ def _save_step_trajectory_plot(
     cv2.putText(canvas, "selected: orange", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (242, 153, 74), 1, cv2.LINE_AA)
     cv2.putText(canvas, "others: teal", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (111, 179, 206), 1, cv2.LINE_AA)
     cv2.putText(canvas, "anchors: light blue", (160, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (140, 150, 210), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "target line: green", (20, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (60, 190, 60), 1, cv2.LINE_AA)
     if show_topology_polyline:
-        cv2.putText(canvas, "topology: purple", (290, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (176, 132, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "topology: purple", (180, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (176, 132, 255), 1, cv2.LINE_AA)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
@@ -826,6 +1041,209 @@ def _save_trajectory_plot(
     plt.close(fig)
 
 
+def _control_error_records_to_dicts(records: list[ControlErrorRecord]) -> list[dict]:
+    return [
+        {
+            key: value
+            for key, value in record.__dict__.items()
+            if value is not None
+        }
+        for record in records
+    ]
+
+
+def _summarize_control_errors(records: list[ControlErrorRecord]) -> dict:
+    if not records:
+        return {
+            "num_steps": 0,
+            "mean_abs_lateral_error_m": None,
+            "max_abs_lateral_error_m": None,
+            "mean_abs_longitudinal_error_m": None,
+            "max_abs_longitudinal_error_m": None,
+        }
+    lateral_abs = np.asarray([r.abs_lateral_error_m for r in records], dtype=np.float64)
+    longitudinal_abs = np.asarray([r.abs_longitudinal_error_m for r in records], dtype=np.float64)
+    lateral_signed = np.asarray([r.lateral_error_m for r in records], dtype=np.float64)
+    longitudinal_signed = np.asarray([r.longitudinal_error_m for r in records], dtype=np.float64)
+    return {
+        "num_steps": int(len(records)),
+        "mean_lateral_error_m": float(lateral_signed.mean()),
+        "mean_longitudinal_error_m": float(longitudinal_signed.mean()),
+        "mean_abs_lateral_error_m": float(lateral_abs.mean()),
+        "max_abs_lateral_error_m": float(lateral_abs.max()),
+        "mean_abs_longitudinal_error_m": float(longitudinal_abs.mean()),
+        "max_abs_longitudinal_error_m": float(longitudinal_abs.max()),
+        "p95_abs_lateral_error_m": float(np.percentile(lateral_abs, 95)),
+        "p95_abs_longitudinal_error_m": float(np.percentile(longitudinal_abs, 95)),
+    }
+
+
+def _save_control_error_plots(
+    records: list[ControlErrorRecord],
+    output_dir: Path,
+    episode_idx: int,
+) -> None:
+    if not records:
+        return
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    steps = np.asarray([r.step_idx for r in records], dtype=np.int32)
+    lateral = np.asarray([r.lateral_error_m for r in records], dtype=np.float64)
+    longitudinal = np.asarray([r.longitudinal_error_m for r in records], dtype=np.float64)
+    speed = np.asarray(
+        [np.nan if r.speed_km_h is None else r.speed_km_h for r in records],
+        dtype=np.float64,
+    )
+    speed_error = np.asarray(
+        [np.nan if r.speed_error_km_h is None else r.speed_error_km_h for r in records],
+        dtype=np.float64,
+    )
+    target_speed = np.asarray(
+        [np.nan if r.target_speed_km_h is None else r.target_speed_km_h for r in records],
+        dtype=np.float64,
+    )
+    trajectory_target_speed = np.asarray(
+        [np.nan if r.trajectory_target_speed_km_h is None else r.trajectory_target_speed_km_h for r in records],
+        dtype=np.float64,
+    )
+    throttle = np.asarray(
+        [np.nan if r.throttle is None else r.throttle for r in records],
+        dtype=np.float64,
+    )
+    steering = np.asarray(
+        [np.nan if r.steering is None else r.steering for r in records],
+        dtype=np.float64,
+    )
+    acceleration = np.asarray(
+        [np.nan if r.acceleration_mps2 is None else r.acceleration_mps2 for r in records],
+        dtype=np.float64,
+    )
+    actual_world = np.asarray([[r.actual_world_x, r.actual_world_y] for r in records], dtype=np.float64)
+    reference_world = np.asarray([[r.reference_world_x, r.reference_world_y] for r in records], dtype=np.float64)
+
+    def _save_time_series(
+        values: np.ndarray,
+        *,
+        name: str,
+        ylabel: str,
+        color: str,
+        title: str,
+        extra_series: list[tuple[np.ndarray, str, str]] | None = None,
+    ) -> None:
+        fig, ax = plt.subplots(1, 1, figsize=(12, 4))
+        ax.plot(steps, values, color=color, linewidth=1.8, label=name)
+        if extra_series:
+            for series, label, series_color in extra_series:
+                ax.plot(steps, series, color=series_color, linewidth=1.2, alpha=0.85, label=label)
+        ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.35)
+        ax.set_title(title)
+        ax.set_xlabel("step")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(output_dir / f"episode_{episode_idx:03d}_{name}.png", dpi=150)
+        plt.close(fig)
+
+    _save_time_series(
+        lateral,
+        name="lat_error",
+        ylabel="lateral error (m)",
+        color="#D97706",
+        title=f"Episode {episode_idx}: lateral tracking error",
+    )
+    _save_time_series(
+        longitudinal,
+        name="lon_error",
+        ylabel="longitudinal error (m)",
+        color="#2563EB",
+        title=f"Episode {episode_idx}: longitudinal tracking error",
+    )
+    _save_time_series(
+        speed_error,
+        name="speed_error",
+        ylabel="speed error (km/h)",
+        color="#DC2626",
+        title=f"Episode {episode_idx}: controller speed error",
+        extra_series=[
+            (speed, "ego speed km/h", "#059669"),
+            (target_speed, "effective target speed km/h", "#7C3AED"),
+            (trajectory_target_speed, "trajectory target speed km/h", "#0891B2"),
+        ],
+    )
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 4))
+    ax.plot(steps, throttle, color="#DC2626", linewidth=1.7, label="acc/throttle command")
+    ax.plot(steps, steering, color="#7C3AED", linewidth=1.7, label="steer command")
+    ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.35)
+    ax.set_xlabel("step")
+    ax.set_ylabel("control command")
+    ax.grid(True, alpha=0.3)
+    ax_acc = ax.twinx()
+    ax_acc.plot(steps, acceleration, color="#059669", linewidth=1.2, alpha=0.75, label="measured accel m/s^2")
+    ax_acc.set_ylabel("measured acceleration (m/s^2)")
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax_acc.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, loc="best")
+    ax.set_title(f"Episode {episode_idx}: control commands and measured acceleration")
+    fig.tight_layout()
+    fig.savefig(output_dir / f"episode_{episode_idx:03d}_control.png", dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    ax.plot(reference_world[:, 0], reference_world[:, 1], "-", color="#F97316", linewidth=2.0, label="time-aligned reference")
+    ax.plot(actual_world[:, 0], actual_world[:, 1], "-", color="#2563EB", linewidth=2.0, label="actual after step")
+    ax.scatter(reference_world[0, 0], reference_world[0, 1], color="#FDBA74", s=60, label="ref start", zorder=5)
+    ax.scatter(actual_world[0, 0], actual_world[0, 1], color="#93C5FD", s=60, label="actual start", zorder=5)
+    ax.set_title(f"Episode {episode_idx}: reference vs actual trajectory")
+    ax.set_xlabel("world x")
+    ax.set_ylabel("world y")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / f"episode_{episode_idx:03d}_trajectory_compare.png", dpi=150)
+    plt.close(fig)
+
+
+def _write_control_error_summary(
+    *,
+    output_dir: Path,
+    per_episode_records: dict[int, list[ControlErrorRecord]],
+) -> Path:
+    all_records = [
+        record
+        for episode_records in per_episode_records.values()
+        for record in episode_records
+    ]
+    payload = {
+        "definition": (
+            "At each closed-loop step, the actual ego pose after one control interval "
+            "is transformed into the pre-step ego-local frame and compared with the "
+            "predicted trajectory reference interpolated at the same elapsed time."
+        ),
+        "control_step_s": 0.1,
+        "waypoint_interval_s": 0.5,
+        "overall": _summarize_control_errors(all_records),
+        "episodes": {
+            str(episode_idx): {
+                "summary": _summarize_control_errors(records),
+                "records": _control_error_records_to_dicts(records),
+            }
+            for episode_idx, records in sorted(per_episode_records.items())
+        },
+    }
+    output_path = output_dir / "control_errors" / "control_error_summary.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return output_path
+
+
 def infer_model_size_from_checkpoint(checkpoint_path: Path) -> str:
 # 自动推断模型规模（small/base）
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -847,13 +1265,24 @@ def infer_model_size_from_checkpoint(checkpoint_path: Path) -> str:
     )
 
 
-def build_env_config(args, resolved_model_size: str):
+def _model_overrides_from_args(args, model_config: dict) -> dict:
+    overrides = diffusion_model_config_to_overrides(model_config)
+    if args.plan_anchor_path is not None:
+        overrides["plan_anchor_path"] = args.plan_anchor_path
+    if args.trajectory_reg_decoder_type is not None:
+        overrides["trajectory_reg_decoder_type"] = args.trajectory_reg_decoder_type
+    if args.target_guidance_type is not None:
+        overrides["target_guidance_type"] = args.target_guidance_type
+    if args.target_line_num_points is not None:
+        overrides["target_line_num_points"] = args.target_line_num_points
+    return overrides
+
+
+def build_env_config(args, resolved_model_size: str, model_config: dict):
     transfuser_config = build_transfuser_config(
         resolved_model_size,
-        trajectory_reg_decoder_type=args.trajectory_reg_decoder_type,
+        **_model_overrides_from_args(args, model_config),
     )
-    if args.plan_anchor_path:
-        transfuser_config.plan_anchor_path = args.plan_anchor_path
 
     return {
         "use_render": bool(args.render),
@@ -923,12 +1352,18 @@ def main():
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    resolved_model_size = infer_model_size_from_checkpoint(checkpoint_path) if args.model_size == "auto" else args.model_size
+    model_config = load_diffusion_model_config(args.model_config_path)
+    requested_model_size = resolve_model_config_value(args.model_size, model_config, "model_size", "auto")
+    resolved_model_size = infer_model_size_from_checkpoint(checkpoint_path) if requested_model_size == "auto" else requested_model_size
     resolved_device = resolve_device(args.device)
     print(f"[test] checkpoint={checkpoint_path}")
+    print(f"[test] model_config_path={args.model_config_path}")
     print(f"[test] model_size={resolved_model_size}")
     print(f"[test] device={resolved_device}")
     print(f"[test] controller_type={args.controller_type}")
+    print(
+        f"[test] requested_model_size={requested_model_size}"
+    )
     print(f"[test] image_on_cuda={bool(args.image_on_cuda)}")
     print(
         f"[test] render={bool(args.render)} save_3d_video={bool(args.save_3d_video)} "
@@ -939,14 +1374,12 @@ def main():
     if args.save_camera_interval > 0:
         print(f"[test] save_camera_interval={args.save_camera_interval} camera_output_dir={args.camera_output_dir}")
 
-    env_config = build_env_config(args, resolved_model_size)
+    env_config = build_env_config(args, resolved_model_size, model_config)
     env = DatasetCollectEnv(env_config)
     transfuser_config = build_transfuser_config(
         resolved_model_size,
-        trajectory_reg_decoder_type=args.trajectory_reg_decoder_type,
+        **_model_overrides_from_args(args, model_config),
     )
-    if args.plan_anchor_path:
-        transfuser_config.plan_anchor_path = args.plan_anchor_path
     anchors = None
     anchor_path = Path(transfuser_config.plan_anchor_path)
     if anchor_path.exists():
@@ -963,6 +1396,7 @@ def main():
         "mode_idx": [],
     }
     episode_route_rng = np.random.RandomState(args.start_seed)
+    per_episode_control_error_records: dict[int, list[ControlErrorRecord]] = {}
 
     try:
         for episode_idx in range(args.episodes):
@@ -1001,6 +1435,7 @@ def main():
             planned_trajectories = []
             multimodal_trajectories = []
             step_plot_records = []
+            control_error_records: list[ControlErrorRecord] = []
             road_boundaries = _extract_road_topology(env)
             _prev_ego_speed_km_h: float | None = None
 
@@ -1046,6 +1481,24 @@ def main():
                 episode_reward += float(reward[agent_id])
                 episode_length += 1
                 final_info = info.get(agent_id, {})
+                ego_after_step = env.agents.get(primary_agent_id) if primary_agent_id is not None else None
+                ego_xy_after_step = (
+                    np.asarray(ego_after_step.position[:2], dtype=np.float64)
+                    if ego_after_step is not None else None
+                )
+                control_error_record = _compute_control_error_record(
+                    episode_idx=episode_idx,
+                    step_idx=episode_length,
+                    ego_xy_before_step=ego_xy_before_step,
+                    ego_heading_before_step=ego_heading_before_step,
+                    ego_xy_after_step=ego_xy_after_step,
+                    final_info=final_info,
+                    step_dt_s=_step_dt,
+                    ego_speed_km_h=_cur_ego_speed_km_h,
+                    ego_accel_mps2=_ego_accel_mps2,
+                )
+                if control_error_record is not None:
+                    control_error_records.append(control_error_record)
                 done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
 
                 if args.save_3d_video:
@@ -1139,6 +1592,7 @@ def main():
             summary["out_of_road"] += int(bool(final_info.get("out_of_road", False)))
             summary["episode_reward"].append(episode_reward)
             summary["episode_length"].append(episode_length)
+            per_episode_control_error_records[episode_idx] = control_error_records
             print(
                 f"[episode={episode_idx}] reward={episode_reward:.2f} length={episode_length} "
                 f"success={final_info.get('arrive_dest', False)} crash={final_info.get('crash', False)} "
@@ -1174,8 +1628,20 @@ def main():
                         episode_idx=episode_idx,
                         show_topology_polyline=bool(args.show_topology_polyline),
                     )
+            if control_error_records:
+                _save_control_error_plots(
+                    control_error_records,
+                    output_dir / "control_errors",
+                    episode_idx,
+                )
     finally:
         env.close()
+
+    control_error_json = _write_control_error_summary(
+        output_dir=Path(args.output_dir),
+        per_episode_records=per_episode_control_error_records,
+    )
+    print(f"[control_error] summary_json={control_error_json}")
 
     num_episodes = max(args.episodes, 1)
     mode_hist = dict(sorted(Counter(summary["mode_idx"]).items()))

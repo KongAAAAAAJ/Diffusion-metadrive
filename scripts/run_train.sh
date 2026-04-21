@@ -32,14 +32,11 @@ STAGE="${STAGE:-1}"   # 1 | 2 | both
 # ---------------------------------------------------------------------------
 # 阶段一：单车扩散 Policy 开环预训练
 # ---------------------------------------------------------------------------
-MODEL_SIZE="${MODEL_SIZE:-small}"
-REG_TYPE="${REG_TYPE:-gru}"  # * --- mlp | gru
+MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
 EXPERT_NAME="${EXPERT_NAME:-idm}"
 DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metaIDM_pp}"
-ANCHOR_METHOD="${ANCHOR_METHOD:-dynamic}"
-PLAN_ANCHOR_PATH="${PLAN_ANCHOR_PATH:-${REPO_ROOT}/metadrive/exp_dataset/anchors.npy}"
 STAGE1_OUTPUT_DIR="${STAGE1_OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion}"
-STAGE1_MAX_EPOCHS="${STAGE1_MAX_EPOCHS:-40}"  # *
+STAGE1_MAX_EPOCHS="${STAGE1_MAX_EPOCHS:-50}"  # *
 STAGE1_BATCH_SIZE="${STAGE1_BATCH_SIZE:-16}"
 STAGE1_NUM_WORKERS="${STAGE1_NUM_WORKERS:-8}"
 STAGE1_LR="${STAGE1_LR:-1e-4}"
@@ -101,50 +98,23 @@ run_stage1() {
         log_error "请先运行 bash scripts/run_dataset_collect.sh 采集数据"
         exit 1
     fi
-    if [[ "${ANCHOR_METHOD}" == "k_means" && ! -f "${PLAN_ANCHOR_PATH}" ]]; then
-        log_error "plan anchor 文件不存在：${PLAN_ANCHOR_PATH}"
-        log_error "请先运行 bash scripts/run_abstract_anchors.sh 生成 anchor"
-        exit 1
-    fi
 
     log_info "数据集   ：${DATASET_ROOT}"
-    log_info "Anchor方法：${ANCHOR_METHOD}"
-    if [[ "${ANCHOR_METHOD}" == "k_means" ]]; then
-        log_info "Anchor   ：${PLAN_ANCHOR_PATH}"
-    fi
+    log_info "模型配置 ：${MODEL_CONFIG_PATH}"
     log_info "输出目录 ：${STAGE1_OUTPUT_DIR}"
     log_info "Epochs   ：${STAGE1_MAX_EPOCHS}，batch_size=${STAGE1_BATCH_SIZE}"
 
-    if [[ "${ANCHOR_METHOD}" == "k_means" ]]; then
-        "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.train_transfuser \
-            --model-size              "${MODEL_SIZE}" \
-            --trajectory-reg-decoder-type "${REG_TYPE}" \
-            --dataset-root            "${DATASET_ROOT}" \
-            --anchor-method          k_means \
-            --plan-anchor-path        "${PLAN_ANCHOR_PATH}" \
-            --output-dir              "${STAGE1_OUTPUT_DIR}" \
-            --max-epochs              "${STAGE1_MAX_EPOCHS}" \
-            --batch-size              "${STAGE1_BATCH_SIZE}" \
-            --num-workers             "${STAGE1_NUM_WORKERS}" \
-            --lr                      "${STAGE1_LR}" \
-            --precision               "${STAGE1_PRECISION}" \
-            --check-val-every-n-epoch 1 \
-            --cache-shards-in-memory
-    else
-        "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.train_transfuser \
-            --model-size              "${MODEL_SIZE}" \
-            --trajectory-reg-decoder-type "${REG_TYPE}" \
-            --dataset-root            "${DATASET_ROOT}" \
-            --anchor-method          dynamic \
-            --output-dir              "${STAGE1_OUTPUT_DIR}" \
-            --max-epochs              "${STAGE1_MAX_EPOCHS}" \
-            --batch-size              "${STAGE1_BATCH_SIZE}" \
-            --num-workers             "${STAGE1_NUM_WORKERS}" \
-            --lr                      "${STAGE1_LR}" \
-            --precision               "${STAGE1_PRECISION}" \
-            --check-val-every-n-epoch 1 \
-            --cache-shards-in-memory
-    fi
+    "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.train_transfuser \
+        --model-config-path       "${MODEL_CONFIG_PATH}" \
+        --dataset-root            "${DATASET_ROOT}" \
+        --output-dir              "${STAGE1_OUTPUT_DIR}" \
+        --max-epochs              "${STAGE1_MAX_EPOCHS}" \
+        --batch-size              "${STAGE1_BATCH_SIZE}" \
+        --num-workers             "${STAGE1_NUM_WORKERS}" \
+        --lr                      "${STAGE1_LR}" \
+        --precision               "${STAGE1_PRECISION}" \
+        --check-val-every-n-epoch 1 \
+        --cache-shards-in-memory
 
     SINGLE_CKPT="$(find_best_ckpt "${STAGE1_OUTPUT_DIR}")"
     log_ok "阶段一完成。checkpoint：${SINGLE_CKPT}"
@@ -194,7 +164,7 @@ cd "${REPO_ROOT}"
 
 echo ""
 log_info "========================================================"
-log_info " 编队扩散 Policy 两阶段训练流水线  STAGE=${STAGE}"
+log_info " 编队扩散 Policy 两阶段训练  STAGE=${STAGE}"
 log_info "========================================================"
 
 if [[ "${STAGE}" == "1" || "${STAGE}" == "both" ]]; then
@@ -215,5 +185,5 @@ fi
 
 echo ""
 log_ok "========================================================"
-log_ok " 两阶段训练流水线全部完成"
+log_ok " 两阶段训练全部完成"
 log_ok "========================================================"

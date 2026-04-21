@@ -16,7 +16,13 @@ from torch.utils.data import DataLoader
 from metadrive.policy.diffusion_policy.mode_definitions import get_mode_slot
 from metadrive.policy.diffusion_policy.transfuser_agent import TransfuserAgent
 from metadrive.policy.diffusion_policy.transfuser_callback import render_open_loop_prediction
-from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig, build_transfuser_config
+from metadrive.policy.diffusion_policy.transfuser_config import (
+    TransfuserConfig,
+    build_transfuser_config,
+    diffusion_model_config_to_overrides,
+    load_diffusion_model_config,
+    resolve_model_config_value,
+)
 from metadrive.policy.diffusion_policy.transfuser_features import MetaDriveTransfuserDataset
 from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
 from metadrive.policy.diffusion_policy.verify_transfuser_dataset import AUTO_DATASET_FORMAT, verify_dataset
@@ -25,6 +31,7 @@ from metadrive.policy.diffusion_policy.verify_transfuser_dataset import AUTO_DAT
 DEFAULT_DATASET_ROOT = "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_ppo_preprocessed_small_dir"
 DEFAULT_PLAN_ANCHOR_PATH = "metadrive/exp_dataset/metadrive_anchors.npy"
 DEFAULT_OUTPUT_DIR = "/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/open_loop_eval"
+DEFAULT_MODEL_CONFIG_PATH = "configs/diffusion/model.yaml"
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -33,9 +40,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 def parse_args():
     parser = argparse.ArgumentParser(description="Open-loop evaluation for MetaDrive TransFuser.")
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--model-config-path", type=str, default=DEFAULT_MODEL_CONFIG_PATH)
     parser.add_argument("--dataset-root", type=str, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--split", type=str, default="val")
-    parser.add_argument("--model-size", type=str, default="auto")
+    parser.add_argument("--model-size", type=str, default=None)
     parser.add_argument("--dataset-format", type=str, default=AUTO_DATASET_FORMAT)
     parser.add_argument("--num-samples", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -46,9 +54,11 @@ def parse_args():
     parser.add_argument("--save-trajectory-plots", type=int, choices=(0, 1), default=1)
     parser.add_argument("--save-csv", type=int, choices=(0, 1), default=1)
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--plan-anchor-path", type=str, default=DEFAULT_PLAN_ANCHOR_PATH)
-    parser.add_argument("--anchor-method", type=str, choices=("k_means", "dynamic"), default="dynamic")
-    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default="mlp")
+    parser.add_argument("--plan-anchor-path", type=str, default=None)
+    parser.add_argument("--anchor-method", type=str, choices=("k_means", "dynamic"), default=None)
+    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default=None)
+    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line"), default=None)
+    parser.add_argument("--target-line-num-points", type=int, default=None)
     parser.add_argument("--overlay-all-anchors", type=int, choices=(0, 1), default=1)
     parser.add_argument("--verify-dataset-before-eval", type=int, choices=(0, 1), default=1)
     return parser.parse_args()
@@ -593,15 +603,28 @@ def main():
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    resolved_model_size = infer_model_size_from_checkpoint(checkpoint_path) if args.model_size == "auto" else args.model_size
-    config = build_transfuser_config(
-        resolved_model_size,
+    model_config = load_diffusion_model_config(args.model_config_path)
+    requested_model_size = resolve_model_config_value(args.model_size, model_config, "model_size", "auto")
+    resolved_model_size = infer_model_size_from_checkpoint(checkpoint_path) if requested_model_size == "auto" else requested_model_size
+    config_overrides = diffusion_model_config_to_overrides(model_config)
+    if args.plan_anchor_path is not None:
+        config_overrides["plan_anchor_path"] = args.plan_anchor_path
+    if args.anchor_method is not None:
+        config_overrides["use_dynamic_anchors"] = args.anchor_method == "dynamic"
+    if args.trajectory_reg_decoder_type is not None:
+        config_overrides["trajectory_reg_decoder_type"] = args.trajectory_reg_decoder_type
+    if args.target_guidance_type is not None:
+        config_overrides["target_guidance_type"] = args.target_guidance_type
+    if args.target_line_num_points is not None:
+        config_overrides["target_line_num_points"] = args.target_line_num_points
+    config_overrides.update(
         dataset_root=args.dataset_root or TransfuserConfig().dataset_root,
-        plan_anchor_path=args.plan_anchor_path or TransfuserConfig().plan_anchor_path,
-        use_dynamic_anchors=(args.anchor_method == "dynamic"),
-        trajectory_reg_decoder_type=args.trajectory_reg_decoder_type,
         batch_size=args.batch_size,
         cache_shards_in_memory=False,
+    )
+    config = build_transfuser_config(
+        resolved_model_size,
+        **config_overrides,
     )
     device = resolve_device(args.device)
     if bool(args.verify_dataset_before_eval):

@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
 from dataclasses import asdict as dataclass_asdict
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+import yaml
 
 
 @dataclass
@@ -107,10 +108,10 @@ class TransfuserConfig:
     agent_class_weight: float = 10.0
     agent_box_weight: float = 1.0
     bev_semantic_weight: float = 14.0
-    topology_weight: float = 8.0
-    lane_direction_weight: float = 1.0
-    corridor_weight: float = 0.2
-    corridor_half_width_m: float = 0.2
+    topology_weight: float = 0.0  # !未起作用，后面删掉
+    lane_direction_weight: float = 0.0
+    corridor_weight: float = 0.0
+    corridor_half_width_m: float = 0.0
     use_ema: bool = False
 
     # !BEV 语义映射分类
@@ -133,6 +134,8 @@ class TransfuserConfig:
     bev_upsample_factor: int = 2
 
     status_feature_dim: int = 19  # full ego_state (9D) + navigation info (10D)
+    target_guidance_type: str = "point"
+    target_line_num_points: int = 8
     target_point_dim: int = 32
     target_point_min_forward_distance_m: float = 3.0
     target_point_prediction_horizon_s: float = 4.0
@@ -188,6 +191,11 @@ class TransfuserConfig:
             raise ValueError(
                 f"trajectory_reg_decoder_type must be 'mlp' or 'gru', got {self.trajectory_reg_decoder_type!r}"
             )
+        if self.target_guidance_type not in ("point", "line"):
+            raise ValueError(
+                f"target_guidance_type must be 'point' or 'line', got {self.target_guidance_type!r}"
+            )
+        self.target_line_num_points = max(1, int(self.target_line_num_points))
         if self.trajectory_gru_hidden_dim is None:
             self.trajectory_gru_hidden_dim = self.tf_d_model
 
@@ -237,6 +245,50 @@ def build_transfuser_config(model_size: str = "small", **overrides) -> Transfuse
     config_kwargs = dict(presets[model_size])
     config_kwargs.update(overrides)
     return TransfuserConfig(**config_kwargs)
+
+
+def load_diffusion_model_config(config_path: Optional[str]) -> Dict[str, Any]:
+    if not config_path:
+        return {}
+    path = Path(config_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Diffusion model config file not found: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Diffusion model config must be a YAML mapping: {path}")
+    model_config = loaded.get("model", loaded)
+    if not isinstance(model_config, dict):
+        raise ValueError(f"Diffusion model config 'model' section must be a mapping: {path}")
+    return dict(model_config)
+
+
+def resolve_model_config_value(
+    cli_value: Any,
+    model_config: Dict[str, Any],
+    key: str,
+    default: Any,
+) -> Any:
+    return cli_value if cli_value is not None else model_config.get(key, default)
+
+
+def diffusion_model_config_to_overrides(model_config: Dict[str, Any]) -> Dict[str, Any]:
+    overrides: Dict[str, Any] = {}
+    if "plan_anchor_path" in model_config:
+        overrides["plan_anchor_path"] = model_config["plan_anchor_path"]
+    if "anchor_method" in model_config:
+        anchor_method = str(model_config["anchor_method"])
+        if anchor_method not in ("k_means", "dynamic"):
+            raise ValueError(f"anchor_method must be 'k_means' or 'dynamic', got {anchor_method!r}")
+        overrides["use_dynamic_anchors"] = anchor_method == "dynamic"
+    for key in (
+        "trajectory_reg_decoder_type",
+        "target_guidance_type",
+        "target_line_num_points",
+    ):
+        if key in model_config:
+            overrides[key] = model_config[key]
+    return overrides
 
 
 def transfuser_config_to_dict(config: TransfuserConfig) -> Dict:

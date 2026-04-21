@@ -6,6 +6,17 @@ set -euo pipefail
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
+
+resolve_model_config_anchor_method() {
+    "${PYTHON_BIN}" - "${MODEL_CONFIG_PATH}" <<'PY'
+import sys
+from metadrive.policy.diffusion_policy.transfuser_config import load_diffusion_model_config
+
+config = load_diffusion_model_config(sys.argv[1])
+print(config.get("anchor_method", "dynamic"))
+PY
+}
 
 # ── Stage selector ──────────────────────────────────────────────────────────
 STAGE="${STAGE:-preprocess}"  # all | collect | anchors | preprocess  # 选择数据处理阶段
@@ -13,7 +24,7 @@ STAGE="${STAGE:-preprocess}"  # all | collect | anchors | preprocess  # 选择�
 # *── Shared paths ────────────────────────────────────────────────────────────
 EXPERT_TYPE="${EXPERT_TYPE:-idm}"
 COLLECTION_MODE="${COLLECTION_MODE:-single}"  # 选择地图模式：single | fixed_hybrid | random_road | phase2_plan
-ANCHOR_METHOD="${ANCHOR_METHOD:-dynamic}"  # k_means | dynamic
+ANCHOR_METHOD="${ANCHOR_METHOD:-$(resolve_model_config_anchor_method)}"  # k_means | dynamic
 DATASET_NAME="${DATASET_NAME:-metaIDM}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
 SCENARIO_WEIGHTS=${SCENARIO_WEIGHTS:-'{
@@ -65,7 +76,6 @@ NUM_ANCHORS="${NUM_ANCHORS:-20}"  # *
 ANCHOR_SEED="${ANCHOR_SEED:-0}"
 
 # Preprocess parameters
-MODEL_SIZE="${MODEL_SIZE:-small}"
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-dir}"
 
 # ── Stage 1: Data Collection ────────────────────────────────────────────────
@@ -167,12 +177,13 @@ run_preprocess() {
         --input-root "${COLLECT_OUTPUT}" \
         --output-root "${PREPROCESS_OUTPUT}" \
         --output-format "${OUTPUT_FORMAT}" \
-        --model-size "${MODEL_SIZE}"
+        --model-config-path "${MODEL_CONFIG_PATH}"
     echo "=== [3/3] Done. Preprocessed: ${PREPROCESS_OUTPUT} ==="
 }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 echo "Pipeline config: STAGE=${STAGE} EXPERT_TYPE=${EXPERT_TYPE} COLLECTION_MODE=${COLLECTION_MODE} ANCHOR_METHOD=${ANCHOR_METHOD}"
+echo "  model_config=${MODEL_CONFIG_PATH}"
 echo "  collect_output=${COLLECT_OUTPUT}"
 echo "  anchors_output=${ANCHORS_OUTPUT}"
 echo "  preprocess_output=${PREPROCESS_OUTPUT}"

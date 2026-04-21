@@ -54,6 +54,12 @@ class V2TransfuserModel(nn.Module):
             nn.Linear(config.tf_d_model, config.target_point_dim),
             nn.ReLU(),
         )
+        self._target_line_mlp = nn.Sequential(
+            nn.Linear(2 * config.target_line_num_points, config.tf_d_model),
+            nn.ReLU(),
+            nn.Linear(config.tf_d_model, config.target_point_dim),
+            nn.ReLU(),
+        )
 
         self._bev_semantic_head = nn.Sequential(
             nn.Conv2d(
@@ -109,6 +115,35 @@ class V2TransfuserModel(nn.Module):
         )
 
 
+    def _encode_target_guidance(self, features: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
+        if self._config.target_guidance_type == "line":
+            target_line: Optional[torch.Tensor] = features.get("target_line")
+            if target_line is None:
+                target_point: Optional[torch.Tensor] = features.get("target_point")
+                if target_point is None:
+                    return None
+                ratios = torch.linspace(
+                    0.0,
+                    1.0,
+                    self._config.target_line_num_points,
+                    dtype=target_point.dtype,
+                    device=target_point.device,
+                ).view(1, -1, 1)
+                target_line = ratios * target_point[:, None, :2]
+            if target_line.shape[1] != self._config.target_line_num_points:
+                target_line = F.interpolate(
+                    target_line.permute(0, 2, 1),
+                    size=self._config.target_line_num_points,
+                    mode="linear",
+                    align_corners=True,
+                ).permute(0, 2, 1)
+            target_line = target_line.reshape(target_line.shape[0], -1)
+            return self._target_line_mlp(target_line)
+
+        target_point: Optional[torch.Tensor] = features.get("target_point")
+        return self._target_point_mlp(target_point) if target_point is not None else None
+
+
     def forward(self, features: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]=None) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
 
@@ -120,13 +155,8 @@ class V2TransfuserModel(nn.Module):
 
         # *单样本 shape=[19]，batch 后 shape=[B, 19]
         status_feature: torch.Tensor = features["status_feature"]  # *导航命令[left, straight, right, lane_follow/other] + 车速[vx,vy] + 加速度[ax,ay]
-        target_point: Optional[torch.Tensor] = features.get("target_point")
         batch_size = status_feature.shape[0]
-        target_point_embed = (
-            self._target_point_mlp(target_point)
-            if target_point is not None
-            else None
-        )
+        target_point_embed = self._encode_target_guidance(features)
 
         bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)  # *bev_feature是下采样后的BEV特征(512*512)，
         cross_bev_feature = bev_feature_upscale
@@ -184,13 +214,8 @@ class V2TransfuserModel(nn.Module):
         camera_feature: torch.Tensor = features["camera_feature"]
         lidar_feature: torch.Tensor = features["lidar_feature"]
         status_feature: torch.Tensor = features["status_feature"]
-        target_point: Optional[torch.Tensor] = features.get("target_point")
         batch_size = status_feature.shape[0]
-        target_point_embed = (
-            self._target_point_mlp(target_point)
-            if target_point is not None
-            else None
-        )
+        target_point_embed = self._encode_target_guidance(features)
 
         bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
         cross_bev_feature = bev_feature_upscale

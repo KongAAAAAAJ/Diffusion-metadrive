@@ -42,7 +42,10 @@ REQUIRED_RAW_KEYS: Tuple[str, ...] = (
     "agent_labels",
     "bev_raster",
 )
-REQUIRED_PREPROCESSED_KEYS: Tuple[str, ...] = PROCESSED_FIELDS
+OPTIONAL_PREPROCESSED_KEYS: Tuple[str, ...] = ("target_line",)
+REQUIRED_PREPROCESSED_KEYS: Tuple[str, ...] = tuple(
+    key for key in PROCESSED_FIELDS if key not in OPTIONAL_PREPROCESSED_KEYS
+)
 FINAL_BAD_STATUSES = {"corrupt", "repair_failed", "missing_source"}
 
 
@@ -130,11 +133,12 @@ def _validate_zip_structure(shard_path: Path) -> None:
 def _validate_processed_npz_legacy_shard(shard_path: Path) -> Tuple[List[str], int]:
     validated_keys: List[str] = []
     expected_keys = set(REQUIRED_PREPROCESSED_KEYS)
+    allowed_keys = expected_keys | set(OPTIONAL_PREPROCESSED_KEYS)
 
     with np.load(shard_path, allow_pickle=False) as raw:
         actual_keys = set(raw.files)
         missing_keys = sorted(expected_keys - actual_keys)
-        unexpected_keys = sorted(actual_keys - expected_keys)
+        unexpected_keys = sorted(actual_keys - allowed_keys)
         if missing_keys or unexpected_keys:
             raise ValueError(
                 f"Unexpected shard schema for {shard_path.name}. "
@@ -158,6 +162,17 @@ def _validate_processed_npz_legacy_shard(shard_path: Path) -> Tuple[List[str], i
 
         if sample_count is None or sample_count <= 0:
             raise ValueError(f"Shard {shard_path.name} has no samples")
+        for key in OPTIONAL_PREPROCESSED_KEYS:
+            if key in raw.files:
+                value = np.asarray(raw[key])
+                validated_keys.append(key)
+                if value.ndim == 0:
+                    raise ValueError(f"Key '{key}' in {shard_path.name} is scalar; expected batched array")
+                if int(value.shape[0]) != sample_count:
+                    raise ValueError(
+                        f"Inconsistent sample count in {shard_path.name}: "
+                        f"key '{key}' has {int(value.shape[0])}, expected {sample_count}"
+                    )
 
     return validated_keys, sample_count
 
@@ -238,9 +253,11 @@ def _validate_processed_dir_shard(shard_path: Path) -> Tuple[List[str], int]:
 
     validated_keys: List[str] = []
     sample_count: Optional[int] = None
-    for key in REQUIRED_PREPROCESSED_KEYS:
+    for key in REQUIRED_PREPROCESSED_KEYS + OPTIONAL_PREPROCESSED_KEYS:
         field_path = shard_path / f"{key}.npy"
         if not field_path.exists():
+            if key in OPTIONAL_PREPROCESSED_KEYS:
+                continue
             raise FileNotFoundError(f"Processed shard field not found: {field_path}")
         array = np.load(field_path, mmap_mode="r", allow_pickle=False)
         validated_keys.append(key)
@@ -257,6 +274,8 @@ def _validate_processed_dir_shard(shard_path: Path) -> Tuple[List[str], int]:
 
         expected = fields_meta.get(key)
         if not isinstance(expected, dict):
+            if key in OPTIONAL_PREPROCESSED_KEYS:
+                continue
             raise ValueError(f"Missing metadata for key '{key}' in {meta_path}")
         if list(array.shape) != expected.get("shape"):
             raise ValueError(

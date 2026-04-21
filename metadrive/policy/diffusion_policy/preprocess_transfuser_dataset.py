@@ -9,7 +9,12 @@ import uuid
 
 import numpy as np
 
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
+from metadrive.policy.diffusion_policy.transfuser_config import (
+    build_transfuser_config,
+    diffusion_model_config_to_overrides,
+    load_diffusion_model_config,
+    resolve_model_config_value,
+)
 from metadrive.policy.diffusion_policy.transfuser_features import sample_to_features_targets
 
 
@@ -23,12 +28,14 @@ PROCESSED_FIELDS = (
     "status_feature",
     "ego_state",
     "target_point",
+    "target_line",
     "topology_polyline",
     "trajectory",
     "agent_states",
     "agent_labels",
     "bev_semantic_map",
 )
+DEFAULT_MODEL_CONFIG_PATH = "configs/diffusion/model.yaml"
 OPTIONAL_PASSTHROUGH_FIELDS = (
     "scenario_id",
     "local_route",
@@ -71,7 +78,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Preprocess MetaDrive dataset into TransFuser-ready tensors.")
     parser.add_argument("--input-root", type=str, required=True)
     parser.add_argument("--output-root", type=str, required=True)
-    parser.add_argument("--model-size", type=str, default="small")
+    parser.add_argument("--model-config-path", type=str, default=DEFAULT_MODEL_CONFIG_PATH)
+    parser.add_argument("--model-size", type=str, default=None)
     parser.add_argument("--max-shards", type=int, default=0)
     parser.add_argument("--output-format", type=str, default=OUTPUT_FORMAT_DIR, choices=SUPPORTED_OUTPUT_FORMATS)
     parser.add_argument("--overwrite", action="store_true")
@@ -179,6 +187,7 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
         processed["status_feature"].append(tensor_to_numpy(features["status_feature"]).astype(np.float32))
         processed["ego_state"].append(tensor_to_numpy(features["ego_state"]).astype(np.float32))
         processed["target_point"].append(tensor_to_numpy(features["target_point"]).astype(np.float32))
+        processed["target_line"].append(tensor_to_numpy(features["target_line"]).astype(np.float32))
         processed["topology_polyline"].append(tensor_to_numpy(targets["topology_polyline"]).astype(np.float32))
         processed["trajectory"].append(tensor_to_numpy(targets["trajectory"]).astype(np.float32))
         processed["agent_states"].append(tensor_to_numpy(targets["agent_states"]).astype(np.float32))
@@ -255,7 +264,12 @@ def main():
     args = parse_args()
     input_root = Path(args.input_root)
     output_root = Path(args.output_root)
-    config = build_transfuser_config(args.model_size)
+    model_config = load_diffusion_model_config(args.model_config_path)
+    model_size = resolve_model_config_value(args.model_size, model_config, "model_size", "small")
+    config = build_transfuser_config(
+        model_size,
+        **diffusion_model_config_to_overrides(model_config),
+    )
 
     shard_paths = sorted((input_root / "shards").glob("*.npz"))
     if args.only_shards:
@@ -297,7 +311,8 @@ def main():
 
     manifest = {
         "source_dataset": str(input_root),
-        "model_size": args.model_size,
+        "model_size": model_size,
+        "model_config_path": args.model_config_path,
         "num_shards": processed_shards,
         "num_samples": total_samples,
         "format": "transfuser_preprocessed",

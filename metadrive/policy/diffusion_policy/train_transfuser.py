@@ -10,7 +10,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from metadrive.policy.diffusion_policy.transfuser_agent import TransfuserAgent
-from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig, build_transfuser_config
+from metadrive.policy.diffusion_policy.transfuser_config import (
+    TransfuserConfig,
+    build_transfuser_config,
+    diffusion_model_config_to_overrides,
+    load_diffusion_model_config,
+    resolve_model_config_value,
+)
 from metadrive.policy.diffusion_policy.transfuser_features import MetaDriveTransfuserDataset
 from metadrive.policy.diffusion_policy.verify_transfuser_dataset import (
     AUTO_DATASET_FORMAT,
@@ -24,6 +30,7 @@ from metadrive.policy.diffusion_policy.verify_transfuser_dataset import (
 
 DEFAULT_DATASET_ROOT = "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_ppo"
 DEFAULT_PLAN_ANCHOR_PATH = "metadrive/exp_dataset/metadrive_anchors.npy"
+DEFAULT_MODEL_CONFIG_PATH = "configs/diffusion/model.yaml"
 RUN_DIR_PATTERN = re.compile(r"^run_(\d+)$")
 
 
@@ -136,11 +143,14 @@ def create_next_run_dir(output_root: Path) -> Path:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train MetaDrive Diffusion Policy.")
-    parser.add_argument("--model-size", type=str, default="small")  # “small” or “base”，决定模型规模
+    parser.add_argument("--model-config-path", type=str, default=DEFAULT_MODEL_CONFIG_PATH)
+    parser.add_argument("--model-size", type=str, default=None)  # “small” or “base”，决定模型规模
     parser.add_argument("--dataset-root", type=str, default=DEFAULT_DATASET_ROOT)
-    parser.add_argument("--plan-anchor-path", type=str, default=DEFAULT_PLAN_ANCHOR_PATH)
-    parser.add_argument("--anchor-method", type=str, choices=("k_means", "dynamic"), default="dynamic")
-    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default="mlp")
+    parser.add_argument("--plan-anchor-path", type=str, default=None)
+    parser.add_argument("--anchor-method", type=str, choices=("k_means", "dynamic"), default=None)
+    parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default=None)
+    parser.add_argument("--target-guidance-type", type=str, choices=("point", "line"), default=None)
+    parser.add_argument("--target-line-num-points", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--persistent-workers", type=int, default=1)  # worker 进程复用，会多占内存
@@ -165,11 +175,21 @@ def parse_args():
 
 def main():
     args = parse_args()
-    config_overrides = dict(
+    model_config = load_diffusion_model_config(args.model_config_path)
+    model_size = resolve_model_config_value(args.model_size, model_config, "model_size", "small")
+    config_overrides = diffusion_model_config_to_overrides(model_config)
+    if args.plan_anchor_path is not None:
+        config_overrides["plan_anchor_path"] = args.plan_anchor_path
+    if args.anchor_method is not None:
+        config_overrides["use_dynamic_anchors"] = args.anchor_method == "dynamic"
+    if args.trajectory_reg_decoder_type is not None:
+        config_overrides["trajectory_reg_decoder_type"] = args.trajectory_reg_decoder_type
+    if args.target_guidance_type is not None:
+        config_overrides["target_guidance_type"] = args.target_guidance_type
+    if args.target_line_num_points is not None:
+        config_overrides["target_line_num_points"] = args.target_line_num_points
+    config_overrides.update(
         dataset_root=args.dataset_root or TransfuserConfig().dataset_root,
-        plan_anchor_path=args.plan_anchor_path or TransfuserConfig().plan_anchor_path,
-        use_dynamic_anchors=(args.anchor_method == "dynamic"),
-        trajectory_reg_decoder_type=args.trajectory_reg_decoder_type,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         persistent_workers=bool(args.persistent_workers),
@@ -181,18 +201,19 @@ def main():
         val_visualization_interval=args.val_visualization_interval,
         enable_val_visualization=args.enable_val_visualization,
     )
-    config = build_transfuser_config(args.model_size, **config_overrides)
+    config = build_transfuser_config(model_size, **config_overrides)
     validate_runtime_paths(config)
     if bool(args.verify_dataset_before_train):
         verify_runtime_dataset(
             config=config,
-            model_size=args.model_size,
+            model_size=model_size,
             dataset_format=args.dataset_format,
             source_dataset_root=args.source_dataset_root,
             repair_corrupt_shards=bool(args.repair_corrupt_shards),
             fail_on_repair_error=bool(args.fail_on_repair_error),
         )
     resolved_precision = resolve_precision(config.precision)
+    print(f"[train] model_config_path={args.model_config_path}")
     print(f"[train] model_size={config.model_size}")
     print(
         "[train] dataloader "
@@ -205,6 +226,8 @@ def main():
         "[train] runtime "
         f"precision={resolved_precision} camera=({config.camera_height}, {config.camera_width}) "
         f"trajectory_reg_decoder_type={config.trajectory_reg_decoder_type} "
+        f"target_guidance_type={config.target_guidance_type} "
+        f"target_line_num_points={config.target_line_num_points} "
         f"check_val_every_n_epoch={config.check_val_every_n_epoch} "
         f"val_visualization_interval={config.val_visualization_interval} "
         f"enable_val_visualization={config.enable_val_visualization}"
