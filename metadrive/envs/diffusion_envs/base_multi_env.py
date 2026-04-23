@@ -7,7 +7,7 @@ from metadrive.utils import Config
 from metadrive.manager.traffic_manager import TrafficMode
 from metadrive.engine.engine_utils import initialize_global_config
 from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config, transfuser_config_to_dict
-from metadrive.exp_dataset.route_definitions import get_route_blocks, get_required_preset, ROUTE_BY_NAME
+from routes.route_definitions import get_route_blocks, get_required_preset, ROUTE_BY_NAME
 import numpy as np
 
 

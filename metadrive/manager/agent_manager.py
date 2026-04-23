@@ -129,7 +129,7 @@ class VehicleAgentManager(BaseAgentManager):
         if not scenario_id:
             return False
         try:
-            from metadrive.exp_dataset.scenario_definitions import SCENARIO_BY_ID
+            from scenarios.definitions import SCENARIO_BY_ID
         except Exception:
             return False
         scenario = SCENARIO_BY_ID.get(str(scenario_id))

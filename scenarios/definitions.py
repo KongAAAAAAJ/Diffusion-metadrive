@@ -1,11 +1,11 @@
-"""Scenario definitions for Phase 2 route-conditioned data collection."""
+"""Scenario definitions for route-conditioned data collection and training."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from metadrive.exp_dataset.route_definitions import get_required_preset
+from routes.route_definitions import get_required_preset
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
     ),
     ScenarioDefinition(
         code="S5",
-        scenario_id="S5_hard_brake_lead",  
+        scenario_id="S5_hard_brake_lead",
         allowed_local_routes=("R1_entry_straight", "R3_mainline_straight", "R3_post_transition_straight"),
         trigger_by_local_route={
             "R1_entry_straight": TriggerSpec("s0", 80.0, 220.0),
@@ -140,7 +140,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
     ),
     ScenarioDefinition(
         code="S6",
-        scenario_id="S6_background_merge_in",  # !ego车只是固定出生在靠近匝道的车道，后面行驶时是可以自由换道的
+        scenario_id="S6_background_merge_in",
         allowed_local_routes=("R6_mainline_merge_approach",),
         trigger_by_local_route={
             "R6_mainline_merge_approach": TriggerSpec("c2", 10.0, 95.0),
@@ -210,7 +210,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         description="ego 从主线驶出",
     ),
     ScenarioDefinition(
-        code="S9", 
+        code="S9",
         scenario_id="S9_narrow_channel_negotiation",
         allowed_local_routes=("R8_narrow_channel",),
         trigger_by_local_route={
@@ -248,7 +248,6 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
     ScenarioDefinition(
         code="S10",
         scenario_id="S10_straight_lane_change",
-        # 与 S1/S3 共享直道 local_route；R3_post_transition_straight 较短，trigger 窗口收窄
         allowed_local_routes=("R1_entry_straight", "R3_mainline_straight", "R3_post_transition_straight"),
         trigger_by_local_route={
             "R1_entry_straight":             TriggerSpec("s0",      80.0, 180.0),
@@ -259,7 +258,6 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
             RecipeSpec(
                 "ensure_lead_vehicle",
                 {
-                    # 在 ego 前方 12 m 插入一辆速度极慢的车辆，迫使 ego 换道绕行
                     "distance_m": 12.0,
                     "target_speed_kmh": 8.0,
                 },
@@ -277,7 +275,6 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
     ScenarioDefinition(
         code="S11",
         scenario_id="S11_curve_lane_change",
-        # 与 S2/S4 共享弯道 local_route；R5_ramp_curve 为单车道匝道，排除
         allowed_local_routes=("R2_entry_curve",),
         trigger_by_local_route={
             "R2_entry_curve": TriggerSpec("c0", 15.0, 100.0),
@@ -348,7 +345,6 @@ SCENARIO_EXPERT_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "enable_lane_change": True,
     },
     "S10_straight_lane_change": {
-        # 高频换道检查 + 较短安全距离要求，使 ego 能在慢车出现后迅速切换到相邻车道
         "enable_lane_change": True,
         "lane_change_freq": 15,
         "safe_lane_change_distance": 10.0,
@@ -358,7 +354,7 @@ SCENARIO_EXPERT_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "enable_lane_change": True,
         "lane_change_freq": 15,
         "safe_lane_change_distance": 10.0,
-        "normal_speed_kmh": 22.0,   # 弯道保守速度
+        "normal_speed_kmh": 22.0,
         "time_wanted": 1.0,
     },
 }
@@ -366,10 +362,10 @@ SCENARIO_TO_ROUTES: Dict[str, Tuple[str, ...]] = {
     scenario.scenario_id: scenario.allowed_local_routes for scenario in SCENARIO_DEFINITIONS
 }
 ROUTE_TO_SCENARIOS: Dict[str, Tuple[str, ...]] = {}
-for scenario in SCENARIO_DEFINITIONS:
-    for route_name in scenario.allowed_local_routes:
-        ROUTE_TO_SCENARIOS.setdefault(route_name, tuple())
-        ROUTE_TO_SCENARIOS[route_name] = ROUTE_TO_SCENARIOS[route_name] + (scenario.scenario_id,)
+for _scenario in SCENARIO_DEFINITIONS:
+    for _route_name in _scenario.allowed_local_routes:
+        ROUTE_TO_SCENARIOS.setdefault(_route_name, tuple())
+        ROUTE_TO_SCENARIOS[_route_name] = ROUTE_TO_SCENARIOS[_route_name] + (_scenario.scenario_id,)
 
 
 def get_scenario_definition(scenario_id: str) -> ScenarioDefinition:

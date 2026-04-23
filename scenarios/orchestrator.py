@@ -1,13 +1,65 @@
-"""Scenario orchestrator for local traffic control during expert data collection."""
+"""Scenario orchestrator for local traffic control during episode execution.
+
+This module is the canonical location for ScenarioOrchestrator and the
+TriggerEvaluator abstraction. The old path
+(metadrive.exp_dataset.scenario_orchestrator) is a backward-compatibility shim.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
-from metadrive.exp_dataset.scenario_definitions import ScenarioDefinition
+from scenarios.definitions import ScenarioDefinition
 from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
 
+if TYPE_CHECKING:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Trigger evaluator protocol + built-in implementations
+# ---------------------------------------------------------------------------
+
+class TriggerEvaluator:
+    """Protocol: returns True when the scenario trigger condition is met.
+
+    Subclass or replace to customise when a scenario fires (e.g. platoon lead
+    vehicle vs formation centroid vs any agent).
+    """
+
+    def is_triggered(self, env, agent_id: str, orchestrator: "ScenarioOrchestrator") -> bool:
+        raise NotImplementedError
+
+
+class SingleVehicleTrigger(TriggerEvaluator):
+    """Default trigger: fires when the named agent enters the block/longitudinal window."""
+
+    def is_triggered(self, env, agent_id: str, orchestrator: "ScenarioOrchestrator") -> bool:
+        ego_vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
+        if ego_vehicle is None:
+            return False
+        return orchestrator._is_in_trigger_window(ego_vehicle)
+
+
+class LeadVehicleTrigger(TriggerEvaluator):
+    """Platoon trigger: always evaluates against a fixed lead agent, regardless
+    of which agent_id is passed to before_step().
+    """
+
+    def __init__(self, lead_agent_id: str = "agent0") -> None:
+        self.lead_agent_id = lead_agent_id
+
+    def is_triggered(self, env, agent_id: str, orchestrator: "ScenarioOrchestrator") -> bool:
+        lead_vehicle = (getattr(env, "agents", {}) or {}).get(self.lead_agent_id)
+        if lead_vehicle is None:
+            return False
+        return orchestrator._is_in_trigger_window(lead_vehicle)
+
+
+# ---------------------------------------------------------------------------
+# Episode tracking dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ScenarioEpisodeSummary:
@@ -19,12 +71,24 @@ class ScenarioEpisodeSummary:
     notes: List[str] = field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# ScenarioOrchestrator
+# ---------------------------------------------------------------------------
+
 class ScenarioOrchestrator:
-    def __init__(self, definition: ScenarioDefinition, local_route: str):
+    def __init__(
+        self,
+        definition: ScenarioDefinition,
+        local_route: str,
+        trigger_evaluator: TriggerEvaluator | None = None,
+    ) -> None:
         self.definition = definition
         self.local_route = local_route
         self.trigger_spec = definition.get_trigger_spec(local_route)
         self.summary = ScenarioEpisodeSummary(scenario_id=definition.scenario_id)
+        self._trigger_evaluator: TriggerEvaluator = (
+            trigger_evaluator if trigger_evaluator is not None else SingleVehicleTrigger()
+        )
         self._road_to_block_id: Dict[Tuple[str, str], str] = {}
         self._speed_profiles: Dict[str, Dict[str, float]] = {}
         self._lead_vehicle_name: str | None = None
@@ -37,15 +101,15 @@ class ScenarioOrchestrator:
 
     def before_step(self, env, agent_id: str, step_count: int) -> None:
         self._apply_speed_profiles(env)
-        ego_vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
-        if ego_vehicle is None:
-            return
         if self.summary.scenario_triggered:
             return
-        if not self._is_in_trigger_window(ego_vehicle):
+        if not self._trigger_evaluator.is_triggered(env, agent_id, self):
             return
         self.summary.scenario_triggered = True
         self.summary.trigger_step = int(step_count)
+        ego_vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
+        if ego_vehicle is None:
+            return
         self._execute_recipe(env, ego_vehicle, step_count)
 
     def get_episode_summary(self) -> Dict[str, object]:
@@ -93,12 +157,10 @@ class ScenarioOrchestrator:
                 return False
             self._lead_vehicle_name = getattr(spawned, "name", None)
             self._mark_realized(step_count, "lead_spawned")
-        # Register a persistent speed profile so _apply_speed_profiles keeps the
-        # warning marker (!) visible on the slow lead vehicle throughout the episode.
         if self._lead_vehicle_name is not None:
             target_speed_kmh = float(params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0)))
             self._speed_profiles[self._lead_vehicle_name] = {
-                "remaining_steps": float("inf"),   # never expires — marker lasts the whole episode
+                "remaining_steps": float("inf"),
                 "target_speed_kmh": target_speed_kmh,
             }
         return True

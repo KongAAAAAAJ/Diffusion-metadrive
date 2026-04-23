@@ -75,20 +75,20 @@ from metadrive.exp_dataset.expert_idm_policy import ExpertIDMConfig, ExpertIDMPo
 from metadrive.policy.diffusion_policy.transfuser_features import BoundingBox2DIndex
 from metadrive.utils import Config
 from metadrive.exp_dataset.metadrive_dataset import split_shards
-from metadrive.exp_dataset.route_definitions import (
+from routes.route_definitions import (
     DEFAULT_LOCAL_ROUTE_WEIGHTS,
     ROUTE_BY_NAME,
     get_required_preset,
     get_route_blocks,
 )
-from metadrive.exp_dataset.scenario_definitions import (
+from scenarios.definitions import (
     DEFAULT_SCENARIO_WEIGHTS,
     SCENARIO_BY_ID,
     SCENARIO_EXPERT_OVERRIDES,
     get_scenario_definition,
 )
-from metadrive.exp_dataset.local_traffic_spawner import LocalTrafficSpawner
-from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
+from traffic.local_traffic_spawner import LocalTrafficSpawner
+from scenarios.orchestrator import ScenarioOrchestrator
 from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_sample, build_mode_context_from_vehicle
 from metadrive.policy.diffusion_policy.mode_labeler import label_mode_from_expert_decision
 from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator

@@ -5,8 +5,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 import numpy as np
 from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy
-from metadrive.exp_dataset.scenario_definitions import get_scenario_definition, SCENARIO_BY_ID
-from metadrive.exp_dataset.route_definitions import ROUTE_BY_NAME, get_route_blocks
+from scenarios.definitions import get_scenario_definition, SCENARIO_BY_ID
+from routes.route_definitions import ROUTE_BY_NAME, get_route_blocks
 
 
 def run_scenario(scenario_id, route_name, max_steps=400):

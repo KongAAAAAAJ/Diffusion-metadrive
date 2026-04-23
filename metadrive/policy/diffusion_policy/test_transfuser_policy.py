@@ -10,9 +10,9 @@ from typing import Callable
 import cv2
 import numpy as np
 import torch, time
-from metadrive.exp_dataset.route_definitions import get_required_preset, get_route_blocks
-from metadrive.exp_dataset.scenario_definitions import SCENARIO_BY_ID, get_scenario_definition
-from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
+from routes.route_definitions import get_required_preset, get_route_blocks
+from scenarios.definitions import SCENARIO_BY_ID, get_scenario_definition
+from scenarios.orchestrator import ScenarioOrchestrator
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
 from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction

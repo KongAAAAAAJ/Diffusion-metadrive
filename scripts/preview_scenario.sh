@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Usage:
-#   ./scripts/preview_scenario.sh S3_straight_following [NUM_EPISODES] [--heading-up]
+#   ./scripts/preview_scenario.sh S3_straight_following [NUM_EPISODES] [--heading-up] [--platoon [NUM_AGENTS]]
 #
 # Runs the expert policy for one scenario at a time and saves top-down videos.
 # Output goes to /tmp/scenario_preview/<SCENARIO_ID>/
 # After collection, prints the video directory path.
 #
 # Options:
-#   --heading-up    Enable camera rotation with ego vehicle heading (default: false)
+#   --heading-up         Enable camera rotation with ego vehicle heading (default: false)
+#   --platoon [N]        Use PlatoonEnv with N agents (default 3) instead of single-vehicle IDM
+#   --local-route ROUTE  Explicit local route name (e.g. R3_mainline_straight)
 
 set -euo pipefail
 
@@ -22,6 +24,9 @@ fi
 HEADING_UP="false"
 MODE_GENERATE="${MODE_GENERATE:-0}"
 MODE_FRAME_LIMIT="${MODE_FRAME_LIMIT:--1}"
+PLATOON_MODE="true"
+PLATOON_NUM_AGENTS="${PLATOON_NUM_AGENTS:-3}"
+LOCAL_ROUTE="${LOCAL_ROUTE:-}"
 
 # Parse optional arguments
 while [[ $# -gt 0 ]]; do
@@ -36,6 +41,19 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mode-frame-limit)
             MODE_FRAME_LIMIT="${2:?missing value for --mode-frame-limit}"
+            shift 2
+            ;;
+        --platoon)
+            PLATOON_MODE="true"
+            # Optional numeric argument for agent count
+            if [[ $# -gt 1 && "${2:-}" =~ ^[0-9]+$ ]]; then
+                PLATOON_NUM_AGENTS="$2"
+                shift
+            fi
+            shift
+            ;;
+        --local-route)
+            LOCAL_ROUTE="${2:?missing value for --local-route}"
             shift 2
             ;;
         *)
@@ -90,6 +108,30 @@ PY
 
 echo "=== Preview: ${SCENARIO_ID} (${NUM_EPISODES} episodes) ==="
 
+# --- Platoon mode -----------------------------------------------------------
+if [[ "${PLATOON_MODE}" == "true" ]]; then
+    echo "--- platoon mode: ${PLATOON_NUM_AGENTS} agents ---"
+    PLATOON_ARGS=(
+        --scenario-id "${SCENARIO_ID}"
+        --num-agents "${PLATOON_NUM_AGENTS}"
+        --num-episodes "${NUM_EPISODES}"
+        --output-root "${OUTPUT_ROOT}"
+        --heading-up "${HEADING_UP}"
+        --traffic-density "0.10"
+        --start-seed 59
+        --video-fps 10
+    )
+    if [[ -n "${LOCAL_ROUTE}" ]]; then
+        PLATOON_ARGS+=(--local-route "${LOCAL_ROUTE}")
+    fi
+    "${PYTHON_BIN}" -m metadrive.exp_dataset.preview_platoon "${PLATOON_ARGS[@]}"
+    echo ""
+    echo "=== Platoon videos saved to: ${VIDEO_DIR} ==="
+    ls -lh "${VIDEO_DIR}" 2>/dev/null || echo "(no videos found — check logs above)"
+    exit 0
+fi
+
+# --- Single-vehicle mode (original) -----------------------------------------
 existing_videos="$(count_videos)"
 target_videos="$(( existing_videos + NUM_EPISODES ))"
 

@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from metadrive.exp_dataset.scenario_definitions import get_scenario_definition
-from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
+from scenarios.definitions import get_scenario_definition
+from scenarios.orchestrator import ScenarioOrchestrator
 
 
 class _Lane:

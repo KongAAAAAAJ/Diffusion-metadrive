@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from metadrive.exp_dataset.route_definitions import get_required_preset
-from metadrive.exp_dataset.route_definitions import get_route_blocks
-from metadrive.exp_dataset.scenario_definitions import (
+from routes.route_definitions import get_required_preset, get_route_blocks
+from scenarios.definitions import (
     DEFAULT_SCENARIO_WEIGHTS,
     ROUTE_TO_SCENARIOS,
     SCENARIO_BY_ID,

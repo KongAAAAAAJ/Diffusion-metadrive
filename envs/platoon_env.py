@@ -11,10 +11,12 @@ try:
 except Exception:  # pragma: no cover - fallback for older setups
     import gym  # type: ignore
 
+from maps.map_presets import DEFAULT_HYBRID_MAP_CONFIG  # noqa: E402
+
 try:  # pragma: no cover - exercised only in real MetaDrive runtime
     from metadrive.component.sensors.rgb_camera import RGBCamera
     from metadrive.component.pgblock.first_block import FirstPGBlock
-    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv, DEFAULT_HYBRID_MAP_CONFIG
+    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
     from metadrive.obs.diff_obs.top_down_state_obs_multi_channel import DatasetCollectObservation
     from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
     from metadrive.policy.diffusion_policy.transfuser_features import observation_to_features
@@ -23,7 +25,6 @@ try:  # pragma: no cover - exercised only in real MetaDrive runtime
 except Exception as exc:  # pragma: no cover - import errors are surfaced at runtime
     RGBCamera = None  # type: ignore
     FirstPGBlock = None  # type: ignore
-    DEFAULT_HYBRID_MAP_CONFIG = ()  # type: ignore
     _METADRIVE_IMPORT_ERROR = exc
     BaseMultiEnv = object  # type: ignore
     DatasetCollectObservation = object  # type: ignore
@@ -331,7 +332,7 @@ class PlatoonEnv(BaseMultiEnv):
             )
 
     def _setup_scenario_orchestrator(self) -> None:
-        """Initialise ScenarioOrchestrator when scenario_id + local_route are both set."""
+        """Initialise PlatoonScenarioOrchestrator when scenario_id + local_route are both set."""
         self._scenario_orchestrator = None
         self._scenario_step_count = 0
         scenario_id = self.platoon_config.scenario_id
@@ -339,17 +340,17 @@ class PlatoonEnv(BaseMultiEnv):
         if not scenario_id or not local_route:
             return
         try:
-            from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
-            from metadrive.exp_dataset.scenario_definitions import get_scenario_definition, SCENARIO_BY_ID
+            from scenarios.definitions import get_scenario_definition, SCENARIO_BY_ID
+            from scenarios.platoon_orchestrator import PlatoonScenarioOrchestrator
             if scenario_id not in SCENARIO_BY_ID:
                 return
             defn = get_scenario_definition(scenario_id)
             if local_route not in defn.trigger_by_local_route:
                 return
-            self._scenario_orchestrator = ScenarioOrchestrator(defn, local_route)
-            # Use the lead vehicle (agent0) as the trigger reference
-            lead_agent_id = self._agent_ids[0]
-            self._scenario_orchestrator.reset(self, lead_agent_id)
+            self._scenario_orchestrator = PlatoonScenarioOrchestrator(
+                defn, local_route, self._agent_ids
+            )
+            self._scenario_orchestrator.reset(self, self._agent_ids[0])
         except Exception:
             self._scenario_orchestrator = None
 

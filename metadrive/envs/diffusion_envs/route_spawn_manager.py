@@ -5,7 +5,7 @@ from typing import List, Optional
 import numpy as np
 
 from metadrive.manager.spawn_manager import SpawnManager
-from metadrive.exp_dataset.scenario_definitions import SCENARIO_BY_ID
+from scenarios.definitions import SCENARIO_BY_ID
 
 
 class _RouteRoadRef:
