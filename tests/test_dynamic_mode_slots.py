@@ -35,21 +35,33 @@ def _mode_context() -> ModeContext:
     )
 
 
-def test_default_mode_slots_keep_backward_compatible_names() -> None:
+def test_default_mode_slots_use_compact_group_names() -> None:
     slots = build_mode_slots()
     assert [slot.name for slot in slots] == [
-        "KEEP_LANE_HIGH",
-        "KEEP_LANE_MEDIUM",
-        "KEEP_LANE_LOW",
-        "LANE_CHANGE_LEFT_HIGH",
-        "LANE_CHANGE_LEFT_MEDIUM",
-        "LANE_CHANGE_LEFT_LOW",
-        "LANE_CHANGE_RIGHT_HIGH",
-        "LANE_CHANGE_RIGHT_MEDIUM",
-        "LANE_CHANGE_RIGHT_LOW",
-        "EMERGENCY_STOP",
+        "KEEP_HIGH",
+        "KEEP_MEDIUM",
+        "KEEP_LOW",
+        "LEFT_LC_HIGH",
+        "LEFT_LC_MEDIUM",
+        "LEFT_LC_LOW",
+        "RIGHT_LC_HIGH",
+        "RIGHT_LC_MEDIUM",
+        "RIGHT_LC_LOW",
+        "STOP",
     ]
     assert [slot.index for slot in slots] == list(range(10))
+    assert [slot.semantic_group for slot in slots] == [
+        "KEEP",
+        "KEEP",
+        "KEEP",
+        "LEFT_LC",
+        "LEFT_LC",
+        "LEFT_LC",
+        "RIGHT_LC",
+        "RIGHT_LC",
+        "RIGHT_LC",
+        "STOP",
+    ]
 
 
 def test_mode_slots_can_expand_lane_change_density() -> None:
@@ -62,13 +74,13 @@ def test_mode_slots_can_expand_lane_change_density() -> None:
 
     assert len(slots) == 16
     assert [slot.name for slot in slots[:3]] == [
-        "KEEP_LANE_HIGH",
-        "KEEP_LANE_MEDIUM",
-        "KEEP_LANE_LOW",
+        "KEEP_HIGH",
+        "KEEP_MEDIUM",
+        "KEEP_LOW",
     ]
-    assert [slot.name for slot in slots[3:9]] == [f"LANE_CHANGE_LEFT_LEVEL_{i}" for i in range(6)]
-    assert [slot.name for slot in slots[9:15]] == [f"LANE_CHANGE_RIGHT_LEVEL_{i}" for i in range(6)]
-    assert slots[-1].name == "EMERGENCY_STOP"
+    assert [slot.name for slot in slots[3:9]] == [f"LEFT_LC_LEVEL_{i}" for i in range(6)]
+    assert [slot.name for slot in slots[9:15]] == [f"RIGHT_LC_LEVEL_{i}" for i in range(6)]
+    assert slots[-1].name == "STOP"
 
 
 def test_transfuser_config_aligns_ego_fut_mode_with_mode_counts() -> None:

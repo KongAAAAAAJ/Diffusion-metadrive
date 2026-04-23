@@ -14,6 +14,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from metadrive.policy.diffusion_policy.mode_definitions import ModeSlot, build_mode_slots, get_mode_slot
+from metadrive.policy.diffusion_policy.mode_visualization import mode_color
 from metadrive.policy.diffusion_policy.transfuser_agent import TransfuserAgent
 from metadrive.policy.diffusion_policy.transfuser_callback import render_open_loop_prediction
 from metadrive.policy.diffusion_policy.transfuser_config import (
@@ -170,17 +171,33 @@ def _predict_open_loop(model, features_device, targets_device):
     return model(features_device, targets_device)
 
 
-def _mode_name(mode_idx: Optional[int]) -> Optional[str]:
+def _mode_name(mode_idx: Optional[int], mode_slots: Sequence[ModeSlot] | None = None) -> Optional[str]:
     if mode_idx is None:
         return None
     try:
-        return get_mode_slot(int(mode_idx)).name
+        return get_mode_slot(int(mode_idx), mode_slots).name
     except Exception:
         return f"MODE_{int(mode_idx)}"
 
 
+def _extract_multi_point_guidance_points(coarse_trajectories: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if coarse_trajectories is None:
+        return None
+    coarse = np.asarray(coarse_trajectories, dtype=np.float64)
+    if coarse.ndim != 3 or coarse.shape[1] == 0 or coarse.shape[2] < 2:
+        return None
+    return coarse[:, -1, :2].copy()
+
+
+def _matplotlib_color(color):
+    if isinstance(color, tuple) and len(color) == 3:
+        b, g, r = color
+        return (float(r) / 255.0, float(g) / 255.0, float(b) / 255.0)
+    return color
+
+
 def _resolve_gt_mode_idx(metadata: Dict[str, object]) -> Optional[int]:
-    for key in ("hierarchical_mode_label", "trajectory_mode"):
+    for key in ("gt_mode_label", "trajectory_mode"):
         value = metadata.get(key)
         if value is not None:
             return int(value)
@@ -200,6 +217,8 @@ def save_trajectory_comparison_plot(
     fde: float,
     target_point: Optional[np.ndarray] = None,
     trajectory_candidates: Optional[np.ndarray] = None,
+    multi_point_guidance: Optional[np.ndarray] = None,
+    mode_slots: Sequence[ModeSlot] | None = None,
 ) -> None:
     pred_xy = np.asarray(pred_traj[:, :2], dtype=np.float64)
     gt_xy = np.asarray(gt_traj[:, :2], dtype=np.float64)
@@ -236,6 +255,25 @@ def save_trajectory_comparison_plot(
                 label="Target Point",
                 zorder=5,
             )
+    if multi_point_guidance is not None:
+        points = np.asarray(multi_point_guidance, dtype=np.float64)
+        slots = tuple(mode_slots) if mode_slots is not None else ()
+        if points.ndim == 2 and points.shape[1] >= 2:
+            for mode_i, point in enumerate(points):
+                color = _matplotlib_color(mode_color(slots[mode_i])) if mode_i < len(slots) else "#CC79A7"
+                is_selected = pred_mode_idx is not None and int(mode_i) == int(pred_mode_idx)
+                plt.scatter(
+                    [float(point[0])],
+                    [float(point[1])],
+                    marker="o",
+                    s=58 if is_selected else 26,
+                    facecolors=color,
+                    edgecolors="black" if is_selected else "none",
+                    linewidths=0.8 if is_selected else 0.0,
+                    alpha=0.95 if is_selected else 0.62,
+                    label="Mode guidance points" if mode_i == 0 else None,
+                    zorder=6 if is_selected else 4,
+                )
     plt.xlabel("x")
     plt.ylabel("y")
     plt.title(
@@ -356,7 +394,7 @@ def summarize_open_loop_records(records: List[Dict], mode_slots: Sequence[ModeSl
                 return "LEFT"
             if slot_def.lateral_direction == "right":
                 return "RIGHT"
-            if slot_def.semantic_group == "KEEP_LANE":
+            if slot_def.semantic_group == "KEEP":
                 return "KEEP"
             return "OTHER"
         if 0 <= slot <= 2:
@@ -365,7 +403,7 @@ def summarize_open_loop_records(records: List[Dict], mode_slots: Sequence[ModeSl
             return "LEFT"
         if 6 <= slot <= 8:
             return "RIGHT"
-        return "OTHER"  # slot 9 EMERGENCY_STOP
+        return "OTHER"  # default final slot is STOP
 
     for record in records:
         pred_mode_idx = _pred_mode(record)
@@ -464,6 +502,12 @@ def evaluate_open_loop(
     anchor_path = Path(config.plan_anchor_path)
     if not config.use_dynamic_anchors and anchor_path.exists():
         anchors = np.load(anchor_path)
+    mode_slots = build_mode_slots(
+        keep_lane_count=config.mode_keep_lane_count,
+        lane_change_left_count=config.mode_lane_change_left_count,
+        lane_change_right_count=config.mode_lane_change_right_count,
+        emergency_stop_count=config.mode_emergency_stop_count,
+    )
 
     records: List[Dict] = []
     global_index = 0
@@ -495,12 +539,20 @@ def evaluate_open_loop(
                     for idx in topk_indices
                 ]
             ade, fde = compute_ade_fde(pred_traj, gt_traj)
-            gt_mode_idx = _resolve_gt_mode_idx(metadata)
-            pred_mode_name = _mode_name(pred_mode_idx)
-            gt_mode_name = _mode_name(gt_mode_idx)
+            if "gt_mode_label" in targets_cpu:
+                gt_mode_idx = int(targets_cpu["gt_mode_label"][in_batch_idx].item())
+            else:
+                gt_mode_idx = _resolve_gt_mode_idx(metadata)
+            pred_mode_name = _mode_name(pred_mode_idx, mode_slots)
+            gt_mode_name = _mode_name(gt_mode_idx, mode_slots)
             trajectory_candidates = None
             if "trajectory_candidates" in predictions_cpu:
                 trajectory_candidates = predictions_cpu["trajectory_candidates"][in_batch_idx].numpy()
+            multi_point_guidance = None
+            if "coarse_trajectories" in features_cpu:
+                multi_point_guidance = _extract_multi_point_guidance_points(
+                    features_cpu["coarse_trajectories"][in_batch_idx].numpy()
+                )
             target_point = features_cpu.get("target_point")
             target_point_xy = None
             if target_point is not None:
@@ -545,6 +597,8 @@ def evaluate_open_loop(
                     fde=fde,
                     target_point=target_point_xy,
                     trajectory_candidates=trajectory_candidates,
+                    multi_point_guidance=multi_point_guidance,
+                    mode_slots=mode_slots,
                 )
 
             if save_images:
@@ -573,12 +627,7 @@ def evaluate_open_loop(
 
     metrics = summarize_open_loop_records(
         records,
-        build_mode_slots(
-            keep_lane_count=config.mode_keep_lane_count,
-            lane_change_left_count=config.mode_lane_change_left_count,
-            lane_change_right_count=config.mode_lane_change_right_count,
-            emergency_stop_count=config.mode_emergency_stop_count,
-        ),
+        mode_slots,
     )
     summary = {
         "checkpoint": getattr(model, "_checkpoint_path", None),

@@ -16,7 +16,7 @@ def _make_loss_computer() -> LossComputer:
     return LossComputer(config)
 
 
-def test_loss_computer_prefers_hierarchical_mode_label_over_nearest_anchor():
+def test_loss_computer_prefers_gt_mode_label_over_nearest_anchor():
     loss_computer = _make_loss_computer()
 
     poses_reg = torch.tensor(
@@ -29,7 +29,7 @@ def test_loss_computer_prefers_hierarchical_mode_label_over_nearest_anchor():
     poses_cls = torch.tensor([[-10.0, 10.0]], dtype=torch.float32)
     targets = {
         "trajectory": torch.tensor([[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]], dtype=torch.float32),
-        "hierarchical_mode_label": torch.tensor([1], dtype=torch.int64),
+        "gt_mode_label": torch.tensor([1], dtype=torch.int64),
     }
     plan_anchor = torch.tensor(
         [[
@@ -45,7 +45,7 @@ def test_loss_computer_prefers_hierarchical_mode_label_over_nearest_anchor():
     assert loss.item() == pytest.approx(0.0, abs=1e-3)
 
 
-def test_loss_computer_falls_back_when_hierarchical_mode_label_is_invalid():
+def test_loss_computer_falls_back_when_gt_mode_label_is_invalid():
     loss_computer = _make_loss_computer()
 
     poses_reg = torch.tensor(
@@ -58,7 +58,7 @@ def test_loss_computer_falls_back_when_hierarchical_mode_label_is_invalid():
     poses_cls = torch.tensor([[10.0, -10.0]], dtype=torch.float32)
     targets = {
         "trajectory": torch.tensor([[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]], dtype=torch.float32),
-        "hierarchical_mode_label": torch.tensor([1], dtype=torch.int64),
+        "gt_mode_label": torch.tensor([1], dtype=torch.int64),
     }
     plan_anchor = torch.tensor(
         [[

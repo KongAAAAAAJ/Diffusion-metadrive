@@ -21,7 +21,7 @@ def _select_topology_supervised_trajectory(
 ) -> Optional[torch.Tensor]:
     trajectory = predictions.get("trajectory")
     candidates = predictions.get("trajectory_candidates_train")
-    mode_labels = targets.get("hierarchical_mode_label")
+    mode_labels = targets.get("gt_mode_label")
     if trajectory is None:
         return None
     if candidates is None or mode_labels is None:

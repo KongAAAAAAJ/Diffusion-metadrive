@@ -19,7 +19,7 @@ PY
 }
 
 # ── Stage selector ──────────────────────────────────────────────────────────
-STAGE="${STAGE:-preprocess}"  # all | collect | anchors | preprocess  # 选择数据处理阶段
+STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess  # 选择数据处理阶段
 
 # *── Shared paths ────────────────────────────────────────────────────────────
 EXPERT_TYPE="${EXPERT_TYPE:-idm}"

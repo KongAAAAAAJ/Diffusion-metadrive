@@ -59,6 +59,7 @@ def _raw_sample() -> dict:
         ),
         "reference_lane_index": np.asarray(0, dtype=np.int16),
         "future_reference_lane_index": np.asarray([0, 0, 0, 0, 0, 0, 0, 0], dtype=np.int16),
+        "expert_lateral_decision": np.asarray(0, dtype=np.int8),
         "ego_speed_km_h": np.asarray(10.0, dtype=np.float32),
         "current_lane_polyline": np.asarray(
             [[0.0, 0.0], [2.0, 0.0], [4.0, 0.0], [6.0, 0.0], [8.0, 0.0]],
@@ -188,7 +189,7 @@ def test_topology_consistency_loss_penalizes_corridor_violation():
     assert lane_direction_loss.item() == pytest.approx(0.0, abs=1e-5)
 
 
-def test_topology_consistency_loss_prefers_hierarchical_mode_candidate():
+def test_topology_consistency_loss_prefers_gt_mode_candidate():
     config = build_transfuser_config(
         "small",
         topology_weight=1.0,
@@ -211,7 +212,7 @@ def test_topology_consistency_loss_prefers_hierarchical_mode_candidate():
         "trajectory_mode_logits_train": torch.tensor([[0.0, 1.0]], dtype=torch.float32),
     }
     targets = {
-        "hierarchical_mode_label": torch.tensor([1], dtype=torch.int64),
+        "gt_mode_label": torch.tensor([1], dtype=torch.int64),
         "topology_polyline": torch.tensor(
             [[[0.0, 0.0], [2.0, 0.0], [4.0, 0.0], [6.0, 0.0], [8.0, 0.0]]],
             dtype=torch.float32,

@@ -20,6 +20,40 @@ class StateSE2Index:
     Y = 1
     HEADING = 2
 
+
+def compute_preference_bias(
+    preference_point: Optional[torch.Tensor],
+    coarse_trajectories: Optional[torch.Tensor],
+    temperature: float,
+    mode_valid_mask: Optional[torch.Tensor] = None,
+) -> Optional[torch.Tensor]:
+    """Return a per-mode classification bias from anchor endpoint distance."""
+    if preference_point is None or coarse_trajectories is None:
+        return None
+    preference_point = preference_point.to(device=coarse_trajectories.device, dtype=coarse_trajectories.dtype)
+    if preference_point.ndim == 1:
+        preference_point = preference_point.unsqueeze(0)
+    if preference_point.ndim != 2 or preference_point.shape[-1] < 2:
+        raise ValueError(f"preference_point must have shape [B,2], got {tuple(preference_point.shape)}")
+    endpoints = coarse_trajectories[..., -1, :2].to(dtype=preference_point.dtype)
+    distance = torch.linalg.norm(endpoints - preference_point[:, None, :2], dim=-1)
+    if mode_valid_mask is None:
+        valid = torch.ones_like(distance, dtype=torch.bool)
+    else:
+        valid = mode_valid_mask.to(device=distance.device, dtype=torch.bool)
+
+    has_valid = valid.any(dim=-1, keepdim=True)
+    valid_min = distance.masked_fill(~valid, float("inf")).amin(dim=-1, keepdim=True)
+    valid_max = distance.masked_fill(~valid, float("-inf")).amax(dim=-1, keepdim=True)
+    valid_min = torch.where(has_valid, valid_min, torch.zeros_like(valid_min))
+    valid_max = torch.where(has_valid, valid_max, valid_min)
+    normalized_distance = (distance - valid_min) / (valid_max - valid_min).clamp_min(1e-6)
+    normalized_distance = torch.where(has_valid, normalized_distance, torch.zeros_like(normalized_distance))
+
+    bias = -normalized_distance / max(float(temperature), 1e-6)
+    bias = bias.masked_fill(~valid, -1e9)
+    return bias
+
     
 class V2TransfuserModel(nn.Module):
     """Torch module for Transfuser."""
@@ -157,6 +191,50 @@ class V2TransfuserModel(nn.Module):
         target_point: Optional[torch.Tensor] = features.get("target_point")
         return self._target_point_mlp(target_point) if target_point is not None else None
 
+    def _prepare_preference_point(self, features: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
+        if not self._config.use_preference_bias:
+            return None
+        preference_point: Optional[torch.Tensor] = features.get("preference_point")
+        if preference_point is None:
+            return None
+        preference_point = preference_point.to(dtype=features["status_feature"].dtype, device=features["status_feature"].device)
+        if preference_point.ndim == 1:
+            preference_point = preference_point.unsqueeze(0)
+        preference_point = preference_point[:, :2]
+        if self.training and self._config.preference_train_noise_std > 0.0:
+            preference_point = preference_point + torch.randn_like(preference_point) * float(self._config.preference_train_noise_std)
+        if self.training and self._config.preference_dropout_prob > 0.0:
+            keep = torch.rand((preference_point.shape[0], 1), device=preference_point.device) >= float(
+                self._config.preference_dropout_prob
+            )
+            preference_point = torch.where(keep, preference_point, torch.zeros_like(preference_point))
+        return preference_point
+
+    def _compute_preference_bias(
+        self,
+        features: Dict[str, torch.Tensor],
+        coarse_trajectories: Optional[torch.Tensor],
+        mode_valid_mask: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if not self._config.use_preference_bias:
+            return None
+        if coarse_trajectories is None:
+            batch_size = features["status_feature"].shape[0]
+            anchor_points = self._trajectory_head.plan_anchor.to(
+                device=features["status_feature"].device,
+                dtype=features["status_feature"].dtype,
+            )
+            coarse_trajectories = anchor_points.unsqueeze(0).expand(batch_size, -1, -1, -1)
+        preference_bias = compute_preference_bias(
+            preference_point=self._prepare_preference_point(features),
+            coarse_trajectories=coarse_trajectories,
+            temperature=self._config.preference_bias_temperature,
+            mode_valid_mask=mode_valid_mask,
+        )
+        if preference_bias is None:
+            return None
+        return preference_bias * float(self._config.preference_bias_beta)
+
 
     def forward(self, features: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]=None) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
@@ -202,6 +280,7 @@ class V2TransfuserModel(nn.Module):
 
         coarse_trajectories = features.get("coarse_trajectories")
         mode_valid_mask = features.get("mode_valid_mask")
+        preference_bias = self._compute_preference_bias(features, coarse_trajectories, mode_valid_mask)
 
         trajectory = self._trajectory_head(
             trajectory_query,
@@ -214,6 +293,7 @@ class V2TransfuserModel(nn.Module):
             target_point_embed=target_point_embed,
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
+            preference_bias=preference_bias,
         )
         output.update(trajectory)
 
@@ -262,6 +342,7 @@ class V2TransfuserModel(nn.Module):
 
         coarse_trajectories = features.get("coarse_trajectories")
         mode_valid_mask = features.get("mode_valid_mask")
+        preference_bias = self._compute_preference_bias(features, coarse_trajectories, mode_valid_mask)
 
         trajectory = self._trajectory_head.infer_multimodal(
             trajectory_query,
@@ -273,6 +354,7 @@ class V2TransfuserModel(nn.Module):
             target_point_embed=target_point_embed,
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
+            preference_bias=preference_bias,
         )
         output.update(trajectory)
 
@@ -385,6 +467,7 @@ class DiffMotionPlanningRefinementModule(nn.Module):
         traj_feature,
         target_point_embed=None,
         noisy_traj_points=None,
+        preference_bias=None,
     ):
         bs, ego_fut_mode, _ = traj_feature.shape
         base_traj_feature = traj_feature
@@ -405,7 +488,10 @@ class DiffMotionPlanningRefinementModule(nn.Module):
 
         # 6. get final prediction
         traj_feature = traj_feature.view(bs, ego_fut_mode,-1)
-        plan_cls = self.plan_cls_branch(traj_feature).squeeze(-1)  # *轨迹分类分支，输出每个模式的概率
+        raw_logits = self.plan_cls_branch(traj_feature).squeeze(-1)  # *轨迹分类分支，输出每个模式的概率
+        plan_cls = raw_logits if preference_bias is None else raw_logits + preference_bias.to(
+            device=raw_logits.device, dtype=raw_logits.dtype
+        )
         if self.trajectory_reg_decoder_type == "mlp":
             traj_delta = self.plan_reg_branch(traj_feature)  # *轨迹回归分支，输出每个模式的轨迹
             plan_reg = traj_delta.reshape(bs, ego_fut_mode, self.ego_fut_ts, 3)
@@ -549,7 +635,8 @@ class CustomTransformerDecoderLayer(nn.Module):
                 time_embed, 
                 status_encoding,
                 target_point_embed=None,
-                global_img=None):
+                global_img=None,
+                preference_bias=None):
         traj_feature = self.cross_bev_attention(traj_feature,noisy_traj_points,bev_feature,bev_spatial_shape)
         traj_feature = traj_feature + self.dropout(self.cross_agent_attention(traj_feature, agents_query,agents_query)[0])
         traj_feature = self.norm1(traj_feature)
@@ -571,6 +658,7 @@ class CustomTransformerDecoderLayer(nn.Module):
             traj_feature,
             target_point_embed=target_point_embed,
             noisy_traj_points=noisy_traj_points,
+            preference_bias=preference_bias,
         ) #bs,20,8,3; bs,20
         poses_reg[...,:2] = poses_reg[...,:2] + noisy_traj_points
         poses_reg[..., StateSE2Index.HEADING] = poses_reg[..., StateSE2Index.HEADING].tanh() * np.pi
@@ -604,6 +692,7 @@ class CustomTransformerDecoder(nn.Module):
                 status_encoding,
                 target_point_embed=None,
                 global_img=None,
+                preference_bias=None,
                 return_traj_feature: bool = False):
         poses_reg_list = []
         poses_cls_list = []
@@ -620,6 +709,7 @@ class CustomTransformerDecoder(nn.Module):
                 status_encoding,
                 target_point_embed,
                 global_img,
+                preference_bias,
             )
             poses_reg_list.append(poses_reg)
             poses_cls_list.append(poses_cls)
@@ -731,6 +821,7 @@ class TrajectoryHead(nn.Module):
         target_point_embed=None,
         coarse_trajectories=None,
         mode_valid_mask=None,
+        preference_bias=None,
     ) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
         if self.training:
@@ -745,6 +836,7 @@ class TrajectoryHead(nn.Module):
                 target_point_embed=target_point_embed,
                 coarse_trajectories=coarse_trajectories,
                 mode_valid_mask=mode_valid_mask,
+                preference_bias=preference_bias,
             )
         else:
             return self.forward_test(
@@ -758,6 +850,7 @@ class TrajectoryHead(nn.Module):
                 target_point_embed=target_point_embed,
                 coarse_trajectories=coarse_trajectories,
                 mode_valid_mask=mode_valid_mask,
+                preference_bias=preference_bias,
             )
 
     def infer_multimodal(
@@ -771,6 +864,7 @@ class TrajectoryHead(nn.Module):
         target_point_embed=None,
         coarse_trajectories=None,
         mode_valid_mask=None,
+        preference_bias=None,
     ) -> Dict[str, torch.Tensor]:
         """Return multimodal trajectory candidates before selector sampling."""
         return self.forward_test(
@@ -784,6 +878,7 @@ class TrajectoryHead(nn.Module):
             target_point_embed=target_point_embed,
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
+            preference_bias=preference_bias,
         )
 
 
@@ -799,6 +894,7 @@ class TrajectoryHead(nn.Module):
         target_point_embed=None,
         coarse_trajectories=None,
         mode_valid_mask=None,
+        preference_bias=None,
     ) -> Dict[str, torch.Tensor]:
         bs = ego_query.shape[0]
         device = ego_query.device
@@ -841,6 +937,7 @@ class TrajectoryHead(nn.Module):
             status_encoding,
             target_point_embed,
             global_img,
+            preference_bias=preference_bias,
         )
 
         trajectory_loss_dict = {}
@@ -874,6 +971,7 @@ class TrajectoryHead(nn.Module):
         target_point_embed=None,
         coarse_trajectories=None,
         mode_valid_mask=None,
+        preference_bias=None,
     ) -> Dict[str, torch.Tensor]:
         step_num = 2
         bs = ego_query.shape[0]
@@ -926,6 +1024,7 @@ class TrajectoryHead(nn.Module):
                     status_encoding,
                     target_point_embed,
                     global_img,
+                    preference_bias,
                     return_traj_feature=True,
                 )
             else:
@@ -940,6 +1039,7 @@ class TrajectoryHead(nn.Module):
                     status_encoding,
                     target_point_embed,
                     global_img,
+                    preference_bias,
                 )
             poses_reg = poses_reg_list[-1]
             poses_cls = poses_cls_list[-1]

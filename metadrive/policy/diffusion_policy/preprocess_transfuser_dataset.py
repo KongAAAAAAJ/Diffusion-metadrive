@@ -29,6 +29,7 @@ PROCESSED_FIELDS = (
     "ego_state",
     "target_point",
     "target_line",
+    "preference_point",
     "topology_polyline",
     "coarse_trajectories",
     "mode_valid_mask",
@@ -41,7 +42,9 @@ DEFAULT_MODEL_CONFIG_PATH = "configs/diffusion/model.yaml"
 OPTIONAL_PASSTHROUGH_FIELDS = (
     "scenario_id",
     "local_route",
-    "hierarchical_mode_label",
+    "expert_lateral_decision",
+    "reference_lane_index",
+    "future_reference_lane_index",
     "trajectory_mode",
     "trajectory_raw",
     "trajectory_correction_strength",
@@ -179,7 +182,7 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
 
     num_samples = int(shard["trajectory"].shape[0])
     processed = {field: [] for field in PROCESSED_FIELDS}
-    hierarchical_mode_labels = []
+    gt_mode_labels = []
 
     for sample_idx in range(num_samples):
         sample = {key: shard[key][sample_idx] for key in shard.keys()}
@@ -190,6 +193,8 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
         processed["ego_state"].append(tensor_to_numpy(features["ego_state"]).astype(np.float32))
         processed["target_point"].append(tensor_to_numpy(features["target_point"]).astype(np.float32))
         processed["target_line"].append(tensor_to_numpy(features["target_line"]).astype(np.float32))
+        preference_point = features.get("preference_point", features["target_point"])
+        processed["preference_point"].append(tensor_to_numpy(preference_point).astype(np.float32))
         processed["topology_polyline"].append(tensor_to_numpy(targets["topology_polyline"]).astype(np.float32))
         processed["coarse_trajectories"].append(tensor_to_numpy(features["coarse_trajectories"]).astype(np.float32))
         processed["mode_valid_mask"].append(tensor_to_numpy(features["mode_valid_mask"]).astype(bool))
@@ -197,12 +202,12 @@ def build_processed_payload(shard_path: Path, config) -> Dict[str, np.ndarray]:
         processed["agent_states"].append(tensor_to_numpy(targets["agent_states"]).astype(np.float32))
         processed["agent_labels"].append(tensor_to_numpy(targets["agent_labels"]).astype(bool))
         processed["bev_semantic_map"].append(tensor_to_numpy(targets["bev_semantic_map"]).astype(np.uint8))
-        if "hierarchical_mode_label" in targets:
-            hierarchical_mode_labels.append(int(tensor_to_numpy(targets["hierarchical_mode_label"]).reshape(-1)[0]))
+        if "gt_mode_label" in targets:
+            gt_mode_labels.append(int(tensor_to_numpy(targets["gt_mode_label"]).reshape(-1)[0]))
 
     payload = {key: np.stack(values, axis=0) for key, values in processed.items()}
-    if hierarchical_mode_labels:
-        payload["hierarchical_mode_label"] = np.asarray(hierarchical_mode_labels, dtype=np.int8)
+    if gt_mode_labels:
+        payload["gt_mode_label"] = np.asarray(gt_mode_labels, dtype=np.int8)
     for field in OPTIONAL_PASSTHROUGH_FIELDS:
         if field in shard:
             payload[field] = np.asarray(shard[field])

@@ -296,6 +296,7 @@ class TransfuserPolicy(BasePolicy):
             "status_feature",
             "ego_state",
             "target_point",
+            "preference_point",
             "target_line",
             "topology_polyline",
             "lane_decision",

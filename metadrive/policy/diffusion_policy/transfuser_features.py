@@ -19,6 +19,7 @@ PROCESSED_DIR_FIELDS = (
     "ego_state",
     "target_point",
     "target_line",
+    "preference_point",
     "topology_polyline",
     "coarse_trajectories",
     "mode_valid_mask",
@@ -31,7 +32,9 @@ PROCESSED_DIR_FIELDS = (
 METADATA_PASSTHROUGH_FIELDS = (
     "scenario_id",
     "local_route",
-    "hierarchical_mode_label",
+    "gt_mode_label",
+    "expert_lateral_decision",
+    "reference_lane_index",
     "trajectory_mode",
 )
 
@@ -1071,6 +1074,62 @@ def _build_mode_features(sample: Dict[str, np.ndarray], config: TransfuserConfig
         }
 
 
+def _derive_lateral_decision_for_mode_label(sample: Dict[str, np.ndarray]) -> int:
+    """Prefer sample-level future reference-lane semantics over instant IDM state."""
+    if "expert_lateral_decision" not in sample:
+        raise ValueError(
+            "Missing expert_lateral_decision while building gt_mode_label. "
+            "Re-collect raw data with expert_lateral_decision enabled before preprocessing."
+        )
+
+    if "reference_lane_index" in sample and "future_reference_lane_index" in sample:
+        current = int(_to_numpy(sample["reference_lane_index"]).reshape(-1)[0])
+        if current >= 0:
+            future_indices = _to_numpy(sample["future_reference_lane_index"]).reshape(-1)
+            for lane_index in future_indices:
+                future = int(lane_index)
+                if future < 0:
+                    continue
+                if future < current:
+                    return -1
+                if future > current:
+                    return 1
+            return 0
+
+    return int(_to_numpy(sample["expert_lateral_decision"]).reshape(-1)[0])
+
+
+def _gt_mode_label_from_expert_decision(
+    sample: Dict[str, np.ndarray],
+    features: Dict[str, torch.Tensor],
+    config: TransfuserConfig,
+) -> torch.Tensor:
+    """Recompute mode label against the current config-aware dynamic slots."""
+    from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots
+    from metadrive.policy.diffusion_policy.mode_labeler import label_mode_from_expert_decision
+
+    if "coarse_trajectories" not in features or "mode_valid_mask" not in features:
+        raise ValueError("Missing dynamic mode features while building gt_mode_label.")
+
+    gt_xy = _to_numpy(sample["trajectory"]).astype(np.float32)[:, :2]
+    coarse = _to_numpy(features["coarse_trajectories"]).astype(np.float32)
+    mask = _to_numpy(features["mode_valid_mask"]).astype(bool)
+    mode_slots = build_mode_slots(
+        keep_lane_count=config.mode_keep_lane_count,
+        lane_change_left_count=config.mode_lane_change_left_count,
+        lane_change_right_count=config.mode_lane_change_right_count,
+        emergency_stop_count=config.mode_emergency_stop_count,
+    )
+    label = label_mode_from_expert_decision(
+        lateral_decision=_derive_lateral_decision_for_mode_label(sample),
+        gt_trajectory=gt_xy,
+        coarse_trajectories=coarse,
+        mode_valid_mask=mask,
+        mode_slots=mode_slots,
+    )
+    return torch.tensor(label, dtype=torch.int8)
+
+
 def sample_to_features_targets(
     sample: Dict[str, np.ndarray],
     config: TransfuserConfig,
@@ -1097,6 +1156,7 @@ def sample_to_features_targets(
         "ego_state": torch.from_numpy(_to_numpy(sample["ego_state"]).astype(np.float32, copy=False)),
         "target_point": target_point,
         "target_line": _build_target_line(topology_polyline.numpy(), target_point, config),
+        "preference_point": _gt_trajectory_endpoint_from_sample(sample),
         "lane_decision": torch.tensor(int(lane_decision), dtype=torch.int8),
     }
     features.update(_build_mode_features(sample, config))
@@ -1112,17 +1172,7 @@ def sample_to_features_targets(
         if "bev_semantic_map" in sample
         else bev_raster_to_target(sample["bev_raster"], config),
     }
-    # Hierarchical mode label from GT trajectory + coarse trajectories
-    try:
-        from metadrive.policy.diffusion_policy.mode_labeler import label_hierarchical_mode
-        gt_xy = _to_numpy(sample["trajectory"]).astype(np.float32)[:, :2]
-        coarse = features["coarse_trajectories"].numpy()
-        mask = features["mode_valid_mask"].numpy()
-        targets["hierarchical_mode_label"] = torch.tensor(
-            label_hierarchical_mode(gt_xy, coarse, mask), dtype=torch.int8
-        )
-    except Exception:
-        pass
+    targets["gt_mode_label"] = _gt_mode_label_from_expert_decision(sample, features, config)
     return features, targets
 
 
@@ -1149,6 +1199,9 @@ def processed_sample_to_features_targets(
         "ego_state": torch.from_numpy(_to_numpy(sample["ego_state"]).astype(np.float32, copy=True)),
         "target_point": target_point,
         "target_line": target_line,
+        "preference_point": torch.from_numpy(
+            _to_numpy(sample.get("preference_point", target_point)).astype(np.float32, copy=True)
+        ),
     }
     if "coarse_trajectories" in sample:
         features["coarse_trajectories"] = torch.from_numpy(
@@ -1168,10 +1221,12 @@ def processed_sample_to_features_targets(
         targets["topology_polyline"] = torch.from_numpy(
             _to_numpy(sample["topology_polyline"]).astype(np.float32, copy=True)
         )
-    if "hierarchical_mode_label" in sample:
-        targets["hierarchical_mode_label"] = torch.tensor(
-            int(_to_numpy(sample["hierarchical_mode_label"]).reshape(-1)[0]),
-            dtype=torch.int64,
+    if "expert_lateral_decision" in sample:
+        targets["gt_mode_label"] = _gt_mode_label_from_expert_decision(sample, features, config)
+    elif "gt_mode_label" in sample:
+        raise ValueError(
+            "Processed shard contains gt_mode_label but is missing expert_lateral_decision. "
+            "Reprocess from raw shards collected with expert_lateral_decision so labels match current mode slots."
         )
     return features, targets
 
@@ -1199,6 +1254,7 @@ def observation_to_features(
         # geometry only.  It should not be shifted onto an adjacent lane by the
         # current lane-decision / mode semantics.
         "target_point": target_point,
+        "preference_point": target_point.clone(),
         "target_line": _build_target_line(topology_polyline.numpy(), target_point, config),
         "topology_polyline": topology_polyline,
     }
@@ -1311,7 +1367,7 @@ class MetaDriveTransfuserDataset(Dataset):
             if value.size == 0:
                 continue
             scalar = value[0]
-            if field_name in ("trajectory_mode", "hierarchical_mode_label"):
+            if field_name in ("trajectory_mode", "gt_mode_label"):
                 metadata[field_name] = int(scalar)
                 continue
             if isinstance(scalar, bytes):
@@ -1400,7 +1456,7 @@ class MetaDriveTransfuserDataset(Dataset):
             for key in fields:
                 field_path = shard_path / f"{key}.npy"
                 if not field_path.exists():
-                    if key == "target_line":
+                    if key in ("target_line", "preference_point"):
                         continue
                     raise FileNotFoundError(f"Processed shard field not found: {field_path}")
                 array = np.load(field_path, mmap_mode=mmap_mode, allow_pickle=False)

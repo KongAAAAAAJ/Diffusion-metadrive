@@ -143,6 +143,12 @@ class TransfuserConfig:
     target_guidance_type: str = "point"
     target_line_num_points: int = 8
     target_point_dim: int = 32
+    preference: bool = False
+    use_preference_bias: bool = False
+    preference_bias_beta: float = 1.0
+    preference_bias_temperature: float = 8.0
+    preference_train_noise_std: float = 0.0
+    preference_dropout_prob: float = 0.0
     target_point_min_forward_distance_m: float = 3.0
     target_point_prediction_horizon_s: float = 4.0
     target_point_max_reachable_accel_mps2: float = 1.5
@@ -201,7 +207,12 @@ class TransfuserConfig:
             raise ValueError(
                 f"target_guidance_type must be 'point', 'line', or 'multi_point', got {self.target_guidance_type!r}"
             )
+        if self.preference:
+            self.use_preference_bias = True
         self.target_line_num_points = max(1, int(self.target_line_num_points))
+        self.preference_bias_temperature = max(1e-6, float(self.preference_bias_temperature))
+        self.preference_train_noise_std = max(0.0, float(self.preference_train_noise_std))
+        self.preference_dropout_prob = min(1.0, max(0.0, float(self.preference_dropout_prob)))
         self.mode_keep_lane_count = max(1, int(self.mode_keep_lane_count))
         self.mode_lane_change_left_count = max(1, int(self.mode_lane_change_left_count))
         self.mode_lane_change_right_count = max(1, int(self.mode_lane_change_right_count))
@@ -306,9 +317,17 @@ def diffusion_model_config_to_overrides(model_config: Dict[str, Any]) -> Dict[st
         "mode_lane_change_left_count",
         "mode_lane_change_right_count",
         "mode_emergency_stop_count",
+        "preference",
+        "use_preference_bias",
+        "preference_bias_beta",
+        "preference_bias_temperature",
+        "preference_train_noise_std",
+        "preference_dropout_prob",
     ):
         if key in model_config:
             overrides[key] = model_config[key]
+    if "preference" in overrides:
+        overrides["use_preference_bias"] = bool(overrides["preference"])
     return overrides
 
 

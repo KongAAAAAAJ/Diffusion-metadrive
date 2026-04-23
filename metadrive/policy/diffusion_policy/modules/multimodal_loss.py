@@ -134,9 +134,7 @@ class LossComputer(nn.Module):
 
         mode_idx = None
         valid_gt_mode = None
-        gt_mode_label = targets.get("hierarchical_mode_label")
-        if gt_mode_label is None:
-            gt_mode_label = targets.get("trajectory_mode")
+        gt_mode_label = targets.get("gt_mode_label")
         if gt_mode_label is not None:
             gt_mode_label = gt_mode_label.to(device=poses_cls.device, dtype=torch.long).view(-1)
             if gt_mode_label.shape[0] == bs:

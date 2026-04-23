@@ -27,7 +27,7 @@ PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 # ---------------------------------------------------------------------------
 # 流程控制
 # ---------------------------------------------------------------------------
-STAGE="${STAGE:-1}"   # 1 | 2 | both
+STAGE="${STAGE:-both}"   # 1 | 2 | both
 
 # ---------------------------------------------------------------------------
 # 阶段一：单车扩散 Policy 开环预训练
@@ -46,13 +46,13 @@ STAGE1_PRECISION="${STAGE1_PRECISION:-auto}"
 # 阶段二：编队闭环强化微调
 # ---------------------------------------------------------------------------
 # 若已有预训练 checkpoint，设置 SINGLE_CKPT 可直接跳过阶段一
-# SINGLE_CKPT="${SINGLE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_9/checkpoints/diffusion-epoch=42.ckpt}"
-SINGLE_CKPT="${SINGLE_CKPT:-}"
+SINGLE_CKPT="${SINGLE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_16/checkpoints/diffusion-epoch=34.ckpt}"
+# SINGLE_CKPT="${SINGLE_CKPT:-}"
 
 RL_CONFIG="${RL_CONFIG:-${REPO_ROOT}/configs/train/selector.yaml}"
 RL_NUM_AGENTS="${RL_NUM_AGENTS:-3}"
 RL_RENDER="${RL_RENDER:-0}"
-RL_STEPS="${RL_STEPS:-20000}"  # total env steps
+RL_STEPS="${RL_STEPS:-50000}"  # total env steps
 RL_CKPT_DIR="${RL_CKPT_DIR:-}" 
 RL_LOG_DIR="${RL_LOG_DIR:-}"
 

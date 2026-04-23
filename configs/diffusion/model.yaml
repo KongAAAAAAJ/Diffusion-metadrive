@@ -7,6 +7,11 @@ plan_anchor_path: metadrive/exp_dataset/anchors.npy
 trajectory_reg_decoder_type: gru  # mlp | gru
 target_guidance_type: multi_point  # point | # !line删掉 | multi_point
 target_line_num_points: 8  # 对应line类型的target_guidance，表示每条线使用多少个点进行表示
+preference: true  # false | true；只给分类头加 preference bias，不输入轨迹残差头
+preference_bias_beta: 1.0
+preference_bias_temperature: 8.0
+preference_train_noise_std: 0.05
+preference_dropout_prob: 0.02
 mode_keep_lane_count: 5
 mode_lane_change_left_count: 5
 mode_lane_change_right_count: 5

@@ -67,7 +67,7 @@ POLYLINE_FIELDS = [
 ]
 FLAG_FIELDS = ["has_left_adjacent", "has_right_adjacent", "has_left_branch", "has_right_branch"]
 GAP_FIELDS = ["left_lane_gap", "right_lane_gap"]
-SAMPLE_EXTRA = ["coarse_trajectories", "mode_valid_mask", "hierarchical_mode_label"]
+SAMPLE_EXTRA = ["coarse_trajectories", "mode_valid_mask", "gt_mode_label"]
 
 
 def verify_frame(frame: dict) -> int:
@@ -104,9 +104,9 @@ def verify_sample(sample: dict) -> int:
     if not check("sample['mode_valid_mask'] shape==(10,)", ok,
                  str(np.asarray(sample["mode_valid_mask"]).shape) if "mode_valid_mask" in sample else "missing"):
         n_fail += 1
-    ok = "hierarchical_mode_label" in sample and np.asarray(sample["hierarchical_mode_label"]).ndim == 0
-    if not check("sample['hierarchical_mode_label'] is scalar", ok,
-                 str(np.asarray(sample["hierarchical_mode_label"]).shape) if "hierarchical_mode_label" in sample else "missing"):
+    ok = "gt_mode_label" in sample and np.asarray(sample["gt_mode_label"]).ndim == 0
+    if not check("sample['gt_mode_label'] is scalar", ok,
+                 str(np.asarray(sample["gt_mode_label"]).shape) if "gt_mode_label" in sample else "missing"):
         n_fail += 1
     # emergency stop always valid
     if "mode_valid_mask" in sample:
@@ -185,7 +185,7 @@ def make_figure(frames: list, samples: list, out_path: str) -> None:
         sample = samples[0]
         coarse = np.asarray(sample.get("coarse_trajectories", np.zeros((10, 8, 2))))
         mask   = np.asarray(sample.get("mode_valid_mask", np.zeros(10, dtype=bool)))
-        label  = int(sample.get("hierarchical_mode_label", 0))
+        label  = int(sample.get("gt_mode_label", 0))
         gt_xy  = np.asarray(sample.get("trajectory", np.zeros((8, 3))))[:, :2]
 
         for slot in MODE_SLOTS:
@@ -333,7 +333,7 @@ def main():
         if samples:
             label_counts: dict = defaultdict(int)
             for s in samples:
-                lbl = int(s.get("hierarchical_mode_label", -1))
+                lbl = int(s.get("gt_mode_label", -1))
                 name = MODE_SLOTS[lbl].name if 0 <= lbl < 10 else str(lbl)
                 label_counts[name] += 1
             print("\n[4] Mode label distribution:")

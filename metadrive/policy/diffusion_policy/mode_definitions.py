@@ -53,8 +53,8 @@ def _profile_for_level(level_index: int, level_count: int) -> SpeedProfile:
 
 
 def _slot_name(group: str, level_index: int, level_count: int) -> str:
-    if group == "EMERGENCY_STOP":
-        return "EMERGENCY_STOP" if level_count == 1 else f"EMERGENCY_STOP_LEVEL_{level_index}"
+    if group == "STOP":
+        return "STOP" if level_count == 1 else f"STOP_LEVEL_{level_index}"
     if level_count == 3:
         return f"{group}_{('HIGH', 'MEDIUM', 'LOW')[level_index]}"
     return f"{group}_LEVEL_{level_index}"
@@ -97,24 +97,24 @@ def build_mode_slots(
     levels inside the same group.
     """
     slots: list[ModeSlot] = []
-    _append_level_slots(slots, group="KEEP_LANE", count=keep_lane_count, behavior_type=BehaviorType.KEEP_LANE)
+    _append_level_slots(slots, group="KEEP", count=keep_lane_count, behavior_type=BehaviorType.KEEP_LANE)
     _append_level_slots(
         slots,
-        group="LANE_CHANGE_LEFT",
+        group="LEFT_LC",
         count=lane_change_left_count,
         behavior_type=BehaviorType.LANE_CHANGE,
         lateral_direction="left",
     )
     _append_level_slots(
         slots,
-        group="LANE_CHANGE_RIGHT",
+        group="RIGHT_LC",
         count=lane_change_right_count,
         behavior_type=BehaviorType.LANE_CHANGE,
         lateral_direction="right",
     )
     _append_level_slots(
         slots,
-        group="EMERGENCY_STOP",
+        group="STOP",
         count=emergency_stop_count,
         behavior_type=BehaviorType.KEEP_LANE,
     )

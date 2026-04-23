@@ -141,16 +141,16 @@ class ModeTrajectoryGenerator:
 
     def _desired_speed(self, ctx: ModeContext, slot: ModeSlot) -> float:
         ego_speed = max(float(ctx.ego_speed_mps), 0.0)
-        if slot.behavior_type == BehaviorType.KEEP_LANE and slot.name == "KEEP_LANE_HIGH":
+        if slot.semantic_group == "KEEP" and slot.name == "KEEP_HIGH":
             return max(ego_speed, self.keep_lane_high_speed_mps)
-        if slot.behavior_type == BehaviorType.KEEP_LANE and slot.name == "KEEP_LANE_MEDIUM":
+        if slot.semantic_group == "KEEP" and slot.name == "KEEP_MEDIUM":
             front_speed = float(ctx.front_object_speed_mps)
             if ctx.front_object_distance >= 0.0:
                 return max(min(ego_speed, front_speed if front_speed > 0.0 else ego_speed), 1.0)
             return max(min(ego_speed, self.keep_lane_medium_speed_mps), 1.0)
-        if slot.behavior_type == BehaviorType.KEEP_LANE and slot.name == "KEEP_LANE_LOW":
+        if slot.semantic_group == "KEEP" and slot.name == "KEEP_LOW":
             return min(ego_speed, self.keep_lane_low_speed_mps)
-        if slot.name.startswith("KEEP_LANE_LEVEL_") or slot.name.startswith("LANE_CHANGE_LEFT_LEVEL_") or slot.name.startswith("LANE_CHANGE_RIGHT_LEVEL_"):
+        if slot.name.startswith("KEEP_LEVEL_") or slot.name.startswith("LEFT_LC_LEVEL_") or slot.name.startswith("RIGHT_LC_LEVEL_"):
             return self._interpolated_speed(ctx, slot)
         if slot.speed_profile == SpeedProfile.HIGH:
             return max(ego_speed, self.keep_lane_high_speed_mps)
@@ -209,25 +209,25 @@ class ModeTrajectoryGenerator:
         return True
 
     def _generate_slot_trajectory(self, ctx: ModeContext, slot: ModeSlot, speed_mps: float) -> np.ndarray | None:
-        if slot.semantic_group == "KEEP_LANE":
+        if slot.semantic_group == "KEEP":
             return self._generate_keep_lane(ctx, speed_mps)
         if slot.behavior_type == BehaviorType.LANE_CHANGE:
             target_polyline = self._lane_change_target(ctx, slot)
             if target_polyline is None:
                 return None
             return self._generate_lane_change(ctx, target_polyline, speed_mps)
-        if slot.semantic_group == "EMERGENCY_STOP":
+        if slot.semantic_group == "STOP":
             return self._generate_emergency_stop(ctx)
         return None
 
     def _generate_collision_aware_trajectory(self, ctx: ModeContext, slot: ModeSlot, base_speed_mps: float) -> np.ndarray | None:
-        # KEEP_LANE_LOW and EMERGENCY_STOP always produce a trajectory
+        # KEEP_LOW and STOP always produce a trajectory
         # regardless of surrounding obstacles so the vehicle always has at
-        # least one actionable mode.  Faster KEEP_LANE modes (HIGH / MEDIUM)
+        # least one actionable mode.  Faster KEEP modes (HIGH / MEDIUM)
         # are subject to collision checking — when the ego drives fast toward
         # a close front vehicle the trajectory would overlap, so those modes
         # should become invalid to nudge the planner toward deceleration.
-        if slot.semantic_group == "KEEP_LANE":
+        if slot.semantic_group == "KEEP":
             trajectory = self._generate_slot_trajectory(ctx, slot, base_speed_mps)
             if slot.level_fraction > 0.0:
                 if trajectory is not None and not self._is_collision_free(ctx, trajectory):
@@ -248,7 +248,7 @@ class ModeTrajectoryGenerator:
         coarse = np.zeros((self.num_mode_slots, self.horizon_steps, 2), dtype=np.float32)
 
         for slot in self.mode_slots:
-            if not bool(valid_mask[slot.index]) and slot.semantic_group != "EMERGENCY_STOP":
+            if not bool(valid_mask[slot.index]) and slot.semantic_group != "STOP":
                 continue
             trajectory = self._generate_collision_aware_trajectory(ctx, slot, self._desired_speed(ctx, slot))
             if trajectory is None:
@@ -257,7 +257,7 @@ class ModeTrajectoryGenerator:
             coarse[slot.index] = trajectory
 
         for slot in self.mode_slots:
-            if slot.semantic_group == "EMERGENCY_STOP":
+            if slot.semantic_group == "STOP":
                 valid_mask[slot.index] = True
 
         coarse[~valid_mask] = 0.0

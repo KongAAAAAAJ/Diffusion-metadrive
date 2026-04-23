@@ -10,16 +10,16 @@ from metadrive.policy.diffusion_policy.mode_definitions import BehaviorType, MOD
 
 
 _COLOR_BY_MODE_NAME = {
-    "KEEP_LANE_HIGH": (245, 158, 11),
-    "KEEP_LANE_MEDIUM": (234, 88, 12),
-    "KEEP_LANE_LOW": (217, 70, 239),
-    "LANE_CHANGE_LEFT_HIGH": (22, 163, 74),
-    "LANE_CHANGE_LEFT_MEDIUM": (34, 197, 94),
-    "LANE_CHANGE_LEFT_LOW": (134, 239, 172),
-    "LANE_CHANGE_RIGHT_HIGH": (13, 148, 136),
-    "LANE_CHANGE_RIGHT_MEDIUM": (16, 185, 129),
-    "LANE_CHANGE_RIGHT_LOW": (153, 246, 228),
-    "EMERGENCY_STOP": (239, 68, 68),
+    "KEEP_HIGH": (245, 158, 11),
+    "KEEP_MEDIUM": (234, 88, 12),
+    "KEEP_LOW": (217, 70, 239),
+    "LEFT_LC_HIGH": (22, 163, 74),
+    "LEFT_LC_MEDIUM": (34, 197, 94),
+    "LEFT_LC_LOW": (134, 239, 172),
+    "RIGHT_LC_HIGH": (13, 148, 136),
+    "RIGHT_LC_MEDIUM": (16, 185, 129),
+    "RIGHT_LC_LOW": (153, 246, 228),
+    "STOP": (239, 68, 68),
 }
 _INVALID_COLOR = (170, 170, 170)
 _RECOMMENDED_COLOR = (255, 255, 255)
@@ -29,12 +29,12 @@ def mode_color(slot: ModeSlot | str) -> tuple[int, int, int]:
     if isinstance(slot, str):
         if slot in _COLOR_BY_MODE_NAME:
             return _COLOR_BY_MODE_NAME[slot]
-        if slot == "EMERGENCY_STOP" or slot.startswith("EMERGENCY_STOP_LEVEL_"):
+        if slot == "STOP" or slot.startswith("STOP_LEVEL_"):
             return (239, 68, 68)
         return (255, 255, 255)
     if slot.name in _COLOR_BY_MODE_NAME:
         return _COLOR_BY_MODE_NAME[slot.name]
-    if slot.semantic_group == "KEEP_LANE":
+    if slot.semantic_group == "KEEP":
         return (245, int(120 + 80 * slot.level_fraction), 11)
     if slot.lateral_direction == "left":
         return (22, int(120 + 100 * slot.level_fraction), 74)
@@ -66,26 +66,26 @@ class ModeOverlayRenderContext:
 
 def _mode_short_name(slot: ModeSlot) -> str:
     mapping = {
-        "KEEP_LANE_HIGH": "KL_H",
-        "KEEP_LANE_MEDIUM": "KL_M",
-        "KEEP_LANE_LOW": "KL_L",
-        "LANE_CHANGE_LEFT_HIGH": "LC_L_H",
-        "LANE_CHANGE_LEFT_MEDIUM": "LC_L_M",
-        "LANE_CHANGE_LEFT_LOW": "LC_L_L",
-        "LANE_CHANGE_RIGHT_HIGH": "LC_R_H",
-        "LANE_CHANGE_RIGHT_MEDIUM": "LC_R_M",
-        "LANE_CHANGE_RIGHT_LOW": "LC_R_L",
-        "EMERGENCY_STOP": "STOP",
+        "KEEP_HIGH": "K_H",
+        "KEEP_MEDIUM": "K_M",
+        "KEEP_LOW": "K_L",
+        "LEFT_LC_HIGH": "LLC_H",
+        "LEFT_LC_MEDIUM": "LLC_M",
+        "LEFT_LC_LOW": "LLC_L",
+        "RIGHT_LC_HIGH": "RLC_H",
+        "RIGHT_LC_MEDIUM": "RLC_M",
+        "RIGHT_LC_LOW": "RLC_L",
+        "STOP": "STOP",
     }
     if slot.name in mapping:
         return mapping[slot.name]
-    if slot.semantic_group == "KEEP_LANE":
-        return f"KL_{slot.level_index}"
+    if slot.semantic_group == "KEEP":
+        return f"K_{slot.level_index}"
     if slot.lateral_direction == "left":
-        return f"LC_L_{slot.level_index}"
+        return f"LLC_{slot.level_index}"
     if slot.lateral_direction == "right":
-        return f"LC_R_{slot.level_index}"
-    if slot.semantic_group == "EMERGENCY_STOP":
+        return f"RLC_{slot.level_index}"
+    if slot.semantic_group == "STOP":
         return "STOP"
     return slot.name
 
@@ -95,9 +95,9 @@ def pick_recommended_mode(valid_mask: np.ndarray, mode_slots: Sequence[ModeSlot]
     grouped_priority = (
         [s.index for s in slots if s.behavior_type == BehaviorType.LANE_CHANGE and 0.3 <= s.level_fraction <= 0.8],
         [s.index for s in slots if s.behavior_type == BehaviorType.LANE_CHANGE],
-        [s.index for s in slots if s.semantic_group == "KEEP_LANE" and 0.3 <= s.level_fraction <= 0.8],
-        [s.index for s in slots if s.semantic_group == "KEEP_LANE"],
-        [s.index for s in slots if s.semantic_group == "EMERGENCY_STOP"],
+        [s.index for s in slots if s.semantic_group == "KEEP" and 0.3 <= s.level_fraction <= 0.8],
+        [s.index for s in slots if s.semantic_group == "KEEP"],
+        [s.index for s in slots if s.semantic_group == "STOP"],
     )
     for group in grouped_priority:
         for index in group:

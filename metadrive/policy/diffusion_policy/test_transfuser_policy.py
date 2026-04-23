@@ -65,11 +65,11 @@ def _plot_color_for_mode_index(mode_index: int, mode_slot_names: list[str] | Non
         if base != (255, 255, 255):
             return base
         fraction = _level_fraction_from_name(mode_name, names)
-        if mode_name.startswith("KEEP_LANE_LEVEL_"):
+        if mode_name.startswith("KEEP_LEVEL_"):
             return (245, int(120 + 80 * fraction), 11)
-        if mode_name.startswith("LANE_CHANGE_LEFT_LEVEL_"):
+        if mode_name.startswith("LEFT_LC_LEVEL_"):
             return (22, int(120 + 100 * fraction), 74)
-        if mode_name.startswith("LANE_CHANGE_RIGHT_LEVEL_"):
+        if mode_name.startswith("RIGHT_LC_LEVEL_"):
             return (13, int(130 + 100 * fraction), 136)
 
     # Stable fallback for old records that do not carry mode names.

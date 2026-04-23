@@ -21,7 +21,7 @@ def label_mode_from_expert_decision(
     if lateral_decision == 0:
         candidate_slots = [
             slot.index for slot in slots
-            if slot.semantic_group == "KEEP_LANE"
+            if slot.semantic_group == "KEEP"
         ]
     elif lateral_decision < 0:
         candidate_slots = [
@@ -46,9 +46,9 @@ def label_mode_from_expert_decision(
     if best_slot >= 0:
         return best_slot
 
-    # Fallback 1: KEEP_LANE group (always partially valid)
+    # Fallback 1: KEEP group (always partially valid)
     for slot in slots:
-        if slot.semantic_group == "KEEP_LANE" and slot.index < mask.shape[0] and mask[slot.index]:
+        if slot.semantic_group == "KEEP" and slot.index < mask.shape[0] and mask[slot.index]:
             return slot.index
 
     # Fallback 2: any valid slot

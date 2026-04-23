@@ -57,7 +57,7 @@ class TrafficFeasibilityChecker:
         has_front_vehicle = front_distance >= 0.0 and front_distance <= self.keep_lane_medium_front_window_m
         if not has_front_vehicle:
             for slot in slots:
-                if slot.semantic_group == "KEEP_LANE" and 0.0 < slot.level_fraction < 1.0:
+                if slot.semantic_group == "KEEP" and 0.0 < slot.level_fraction < 1.0:
                     mask[slot.index] = False
 
         left_gap = float(ctx.left_lane_gap)

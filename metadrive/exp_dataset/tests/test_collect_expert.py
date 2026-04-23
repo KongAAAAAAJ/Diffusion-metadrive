@@ -58,8 +58,14 @@ def _load_module():
     metadrive_package.__path__ = []
     exp_dataset_package = ModuleType("metadrive.exp_dataset")
     exp_dataset_package.__path__ = []
+    policy_package = ModuleType("metadrive.policy")
+    policy_package.__path__ = []
+    diffusion_policy_package = ModuleType("metadrive.policy.diffusion_policy")
+    diffusion_policy_package.__path__ = []
     sys.modules.setdefault("metadrive", metadrive_package)
     sys.modules.setdefault("metadrive.exp_dataset", exp_dataset_package)
+    sys.modules.setdefault("metadrive.policy", policy_package)
+    sys.modules.setdefault("metadrive.policy.diffusion_policy", diffusion_policy_package)
 
     class _StubConfig(dict):
         pass
@@ -165,6 +171,52 @@ def _load_module():
         (),
         {"size": staticmethod(lambda: 5), "POINT": slice(0, 2)},
     )
+    mode_context_module = ModuleType("metadrive.policy.diffusion_policy.mode_context")
+    mode_context_module.build_mode_context_from_sample = lambda sample: None
+    mode_context_module.build_mode_context_from_vehicle = lambda *args, **kwargs: None
+
+    mode_labeler_module = ModuleType("metadrive.policy.diffusion_policy.mode_labeler")
+    mode_labeler_module.label_hierarchical_mode = lambda *args, **kwargs: 0
+    mode_labeler_module.label_mode_from_expert_decision = lambda *args, **kwargs: 0
+
+    class _StubModeTrajectoryOutput:
+        coarse_trajectories = np.zeros((1, 3, 2), dtype=np.float32)
+        mode_valid_mask = np.ones((1,), dtype=bool)
+
+    class _StubModeTrajectoryGenerator:
+        num_mode_slots = 1
+        mode_slots = ()
+
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def generate(self, *args, **kwargs):
+            return _StubModeTrajectoryOutput()
+
+    mode_trajectory_generator_module = ModuleType("metadrive.policy.diffusion_policy.mode_trajectory_generator")
+    mode_trajectory_generator_module.ModeTrajectoryGenerator = _StubModeTrajectoryGenerator
+
+    mode_visualization_module = ModuleType("metadrive.policy.diffusion_policy.mode_visualization")
+    mode_visualization_module.ModeOverlayRenderContext = type("ModeOverlayRenderContext", (), {})
+    mode_visualization_module.overlay_mode_trajectories_on_frame = lambda *args, **kwargs: args[0].frame if args else None
+    mode_visualization_module.pick_recommended_mode = lambda *args, **kwargs: 0
+
+    class _StubTransfuserConfig:
+        mode_keep_high_speed_mps = 8.3
+        mode_keep_medium_speed_mps = 5.0
+        mode_keep_low_speed_mps = 2.0
+        mode_emergency_decel_mps2 = 4.0
+        mode_keep_lane_count = 3
+        mode_lane_change_left_count = 3
+        mode_lane_change_right_count = 3
+        mode_emergency_stop_count = 1
+        ego_fut_mode = 10
+
+    transfuser_config_module = ModuleType("metadrive.policy.diffusion_policy.transfuser_config")
+    transfuser_config_module.build_transfuser_config = lambda *args, **kwargs: _StubTransfuserConfig()
+    transfuser_config_module.diffusion_model_config_to_overrides = lambda *args, **kwargs: {}
+    transfuser_config_module.load_diffusion_model_config = lambda *args, **kwargs: {}
+    transfuser_config_module.resolve_model_config_value = lambda *args, **kwargs: None
 
     utils_module = ModuleType("metadrive.utils")
     utils_module.Config = _StubConfig
@@ -203,6 +255,11 @@ def _load_module():
         trajectory_module,
         idm_module,
         transfuser_features_module,
+        mode_context_module,
+        mode_labeler_module,
+        mode_trajectory_generator_module,
+        mode_visualization_module,
+        transfuser_config_module,
         utils_module,
         dataset_module,
         trajectory_filter_module,
@@ -253,6 +310,14 @@ def _load_module():
     spec.loader.exec_module(module)
     for injected in injected_module_names:
         sys.modules.pop(injected.__name__, None)
+    if sys.modules.get("metadrive.policy.diffusion_policy") is diffusion_policy_package:
+        sys.modules.pop("metadrive.policy.diffusion_policy", None)
+    if sys.modules.get("metadrive.policy") is policy_package:
+        sys.modules.pop("metadrive.policy", None)
+    if sys.modules.get("metadrive.exp_dataset") is exp_dataset_package:
+        sys.modules.pop("metadrive.exp_dataset", None)
+    if sys.modules.get("metadrive") is metadrive_package:
+        sys.modules.pop("metadrive", None)
     sys.modules.pop(route_definitions_spec.name, None)
     sys.modules.pop(scenario_definitions_spec.name, None)
     sys.modules.pop(local_traffic_spawner_spec.name, None)
@@ -267,6 +332,14 @@ detect_existing_state = collect_expert.detect_existing_state
 parse_args = collect_expert.parse_args
 run_collection = collect_expert.run_collection
 write_manifest = collect_expert.write_manifest
+derive_sample_lateral_decision = collect_expert.derive_sample_lateral_decision
+
+
+def test_derive_sample_lateral_decision_uses_future_reference_lane_window():
+    assert derive_sample_lateral_decision(1, (1, 1, 0, 0)) == -1
+    assert derive_sample_lateral_decision(1, (1, 1, 2, 2)) == 1
+    assert derive_sample_lateral_decision(1, (1, 1, 1, 1)) == 0
+    assert derive_sample_lateral_decision(-1, (1, 0, 0)) == 0
 
 
 def test_build_episode_samples_includes_future_reference_metadata(monkeypatch):
@@ -689,7 +762,9 @@ def test_rollout_episode_sets_spawn_seed_before_reset(monkeypatch):
     )
 
     assert recorded["spawn_seed"] == 42
-    assert frames == [{"frame": 1}]
+    assert frames[0]["frame"] == 1
+    assert int(frames[0]["expert_lateral_decision"]) == 0
+    assert float(frames[0]["expert_target_speed_km_h"]) == 30.0
     assert map_geometry is None
     assert video_frames == []
     assert base_traffic_count == 0
@@ -751,7 +826,9 @@ def test_rollout_episode_passes_custom_idm_config_to_build_expert_policy(monkeyp
         idm_config=custom_idm_config,
     )
 
-    assert frames == [{"frame": 1}]
+    assert frames[0]["frame"] == 1
+    assert int(frames[0]["expert_lateral_decision"]) == 0
+    assert float(frames[0]["expert_target_speed_km_h"]) == 30.0
     assert map_geometry is None
     assert video_frames == []
     assert base_traffic_count == 0

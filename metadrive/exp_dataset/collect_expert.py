@@ -90,7 +90,7 @@ from metadrive.exp_dataset.scenario_definitions import (
 from metadrive.exp_dataset.local_traffic_spawner import LocalTrafficSpawner
 from metadrive.exp_dataset.scenario_orchestrator import ScenarioOrchestrator
 from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_sample, build_mode_context_from_vehicle
-from metadrive.policy.diffusion_policy.mode_labeler import label_hierarchical_mode, label_mode_from_expert_decision
+from metadrive.policy.diffusion_policy.mode_labeler import label_mode_from_expert_decision
 from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
 from metadrive.policy.diffusion_policy.mode_visualization import (
     ModeOverlayRenderContext,
@@ -1013,6 +1013,22 @@ def _build_mode_trajectory_generator(config: ExpertCollectorConfig) -> ModeTraje
     )
 
 
+def derive_sample_lateral_decision(current_lane_index: int | None, future_lane_indices: tuple[int | None, ...]) -> int:
+    """Derive sample-level lateral semantics from the future reference-lane window."""
+    if current_lane_index is None or int(current_lane_index) < 0:
+        return 0
+    current = int(current_lane_index)
+    for lane_index in future_lane_indices:
+        if lane_index is None or int(lane_index) < 0:
+            continue
+        future = int(lane_index)
+        if future < current:
+            return -1
+        if future > current:
+            return 1
+    return 0
+
+
 def build_episode_samples(
     frames: List[Dict[str, np.ndarray]],
     config: ExpertCollectorConfig,
@@ -1082,6 +1098,7 @@ def build_episode_samples(
             for offset in future_offsets
         )
         current_lane_index = int(current_frame["reference_lane_index"]) if int(current_frame["reference_lane_index"]) >= 0 else None
+        sample_lateral_decision = derive_sample_lateral_decision(current_lane_index, future_lane_indices)
         next_ref_lane_count = int(current_frame["next_ref_lane_count"])
         context = TrajectoryCorrectionContext(
             current_lane_index=current_lane_index,
@@ -1168,57 +1185,44 @@ def build_episode_samples(
                 "_current_pose": np.asarray(current_pose, dtype=np.float32),
                 "_trajectory_raw": np.asarray(raw_trajectory, dtype=np.float32),
                 # Mode polyline fields (passed through from frame)
-                "current_lane_polyline": current_frame["current_lane_polyline"],
-                "left_lane_polyline":    current_frame["left_lane_polyline"],
-                "right_lane_polyline":   current_frame["right_lane_polyline"],
-                "left_branch_polyline":  current_frame["left_branch_polyline"],
-                "right_branch_polyline": current_frame["right_branch_polyline"],
-                "has_left_adjacent":  current_frame["has_left_adjacent"],
-                "has_right_adjacent": current_frame["has_right_adjacent"],
-                "has_left_branch":    current_frame["has_left_branch"],
-                "has_right_branch":   current_frame["has_right_branch"],
-                "left_lane_gap":  current_frame["left_lane_gap"],
-                "right_lane_gap": current_frame["right_lane_gap"],
+                "current_lane_polyline": current_frame.get("current_lane_polyline", np.zeros((20, 2), dtype=np.float32)),
+                "left_lane_polyline":    current_frame.get("left_lane_polyline", np.zeros((20, 2), dtype=np.float32)),
+                "right_lane_polyline":   current_frame.get("right_lane_polyline", np.zeros((20, 2), dtype=np.float32)),
+                "left_branch_polyline":  current_frame.get("left_branch_polyline", np.zeros((20, 2), dtype=np.float32)),
+                "right_branch_polyline": current_frame.get("right_branch_polyline", np.zeros((20, 2), dtype=np.float32)),
+                "has_left_adjacent":  current_frame.get("has_left_adjacent", np.asarray(0, dtype=np.int8)),
+                "has_right_adjacent": current_frame.get("has_right_adjacent", np.asarray(0, dtype=np.int8)),
+                "has_left_branch":    current_frame.get("has_left_branch", np.asarray(0, dtype=np.int8)),
+                "has_right_branch":   current_frame.get("has_right_branch", np.asarray(0, dtype=np.int8)),
+                "left_lane_gap":  current_frame.get("left_lane_gap", np.asarray(-1.0, dtype=np.float32)),
+                "right_lane_gap": current_frame.get("right_lane_gap", np.asarray(-1.0, dtype=np.float32)),
             }
         )
-        # Generate coarse trajectories + mode label from the just-appended sample.
-        # Priority: use the expert IDM's recorded lateral decision when available
-        # (avoids geometric L2 matching which mislabels keep-lane in curved roads).
-        # Fallback: L2 matching against coarse trajectories.
+        samples[-1]["expert_lateral_decision"] = np.asarray(sample_lateral_decision, dtype=np.int8)
+        # Generate coarse trajectories + GT mode label from the just-appended sample.
+        # Lateral semantics come from the sample's future reference-lane window,
+        # not a single-frame IDM command, so lane-change labels persist across
+        # the relevant future trajectory segment.
         try:
             _ctx = build_mode_context_from_sample(samples[-1])
             _mode_out = _mode_gen.generate(_ctx)
             samples[-1]["coarse_trajectories"] = _mode_out.coarse_trajectories
             samples[-1]["mode_valid_mask"] = _mode_out.mode_valid_mask
 
-            _has_expert_decision = "expert_lateral_decision" in current_frame
-            if _has_expert_decision:
-                # Lateral direction: from expert IDM decision (no curve bias).
-                # Speed profile: L2 distance within the lateral group.
-                samples[-1]["hierarchical_mode_label"] = np.asarray(
-                    label_mode_from_expert_decision(
-                        lateral_decision=int(current_frame["expert_lateral_decision"]),
-                        gt_trajectory=trajectory[:, :2],
-                        coarse_trajectories=_mode_out.coarse_trajectories,
-                        mode_valid_mask=_mode_out.mode_valid_mask,
-                        mode_slots=_mode_gen.mode_slots,
-                    ),
-                    dtype=np.int8,
-                )
-            else:
-                # Fallback for non-IDM experts (e.g. PPO) or old data without expert_lateral_decision
-                samples[-1]["hierarchical_mode_label"] = np.asarray(
-                    label_hierarchical_mode(
-                        trajectory[:, :2],
-                        _mode_out.coarse_trajectories,
-                        _mode_out.mode_valid_mask,
-                    ),
-                    dtype=np.int8,
-                )
+            samples[-1]["gt_mode_label"] = np.asarray(
+                label_mode_from_expert_decision(
+                    lateral_decision=int(sample_lateral_decision),
+                    gt_trajectory=trajectory[:, :2],
+                    coarse_trajectories=_mode_out.coarse_trajectories,
+                    mode_valid_mask=_mode_out.mode_valid_mask,
+                    mode_slots=_mode_gen.mode_slots,
+                ),
+                dtype=np.int8,
+            )
         except Exception:
             samples[-1]["coarse_trajectories"] = np.zeros((_mode_gen.num_mode_slots, 8, 2), dtype=np.float32)
             samples[-1]["mode_valid_mask"] = np.zeros((_mode_gen.num_mode_slots,), dtype=bool)
-            samples[-1]["hierarchical_mode_label"] = np.asarray(0, dtype=np.int8)
+            samples[-1]["gt_mode_label"] = np.asarray(0, dtype=np.int8)
 
         if bool(config.save_raw_trajectory):
             samples[-1]["trajectory_raw"] = raw_trajectory
@@ -1791,12 +1795,13 @@ def rollout_episode(
             # lateral_decision: -1=CHANGE_LEFT, 0=KEEP, +1=CHANGE_RIGHT (clamped).
             # target_speed_km_h: IDM's planned speed (NORMAL_SPEED or CREEP_SPEED).
             # These are used later by label_mode_from_expert_decision() to assign
-            # hierarchical_mode_label without geometric L2 trajectory matching.
+            # gt_mode_label without geometric L2 trajectory matching.
+            action_info = getattr(idm_policy, "action_info", {}) or {}
             frames[-1]["expert_lateral_decision"] = np.asarray(
-                int(idm_policy.action_info.get("lateral_decision", 0)), dtype=np.int8
+                int(action_info.get("lateral_decision", 0)), dtype=np.int8
             )
             frames[-1]["expert_target_speed_km_h"] = np.asarray(
-                float(idm_policy.action_info.get("target_speed_km_h", idm_policy.NORMAL_SPEED)),
+                float(action_info.get("target_speed_km_h", getattr(idm_policy, "NORMAL_SPEED", 30.0))),
                 dtype=np.float32,
             )
         else:
