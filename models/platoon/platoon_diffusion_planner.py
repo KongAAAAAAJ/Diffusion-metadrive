@@ -36,6 +36,8 @@ class PlatoonDiffusionPlanner(nn.Module):
 
     @staticmethod
     def _ensure_batch_dim(value: Tensor) -> Tensor:
+        if not torch.is_tensor(value):
+            value = torch.as_tensor(value)
         if value.ndim == 1:
             return value.unsqueeze(0)
         if value.ndim == 3:
@@ -90,24 +92,26 @@ class PlatoonDiffusionPlanner(nn.Module):
         trajectories = outputs["trajectory"]
         return {agent_id: trajectories[idx] for idx, agent_id in enumerate(agent_ids)}
 
-    def forward_selector(self, batch: Mapping[str, Mapping[str, Tensor]]) -> Dict[str, Dict[str, Tensor]]:
+    def forward_with_preference(
+        self,
+        batch: Mapping[str, Mapping[str, Tensor]],
+        preference_points: Mapping[str, Tensor],
+    ) -> Dict[str, Tensor]:
         if not batch:
             return {}
-
         agent_ids, model_inputs, _ = self._build_model_inputs(batch)
-        outputs = self._forward_model(model_inputs, return_multimodal=True)
-        ret: Dict[str, Dict[str, Tensor]] = {}
-        for idx, agent_id in enumerate(agent_ids):
-            ret[agent_id] = {
-                "trajectory": outputs["trajectory"][idx],
-                "trajectory_mode_idx": outputs["trajectory_mode_idx"][idx],
-                "trajectory_mode_logits": outputs["trajectory_mode_logits"][idx],
-                "trajectory_candidates": outputs["trajectory_candidates"][idx],
-                "trajectory_mode_embedding": outputs["trajectory_mode_embedding"][idx],
-            }
-        return ret
+        points = []
+        for agent_id in agent_ids:
+            if agent_id not in preference_points:
+                raise KeyError(f"Missing co-preference target point for {agent_id!r}.")
+            point = self._ensure_batch_dim(torch.as_tensor(preference_points[agent_id])).float()
+            points.append(point[:, :2])
+        model_inputs["preference_point"] = torch.cat(points, dim=0).to(model_inputs["status_feature"].device)
+        outputs = self._forward_model(model_inputs)
+        trajectories = outputs["trajectory"]
+        return {agent_id: trajectories[idx] for idx, agent_id in enumerate(agent_ids)}
 
-    def freeze_for_selector(self) -> "PlatoonDiffusionPlanner":
+    def freeze_for_co_preference(self) -> "PlatoonDiffusionPlanner":
         self.eval()
         for parameter in self.parameters():
             parameter.requires_grad_(False)

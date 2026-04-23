@@ -18,7 +18,7 @@ print(config.get("anchor_method", "dynamic"))
 PY
 }
 
-# ── Stage selector ──────────────────────────────────────────────────────────
+# ── Stage selection ─────────────────────────────────────────────────────────
 STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess  # 选择数据处理阶段
 
 # *── Shared paths ────────────────────────────────────────────────────────────

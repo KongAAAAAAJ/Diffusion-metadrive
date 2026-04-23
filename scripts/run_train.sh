@@ -3,12 +3,12 @@
 # run.sh — 两阶段训练流水线
 #
 # 阶段一：单车扩散 Policy 开环预训练（train_transfuser）
-# 阶段二：编队意图 selector 强化训练（RLlib MAPPO）
+# 阶段二：co-preference 协同 target-point 强化训练（RLlib PPO）
 #
 # 用法：
-#   bash scripts/run.sh                      # 完整流水线（阶段一 → 二）
-#   STAGE=1 bash scripts/run.sh              # 仅阶段一预训练
-#   STAGE=2 bash scripts/run.sh              # 仅阶段二（需预先设置 SINGLE_CKPT）
+#   bash scripts/run_train.sh                # 完整流水线（阶段一 → 二）
+#   STAGE=1 bash scripts/run_train.sh        # 仅阶段一预训练
+#   STAGE=2 bash scripts/run_train.sh        # 仅阶段二（需预先设置 SINGLE_CKPT）
 #
 # 所有参数均可通过环境变量覆盖，无需修改本脚本。
 # =============================================================================
@@ -49,7 +49,7 @@ STAGE1_PRECISION="${STAGE1_PRECISION:-auto}"
 SINGLE_CKPT="${SINGLE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_16/checkpoints/diffusion-epoch=34.ckpt}"
 # SINGLE_CKPT="${SINGLE_CKPT:-}"
 
-RL_CONFIG="${RL_CONFIG:-${REPO_ROOT}/configs/train/selector.yaml}"
+RL_CONFIG="${RL_CONFIG:-${REPO_ROOT}/configs/train/co_preference.yaml}"
 RL_NUM_AGENTS="${RL_NUM_AGENTS:-3}"
 RL_RENDER="${RL_RENDER:-0}"
 RL_STEPS="${RL_STEPS:-50000}"  # total env steps
@@ -124,15 +124,16 @@ run_stage1() {
 # 阶段二：闭环强化微调
 # ---------------------------------------------------------------------------
 run_stage2() {
-    log_section "阶段二：编队意图 selector 强化训练（MAPPO，${RL_STEPS} env steps）"
+    log_section "阶段二：co-preference 协同 target-point 强化训练（PPO，${RL_STEPS} env steps）"
     log_info "单车 checkpoint ：${SINGLE_CKPT}"
     log_info "训练配置        ：${RL_CONFIG}"
     log_info "编队车辆数      ：${RL_NUM_AGENTS}"
-    log_info "包含            ：冻结 planner + shared selector actor + centralized critic"
+    log_info "包含            ：冻结单车 diffusion planner + co-preference model"
 
     local cmd=(
-        "${PYTHON_BIN}" -m train.train_selector
+        "${PYTHON_BIN}" -m train.train_co_preference
         --config "${RL_CONFIG}"
+        --stage ppo
         --total-env-steps "${RL_STEPS}"
         --pretrained-ckpt "${SINGLE_CKPT}"
     )
@@ -148,12 +149,12 @@ run_stage2() {
     if [[ -n "${RL_CKPT_DIR}" ]]; then
         log_info "checkpoints → ${RL_CKPT_DIR}"
     else
-        log_info "checkpoints → /media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/checkpoints"
+        log_info "checkpoints → /media/kong/Elements_SE/Diffusion_Data/outputs/co_preference/run_x/checkpoints"
     fi
     if [[ -n "${RL_LOG_DIR}" ]]; then
         log_info "TensorBoard → tensorboard --logdir ${RL_LOG_DIR}"
     else
-        log_info "TensorBoard → tensorboard --logdir /media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/tb"
+        log_info "TensorBoard → tensorboard --logdir /media/kong/Elements_SE/Diffusion_Data/outputs/co_preference/run_x/tb"
     fi
 }
 

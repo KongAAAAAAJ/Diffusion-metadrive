@@ -303,7 +303,7 @@ class V2TransfuserModel(nn.Module):
         return output
 
     def infer_multimodal(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Torch module inference pass exposing selector-facing multimodal outputs."""
+        """Torch module inference pass exposing multimodal outputs for evaluation/visualization."""
 
         camera_feature: torch.Tensor = features["camera_feature"]
         lidar_feature: torch.Tensor = features["lidar_feature"]
@@ -866,7 +866,7 @@ class TrajectoryHead(nn.Module):
         mode_valid_mask=None,
         preference_bias=None,
     ) -> Dict[str, torch.Tensor]:
-        """Return multimodal trajectory candidates before selector sampling."""
+        """Return multimodal trajectory candidates for evaluation/visualization."""
         return self.forward_test(
             ego_query,
             agents_query,

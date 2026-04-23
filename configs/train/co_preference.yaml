@@ -1,0 +1,52 @@
+pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt
+model_config_path: configs/diffusion/model.yaml
+num_agents: 3
+status_dim: 8
+relation_dim: 12
+hidden: [256, 256]
+output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/co_preference
+
+imitation_dataset: ""
+imitation_lr: 1.0e-3
+imitation_steps: 1000
+
+lr: 3.0e-4
+gamma: 0.99
+train_batch_size: 1024
+rollout_fragment_length: 128
+num_rollout_workers: 0
+
+model_config:
+  status_dim: 8
+  relation_dim: 12
+  hidden: [256, 256]
+
+env_config:
+  num_agents: 3
+  observation_mode: multimodal
+  use_render: false
+  planner_device: cuda
+
+reward_config:
+  delta_s_max: 10.0
+  d_norm: 10.0
+  d_safe: 8.0
+  w_progress: 0.8
+  w_formation: 1.0
+  w_safety: 0.8
+  w_collision: 10.0
+  w_road: 5.0
+  w_comfort: 0.05
+  w_team_formation: 1.0
+  w_team_safety: 1.5
+  w_team_efficiency: 0.2
+  w_team_collision: 10.0
+  reward_clip: 8.0
+
+preference_reward_config:
+  reachable_distance_m: 30.0
+  corridor_half_width_m: 1.75
+  max_target_jump_m: 8.0
+  w_corridor: 1.0
+  w_reachable: 0.5
+  w_jump: 0.2
