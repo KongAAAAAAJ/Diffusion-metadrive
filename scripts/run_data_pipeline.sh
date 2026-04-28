@@ -19,7 +19,7 @@ PY
 }
 
 # ── Stage selection ─────────────────────────────────────────────────────────
-STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess  # 选择数据处理阶段
+STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess
 
 # *── Shared paths ────────────────────────────────────────────────────────────
 EXPERT_TYPE="${EXPERT_TYPE:-idm}"
@@ -27,23 +27,23 @@ COLLECTION_MODE="${COLLECTION_MODE:-single}"  # 选择地图模式：single | fi
 ANCHOR_METHOD="${ANCHOR_METHOD:-$(resolve_model_config_anchor_method)}"  # k_means | dynamic
 DATASET_NAME="${DATASET_NAME:-metaIDM}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
-SCENARIO_WEIGHTS=${SCENARIO_WEIGHTS:-'{
-    "S1_free_cruise_straight": 1.0,
-    "S2_free_cruise_curve": 2.0,
-    "S3_straight_following": 3.0,
-    "S4_curve_following": 3.0}'}
 # SCENARIO_WEIGHTS=${SCENARIO_WEIGHTS:-'{
 #     "S1_free_cruise_straight": 1.0,
-#     "S2_free_cruise_curve": 1.0,
-#     "S3_straight_following": 2.0,
-#     "S4_curve_following": 2.0,
-#     "S5_hard_brake_lead": 1.0,
-#     "S6_background_merge_in": 1.0,
-#     "S7_ego_merge_from_ramp": 1.0,
-#     "S8_ego_exit_to_ramp": 1.0,
-#     "S9_narrow_channel_negotiation": 1.0,
-#     "S10_straight_lane_change": 2.0,
-#     "S11_curve_lane_change": 2.0}'}
+#     "S2_free_cruise_curve": 2.0,
+#     "S3_straight_following": 3.0,
+#     "S4_curve_following": 3.0}'}
+SCENARIO_WEIGHTS=${SCENARIO_WEIGHTS:-'{
+    "S1_free_cruise_straight": 1.0,
+    "S2_free_cruise_curve": 1.0,
+    "S3_straight_following": 2.0,
+    "S4_curve_following": 2.0,
+    "S5_hard_brake_lead": 1.0,
+    "S6_background_merge_in": 1.0,
+    "S7_ego_merge_from_ramp": 1.0,
+    "S8_ego_exit_to_ramp": 1.0,
+    "S9_narrow_channel_negotiation": 1.0,
+    "S10_straight_lane_change": 2.0,
+    "S11_curve_lane_change": 2.0}'}
 IDM_VARIANT_WEIGHTS=${IDM_VARIANT_WEIGHTS:-'{"default": 1.0}'}
 
 # Derived paths (auto-chained between stages)

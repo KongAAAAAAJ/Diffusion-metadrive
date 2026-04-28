@@ -10,10 +10,12 @@
 #   --heading-up         Enable camera rotation with ego vehicle heading (default: false)
 #   --platoon [N]        Use PlatoonEnv with N agents (default 3) instead of single-vehicle IDM
 #   --local-route ROUTE  Explicit local route name (e.g. R3_mainline_straight)
+#   --expert idm|lqr     Platoon expert type (default: idm)
+#   --all-scenarios      Run all 11 scenarios in platoon mode (ignores SCENARIO_ID)
 
 set -euo pipefail
 
-SCENARIO_ID="${1:-${SCENARIO_ID:-S4_curve_following}}"
+SCENARIO_ID="${1:-${SCENARIO_ID:-S1_free_cruise_straight}}"
 if [[ $# -gt 0 && "${1:-}" != --* ]]; then
     shift
 fi
@@ -26,6 +28,8 @@ MODE_GENERATE="${MODE_GENERATE:-0}"
 MODE_FRAME_LIMIT="${MODE_FRAME_LIMIT:--1}"
 PLATOON_MODE="true"
 PLATOON_NUM_AGENTS="${PLATOON_NUM_AGENTS:-3}"
+PLATOON_EXPERT="${PLATOON_EXPERT:-lqr}"  # idm | lqr
+ALL_SCENARIOS="false"
 LOCAL_ROUTE="${LOCAL_ROUTE:-}"
 
 # Parse optional arguments
@@ -55,6 +59,14 @@ while [[ $# -gt 0 ]]; do
         --local-route)
             LOCAL_ROUTE="${2:?missing value for --local-route}"
             shift 2
+            ;;
+        --expert)
+            PLATOON_EXPERT="${2:?missing value for --expert}"
+            shift 2
+            ;;
+        --all-scenarios)
+            ALL_SCENARIOS="true"
+            shift
             ;;
         *)
             echo "Unknown option: $1"
@@ -110,9 +122,8 @@ echo "=== Preview: ${SCENARIO_ID} (${NUM_EPISODES} episodes) ==="
 
 # --- Platoon mode -----------------------------------------------------------
 if [[ "${PLATOON_MODE}" == "true" ]]; then
-    echo "--- platoon mode: ${PLATOON_NUM_AGENTS} agents ---"
+    echo "--- platoon mode: ${PLATOON_NUM_AGENTS} agents, expert=${PLATOON_EXPERT} ---"
     PLATOON_ARGS=(
-        --scenario-id "${SCENARIO_ID}"
         --num-agents "${PLATOON_NUM_AGENTS}"
         --num-episodes "${NUM_EPISODES}"
         --output-root "${OUTPUT_ROOT}"
@@ -120,14 +131,24 @@ if [[ "${PLATOON_MODE}" == "true" ]]; then
         --traffic-density "0.10"
         --start-seed 59
         --video-fps 10
+        --expert "${PLATOON_EXPERT}"
     )
-    if [[ -n "${LOCAL_ROUTE}" ]]; then
-        PLATOON_ARGS+=(--local-route "${LOCAL_ROUTE}")
+    if [[ "${ALL_SCENARIOS}" == "true" ]]; then
+        PLATOON_ARGS+=(--all-scenarios)
+    else
+        PLATOON_ARGS+=(--scenario-id "${SCENARIO_ID}")
+        if [[ -n "${LOCAL_ROUTE}" ]]; then
+            PLATOON_ARGS+=(--local-route "${LOCAL_ROUTE}")
+        fi
     fi
     "${PYTHON_BIN}" -m metadrive.exp_dataset.preview_platoon "${PLATOON_ARGS[@]}"
     echo ""
-    echo "=== Platoon videos saved to: ${VIDEO_DIR} ==="
-    ls -lh "${VIDEO_DIR}" 2>/dev/null || echo "(no videos found — check logs above)"
+    if [[ "${ALL_SCENARIOS}" == "true" ]]; then
+        echo "=== All-scenario platoon videos saved to: ${OUTPUT_ROOT} ==="
+    else
+        echo "=== Platoon videos saved to: ${VIDEO_DIR} ==="
+        ls -lh "${VIDEO_DIR}" 2>/dev/null || echo "(no videos found — check logs above)"
+    fi
     exit 0
 fi
 

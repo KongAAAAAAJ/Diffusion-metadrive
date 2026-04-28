@@ -6,6 +6,6 @@ except Exception:  # pragma: no cover - keep package import lightweight
     PlatoonEnv = None  # type: ignore
     PlatoonEnvConfig = None  # type: ignore
 
-from .co_preference_platoon_env import CoPreferencePlatoonEnv
+from .mode_selection_sb3_env import ModeSelectionSB3Env
 
-__all__ = ["CoPreferencePlatoonEnv", "PlatoonEnv", "PlatoonEnvConfig"]
+__all__ = ["ModeSelectionSB3Env", "PlatoonEnv", "PlatoonEnvConfig"]

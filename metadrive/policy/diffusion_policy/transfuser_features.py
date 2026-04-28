@@ -1104,30 +1104,69 @@ def _gt_mode_label_from_expert_decision(
     features: Dict[str, torch.Tensor],
     config: TransfuserConfig,
 ) -> torch.Tensor:
-    """Recompute mode label against the current config-aware dynamic slots."""
+    """Assign GT mode label for eval display: lateral-group-first, then L2 within group.
+
+    Step 1 — lateral group from GT endpoint net lateral displacement:
+      Use gt_xy[-1, 1] - gt_xy[0, 1] relative to a threshold to determine LEFT /
+      KEEP / RIGHT.  Robust to IDM decision timing mismatch and lane-index delays.
+
+    Step 2 — speed tier within group by L2 (mask-agnostic):
+      Among ALL slots in the preferred lateral group (ignoring mode_valid_mask),
+      pick the one whose coarse trajectory minimises mean per-step L2 to GT xy.
+      mode_valid_mask is intentionally NOT used here because the generator often
+      marks lane-change slots as invalid even when the vehicle is actively changing
+      lanes (the generator queries road topology at a slightly different time/pose).
+      For training, LossComputer uses its own mask-aware distance assignment.
+
+    Fallback: pure L2 over all slots if no slot found in the preferred group.
+    """
     from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots
-    from metadrive.policy.diffusion_policy.mode_labeler import label_mode_from_expert_decision
 
     if "coarse_trajectories" not in features or "mode_valid_mask" not in features:
         raise ValueError("Missing dynamic mode features while building gt_mode_label.")
 
     gt_xy = _to_numpy(sample["trajectory"]).astype(np.float32)[:, :2]
-    coarse = _to_numpy(features["coarse_trajectories"]).astype(np.float32)
-    mask = _to_numpy(features["mode_valid_mask"]).astype(bool)
+    coarse = _to_numpy(features["coarse_trajectories"]).astype(np.float32)  # (N, T, 2)
+
+    # Step 1: lateral group from net endpoint displacement
+    lateral_threshold_m = float(getattr(config, "gt_mode_lateral_threshold_m", 0.5))
+    net_lateral = float(gt_xy[-1, 1] - gt_xy[0, 1])   # + = left, - = right in ego frame
+    if net_lateral > lateral_threshold_m:
+        lateral_decision = -1    # left lane change
+    elif net_lateral < -lateral_threshold_m:
+        lateral_decision = 1     # right lane change
+    else:
+        lateral_decision = 0     # keep lane
+
     mode_slots = build_mode_slots(
         keep_lane_count=config.mode_keep_lane_count,
         lane_change_left_count=config.mode_lane_change_left_count,
         lane_change_right_count=config.mode_lane_change_right_count,
         emergency_stop_count=config.mode_emergency_stop_count,
     )
-    label = label_mode_from_expert_decision(
-        lateral_decision=_derive_lateral_decision_for_mode_label(sample),
-        gt_trajectory=gt_xy,
-        coarse_trajectories=coarse,
-        mode_valid_mask=mask,
-        mode_slots=mode_slots,
-    )
-    return torch.tensor(label, dtype=torch.int8)
+
+    # Step 2: pick the closest slot in the preferred group, mask-agnostic
+    if lateral_decision == 0:
+        group_slots = [s.index for s in mode_slots if s.semantic_group == "KEEP"]
+    elif lateral_decision < 0:
+        group_slots = [s.index for s in mode_slots if s.lateral_direction == "left"]
+    else:
+        group_slots = [s.index for s in mode_slots if s.lateral_direction == "right"]
+
+    best_slot, best_dist = -1, float("inf")
+    for slot_idx in group_slots:
+        if slot_idx >= coarse.shape[0]:
+            continue
+        dist = float(np.linalg.norm(gt_xy[None] - coarse[slot_idx], axis=-1).mean())
+        if dist < best_dist:
+            best_dist, best_slot = dist, slot_idx
+
+    if best_slot >= 0:
+        return torch.tensor(best_slot, dtype=torch.int8)
+
+    # Fallback: pure L2 over all slots (coarse should always be non-empty)
+    dists = np.linalg.norm(gt_xy[None] - coarse, axis=-1).mean(axis=-1)  # (N,)
+    return torch.tensor(int(np.argmin(dists)), dtype=torch.int8)
 
 
 def sample_to_features_targets(
@@ -1221,13 +1260,8 @@ def processed_sample_to_features_targets(
         targets["topology_polyline"] = torch.from_numpy(
             _to_numpy(sample["topology_polyline"]).astype(np.float32, copy=True)
         )
-    if "expert_lateral_decision" in sample:
+    if "coarse_trajectories" in features and "mode_valid_mask" in features:
         targets["gt_mode_label"] = _gt_mode_label_from_expert_decision(sample, features, config)
-    elif "gt_mode_label" in sample:
-        raise ValueError(
-            "Processed shard contains gt_mode_label but is missing expert_lateral_decision. "
-            "Reprocess from raw shards collected with expert_lateral_decision so labels match current mode slots."
-        )
     return features, targets
 
 

@@ -8,9 +8,9 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
 DATA_ROOT="${DATA_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets}"
-DATASET_NAME="${DATASET_NAME:-metaIDM}"
+DATASET_NAME="${DATASET_NAME:-metaIDM_0424}"
 PREPROCESSED_ROOT="${PREPROCESSED_ROOT:-${DATA_ROOT}/${DATASET_NAME}_pp}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_17/checkpoints/diffusion-epoch=17.ckpt}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
 OUTPUT_DIR="${OUTPUT_DIR:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/open}"
 
 "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.eval_transfuser_open_loop \

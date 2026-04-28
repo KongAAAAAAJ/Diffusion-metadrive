@@ -44,10 +44,14 @@ class PlatoonDiffusionPlanner(nn.Module):
             return value.unsqueeze(0)
         return value
 
+    def _device(self) -> torch.device:
+        return next(self.parameters()).device
+
     def _build_model_inputs(
         self, batch: Mapping[str, Mapping[str, Tensor]]
     ) -> tuple[list[str], Dict[str, Tensor], Dict[str, dict]]:
         agent_ids = list(batch.keys())
+        device = self._device()
         camera = []
         lidar = []
         status = []
@@ -55,10 +59,10 @@ class PlatoonDiffusionPlanner(nn.Module):
         agent_contexts: Dict[str, dict] = {}
         for agent_id in agent_ids:
             sample = batch[agent_id]
-            camera_tensor = self._ensure_batch_dim(sample["camera"])
-            lidar_tensor = self._ensure_batch_dim(sample["lidar"])
-            status_tensor = self._ensure_batch_dim(sample["status"])
-            relation_tensor = self._ensure_batch_dim(sample["formation_relation_state"])
+            camera_tensor = self._ensure_batch_dim(sample["camera"]).to(device=device)
+            lidar_tensor = self._ensure_batch_dim(sample["lidar"]).to(device=device)
+            status_tensor = self._ensure_batch_dim(sample["status"]).to(device=device)
+            relation_tensor = self._ensure_batch_dim(sample["formation_relation_state"]).to(device=device)
             camera.append(camera_tensor)
             lidar.append(lidar_tensor)
             status.append(status_tensor)
@@ -90,28 +94,39 @@ class PlatoonDiffusionPlanner(nn.Module):
         agent_ids, model_inputs, _ = self._build_model_inputs(batch)
         outputs = self._forward_model(model_inputs)
         trajectories = outputs["trajectory"]
-        return {agent_id: trajectories[idx] for idx, agent_id in enumerate(agent_ids)}
+        return {agent_id: trajectories[idx].detach().cpu() for idx, agent_id in enumerate(agent_ids)}
 
-    def forward_with_preference(
-        self,
-        batch: Mapping[str, Mapping[str, Tensor]],
-        preference_points: Mapping[str, Tensor],
-    ) -> Dict[str, Tensor]:
+    def export_mode_selection(self, batch: Mapping[str, Mapping[str, Tensor]]) -> Dict[str, object]:
+        """Export frozen candidates and classification features for mode-selection RL."""
         if not batch:
-            return {}
+            raise ValueError("export_mode_selection requires a non-empty batch.")
         agent_ids, model_inputs, _ = self._build_model_inputs(batch)
-        points = []
-        for agent_id in agent_ids:
-            if agent_id not in preference_points:
-                raise KeyError(f"Missing co-preference target point for {agent_id!r}.")
-            point = self._ensure_batch_dim(torch.as_tensor(preference_points[agent_id])).float()
-            points.append(point[:, :2])
-        model_inputs["preference_point"] = torch.cat(points, dim=0).to(model_inputs["status_feature"].device)
-        outputs = self._forward_model(model_inputs)
-        trajectories = outputs["trajectory"]
-        return {agent_id: trajectories[idx] for idx, agent_id in enumerate(agent_ids)}
+        outputs = self._forward_model(model_inputs, return_multimodal=True)
+        candidates = outputs["trajectory_candidates"].detach().cpu()
+        logits = outputs["trajectory_mode_logits"].detach().cpu()
+        cls_feature = outputs.get("trajectory_cls_feature")
+        if cls_feature is None:
+            cls_feature = outputs["trajectory_mode_embedding"]
+        cls_feature = cls_feature.detach().cpu()
+        num_agents, num_modes = logits.shape
+        mode_valid_mask = outputs.get("mode_valid_mask")
+        if mode_valid_mask is None:
+            mode_valid_mask = torch.ones((num_agents, num_modes), dtype=torch.bool)
+        else:
+            mode_valid_mask = mode_valid_mask.detach().cpu().bool()
+        masked_logits = logits.masked_fill(~mode_valid_mask, float("-inf"))
+        pretrained_argmax = masked_logits.argmax(dim=-1)
+        return {
+            "agent_ids": agent_ids,
+            "trajectory_candidates": candidates.numpy(),
+            "cls_feature": cls_feature.numpy(),
+            "raw_cls_logits": logits.numpy(),
+            "masked_cls_logits": masked_logits.numpy(),
+            "mode_valid_mask": mode_valid_mask.numpy(),
+            "pretrained_argmax_mode": pretrained_argmax.numpy(),
+        }
 
-    def freeze_for_co_preference(self) -> "PlatoonDiffusionPlanner":
+    def freeze_for_mode_selection(self) -> "PlatoonDiffusionPlanner":
         self.eval()
         for parameter in self.parameters():
             parameter.requires_grad_(False)
@@ -126,7 +141,7 @@ class PlatoonDiffusionPlanner(nn.Module):
         devices = []
         if model_inputs["camera_feature"].is_cuda:
             devices = [model_inputs["camera_feature"].device]
-        with torch.random.fork_rng(devices=devices):
+        with torch.inference_mode(), torch.random.fork_rng(devices=devices):
             torch.manual_seed(self.inference_seed)
             if devices:
                 torch.cuda.manual_seed_all(self.inference_seed)

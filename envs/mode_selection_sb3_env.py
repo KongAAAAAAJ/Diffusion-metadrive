@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Mapping, Optional
+
+import numpy as np
+
+try:
+    import gymnasium as gym
+except Exception:  # pragma: no cover
+    import gym  # type: ignore
+
+from evaluation.reward_terms import compute_step_reward, compute_team_reward
+
+
+class ModeSelectionSB3Env(gym.Env):
+    """Joint CTDE Gymnasium env for selecting one trajectory mode per vehicle."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, config: Optional[Mapping[str, Any]] = None):
+        super().__init__()
+        self.config = self._with_selected_scenario(dict(config or {}))
+        self.num_agents = int(self.config.get("num_agents", 3))
+        self.reward_config = dict(self.config.get("reward_config", {}))
+        self.base_env = self._build_base_env()
+        self.planner = self._build_planner()
+        self._agent_ids = [f"agent{i}" for i in range(self.num_agents)]
+        self._last_raw_obs: dict[str, Mapping[str, Any]] = {}
+        self._last_export: dict[str, Any] | None = None
+        self._last_obs: dict[str, np.ndarray] | None = None
+        self._num_modes = int(self.config.get("num_modes", 1))
+        self._cls_feature_dim = int(self.config.get("cls_feature_dim", 1))
+        self._global_state_dim = int(self.config.get("global_state_dim", self.num_agents * 20))
+        debug_log_path = self.config.get("debug_log_path")
+        self._debug_log_path = Path(debug_log_path) if debug_log_path else None
+        self._step_count = 0
+        self.action_space = gym.spaces.MultiDiscrete([self._num_modes] * self.num_agents)
+        self.observation_space = self._make_observation_space()
+
+    def _build_base_env(self):
+        if self.config.get("base_env") is not None:
+            return self.config["base_env"]
+        factory = self.config.get("base_env_factory")
+        if callable(factory):
+            return factory(self.config)
+        from envs.platoon_env import PlatoonEnv
+
+        filtered = {
+            key: value
+            for key, value in self.config.items()
+            if key
+            not in {
+                "base_env",
+                "base_env_factory",
+                "planner",
+                "planner_factory",
+                "reward_config",
+                "num_modes",
+                "cls_feature_dim",
+                "global_state_dim",
+                "planner_device",
+                "scenario_ids",
+                "scenario_index",
+                "local_route_index",
+                "debug_log_path",
+                "seed_offset",
+            }
+        }
+        return PlatoonEnv(filtered)
+
+    @staticmethod
+    def _with_selected_scenario(config: dict[str, Any]) -> dict[str, Any]:
+        scenario_ids = list(config.get("scenario_ids") or [])
+        if not scenario_ids:
+            return config
+        try:
+            from scenarios.definitions import SCENARIO_BY_ID
+        except Exception as exc:  # pragma: no cover - import should be available in project runtime
+            raise RuntimeError("scenario_ids require scenarios.definitions.SCENARIO_BY_ID") from exc
+
+        index = (int(config.get("scenario_index", 0)) + int(config.get("seed_offset", 0))) % len(scenario_ids)
+        scenario_id = str(scenario_ids[index])
+        if scenario_id not in SCENARIO_BY_ID:
+            raise ValueError(f"Unknown scenario_id in mode-selection config: {scenario_id}")
+        scenario = SCENARIO_BY_ID[scenario_id]
+        local_routes = tuple(scenario.allowed_local_routes)
+        if not local_routes:
+            raise ValueError(f"Scenario {scenario_id} has no allowed local routes.")
+        route_index = int(config.get("local_route_index", 0)) % len(local_routes)
+        config = dict(config)
+        config.setdefault("scenario_id", scenario_id)
+        config.setdefault("local_route", local_routes[route_index])
+        return config
+
+    def _build_planner(self):
+        if self.config.get("planner") is not None:
+            return self.config["planner"]
+        factory = self.config.get("planner_factory")
+        if callable(factory):
+            return factory(self.config)
+        raise RuntimeError("ModeSelectionSB3Env requires planner or planner_factory.")
+
+    def _make_observation_space(self):
+        return gym.spaces.Dict(
+            {
+                "agent_cls_features": gym.spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self.num_agents, self._num_modes, self._cls_feature_dim),
+                    dtype=np.float32,
+                ),
+                "agent_mode_masks": gym.spaces.Box(
+                    low=0,
+                    high=1,
+                    shape=(self.num_agents, self._num_modes),
+                    dtype=np.bool_,
+                ),
+                "pretrained_logits": gym.spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self.num_agents, self._num_modes),
+                    dtype=np.float32,
+                ),
+                "global_state": gym.spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self._global_state_dim,),
+                    dtype=np.float32,
+                ),
+            }
+        )
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        result = self.base_env.reset()
+        self._step_count = 0
+        if isinstance(result, tuple) and len(result) == 2:
+            raw_obs, info = result
+        else:
+            raw_obs, info = result, {}
+        self._last_raw_obs = self._normalize_raw_obs(raw_obs or {}, previous_obs=None)
+        obs = self._refresh_mode_export()
+        return obs, dict(info or {})
+
+    def step(self, action):
+        if self._last_export is None:
+            raise RuntimeError("ModeSelectionSB3Env.step() called before reset().")
+        step_export = self._last_export
+        action_arr = np.asarray(action, dtype=np.int64).reshape(-1)
+        if action_arr.shape[0] != self.num_agents:
+            raise ValueError(f"Expected {self.num_agents} mode actions, got {action_arr.shape[0]}.")
+        masks = np.asarray(step_export["mode_valid_mask"], dtype=bool)
+        candidates = np.asarray(step_export["trajectory_candidates"], dtype=np.float32)
+        agent_ids = list(step_export["agent_ids"])
+        vehicle_state_before = self._vehicle_states(agent_ids)
+        vehicle_position_before = {
+            agent_id: state["position"] for agent_id, state in vehicle_state_before.items()
+        }
+        trajectories: dict[str, np.ndarray] = {}
+        for idx, (agent_id, mode_idx) in enumerate(zip(agent_ids, action_arr)):
+            if mode_idx < 0 or mode_idx >= masks.shape[1] or not bool(masks[idx, mode_idx]):
+                raise ValueError(f"invalid mode action for {agent_id}: {int(mode_idx)}")
+            trajectory = np.asarray(candidates[idx, mode_idx], dtype=np.float32)
+            if trajectory.shape != (8, 3):
+                raise ValueError(f"selected trajectory for {agent_id} must have shape (8,3), got {trajectory.shape}")
+            trajectories[agent_id] = trajectory
+
+        result = self.base_env.step(trajectories)
+        if len(result) == 5:
+            raw_obs, env_reward, terminated, truncated, info = result
+            done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
+        else:
+            raw_obs, env_reward, done_dict, info = result
+            terminated = done_dict
+            truncated = {agent_id: False for agent_id in done_dict}
+            done = bool(done_dict.get("__all__", False))
+        info = dict(info or {})
+        vehicle_state_after = self._vehicle_states(agent_ids)
+        vehicle_position_after = {
+            agent_id: state["position"] for agent_id, state in vehicle_state_after.items()
+        }
+        env_reward = dict(env_reward or {})
+        reward_values = []
+        for idx, agent_id in enumerate(agent_ids):
+            agent_info = dict(info.get(agent_id, {}))
+            local_reward = compute_step_reward(agent_info, self.reward_config) if self.reward_config else 0.0
+            reward = float(env_reward.get(agent_id, 0.0)) + float(local_reward)
+            env_reward[agent_id] = reward
+            reward_values.append(reward)
+        if self.reward_config:
+            team_reward = compute_team_reward({agent_id: [info.get(agent_id, {})] for agent_id in agent_ids}, self.reward_config)
+            reward_values = [value + float(team_reward) for value in reward_values]
+        scalar_reward = float(np.mean(reward_values)) if reward_values else 0.0
+
+        self._last_raw_obs = self._normalize_raw_obs(raw_obs or {}, previous_obs=self._last_raw_obs)
+        obs = self._refresh_mode_export() if self._last_raw_obs else self._last_obs
+        pretrained_argmax = np.asarray(step_export["pretrained_argmax_mode"], dtype=np.int64)
+        termination_flags = {
+            **{agent_id: bool(terminated.get(agent_id, False)) for agent_id in agent_ids},
+            "__all__": bool(terminated.get("__all__", False)),
+        }
+        truncation_flags = {
+            **{agent_id: bool(truncated.get(agent_id, False)) for agent_id in agent_ids},
+            "__all__": bool(truncated.get("__all__", False)),
+        }
+        safety_flags = {}
+        base_crash_flags = {}
+        for agent_id in agent_ids:
+            agent_info = dict(info.get(agent_id, {}))
+            base_crash_flags[agent_id] = {
+                "crash": bool(agent_info.get("crash", False)),
+                "crash_vehicle": bool(agent_info.get("crash_vehicle", False)),
+                "crash_human": bool(agent_info.get("crash_human", False)),
+                "crash_object": bool(agent_info.get("crash_object", False)),
+                "crash_building": bool(agent_info.get("crash_building", False)),
+                "crash_sidewalk": bool(agent_info.get("crash_sidewalk", False)),
+                "out_of_road": bool(agent_info.get("out_of_road", False)),
+            }
+            safety_flags[agent_id] = {
+                "crash": bool(agent_info.get("crash", False)),
+                "terminal_crash": bool(
+                    agent_info.get("crash_vehicle", False)
+                    or agent_info.get("crash_human", False)
+                    or agent_info.get("crash_object", False)
+                    or agent_info.get("crash_building", False)
+                ),
+                "out_of_road": bool(agent_info.get("out_of_road", False)),
+            }
+        info.update(
+            {
+                "step": int(self._step_count),
+                "executed_mode": [int(x) for x in action_arr.tolist()],
+                "pretrained_argmax_mode": [int(x) for x in pretrained_argmax.tolist()],
+                "invalid_mode_rate": 0.0,
+                "raw_cls_logits": np.asarray(step_export["raw_cls_logits"], dtype=float).tolist(),
+                "masked_cls_logits": np.asarray(step_export["masked_cls_logits"], dtype=float).tolist(),
+                "mode_valid_mask": masks.astype(bool).tolist(),
+                "selected_trajectory_endpoint": [
+                    trajectories[agent_id][-1, :2].astype(float).tolist() for agent_id in agent_ids
+                ],
+                "candidate_endpoints": candidates[:, :, -1, :2].astype(float).tolist(),
+                "reward": scalar_reward,
+                "terminated": bool(terminated.get("__all__", False)),
+                "truncated": bool(truncated.get("__all__", False)),
+                "termination_flags": termination_flags,
+                "truncation_flags": truncation_flags,
+                "safety_flags": safety_flags,
+                "base_crash_flags": base_crash_flags,
+                "vehicle_position_before": vehicle_position_before,
+                "vehicle_position_after": vehicle_position_after,
+                "vehicle_state_before": vehicle_state_before,
+                "vehicle_state_after": vehicle_state_after,
+            }
+        )
+        self._write_debug_log(info)
+        self._step_count += 1
+        return obs, scalar_reward, done, False, info
+
+    def _write_debug_log(self, info: Mapping[str, Any]) -> None:
+        if self._debug_log_path is None:
+            return
+        self._debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            key: info[key]
+            for key in (
+                "step",
+                "executed_mode",
+                "pretrained_argmax_mode",
+                "invalid_mode_rate",
+                "raw_cls_logits",
+                "masked_cls_logits",
+                "mode_valid_mask",
+                "selected_trajectory_endpoint",
+                "candidate_endpoints",
+                "reward",
+                "terminated",
+                "truncated",
+                "termination_flags",
+                "truncation_flags",
+                "safety_flags",
+                "base_crash_flags",
+                "vehicle_position_before",
+                "vehicle_position_after",
+                "vehicle_state_before",
+                "vehicle_state_after",
+            )
+            if key in info
+        }
+        with self._debug_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
+
+    def action_masks(self) -> np.ndarray:
+        if self._last_export is None:
+            return np.ones((self.num_agents * self._num_modes,), dtype=bool)
+        return np.asarray(self._last_export["mode_valid_mask"], dtype=bool).reshape(-1)
+
+    def _refresh_mode_export(self) -> dict[str, np.ndarray]:
+        planner_batch = {
+            agent_id: self._build_planner_sample(self._last_raw_obs[agent_id])
+            for agent_id in self._agent_ids
+            if agent_id in self._last_raw_obs
+        }
+        export = self.planner.export_mode_selection(planner_batch)
+        self._last_export = export
+        self._num_modes = int(np.asarray(export["mode_valid_mask"]).shape[1])
+        self._cls_feature_dim = int(np.asarray(export["cls_feature"]).shape[-1])
+        self.action_space = gym.spaces.MultiDiscrete([self._num_modes] * self.num_agents)
+        self.observation_space = self._make_observation_space()
+        obs = {
+            "agent_cls_features": np.asarray(export["cls_feature"], dtype=np.float32),
+            "agent_mode_masks": np.asarray(export["mode_valid_mask"], dtype=bool),
+            "pretrained_logits": np.asarray(export["raw_cls_logits"], dtype=np.float32),
+            "global_state": self._build_global_state(self._last_raw_obs),
+        }
+        self._last_obs = obs
+        return obs
+
+    def _normalize_raw_obs(
+        self,
+        raw_obs: Mapping[str, Mapping[str, Any]],
+        previous_obs: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    ) -> dict[str, Mapping[str, Any]]:
+        normalized: dict[str, Mapping[str, Any]] = {}
+        previous_obs = previous_obs or {}
+        for agent_id in self._agent_ids:
+            if agent_id in raw_obs:
+                normalized[agent_id] = raw_obs[agent_id]
+            elif agent_id in previous_obs:
+                normalized[agent_id] = previous_obs[agent_id]
+            else:
+                raise KeyError(f"ModeSelectionSB3Env missing initial observation for {agent_id}")
+        return normalized
+
+    def _build_global_state(self, obs: Mapping[str, Mapping[str, Any]]) -> np.ndarray:
+        parts = []
+        for agent_id in sorted(obs):
+            item = obs[agent_id]
+            parts.append(np.asarray(item.get("status", []), dtype=np.float32).reshape(-1))
+            parts.append(np.asarray(item.get("formation_relation_state", []), dtype=np.float32).reshape(-1))
+        state = np.concatenate(parts, axis=0) if parts else np.zeros((0,), dtype=np.float32)
+        if state.size < self._global_state_dim:
+            state = np.pad(state, (0, self._global_state_dim - state.size))
+        return state[: self._global_state_dim].astype(np.float32)
+
+    def _vehicle_states(self, agent_ids: list[str]) -> dict[str, dict[str, float | list[float]]]:
+        states: dict[str, dict[str, float | list[float]]] = {}
+        agents = getattr(self.base_env, "agents", {})
+        for agent_id in agent_ids:
+            vehicle = agents.get(agent_id)
+            if vehicle is None:
+                continue
+            position = np.asarray(getattr(vehicle, "position", [0.0, 0.0])[:2], dtype=np.float64)
+            states[agent_id] = {
+                "position": position.astype(float).tolist(),
+                "heading": float(getattr(vehicle, "heading_theta", getattr(vehicle, "heading", 0.0))),
+                "length": float(getattr(vehicle, "LENGTH", 0.0)),
+                "width": float(getattr(vehicle, "WIDTH", 0.0)),
+            }
+        return states
+
+    @staticmethod
+    def _build_planner_sample(obs: Mapping[str, Any]) -> dict[str, Any]:
+        keys = ("camera", "lidar", "status", "formation_relation_state")
+        missing = [key for key in keys if key not in obs]
+        if missing:
+            raise KeyError(f"ModeSelectionSB3Env observation missing keys: {missing}")
+        return {key: obs[key] for key in keys}

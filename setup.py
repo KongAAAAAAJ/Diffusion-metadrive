@@ -49,7 +49,9 @@ install_requires = [
     "shapely",
     "filelock",
     "Pygments",
-    "mediapy"
+    "mediapy",
+    "stable-baselines3",
+    "sb3-contrib",
 ]
 
 test_requirement = [

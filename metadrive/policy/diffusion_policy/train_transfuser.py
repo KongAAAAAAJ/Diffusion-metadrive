@@ -141,6 +141,56 @@ def create_next_run_dir(output_root: Path) -> Path:
     return run_dir
 
 
+def load_lightning_checkpoint(checkpoint_path: str) -> dict:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"Invalid Lightning checkpoint format: {checkpoint_path}")
+    return checkpoint
+
+
+def resolve_training_run_dir(output_root: Path, resume_checkpoint: Optional[str]) -> Path:
+    if not resume_checkpoint:
+        output_root.mkdir(parents=True, exist_ok=True)
+        return create_next_run_dir(output_root)
+
+    checkpoint_path = Path(resume_checkpoint).expanduser().resolve()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+    if checkpoint_path.parent.name != "checkpoints":
+        raise ValueError(
+            "Resume checkpoint must be located under a run checkpoint directory "
+            f"(.../run_x/checkpoints/*.ckpt), got: {checkpoint_path}"
+        )
+    run_dir = checkpoint_path.parent.parent
+    if not RUN_DIR_PATTERN.match(run_dir.name):
+        raise ValueError(
+            "Resume checkpoint must be located under a numbered run directory "
+            f"(.../run_x/checkpoints/*.ckpt), got: {checkpoint_path}"
+        )
+    if output_root.resolve() not in run_dir.parents:
+        raise ValueError(
+            f"Resume checkpoint run directory {run_dir} is not under output dir {output_root.resolve()}"
+        )
+    return run_dir
+
+
+def resolve_resume_max_epochs(checkpoint_epoch: int, additional_epochs: int) -> int:
+    if additional_epochs < 0:
+        raise ValueError(f"resume_additional_epochs must be >= 0, got: {additional_epochs}")
+    return checkpoint_epoch + 1 + additional_epochs
+
+
+def build_checkpoint_callback(checkpoint_dir: Path) -> ModelCheckpoint:
+    return ModelCheckpoint(
+        dirpath=str(checkpoint_dir),
+        save_top_k=3,
+        save_last=True,
+        monitor="val/loss",
+        mode="min",
+        filename="diffusion-{epoch:02d}",
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train MetaDrive Diffusion Policy.")
     parser.add_argument("--model-config-path", type=str, default=DEFAULT_MODEL_CONFIG_PATH)
@@ -168,6 +218,8 @@ def parse_args():
     parser.add_argument("--source-dataset-root", type=str, default=None)
     parser.add_argument("--fail-on-repair-error", type=int, default=1)
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--resume-from-checkpoint", type=str, default=None)
+    parser.add_argument("--resume-additional-epochs", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion")
     parser.add_argument("--max-steps", type=int, default=-1)
     return parser.parse_args()
@@ -175,6 +227,11 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.checkpoint and args.resume_from_checkpoint:
+        raise ValueError(
+            "--checkpoint (warm start) and --resume-from-checkpoint (true resume) are mutually exclusive"
+        )
+
     model_config = load_diffusion_model_config(args.model_config_path)
     model_size = resolve_model_config_value(args.model_size, model_config, "model_size", "small")
     config_overrides = diffusion_model_config_to_overrides(model_config)
@@ -188,6 +245,18 @@ def main():
         config_overrides["target_guidance_type"] = args.target_guidance_type
     if args.target_line_num_points is not None:
         config_overrides["target_line_num_points"] = args.target_line_num_points
+    effective_max_epochs = args.max_epochs
+    resume_checkpoint = args.resume_from_checkpoint
+    resume_checkpoint_epoch = None
+    training_mode = "warm_start" if args.checkpoint else "fresh"
+    if resume_checkpoint:
+        resume_state = load_lightning_checkpoint(resume_checkpoint)
+        resume_checkpoint_epoch = int(resume_state["epoch"])
+        effective_max_epochs = resolve_resume_max_epochs(
+            checkpoint_epoch=resume_checkpoint_epoch,
+            additional_epochs=args.resume_additional_epochs,
+        )
+        training_mode = "resume"
     config_overrides.update(
         dataset_root=args.dataset_root or TransfuserConfig().dataset_root,
         batch_size=args.batch_size,
@@ -195,7 +264,7 @@ def main():
         persistent_workers=bool(args.persistent_workers),
         prefetch_factor=args.prefetch_factor,
         cache_shards_in_memory=args.cache_shards_in_memory,
-        max_epochs=args.max_epochs,
+        max_epochs=effective_max_epochs,
         precision=args.precision,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
         val_visualization_interval=args.val_visualization_interval,
@@ -240,23 +309,26 @@ def main():
         f"val_visualization_interval={config.val_visualization_interval} "
         f"enable_val_visualization={config.enable_val_visualization}"
     )
+    print(f"[train] mode={training_mode}")
+    if args.checkpoint:
+        print(f"[train] warm_start_checkpoint={args.checkpoint}")
+    if resume_checkpoint:
+        print(f"[train] resume_checkpoint={resume_checkpoint}")
+        print(f"[train] resume_epoch={resume_checkpoint_epoch}")
+        print(f"[train] resume_additional_epochs={args.resume_additional_epochs}")
+        print(f"[train] target_max_epochs={effective_max_epochs}")
 
     model = TransfuserAgent(config=config, lr=args.lr, checkpoint_path=args.checkpoint)
     train_loader = build_dataloader(config, config.train_split, shuffle=True)
     val_loader = build_dataloader(config, config.val_split, shuffle=False)
 
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = create_next_run_dir(output_dir)
+    run_dir = resolve_training_run_dir(output_dir, resume_checkpoint)
     print(f"[train] run_dir={run_dir}")
+    if resume_checkpoint:
+        print("[train] log_dir_mode=reuse_existing_run_dir")
     logger = TensorBoardLogger(save_dir=str(run_dir), name="tb")
-    checkpoint = ModelCheckpoint(
-        dirpath=str(run_dir / "checkpoints"),
-        save_top_k=3,
-        monitor="val/loss",
-        mode="min",
-        filename="diffusion-{epoch:02d}",
-    )
+    checkpoint = build_checkpoint_callback(run_dir / "checkpoints")
 
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
@@ -269,7 +341,7 @@ def main():
         check_val_every_n_epoch=config.check_val_every_n_epoch,
         log_every_n_steps=10,
     )
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader, val_loader, ckpt_path=resume_checkpoint)
 
 
 if __name__ == "__main__":

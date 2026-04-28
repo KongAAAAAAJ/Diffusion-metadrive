@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from metadrive.policy.diffusion_policy.train_transfuser import create_next_run_dir, validate_runtime_paths
+import pytest
+
+from metadrive.policy.diffusion_policy.train_transfuser import (
+    build_checkpoint_callback,
+    create_next_run_dir,
+    resolve_resume_max_epochs,
+    resolve_training_run_dir,
+    validate_runtime_paths,
+)
 from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
 from metadrive.policy.diffusion_policy.transfuser_model_v2 import TrajectoryHead
 
@@ -31,6 +39,41 @@ def test_create_next_run_dir_ignores_non_run_directories(tmp_path: Path):
 
     run_dir = create_next_run_dir(output_root)
     assert run_dir.name == "run_2"
+
+
+def test_resolve_training_run_dir_uses_checkpoint_parent_run_dir(tmp_path: Path):
+    output_root = tmp_path / "diffusion"
+    run_dir = output_root / "run_7"
+    ckpt_path = run_dir / "checkpoints" / "diffusion-epoch=05.ckpt"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    ckpt_path.write_bytes(b"placeholder")
+
+    resolved_run_dir = resolve_training_run_dir(output_root, str(ckpt_path))
+
+    assert resolved_run_dir == run_dir
+
+
+def test_resolve_training_run_dir_rejects_checkpoint_outside_run_dir(tmp_path: Path):
+    output_root = tmp_path / "diffusion"
+    ckpt_path = tmp_path / "manual.ckpt"
+    ckpt_path.write_bytes(b"placeholder")
+
+    with pytest.raises(ValueError, match="run_"):
+        resolve_training_run_dir(output_root, str(ckpt_path))
+
+
+def test_resolve_resume_max_epochs_uses_additional_epoch_semantics():
+    assert resolve_resume_max_epochs(checkpoint_epoch=5, additional_epochs=10) == 16
+
+
+def test_build_checkpoint_callback_keeps_best_three_and_latest(tmp_path: Path):
+    callback = build_checkpoint_callback(tmp_path)
+
+    assert callback.monitor == "val/loss"
+    assert callback.mode == "min"
+    assert callback.save_top_k == 3
+    assert callback.save_last is True
+    assert Path(callback.dirpath) == tmp_path
 
 
 def test_validate_runtime_paths_skips_anchor_requirement_in_dynamic_mode(tmp_path: Path):

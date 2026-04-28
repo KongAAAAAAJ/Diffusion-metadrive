@@ -313,14 +313,14 @@ class PlatoonEnv(BaseMultiEnv):
 
         speed_m_s = self.platoon_config.initial_speed_km_h / 3.6
         gap_m = self._desired_center_spacing_m()
-        lead_long = 20.0
+        lane_idx = 0
+        lane = lanes[lane_idx]
+        lead_long = self._select_route_spawn_lead_long(lane, gap_m)
         for i, agent_id in enumerate(self._agent_ids):
             vehicle = self.agents.get(agent_id)
             if vehicle is None:
                 continue
-            long = max(lead_long - i * gap_m, 2.0)
-            lane_idx = 0
-            lane = lanes[lane_idx]
+            long = self._route_spawn_vehicle_longitude(lead_long, gap_m, i)
             pos = lane.position(long, 0.0)
             heading = lane.heading_theta_at(long)
             vehicle.set_position(pos)
@@ -330,6 +330,84 @@ class PlatoonEnv(BaseMultiEnv):
                 (speed_m_s * np.cos(heading), speed_m_s * np.sin(heading)),
                 in_local_frame=False,
             )
+            # Refresh navigation so vehicle.lane / current_ref_lanes reflect the
+            # new physical position on the route road (c2, s_main0, etc.) rather
+            # than the original NODE_1/NODE_2 spawn lane.  Without this,
+            # IDMPolicy.move_to_next_road() sets routing_target_lane to the stale
+            # NODE_1→NODE_2 lane and steering_control() computes headings against
+            # that wrong lane at the teleported position → vehicles steer in the
+            # opposite direction on curves (observed as left-turn on S6 right curve).
+            nav = getattr(vehicle, "navigation", None)
+            if nav is not None:
+                try:
+                    nav.update_localization(vehicle)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _route_spawn_min_tail_buffer_m() -> float:
+        return 6.0
+
+    @staticmethod
+    def _route_spawn_min_front_buffer_m() -> float:
+        return 8.0
+
+    @staticmethod
+    def _route_spawn_reference_lead_long_m() -> float:
+        return 20.0
+
+    def _route_spawn_lead_long_bounds(self, lane_length: float, gap_m: float) -> tuple[float, float]:
+        platoon_span = gap_m * max(len(self._agent_ids) - 1, 0)
+        min_lead = platoon_span + self._route_spawn_min_tail_buffer_m()
+        max_lead = max(float(lane_length) - self._route_spawn_min_front_buffer_m(), min_lead)
+        return float(min_lead), float(max_lead)
+
+    def _route_spawn_vehicle_longitude(self, lead_long: float, gap_m: float, vehicle_index: int) -> float:
+        platoon_long = float(lead_long) - float(vehicle_index) * float(gap_m)
+        return max(platoon_long, 2.0)
+
+    def _route_spawn_clearance_score(self, lane, lead_long: float, gap_m: float) -> float:
+        traffic_manager = getattr(getattr(self, "engine", None), "traffic_manager", None)
+        traffic_vehicles = list(getattr(traffic_manager, "_traffic_vehicles", []) or [])
+        if not traffic_vehicles:
+            return 0.0
+
+        score = float("inf")
+        for i, _ in enumerate(self._agent_ids):
+            long = self._route_spawn_vehicle_longitude(lead_long, gap_m, i)
+            pos = np.asarray(lane.position(long, 0.0), dtype=np.float32)
+            for vehicle in traffic_vehicles:
+                traffic_pos = np.asarray(getattr(vehicle, "position", (0.0, 0.0)), dtype=np.float32)
+                dist = float(np.linalg.norm(pos - traffic_pos))
+                if dist < score:
+                    score = dist
+        if score == float("inf"):
+            return 0.0
+        return score
+
+    def _select_route_spawn_lead_long(self, lane, gap_m: float) -> float:
+        lane_length = float(getattr(lane, "length", 0.0))
+        min_lead, max_lead = self._route_spawn_lead_long_bounds(lane_length, gap_m)
+        reference = self._route_spawn_reference_lead_long_m()
+        base_lead = float(np.clip(reference, min_lead, max_lead))
+        if max_lead <= min_lead + 1e-3:
+            return base_lead
+
+        candidates = {base_lead, min_lead, max_lead}
+        for value in np.linspace(min_lead, max_lead, num=7):
+            candidates.add(float(value))
+
+        best_lead = base_lead
+        best_score = None
+        for candidate in sorted(candidates):
+            clearance = self._route_spawn_clearance_score(lane, candidate, gap_m)
+            # Prefer higher-clearance placements while staying close to the nominal
+            # start point when several candidates are similarly safe.
+            score = clearance - 0.15 * abs(candidate - base_lead)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_lead = candidate
+        return float(best_lead)
 
     def _setup_scenario_orchestrator(self) -> None:
         """Initialise PlatoonScenarioOrchestrator when scenario_id + local_route are both set."""
@@ -354,9 +432,9 @@ class PlatoonEnv(BaseMultiEnv):
         except Exception:
             self._scenario_orchestrator = None
 
-    def reset(self):
+    def reset(self, seed: Optional[int] = None):
         self._metrics.start_episode()
-        obs, _ = super().reset()
+        obs, _ = super().reset(seed=seed)
 
         if "enable_idm_lane_change" in self._runtime_flags:
             self.config["enable_idm_lane_change"] = bool(self._runtime_flags["enable_idm_lane_change"])
@@ -472,10 +550,10 @@ class PlatoonEnv(BaseMultiEnv):
             return terminated, truncated
         any_failure = any(
             bool(
-                info[agent_id].get("crash", False)
-                or info[agent_id].get("crash_vehicle", False)
+                info[agent_id].get("crash_vehicle", False)
                 or info[agent_id].get("crash_object", False)
                 or info[agent_id].get("crash_building", False)
+                or info[agent_id].get("crash_human", False)
                 or info[agent_id].get("out_of_road", False)
             )
             for agent_id in active_ids

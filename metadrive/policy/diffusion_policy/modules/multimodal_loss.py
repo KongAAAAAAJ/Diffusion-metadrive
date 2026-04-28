@@ -127,43 +127,17 @@ class LossComputer(nn.Module):
         poses_cls: (bs, num_mode)
         plan_anchor: (bs, num_mode, 8, 2)
         targets['trajectory']: (bs, 8, 3)
-        mode_valid_mask: (bs, num_mode) bool, optional — invalid slots excluded from GT assignment and cls gradient
+        mode_valid_mask: (bs, num_mode) bool, optional — invalid slots get inf distance so they are never chosen as mode_idx
         """
         bs, num_mode, ts, d = poses_reg.shape
         target_traj = targets["trajectory"]
 
-        mode_idx = None
-        valid_gt_mode = None
-        gt_mode_label = targets.get("gt_mode_label")
-        if gt_mode_label is not None:
-            gt_mode_label = gt_mode_label.to(device=poses_cls.device, dtype=torch.long).view(-1)
-            if gt_mode_label.shape[0] == bs:
-                valid_gt_mode = torch.logical_and(gt_mode_label >= 0, gt_mode_label < num_mode)
-                if mode_valid_mask is not None:
-                    valid_indices = valid_gt_mode.nonzero(as_tuple=False).view(-1)
-                    gt_mode_mask = torch.zeros_like(valid_gt_mode, dtype=torch.bool)
-                    if valid_indices.numel() > 0:
-                        gt_mode_mask[valid_indices] = mode_valid_mask[valid_indices, gt_mode_label[valid_indices]]
-                    valid_gt_mode = torch.logical_and(valid_gt_mode, gt_mode_mask)
-                mode_idx = gt_mode_label.clamp(min=0, max=num_mode - 1)
-
-        needs_fallback = mode_idx is None
-        if valid_gt_mode is not None:
-            needs_fallback = needs_fallback or not bool(valid_gt_mode.all().item())
-
-        if needs_fallback:
-            # Legacy fallback for old datasets without explicit mode labels, or for
-            # samples whose stored label is invalid under the current valid-mask.
-            dist = torch.linalg.norm(target_traj.unsqueeze(1)[..., :2] - plan_anchor[..., :2], dim=-1)
-            dist = dist.mean(dim=-1)  # (bs, num_mode)
-            dist_for_assign = dist.clone()
-            if mode_valid_mask is not None:
-                dist_for_assign = dist_for_assign.masked_fill(~mode_valid_mask, float("inf"))
-            fallback_mode_idx = torch.argmin(dist_for_assign, dim=-1)
-            if mode_idx is None:
-                mode_idx = fallback_mode_idx
-            else:
-                mode_idx = torch.where(valid_gt_mode, mode_idx, fallback_mode_idx)
+        # Select mode_idx as the anchor closest to the GT trajectory (average L2 over timesteps).
+        # mode_valid_mask is intentionally ignored: the generator may mark lane-change slots
+        # as invalid even when the vehicle is actively changing lanes (timing/pose mismatch).
+        dist = torch.linalg.norm(target_traj.unsqueeze(1)[..., :2] - plan_anchor[..., :2], dim=-1)
+        dist = dist.mean(dim=-1)  # (bs, num_mode)
+        mode_idx = torch.argmin(dist, dim=-1)  # (bs,)
 
         cls_target = mode_idx
         mode_idx_gather = mode_idx[...,None,None,None].repeat(1,1,ts,d)
@@ -176,17 +150,13 @@ class LossComputer(nn.Module):
                                             device=poses_cls.device)
         target_classes_onehot.scatter_(1, cls_target.unsqueeze(1), 1)
 
-        # Zero gradient for invalid slots via per-slot weight
-        cls_weight = mode_valid_mask.float() if mode_valid_mask is not None else None
-
         loss_cls = self.cls_loss_weight * py_sigmoid_focal_loss(
             poses_cls,
             target_classes_onehot,
-            weight=cls_weight,
             gamma=2.0,
             alpha=0.25,
             reduction='mean',
-            avg_factor=None
+            avg_factor=None,
         )
 
         # Calculate regression loss

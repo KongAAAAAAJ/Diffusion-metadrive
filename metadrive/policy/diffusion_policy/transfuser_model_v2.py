@@ -51,7 +51,9 @@ def compute_preference_bias(
     normalized_distance = torch.where(has_valid, normalized_distance, torch.zeros_like(normalized_distance))
 
     bias = -normalized_distance / max(float(temperature), 1e-6)
-    bias = bias.masked_fill(~valid, -1e9)
+    # fp16 range is ±65504; -1e9 overflows to -inf which causes NaN via inf*0 in focal loss.
+    # -1e4 is sufficient to suppress invalid modes in softmax while staying numerically safe.
+    bias = bias.masked_fill(~valid, -1e4)
     return bias
 
     
@@ -191,6 +193,20 @@ class V2TransfuserModel(nn.Module):
         target_point: Optional[torch.Tensor] = features.get("target_point")
         return self._target_point_mlp(target_point) if target_point is not None else None
 
+    def _encode_cls_preference_guidance(self, features: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
+        preference_point: Optional[torch.Tensor] = features.get("preference_point")
+        if preference_point is None:
+            preference_point = features.get("target_point")
+        if preference_point is None:
+            return None
+        preference_point = preference_point.to(
+            dtype=features["status_feature"].dtype,
+            device=features["status_feature"].device,
+        )
+        if preference_point.ndim == 1:
+            preference_point = preference_point.unsqueeze(0)
+        return self._target_point_mlp(preference_point[:, :2])
+
     def _prepare_preference_point(self, features: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
         if not self._config.use_preference_bias:
             return None
@@ -248,7 +264,8 @@ class V2TransfuserModel(nn.Module):
         # *单样本 shape=[19]，batch 后 shape=[B, 19]
         status_feature: torch.Tensor = features["status_feature"]  # *导航命令[left, straight, right, lane_follow/other] + 车速[vx,vy] + 加速度[ax,ay]
         batch_size = status_feature.shape[0]
-        target_point_embed = self._encode_target_guidance(features)
+        reg_target_embed = self._encode_target_guidance(features)
+        cls_preference_embed = self._encode_cls_preference_guidance(features)
 
         bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)  # *bev_feature是下采样后的BEV特征(512*512)，
         cross_bev_feature = bev_feature_upscale
@@ -290,7 +307,8 @@ class V2TransfuserModel(nn.Module):
             status_encoding[:, None],
             targets=targets,
             global_img=None,
-            target_point_embed=target_point_embed,
+            reg_target_embed=reg_target_embed,
+            cls_preference_embed=cls_preference_embed,
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
             preference_bias=preference_bias,
@@ -309,7 +327,8 @@ class V2TransfuserModel(nn.Module):
         lidar_feature: torch.Tensor = features["lidar_feature"]
         status_feature: torch.Tensor = features["status_feature"]
         batch_size = status_feature.shape[0]
-        target_point_embed = self._encode_target_guidance(features)
+        reg_target_embed = self._encode_target_guidance(features)
+        cls_preference_embed = self._encode_cls_preference_guidance(features)
 
         bev_feature_upscale, bev_feature, _ = self._backbone(camera_feature, lidar_feature)
         cross_bev_feature = bev_feature_upscale
@@ -351,7 +370,8 @@ class V2TransfuserModel(nn.Module):
             bev_spatial_shape,
             status_encoding[:, None],
             global_img=None,
-            target_point_embed=target_point_embed,
+            reg_target_embed=reg_target_embed,
+            cls_preference_embed=cls_preference_embed,
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
             preference_bias=preference_bias,
@@ -466,34 +486,45 @@ class DiffMotionPlanningRefinementModule(nn.Module):
         self,
         traj_feature,
         target_point_embed=None,
+        reg_target_embed=None,
+        cls_preference_embed=None,
         noisy_traj_points=None,
         preference_bias=None,
+        return_cls_feature: bool = False,
     ):
         bs, ego_fut_mode, _ = traj_feature.shape
         base_traj_feature = traj_feature
+        if reg_target_embed is None:
+            reg_target_embed = target_point_embed
         if self.target_point_dim > 0:
-            if target_point_embed is None:
-                target_point_embed = traj_feature.new_zeros((bs, ego_fut_mode, self.target_point_dim))
-            elif target_point_embed.ndim == 2:
-                target_point_embed = target_point_embed.unsqueeze(1).expand(-1, ego_fut_mode, -1)
-            elif target_point_embed.ndim == 3:
-                if target_point_embed.shape[1] != ego_fut_mode:
-                    raise ValueError(
-                        "Per-mode target guidance must have the same mode count as traj_feature: "
-                        f"got {target_point_embed.shape[1]} vs {ego_fut_mode}"
-                    )
-            else:
-                raise ValueError(f"Unsupported target_point_embed shape: {tuple(target_point_embed.shape)}")
-            traj_feature = torch.cat([traj_feature, target_point_embed], dim=-1)
+            reg_target_embed = self._expand_guidance(
+                reg_target_embed,
+                traj_feature,
+                ego_fut_mode,
+                guidance_name="reg_target_embed",
+            )
+            cls_preference_embed = self._expand_guidance(
+                cls_preference_embed,
+                traj_feature,
+                ego_fut_mode,
+                guidance_name="cls_preference_embed",
+            )
+        else:
+            reg_target_embed = None
+            cls_preference_embed = None
+
+        cls_feature = torch.cat([traj_feature, cls_preference_embed], dim=-1) if cls_preference_embed is not None else traj_feature
+        reg_feature = torch.cat([traj_feature, reg_target_embed], dim=-1) if reg_target_embed is not None else traj_feature
 
         # 6. get final prediction
-        traj_feature = traj_feature.view(bs, ego_fut_mode,-1)
-        raw_logits = self.plan_cls_branch(traj_feature).squeeze(-1)  # *轨迹分类分支，输出每个模式的概率
+        cls_feature = cls_feature.view(bs, ego_fut_mode,-1)
+        raw_logits = self.plan_cls_branch(cls_feature).squeeze(-1)  # *轨迹分类分支，输出每个模式的概率
         plan_cls = raw_logits if preference_bias is None else raw_logits + preference_bias.to(
             device=raw_logits.device, dtype=raw_logits.dtype
         )
         if self.trajectory_reg_decoder_type == "mlp":
-            traj_delta = self.plan_reg_branch(traj_feature)  # *轨迹回归分支，输出每个模式的轨迹
+            reg_feature = reg_feature.view(bs, ego_fut_mode, -1)
+            traj_delta = self.plan_reg_branch(reg_feature)  # *轨迹回归分支，输出每个模式的轨迹
             plan_reg = traj_delta.reshape(bs, ego_fut_mode, self.ego_fut_ts, 3)
         else:
             if noisy_traj_points is None:
@@ -501,10 +532,42 @@ class DiffMotionPlanningRefinementModule(nn.Module):
             plan_reg = self._forward_gru(
                 traj_feature=base_traj_feature,
                 noisy_traj_points=noisy_traj_points,
-                target_point_embed=target_point_embed,
+                target_point_embed=reg_target_embed,
             )
 
+        if return_cls_feature:
+            return plan_reg, plan_cls, cls_feature
         return plan_reg, plan_cls
+
+    def _expand_guidance(
+        self,
+        guidance,
+        traj_feature,
+        ego_fut_mode,
+        guidance_name: str,
+    ):
+        bs = traj_feature.shape[0]
+        if guidance is None:
+            return traj_feature.new_zeros((bs, ego_fut_mode, self.target_point_dim))
+        guidance = guidance.to(device=traj_feature.device, dtype=traj_feature.dtype)
+        if guidance.ndim == 2:
+            if guidance.shape[-1] != self.target_point_dim:
+                raise ValueError(
+                    f"{guidance_name} must have last dim {self.target_point_dim}, got {guidance.shape[-1]}"
+                )
+            return guidance.unsqueeze(1).expand(-1, ego_fut_mode, -1)
+        if guidance.ndim == 3:
+            if guidance.shape[1] != ego_fut_mode:
+                raise ValueError(
+                    f"Per-mode {guidance_name} must have the same mode count as traj_feature: "
+                    f"got {guidance.shape[1]} vs {ego_fut_mode}"
+                )
+            if guidance.shape[-1] != self.target_point_dim:
+                raise ValueError(
+                    f"{guidance_name} must have last dim {self.target_point_dim}, got {guidance.shape[-1]}"
+                )
+            return guidance
+        raise ValueError(f"Unsupported {guidance_name} shape: {tuple(guidance.shape)}")
 
     def _forward_gru(
         self,
@@ -635,8 +698,11 @@ class CustomTransformerDecoderLayer(nn.Module):
                 time_embed, 
                 status_encoding,
                 target_point_embed=None,
+                reg_target_embed=None,
+                cls_preference_embed=None,
                 global_img=None,
-                preference_bias=None):
+                preference_bias=None,
+                return_cls_feature: bool = False):
         traj_feature = self.cross_bev_attention(traj_feature,noisy_traj_points,bev_feature,bev_spatial_shape)
         traj_feature = traj_feature + self.dropout(self.cross_agent_attention(traj_feature, agents_query,agents_query)[0])
         traj_feature = self.norm1(traj_feature)
@@ -654,15 +720,24 @@ class CustomTransformerDecoderLayer(nn.Module):
         
         # 4.9 predict the offset & heading  
         # *self.task_decoder预测的是噪声残差，即去噪轨迹点与加噪轨迹点的差值，最终轨迹点=加噪轨迹点+残差
-        poses_reg, poses_cls = self.task_decoder(
+        task_out = self.task_decoder(
             traj_feature,
             target_point_embed=target_point_embed,
+            reg_target_embed=reg_target_embed,
+            cls_preference_embed=cls_preference_embed,
             noisy_traj_points=noisy_traj_points,
             preference_bias=preference_bias,
+            return_cls_feature=return_cls_feature,
         ) #bs,20,8,3; bs,20
+        if return_cls_feature:
+            poses_reg, poses_cls, cls_feature = task_out
+        else:
+            poses_reg, poses_cls = task_out
         poses_reg[...,:2] = poses_reg[...,:2] + noisy_traj_points
         poses_reg[..., StateSE2Index.HEADING] = poses_reg[..., StateSE2Index.HEADING].tanh() * np.pi
 
+        if return_cls_feature:
+            return poses_reg, poses_cls, cls_feature
         return poses_reg, poses_cls
 def _get_clones(module, N):
     # FIXME: copy.deepcopy() is not defined on nn.module
@@ -691,14 +766,17 @@ class CustomTransformerDecoder(nn.Module):
                 time_embed, 
                 status_encoding,
                 target_point_embed=None,
+                reg_target_embed=None,
+                cls_preference_embed=None,
                 global_img=None,
                 preference_bias=None,
-                return_traj_feature: bool = False):
+                return_traj_feature: bool = False,
+                return_cls_feature: bool = False):
         poses_reg_list = []
         poses_cls_list = []
         traj_points = noisy_traj_points
         for mod in self.layers:
-            poses_reg, poses_cls = mod(
+            mod_out = mod(
                 traj_feature,
                 traj_points,
                 bev_feature,
@@ -708,13 +786,22 @@ class CustomTransformerDecoder(nn.Module):
                 time_embed,
                 status_encoding,
                 target_point_embed,
+                reg_target_embed,
+                cls_preference_embed,
                 global_img,
                 preference_bias,
+                return_cls_feature=return_cls_feature,
             )
+            if return_cls_feature:
+                poses_reg, poses_cls, cls_feature = mod_out
+            else:
+                poses_reg, poses_cls = mod_out
             poses_reg_list.append(poses_reg)
             poses_cls_list.append(poses_cls)
             traj_points = poses_reg[...,:2].clone().detach()
         if return_traj_feature:
+            if return_cls_feature:
+                return poses_reg_list, poses_cls_list, traj_feature, cls_feature
             return poses_reg_list, poses_cls_list, traj_feature
         return poses_reg_list, poses_cls_list
 
@@ -819,6 +906,8 @@ class TrajectoryHead(nn.Module):
         global_img=None,
         return_candidates: bool = False,
         target_point_embed=None,
+        reg_target_embed=None,
+        cls_preference_embed=None,
         coarse_trajectories=None,
         mode_valid_mask=None,
         preference_bias=None,
@@ -834,6 +923,8 @@ class TrajectoryHead(nn.Module):
                 targets,
                 global_img,
                 target_point_embed=target_point_embed,
+                reg_target_embed=reg_target_embed,
+                cls_preference_embed=cls_preference_embed,
                 coarse_trajectories=coarse_trajectories,
                 mode_valid_mask=mode_valid_mask,
                 preference_bias=preference_bias,
@@ -848,6 +939,8 @@ class TrajectoryHead(nn.Module):
                 global_img,
                 return_candidates=return_candidates,
                 target_point_embed=target_point_embed,
+                reg_target_embed=reg_target_embed,
+                cls_preference_embed=cls_preference_embed,
                 coarse_trajectories=coarse_trajectories,
                 mode_valid_mask=mode_valid_mask,
                 preference_bias=preference_bias,
@@ -862,6 +955,8 @@ class TrajectoryHead(nn.Module):
         status_encoding,
         global_img=None,
         target_point_embed=None,
+        reg_target_embed=None,
+        cls_preference_embed=None,
         coarse_trajectories=None,
         mode_valid_mask=None,
         preference_bias=None,
@@ -876,6 +971,8 @@ class TrajectoryHead(nn.Module):
             global_img,
             return_candidates=True,
             target_point_embed=target_point_embed,
+            reg_target_embed=reg_target_embed,
+            cls_preference_embed=cls_preference_embed,
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
             preference_bias=preference_bias,
@@ -892,6 +989,8 @@ class TrajectoryHead(nn.Module):
         targets=None,
         global_img=None,
         target_point_embed=None,
+        reg_target_embed=None,
+        cls_preference_embed=None,
         coarse_trajectories=None,
         mode_valid_mask=None,
         preference_bias=None,
@@ -935,8 +1034,10 @@ class TrajectoryHead(nn.Module):
             ego_query,
             time_embed,
             status_encoding,
-            target_point_embed,
-            global_img,
+            target_point_embed=target_point_embed,
+            reg_target_embed=reg_target_embed,
+            cls_preference_embed=cls_preference_embed,
+            global_img=global_img,
             preference_bias=preference_bias,
         )
 
@@ -969,6 +1070,8 @@ class TrajectoryHead(nn.Module):
         global_img,
         return_candidates: bool = False,
         target_point_embed=None,
+        reg_target_embed=None,
+        cls_preference_embed=None,
         coarse_trajectories=None,
         mode_valid_mask=None,
         preference_bias=None,
@@ -1013,7 +1116,7 @@ class TrajectoryHead(nn.Module):
 
             # 4. begin the stacked decoder
             if return_candidates:
-                poses_reg_list, poses_cls_list, traj_feature = self.diff_decoder(
+                poses_reg_list, poses_cls_list, traj_feature, cls_feature = self.diff_decoder(
                     traj_feature,
                     noisy_traj_points,
                     bev_feature,
@@ -1022,10 +1125,13 @@ class TrajectoryHead(nn.Module):
                     ego_query,
                     time_embed,
                     status_encoding,
-                    target_point_embed,
-                    global_img,
-                    preference_bias,
+                    target_point_embed=target_point_embed,
+                    reg_target_embed=reg_target_embed,
+                    cls_preference_embed=cls_preference_embed,
+                    global_img=global_img,
+                    preference_bias=preference_bias,
                     return_traj_feature=True,
+                    return_cls_feature=True,
                 )
             else:
                 poses_reg_list, poses_cls_list = self.diff_decoder(
@@ -1037,9 +1143,11 @@ class TrajectoryHead(nn.Module):
                     ego_query,
                     time_embed,
                     status_encoding,
-                    target_point_embed,
-                    global_img,
-                    preference_bias,
+                    target_point_embed=target_point_embed,
+                    reg_target_embed=reg_target_embed,
+                    cls_preference_embed=cls_preference_embed,
+                    global_img=global_img,
+                    preference_bias=preference_bias,
                 )
             poses_reg = poses_reg_list[-1]
             poses_cls = poses_cls_list[-1]
@@ -1067,6 +1175,7 @@ class TrajectoryHead(nn.Module):
                 {
                     "trajectory_candidates": poses_reg,
                     "trajectory_mode_embedding": traj_feature,
+                    "trajectory_cls_feature": cls_feature,
                 }
                 if return_candidates
                 else {}

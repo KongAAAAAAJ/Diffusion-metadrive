@@ -15,6 +15,14 @@ def _as_bool(mapping: Mapping, key: str, default: bool = False) -> bool:
     return bool(mapping.get(key, default))
 
 
+def _has_terminal_collision(info: Mapping) -> bool:
+    collision_keys = ("crash_vehicle", "crash_object", "crash_building", "crash_human")
+    known_crash_keys = collision_keys + ("crash_sidewalk",)
+    if any(key in info for key in known_crash_keys):
+        return any(_as_bool(info, key, False) for key in collision_keys)
+    return _as_bool(info, "crash", False)
+
+
 def _clip_reward(value: float, config: Mapping, key: str = "reward_clip") -> float:
     clip = _as_float(config, key, 0.0)
     if clip <= 0.0:
@@ -48,7 +56,8 @@ def compute_step_reward(info: dict, config: dict) -> float:
     r_progress = progress / delta_s_max
     r_formation = -(formation_error / d_norm)
     r_safety = -max(0.0, d_safe - min_gap) / d_safe
-    r_collision = -w_collision if _as_bool(info, "crash", False) else 0.0
+    collision = _has_terminal_collision(info)
+    r_collision = -w_collision if collision else 0.0
     r_road = -w_road if _as_bool(info, "out_of_road", False) else 0.0
     r_comfort = -(0.5 * jerk + 0.5 * delta_steering)
 
@@ -66,7 +75,7 @@ def compute_step_reward(info: dict, config: dict) -> float:
     if _as_bool(info, "formation_recovered", False):
         reward += recovery_bonus
 
-    if _as_bool(info, "crash", False):
+    if collision:
         reward = min(reward, -w_collision)
     if _as_bool(info, "out_of_road", False):
         reward = min(reward, -w_road)
@@ -102,7 +111,7 @@ def compute_team_reward(per_agent_step_infos: Mapping[str, Iterable[dict]], conf
         for info in step_infos:
             total_formation_error += abs(_as_float(info, "formation_error", 0.0))
             total_progress += max(_as_float(info, "progress", 0.0), 0.0)
-            agent_crashed = agent_crashed or _as_bool(info, "crash", False)
+            agent_crashed = agent_crashed or _has_terminal_collision(info)
             count += 1
         if agent_crashed:
             crash_count += 1
