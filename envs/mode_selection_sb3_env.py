@@ -11,7 +11,7 @@ try:
 except Exception:  # pragma: no cover
     import gym  # type: ignore
 
-from evaluation.reward_terms import compute_step_reward, compute_team_reward
+from metadrive.policy.diffusion_policy.transfuser_policy import compute_trajectory_control
 
 
 class ModeSelectionSB3Env(gym.Env):
@@ -23,7 +23,6 @@ class ModeSelectionSB3Env(gym.Env):
         super().__init__()
         self.config = self._with_selected_scenario(dict(config or {}))
         self.num_agents = int(self.config.get("num_agents", 3))
-        self.reward_config = dict(self.config.get("reward_config", {}))
         self.base_env = self._build_base_env()
         self.planner = self._build_planner()
         self._agent_ids = [f"agent{i}" for i in range(self.num_agents)]
@@ -31,13 +30,16 @@ class ModeSelectionSB3Env(gym.Env):
         self._last_export: dict[str, Any] | None = None
         self._last_obs: dict[str, np.ndarray] | None = None
         self._num_modes = int(self.config.get("num_modes", 1))
-        self._cls_feature_dim = int(self.config.get("cls_feature_dim", 1))
+        self._relation_state_dim = int(self.config.get("relation_state_dim", 12))
         self._global_state_dim = int(self.config.get("global_state_dim", self.num_agents * 20))
         debug_log_path = self.config.get("debug_log_path")
         self._debug_log_path = Path(debug_log_path) if debug_log_path else None
         self._step_count = 0
         self.action_space = gym.spaces.MultiDiscrete([self._num_modes] * self.num_agents)
         self.observation_space = self._make_observation_space()
+        self._lookahead_index = int(self.config.get("lookahead_index", 2))
+        self._target_speed_km_h = float(self.config.get("target_speed_km_h", 30.0))
+        self._controller_type = str(self.config.get("controller_type", "stabilized"))
 
     def _build_base_env(self):
         if self.config.get("base_env") is not None:
@@ -56,11 +58,14 @@ class ModeSelectionSB3Env(gym.Env):
                 "base_env_factory",
                 "planner",
                 "planner_factory",
-                "reward_config",
                 "num_modes",
-                "cls_feature_dim",
+                "relation_state_dim",
                 "global_state_dim",
                 "planner_device",
+                "lookahead_index",
+                "target_speed_km_h",
+                "controller_type",
+                "debug_dynamic_anchor_errors",
                 "scenario_ids",
                 "scenario_index",
                 "local_route_index",
@@ -105,10 +110,16 @@ class ModeSelectionSB3Env(gym.Env):
     def _make_observation_space(self):
         return gym.spaces.Dict(
             {
-                "agent_cls_features": gym.spaces.Box(
+                "agent_relation_states": gym.spaces.Box(
                     low=-np.inf,
                     high=np.inf,
-                    shape=(self.num_agents, self._num_modes, self._cls_feature_dim),
+                    shape=(self.num_agents, self._relation_state_dim),
+                    dtype=np.float32,
+                ),
+                "trajectory_candidates": gym.spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self.num_agents, self._num_modes, 8, 3),
                     dtype=np.float32,
                 ),
                 "agent_mode_masks": gym.spaces.Box(
@@ -159,6 +170,8 @@ class ModeSelectionSB3Env(gym.Env):
             agent_id: state["position"] for agent_id, state in vehicle_state_before.items()
         }
         trajectories: dict[str, np.ndarray] = {}
+        low_level_actions: dict[str, np.ndarray] = {}
+        controller_debug: dict[str, dict[str, float]] = {}
         for idx, (agent_id, mode_idx) in enumerate(zip(agent_ids, action_arr)):
             if mode_idx < 0 or mode_idx >= masks.shape[1] or not bool(masks[idx, mode_idx]):
                 raise ValueError(f"invalid mode action for {agent_id}: {int(mode_idx)}")
@@ -166,8 +179,19 @@ class ModeSelectionSB3Env(gym.Env):
             if trajectory.shape != (8, 3):
                 raise ValueError(f"selected trajectory for {agent_id} must have shape (8,3), got {trajectory.shape}")
             trajectories[agent_id] = trajectory
+            vehicle = getattr(self.base_env, "agents", {}).get(agent_id)
+            current_speed_km_h = float(getattr(vehicle, "speed_km_h", 0.0)) if vehicle is not None else 0.0
+            action_2d, debug = compute_trajectory_control(
+                trajectory=trajectory,
+                lookahead_index=self._lookahead_index,
+                current_speed_km_h=current_speed_km_h,
+                target_speed_km_h=self._target_speed_km_h,
+                controller_type=self._controller_type,
+            )
+            low_level_actions[agent_id] = action_2d
+            controller_debug[agent_id] = debug
 
-        result = self.base_env.step(trajectories)
+        result = self.base_env.step(low_level_actions)
         if len(result) == 5:
             raw_obs, env_reward, terminated, truncated, info = result
             done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
@@ -177,21 +201,22 @@ class ModeSelectionSB3Env(gym.Env):
             truncated = {agent_id: False for agent_id in done_dict}
             done = bool(done_dict.get("__all__", False))
         info = dict(info or {})
+        missing_agent_ids = [agent_id for agent_id in self._agent_ids if agent_id not in (raw_obs or {})]
+        if missing_agent_ids:
+            terminated = dict(terminated)
+            truncated = dict(truncated)
+            for agent_id in self._agent_ids:
+                terminated[agent_id] = True
+            terminated["__all__"] = True
+            truncated["__all__"] = False
+            done = True
+            info["missing_agent_ids"] = list(missing_agent_ids)
         vehicle_state_after = self._vehicle_states(agent_ids)
         vehicle_position_after = {
             agent_id: state["position"] for agent_id, state in vehicle_state_after.items()
         }
         env_reward = dict(env_reward or {})
-        reward_values = []
-        for idx, agent_id in enumerate(agent_ids):
-            agent_info = dict(info.get(agent_id, {}))
-            local_reward = compute_step_reward(agent_info, self.reward_config) if self.reward_config else 0.0
-            reward = float(env_reward.get(agent_id, 0.0)) + float(local_reward)
-            env_reward[agent_id] = reward
-            reward_values.append(reward)
-        if self.reward_config:
-            team_reward = compute_team_reward({agent_id: [info.get(agent_id, {})] for agent_id in agent_ids}, self.reward_config)
-            reward_values = [value + float(team_reward) for value in reward_values]
+        reward_values = [float(env_reward.get(agent_id, 0.0)) for agent_id in agent_ids]
         scalar_reward = float(np.mean(reward_values)) if reward_values else 0.0
 
         self._last_raw_obs = self._normalize_raw_obs(raw_obs or {}, previous_obs=self._last_raw_obs)
@@ -240,6 +265,10 @@ class ModeSelectionSB3Env(gym.Env):
                 "selected_trajectory_endpoint": [
                     trajectories[agent_id][-1, :2].astype(float).tolist() for agent_id in agent_ids
                 ],
+                "selected_low_level_action": {
+                    agent_id: low_level_actions[agent_id].astype(float).tolist() for agent_id in agent_ids
+                },
+                "controller_debug": controller_debug,
                 "candidate_endpoints": candidates[:, :, -1, :2].astype(float).tolist(),
                 "reward": scalar_reward,
                 "terminated": bool(terminated.get("__all__", False)),
@@ -273,6 +302,8 @@ class ModeSelectionSB3Env(gym.Env):
                 "masked_cls_logits",
                 "mode_valid_mask",
                 "selected_trajectory_endpoint",
+                "selected_low_level_action",
+                "controller_debug",
                 "candidate_endpoints",
                 "reward",
                 "terminated",
@@ -298,24 +329,39 @@ class ModeSelectionSB3Env(gym.Env):
 
     def _refresh_mode_export(self) -> dict[str, np.ndarray]:
         planner_batch = {
-            agent_id: self._build_planner_sample(self._last_raw_obs[agent_id])
+            agent_id: self._build_planner_sample(agent_id, self._last_raw_obs[agent_id])
             for agent_id in self._agent_ids
             if agent_id in self._last_raw_obs
         }
         export = self.planner.export_mode_selection(planner_batch)
         self._last_export = export
         self._num_modes = int(np.asarray(export["mode_valid_mask"]).shape[1])
-        self._cls_feature_dim = int(np.asarray(export["cls_feature"]).shape[-1])
         self.action_space = gym.spaces.MultiDiscrete([self._num_modes] * self.num_agents)
         self.observation_space = self._make_observation_space()
         obs = {
-            "agent_cls_features": np.asarray(export["cls_feature"], dtype=np.float32),
+            "agent_relation_states": self._build_agent_relation_states(self._last_raw_obs, list(export["agent_ids"])),
+            "trajectory_candidates": np.asarray(export["trajectory_candidates"], dtype=np.float32),
             "agent_mode_masks": np.asarray(export["mode_valid_mask"], dtype=bool),
             "pretrained_logits": np.asarray(export["raw_cls_logits"], dtype=np.float32),
             "global_state": self._build_global_state(self._last_raw_obs),
         }
         self._last_obs = obs
         return obs
+
+    def _build_agent_relation_states(
+        self,
+        obs: Mapping[str, Mapping[str, Any]],
+        agent_ids: list[str],
+    ) -> np.ndarray:
+        rows = []
+        for agent_id in agent_ids:
+            relation = np.asarray(obs[agent_id].get("formation_relation_state", []), dtype=np.float32).reshape(-1)
+            if relation.size < self._relation_state_dim:
+                relation = np.pad(relation, (0, self._relation_state_dim - relation.size))
+            rows.append(relation[: self._relation_state_dim])
+        if len(rows) < self.num_agents:
+            rows.extend([np.zeros((self._relation_state_dim,), dtype=np.float32) for _ in range(self.num_agents - len(rows))])
+        return np.stack(rows[: self.num_agents], axis=0).astype(np.float32)
 
     def _normalize_raw_obs(
         self,
@@ -360,10 +406,60 @@ class ModeSelectionSB3Env(gym.Env):
             }
         return states
 
-    @staticmethod
-    def _build_planner_sample(obs: Mapping[str, Any]) -> dict[str, Any]:
+    def _build_planner_sample(self, agent_id: str, obs: Mapping[str, Any]) -> dict[str, Any]:
         keys = ("camera", "lidar", "status", "formation_relation_state")
         missing = [key for key in keys if key not in obs]
         if missing:
             raise KeyError(f"ModeSelectionSB3Env observation missing keys: {missing}")
-        return {key: obs[key] for key in keys}
+        sample = {key: obs[key] for key in keys}
+        vehicle = getattr(self.base_env, "agents", {}).get(agent_id)
+        if vehicle is not None:
+            sample.update(self._build_dynamic_mode_features(vehicle))
+        return sample
+
+    def _build_dynamic_mode_features(self, vehicle) -> dict[str, np.ndarray]:
+        from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
+        from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots, mode_slot_count
+        from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
+
+        planner_config = getattr(self.planner, "config", None)
+        if planner_config is None:
+            return {}
+        mode_slots = build_mode_slots(
+            keep_lane_count=planner_config.mode_keep_lane_count,
+            lane_change_left_count=planner_config.mode_lane_change_left_count,
+            lane_change_right_count=planner_config.mode_lane_change_right_count,
+            emergency_stop_count=planner_config.mode_emergency_stop_count,
+        )
+        num_slots = mode_slot_count(
+            planner_config.mode_keep_lane_count,
+            planner_config.mode_lane_change_left_count,
+            planner_config.mode_lane_change_right_count,
+            planner_config.mode_emergency_stop_count,
+        )
+        try:
+            current_map = getattr(getattr(vehicle, "engine", None), "current_map", None)
+            ctx = build_mode_context_from_vehicle(vehicle, current_map=current_map)
+            generator = ModeTrajectoryGenerator(
+                keep_lane_high_speed_mps=planner_config.mode_keep_high_speed_mps,
+                keep_lane_medium_speed_mps=planner_config.mode_keep_medium_speed_mps,
+                keep_lane_low_speed_mps=planner_config.mode_keep_low_speed_mps,
+                emergency_decel_mps2=planner_config.mode_emergency_decel_mps2,
+                keep_lane_level_count=planner_config.mode_keep_lane_count,
+                lane_change_left_level_count=planner_config.mode_lane_change_left_count,
+                lane_change_right_level_count=planner_config.mode_lane_change_right_count,
+                emergency_stop_level_count=planner_config.mode_emergency_stop_count,
+                mode_slots=mode_slots,
+            )
+            output = generator.generate(ctx)
+            return {
+                "coarse_trajectories": np.asarray(output.coarse_trajectories, dtype=np.float32),
+                "mode_valid_mask": np.asarray(output.mode_valid_mask, dtype=bool),
+            }
+        except Exception as exc:
+            if bool(self.config.get("debug_dynamic_anchor_errors", False)):
+                print(f"[ModeSelectionSB3Env] dynamic anchor generation failed for {getattr(vehicle, 'name', '?')}: {exc}")
+            return {
+                "coarse_trajectories": np.zeros((num_slots, 8, 2), dtype=np.float32),
+                "mode_valid_mask": np.zeros((num_slots,), dtype=bool),
+            }

@@ -116,7 +116,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         scenario_id="S5_hard_brake_lead",
         allowed_local_routes=("R1_entry_straight", "R3_mainline_straight", "R3_post_transition_straight"),
         trigger_by_local_route={
-            "R1_entry_straight": TriggerSpec("s0", 80.0, 220.0),
+            "R1_entry_straight": TriggerSpec("s0", 80.0, 220.0),  # 80-220m 之间触发，确保有足够距离完成急刹
             "R3_mainline_straight": TriggerSpec("s_main0", 60.0, 160.0),
             "R3_post_transition_straight": TriggerSpec("s_main1", 60.0, 115.0),
         },

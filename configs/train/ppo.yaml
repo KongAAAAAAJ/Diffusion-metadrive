@@ -12,8 +12,12 @@ gamma: 0.99
 lambda_kl: 0.02
 
 num_modes: 16
-cls_feature_dim: 160
 global_state_dim: 60
+relation_input_dim: 12
+relation_dim: 32
+trajectory_embed_dim: 128
+actor_hidden_dims: [256, 128]
+value_hidden_dim: 256
 ckpt_top_k: 3
 checkpoint_interval_steps: 10000   # save checkpoint every N timesteps (not every rollout)
 
@@ -26,24 +30,11 @@ env_config:
   observation_mode: multimodal
   use_render: false
   planner_device: cuda
+  lookahead_index: 2
+  target_speed_km_h: 30.0
+  controller_type: stabilized
   scenario_ids:
     - S1_free_cruise_straight
     - S2_free_cruise_curve
     - S3_straight_following
     - S4_curve_following
-
-reward_config:
-  delta_s_max: 10.0
-  d_norm: 10.0
-  d_safe: 8.0
-  w_progress: 0.8
-  w_formation: 1.0
-  w_safety: 0.8
-  w_collision: 10.0
-  w_road: 5.0
-  w_comfort: 0.05
-  w_team_formation: 1.0
-  w_team_safety: 1.5
-  w_team_efficiency: 0.2
-  w_team_collision: 10.0
-  reward_clip: 8.0

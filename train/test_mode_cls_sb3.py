@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import re
@@ -15,7 +14,7 @@ import numpy as np
 import cv2
 
 from envs.mode_selection_sb3_env import ModeSelectionSB3Env
-from models.mode_selection.sb3_mode_cls_policy import load_plan_cls_delta, require_sb3
+from models.mode_selection.sb3_mode_cls_policy import require_sb3
 from train.train_mode_cls_sb3 import build_planner, load_config
 from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     _build_topdown_world_to_screen_projector,
@@ -24,7 +23,7 @@ from metadrive.policy.diffusion_policy.test_transfuser_policy import (
 )
 
 
-DEFAULT_CONFIG_PATH = "configs/train/mode_cls_ppo.yaml"
+DEFAULT_CONFIG_PATH = "configs/train/ppo.yaml"
 DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/mode_cls_ppo")
 _RUN_DIR_RE = re.compile(r"^run_(\d+)$")
 _TEST_DIR_RE = re.compile(r"^test_(\d+)$")
@@ -79,21 +78,6 @@ def resolve_ppo_checkpoint(ppo_ckpt: str | Path | None = None, ppo_run_dir: str 
     path = Path(ppo_run_dir) / "checkpoints" / "final" / "sb3_model.zip"
     if not path.is_file():
         raise FileNotFoundError(f"Final SB3 checkpoint does not exist: {path}")
-    return path
-
-
-def resolve_plan_cls_delta(ppo_ckpt: str | Path | None = None, ppo_run_dir: str | Path | None = None) -> Path:
-    if ppo_ckpt:
-        path = Path(ppo_ckpt).with_name("plan_cls_branch_delta.pt")
-    else:
-        if not ppo_run_dir:
-            ppo_run_dir = find_latest_run_dir(DEFAULT_OUTPUT_ROOT)
-        path = Path(ppo_run_dir) / "checkpoints" / "final" / "plan_cls_branch_delta.pt"
-    if not path.is_file():
-        raise FileNotFoundError(
-            "plan_cls_branch_delta.pt is required when testing with an agent count "
-            f"different from the training checkpoint space, but it was not found: {path}"
-        )
     return path
 
 
@@ -429,23 +413,24 @@ def build_test_env(config: Mapping[str, Any], output_dir: Path) -> ModeSelection
     env_config = dict(config.get("env_config", {}))
     planner = build_planner(config, env_config)
     env_config["planner"] = planner
-    env_config["reward_config"] = dict(config.get("reward_config", {}))
     env_config.setdefault("num_agents", int(config.get("num_agents", 3)))
     env_config.setdefault("num_modes", int(config.get("num_modes", 16)))
-    env_config.setdefault("cls_feature_dim", int(config.get("cls_feature_dim", 160)))
+    env_config.setdefault("relation_state_dim", int(config.get("relation_input_dim", 12)))
     env_config.setdefault("global_state_dim", int(config.get("global_state_dim", 60)))
     env_config["debug_log_path"] = str(output_dir / "ppo_test_debug.jsonl")
     return ModeSelectionSB3Env(env_config)
 
 
 def _build_policy_kwargs(config: Mapping[str, Any], env: ModeSelectionSB3Env) -> dict[str, Any]:
-    plan_cls_branch = copy.deepcopy(env.planner.model._trajectory_head.diff_decoder.layers[-1].task_decoder.plan_cls_branch)
     return {
-        "plan_cls_branch": plan_cls_branch,
         "num_agents": int(env.num_agents),
         "num_modes": int(config.get("num_modes", env._num_modes)),
-        "cls_feature_dim": int(config.get("cls_feature_dim", env._cls_feature_dim)),
         "global_state_dim": int(config.get("global_state_dim", env._global_state_dim)),
+        "relation_input_dim": int(config.get("relation_input_dim", 12)),
+        "relation_dim": int(config.get("relation_dim", 32)),
+        "trajectory_embed_dim": int(config.get("trajectory_embed_dim", 128)),
+        "actor_hidden_dims": list(config.get("actor_hidden_dims", [256, 128])),
+        "value_hidden_dim": int(config.get("value_hidden_dim", 256)),
         "lambda_kl": float(config.get("lambda_kl", 0.02)),
     }
 
@@ -463,55 +448,22 @@ def load_mode_cls_model_for_test(
 ):
     MaskablePPO, Policy = require_sb3()
     policy_kwargs = _build_policy_kwargs(config, env)
-    try:
-        return MaskablePPO.load(
-            str(ppo_ckpt),
-            env=env,
-            device="cpu",
-            custom_objects={"policy_class": Policy, "policy_kwargs": policy_kwargs},
-        )
-    except ValueError as exc:
-        if not _spaces_mismatch(exc):
-            raise
-
-        delta_path = resolve_plan_cls_delta(ppo_ckpt, ppo_run_dir)
-        print(
-            "[mode_cls_ppo_test] SB3 checkpoint space differs from current test env; "
-            f"rebuilding a {env.num_agents}-agent MaskablePPO wrapper and loading shared actor delta: {delta_path}",
-            flush=True,
-        )
-        model = MaskablePPO(
-            Policy,
-            env,
-            policy_kwargs=policy_kwargs,
-            learning_rate=float(config.get("learning_rate", 3e-4)),
-            n_steps=max(2, int(config.get("n_steps", 32))),
-            batch_size=max(2, int(config.get("batch_size", 32))),
-            n_epochs=max(1, int(config.get("n_epochs", 4))),
-            gamma=float(config.get("gamma", 0.99)),
-            verbose=0,
-            device="cpu",
-        )
-        load_plan_cls_delta(model.policy.mode_cls_core.plan_cls_branch, delta_path)
-        return model
-
-
-def build_pretrained_mode_cls_model_for_test(config: Mapping[str, Any], env: ModeSelectionSB3Env):
-    """Build an SB3-compatible policy wrapper using the frozen pretrained cls head."""
-    MaskablePPO, Policy = require_sb3()
-    policy_kwargs = _build_policy_kwargs(config, env)
-    return MaskablePPO(
-        Policy,
-        env,
-        policy_kwargs=policy_kwargs,
-        learning_rate=float(config.get("learning_rate", 3e-4)),
-        n_steps=max(2, int(config.get("n_steps", 32))),
-        batch_size=max(2, int(config.get("batch_size", 32))),
-        n_epochs=max(1, int(config.get("n_epochs", 4))),
-        gamma=float(config.get("gamma", 0.99)),
-        verbose=0,
+    return MaskablePPO.load(
+        str(ppo_ckpt),
+        env=env,
         device="cpu",
+        custom_objects={"policy_class": Policy, "policy_kwargs": policy_kwargs},
     )
+
+
+class PretrainedArgmaxModeModel:
+    """Minimal predict() baseline that selects frozen planner pretrained argmax logits."""
+
+    def predict(self, obs, deterministic: bool = True, action_masks=None):
+        logits = np.asarray(obs["pretrained_logits"], dtype=np.float32)
+        masks = np.asarray(obs["agent_mode_masks"], dtype=bool)
+        masked = np.where(masks, logits, -1e9)
+        return np.argmax(masked, axis=-1).astype(np.int64), None
 
 
 def run_test(
@@ -533,7 +485,7 @@ def run_test(
     env = build_test_env(config, output_dir)
     policy_source = str(policy_source).lower()
     if policy_source == "pretrained":
-        model = build_pretrained_mode_cls_model_for_test(config, env)
+        model = PretrainedArgmaxModeModel()
     elif policy_source == "ppo":
         if ppo_ckpt is None:
             raise ValueError("policy_source=ppo requires a PPO checkpoint.")

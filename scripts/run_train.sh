@@ -51,14 +51,15 @@ STAGE1_PRECISION="${STAGE1_PRECISION:-auto}"
 SINGLE_CKPT="${SINGLE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
 # SINGLE_CKPT="${SINGLE_CKPT:-}"
 
-MODE_CLS_CONFIG="${MODE_CLS_CONFIG:-${REPO_ROOT}/configs/train/mode_cls_ppo.yaml}"
-MODE_CLS_OUTPUT_ROOT="${MODE_CLS_OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/mode_cls_ppo}"
+MODE_CLS_CONFIG="${MODE_CLS_CONFIG:-${REPO_ROOT}/configs/train/ppo.yaml}"
+MODE_CLS_OUTPUT_ROOT="${MODE_CLS_OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/ppo}"
 RL_NUM_AGENTS="${RL_NUM_AGENTS:-3}"
 RL_RENDER="${RL_RENDER:-0}"
 RL_STEPS="${RL_STEPS:-200000}"  # SB3 total env steps
 MODE_CLS_PLANNER_DEVICE="${MODE_CLS_PLANNER_DEVICE:-cuda}"
-# 逗号分隔的场景 ID；第一版默认限定 S1~S4
-MODE_CLS_SCENARIO_IDS="${MODE_CLS_SCENARIO_IDS:-S1_free_cruise_straight,S2_free_cruise_curve,S3_straight_following,S4_curve_following}"
+# 逗号分隔的场景 ID；默认使用全部场景进行训练
+# MODE_CLS_SCENARIO_IDS="${MODE_CLS_SCENARIO_IDS:-S1_free_cruise_straight,S2_free_cruise_curve,S3_straight_following,S4_curve_following}"
+MODE_CLS_SCENARIO_IDS="${MODE_CLS_SCENARIO_IDS:-}"
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -118,7 +119,7 @@ has_mode_cls_final_outputs() {
     local run_dir="$1"
     [[ -f "${run_dir}/summary.json" ]] \
         && [[ -f "${run_dir}/checkpoints/final/sb3_model.zip" ]] \
-        && [[ -f "${run_dir}/checkpoints/final/plan_cls_branch_delta.pt" ]]
+        && [[ -f "${run_dir}/checkpoints/final/actor_config.json" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -193,7 +194,7 @@ run_stage2() {
     log_info "Planner device  ：${MODE_CLS_PLANNER_DEVICE}"
     log_info "训练步数        ：${RL_STEPS}"
     log_info "场景            ：${MODE_CLS_SCENARIO_IDS}"
-    log_info "包含            ：冻结候选轨迹生成 + SB3 MaskablePPO 微调 plan_cls_branch"
+    log_info "包含            ：冻结候选轨迹生成 + SB3 MaskablePPO 外部 MLP mode actor"
 
     local cmd=(
         "${PYTHON_BIN}" -m train.train_mode_cls_sb3
@@ -232,10 +233,13 @@ run_stage2() {
     if [[ -n "${latest_run}" ]]; then
         log_info "输出      → ${latest_run}"
         log_info "checkpoints → ${latest_run}/checkpoints/{step_*,final}"
+        log_info "PPO actor  → ${latest_run}/checkpoints/final/sb3_model.zip"
+        log_info "测试命令  → NUM_AGENTS=${RL_NUM_AGENTS} CHECKPOINT_PATH=${SINGLE_CKPT} PPO_RUN_DIR=${latest_run} bash scripts/run_diffusion_test.sh"
         log_info "debug log   → ${latest_run}/mode_selection_debug.jsonl"
     else
         log_info "输出      → ${MODE_CLS_OUTPUT_ROOT}/run_x"
         log_info "checkpoints → ${MODE_CLS_OUTPUT_ROOT}/run_x/checkpoints/{step_*,final}"
+        log_info "PPO actor  → ${MODE_CLS_OUTPUT_ROOT}/run_x/checkpoints/final/sb3_model.zip"
         log_info "debug log   → ${MODE_CLS_OUTPUT_ROOT}/run_x/mode_selection_debug.jsonl"
     fi
 }

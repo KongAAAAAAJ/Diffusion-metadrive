@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
-MODE_CLS_CONFIG="${MODE_CLS_CONFIG:-${REPO_ROOT}/configs/train/mode_cls_ppo.yaml}"
+MODE_CLS_CONFIG="${MODE_CLS_CONFIG:-${REPO_ROOT}/configs/train/ppo.yaml}"
 SINGLE_CKPT="${SINGLE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
 MODE_CLS_OUTPUT_ROOT="${MODE_CLS_OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/mode_cls_ppo}"
 PPO_POLICY_SOURCE="${PPO_POLICY_SOURCE:-pretrained}"  # ppo | pretrained

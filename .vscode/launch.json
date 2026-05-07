@@ -10,10 +10,10 @@
         //     "console": "integratedTerminal"
         // },
         {
-            "name": "Expert",
+            "name": "Test",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/metadrive/exp_dataset/collect_expert.py",
+            "program": "${workspaceFolder}/metadrive/policy/diffusion_policy/test_transfuser_policy.py",
             "console": "integratedTerminal",
             // "args": [
             //     "--checkpoint", "outputs/diffusion/checkpoints/diffusion-epoch=98.ckpt"

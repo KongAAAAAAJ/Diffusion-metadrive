@@ -1,63 +1,108 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from models.platoon.relation_encoder import RelationEncoder
 
-class ModeClsActorCriticCore(nn.Module):
-    """Shared decentralized actor + centralized critic core for mode selection."""
+
+def _as_hidden_dims(value: Sequence[int] | str | None, default: tuple[int, ...]) -> tuple[int, ...]:
+    if value is None:
+        return tuple(default)
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+        return tuple(int(item) for item in items) if items else tuple(default)
+    return tuple(int(item) for item in value)
+
+
+def _make_mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    prev_dim = int(input_dim)
+    for hidden_dim in hidden_dims:
+        layers.extend([nn.Linear(prev_dim, int(hidden_dim)), nn.ReLU()])
+        prev_dim = int(hidden_dim)
+    layers.append(nn.Linear(prev_dim, int(output_dim)))
+    return nn.Sequential(*layers)
+
+
+class ModeSelectionMLPActorCriticCore(nn.Module):
+    """External decentralized MLP actor + centralized critic for mode selection."""
 
     def __init__(
         self,
-        plan_cls_branch: nn.Module,
+        *,
         num_agents: int,
         num_modes: int,
-        cls_feature_dim: int,
         global_state_dim: int = 60,
+        relation_input_dim: int = 12,
+        relation_dim: int = 32,
+        trajectory_embed_dim: int = 128,
+        actor_hidden_dims: Sequence[int] | str | None = (256, 128),
         value_hidden_dim: int = 256,
         lambda_kl: float = 0.02,
     ):
         super().__init__()
-        self.plan_cls_branch = plan_cls_branch
         self.num_agents = int(num_agents)
         self.num_modes = int(num_modes)
-        self.cls_feature_dim = int(cls_feature_dim)
+        self.global_state_dim = int(global_state_dim)
+        self.relation_input_dim = int(relation_input_dim)
+        self.relation_dim = int(relation_dim)
+        self.trajectory_embed_dim = int(trajectory_embed_dim)
         self.lambda_kl = float(lambda_kl)
+
+        self.relation_encoder = RelationEncoder(
+            input_dim=self.relation_input_dim,
+            hidden_dim=max(64, self.relation_dim * 2),
+            output_dim=self.relation_dim,
+        )
+        self.trajectory_encoder = _make_mlp(8 * 3, (128,), self.trajectory_embed_dim)
+        actor_hidden = _as_hidden_dims(actor_hidden_dims, (256, 128))
+        # The mask value is included as an explicit feature, but validity is still
+        # enforced by hard masking logits before sampling.
+        self.actor_head = _make_mlp(self.relation_dim + self.trajectory_embed_dim + 1, actor_hidden, 1)
         self.value_head = nn.Sequential(
-            nn.Linear(int(global_state_dim), int(value_hidden_dim)),
+            nn.Linear(self.global_state_dim, int(value_hidden_dim)),
             nn.ReLU(),
             nn.Linear(int(value_hidden_dim), 1),
         )
 
+    def _ensure_batch(self, tensor: torch.Tensor, expected_ndim: int) -> torch.Tensor:
+        if tensor.ndim == expected_ndim - 1:
+            return tensor.unsqueeze(0)
+        return tensor
+
     def forward(self, obs: Mapping[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-        cls_feature = obs["agent_cls_features"].float()
-        if cls_feature.ndim == 3:
-            cls_feature = cls_feature.unsqueeze(0)
-        bs, num_agents, num_modes, feature_dim = cls_feature.shape
-        logits = self.plan_cls_branch(cls_feature.reshape(bs * num_agents * num_modes, feature_dim))
-        logits = logits.reshape(bs, num_agents, num_modes)
-        mask = obs.get("agent_mode_masks")
-        if mask is not None:
-            mask = mask.bool()
-            if mask.ndim == 2:
-                mask = mask.unsqueeze(0)
-            logits = logits.masked_fill(~mask, -1e9)
+        candidates = self._ensure_batch(obs["trajectory_candidates"].float(), 5)
+        relation_states = self._ensure_batch(obs["agent_relation_states"].float(), 3)
+        mask = self._ensure_batch(obs["agent_mode_masks"].bool(), 3)
+
+        bs, num_agents, num_modes, horizon, traj_dim = candidates.shape
+        if horizon != 8 or traj_dim != 3:
+            raise ValueError(f"trajectory_candidates must have shape [B,N,M,8,3], got {tuple(candidates.shape)}")
+        relation_flat = relation_states.reshape(bs * num_agents, -1)
+        relation_emb = self.relation_encoder(relation_flat).reshape(bs, num_agents, 1, self.relation_dim)
+        relation_emb = relation_emb.expand(bs, num_agents, num_modes, self.relation_dim)
+
+        traj_flat = candidates.reshape(bs * num_agents * num_modes, horizon * traj_dim)
+        traj_emb = self.trajectory_encoder(traj_flat).reshape(bs, num_agents, num_modes, self.trajectory_embed_dim)
+        mask_feature = mask.float().unsqueeze(-1)
+        actor_input = torch.cat([relation_emb, traj_emb, mask_feature], dim=-1)
+        logits = self.actor_head(actor_input.reshape(bs * num_agents * num_modes, -1)).reshape(bs, num_agents, num_modes)
+        logits = logits.masked_fill(~mask, -1e9)
+
         global_state = obs["global_state"].float()
         if global_state.ndim == 1:
             global_state = global_state.unsqueeze(0)
         values = self.value_head(global_state).squeeze(-1)
+
         pretrained_logits = obs.get("pretrained_logits")
         if pretrained_logits is not None:
-            pretrained_logits = pretrained_logits.float()
-            if pretrained_logits.ndim == 2:
-                pretrained_logits = pretrained_logits.unsqueeze(0)
-            if mask is not None:
-                pretrained_logits = pretrained_logits.masked_fill(~mask, -1e9)
+            pretrained_logits = self._ensure_batch(pretrained_logits.float(), 3)
+            pretrained_logits = pretrained_logits.masked_fill(~mask, -1e9)
             logp_new = F.log_softmax(logits, dim=-1)
             p_new = logp_new.exp()
             logp_old = F.log_softmax(pretrained_logits, dim=-1)
@@ -67,27 +112,10 @@ class ModeClsActorCriticCore(nn.Module):
         entropy = torch.distributions.Categorical(logits=logits.reshape(-1, num_modes)).entropy().mean()
         return logits, values, {"KL_to_pretrained": kl, "mode_entropy": entropy}
 
-    def regularized_loss(self, ppo_loss: torch.Tensor, metrics: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        return ppo_loss + self.lambda_kl * metrics.get("KL_to_pretrained", ppo_loss.new_tensor(0.0))
 
-
-def export_plan_cls_delta(plan_cls_branch: nn.Module, path: str | Path, metadata: Mapping[str, Any]) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "state_dict": plan_cls_branch.state_dict(),
-            "metadata": dict(metadata),
-        },
-        path,
-    )
-    return path
-
-
-def load_plan_cls_delta(plan_cls_branch: nn.Module, path: str | Path) -> Mapping[str, Any]:
-    checkpoint = torch.load(Path(path), map_location="cpu")
-    plan_cls_branch.load_state_dict(checkpoint["state_dict"], strict=True)
-    return dict(checkpoint.get("metadata", {}))
+# Backward-compatible alias for tests/imports that need the actor core class name,
+# while the implementation is now the external MLP actor.
+ModeClsActorCriticCore = ModeSelectionMLPActorCriticCore
 
 
 def require_sb3() -> tuple[Any, Any]:
@@ -111,29 +139,53 @@ try:  # pragma: no cover - optional dependency is absent in CI/dev by default
     from stable_baselines3.common.utils import explained_variance
 
     class ModeClsMaskablePolicy(_MaskableBase):
-        """SB3 MaskablePPO policy whose actor is the planner plan_cls_branch."""
+        """SB3 MaskablePPO policy whose actor is an external MLP selector."""
 
         def __init__(
             self,
             *args,
-            plan_cls_branch: nn.Module,
             num_agents: int,
             num_modes: int,
-            cls_feature_dim: int,
             global_state_dim: int = 60,
+            relation_input_dim: int = 12,
+            relation_dim: int = 32,
+            trajectory_embed_dim: int = 128,
+            actor_hidden_dims: Sequence[int] | str | None = (256, 128),
+            value_hidden_dim: int = 256,
             lambda_kl: float = 0.02,
             **kwargs,
         ):
+            lr_schedule = kwargs.get("lr_schedule")
+            if lr_schedule is None and len(args) >= 3:
+                lr_schedule = args[2]
             super().__init__(*args, **kwargs)
-            self.mode_cls_core = ModeClsActorCriticCore(
-                plan_cls_branch=plan_cls_branch,
+            self.mode_cls_core = ModeSelectionMLPActorCriticCore(
                 num_agents=num_agents,
                 num_modes=num_modes,
-                cls_feature_dim=cls_feature_dim,
                 global_state_dim=global_state_dim,
+                relation_input_dim=relation_input_dim,
+                relation_dim=relation_dim,
+                trajectory_embed_dim=trajectory_embed_dim,
+                actor_hidden_dims=actor_hidden_dims,
+                value_hidden_dim=value_hidden_dim,
                 lambda_kl=lambda_kl,
             )
             self._last_metrics: dict[str, torch.Tensor] = {}
+            self._rebuild_mode_cls_optimizer(lr_schedule)
+
+        def _rebuild_mode_cls_optimizer(self, lr_schedule) -> None:
+            if lr_schedule is None:
+                raise RuntimeError("ModeClsMaskablePolicy could not resolve SB3 lr_schedule.")
+            for name, parameter in self.named_parameters():
+                parameter.requires_grad_(name.startswith("mode_cls_core."))
+            trainable_parameters = [p for p in self.mode_cls_core.parameters() if p.requires_grad]
+            if not trainable_parameters:
+                raise RuntimeError("ModeClsMaskablePolicy has no trainable external actor parameters.")
+            self.optimizer = self.optimizer_class(
+                trainable_parameters,
+                lr=lr_schedule(1),
+                **self.optimizer_kwargs,
+            )
 
         def _distribution_from_logits(self, logits: torch.Tensor, action_masks=None):
             dist = self.action_dist.proba_distribution(action_logits=logits.reshape(logits.shape[0], -1))
@@ -164,11 +216,6 @@ try:  # pragma: no cover - optional dependency is absent in CI/dev by default
             _, values, metrics = self.mode_cls_core(obs)
             self._last_metrics = metrics
             return values
-
-        def custom_loss(self, policy_loss, loss_inputs):
-            if isinstance(policy_loss, list):
-                return [self.mode_cls_core.regularized_loss(loss, self._last_metrics) for loss in policy_loss]
-            return self.mode_cls_core.regularized_loss(policy_loss, self._last_metrics)
 
         def metrics(self) -> dict[str, torch.Tensor]:
             return {key: value.detach() for key, value in self._last_metrics.items()}

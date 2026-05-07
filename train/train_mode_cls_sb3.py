@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import heapq
 import json
 import multiprocessing
@@ -17,10 +16,10 @@ import torch
 import yaml
 
 from envs.mode_selection_sb3_env import ModeSelectionSB3Env
-from models.mode_selection.sb3_mode_cls_policy import export_plan_cls_delta, require_sb3
+from models.mode_selection.sb3_mode_cls_policy import require_sb3
 
 
-DEFAULT_CONFIG_PATH = "configs/train/mode_cls_ppo.yaml"
+DEFAULT_CONFIG_PATH = "configs/train/ppo.yaml"
 DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/mode_cls_ppo")
 _RUN_DIR_RE = re.compile(r"^run_(\d+)$")
 
@@ -54,11 +53,26 @@ class TopKCheckpointKeeper:
             shutil.rmtree(remove_path, ignore_errors=True)
 
 
-def _extract_trained_plan_cls_branch(model):
-    core = getattr(getattr(model, "policy", None), "mode_cls_core", None)
-    if core is None:
-        raise RuntimeError("SB3 policy does not expose mode_cls_core; cannot export plan_cls_branch delta.")
-    return core.plan_cls_branch
+def _actor_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "actor_type": "external_mlp_mode_selector",
+        "num_agents": int(config.get("num_agents", 3)),
+        "num_modes": int(config.get("num_modes", 16)),
+        "global_state_dim": int(config.get("global_state_dim", 60)),
+        "relation_input_dim": int(config.get("relation_input_dim", 12)),
+        "relation_dim": int(config.get("relation_dim", 32)),
+        "trajectory_embed_dim": int(config.get("trajectory_embed_dim", 128)),
+        "actor_hidden_dims": list(config.get("actor_hidden_dims", [256, 128])),
+        "value_hidden_dim": int(config.get("value_hidden_dim", 256)),
+        "lambda_kl": float(config.get("lambda_kl", 0.02)),
+    }
+
+
+def _save_actor_config(config: Mapping[str, Any], ckpt_dir: Path, extra: Mapping[str, Any] | None = None) -> None:
+    payload = _actor_config(config)
+    payload.update(dict(extra or {}))
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    (ckpt_dir / "actor_config.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def resolve_device(name: str | None) -> torch.device:
@@ -114,11 +128,13 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
 
     # ── env config ──────────────────────────────────────────────────────────
     env_config = dict(config.get("env_config", {}))
-    env_config["reward_config"] = dict(config.get("reward_config", {}))
     env_config.setdefault("num_agents", int(config.get("num_agents", 3)))
     env_config.setdefault("num_modes", int(config.get("num_modes", 16)))
-    env_config.setdefault("cls_feature_dim", int(config.get("cls_feature_dim", 160)))
+    env_config.setdefault("relation_state_dim", int(config.get("relation_input_dim", 12)))
     env_config.setdefault("global_state_dim", int(config.get("global_state_dim", 60)))
+    env_config.setdefault("lookahead_index", int(config.get("lookahead_index", 2)))
+    env_config.setdefault("target_speed_km_h", float(config.get("target_speed_km_h", 30.0)))
+    env_config.setdefault("controller_type", str(config.get("controller_type", "stabilized")))
 
     # debug logging: disabled by default in production; enable via debug_logging=true
     if config.get("debug_logging", False):
@@ -138,13 +154,18 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
         print("[mode_cls_ppo] WARNING: ppo_device=cuda requested but CUDA not available, falling back to CPU", flush=True)
         ppo_device = torch.device("cpu")
 
-    # ── trainable cls branch (extracted in main process) ────────────────────
     main_planner = build_planner(config, env_config)
-    trainable_plan_cls_branch = copy.deepcopy(
-        main_planner.model._trajectory_head.diff_decoder.layers[-1].task_decoder.plan_cls_branch
+    planner_trainable = sum(int(parameter.requires_grad) for parameter in main_planner.parameters())
+    print(
+        "[mode_cls_ppo] action pipeline: mode action -> candidate trajectory[mode] "
+        "-> trajectory controller -> PlatoonEnv.step",
+        flush=True,
     )
-    for parameter in trainable_plan_cls_branch.parameters():
-        parameter.requires_grad_(True)
+    print(
+        "[mode_cls_ppo] trainable scope: external MLP actor + RelationEncoder + centralized critic; "
+        f"frozen planner trainable tensors={planner_trainable}",
+        flush=True,
+    )
 
     # ── build env(s) ────────────────────────────────────────────────────────
     num_envs = int(config.get("num_envs", 1))
@@ -204,15 +225,10 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
             ckpt_dir = ckpt_root / f"step_{self.num_timesteps:08d}_score_{score:.4f}"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             self.model.save(str(ckpt_dir / "sb3_model"))
-            export_plan_cls_delta(
-                _extract_trained_plan_cls_branch(self.model),
-                ckpt_dir / "plan_cls_branch_delta.pt",
-                {
-                    "pretrained_ckpt": pretrained_ckpt,
-                    "num_modes": int(config.get("num_modes", 16)),
-                    "score": score,
-                    "timesteps": int(self.num_timesteps),
-                },
+            _save_actor_config(
+                config,
+                ckpt_dir,
+                {"pretrained_ckpt": pretrained_ckpt, "score": score, "timesteps": int(self.num_timesteps)},
             )
             keeper.update(score, ckpt_dir)
             print(
@@ -225,11 +241,14 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
         _Policy,
         env,
         policy_kwargs={
-            "plan_cls_branch": trainable_plan_cls_branch,
             "num_agents": int(config.get("num_agents", 3)),
             "num_modes": int(config.get("num_modes", 16)),
-            "cls_feature_dim": int(config.get("cls_feature_dim", 160)),
             "global_state_dim": int(config.get("global_state_dim", 60)),
+            "relation_input_dim": int(config.get("relation_input_dim", 12)),
+            "relation_dim": int(config.get("relation_dim", 32)),
+            "trajectory_embed_dim": int(config.get("trajectory_embed_dim", 128)),
+            "actor_hidden_dims": list(config.get("actor_hidden_dims", [256, 128])),
+            "value_hidden_dim": int(config.get("value_hidden_dim", 256)),
             "lambda_kl": float(config.get("lambda_kl", 0.02)),
         },
         learning_rate=float(config.get("learning_rate", 3e-4)),
@@ -247,16 +266,18 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
     ckpt_dir = ckpt_root / "final"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     model.save(str(ckpt_dir / "sb3_model"))
-    export_plan_cls_delta(
-        _extract_trained_plan_cls_branch(model),
-        ckpt_dir / "plan_cls_branch_delta.pt",
+    _save_actor_config(
+        config,
+        ckpt_dir,
         {
             "pretrained_ckpt": str(config.get("pretrained_ckpt", "")),
-            "num_modes": int(config.get("num_modes", 16)),
-            "note": "Final SB3 checkpoint; top-k checkpoints are stored in sibling step_* directories.",
+            "note": "Final external MLP actor checkpoint; top-k checkpoints are stored in sibling step_* directories.",
         },
     )
-    (run_dir / "summary.json").write_text(json.dumps({"total_timesteps": int(total_timesteps)}, indent=2), encoding="utf-8")
+    (run_dir / "summary.json").write_text(
+        json.dumps({"total_timesteps": int(total_timesteps), "actor_type": "external_mlp_mode_selector"}, indent=2),
+        encoding="utf-8",
+    )
     return run_dir
 
 

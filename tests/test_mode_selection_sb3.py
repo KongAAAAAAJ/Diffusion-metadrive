@@ -12,17 +12,19 @@ from envs.platoon_env import PlatoonEnv
 from evaluation.reward_terms import compute_step_reward, compute_team_reward
 from models.mode_selection.sb3_mode_cls_policy import (
     ModeClsActorCriticCore,
-    export_plan_cls_delta,
-    load_plan_cls_delta,
 )
 from train.test_mode_cls_sb3 import (
+    PretrainedArgmaxModeModel,
     _termination_reason_from_info,
-    build_pretrained_mode_cls_model_for_test,
     draw_multivehicle_multimodal_overlay,
     draw_vehicle_footprint_overlay,
     evaluate_mode_cls_policy,
-    resolve_plan_cls_delta,
     resolve_ppo_checkpoint,
+)
+from metadrive.policy.diffusion_policy.test_transfuser_policy import (
+    _build_ppo_actor_obs,
+    _missing_controlled_agents,
+    _predict_ppo_modes,
 )
 
 
@@ -99,7 +101,17 @@ def test_mode_selection_env_masks_and_executes_selected_candidates(tmp_path):
     planner = _FakePlanner()
     debug_log_path = tmp_path / "mode_selection_debug.jsonl"
     env = ModeSelectionSB3Env(
-        {"base_env": base_env, "planner": planner, "num_agents": 3, "debug_log_path": str(debug_log_path)}
+        {
+            "base_env": base_env,
+            "planner": planner,
+            "num_agents": 3,
+            "debug_log_path": str(debug_log_path),
+            "reward_config": {
+                "w_progress": 1000.0,
+                "w_team_efficiency": 1000.0,
+                "reward_clip": 0.0,
+            },
+        }
     )
 
     obs, _ = env.reset()
@@ -107,16 +119,19 @@ def test_mode_selection_env_masks_and_executes_selected_candidates(tmp_path):
     assert isinstance(env.action_space, gym.spaces.MultiDiscrete)
     assert env.action_masks().shape == (12,)
     assert env.action_masks().reshape(3, 4)[1, 3] == 0
-    assert obs["agent_cls_features"].shape == (3, 4, 6)
+    assert obs["agent_relation_states"].shape == (3, 12)
+    assert obs["trajectory_candidates"].shape == (3, 4, 8, 3)
 
     next_obs, reward, terminated, truncated, info = env.step(np.asarray([2, 1, 3], dtype=np.int64))
 
     assert reward == np.mean([0.0, 1.0, 2.0])
+    assert info["reward"] == reward
     assert terminated is False
     assert truncated is False
     assert next_obs["agent_mode_masks"].shape == (3, 4)
-    np.testing.assert_allclose(base_env.last_actions["agent0"], np.full((8, 3), [2.0, 0.0, 0.0], dtype=np.float32))
+    assert base_env.last_actions["agent0"].shape == (2,)
     assert info["executed_mode"] == [2, 1, 3]
+    assert info["selected_trajectory_endpoint"][0] == [2.0, 0.0]
     assert info["invalid_mode_rate"] == 0.0
     assert info["pretrained_argmax_mode"] == [3, 2, 3]
     assert info["terminated"] is False
@@ -181,16 +196,35 @@ def test_mode_selection_env_keeps_fixed_agent_observation_shape_when_base_env_om
             "planner": _FakePlanner(),
             "num_agents": 3,
             "num_modes": 4,
-            "cls_feature_dim": 6,
+            "relation_state_dim": 12,
         }
     )
     env.reset()
 
     obs, *_ = env.step(np.asarray([2, 1, 3], dtype=np.int64))
 
-    assert obs["agent_cls_features"].shape == (3, 4, 6)
+    assert obs["agent_relation_states"].shape == (3, 12)
+    assert obs["trajectory_candidates"].shape == (3, 4, 8, 3)
     assert env.action_masks().shape == (12,)
     assert env._last_export["agent_ids"] == ["agent0", "agent1", "agent2"]
+
+
+def test_mode_selection_env_terminates_when_controlled_agent_disappears():
+    env = ModeSelectionSB3Env(
+        {
+            "base_env": _FakeBaseEnv(drop_agent_after_step="agent2"),
+            "planner": _FakePlanner(),
+            "num_agents": 3,
+            "num_modes": 4,
+        }
+    )
+    env.reset()
+
+    _obs, _reward, terminated, truncated, info = env.step(np.asarray([2, 1, 3], dtype=np.int64))
+
+    assert terminated is True
+    assert truncated is False
+    assert info["missing_agent_ids"] == ["agent2"]
 
 
 def test_mode_selection_env_applies_configured_s1_s4_scenario_before_base_env_build():
@@ -215,16 +249,18 @@ def test_mode_selection_env_applies_configured_s1_s4_scenario_before_base_env_bu
     env.reset()
 
 
-def test_mode_cls_core_trainable_scope_and_delta_roundtrip(tmp_path):
-    plan_cls_branch = torch.nn.Sequential(torch.nn.Linear(6, 8), torch.nn.ReLU(), torch.nn.Linear(8, 1))
-    core = ModeClsActorCriticCore(plan_cls_branch=plan_cls_branch, num_agents=3, num_modes=4, cls_feature_dim=6)
+def test_mode_cls_core_trainable_scope_and_forward():
+    core = ModeClsActorCriticCore(num_agents=3, num_modes=4, relation_dim=16, trajectory_embed_dim=32)
 
     trainable = {name for name, param in core.named_parameters() if param.requires_grad}
-    assert any(name.startswith("plan_cls_branch") for name in trainable)
+    assert any(name.startswith("relation_encoder") for name in trainable)
+    assert any(name.startswith("trajectory_encoder") for name in trainable)
+    assert any(name.startswith("actor_head") for name in trainable)
     assert any(name.startswith("value_head") for name in trainable)
 
     obs = {
-        "agent_cls_features": torch.ones((2, 3, 4, 6), dtype=torch.float32),
+        "agent_relation_states": torch.ones((2, 3, 12), dtype=torch.float32),
+        "trajectory_candidates": torch.ones((2, 3, 4, 8, 3), dtype=torch.float32),
         "agent_mode_masks": torch.ones((2, 3, 4), dtype=torch.bool),
         "global_state": torch.zeros((2, 60), dtype=torch.float32),
         "pretrained_logits": torch.zeros((2, 3, 4), dtype=torch.float32),
@@ -233,13 +269,6 @@ def test_mode_cls_core_trainable_scope_and_delta_roundtrip(tmp_path):
     assert logits.shape == (2, 3, 4)
     assert values.shape == (2,)
     assert "KL_to_pretrained" in metrics
-
-    delta_path = tmp_path / "plan_cls_branch_delta.pt"
-    export_plan_cls_delta(core.plan_cls_branch, delta_path, {"pretrained_ckpt": "dummy.ckpt", "num_modes": 4})
-    reloaded = torch.nn.Sequential(torch.nn.Linear(6, 8), torch.nn.ReLU(), torch.nn.Linear(8, 1))
-    load_plan_cls_delta(reloaded, delta_path)
-    for left, right in zip(core.plan_cls_branch.parameters(), reloaded.parameters()):
-        assert torch.allclose(left, right)
 
 
 def test_maskable_ppo_fake_env_smoke_runs_one_rollout():
@@ -253,19 +282,18 @@ def test_maskable_ppo_fake_env_smoke_runs_one_rollout():
             "planner": _FakePlanner(),
             "num_agents": 3,
             "num_modes": 4,
-            "cls_feature_dim": 6,
+            "relation_state_dim": 12,
         }
     )
-    plan_cls_branch = torch.nn.Sequential(torch.nn.Linear(6, 8), torch.nn.ReLU(), torch.nn.Linear(8, 1))
     MaskablePPO, Policy = require_sb3()
     model = MaskablePPO(
         Policy,
         env,
         policy_kwargs={
-            "plan_cls_branch": plan_cls_branch,
             "num_agents": 3,
             "num_modes": 4,
-            "cls_feature_dim": 6,
+            "relation_dim": 16,
+            "trajectory_embed_dim": 32,
         },
         n_steps=4,
         batch_size=4,
@@ -278,54 +306,23 @@ def test_maskable_ppo_fake_env_smoke_runs_one_rollout():
     assert hasattr(model.policy, "mode_cls_core")
 
 
-def test_pretrained_policy_source_builds_predictable_sb3_wrapper():
-    pytest.importorskip("stable_baselines3")
-    pytest.importorskip("sb3_contrib")
-
-    class _TaskDecoder:
-        def __init__(self):
-            self.plan_cls_branch = torch.nn.Sequential(torch.nn.Linear(6, 8), torch.nn.ReLU(), torch.nn.Linear(8, 1))
-
-    class _Layer:
-        def __init__(self):
-            self.task_decoder = _TaskDecoder()
-
-    class _DiffDecoder:
-        def __init__(self):
-            self.layers = [_Layer()]
-
-    class _TrajectoryHead:
-        def __init__(self):
-            self.diff_decoder = _DiffDecoder()
-
-    class _Model:
-        def __init__(self):
-            self._trajectory_head = _TrajectoryHead()
-
-    class _Planner(_FakePlanner):
-        def __init__(self):
-            super().__init__(num_agents=3, num_modes=4, feature_dim=6)
-            self.model = _Model()
-
+def test_pretrained_policy_source_uses_argmax_baseline():
     env = ModeSelectionSB3Env(
         {
             "base_env": _FakeBaseEnv(),
-            "planner": _Planner(),
+            "planner": _FakePlanner(),
             "num_agents": 3,
             "num_modes": 4,
-            "cls_feature_dim": 6,
+            "relation_state_dim": 12,
         }
     )
     obs, _ = env.reset()
-    model = build_pretrained_mode_cls_model_for_test(
-        {"num_modes": 4, "cls_feature_dim": 6, "global_state_dim": 60},
-        env,
-    )
+    model = PretrainedArgmaxModeModel()
 
     action, _ = model.predict(obs, deterministic=True, action_masks=env.action_masks())
 
     assert np.asarray(action).shape == (3,)
-    assert hasattr(model.policy, "mode_cls_core")
+    assert np.asarray(action).tolist() == [3, 2, 3]
 
 
 def test_resolve_ppo_checkpoint_prefers_explicit_file_and_supports_run_dir(tmp_path):
@@ -338,22 +335,6 @@ def test_resolve_ppo_checkpoint_prefers_explicit_file_and_supports_run_dir(tmp_p
 
     assert resolve_ppo_checkpoint(explicit_ckpt, run_dir) == explicit_ckpt
     assert resolve_ppo_checkpoint("", run_dir) == final_ckpt
-
-
-def test_resolve_plan_cls_delta_supports_explicit_ckpt_and_run_dir(tmp_path):
-    run_dir = tmp_path / "run_1"
-    final_dir = run_dir / "checkpoints" / "final"
-    final_dir.mkdir(parents=True)
-    run_delta = final_dir / "plan_cls_branch_delta.pt"
-    run_delta.write_bytes(b"fake")
-    explicit_ckpt = tmp_path / "step_10" / "sb3_model.zip"
-    explicit_ckpt.parent.mkdir(parents=True)
-    explicit_ckpt.write_bytes(b"fake")
-    explicit_delta = explicit_ckpt.with_name("plan_cls_branch_delta.pt")
-    explicit_delta.write_bytes(b"fake")
-
-    assert resolve_plan_cls_delta(explicit_ckpt, run_dir) == explicit_delta
-    assert resolve_plan_cls_delta("", run_dir) == run_delta
 
 
 def test_termination_reason_prefers_safety_flags():
@@ -389,7 +370,7 @@ def test_evaluate_mode_cls_policy_collects_closed_loop_metrics(tmp_path):
             "planner": _FakePlanner(),
             "num_agents": 3,
             "num_modes": 4,
-            "cls_feature_dim": 6,
+            "relation_state_dim": 12,
             "debug_log_path": str(tmp_path / "ppo_test_debug.jsonl"),
         }
     )
@@ -450,3 +431,63 @@ def test_draw_vehicle_footprint_overlay_draws_actual_vehicle_box():
 
     assert canvas.shape == frame.shape
     assert int(canvas.sum()) > 0
+
+
+def test_ppo_actor_obs_pads_missing_agent_slots_for_fixed_sb3_space():
+    obs = {
+        "agent0": {
+            "status": np.ones((8,), dtype=np.float32),
+            "formation_relation_state": np.ones((12,), dtype=np.float32),
+        },
+        "agent2": {
+            "status": np.full((8,), 2.0, dtype=np.float32),
+            "formation_relation_state": np.full((12,), 2.0, dtype=np.float32),
+        },
+    }
+    candidates = np.ones((2, 4, 8, 3), dtype=np.float32)
+    masks = np.ones((2, 4), dtype=bool)
+    raw_logits = np.ones((2, 4), dtype=np.float32)
+
+    actor_obs = _build_ppo_actor_obs(
+        obs=obs,
+        agent_ids=["agent0", "agent2"],
+        policy_agent_ids=["agent0", "agent1", "agent2"],
+        candidates=candidates,
+        mode_valid_mask=masks,
+        raw_logits=raw_logits,
+    )
+
+    assert actor_obs["agent_relation_states"].shape == (3, 12)
+    assert actor_obs["trajectory_candidates"].shape == (3, 4, 8, 3)
+    assert actor_obs["agent_mode_masks"].shape == (3, 4)
+    assert actor_obs["agent_mode_masks"][1].tolist() == [True, False, False, False]
+    assert np.allclose(actor_obs["agent_relation_states"][1], 0.0)
+
+
+def test_missing_controlled_agents_detects_disappeared_platoon_member():
+    assert _missing_controlled_agents({"agent0": {}, "agent2": {}}, ["agent0", "agent1", "agent2"]) == ["agent1"]
+    assert _missing_controlled_agents({"agent0": {}, "agent1": {}, "agent2": {}}, ["agent0", "agent1", "agent2"]) == []
+
+
+def test_predict_ppo_modes_returns_fixed_slot_actions_and_active_subset_can_be_mapped():
+    class DummyModel:
+        def predict(self, obs, deterministic=True, action_masks=None):
+            assert obs["agent_relation_states"].shape == (3, 12)
+            assert np.asarray(action_masks).shape == (12,)
+            return np.asarray([2, 0, 3], dtype=np.int64), None
+
+    full_mask = np.zeros((3, 4), dtype=bool)
+    full_mask[0, 2] = True
+    full_mask[1, 0] = True
+    full_mask[2, 3] = True
+    actions = _predict_ppo_modes(
+        DummyModel(),
+        {"agent_relation_states": np.zeros((3, 12), dtype=np.float32)},
+        full_mask,
+        deterministic=True,
+    )
+
+    policy_agent_ids = ["agent0", "agent1", "agent2"]
+    exported_ids = ["agent0", "agent2"]
+    active_actions = [actions[policy_agent_ids.index(agent_id)] for agent_id in exported_ids]
+    assert active_actions == [2, 3]

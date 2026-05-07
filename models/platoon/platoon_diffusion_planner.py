@@ -56,6 +56,10 @@ class PlatoonDiffusionPlanner(nn.Module):
         lidar = []
         status = []
         relation = []
+        coarse_trajectories = []
+        mode_valid_masks = []
+        target_points = []
+        preference_points = []
         agent_contexts: Dict[str, dict] = {}
         for agent_id in agent_ids:
             sample = batch[agent_id]
@@ -67,6 +71,22 @@ class PlatoonDiffusionPlanner(nn.Module):
             lidar.append(lidar_tensor)
             status.append(status_tensor)
             relation.append(relation_tensor)
+            if "coarse_trajectories" in sample:
+                coarse_trajectories.append(
+                    self._ensure_batch_dim(sample["coarse_trajectories"]).to(device=device)
+                )
+            if "mode_valid_mask" in sample:
+                mode_valid_masks.append(
+                    self._ensure_batch_dim(sample["mode_valid_mask"]).to(device=device)
+                )
+            if "target_point" in sample:
+                target_points.append(
+                    self._ensure_batch_dim(sample["target_point"]).to(device=device)
+                )
+            if "preference_point" in sample:
+                preference_points.append(
+                    self._ensure_batch_dim(sample["preference_point"]).to(device=device)
+                )
             agent_contexts[agent_id] = {
                 "camera": camera_tensor,
                 "lidar": lidar_tensor,
@@ -86,6 +106,14 @@ class PlatoonDiffusionPlanner(nn.Module):
             "lidar_feature": lidar_feature,
             "status_feature": fused_status,
         }
+        if len(coarse_trajectories) == len(agent_ids):
+            model_inputs["coarse_trajectories"] = torch.cat(coarse_trajectories, dim=0).float()
+        if len(mode_valid_masks) == len(agent_ids):
+            model_inputs["mode_valid_mask"] = torch.cat(mode_valid_masks, dim=0).bool()
+        if len(target_points) == len(agent_ids):
+            model_inputs["target_point"] = torch.cat(target_points, dim=0).float()
+        if len(preference_points) == len(agent_ids):
+            model_inputs["preference_point"] = torch.cat(preference_points, dim=0).float()
         return agent_ids, model_inputs, agent_contexts
 
     def forward(self, batch: Mapping[str, Mapping[str, Tensor]]) -> Dict[str, Tensor]:
@@ -110,6 +138,8 @@ class PlatoonDiffusionPlanner(nn.Module):
         cls_feature = cls_feature.detach().cpu()
         num_agents, num_modes = logits.shape
         mode_valid_mask = outputs.get("mode_valid_mask")
+        if mode_valid_mask is None:
+            mode_valid_mask = model_inputs.get("mode_valid_mask")
         if mode_valid_mask is None:
             mode_valid_mask = torch.ones((num_agents, num_modes), dtype=torch.bool)
         else:

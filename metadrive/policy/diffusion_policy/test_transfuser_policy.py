@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 import cv2
 import numpy as np
 import torch, time
@@ -24,13 +24,17 @@ from metadrive.policy.diffusion_policy.transfuser_config import (
     transfuser_config_to_dict,
 )
 from metadrive.policy.diffusion_policy.mode_visualization import mode_color
-from metadrive.policy.diffusion_policy.transfuser_policy import TransfuserPolicy
+from metadrive.policy.diffusion_policy.transfuser_policy import TransfuserPolicy, compute_trajectory_control
 
 MULTIMODAL_SELECTED_COLOR = "#C76B00"
 MULTIMODAL_OTHER_COLOR = "#1F6F8B"
 ROAD_BOUNDARY_COLOR = "#7A7A7A"
 ACTUAL_TRAJECTORY_COLOR = "#1D4ED8"
 DEFAULT_MODEL_CONFIG_PATH = "configs/diffusion/model.yaml"
+DEFAULT_CHECKPOINT_PATH = "/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt"
+DEFAULT_CAMERA_OUTPUT_DIR = "/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed/cameras"
+DEFAULT_OUTPUT_DIR = "/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed"
+DEFAULT_PPO_ACTOR_CKPT = "/media/kong/Elements_SE/Diffusion_Data/outputs/mode_cls_ppo/run_4/checkpoints/final/sb3_model.zip"
 
 PAPER_SELECTED_TRAJ_COLOR = (0, 94, 213)  # Okabe-Ito vermillion in BGR
 PAPER_OTHER_TRAJ_COLOR = (178, 114, 86)  # sky blue
@@ -106,6 +110,9 @@ class StepTrajectoryPlotRecord:
     world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None
     ego_speed_km_h: float | None = None
     ego_acceleration: float | None = None
+    env_reward: float | None = None
+    agent_label: str | None = None
+    peer_records: list["StepTrajectoryPlotRecord"] | None = None
 
 
 @dataclass
@@ -145,10 +152,16 @@ class ScenarioRouteSelection:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Closed-loop evaluation for MetaDrive TransFuser.")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the trained TransFuser checkpoint.")
+    parser.add_argument("--checkpoint", type=str, default=DEFAULT_CHECKPOINT_PATH, help="Path to the trained TransFuser checkpoint.")
     parser.add_argument("--model-config-path", type=str, default=DEFAULT_MODEL_CONFIG_PATH)
     parser.add_argument("--model-size", type=str, default=None)
-    parser.add_argument("--episodes", type=int, default=1)
+    parser.add_argument("--episodes", type=int, default=5)
+    parser.add_argument(
+        "--num-agents",
+        type=int,
+        default=3,
+        help="Number of vehicles to evaluate. 1 keeps the original TransfuserPolicy path; >1 uses PlatoonEnv.",
+    )
     parser.add_argument("--render", type=int, choices=(0, 1), default=0)
     parser.add_argument("--image-on-cuda", type=int, choices=(0, 1), default=0)
     parser.add_argument("--device", type=str, default="auto")
@@ -157,7 +170,7 @@ def parse_args(argv=None):
     parser.add_argument("--controller-type", type=str, default="stabilized")
     parser.add_argument("--print-trajectory-debug", type=int, choices=(0, 1), default=1)
     parser.add_argument("--save-camera-interval", type=int, default=0)  # 默认关闭相机图片保存
-    parser.add_argument("--camera-output-dir", type=str, default="/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/closed_loop/cameras")
+    parser.add_argument("--camera-output-dir", type=str, default=DEFAULT_CAMERA_OUTPUT_DIR)
     parser.add_argument("--start-seed", type=int, default=0)
     parser.add_argument("--num-scenarios", type=int, default=1)
     parser.add_argument("--traffic-density", type=float, default=0.06)
@@ -173,23 +186,56 @@ def parse_args(argv=None):
     parser.add_argument(
         "--scenario-id",
         type=str,
-        default="S1_free_cruise_straight",
+        default="S2_free_cruise_curve",
         help="Scenario id to evaluate. The script samples one allowed local route per episode.",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/closed_loop",
+        default=DEFAULT_OUTPUT_DIR,
     )
     parser.add_argument("--video-fps", type=int, default=10)
     parser.add_argument("--topdown-camera-height", type=float, default=80.0)
-    parser.add_argument("--show-topology-polyline", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--show-topology-polyline", type=int, choices=(0, 1), default=1)
+    parser.add_argument(
+        "--local-route",
+        type=str,
+        default="",
+        help="Fix evaluation to a specific local route (e.g. R1_entry_straight). "
+             "Empty string means the default/random route selection is used.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=0,
+        help="Hard limit on steps per episode (0 = use the env horizon).",
+    )
+    parser.add_argument(
+        "--selection-policy",
+        type=str,
+        choices=("argmax", "random_valid"),
+        default="argmax",
+        help="Mode selection policy for platoon planner backend.",
+    )
+    parser.add_argument("--random-action-seed", type=int, default=None)
+    parser.add_argument("--random-use-mode-endpoint-target", type=int, choices=(0, 1), default=0)
+    parser.add_argument(
+        "--ppo-actor-ckpt",
+        type=str,
+        default="",
+        help="SB3 MaskablePPO actor checkpoint (.zip). "
+             "Empty string (default) = skip PPO and use the pretrained diffusion planner directly (argmax/random_valid).",
+    )
+    parser.add_argument("--ppo-run-dir", type=str, default="")
+    parser.add_argument("--ppo-deterministic", type=int, choices=(0, 1), default=1)
     return parser.parse_args(argv)
 
 
 def _normalize_visualization_args(args):
     if args.save_3d_video and not args.render:
         args.render = 1
+    if args.random_action_seed is None:
+        args.random_action_seed = int(args.start_seed)
     return args
 
 
@@ -197,6 +243,221 @@ def resolve_device(device: str) -> str:
     if device == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     return device
+
+
+def _choose_mode_indices(
+    *,
+    masked_logits: np.ndarray,
+    mode_valid_mask: np.ndarray,
+    policy: str,
+    rng: np.random.RandomState,
+) -> list[int]:
+    """Choose one mode per agent, respecting valid masks."""
+    masked_logits = np.asarray(masked_logits, dtype=np.float32)
+    mode_valid_mask = np.asarray(mode_valid_mask, dtype=bool)
+    if mode_valid_mask.ndim != 2:
+        raise ValueError(f"mode_valid_mask must have shape [N,M], got {mode_valid_mask.shape}")
+    if policy == "argmax":
+        return [int(np.argmax(masked_logits[i])) for i in range(mode_valid_mask.shape[0])]
+    if policy != "random_valid":
+        raise ValueError(f"Unsupported selection policy: {policy}")
+    selected: list[int] = []
+    for agent_index, valid in enumerate(mode_valid_mask):
+        valid_indices = np.flatnonzero(valid)
+        if valid_indices.size == 0:
+            raise ValueError(f"No valid trajectory mode for agent index {agent_index}.")
+        selected.append(int(rng.choice(valid_indices)))
+    return selected
+
+
+def _resolve_ppo_actor_checkpoint(actor_ckpt: str, run_dir: str) -> "Path | None":
+    """Return the resolved PPO actor checkpoint path, or None when neither argument is provided.
+
+    None → use the pretrained diffusion planner directly (argmax / random_valid selection).
+    """
+    if not actor_ckpt and not run_dir:
+        return None
+    if actor_ckpt:
+        path = Path(actor_ckpt)
+    else:
+        path = Path(run_dir) / "checkpoints" / "final" / "sb3_model.zip"
+    if not path.is_file():
+        raise FileNotFoundError(f"PPO actor checkpoint not found: {path}")
+    return path
+
+
+def _build_ppo_agent_relation_states(
+    obs: Mapping[str, Mapping],
+    agent_ids: list[str],
+    relation_dim: int = 12,
+) -> np.ndarray:
+    rows = []
+    for agent_id in agent_ids:
+        relation = np.asarray(obs.get(agent_id, {}).get("formation_relation_state", []), dtype=np.float32).reshape(-1)
+        if relation.size < relation_dim:
+            relation = np.pad(relation, (0, relation_dim - relation.size))
+        rows.append(relation[:relation_dim])
+    return np.stack(rows, axis=0).astype(np.float32)
+
+
+def _build_ppo_global_state(obs: Mapping[str, Mapping], agent_ids: list[str], global_state_dim: int = 60) -> np.ndarray:
+    parts = []
+    for agent_id in sorted(agent_ids):
+        item = obs.get(agent_id, {})
+        parts.append(np.asarray(item.get("status", []), dtype=np.float32).reshape(-1))
+        parts.append(np.asarray(item.get("formation_relation_state", []), dtype=np.float32).reshape(-1))
+    state = np.concatenate(parts, axis=0) if parts else np.zeros((0,), dtype=np.float32)
+    if state.size < global_state_dim:
+        state = np.pad(state, (0, global_state_dim - state.size))
+    return state[:global_state_dim].astype(np.float32)
+
+
+def _missing_controlled_agents(obs: Mapping[str, Mapping] | None, expected_agent_ids: list[str]) -> list[str]:
+    obs = obs or {}
+    return [agent_id for agent_id in expected_agent_ids if agent_id not in obs]
+
+
+def _build_ppo_actor_obs(
+    *,
+    obs: Mapping[str, Mapping],
+    agent_ids: list[str],
+    policy_agent_ids: list[str],
+    candidates: np.ndarray,
+    mode_valid_mask: np.ndarray,
+    raw_logits: np.ndarray,
+) -> dict[str, np.ndarray]:
+    candidates = np.asarray(candidates, dtype=np.float32)
+    mode_valid_mask = np.asarray(mode_valid_mask, dtype=bool)
+    raw_logits = np.asarray(raw_logits, dtype=np.float32)
+    if candidates.ndim != 4:
+        raise ValueError(f"trajectory_candidates must have shape [N,M,8,3], got {candidates.shape}")
+    num_modes = int(candidates.shape[1])
+    full_candidates = np.zeros((len(policy_agent_ids), num_modes, 8, 3), dtype=np.float32)
+    full_masks = np.zeros((len(policy_agent_ids), num_modes), dtype=bool)
+    full_logits = np.zeros((len(policy_agent_ids), num_modes), dtype=np.float32)
+    # Missing vehicles still need one valid dummy action so SB3's masked
+    # distribution remains well-defined. Their sampled action is ignored.
+    full_masks[:, 0] = True
+    active_index_by_id = {agent_id: idx for idx, agent_id in enumerate(agent_ids)}
+    for policy_idx, agent_id in enumerate(policy_agent_ids):
+        active_idx = active_index_by_id.get(agent_id)
+        if active_idx is None:
+            continue
+        full_candidates[policy_idx] = candidates[active_idx]
+        full_masks[policy_idx] = mode_valid_mask[active_idx]
+        full_logits[policy_idx] = raw_logits[active_idx]
+    return {
+        "agent_relation_states": _build_ppo_agent_relation_states(obs, policy_agent_ids),
+        "trajectory_candidates": full_candidates,
+        "agent_mode_masks": full_masks,
+        "pretrained_logits": full_logits,
+        "global_state": _build_ppo_global_state(obs, policy_agent_ids),
+    }
+
+
+def _predict_ppo_modes(model, actor_obs: dict[str, np.ndarray], mode_valid_mask: np.ndarray, deterministic: bool) -> list[int]:
+    action_masks = np.asarray(mode_valid_mask, dtype=bool).reshape(-1)
+    action, _ = model.predict(actor_obs, deterministic=deterministic, action_masks=action_masks)
+    action_arr = np.asarray(action, dtype=np.int64).reshape(-1)
+    if action_arr.shape[0] != np.asarray(mode_valid_mask).shape[0]:
+        raise ValueError(f"PPO actor returned {action_arr.shape[0]} actions, expected {np.asarray(mode_valid_mask).shape[0]}")
+    return [int(value) for value in action_arr.tolist()]
+
+
+def _coerce_optional_point(value) -> list[float] | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float32).reshape(-1)
+    if array.size < 2:
+        return None
+    return [float(array[0]), float(array[1])]
+
+
+def _apply_selected_mode_target_overrides(
+    planner_batch: dict[str, dict],
+    *,
+    agent_ids: list[str],
+    selected_modes: list[int],
+    coarse_by_agent: dict[str, np.ndarray],
+) -> dict[str, dict]:
+    """Write selected dynamic-anchor endpoints as target/preference points."""
+    metadata: dict[str, dict] = {}
+    for agent_id, mode_idx in zip(agent_ids, selected_modes):
+        if agent_id not in planner_batch:
+            continue
+        coarse = np.asarray(coarse_by_agent[agent_id], dtype=np.float32)
+        endpoint = np.asarray(coarse[int(mode_idx), -1, :2], dtype=np.float32)
+        before = _coerce_optional_point(planner_batch[agent_id].get("target_point"))
+        planner_batch[agent_id]["target_point"] = endpoint.copy()
+        planner_batch[agent_id]["preference_point"] = endpoint.copy()
+        metadata[agent_id] = {
+            "target_point_before": before,
+            "target_point_after": endpoint.astype(float).tolist(),
+            "selected_coarse_endpoint": endpoint.astype(float).tolist(),
+        }
+    return metadata
+
+
+def _safe_mean(values: list[float]) -> float:
+    return float(np.mean(values)) if values else 0.0
+
+
+def _safe_std(values: list[float]) -> float:
+    return float(np.std(values)) if values else 0.0
+
+
+def _summarize_random_action_rewards(
+    records: list[dict],
+    *,
+    episodes: int,
+    success: int,
+    crash: int,
+    out_of_road: int,
+    metadata: dict,
+) -> dict:
+    by_mode: dict[int, dict[str, list[float] | int]] = {}
+    episode_env_rewards: dict[int, list[float]] = {}
+    for record in records:
+        episode_idx = int(record.get("episode", 0))
+        episode_env_rewards.setdefault(episode_idx, []).append(float(record.get("env_reward_mean", 0.0)))
+        selected_modes = dict(record.get("selected_mode", {}))
+        env_rewards = dict(record.get("env_reward", {}))
+        for agent_id, mode_idx in selected_modes.items():
+            mode_i = int(mode_idx)
+            bucket = by_mode.setdefault(
+                mode_i,
+                {"selected_count": 0, "env_reward": []},
+            )
+            bucket["selected_count"] = int(bucket["selected_count"]) + 1
+            bucket["env_reward"].append(float(env_rewards.get(agent_id, 0.0)))  # type: ignore[union-attr]
+
+    per_mode = {}
+    for mode_i, bucket in sorted(by_mode.items()):
+        env_values = list(bucket["env_reward"])  # type: ignore[arg-type]
+        per_mode[str(mode_i)] = {
+            "selected_count": int(bucket["selected_count"]),
+            "env_reward_mean": _safe_mean(env_values),
+            "env_reward_std": _safe_std(env_values),
+        }
+
+    # Normalize episode reward by step count → reward_per_step
+    episode_per_step = [
+        float(sum(values)) / max(len(values), 1)
+        for _, values in sorted(episode_env_rewards.items())
+    ]
+    num_episodes = max(int(episodes), 1)
+    return {
+        "metadata": dict(metadata),
+        "num_records": len(records),
+        "episode_env_reward_per_step_mean": _safe_mean(episode_per_step),
+        "episode_env_reward_per_step_std": _safe_std(episode_per_step),
+        "episode_env_reward_per_step_min": float(min(episode_per_step)) if episode_per_step else 0.0,
+        "episode_env_reward_per_step_max": float(max(episode_per_step)) if episode_per_step else 0.0,
+        "success_rate": float(success) / num_episodes,
+        "crash_rate": float(crash) / num_episodes,
+        "out_of_road_rate": float(out_of_road) / num_episodes,
+        "per_mode": per_mode,
+    }
 
 
 def _extract_state_dict(checkpoint_obj):
@@ -250,14 +511,25 @@ def _capture_2d_topdown_frame(env, screen_size: int = 800, film_size: int = 3000
     renderer = getattr(env, "top_down_renderer", None)
     if renderer is not None:
         renderer.position = (float(ego_pos[0]), float(ego_pos[1]))
-    frame = env.render(
-        mode="top_down",
-        window=False,
-        screen_size=(screen_size, screen_size),
-        film_size=(film_size, film_size),
-        target_agent_heading_up=False,
-        camera_position=(float(ego_pos[0]), float(ego_pos[1])),
-    )
+    main_camera = getattr(getattr(env, "engine", None), "main_camera", None)
+    original_track_agent = getattr(main_camera, "current_track_agent", None)
+    if main_camera is not None:
+        # The native topdown renderer draws a single "EGO" callout for the
+        # tracked camera agent.  Step plots add explicit EGO1/EGO2/... labels,
+        # so suppress the native callout only while capturing this frame.
+        main_camera.current_track_agent = None
+    try:
+        frame = env.render(
+            mode="top_down",
+            window=False,
+            screen_size=(screen_size, screen_size),
+            film_size=(film_size, film_size),
+            target_agent_heading_up=False,
+            camera_position=(float(ego_pos[0]), float(ego_pos[1])),
+        )
+    finally:
+        if main_camera is not None:
+            main_camera.current_track_agent = original_track_agent
     if frame is None:
         return None
     frame_array = np.asarray(frame)
@@ -482,6 +754,20 @@ def _build_step_trajectory_plot_path(output_dir: Path, episode_idx: int, step_id
     return output_dir / "step_trajectory_plots" / f"episode_{episode_idx:03d}" / f"step_{step_idx:05d}.png"
 
 
+def _format_step_reward_lines(
+    reward_records: list[tuple[str, float | None]],
+) -> list[str]:
+    env_parts = [
+        f"{label}={float(env_reward):+.2f}"
+        for label, env_reward in reward_records
+        if env_reward is not None
+    ]
+    lines: list[str] = []
+    if env_parts:
+        lines.append("env reward: " + " ".join(env_parts))
+    return lines
+
+
 def _local_xy_to_world_xy(
     local_xy: np.ndarray,
     ego_world_position: np.ndarray,
@@ -657,6 +943,7 @@ def _record_step_visualization(
     topdown_frame: np.ndarray | None = None,
     world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None,
     ego_accel_mps2: float | None = None,
+    agent_label: str | None = None,
 ) -> None:
     if step_plot_records is None:
         step_plot_records = []
@@ -788,6 +1075,12 @@ def _record_step_visualization(
                 world_to_screen_projector=world_to_screen_projector,
                 ego_speed_km_h=_ego_speed,
                 ego_acceleration=ego_accel_mps2,
+                env_reward=(
+                    float(final_info["env_reward"])
+                    if final_info.get("env_reward") is not None
+                    else None
+                ),
+                agent_label=agent_label,
             )
         )
 
@@ -897,6 +1190,7 @@ def _save_step_trajectory_plot(
     canvas = cv2.resize(canvas, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
     scale_x = float(w_full) / float(crop_w)
     scale_y = float(h_full) / float(crop_h)
+    agent_label_color = (245, 120, 11)  # RGB orange, matching the original topdown EGO label style.
 
     def _proj_zoomed(world_point: np.ndarray) -> np.ndarray:
         """Project world → zoomed canvas pixel."""
@@ -918,6 +1212,125 @@ def _save_step_trajectory_plot(
         overlay = canvas.copy()
         cv2.polylines(overlay, [polyline], False, color, thickness, lineType=cv2.LINE_AA)
         cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0.0, dst=canvas)
+
+    def _draw_agent_record(record: StepTrajectoryPlotRecord, *, primary: bool) -> None:
+        record_ego = np.asarray(record.ego_position, dtype=np.float64)
+        valid_mask = (
+            np.asarray(record.mode_valid_mask, dtype=bool)
+            if record.mode_valid_mask is not None
+            else None
+        )
+        if record.dynamic_anchor_trajectories is not None:
+            for mode_i, anchor in enumerate(np.asarray(record.dynamic_anchor_trajectories, dtype=np.float64)):
+                full_path = np.vstack([record_ego, anchor])
+                is_valid = valid_mask is None or mode_i >= len(valid_mask) or bool(valid_mask[mode_i])
+                anchor_color = (
+                    _plot_color_for_mode_index(mode_i, record.mode_slot_names)
+                    if is_valid
+                    else PAPER_INVALID_MODE_COLOR
+                )
+                _draw_world_polyline(full_path, anchor_color, 1, alpha=0.24 if is_valid else 0.16)
+
+        if record.multimodal_trajectories is not None:
+            candidates_array = np.asarray(record.multimodal_trajectories, dtype=np.float64)
+            selected_idx = record.selected_mode_idx
+            for mode_i in range(candidates_array.shape[0]):
+                if selected_idx is not None and mode_i == int(selected_idx):
+                    continue
+                full_path = np.vstack([record_ego, candidates_array[mode_i]])
+                mode_color_i = _plot_color_for_mode_index(mode_i, record.mode_slot_names)
+                _draw_world_polyline(full_path, mode_color_i, 2 if primary else 1, alpha=0.62 if primary else 0.38)
+            if selected_idx is not None and selected_idx < candidates_array.shape[0]:
+                full_path = np.vstack([record_ego, candidates_array[int(selected_idx)]])
+                selected_color = _plot_color_for_mode_index(int(selected_idx), record.mode_slot_names)
+                _draw_world_polyline(full_path, selected_color, 4 if primary else 3, alpha=0.98 if primary else 0.82)
+        elif record.selected_trajectory is not None:
+            selected_path = np.vstack([record_ego, np.asarray(record.selected_trajectory, dtype=np.float64)])
+            _draw_world_polyline(selected_path, PAPER_SELECTED_TRAJ_COLOR, 4 if primary else 3, alpha=0.96 if primary else 0.78)
+
+        if show_topology_polyline and record.topology_polyline_world is not None:
+            topology_world = np.asarray(record.topology_polyline_world, dtype=np.float64)
+            if topology_world.ndim == 2 and topology_world.shape[0] >= 2:
+                _draw_world_polyline(topology_world, PAPER_TOPOLOGY_COLOR, 2, alpha=0.74 if primary else 0.48)
+
+        if record.target_line_world is not None:
+            target_line_world = np.asarray(record.target_line_world, dtype=np.float64)
+            if target_line_world.ndim == 2 and target_line_world.shape[0] >= 1:
+                for target_line_point in target_line_world:
+                    line_xy = np.round(_proj_zoomed(target_line_point)).astype(np.int32)
+                    cv2.circle(
+                        canvas,
+                        tuple(int(v) for v in line_xy),
+                        3,
+                        PAPER_TARGET_LINE_COLOR,
+                        thickness=-1,
+                        lineType=cv2.LINE_AA,
+                    )
+
+        if record.target_point_world is not None:
+            target_xy = np.round(_proj_zoomed(np.asarray(record.target_point_world, dtype=np.float64))).astype(np.int32)
+            cv2.circle(
+                canvas,
+                tuple(int(v) for v in target_xy),
+                5,
+                PAPER_TARGET_POINT_COLOR,
+                thickness=-1,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.circle(
+                canvas,
+                tuple(int(v) for v in target_xy),
+                5,
+                (45, 90, 140),
+                thickness=1,
+                lineType=cv2.LINE_AA,
+            )
+
+        record_ego_zoomed = np.round(_proj_zoomed(record_ego)).astype(np.int32)
+        cv2.circle(
+            canvas,
+            tuple(int(v) for v in record_ego_zoomed),
+            7,
+            PAPER_EGO_FILL_COLOR,
+            thickness=-1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.circle(
+            canvas,
+            tuple(int(v) for v in record_ego_zoomed),
+            7,
+            PAPER_EGO_EDGE_COLOR,
+            thickness=1,
+            lineType=cv2.LINE_AA,
+        )
+        label = record.agent_label or "EGO"
+        try:
+            label_index = max(int("".join(ch for ch in label if ch.isdigit())) - 1, 0)
+        except Exception:
+            label_index = 0
+        cv2.putText(
+            canvas,
+            label,
+            (int(record_ego_zoomed[0]) - 19, int(record_ego_zoomed[1]) - 15 - 14 * label_index),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (255, 255, 255),
+            4,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            label,
+            (int(record_ego_zoomed[0]) - 18, int(record_ego_zoomed[1]) - 14 - 14 * label_index),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            agent_label_color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    for peer_record in step_record.peer_records or []:
+        _draw_agent_record(peer_record, primary=False)
 
     if step_record.dynamic_anchor_trajectories is not None:
         valid_mask = (
@@ -964,6 +1377,26 @@ def _save_step_trajectory_plot(
     ego_zoomed = np.round(_proj_zoomed(ego)).astype(np.int32)
     cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, PAPER_EGO_FILL_COLOR, thickness=-1, lineType=cv2.LINE_AA)
     cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, PAPER_EGO_EDGE_COLOR, thickness=1, lineType=cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        step_record.agent_label or "EGO",
+        (int(ego_zoomed[0]) - 19, int(ego_zoomed[1]) - 15),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (255, 255, 255),
+        4,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        canvas,
+        step_record.agent_label or "EGO",
+        (int(ego_zoomed[0]) - 18, int(ego_zoomed[1]) - 14),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        agent_label_color,
+        2,
+        cv2.LINE_AA,
+    )
 
     if step_record.target_line_world is not None:
         target_line_world = np.asarray(step_record.target_line_world, dtype=np.float64)
@@ -978,39 +1411,6 @@ def _save_step_trajectory_plot(
                     thickness=-1,
                     lineType=cv2.LINE_AA,
                 )
-
-    if step_record.multi_point_world is not None:
-        multi_points = np.asarray(step_record.multi_point_world, dtype=np.float64)
-        if multi_points.ndim == 2 and multi_points.shape[0] >= 1:
-            for mode_i, multi_point in enumerate(multi_points):
-                point_xy = np.round(_proj_zoomed(multi_point)).astype(np.int32)
-                is_selected = selected_mode_idx is not None and mode_i == int(selected_mode_idx)
-                if is_selected:
-                    cv2.circle(
-                        canvas,
-                        tuple(int(v) for v in point_xy),
-                        7,
-                        PAPER_MULTI_POINT_SELECTED_COLOR,
-                        thickness=-1,
-                        lineType=cv2.LINE_AA,
-                    )
-                    cv2.circle(
-                        canvas,
-                        tuple(int(v) for v in point_xy),
-                        8,
-                        (35, 35, 35),
-                        thickness=1,
-                        lineType=cv2.LINE_AA,
-                    )
-                else:
-                    cv2.circle(
-                        canvas,
-                        tuple(int(v) for v in point_xy),
-                        3,
-                        PAPER_MULTI_POINT_COLOR,
-                        thickness=-1,
-                        lineType=cv2.LINE_AA,
-                    )
 
     if step_record.target_point_world is not None:
         target_xy = np.round(_proj_zoomed(np.asarray(step_record.target_point_world, dtype=np.float64))).astype(np.int32)
@@ -1031,24 +1431,40 @@ def _save_step_trajectory_plot(
             lineType=cv2.LINE_AA,
         )
 
-    # ── 3. Info box with selected mode name ────────────────────────────────────
-    if selected_mode_idx is None:
-        mode_name = "N/A"
-    elif step_record.mode_slot_names and 0 <= int(selected_mode_idx) < len(step_record.mode_slot_names):
-        mode_name = step_record.mode_slot_names[int(selected_mode_idx)]
-    else:
+    # ── 3. Info box with selected mode names ───────────────────────────────────
+    def _mode_name_for_record(record: StepTrajectoryPlotRecord) -> str:
+        idx = record.selected_mode_idx
+        if idx is None:
+            return "N/A"
+        if record.mode_slot_names and 0 <= int(idx) < len(record.mode_slot_names):
+            return record.mode_slot_names[int(idx)]
         try:
             from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
-            mode_name = MODE_SLOTS[int(selected_mode_idx)].name
+            return MODE_SLOTS[int(idx)].name
         except Exception:
-            mode_name = f"mode_{selected_mode_idx}"
-    mode_name_color = (
-        _plot_color_for_mode_index(int(selected_mode_idx), step_record.mode_slot_names)
-        if selected_mode_idx is not None
-        else PAPER_SELECTED_TRAJ_COLOR
-    )
+            return f"mode_{idx}"
 
-    box_x1, box_y1, box_x2, box_y2 = 10, 10, 430, 164
+    all_agent_records = [step_record] + list(step_record.peer_records or [])
+
+    def _record_sort_key(record: StepTrajectoryPlotRecord) -> int:
+        label = record.agent_label or ""
+        digits = "".join(ch for ch in label if ch.isdigit())
+        return int(digits) if digits else 999
+
+    all_agent_records = sorted(all_agent_records, key=_record_sort_key)
+
+    reward_lines = _format_step_reward_lines(
+        [
+            (record.agent_label or "EGO", record.env_reward)
+            for record in all_agent_records
+        ]
+    )
+    _mode_count = min(len(all_agent_records), 4)
+    _mode_text_end_y = 52 + 18 * _mode_count
+    _reward_text_end_y = _mode_text_end_y + 6 + 18 * len(reward_lines)
+    _speed_text_y = max(118, _reward_text_end_y + 6)
+    _legend_y0 = _speed_text_y + 20
+    box_x1, box_y1, box_x2, box_y2 = 10, 10, 500, max(180, _legend_y0 + 44)
     overlay = canvas.copy()
     cv2.rectangle(overlay, (box_x1, box_y1), (box_x2, box_y2), (250, 250, 250), thickness=-1)
     cv2.addWeighted(overlay, 0.88, canvas, 0.12, 0.0, dst=canvas)
@@ -1059,29 +1475,50 @@ def _save_step_trajectory_plot(
         (20, 30),
         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (25, 25, 25), 1, cv2.LINE_AA,
     )
-    # ── 3a. Selected mode label (orange, prominent) ───
-    cv2.putText(
-        canvas,
-        f"mode: {mode_name}",
-        (20, 52),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.52, mode_name_color, 2, cv2.LINE_AA,
-    )
+    # ── 3a. Selected mode labels for all platoon agents ───
+    mode_text_y = 52
+    for record in all_agent_records[:4]:
+        mode_name = _mode_name_for_record(record)
+        mode_color = (
+            _plot_color_for_mode_index(int(record.selected_mode_idx), record.mode_slot_names)
+            if record.selected_mode_idx is not None
+            else PAPER_SELECTED_TRAJ_COLOR
+        )
+        cv2.putText(
+            canvas,
+            f"{record.agent_label or 'EGO'}: {mode_name}",
+            (20, mode_text_y),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.42, mode_color, 2, cv2.LINE_AA,
+        )
+        mode_text_y += 18
+    reward_text_y = mode_text_y + 6
+    for reward_line in reward_lines:
+        cv2.putText(
+            canvas,
+            reward_line,
+            (20, reward_text_y),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (120, 70, 30), 1, cv2.LINE_AA,
+        )
+        reward_text_y += 18
+
     # ── 3b. Speed and acceleration ───
     _speed_str = f"{step_record.ego_speed_km_h:.1f} km/h" if step_record.ego_speed_km_h is not None else "-- km/h"
     _accel_str = f"{step_record.ego_acceleration:+.2f} m/s\u00b2" if step_record.ego_acceleration is not None else "-- m/s\u00b2"
+    speed_text_y = _speed_text_y
     cv2.putText(
         canvas,
         f"speed: {_speed_str}  accel: {_accel_str}",
-        (20, 72),
+        (20, speed_text_y),
         cv2.FONT_HERSHEY_SIMPLEX, 0.44, (40, 40, 120), 1, cv2.LINE_AA,
     )
-    cv2.putText(canvas, "selected: mode color", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (40, 40, 40), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "others: mode colors", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (40, 40, 40), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "anchors: same colors, faint", (178, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (90, 90, 90), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "target line: green", (20, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TARGET_LINE_COLOR, 1, cv2.LINE_AA)
+    legend_y0 = _legend_y0
+    cv2.putText(canvas, "selected: mode color", (20, legend_y0), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (40, 40, 40), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "others: mode colors", (20, legend_y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (40, 40, 40), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "anchors: same colors, faint", (178, legend_y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (90, 90, 90), 1, cv2.LINE_AA)
+    cv2.putText(canvas, "target line: green", (20, legend_y0 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TARGET_LINE_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "target point: blue", (178, legend_y0 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TARGET_POINT_COLOR, 1, cv2.LINE_AA)
     if show_topology_polyline:
-        cv2.putText(canvas, "topology: purple", (180, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TOPOLOGY_COLOR, 1, cv2.LINE_AA)
-    cv2.putText(canvas, "multi-point: purple", (20, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_MULTI_POINT_SELECTED_COLOR, 1, cv2.LINE_AA)
+        cv2.putText(canvas, "topology: purple", (20, legend_y0 + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TOPOLOGY_COLOR, 1, cv2.LINE_AA)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
@@ -1431,7 +1868,187 @@ def build_env_config(args, resolved_model_size: str, model_config: dict):
     }
 
 
-def _resolve_episode_scenario_route(scenario_id: str, rng: np.random.RandomState) -> ScenarioRouteSelection:
+def build_platoon_env_config(args, scenario_id: str = "", local_route: str = "") -> dict:
+    env_config = {
+        "num_agents": int(args.num_agents),
+        "observation_mode": "multimodal",
+        "use_render": bool(args.render),
+        "show_policy_mark": False,
+        "start_seed": int(args.start_seed),
+        "num_scenarios": int(args.num_scenarios),
+        "traffic_density": float(args.traffic_density),
+        "image_on_cuda": bool(args.image_on_cuda),
+        "allow_respawn": False,
+    }
+    if scenario_id:
+        env_config["scenario_id"] = scenario_id
+    if local_route:
+        env_config["local_route"] = local_route
+        env_config["route_preset"] = get_required_preset(local_route)
+        env_config["ego_main_route_block_ids"] = list(get_route_blocks(local_route))
+    return env_config
+
+
+def build_platoon_planner(checkpoint_path: str, args, resolved_model_size: str, model_config: dict):
+    from models.platoon.platoon_diffusion_planner import PlatoonDiffusionPlanner
+    from models.platoon.weight_migration import migrate_single_to_platoon
+
+    transfuser_config = build_transfuser_config(
+        resolved_model_size,
+        **_model_overrides_from_args(args, model_config),
+    )
+    planner = PlatoonDiffusionPlanner(transfuser_config, num_vehicles=int(args.num_agents))
+    planner = migrate_single_to_platoon(checkpoint_path, planner)
+    planner.eval()
+    for parameter in planner.parameters():
+        parameter.requires_grad_(False)
+    return planner.to(torch.device(resolve_device(args.device)))
+
+
+def _build_platoon_planner_batch(obs: dict, agent_ids: list[str]) -> dict[str, dict[str, np.ndarray]]:
+    required_keys = ("camera", "lidar", "status", "formation_relation_state")
+    # Optional keys passed through when present so the model receives full guidance:
+    # target_point / preference_point → preference_bias computation
+    # coarse_trajectories / mode_valid_mask → dynamic anchor mode selection
+    optional_keys = ("target_point", "preference_point", "coarse_trajectories", "mode_valid_mask")
+    batch = {}
+    for agent_id in agent_ids:
+        agent_obs = obs.get(agent_id)
+        if agent_obs is None:
+            continue
+        missing = [key for key in required_keys if key not in agent_obs]
+        if missing:
+            raise KeyError(f"Platoon observation for {agent_id} missing keys: {missing}")
+        sample = {key: agent_obs[key] for key in required_keys}
+        for key in optional_keys:
+            if key in agent_obs:
+                sample[key] = agent_obs[key]
+        batch[agent_id] = sample
+    return batch
+
+
+def _build_dynamic_mode_features_for_vehicle(vehicle, config) -> dict[str, np.ndarray]:
+    from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
+    from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots, mode_slot_count
+    from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
+
+    mode_slots = build_mode_slots(
+        keep_lane_count=config.mode_keep_lane_count,
+        lane_change_left_count=config.mode_lane_change_left_count,
+        lane_change_right_count=config.mode_lane_change_right_count,
+        emergency_stop_count=config.mode_emergency_stop_count,
+    )
+    num_slots = mode_slot_count(
+        config.mode_keep_lane_count,
+        config.mode_lane_change_left_count,
+        config.mode_lane_change_right_count,
+        config.mode_emergency_stop_count,
+    )
+    try:
+        current_map = getattr(getattr(vehicle, "engine", None), "current_map", None)
+        ctx = build_mode_context_from_vehicle(vehicle, current_map=current_map)
+        generator = ModeTrajectoryGenerator(
+            keep_lane_high_speed_mps=config.mode_keep_high_speed_mps,
+            keep_lane_medium_speed_mps=config.mode_keep_medium_speed_mps,
+            keep_lane_low_speed_mps=config.mode_keep_low_speed_mps,
+            emergency_decel_mps2=config.mode_emergency_decel_mps2,
+            keep_lane_level_count=config.mode_keep_lane_count,
+            lane_change_left_level_count=config.mode_lane_change_left_count,
+            lane_change_right_level_count=config.mode_lane_change_right_count,
+            emergency_stop_level_count=config.mode_emergency_stop_count,
+            mode_slots=mode_slots,
+        )
+        output = generator.generate(ctx)
+        return {
+            "coarse_trajectories": np.asarray(output.coarse_trajectories, dtype=np.float32),
+            "mode_valid_mask": np.asarray(output.mode_valid_mask, dtype=bool),
+        }
+    except Exception as exc:
+        print(f"[platoon_dynamic_anchor] WARNING: failed to build dynamic anchors: {exc}")
+        return {
+            "coarse_trajectories": np.zeros((num_slots, 8, 2), dtype=np.float32),
+            "mode_valid_mask": np.zeros((num_slots,), dtype=bool),
+        }
+
+
+def _attach_platoon_dynamic_mode_features(
+    planner_batch: dict[str, dict[str, np.ndarray]],
+    env,
+    config,
+) -> None:
+    for agent_id, sample in planner_batch.items():
+        vehicle = env.agents.get(agent_id)
+        if vehicle is None:
+            continue
+        sample.update(_build_dynamic_mode_features_for_vehicle(vehicle, config))
+
+
+def _mode_slot_names_from_config(config) -> list[str]:
+    from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots
+
+    return [
+        slot.name
+        for slot in build_mode_slots(
+            keep_lane_count=config.mode_keep_lane_count,
+            lane_change_left_count=config.mode_lane_change_left_count,
+            lane_change_right_count=config.mode_lane_change_right_count,
+            emergency_stop_count=config.mode_emergency_stop_count,
+        )
+    ]
+
+
+def _platoon_agent_final_info(
+    *,
+    agent_id: str,
+    agent_index: int,
+    agent_obs: dict,
+    base_info: dict,
+    trajectory: np.ndarray,
+    candidates: np.ndarray,
+    masked_logits: np.ndarray,
+    raw_logits: np.ndarray,
+    mode_valid_mask: np.ndarray,
+    coarse_trajectories: np.ndarray | None,
+    mode_idx: int,
+    mode_slot_names: list[str],
+    controller_debug: dict,
+) -> dict:
+    final_info = dict(base_info or {})
+    # Populate target_point from the observation's navigation guidance so that
+    # _record_step_visualization always draws a target_point circle.
+    # When RANDOM_USE_MODE_ENDPOINT_TARGET=1, this default is overwritten below
+    # (line that checks target_point_after is not None) with the selected coarse
+    # endpoint, making the visual difference between the two modes obvious.
+    _obs_target_point = agent_obs.get("target_point")
+    if _obs_target_point is not None:
+        final_info["target_point"] = np.asarray(_obs_target_point, dtype=np.float32).reshape(-1)
+    final_info.update(
+        {
+            "agent_id": agent_id,
+            "camera_feature": agent_obs.get("camera"),
+            "lidar_feature": agent_obs.get("lidar"),
+            "status_feature": agent_obs.get("status"),
+            "predicted_trajectory": np.asarray(trajectory, dtype=np.float32),
+            "trajectory_candidates": np.asarray(candidates[agent_index], dtype=np.float32),
+            "trajectory_mode_idx": int(mode_idx),
+            "trajectory_mode_logits": np.asarray(raw_logits[agent_index], dtype=np.float32),
+            "masked_trajectory_mode_logits": np.asarray(masked_logits[agent_index], dtype=np.float32),
+            "mode_valid_mask": np.asarray(mode_valid_mask[agent_index], dtype=bool),
+            "coarse_trajectories": (
+                None if coarse_trajectories is None else np.asarray(coarse_trajectories, dtype=np.float32)
+            ),
+            "mode_slot_names": mode_slot_names,
+            "controller_debug": controller_debug,
+        }
+    )
+    return final_info
+
+
+def _resolve_episode_scenario_route(
+    scenario_id: str,
+    rng: np.random.RandomState,
+    fixed_route: str = "",
+) -> ScenarioRouteSelection:
     if scenario_id not in SCENARIO_BY_ID:
         valid_ids = ", ".join(sorted(SCENARIO_BY_ID))
         raise ValueError(f"Unknown scenario_id '{scenario_id}'. Valid scenarios: {valid_ids}")
@@ -1441,7 +2058,14 @@ def _resolve_episode_scenario_route(scenario_id: str, rng: np.random.RandomState
     if not allowed_routes:
         raise ValueError(f"Scenario '{scenario_id}' has no allowed local routes.")
 
-    if len(allowed_routes) == 1:
+    if fixed_route:
+        if fixed_route not in allowed_routes:
+            raise ValueError(
+                f"--local-route '{fixed_route}' is not in allowed routes for '{scenario_id}': "
+                f"{list(allowed_routes)}"
+            )
+        local_route = fixed_route
+    elif len(allowed_routes) == 1:
         local_route = allowed_routes[0]
     else:
         local_route = str(rng.choice(allowed_routes))
@@ -1472,6 +2096,564 @@ def _apply_episode_route_config(env, selection: ScenarioRouteSelection) -> None:
         global_config.update(updates)
 
 
+def run_platoon_planner_backend(
+    *,
+    args,
+    checkpoint_path: Path,
+    resolved_model_size: str,
+    model_config: dict,
+    transfuser_config,
+    anchors: np.ndarray | None,
+) -> None:
+    from envs.platoon_env import PlatoonEnv
+
+    env_config = build_platoon_env_config(args, scenario_id=args.scenario_id, local_route=args.local_route)
+    env = PlatoonEnv(env_config)
+    planner = build_platoon_planner(str(checkpoint_path), args, resolved_model_size, model_config)
+    mode_slot_names = _mode_slot_names_from_config(transfuser_config)
+    ppo_actor_ckpt = _resolve_ppo_actor_checkpoint(
+        str(getattr(args, "ppo_actor_ckpt", "") or ""),
+        str(getattr(args, "ppo_run_dir", "") or ""),
+    )
+
+    ppo_actor = None
+    if ppo_actor_ckpt is not None:
+        from models.mode_selection.sb3_mode_cls_policy import require_sb3
+        MaskablePPO, _ = require_sb3()
+        ppo_actor = MaskablePPO.load(
+            str(ppo_actor_ckpt), device=resolve_device(str(getattr(args, "device", "auto")))
+        )
+        ppo_deterministic = bool(getattr(args, "ppo_deterministic", 1))
+        selection_policy = "ppo_actor"
+        target_override_enabled = False
+        print(f"[test] mode=ppo_actor  ckpt={ppo_actor_ckpt}", flush=True)
+        print(f"[test] ppo_deterministic={ppo_deterministic}", flush=True)
+    else:
+        ppo_deterministic = False
+        selection_policy = str(getattr(args, "selection_policy", "argmax"))
+        target_override_enabled = bool(getattr(args, "random_use_mode_endpoint_target", 0))
+        print(f"[test] mode=pretrained_planner  selection_policy={selection_policy}", flush=True)
+        print(f"[test] target_override_enabled={target_override_enabled}", flush=True)
+
+    # random_rng used by pretrained-planner path (argmax does not consume it)
+    random_rng = np.random.RandomState(
+        int(getattr(args, "random_action_seed", None) or args.start_seed)
+    )
+    policy_agent_ids = [f"agent{i}" for i in range(int(args.num_agents))]
+    random_action_records: list[dict] = []
+    summary = {
+        "success": 0,
+        "crash": 0,
+        "out_of_road": 0,
+        "reward_per_step": [],
+        "episode_length": [],
+        "lookahead_y": [],
+        "lookahead_heading": [],
+        "steering": [],
+        "mode_idx": [],
+    }
+    episode_route_rng = np.random.RandomState(args.start_seed)
+    per_episode_control_error_records: dict[int, list[ControlErrorRecord]] = {}
+
+    try:
+        for episode_idx in range(args.episodes):
+            selection = _resolve_episode_scenario_route(
+                args.scenario_id, episode_route_rng, fixed_route=getattr(args, "local_route", "")
+            )
+            _apply_episode_route_config(env, selection)
+            print(
+                f"[scenario episode={episode_idx}] "
+                f"scenario_id={selection.scenario_id} "
+                f"local_route={selection.local_route} "
+                f"route_preset={selection.route_preset} "
+                f"ego_main_route_block_ids={list(selection.ego_main_route_block_ids)}"
+            )
+            reset_result = env.reset()
+            if isinstance(reset_result, tuple) and len(reset_result) == 2:
+                obs, info = reset_result
+            else:
+                obs, info = reset_result, {}
+            primary_agent_id = _get_primary_agent_id(env)
+            if bool(args.render) and hasattr(env, "switch_to_third_person_view"):
+                env.switch_to_third_person_view()
+
+            done = False
+            episode_reward = 0.0
+            episode_length = 0
+            final_info = {}
+            episode_3d_frames = []
+            episode_2d_frames = []
+            actual_positions = []
+            planned_trajectories = []
+            multimodal_trajectories = []
+            step_plot_records = []
+            control_error_records: list[ControlErrorRecord] = []
+            road_boundaries = _extract_road_topology(env)
+            _prev_ego_speed_km_h: float | None = None
+
+            while not done:
+                active_agent_ids = [agent_id for agent_id in env.agents.keys() if agent_id in obs]
+                if not active_agent_ids:
+                    break
+                primary_agent_id = primary_agent_id if primary_agent_id in active_agent_ids else active_agent_ids[0]
+                pre_step_agent_state = {}
+                for agent_id in active_agent_ids:
+                    vehicle = env.agents.get(agent_id)
+                    if vehicle is None:
+                        continue
+                    pre_step_agent_state[agent_id] = {
+                        "vehicle": vehicle,
+                        "xy": np.asarray(vehicle.position[:2], dtype=np.float64),
+                        "heading": float(getattr(vehicle, "heading_theta", 0.0)),
+                        "speed_km_h": float(getattr(vehicle, "speed_km_h", 0.0)),
+                    }
+                ego_before_step = env.agents.get(primary_agent_id)
+                ego_xy_before_step = (
+                    np.asarray(ego_before_step.position[:2], dtype=np.float64)
+                    if ego_before_step is not None else None
+                )
+                ego_heading_before_step = (
+                    float(getattr(ego_before_step, "heading_theta", 0.0))
+                    if ego_before_step is not None else None
+                )
+                _cur_ego_speed_km_h = (
+                    float(getattr(ego_before_step, "speed_km_h", 0.0))
+                    if ego_before_step is not None else None
+                )
+                _step_dt = 0.1
+                _ego_accel_mps2 = (
+                    (_cur_ego_speed_km_h - _prev_ego_speed_km_h) / 3.6 / _step_dt
+                    if (_cur_ego_speed_km_h is not None and _prev_ego_speed_km_h is not None)
+                    else None
+                )
+                _prev_ego_speed_km_h = _cur_ego_speed_km_h
+                step_plot_frame, step_plot_projector = _capture_step_plot_render_context(
+                    env,
+                    bool(args.save_trajectory_plot),
+                )
+
+                planner_batch = _build_platoon_planner_batch(obs, active_agent_ids)
+                _attach_platoon_dynamic_mode_features(planner_batch, env, transfuser_config)
+                coarse_by_agent = {
+                    agent_id: np.asarray(sample.get("coarse_trajectories"), dtype=np.float32)
+                    for agent_id, sample in planner_batch.items()
+                    if sample.get("coarse_trajectories") is not None
+                }
+                with torch.no_grad():
+                    export = planner.export_mode_selection(planner_batch)
+                exported_ids = list(export["agent_ids"])
+                candidates = np.asarray(export["trajectory_candidates"], dtype=np.float32)
+                masked_logits = np.asarray(export["masked_cls_logits"], dtype=np.float32)
+                raw_logits = np.asarray(export["raw_cls_logits"], dtype=np.float32)
+                mode_valid_mask = np.asarray(export["mode_valid_mask"], dtype=bool)
+
+                if ppo_actor is not None:
+                    actor_obs = _build_ppo_actor_obs(
+                        obs=obs,
+                        agent_ids=exported_ids,
+                        policy_agent_ids=policy_agent_ids,
+                        candidates=candidates,
+                        mode_valid_mask=mode_valid_mask,
+                        raw_logits=raw_logits,
+                    )
+                    all_selected_modes = _predict_ppo_modes(
+                        ppo_actor,
+                        actor_obs,
+                        actor_obs["agent_mode_masks"],
+                        deterministic=ppo_deterministic,
+                    )
+                    selected_modes = [
+                        int(all_selected_modes[policy_agent_ids.index(agent_id)])
+                        for agent_id in exported_ids
+                    ]
+                else:
+                    selected_modes = _choose_mode_indices(
+                        masked_logits=masked_logits,
+                        mode_valid_mask=mode_valid_mask,
+                        policy=selection_policy,
+                        rng=random_rng,
+                    )
+                target_override_metadata: dict[str, dict] = {}
+
+                low_level_actions: dict[str, np.ndarray] = {}
+                planner_final_info: dict[str, dict] = {}
+                for agent_index, agent_id in enumerate(exported_ids):
+                    mode_idx = int(selected_modes[agent_index])
+                    if mode_idx < 0 or mode_idx >= mode_valid_mask.shape[1] or not bool(mode_valid_mask[agent_index, mode_idx]):
+                        raise ValueError(f"Selected invalid mode {mode_idx} for {agent_id}")
+                    trajectory = np.asarray(candidates[agent_index, mode_idx], dtype=np.float32)
+                    vehicle = env.agents.get(agent_id)
+                    current_speed_km_h = float(getattr(vehicle, "speed_km_h", 0.0)) if vehicle is not None else 0.0
+                    action, controller_debug = compute_trajectory_control(
+                        trajectory=trajectory,
+                        lookahead_index=int(args.lookahead_index),
+                        current_speed_km_h=current_speed_km_h,
+                        target_speed_km_h=float(args.target_speed_km_h),
+                        controller_type=str(args.controller_type),
+                    )
+                    low_level_actions[agent_id] = action
+                    planner_final_info[agent_id] = _platoon_agent_final_info(
+                        agent_id=agent_id,
+                        agent_index=agent_index,
+                        agent_obs=obs[agent_id],
+                        base_info={},
+                        trajectory=trajectory,
+                        candidates=candidates,
+                        masked_logits=masked_logits,
+                        raw_logits=raw_logits,
+                        mode_valid_mask=mode_valid_mask,
+                        coarse_trajectories=planner_batch[agent_id].get("coarse_trajectories"),
+                        mode_idx=mode_idx,
+                        mode_slot_names=mode_slot_names,
+                        controller_debug=controller_debug,
+                    )
+                    planner_final_info[agent_id].update(
+                        {
+                            "selection_policy": selection_policy,
+                            "ppo_selected_mode": int(mode_idx),
+                            "selected_mode_valid": bool(mode_valid_mask[agent_index, mode_idx]),
+                            "target_point_override_enabled": target_override_enabled,
+                            **target_override_metadata.get(
+                                agent_id,
+                                {
+                                    "target_point_before": _coerce_optional_point(planner_batch[agent_id].get("target_point")),
+                                    "target_point_after": None,
+                                    "selected_coarse_endpoint": (
+                                        np.asarray(coarse_by_agent[agent_id], dtype=np.float32)[mode_idx, -1, :2]
+                                        .astype(float)
+                                        .tolist()
+                                        if agent_id in coarse_by_agent
+                                        else None
+                                    ),
+                                },
+                            ),
+                        }
+                    )
+                    if planner_final_info[agent_id].get("target_point_after") is not None:
+                        planner_final_info[agent_id]["target_point"] = np.asarray(
+                            planner_final_info[agent_id]["target_point_after"],
+                            dtype=np.float32,
+                        )
+
+                t_start = time.time()
+                obs, reward, terminated, truncated, info = env.step(low_level_actions)
+                t_end = time.time()
+                print(f"[episode={episode_idx} step={episode_length}] step_time={t_end - t_start:.4f}s")
+                episode_length += 1
+                missing_agent_ids = _missing_controlled_agents(obs, policy_agent_ids)
+                if missing_agent_ids:
+                    print(
+                        f"[episode={episode_idx} step={episode_length}] terminating because controlled agents disappeared: "
+                        f"{missing_agent_ids}",
+                        flush=True,
+                    )
+                    terminated = dict(terminated)
+                    truncated = dict(truncated)
+                    for agent_id in policy_agent_ids:
+                        terminated[agent_id] = True
+                    terminated["__all__"] = True
+                    truncated["__all__"] = False
+                    info = dict(info or {})
+                    info["missing_agent_ids"] = list(missing_agent_ids)
+
+                reward_vals = [float(v) for v in reward.values() if isinstance(v, (int, float, np.floating))]
+                episode_reward += float(np.mean(reward_vals)) if reward_vals else 0.0
+                for agent_id, agent_info in info.items():
+                    if agent_id in planner_final_info:
+                        # Preserve target_point when it was explicitly overridden to the
+                        # selected mode's coarse endpoint (target_point_after is not None).
+                        # env.step() info carries MetaDrive's own navigation target_point
+                        # which would otherwise silently overwrite the override.
+                        _preserve_keys = (
+                            {"target_point"}
+                            if planner_final_info[agent_id].get("target_point_after") is not None
+                            else set()
+                        )
+                        for k, v in agent_info.items():
+                            if k not in _preserve_keys:
+                                planner_final_info[agent_id][k] = v
+                env_rewards = {
+                    agent_id: float(reward.get(agent_id, 0.0))
+                    for agent_id in exported_ids
+                }
+                for agent_id in exported_ids:
+                    if agent_id in planner_final_info:
+                        planner_final_info[agent_id]["env_reward"] = env_rewards.get(agent_id)
+                random_action_records.append(
+                    {
+                        "episode": int(episode_idx),
+                        "step": int(episode_length),
+                        "selection_policy": selection_policy,
+                        "selected_mode": {
+                            agent_id: int(selected_modes[idx])
+                            for idx, agent_id in enumerate(exported_ids)
+                        },
+                        "selected_mode_valid": {
+                            agent_id: bool(mode_valid_mask[idx, int(selected_modes[idx])])
+                            for idx, agent_id in enumerate(exported_ids)
+                        },
+                        "candidate_endpoints": {
+                            agent_id: candidates[idx, :, -1, :2].astype(float).tolist()
+                            for idx, agent_id in enumerate(exported_ids)
+                        },
+                        "selected_candidate_endpoint": {
+                            agent_id: candidates[idx, int(selected_modes[idx]), -1, :2].astype(float).tolist()
+                            for idx, agent_id in enumerate(exported_ids)
+                        },
+                        "target_point_override_enabled": target_override_enabled,
+                        "target_point_before": {
+                            agent_id: planner_final_info[agent_id].get("target_point_before")
+                            for agent_id in exported_ids
+                        },
+                        "target_point_after": {
+                            agent_id: planner_final_info[agent_id].get("target_point_after")
+                            for agent_id in exported_ids
+                        },
+                        "selected_coarse_endpoint": {
+                            agent_id: planner_final_info[agent_id].get("selected_coarse_endpoint")
+                            for agent_id in exported_ids
+                        },
+                        "env_reward": env_rewards,
+                        "env_reward_mean": float(np.mean(list(env_rewards.values()))) if env_rewards else 0.0,
+                    }
+                )
+                final_info = planner_final_info.get(primary_agent_id, next(iter(planner_final_info.values()), {}))
+
+                ego_after_step = env.agents.get(primary_agent_id) if primary_agent_id is not None else None
+                ego_xy_after_step = (
+                    np.asarray(ego_after_step.position[:2], dtype=np.float64)
+                    if ego_after_step is not None else None
+                )
+                control_error_record = _compute_control_error_record(
+                    episode_idx=episode_idx,
+                    step_idx=episode_length,
+                    ego_xy_before_step=ego_xy_before_step,
+                    ego_heading_before_step=ego_heading_before_step,
+                    ego_xy_after_step=ego_xy_after_step,
+                    final_info=final_info,
+                    step_dt_s=_step_dt,
+                    ego_speed_km_h=_cur_ego_speed_km_h,
+                    ego_accel_mps2=_ego_accel_mps2,
+                )
+                if control_error_record is not None:
+                    control_error_records.append(control_error_record)
+
+                done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
+                _max_steps = int(getattr(args, "max_steps", 0))
+                if _max_steps > 0 and episode_length >= _max_steps:
+                    done = True
+
+                if args.save_3d_video:
+                    frame_3d = _capture_3d_topdown_frame(env, args.topdown_camera_height)
+                    if frame_3d is not None:
+                        episode_3d_frames.append(frame_3d)
+                if args.save_2d_video:
+                    frame_2d = _capture_2d_topdown_frame(env)
+                    if frame_2d is not None:
+                        episode_2d_frames.append(frame_2d)
+
+                if bool(args.save_trajectory_plot):
+                    per_agent_step_records: list[StepTrajectoryPlotRecord] = []
+                    for agent_id in exported_ids:
+                        agent_state = pre_step_agent_state.get(agent_id)
+                        agent_final_info = planner_final_info.get(agent_id)
+                        if agent_state is None or agent_final_info is None:
+                            continue
+                        record_actual_positions = actual_positions if agent_id == primary_agent_id else []
+                        record_planned = planned_trajectories if agent_id == primary_agent_id else []
+                        record_multimodal = multimodal_trajectories if agent_id == primary_agent_id else []
+                        before_count = len(per_agent_step_records)
+                        _record_step_visualization(
+                            ego_before_step=agent_state["vehicle"],
+                            ego_xy_before_step=agent_state["xy"],
+                            ego_heading_before_step=agent_state["heading"],
+                            final_info=agent_final_info,
+                            episode_length=episode_length,
+                            save_trajectory_plot=True,
+                            actual_positions=record_actual_positions,
+                            planned_trajectories=record_planned,
+                            multimodal_trajectories=record_multimodal,
+                            step_plot_records=per_agent_step_records,
+                            topdown_frame=step_plot_frame,
+                            world_to_screen_projector=step_plot_projector,
+                            ego_accel_mps2=(_ego_accel_mps2 if agent_id == primary_agent_id else None),
+                            agent_label=f"EGO{exported_ids.index(agent_id) + 1}",
+                        )
+                        if len(per_agent_step_records) == before_count:
+                            continue
+                    if per_agent_step_records:
+                        primary_record_index = exported_ids.index(primary_agent_id) if primary_agent_id in exported_ids else 0
+                        primary_record_index = min(primary_record_index, len(per_agent_step_records) - 1)
+                        primary_record = per_agent_step_records[primary_record_index]
+                        primary_record.peer_records = [
+                            record for index, record in enumerate(per_agent_step_records)
+                            if index != primary_record_index
+                        ]
+                        step_plot_records.append(primary_record)
+
+                if bool(args.save_step_images) and episode_length % max(int(args.step_image_interval), 1) == 0:
+                    controller_debug = final_info.get("controller_debug", {})
+                    metadata_text = [
+                        f"episode={episode_idx} step={episode_length}",
+                        f"reward={episode_reward:.2f}",
+                        f"agents={len(exported_ids)}",
+                    ]
+                    if "steering" in controller_debug or "throttle" in controller_debug:
+                        metadata_text.append(
+                            f"steer={float(controller_debug.get('steering', 0.0)):+.3f} "
+                            f"throttle={float(controller_debug.get('throttle', 0.0)):+.3f}"
+                        )
+                    _save_step_image(
+                        final_info=final_info,
+                        config=transfuser_config,
+                        output_dir=Path(args.output_dir),
+                        episode_idx=episode_idx,
+                        step_idx=episode_length,
+                        anchors=anchors,
+                        overlay_all_anchors=True,
+                        metadata_text=metadata_text,
+                    )
+
+                controller_debug = final_info.get("controller_debug")
+                if controller_debug:
+                    summary["lookahead_y"].append(float(controller_debug.get("waypoint_y", 0.0)))
+                    summary["lookahead_heading"].append(float(controller_debug.get("waypoint_heading", 0.0)))
+                    summary["steering"].append(float(controller_debug.get("steering", 0.0)))
+                    mode_idx = final_info.get("trajectory_mode_idx")
+                    if mode_idx is not None:
+                        summary["mode_idx"].append(int(mode_idx))
+                    if bool(args.print_trajectory_debug):
+                        mode_text = f" mode={mode_idx}" if mode_idx is not None else ""
+                        print(
+                            f"[analysis episode={episode_idx} step={episode_length}] "
+                            f"lookahead_y={controller_debug.get('waypoint_y', 0.0):+.3f} "
+                            f"heading={controller_debug.get('waypoint_heading', 0.0):+.3f} "
+                            f"steering={controller_debug.get('steering', 0.0):+.3f}"
+                            f"{mode_text}"
+                        )
+
+                if bool(args.render):
+                    env.render(
+                        text={
+                            "episode": episode_idx,
+                            "step": episode_length,
+                            "reward": f"{episode_reward:.2f}",
+                        }
+                    )
+
+            summary["success"] += int(bool(final_info.get("arrive_dest", False)))
+            summary["crash"] += int(bool(final_info.get("crash_vehicle", False) or final_info.get("crash", False)))
+            summary["out_of_road"] += int(bool(final_info.get("out_of_road", False)))
+            _rps = episode_reward / max(episode_length, 1)
+            summary["reward_per_step"].append(_rps)
+            summary["episode_length"].append(episode_length)
+            per_episode_control_error_records[episode_idx] = control_error_records
+            print(
+                f"[episode={episode_idx}] reward_per_step={_rps:.4f} "
+                f"total_reward={episode_reward:.2f} length={episode_length} "
+                f"success={final_info.get('arrive_dest', False)} crash={final_info.get('crash', False)} "
+                f"out_of_road={final_info.get('out_of_road', False)}"
+            )
+            output_dir = Path(args.output_dir)
+            if args.save_3d_video and episode_3d_frames:
+                _write_video(
+                    str(output_dir / "videos_3d" / f"episode_{episode_idx:03d}.mp4"),
+                    episode_3d_frames,
+                    fps=args.video_fps,
+                )
+            if args.save_2d_video and episode_2d_frames:
+                _write_video(
+                    str(output_dir / "videos_2d" / f"episode_{episode_idx:03d}.mp4"),
+                    episode_2d_frames,
+                    fps=args.video_fps,
+                )
+            if args.save_trajectory_plot and actual_positions:
+                _save_trajectory_plot(
+                    actual_positions,
+                    planned_trajectories,
+                    multimodal_trajectories,
+                    road_boundaries,
+                    str(output_dir / "trajectory_plots" / f"episode_{episode_idx:03d}.png"),
+                    episode_idx,
+                )
+                for step_record in step_plot_records:
+                    _save_step_trajectory_plot(
+                        step_record=step_record,
+                        road_boundaries=road_boundaries,
+                        output_path=_build_step_trajectory_plot_path(output_dir, episode_idx, step_record.step_idx),
+                        episode_idx=episode_idx,
+                        show_topology_polyline=bool(args.show_topology_polyline),
+                    )
+            if control_error_records:
+                _save_control_error_plots(
+                    control_error_records,
+                    output_dir / "control_errors",
+                    episode_idx,
+                )
+    finally:
+        env.close()
+
+    control_error_json = _write_control_error_summary(
+        output_dir=Path(args.output_dir),
+        per_episode_records=per_episode_control_error_records,
+    )
+    print(f"[control_error] summary_json={control_error_json}")
+    random_records_path = Path(args.output_dir) / "random_action_step_records.jsonl"
+    with random_records_path.open("w", encoding="utf-8") as handle:
+        for record in random_action_records:
+            handle.write(json.dumps(record) + "\n")
+    random_summary_path = Path(args.output_dir) / "random_action_reward_summary.json"
+    random_summary = _summarize_random_action_rewards(
+        random_action_records,
+        episodes=args.episodes,
+        success=summary["success"],
+        crash=summary["crash"],
+        out_of_road=summary["out_of_road"],
+        metadata={
+            "selection_policy": selection_policy,
+            "target_point_override_enabled": target_override_enabled,
+            "random_action_seed": int(getattr(args, "random_action_seed", args.start_seed)),
+            "scenario_id": str(args.scenario_id),
+            "local_route": str(getattr(args, "local_route", "")),
+            "checkpoint": str(checkpoint_path),
+            "ppo_actor_ckpt": str(ppo_actor_ckpt),
+            "ppo_deterministic": bool(ppo_deterministic),
+            "num_agents": int(args.num_agents),
+        },
+    )
+    random_summary_path.write_text(json.dumps(random_summary, indent=2), encoding="utf-8")
+    print(f"[random_action] records_jsonl={random_records_path}")
+    print(f"[random_action] summary_json={random_summary_path}")
+    _print_test_summary(summary, args.episodes)
+
+
+def _print_test_summary(summary: dict, episodes: int) -> None:
+    num_episodes = max(episodes, 1)
+    mode_hist = dict(sorted(Counter(summary["mode_idx"]).items()))
+    reward_values = summary.get("reward_per_step") or summary.get("episode_reward") or [0.0]
+    reward_key = "avg_reward_per_step" if "reward_per_step" in summary else "avg_reward"
+    print(
+        "summary: "
+        f"success_rate={summary['success'] / num_episodes:.3f} "
+        f"crash_rate={summary['crash'] / num_episodes:.3f} "
+        f"out_of_road_rate={summary['out_of_road'] / num_episodes:.3f} "
+        f"{reward_key}={float(np.mean(reward_values)):.4f} "
+        f"avg_length={float(np.mean(summary['episode_length'])):.1f}"
+    )
+    if summary["lookahead_y"]:
+        lookahead_y = np.asarray(summary["lookahead_y"], dtype=np.float32)
+        lookahead_heading = np.asarray(summary["lookahead_heading"], dtype=np.float32)
+        steering = np.asarray(summary["steering"], dtype=np.float32)
+        print(
+            "[analysis_summary] "
+            f"mean_lookahead_y={float(lookahead_y.mean()):+.4f} "
+            f"rightward_fraction={float((lookahead_y > 0).mean()):.3f} "
+            f"mean_heading={float(lookahead_heading.mean()):+.4f} "
+            f"mean_steering={float(steering.mean()):+.4f} "
+            f"mode_hist={mode_hist}"
+        )
+
+
 def main():
     args = _normalize_visualization_args(parse_args())
     output_root = Path(args.output_dir)
@@ -1488,6 +2670,7 @@ def main():
     print(f"[test] model_config_path={args.model_config_path}")
     print(f"[test] model_size={resolved_model_size}")
     print(f"[test] device={resolved_device}")
+    print(f"[test] num_agents={int(args.num_agents)}")
     print(f"[test] controller_type={args.controller_type}")
     print(
         f"[test] requested_model_size={requested_model_size}"
@@ -1502,8 +2685,6 @@ def main():
     if args.save_camera_interval > 0:
         print(f"[test] save_camera_interval={args.save_camera_interval} camera_output_dir={args.camera_output_dir}")
 
-    env_config = build_env_config(args, resolved_model_size, model_config)
-    env = DatasetCollectEnv(env_config)
     transfuser_config = build_transfuser_config(
         resolved_model_size,
         **_model_overrides_from_args(args, model_config),
@@ -1520,11 +2701,25 @@ def main():
     anchor_path = Path(transfuser_config.plan_anchor_path)
     if anchor_path.exists():
         anchors = np.load(anchor_path)
+    if int(args.num_agents) > 1:
+        print("[test] backend=platoon_planner + external PPO actor")
+        run_platoon_planner_backend(
+            args=args,
+            checkpoint_path=checkpoint_path,
+            resolved_model_size=resolved_model_size,
+            model_config=model_config,
+            transfuser_config=transfuser_config,
+            anchors=anchors,
+        )
+        return
+    print("[test] backend=single_policy (DatasetCollectEnv + TransfuserPolicy)")
+    env_config = build_env_config(args, resolved_model_size, model_config)
+    env = DatasetCollectEnv(env_config)
     summary = {
         "success": 0,
         "crash": 0,
         "out_of_road": 0,
-        "episode_reward": [],
+        "reward_per_step": [],
         "episode_length": [],
         "lookahead_y": [],
         "lookahead_heading": [],
@@ -1536,7 +2731,9 @@ def main():
 
     try:
         for episode_idx in range(args.episodes):
-            selection = _resolve_episode_scenario_route(args.scenario_id, episode_route_rng)
+            selection = _resolve_episode_scenario_route(
+                args.scenario_id, episode_route_rng, fixed_route=getattr(args, "local_route", "")
+            )
             _apply_episode_route_config(env, selection)
             print(
                 f"[scenario episode={episode_idx}] "
@@ -1617,6 +2814,7 @@ def main():
                 episode_reward += float(reward[agent_id])
                 episode_length += 1
                 final_info = info.get(agent_id, {})
+                final_info["env_reward"] = float(reward[agent_id])
                 ego_after_step = env.agents.get(primary_agent_id) if primary_agent_id is not None else None
                 ego_xy_after_step = (
                     np.asarray(ego_after_step.position[:2], dtype=np.float64)
@@ -1636,6 +2834,9 @@ def main():
                 if control_error_record is not None:
                     control_error_records.append(control_error_record)
                 done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
+                _max_steps = int(getattr(args, "max_steps", 0))
+                if _max_steps > 0 and episode_length >= _max_steps:
+                    done = True
 
                 if args.save_3d_video:
                     frame_3d = _capture_3d_topdown_frame(env, args.topdown_camera_height)
@@ -1726,11 +2927,13 @@ def main():
             summary["success"] += int(bool(final_info.get("arrive_dest", False)))
             summary["crash"] += int(bool(final_info.get("crash_vehicle", False) or final_info.get("crash", False)))
             summary["out_of_road"] += int(bool(final_info.get("out_of_road", False)))
-            summary["episode_reward"].append(episode_reward)
+            _rps = episode_reward / max(episode_length, 1)
+            summary["reward_per_step"].append(_rps)
             summary["episode_length"].append(episode_length)
             per_episode_control_error_records[episode_idx] = control_error_records
             print(
-                f"[episode={episode_idx}] reward={episode_reward:.2f} length={episode_length} "
+                f"[episode={episode_idx}] reward_per_step={_rps:.4f} "
+                f"total_reward={episode_reward:.2f} length={episode_length} "
                 f"success={final_info.get('arrive_dest', False)} crash={final_info.get('crash', False)} "
                 f"out_of_road={final_info.get('out_of_road', False)}"
             )
@@ -1779,28 +2982,7 @@ def main():
     )
     print(f"[control_error] summary_json={control_error_json}")
 
-    num_episodes = max(args.episodes, 1)
-    mode_hist = dict(sorted(Counter(summary["mode_idx"]).items()))
-    print(
-        "summary: "
-        f"success_rate={summary['success'] / num_episodes:.3f} "
-        f"crash_rate={summary['crash'] / num_episodes:.3f} "
-        f"out_of_road_rate={summary['out_of_road'] / num_episodes:.3f} "
-        f"avg_reward={float(np.mean(summary['episode_reward'])):.2f} "
-        f"avg_length={float(np.mean(summary['episode_length'])):.1f}"
-    )
-    if summary["lookahead_y"]:
-        lookahead_y = np.asarray(summary["lookahead_y"], dtype=np.float32)
-        lookahead_heading = np.asarray(summary["lookahead_heading"], dtype=np.float32)
-        steering = np.asarray(summary["steering"], dtype=np.float32)
-        print(
-            "[analysis_summary] "
-            f"mean_lookahead_y={float(lookahead_y.mean()):+.4f} "
-            f"rightward_fraction={float((lookahead_y > 0).mean()):.3f} "
-            f"mean_heading={float(lookahead_heading.mean()):+.4f} "
-            f"mean_steering={float(steering.mean()):+.4f} "
-            f"mode_hist={mode_hist}"
-        )
+    _print_test_summary(summary, args.episodes)
 
 
 if __name__ == "__main__":

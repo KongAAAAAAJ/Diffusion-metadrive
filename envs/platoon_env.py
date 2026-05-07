@@ -100,6 +100,17 @@ class PlatoonEnvConfig:
         observation_mode: str = "lidar_state",
         scenario_id: Optional[str] = None,
         local_route: Optional[str] = None,
+        platoon_reward_enabled: bool = True,
+        platoon_w_safety: float = 2.0,
+        platoon_w_formation: float = 2.0,
+        platoon_w_efficiency: float = 0.5,
+        platoon_w_comfort: float = 0.1,
+        platoon_collision_penalty: float = 10.0,
+        platoon_out_of_road_penalty: float = 5.0,
+        platoon_d_safe: float = 8.0,
+        platoon_d_norm: float = 10.0,
+        platoon_delta_s_max: float = 5.0,
+        platoon_reward_clip: float = 20.0,
     ) -> None:
         self.num_agents = int(num_agents)
         self.use_render = bool(use_render)
@@ -123,6 +134,17 @@ class PlatoonEnvConfig:
         self.observation_mode = str(observation_mode)
         self.scenario_id = scenario_id
         self.local_route = local_route
+        self.platoon_reward_enabled = bool(platoon_reward_enabled)
+        self.platoon_w_safety = float(platoon_w_safety)
+        self.platoon_w_formation = float(platoon_w_formation)
+        self.platoon_w_efficiency = float(platoon_w_efficiency)
+        self.platoon_w_comfort = float(platoon_w_comfort)
+        self.platoon_collision_penalty = float(platoon_collision_penalty)
+        self.platoon_out_of_road_penalty = float(platoon_out_of_road_penalty)
+        self.platoon_d_safe = float(platoon_d_safe)
+        self.platoon_d_norm = float(platoon_d_norm)
+        self.platoon_delta_s_max = float(platoon_delta_s_max)
+        self.platoon_reward_clip = float(platoon_reward_clip)
 
 
 class PlatoonEnv(BaseMultiEnv):
@@ -146,7 +168,64 @@ class PlatoonEnv(BaseMultiEnv):
         self._multimodal_config = build_transfuser_config("base")
         self._scenario_orchestrator = None
         self._scenario_step_count = 0
+        self._pending_low_level_actions: dict[str, np.ndarray] = {}
+        self._platoon_reward_cache: Optional[dict[str, object]] = None
         super().__init__(config=self._build_metadrive_config())
+        self._install_platoon_runtime_config()
+
+    def _cfg(self, key: str, default=None):
+        config = getattr(self, "config", None)
+        if config is not None:
+            try:
+                return config.get(key, default)
+            except Exception:
+                pass
+            try:
+                return config[key]
+            except Exception:
+                pass
+            if hasattr(config, key):
+                return getattr(config, key)
+        return default
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        return float(self._cfg(key, default))
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        return int(self._cfg(key, default))
+
+    def _cfg_bool(self, key: str, default: bool = False) -> bool:
+        return bool(self._cfg(key, default))
+
+    def _platoon_runtime_config(self) -> dict[str, object]:
+        return {
+            "initial_speed_km_h": self.platoon_config.initial_speed_km_h,
+            "target_speed_km_h": self.platoon_config.target_speed_km_h,
+            "headway_time_s": self.platoon_config.headway_time_s,
+            "trajectory_dt": self.platoon_config.trajectory_dt,
+            "vehicle_length_m": self.platoon_config.vehicle_length_m,
+            "formation_error_threshold": self.platoon_config.formation_error_threshold,
+            "observation_mode": self.platoon_config.observation_mode,
+            "platoon_reward_enabled": self.platoon_config.platoon_reward_enabled,
+            "platoon_w_safety": self.platoon_config.platoon_w_safety,
+            "platoon_w_formation": self.platoon_config.platoon_w_formation,
+            "platoon_w_efficiency": self.platoon_config.platoon_w_efficiency,
+            "platoon_w_comfort": self.platoon_config.platoon_w_comfort,
+            "platoon_collision_penalty": self.platoon_config.platoon_collision_penalty,
+            "platoon_out_of_road_penalty": self.platoon_config.platoon_out_of_road_penalty,
+            "platoon_d_safe": self.platoon_config.platoon_d_safe,
+            "platoon_d_norm": self.platoon_config.platoon_d_norm,
+            "platoon_delta_s_max": self.platoon_config.platoon_delta_s_max,
+            "platoon_reward_clip": self.platoon_config.platoon_reward_clip,
+        }
+
+    def _install_platoon_runtime_config(self) -> None:
+        updates = self._platoon_runtime_config()
+        self.config.update(updates)
+        engine = getattr(self, "engine", None)
+        global_config = getattr(engine, "global_config", None)
+        if global_config is not None:
+            global_config.update(updates)
 
     @classmethod
     def _merge_config(cls, config: Optional[Mapping[str, object]]) -> dict:
@@ -189,6 +268,17 @@ class PlatoonEnv(BaseMultiEnv):
             "observation_mode",
             "scenario_id",
             "local_route",
+            "platoon_reward_enabled",
+            "platoon_w_safety",
+            "platoon_w_formation",
+            "platoon_w_efficiency",
+            "platoon_w_comfort",
+            "platoon_collision_penalty",
+            "platoon_out_of_road_penalty",
+            "platoon_d_safe",
+            "platoon_d_norm",
+            "platoon_delta_s_max",
+            "platoon_reward_clip",
         }
         return {key: config[key] for key in keys if key in config}
 
@@ -210,6 +300,17 @@ class PlatoonEnv(BaseMultiEnv):
             "vehicle_length_m",
             "formation_error_threshold",
             "observation_mode",
+            "platoon_reward_enabled",
+            "platoon_w_safety",
+            "platoon_w_formation",
+            "platoon_w_efficiency",
+            "platoon_w_comfort",
+            "platoon_collision_penalty",
+            "platoon_out_of_road_penalty",
+            "platoon_d_safe",
+            "platoon_d_norm",
+            "platoon_delta_s_max",
+            "platoon_reward_clip",
             # scenario_id / local_route are intentionally excluded here so they pass
             # through to the MetaDrive config via _build_metadrive_config explicitly.
         }
@@ -223,7 +324,10 @@ class PlatoonEnv(BaseMultiEnv):
 
     def _build_metadrive_config(self) -> dict:
         speed_m_s = self.platoon_config.initial_speed_km_h / 3.6
-        gap_m = self._desired_center_spacing_m()
+        gap_m = (
+            float(self.platoon_config.vehicle_length_m)
+            + speed_m_s * float(self.platoon_config.headway_time_s)
+        )
         lane_index = (FirstPGBlock.NODE_1, FirstPGBlock.NODE_2, 0)
         lead_long = 20.0
         agent_configs = {
@@ -291,7 +395,7 @@ class PlatoonEnv(BaseMultiEnv):
         immediately repositioned after reset() so the episode starts in the correct
         road segment.
         """
-        if not self.platoon_config.local_route:
+        if not self._cfg("local_route", None):
             return
         spawn_manager = getattr(self.engine, "spawn_manager", None)
         current_map = getattr(self.engine, "current_map", None)
@@ -311,7 +415,7 @@ class PlatoonEnv(BaseMultiEnv):
         if not lanes:
             return
 
-        speed_m_s = self.platoon_config.initial_speed_km_h / 3.6
+        speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
         gap_m = self._desired_center_spacing_m()
         lane_idx = 0
         lane = lanes[lane_idx]
@@ -413,8 +517,9 @@ class PlatoonEnv(BaseMultiEnv):
         """Initialise PlatoonScenarioOrchestrator when scenario_id + local_route are both set."""
         self._scenario_orchestrator = None
         self._scenario_step_count = 0
-        scenario_id = self.platoon_config.scenario_id
-        local_route = self.platoon_config.local_route
+        scenario_id = self.config.scenario_id
+        local_route = self.config.local_route
+        
         if not scenario_id or not local_route:
             return
         try:
@@ -422,6 +527,7 @@ class PlatoonEnv(BaseMultiEnv):
             from scenarios.platoon_orchestrator import PlatoonScenarioOrchestrator
             if scenario_id not in SCENARIO_BY_ID:
                 return
+            
             defn = get_scenario_definition(scenario_id)
             if local_route not in defn.trigger_by_local_route:
                 return
@@ -434,6 +540,8 @@ class PlatoonEnv(BaseMultiEnv):
 
     def reset(self, seed: Optional[int] = None):
         self._metrics.start_episode()
+        self._platoon_reward_cache = None
+        self._pending_low_level_actions = {}
         obs, _ = super().reset(seed=seed)
 
         if "enable_idm_lane_change" in self._runtime_flags:
@@ -442,6 +550,7 @@ class PlatoonEnv(BaseMultiEnv):
 
         # Teleport to route segment if local_route is set
         self._reposition_platoon_on_route()
+        self._clear_traffic_vehicles_near_platoon()
 
         # Initialise scenario orchestrator (hazard injection)
         self._setup_scenario_orchestrator()
@@ -453,6 +562,8 @@ class PlatoonEnv(BaseMultiEnv):
             agent_id: self._capture_progress_reference(agent_id) for agent_id in self._agent_ids
         }
         self._last_info = {}
+        self._platoon_reward_cache = None
+        self._pending_low_level_actions = {}
 
         return self._augment_observations(obs)
 
@@ -463,7 +574,7 @@ class PlatoonEnv(BaseMultiEnv):
         return ret
 
     def _format_agent_observation(self, agent_id: str, agent_obs: object) -> dict[str, np.ndarray]:
-        if self.platoon_config.observation_mode == "multimodal":
+        if self._cfg("observation_mode", "lidar_state") == "multimodal":
             if not isinstance(agent_obs, dict):
                 raise TypeError("Multimodal PlatoonEnv expects dict observations from DatasetCollectObservation.")
             features = observation_to_features(agent_obs, self._multimodal_config)
@@ -483,6 +594,15 @@ class PlatoonEnv(BaseMultiEnv):
 
     def step(self, actions: Dict[str, np.ndarray]):
         if self.config.get("control_mode", "physics") == "teleport":
+            self._pending_low_level_actions = {
+                agent_id: (
+                    np.asarray(action, dtype=np.float32).reshape(2,)
+                    if np.asarray(action).shape == (2,)
+                    else np.zeros((2,), dtype=np.float32)
+                )
+                for agent_id, action in actions.items()
+            }
+            self._platoon_reward_cache = None
             obs, reward, terminated, truncated, info = super().step(actions)
             info = self._build_info_dict("teleport", actions=actions, base_info=info)
             terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
@@ -518,6 +638,11 @@ class PlatoonEnv(BaseMultiEnv):
         raise ValueError(f"Unsupported action shape for PlatoonEnv: {first_action.shape}")
 
     def low_level_step(self, actions: Dict[str, np.ndarray], control_mode: str = "low_level"):
+        self._pending_low_level_actions = {
+            agent_id: np.asarray(action, dtype=np.float32).reshape(2,)
+            for agent_id, action in actions.items()
+        }
+        self._platoon_reward_cache = None
         # Tick ScenarioOrchestrator before the physics step (mirrors collect_expert behaviour)
         if getattr(self, "_scenario_orchestrator", None) is not None:
             lead_agent_id = self._agent_ids[0]
@@ -525,6 +650,7 @@ class PlatoonEnv(BaseMultiEnv):
             self._scenario_orchestrator.before_step(self, lead_agent_id, self._scenario_step_count)
 
         obs, reward, terminated, truncated, info = super().step(actions)
+        self._clear_traffic_vehicles_near_platoon()
         info = self._build_info_dict(control_mode, actions=actions, base_info=info)
         terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
         obs = self._augment_observations(obs)
@@ -534,6 +660,259 @@ class PlatoonEnv(BaseMultiEnv):
         if info:
             self._last_info = info
         return obs, reward, terminated, truncated, info
+
+    def reward_function(self, vehicle_id: str):
+        """Team-level platoon reward shared by all agents.
+
+        BaseEnv calls this once per active agent in a step. The first call builds
+        and caches the team reward so progress and comfort terms are consumed only
+        once; later calls return the same scalar with per-agent diagnostics.
+        """
+        if not self._cfg_bool("platoon_reward_enabled", True):
+            return super().reward_function(vehicle_id)
+        cache = self._get_platoon_reward_cache()
+        per_agent = cache.get("per_agent", {})
+        info = dict(per_agent.get(vehicle_id, {})) if isinstance(per_agent, Mapping) else {}
+        return float(cache.get("reward", 0.0)), info
+
+    def _get_platoon_reward_cache(self) -> dict[str, object]:
+        cache = getattr(self, "_platoon_reward_cache", None)
+        if cache is None:
+            cache = self._build_platoon_reward_cache()
+            self._platoon_reward_cache = cache
+        return cache
+
+    # ------------------------------------------------------------------
+    # Reward sub-functions (one per component)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _r_safety(crash_count: int, out_count: int, n: int) -> float:
+        """Safety: collision penalty + out-of-road penalty, normalised by N."""
+        n = max(n, 1)
+        return -100.0 * crash_count / n - 50.0 * out_count / n
+
+    @staticmethod
+    def _r_spacing(d: float, d_exp: float) -> float:
+        """Spacing reward for one follower (bumper-to-bumper gap d, target d_exp).
+
+        d ∈ (d_exp-5, d_exp+5]  → r = 5 / |d - d_exp|   (peaks near target)
+        d ∈ (15, 30]            → r = (30 - d) / 15      (decays to 0 at 30 m)
+        d ∈ (0,  5)             → r = -10 / d + 3        (strongly negative)
+        else                    → r = 0
+        """
+        diff = abs(d - d_exp)
+        if diff <= 5.0:
+            return 5.0 / max(diff, 0.5)        # cap at 10.0 when diff→0
+        if 15.0 < d <= 30.0:
+            return (30.0 - d) / 15.0
+        if 0.0 < d < 5.0:
+            return -10.0 / max(d, 0.1) + 3.0
+        return 0.0
+
+    @staticmethod
+    def _r_speed(v: float, v_target: float) -> float:
+        """Speed reward for one vehicle (v and v_target in km/h).
+
+        |v - v_target| ≤ 5           → r = 5 / |v - v_target|  (peaks at v_target)
+        15 < v < v_target - 5  (slow) → r = v/10 - (v_target-15)/10
+        v <= 15                (very slow) → r = v - (v_target-15)/10 - 13.5
+        v > v_target + 5       (fast) → r = -v/(v_target+5) + 2
+        else                          → r = 0
+        """
+        diff = abs(v - v_target)
+        if diff <= 5.0:
+            return 5.0 / max(diff, 0.5)        # cap at 10.0 when diff→0
+        if 15.0 < v < v_target - 5.0:
+            return v / 10.0 - (v_target - 15.0) / 10.0
+        if v <= 15.0:
+            return v - (v_target - 15.0) / 10.0 - 13.5
+        if v > v_target + 5.0:
+            return -v / max(v_target + 5.0, 1e-6) + 2.0
+        return 0.0
+
+    @staticmethod
+    def _r_progress(s: float, s_max: float) -> float:
+        """Progress (proximity) reward: 15 * s / s_max."""
+        return 15.0 * s / max(s_max, 1e-6)
+
+    @staticmethod
+    def _r_comfort(j: float, delta: float) -> float:
+        """Comfort reward based on throttle jerk j and steering change delta.
+
+        r = (20 - |j|) / 20 + (10 - |delta|) / 10
+        """
+        return (20.0 - abs(j)) / 20.0 + (10.0 - abs(delta)) / 10.0
+
+    # ------------------------------------------------------------------
+    # Gap helper (bumper-to-bumper distance between two consecutive agents)
+    # ------------------------------------------------------------------
+
+    def _bumper_gap(self, ego_id: str, front_id: str) -> float:
+        """Bumper-to-bumper longitudinal gap (m) between ego and the vehicle ahead."""
+        ego_pose = self._agent_pose(ego_id)
+        front_pose = self._agent_pose(front_id)
+        if ego_pose is None or front_pose is None:
+            return float("inf")
+        center_dist = float(np.linalg.norm(front_pose[:2] - ego_pose[:2]))
+        half_lengths = 0.5 * (self._vehicle_length_m(ego_id) + self._vehicle_length_m(front_id))
+        return max(center_dist - half_lengths, 0.0)
+
+    # ------------------------------------------------------------------
+    # Main cache builder
+    # ------------------------------------------------------------------
+
+    def _build_platoon_reward_cache(self) -> dict[str, object]:
+        agent_ids = [aid for aid in self._agent_ids if aid in self.agents]
+        if not agent_ids:
+            return {"reward": 0.0, "per_agent": {}}
+
+        delta_s_max = max(self._cfg_float("platoon_delta_s_max", 5.0), 1e-6)
+        d_exp       = max(self._cfg_float("platoon_d_exp", 10.0), 1e-6)
+        target_speed_global = max(self._cfg_float("target_speed_km_h", 25.0), 1e-6)
+        lead_id     = self._agent_ids[0]
+        v_lead      = self._agent_speed_km_h(lead_id) if lead_id in self.agents else target_speed_global
+
+        # ── per-agent data collection ────────────────────────────────
+        pending_actions = getattr(self, "_pending_low_level_actions", {}) or {}
+        progress_by_agent: dict[str, float] = {}
+        gap_by_agent:      dict[str, float] = {}   # bumper-to-bumper to front (followers only)
+        speed_by_agent:    dict[str, float] = {}
+        jerk_by_agent:     dict[str, float] = {}
+        delta_by_agent:    dict[str, float] = {}
+        crash_by_agent:    dict[str, bool]  = {}
+        out_by_agent:      dict[str, bool]  = {}
+
+        for agent_id in agent_ids:
+            cur = np.asarray(
+                pending_actions.get(agent_id, np.zeros(2, dtype=np.float32)), dtype=np.float32
+            ).reshape(2)
+            prev = self._last_actions.get(agent_id, np.zeros(2, dtype=np.float32))
+
+            progress_by_agent[agent_id] = float(self._compute_progress(agent_id))
+            speed_by_agent[agent_id]    = float(self._agent_speed_km_h(agent_id))
+            delta_by_agent[agent_id]    = float(cur[0] - prev[0])
+            jerk_by_agent[agent_id]     = float(cur[1] - prev[1])
+            crash_by_agent[agent_id]    = self._agent_has_terminal_collision(agent_id)
+            out_by_agent[agent_id]      = self._agent_is_out_of_road(agent_id)
+
+            ego_idx = self._agent_ids.index(agent_id)
+            if ego_idx > 0:
+                front_id = self._agent_ids[ego_idx - 1]
+                gap_by_agent[agent_id] = self._bumper_gap(agent_id, front_id)
+
+        num_agents  = max(len(agent_ids), 1)
+        crash_count = int(sum(crash_by_agent.values()))
+        out_count   = int(sum(out_by_agent.values()))
+
+        # ── 1. Safety ────────────────────────────────────────────────
+        reward_safety = self._r_safety(crash_count, out_count, num_agents)
+
+        # ── 2. Spacing (followers only, averaged) ────────────────────
+        spacing_scores = [
+            self._r_spacing(gap_by_agent[aid], d_exp)
+            for aid in agent_ids
+            if aid in gap_by_agent
+        ]
+        reward_spacing = float(np.mean(spacing_scores)) if spacing_scores else 0.0
+
+        # ── 3. Speed (leader tracks target_speed; followers track v_lead) ──
+        def _v_target(aid: str) -> float:
+            return target_speed_global if self._agent_ids.index(aid) == 0 else v_lead
+
+        speed_scores = [self._r_speed(speed_by_agent[aid], _v_target(aid)) for aid in agent_ids]
+        reward_speed = float(np.mean(speed_scores)) if speed_scores else 0.0
+
+        # ── 4. Progress (proximity) ──────────────────────────────────
+        progress_scores = [self._r_progress(progress_by_agent[aid], delta_s_max) for aid in agent_ids]
+        reward_progress = float(np.mean(progress_scores)) if progress_scores else 0.0
+
+        # ── 5. Comfort ───────────────────────────────────────────────
+        comfort_scores = [
+            self._r_comfort(jerk_by_agent[aid], delta_by_agent[aid]) for aid in agent_ids
+        ]
+        reward_comfort = float(np.mean(comfort_scores)) if comfort_scores else 0.0
+
+        reward = reward_safety + reward_spacing + reward_speed + reward_progress + reward_comfort
+        clip = self._cfg_float("platoon_reward_clip", 150.0)  
+        reward = float(np.clip(reward, -clip, clip)) if clip > 0.0 else float(reward)
+
+        per_agent: dict[str, dict[str, object]] = {}
+        for agent_id in agent_ids:
+            per_agent[agent_id] = {
+                "platoon_reward":    reward,
+                "reward_safety":     float(reward_safety),
+                "reward_spacing":    float(reward_spacing),
+                "reward_speed":      float(reward_speed),
+                "reward_progress":   float(reward_progress),
+                "reward_comfort":    float(reward_comfort),
+                "team_crash_count":  int(crash_count),
+                "team_out_count":    int(out_count),
+                "bumper_gap":        float(gap_by_agent.get(agent_id, float("inf"))),
+                "speed_km_h":        float(speed_by_agent[agent_id]),
+                "progress":          float(progress_by_agent[agent_id]),
+                "jerk":              float(jerk_by_agent[agent_id]),
+                "delta_steering":    float(delta_by_agent[agent_id]),
+            }
+        return {"reward": reward, "per_agent": per_agent}
+
+    def _agent_has_terminal_collision(self, agent_id: str) -> bool:
+        vehicle = self.agents.get(agent_id)
+        if vehicle is None:
+            return False
+        return bool(
+            getattr(vehicle, "crash_vehicle", False)
+            or getattr(vehicle, "crash_object", False)
+            or getattr(vehicle, "crash_building", False)
+            or getattr(vehicle, "crash_human", False)
+        )
+
+    def _agent_is_out_of_road(self, agent_id: str) -> bool:
+        vehicle = self.agents.get(agent_id)
+        if vehicle is None:
+            return False
+        try:
+            return bool(self._is_out_of_road(vehicle))
+        except Exception:
+            return bool(getattr(vehicle, "out_of_road", False) or (not getattr(vehicle, "on_lane", True)))
+
+    def _clear_traffic_vehicles_near_platoon(self) -> None:
+        """Remove background traffic that overlaps or spawns too close to any platoon agent."""
+        traffic_manager = getattr(getattr(self, "engine", None), "traffic_manager", None)
+        traffic_vehicles = list(getattr(traffic_manager, "_traffic_vehicles", []) or [])
+        if traffic_manager is None or not traffic_vehicles:
+            return
+        agents = getattr(self, "agents", {}) or {}
+        active_agents = [agents[agent_id] for agent_id in self._agent_ids if agent_id in agents]
+        if not active_agents:
+            return
+        min_clearance = float(self.config.get("traffic_spawn_min_agent_clearance_m", 20.0))
+        to_remove = []
+        for traffic_vehicle in traffic_vehicles:
+            if bool(getattr(traffic_vehicle, "scenario_managed_vehicle", False)):
+                continue
+            try:
+                traffic_pos = np.asarray(getattr(traffic_vehicle, "position", (0.0, 0.0))[:2], dtype=np.float32)
+                too_close = any(
+                    float(np.linalg.norm(
+                        traffic_pos - np.asarray(getattr(agent, "position", (0.0, 0.0))[:2], dtype=np.float32)
+                    )) < min_clearance
+                    for agent in active_agents
+                )
+                if too_close:
+                    to_remove.append(traffic_vehicle)
+            except Exception:
+                continue
+        if not to_remove:
+            return
+        ids_to_remove = [vehicle.id for vehicle in to_remove if getattr(vehicle, "id", None) is not None]
+        if ids_to_remove:
+            traffic_manager.clear_objects(ids_to_remove)
+        for vehicle in to_remove:
+            try:
+                traffic_manager._traffic_vehicles.remove(vehicle)
+            except ValueError:
+                pass
 
     def _enforce_platoon_episode_end(
         self,
@@ -609,6 +988,12 @@ class PlatoonEnv(BaseMultiEnv):
         base_info: Optional[Mapping[str, dict]] = None,
     ) -> dict[str, dict]:
         info = {}
+        reward_cache = self._platoon_reward_cache if self._cfg_bool("platoon_reward_enabled", True) else None
+        reward_per_agent = (
+            reward_cache.get("per_agent", {})
+            if isinstance(reward_cache, Mapping)
+            else {}
+        )
         min_gap = self._compute_min_gap()
         active_ids = list(self.agents.keys())
         for agent_id in active_ids:
@@ -619,19 +1004,50 @@ class PlatoonEnv(BaseMultiEnv):
             else:
                 current_action = np.zeros((2,), dtype=np.float32)
             previous_action = self._last_actions.get(agent_id, np.zeros((2,), dtype=np.float32))
-            delta_steering = float(current_action[0] - previous_action[0])
-            jerk = float(current_action[1] - previous_action[1])
+            cached_agent_reward = (
+                dict(reward_per_agent.get(agent_id, {}))
+                if isinstance(reward_per_agent, Mapping)
+                else {}
+            )
+            delta_steering = float(cached_agent_reward.get("delta_steering", current_action[0] - previous_action[0]))
+            jerk = float(cached_agent_reward.get("jerk", current_action[1] - previous_action[1]))
             agent_info["formation_relation_state"] = self.get_formation_relation_state(agent_id)
-            agent_info["formation_error"] = self._compute_agent_formation_error(agent_id)
-            agent_info["min_gap"] = min_gap
+            if "formation_error" in cached_agent_reward:
+                formation_error = cached_agent_reward["formation_error"]
+            else:
+                formation_error = self._compute_agent_formation_error(agent_id)
+            agent_info["formation_error"] = float(formation_error)
+            agent_info["min_gap"] = float(cached_agent_reward.get("min_gap", min_gap))
             agent_info["control_mode"] = control_mode
             agent_info["crash"] = bool(agent_info.get("crash", False))
             agent_info["arrive_dest"] = bool(agent_info.get("arrive_dest", False))
             agent_info["out_of_road"] = bool(agent_info.get("out_of_road", False))
-            agent_info["progress"] = float(self._compute_progress(agent_id))
+            if "progress" in cached_agent_reward:
+                progress = cached_agent_reward["progress"]
+            else:
+                progress = self._compute_progress(agent_id)
+            agent_info["progress"] = float(progress)
             agent_info["jerk"] = jerk
             agent_info["delta_steering"] = delta_steering
-            agent_info["speed_km_h"] = float(self._agent_speed_km_h(agent_id))
+            if "speed_km_h" in cached_agent_reward:
+                speed_km_h = cached_agent_reward["speed_km_h"]
+            else:
+                speed_km_h = self._agent_speed_km_h(agent_id)
+            agent_info["speed_km_h"] = float(speed_km_h)
+            for reward_key in (
+                "platoon_reward",
+                "reward_safety",
+                "reward_formation",
+                "reward_efficiency",
+                "reward_comfort",
+                "team_min_gap",
+                "team_mean_formation_error",
+                "team_mean_progress",
+                "team_crash_count",
+                "team_out_of_road_count",
+            ):
+                if reward_key in cached_agent_reward:
+                    agent_info[reward_key] = cached_agent_reward[reward_key]
             self._last_actions[agent_id] = current_action
             info[agent_id] = agent_info
         return info
@@ -662,18 +1078,19 @@ class PlatoonEnv(BaseMultiEnv):
         return np.asarray([speed * np.cos(heading), speed * np.sin(heading)], dtype=np.float32)
 
     def _vehicle_length_m(self, agent_id: Optional[str] = None) -> float:
+        default_length = self._cfg_float("vehicle_length_m", 5.74)
         if agent_id is None:
-            return float(self.platoon_config.vehicle_length_m)
+            return default_length
         vehicle = self.agents.get(agent_id)
         if vehicle is None:
-            return float(self.platoon_config.vehicle_length_m)
-        return float(getattr(vehicle, "LENGTH", self.platoon_config.vehicle_length_m))
+            return default_length
+        return float(getattr(vehicle, "LENGTH", default_length))
 
     def _desired_center_spacing_m(self, ego_id: Optional[str] = None, other_id: Optional[str] = None) -> float:
-        speed_m_s = self.platoon_config.initial_speed_km_h / 3.6
+        speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
         ego_length = self._vehicle_length_m(ego_id)
         other_length = self._vehicle_length_m(other_id)
-        return 0.5 * (ego_length + other_length) + speed_m_s * self.platoon_config.headway_time_s
+        return 0.5 * (ego_length + other_length) + speed_m_s * self._cfg_float("headway_time_s", 0.5)
 
     def get_formation_relation_state(self, agent_id: str) -> np.ndarray:
         ego_pose = self._agent_pose(agent_id)
@@ -762,7 +1179,7 @@ class PlatoonEnv(BaseMultiEnv):
     def _longitudinal_lqr(self, agent_id: str) -> float:
         ego_idx = self._agent_ids.index(agent_id)
         current_speed = self._agent_speed_km_h(agent_id) / 3.6
-        target_speed = self.platoon_config.target_speed_km_h / 3.6
+        target_speed = self._cfg_float("target_speed_km_h", 25.0) / 3.6
 
         def _speed_tracking_accel() -> float:
             speed_error = current_speed - target_speed
@@ -840,7 +1257,7 @@ class PlatoonEnv(BaseMultiEnv):
 
             for step_idx, world_pose in enumerate(trajectory_world):
                 local_pose = trajectory[step_idx]
-                t = float(step_idx + 1) * float(getattr(self.platoon_config, "trajectory_dt", 0.5))
+                t = float(step_idx + 1) * self._cfg_float("trajectory_dt", 0.5)
                 other_poses_at_t: dict[str, np.ndarray] = {}
                 for other_id, pose_t0 in other_poses_t0.items():
                     vel = other_velocities[other_id]

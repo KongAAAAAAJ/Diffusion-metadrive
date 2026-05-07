@@ -140,6 +140,7 @@ class ScenarioOrchestrator:
     def _handle_ensure_lead_vehicle(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         front_vehicle = self._find_front_vehicle(ego_vehicle)
         if front_vehicle is not None:
+            setattr(front_vehicle, "scenario_managed_vehicle", True)
             self._lead_vehicle_name = getattr(front_vehicle, "name", None)
             self._mark_realized(step_count, "lead_present")
         else:
@@ -168,7 +169,7 @@ class ScenarioOrchestrator:
     def _handle_hard_brake_lead(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         front_vehicle, front_distance = self._find_front_vehicle_with_distance(ego_vehicle)
         min_distance = float(params.get("front_distance_min_m", 10.0))
-        max_distance = float(params.get("front_distance_max_m", float(params.get("lead_distance_m", 20.0)) + 4.0))
+        max_distance = float(params.get("front_distance_max_m", float(params.get("lead_distance_m", 20.0)) + 10.0))
         front_vehicle_in_range = (
             front_vehicle is not None and front_distance is not None and min_distance <= front_distance <= max_distance
         )
@@ -190,6 +191,7 @@ class ScenarioOrchestrator:
             self._lead_vehicle_name = getattr(spawned, "name", None)
             self.summary.notes.append("lead_spawned")
         else:
+            setattr(front_vehicle, "scenario_managed_vehicle", True)
             self._lead_vehicle_name = getattr(front_vehicle, "name", None)
             self.summary.notes.append("lead_present")
 
@@ -231,6 +233,7 @@ class ScenarioOrchestrator:
             if vehicle is None:
                 finished.append(vehicle_name)
                 continue
+            setattr(vehicle, "scenario_managed_vehicle", True)
             target_speed_kmh = float(profile["target_speed_kmh"])
             self._set_vehicle_target_speed(env, vehicle, target_speed_kmh)
             self._force_vehicle_speed(vehicle, target_speed_kmh)
@@ -304,6 +307,11 @@ class ScenarioOrchestrator:
         lane = current_map.road_network.get_lane(lane_tuple)
         ego_long = lane.local_coordinates(ego_vehicle.position)[0] if reference_kind == "ego_lane" else 0.0
         spawn_long = min(max(spawn_longitude + spawn_longitude_offset + ego_long, 2.0), max(lane.length - 2.0, 2.0))
+        spawn_position = lane.position(float(spawn_long), 0.0)
+        min_clearance = float(getattr(env, "config", {}).get("scenario_spawn_min_agent_clearance_m", 10.0))
+        if not self._spawn_position_clear_of_agents(env, spawn_position, min_clearance):
+            self.summary.notes.append("spawn_blocked:agent_clearance")
+            return None
         traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
         if traffic_manager is None or not hasattr(traffic_manager, "_spawn_traffic_vehicle_if_safe"):
             return None
@@ -313,8 +321,30 @@ class ScenarioOrchestrator:
             {"spawn_lane_index": lane_tuple, "spawn_longitude": float(spawn_long)},
         )
         if spawned is not None:
+            setattr(spawned, "scenario_managed_vehicle", True)
             self._set_vehicle_target_speed(env, spawned, target_speed_kmh)
         return spawned
+
+    @staticmethod
+    def _spawn_position_clear_of_agents(env, spawn_position, min_clearance_m: float) -> bool:
+        agents = getattr(env, "agents", {}) or {}
+        try:
+            spawn_xy = (float(spawn_position[0]), float(spawn_position[1]))
+        except Exception:
+            return False
+        min_clearance_m = max(float(min_clearance_m), 0.0)
+        for agent in agents.values():
+            try:
+                agent_pos = getattr(agent, "position", None)
+                if agent_pos is None:
+                    continue
+                dx = float(spawn_xy[0] - float(agent_pos[0]))
+                dy = float(spawn_xy[1] - float(agent_pos[1]))
+                if (dx * dx + dy * dy) ** 0.5 < min_clearance_m:
+                    return False
+            except Exception:
+                continue
+        return True
 
     def _spawn_lead_vehicle(self, env, ego_vehicle, params: Dict[str, object]):
         return self._spawn_on_reference(
@@ -450,13 +480,13 @@ class ScenarioOrchestrator:
 
 
 def _select_reference_lane(vehicle):
+    lane = getattr(vehicle, "lane", None)
+    if lane is not None:
+        return lane
     navigation = getattr(vehicle, "navigation", None)
     current_ref_lanes = getattr(navigation, "current_ref_lanes", None)
     if current_ref_lanes:
         return current_ref_lanes[0]
-    lane = getattr(vehicle, "lane", None)
-    if lane is not None:
-        return lane
     lane_index = getattr(vehicle, "lane_index", None)
     current_map = getattr(getattr(vehicle, "engine", None), "current_map", None)
     road_network = getattr(current_map, "road_network", None)

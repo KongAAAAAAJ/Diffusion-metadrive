@@ -3,14 +3,35 @@ from __future__ import annotations
 import math
 
 from metadrive.envs.diffusion_envs.traffic_manager import CustomTrafficManager
+from metadrive.utils.pg.utils import ray_localization
 
 
 MAX_VEHICLE_LENGTH = 10.0
 MAX_VEHICLE_WIDTH = 2.5
+ROUTE_TRAFFIC_SPAWN_LONGITUDE_BUFFER = 2.0
 
 
 class RouteAwareTrafficManager(CustomTrafficManager):
     """Traffic manager that avoids spawning background cars near the ego spawn zone."""
+
+    def _propose_vehicle_configs(self, lane):
+        """Skip lane-start spawn points that can sit on block-junction mesh gaps."""
+        potential_vehicle_configs = []
+        start = ROUTE_TRAFFIC_SPAWN_LONGITUDE_BUFFER
+        end = float(lane.length) - ROUTE_TRAFFIC_SPAWN_LONGITUDE_BUFFER
+        total_num = max(0, int((end - start) / self.VEHICLE_GAP) + 1)
+        for i in range(total_num):
+            spawn_longitude = start + i * self.VEHICLE_GAP
+            if spawn_longitude >= end:
+                break
+            potential_vehicle_configs.append(
+                {
+                    "spawn_lane_index": lane.index,
+                    "spawn_longitude": spawn_longitude,
+                    "enable_reverse": False,
+                }
+            )
+        return potential_vehicle_configs
 
     @staticmethod
     def _get_first_positive_route_road(block):
@@ -119,6 +140,12 @@ class RouteAwareTrafficManager(CustomTrafficManager):
         lane = current_map.road_network.get_lane(lane_index)
         candidate_longitude = float(vehicle_config["spawn_longitude"])
         candidate_lateral = float(vehicle_config.get("spawn_lateral", 0.0))
+        if candidate_longitude < ROUTE_TRAFFIC_SPAWN_LONGITUDE_BUFFER:
+            return False
+        if candidate_longitude >= float(lane.length) - ROUTE_TRAFFIC_SPAWN_LONGITUDE_BUFFER:
+            return False
+        if not self._is_spawn_navigation_valid(lane, lane_index, candidate_longitude, candidate_lateral):
+            return False
         candidate_position = lane.position(candidate_longitude, candidate_lateral)
         traffic_length, traffic_width = self._resolve_vehicle_dimensions(vehicle_config, "traffic_vehicle_config")
 
@@ -155,6 +182,19 @@ class RouteAwareTrafficManager(CustomTrafficManager):
                 return False
         return True
 
+    def _is_spawn_navigation_valid(self, lane, lane_index, longitude: float, lateral: float) -> bool:
+        candidate_position = lane.position(longitude, lateral)
+        heading_theta = lane.heading_theta_at(longitude)
+        heading_vector = (math.cos(heading_theta), math.sin(heading_theta))
+        possible_lanes = ray_localization(
+            heading_vector,
+            candidate_position,
+            self.engine,
+            use_heading_filter=False,
+        )
+        possible_lane_indexes = [tuple(candidate[1]) for candidate in possible_lanes]
+        return tuple(lane_index) in possible_lane_indexes
+
     def _spawn_traffic_vehicle_if_safe(
         self,
         vehicle_type,
@@ -171,7 +211,12 @@ class RouteAwareTrafficManager(CustomTrafficManager):
         if not traffic_v_config.get("destination", None):
             traffic_v_config = self._apply_fixed_destination(traffic_v_config)
         traffic_v_config.update(self.engine.global_config["traffic_vehicle_config"])
-        random_v = self.spawn_object(vehicle_type, vehicle_config=traffic_v_config)
+        try:
+            random_v = self.spawn_object(vehicle_type, vehicle_config=traffic_v_config)
+        except (AssertionError, Exception):
+            # Spawn position is not on a valid lane surface (block-junction mesh gap).
+            # Skip this vehicle silently rather than crashing the subprocess.
+            return None
         if policy_class is None:
             from metadrive.policy.idm_policy import IDMPolicy
             policy_class = IDMPolicy
@@ -182,12 +227,10 @@ class RouteAwareTrafficManager(CustomTrafficManager):
 
     def _create_basic_vehicles(self, map, traffic_density: float):
         for lane in self.respawn_lanes:
-            total_num = int(lane.length / self.VEHICLE_GAP)
-            vehicle_longs = [i * self.VEHICLE_GAP for i in range(total_num)]
-            self.np_random.shuffle(vehicle_longs)
-            target_longs = vehicle_longs[:int(math.ceil(traffic_density * len(vehicle_longs)))]
-            for long in target_longs:
-                traffic_v_config = {"spawn_lane_index": lane.index, "spawn_longitude": long}
+            potential_vehicle_configs = self._propose_vehicle_configs(lane)
+            self.np_random.shuffle(potential_vehicle_configs)
+            selected = potential_vehicle_configs[:int(math.ceil(traffic_density * len(potential_vehicle_configs)))]
+            for traffic_v_config in selected:
                 vehicle_type = self.random_vehicle_type()
                 self._spawn_traffic_vehicle_if_safe(vehicle_type, traffic_v_config)
 
@@ -296,9 +339,9 @@ class RouteAwareTrafficManager(CustomTrafficManager):
                 all_route_lanes = self._get_all_route_lanes()
                 respawn_pool = all_route_lanes if all_route_lanes else self.respawn_lanes
                 lane = respawn_pool[self.np_random.randint(0, len(respawn_pool))]
-                lane_idx = lane.index
-                long = self.np_random.rand() * lane.length / 2
-                traffic_v_config = {"spawn_lane_index": lane_idx, "spawn_longitude": long}
-                self._spawn_traffic_vehicle_if_safe(vehicle_type, traffic_v_config)
+                candidate_configs = self._propose_vehicle_configs(lane)
+                if candidate_configs:
+                    self.np_random.shuffle(candidate_configs)
+                    self._spawn_traffic_vehicle_if_safe(vehicle_type, candidate_configs[0])
 
         return {}
