@@ -238,7 +238,8 @@ class ModeTrajectoryGenerator:
             candidate = self._generate_slot_trajectory(ctx, slot, base_speed_mps * float(scale))
             if candidate is None:
                 return None
-            if self._is_collision_free(ctx, candidate):
+
+            if slot.semantic_group == "STOP" or self._is_collision_free(ctx, candidate):
                 return candidate
         return None
 
@@ -255,10 +256,6 @@ class ModeTrajectoryGenerator:
                 valid_mask[slot.index] = False
                 continue
             coarse[slot.index] = trajectory
-
-        for slot in self.mode_slots:
-            if slot.semantic_group == "STOP":
-                valid_mask[slot.index] = True
 
         coarse[~valid_mask] = 0.0
         return ModeTrajectoryOutput(coarse_trajectories=coarse, mode_valid_mask=valid_mask.astype(bool))

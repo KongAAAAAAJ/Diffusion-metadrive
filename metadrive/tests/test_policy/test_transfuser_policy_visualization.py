@@ -10,10 +10,15 @@ import pytest
 from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     MULTIMODAL_OTHER_COLOR,
     MULTIMODAL_SELECTED_COLOR,
+    PAPER_TARGET_POINT_COLOR,
     SCENARIO_BY_ID,
     ScenarioRouteSelection,
     StepTrajectoryPlotRecord,
+    _apply_selected_mode_target_overrides,
+    _assert_platoon_candidate_alignment,
+    _build_coordinate_audit_record,
     _local_xy_to_world_xy,
+    _world_xy_to_local_xy,
     _capture_2d_topdown_frame,
     _capture_3d_topdown_frame,
     _capture_step_plot_render_context,
@@ -26,6 +31,7 @@ from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     _save_step_trajectory_plot,
     _resolve_episode_scenario_route,
     _save_step_image,
+    _save_combined_traj_frame,
     _normalize_visualization_args,
     _save_trajectory_plot,
     _write_video,
@@ -33,6 +39,7 @@ from metadrive.policy.diffusion_policy.test_transfuser_policy import (
 )
 from metadrive.obs.diff_obs.top_down_state_obs_multi_channel import DatasetCollectObservation
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
+from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
 
 
 def test_parse_args_defaults_enable_headless_2d_outputs():
@@ -292,6 +299,159 @@ def test_local_xy_to_world_xy_uses_pose_snapshot_instead_of_mutable_vehicle_stat
     assert np.allclose(world, np.asarray([10.0, 7.0], dtype=np.float64), atol=1e-6)
 
 
+def test_local_world_xy_round_trip_preserves_points():
+    origin = np.asarray([4.0, -3.0], dtype=np.float64)
+    heading = 0.73
+    local_points = np.asarray(
+        [
+            [2.0, 0.5],
+            [5.5, -1.25],
+            [8.0, 2.0],
+        ],
+        dtype=np.float64,
+    )
+
+    world_points = np.asarray([
+        _local_xy_to_world_xy(local_point, origin, heading)
+        for local_point in local_points
+    ])
+    recovered_local = np.asarray([
+        _world_xy_to_local_xy(world_point, origin, heading)
+        for world_point in world_points
+    ])
+
+    assert np.allclose(recovered_local, local_points, atol=1e-6)
+
+
+def test_coordinate_audit_record_contains_selected_candidate_local_and_world():
+    final_info = {
+        "trajectory_mode_idx": 1,
+        "predicted_trajectory": np.asarray([[1.0, 1.0, 0.1], [2.0, 1.5, 0.2]], dtype=np.float32),
+        "trajectory_candidates": np.asarray(
+            [
+                [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                [[1.0, 1.0, 0.1], [2.0, 1.5, 0.2]],
+            ],
+            dtype=np.float32,
+        ),
+        "coarse_trajectories": np.asarray(
+            [
+                [[1.0, 0.0], [2.0, 0.0]],
+                [[1.0, 1.0], [2.0, 1.5]],
+            ],
+            dtype=np.float32,
+        ),
+        "target_point": np.asarray([3.0, 0.5], dtype=np.float32),
+        "controller_debug": {
+            "waypoint_x": 1.0,
+            "waypoint_y": 1.0,
+            "waypoint_heading": 0.1,
+        },
+    }
+
+    record = _build_coordinate_audit_record(
+        episode_idx=2,
+        step_idx=7,
+        agent_id="agent1",
+        exported_index=1,
+        ego_xy_before_step=np.asarray([10.0, 20.0], dtype=np.float64),
+        ego_heading_before_step=0.0,
+        final_info=final_info,
+    )
+
+    assert record["episode"] == 2
+    assert record["step"] == 7
+    assert record["agent_id"] == "agent1"
+    assert record["exported_index"] == 1
+    assert record["selected_mode"] == 1
+    assert record["selected_candidate_first_local"] == [1.0, 1.0, 0.10000000149011612]
+    assert record["selected_candidate_endpoint_local"] == [2.0, 1.5, 0.20000000298023224]
+    assert np.allclose(record["selected_candidate_first_world"], [11.0, 21.0])
+    assert np.allclose(record["selected_candidate_endpoint_world"], [12.0, 21.5])
+    assert record["selected_coarse_endpoint_local"] == [2.0, 1.5]
+    assert np.allclose(record["selected_coarse_endpoint_world"], [12.0, 21.5])
+    assert record["target_point_local"] == [3.0, 0.5]
+    assert np.allclose(record["target_point_world"], [13.0, 20.5])
+    assert record["controller_waypoint_x"] == 1.0
+    assert record["controller_waypoint_y"] == 1.0
+    assert record["controller_waypoint_heading"] == 0.1
+
+
+def test_apply_selected_mode_target_overrides_writes_full_guidance_from_selected_coarse():
+    config = build_transfuser_config(target_line_num_points=5)
+    planner_batch = {
+        "agent0": {"target_point": np.asarray([99.0, 99.0], dtype=np.float32)},
+        "agent1": {},
+    }
+    coarse_by_agent = {
+        "agent0": np.asarray(
+            [
+                [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
+                [[1.0, 1.0], [2.0, 1.5], [4.0, 2.0]],
+            ],
+            dtype=np.float32,
+        ),
+        "agent1": np.asarray(
+            [
+                [[0.5, -0.5], [1.0, -1.0], [2.0, -2.0]],
+                [[0.5, 0.5], [1.0, 1.0], [2.0, 2.0]],
+            ],
+            dtype=np.float32,
+        ),
+    }
+
+    metadata = _apply_selected_mode_target_overrides(
+        planner_batch,
+        agent_ids=["agent0", "agent1"],
+        selected_modes=[1, 0],
+        coarse_by_agent=coarse_by_agent,
+        config=config,
+    )
+
+    assert np.allclose(planner_batch["agent0"]["target_point"], [4.0, 2.0])
+    assert np.allclose(planner_batch["agent0"]["preference_point"], [4.0, 2.0])
+    assert np.allclose(planner_batch["agent0"]["topology_polyline"][0], [0.0, 0.0])
+    assert np.allclose(planner_batch["agent0"]["topology_polyline"][-1], [4.0, 2.0])
+    assert planner_batch["agent0"]["target_line"].shape == (5, 2)
+    assert np.allclose(planner_batch["agent0"]["target_line"][-1], [4.0, 2.0])
+    assert metadata["agent0"]["target_point_before"] == [99.0, 99.0]
+    assert metadata["agent0"]["selected_coarse_endpoint"] == [4.0, 2.0]
+    assert metadata["agent0"]["target_line_after"][-1] == [4.0, 2.0]
+
+    assert np.allclose(planner_batch["agent1"]["target_point"], [2.0, -2.0])
+    assert np.allclose(planner_batch["agent1"]["target_line"][-1], [2.0, -2.0])
+
+
+def test_assert_platoon_candidate_alignment_rejects_mismatched_final_info():
+    candidates = np.asarray(
+        [
+            [[[1.0, 0.0, 0.0]] * 8, [[2.0, 0.0, 0.0]] * 8],
+            [[[3.0, 0.0, 0.0]] * 8, [[4.0, 0.0, 0.0]] * 8],
+        ],
+        dtype=np.float32,
+    )
+    planner_final_info = {
+        "agent0": {
+            "trajectory_candidates": candidates[0],
+            "trajectory_mode_idx": 1,
+            "predicted_trajectory": candidates[0, 1],
+        },
+        "agent1": {
+            "trajectory_candidates": candidates[0],
+            "trajectory_mode_idx": 0,
+            "predicted_trajectory": candidates[1, 0],
+        },
+    }
+
+    with pytest.raises(AssertionError, match="trajectory_candidates mismatch for agent1"):
+        _assert_platoon_candidate_alignment(
+            exported_ids=["agent0", "agent1"],
+            candidates=candidates,
+            selected_modes=[1, 0],
+            planner_final_info=planner_final_info,
+        )
+
+
 def test_build_topdown_world_to_screen_projector_uses_renderer_projection():
     class FakeCanvas:
         def get_size(self):
@@ -424,6 +584,47 @@ def test_save_step_trajectory_plot_writes_topdown_overlay_png(tmp_path: Path):
     image = cv2.imread(str(output_path))
     assert image is not None
     assert image.sum() > 0
+
+
+def test_save_combined_traj_frame_marks_target_point_not_selected_endpoint(tmp_path: Path, monkeypatch):
+    output_path = tmp_path / "combined.png"
+    step_record = StepTrajectoryPlotRecord(
+        step_idx=1,
+        ego_position=np.asarray([0.0, 0.0], dtype=np.float64),
+        selected_trajectory=None,
+        multimodal_trajectories=np.asarray(
+            [
+                [[5.0, 0.0], [10.0, 0.0]],
+                [[5.0, 2.0], [10.0, 2.0]],
+            ],
+            dtype=np.float64,
+        ),
+        selected_mode_idx=0,
+        target_point_world=np.asarray([4.0, 0.0], dtype=np.float64),
+        topdown_frame=np.zeros((200, 200, 3), dtype=np.uint8),
+        world_to_screen_projector=lambda point: np.asarray([point[0], point[1]], dtype=np.float32),
+    )
+    target_point_circles: list[tuple[tuple[int, int], tuple[int, int, int]]] = []
+    original_circle = cv2.circle
+
+    def _tracking_circle(image, center, radius, color, *args, **kwargs):
+        if tuple(color) == PAPER_TARGET_POINT_COLOR:
+            target_point_circles.append((tuple(int(v) for v in center), tuple(color)))
+        return original_circle(image, center, radius, color, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "circle", _tracking_circle)
+
+    _save_combined_traj_frame(
+        step_record=step_record,
+        output_path=output_path,
+        show_topology_polyline=True,
+    )
+
+    assert output_path.exists()
+    assert target_point_circles
+    x_positions = [center[0] for center, _ in target_point_circles]
+    assert any(x < 60 for x in x_positions), "target point near x=4 should be marked"
+    assert not any(x >= 75 for x in x_positions), "selected endpoint near x=10 should not be marked"
 
 
 def test_save_step_trajectory_plot_only_draws_topology_polyline_when_enabled(tmp_path: Path):

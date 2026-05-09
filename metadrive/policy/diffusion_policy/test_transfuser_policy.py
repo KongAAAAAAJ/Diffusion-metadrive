@@ -15,6 +15,7 @@ from scenarios.definitions import SCENARIO_BY_ID, get_scenario_definition
 from scenarios.orchestrator import ScenarioOrchestrator
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
 from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
+from metadrive.policy.diffusion_policy.selected_mode_guidance import apply_selected_mode_guidance
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
 from metadrive.policy.diffusion_policy.transfuser_config import (
     build_transfuser_config,
@@ -65,16 +66,18 @@ def _plot_color_for_mode_index(mode_index: int, mode_slot_names: list[str] | Non
     names = mode_slot_names or []
     mode_name = names[int(mode_index)] if 0 <= int(mode_index) < len(names) else ""
     if mode_name:
-        base = mode_color(mode_name)
-        if base != (255, 255, 255):
-            return base
         fraction = _level_fraction_from_name(mode_name, names)
-        if mode_name.startswith("KEEP_LEVEL_"):
-            return (245, int(120 + 80 * fraction), 11)
-        if mode_name.startswith("LEFT_LC_LEVEL_"):
-            return (22, int(120 + 100 * fraction), 74)
-        if mode_name.startswith("RIGHT_LC_LEVEL_"):
-            return (13, int(130 + 100 * fraction), 136)
+        # Keep lane: shades of green  (fraction=1 → light, fraction=0 → deep)
+        if mode_name.startswith("KEEP_LEVEL_") or "KEEP" in mode_name and "LC" not in mode_name:
+            return (int(30 + 40 * fraction), int(150 + 60 * fraction), int(30 + 40 * fraction))
+        # Left lane change: shades of yellow
+        if mode_name.startswith("LEFT_LC_LEVEL_") or "LEFT" in mode_name:
+            return (int(200 + 55 * fraction), int(120 + 90 * fraction), int(20 * fraction))
+        # Right lane change: shades of blue
+        if mode_name.startswith("RIGHT_LC_LEVEL_") or "RIGHT" in mode_name:
+            return (int(10 + 50 * fraction), int(80 + 70 * fraction), int(160 + 65 * fraction))
+        # Emergency stop / other: grey tones
+        return (int(160 + 80 * fraction), int(20 + 80 * fraction), int(20 + 80 * fraction))
 
     # Stable fallback for old records that do not carry mode names.
     palette = (
@@ -92,27 +95,198 @@ def _plot_color_for_mode_index(mode_index: int, mode_slot_names: list[str] | Non
     return palette[int(mode_index) % len(palette)]
 
 
-@dataclass
-class StepTrajectoryPlotRecord:
-    step_idx: int
-    ego_position: np.ndarray
-    selected_trajectory: np.ndarray | None
-    multimodal_trajectories: np.ndarray | None
-    selected_mode_idx: int | None
-    mode_slot_names: list[str] | None = None
-    mode_valid_mask: np.ndarray | None = None
-    dynamic_anchor_trajectories: np.ndarray | None = None
-    multi_point_world: np.ndarray | None = None
-    target_point_world: np.ndarray | None = None
-    target_line_world: np.ndarray | None = None
-    topology_polyline_world: np.ndarray | None = None
-    topdown_frame: np.ndarray | None = None
-    world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None
-    ego_speed_km_h: float | None = None
-    ego_acceleration: float | None = None
-    env_reward: float | None = None
-    agent_label: str | None = None
-    peer_records: list["StepTrajectoryPlotRecord"] | None = None
+def _build_step_overlay_polylines(
+    *,
+    ego_xy: "np.ndarray",
+    ego_heading_rad: float,
+    coarse_anchor_trajectories: "np.ndarray | None",
+    multimodal_trajectories: "np.ndarray | None",
+    selected_mode_idx: "int | None",
+    topology_polyline_world: "np.ndarray | None",
+    mode_valid_mask: "np.ndarray | None",
+    mode_slot_names: "list[str] | None",
+    peer_ego_data: "list[dict] | None" = None,
+) -> "list[dict]":
+    """Build overlay polyline list for _capture_topdown_frame_with_overlay.
+
+    coarse_anchor_trajectories and multimodal_trajectories are in EGO-LOCAL frame
+    (metres ahead / to-side relative to the vehicle).  This function converts them
+    to world coordinates via _local_xy_to_world_xy before adding to the overlay list.
+
+    peer_ego_data dicts must include "heading_rad" alongside "xy".
+
+    Returns list of {"world_points": np.ndarray (N,2), "color": (R,G,B), "width": int}.
+    """
+    import numpy as np_local
+    overlays: list = []
+
+    def _add(world_points, color, width):
+        pts = np_local.asarray(world_points, dtype=np_local.float64)
+        if pts.ndim == 2 and pts.shape[0] >= 2 and pts.shape[1] >= 2:
+            overlays.append({"world_points": pts[:, :2], "color": color, "width": width})
+
+    def _local_traj_to_world(local_pts: "np.ndarray", origin_xy, heading_rad: float) -> "np.ndarray":
+        """Convert (T, 2+) local-frame trajectory to (T, 2) world XY."""
+        pts = np_local.asarray(local_pts, dtype=np_local.float64)
+        cos_h = float(np_local.cos(float(heading_rad)))
+        sin_h = float(np_local.sin(float(heading_rad)))
+        ox, oy = float(origin_xy[0]), float(origin_xy[1])
+        world = np_local.empty((pts.shape[0], 2), dtype=np_local.float64)
+        world[:, 0] = ox + cos_h * pts[:, 0] - sin_h * pts[:, 1]
+        world[:, 1] = oy + sin_h * pts[:, 0] + cos_h * pts[:, 1]
+        return world
+
+    def _draw_agent_overlays(a_ego, a_heading, a_coarse, a_candidates, a_selected, a_mask, primary):
+        ego_world = np_local.asarray(a_ego[:2], dtype=np_local.float64).reshape(1, 2)
+
+        # topology (only for leader, already in world frame)
+        if primary and topology_polyline_world is not None:
+            t = np_local.asarray(topology_polyline_world, dtype=np_local.float64)
+            if t.ndim == 2 and t.shape[0] >= 2:
+                _add(t, PAPER_TOPOLOGY_COLOR, 2)
+
+        # coarse anchors — local → world, all drawn in grey
+        if a_coarse is not None:
+            anchors = np_local.asarray(a_coarse, dtype=np_local.float64)
+            for mode_i, anchor in enumerate(anchors):
+                if anchor.ndim != 2 or anchor.shape[1] < 2:
+                    continue
+                world_pts = _local_traj_to_world(anchor, a_ego, a_heading)
+                path = np_local.vstack([ego_world, world_pts])
+                _add(path, (160, 160, 160), 1)
+
+        # multi-mode candidates — local → world
+        if a_candidates is not None:
+            cands = np_local.asarray(a_candidates, dtype=np_local.float64)
+            if cands.ndim == 3 and cands.shape[2] >= 2:
+                # non-selected first
+                for mode_i in range(cands.shape[0]):
+                    if a_selected is not None and mode_i == int(a_selected):
+                        continue
+                    world_pts = _local_traj_to_world(cands[mode_i], a_ego, a_heading)
+                    path = np_local.vstack([ego_world, world_pts])
+                    color = _plot_color_for_mode_index(mode_i, mode_slot_names if primary else None)
+                    _add(path, color, 3 if primary else 1)
+                # selected last (on top)
+                if a_selected is not None and int(a_selected) < cands.shape[0]:
+                    world_pts = _local_traj_to_world(cands[int(a_selected)], a_ego, a_heading)
+                    path = np_local.vstack([ego_world, world_pts])
+                    color = _plot_color_for_mode_index(int(a_selected), mode_slot_names if primary else None)
+                    _add(path, color, 6 if primary else 3)
+
+    # peer agents first (behind primary)
+    for peer in (peer_ego_data or []):
+        _draw_agent_overlays(
+            peer.get("xy", np_local.zeros(2)),
+            float(peer.get("heading_rad", 0.0)),
+            peer.get("anchors"),
+            peer.get("candidates"),
+            peer.get("selected"),
+            peer.get("valid_mask"),
+            primary=False,
+        )
+
+    # primary agent last (on top)
+    _draw_agent_overlays(
+        ego_xy, float(ego_heading_rad),
+        coarse_anchor_trajectories, multimodal_trajectories,
+        selected_mode_idx, mode_valid_mask, primary=True,
+    )
+    return overlays
+
+
+def _capture_topdown_frame_with_overlay(
+    env,
+    overlay_polylines: "list[dict]",
+    *,
+    screen_size: int = 800,
+    film_size: int = 3000,
+    camera_position: "tuple[float, float] | None" = None,
+) -> "np.ndarray | None":
+    """Capture topdown frame and draw trajectory overlays using the renderer's
+    own coordinate system (renderer._world_to_screen_position), avoiding the
+    OpenCV post-processing projector mismatch.
+    """
+    import pygame
+    import numpy as np_local
+
+    agents = getattr(env, "agents", {})
+    if not agents and camera_position is None:
+        return None
+
+    if camera_position is None:
+        cam_pos = tuple(next(iter(agents.values())).position[:2])
+    else:
+        cam_pos = (float(camera_position[0]), float(camera_position[1]))
+
+    renderer = getattr(env, "top_down_renderer", None)
+    if renderer is not None:
+        renderer.position = cam_pos
+
+    main_camera = getattr(getattr(env, "engine", None), "main_camera", None)
+    original_track = getattr(main_camera, "current_track_agent", None) if main_camera else None
+    if main_camera is not None:
+        main_camera.current_track_agent = None
+
+    try:
+        env.render(
+            mode="top_down",
+            window=False,
+            screen_size=(screen_size, screen_size),
+            film_size=(film_size, film_size),
+            target_agent_heading_up=False,
+            camera_position=cam_pos,
+        )
+    finally:
+        if main_camera is not None:
+            main_camera.current_track_agent = original_track
+
+    if renderer is None:
+        return None
+
+    # Draw overlays on _screen_canvas using renderer's coordinate system
+    try:
+        field = renderer._screen_canvas.get_size()
+        pos_px = renderer._frame_canvas.pos2pix(*cam_pos)
+        off = (pos_px[0] - field[0] / 2, pos_px[1] - field[1] / 2)
+    except Exception:
+        off = (0, 0)
+
+    for poly in overlay_polylines:
+        world_pts = np_local.asarray(poly["world_points"], dtype=np_local.float32)
+        color = tuple(int(c) for c in poly["color"])
+        width = max(2.5, int(poly.get("width", 6)))
+        screen_pts = []
+        for wp in world_pts:
+            try:
+                sp = renderer._world_to_screen_position(wp[:2], off)
+                if sp is not None:
+                    screen_pts.append((int(sp[0]), int(sp[1])))
+            except Exception:
+                pass
+        if len(screen_pts) >= 2:
+            try:
+                pygame.draw.lines(renderer._screen_canvas, color, False, screen_pts, width)
+            except Exception:
+                pass
+
+    # Re-convert _screen_canvas to numpy
+    try:
+        from metadrive.engine.top_down_renderer import WorldSurface
+        frame = WorldSurface.to_cv2_image(renderer._screen_canvas)
+    except Exception:
+        try:
+            frame = np_local.transpose(pygame.surfarray.array3d(renderer._screen_canvas), (1, 0, 2))
+        except Exception:
+            return None
+
+    if frame is None:
+        return None
+    frame = np_local.asarray(frame)
+    if frame.ndim == 3 and frame.shape[2] > 3:
+        frame = frame[:, :, :3]
+    return frame
+
 
 
 @dataclass
@@ -171,7 +345,7 @@ def parse_args(argv=None):
     parser.add_argument("--print-trajectory-debug", type=int, choices=(0, 1), default=1)
     parser.add_argument("--save-camera-interval", type=int, default=0)  # 默认关闭相机图片保存
     parser.add_argument("--camera-output-dir", type=str, default=DEFAULT_CAMERA_OUTPUT_DIR)
-    parser.add_argument("--start-seed", type=int, default=0)
+    parser.add_argument("--start-seed", type=int, default=1)
     parser.add_argument("--num-scenarios", type=int, default=1)
     parser.add_argument("--traffic-density", type=float, default=0.06)
     parser.add_argument("--plan-anchor-path", type=str, default=None)
@@ -220,9 +394,21 @@ def parse_args(argv=None):
     parser.add_argument("--random-action-seed", type=int, default=None)
     parser.add_argument("--random-use-mode-endpoint-target", type=int, choices=(0, 1), default=0)
     parser.add_argument(
+        "--save-combined-traj-frames",
+        type=int, choices=(0, 1), default=1,
+        help="Save per-step combined trajectory frames "
+             "(coarse anchors + all mode candidates + selected trajectory + map topology). "
+             "Output: <output_dir>/combined_traj_frames/episode_XXX/step_XXXXX.png",
+    )
+    parser.add_argument(
+        "--debug-coordinate-audit",
+        type=int, choices=(0, 1), default=0,
+        help="Write per-agent local/world coordinate audit records for platoon trajectory debugging.",
+    )
+    parser.add_argument(
         "--ppo-actor-ckpt",
         type=str,
-        default="",
+        default="/media/kong/Elements_SE/Diffusion_Data/outputs/ppo/run_9/checkpoints/final/sb3_model.zip",
         help="SB3 MaskablePPO actor checkpoint (.zip). "
              "Empty string (default) = skip PPO and use the pretrained diffusion planner directly (argmax/random_valid).",
     )
@@ -379,23 +565,18 @@ def _apply_selected_mode_target_overrides(
     agent_ids: list[str],
     selected_modes: list[int],
     coarse_by_agent: dict[str, np.ndarray],
+    config=None,
 ) -> dict[str, dict]:
     """Write selected dynamic-anchor endpoints as target/preference points."""
-    metadata: dict[str, dict] = {}
-    for agent_id, mode_idx in zip(agent_ids, selected_modes):
-        if agent_id not in planner_batch:
-            continue
-        coarse = np.asarray(coarse_by_agent[agent_id], dtype=np.float32)
-        endpoint = np.asarray(coarse[int(mode_idx), -1, :2], dtype=np.float32)
-        before = _coerce_optional_point(planner_batch[agent_id].get("target_point"))
-        planner_batch[agent_id]["target_point"] = endpoint.copy()
-        planner_batch[agent_id]["preference_point"] = endpoint.copy()
-        metadata[agent_id] = {
-            "target_point_before": before,
-            "target_point_after": endpoint.astype(float).tolist(),
-            "selected_coarse_endpoint": endpoint.astype(float).tolist(),
-        }
-    return metadata
+    if config is None:
+        config = build_transfuser_config()
+    return apply_selected_mode_guidance(
+        planner_batch,
+        agent_ids=agent_ids,
+        selected_modes=selected_modes,
+        coarse_by_agent=coarse_by_agent,
+        config=config,
+    )
 
 
 def _safe_mean(values: list[float]) -> float:
@@ -647,6 +828,7 @@ def _draw_multimodal_trajectories(
     candidates_world: np.ndarray,
     selected_mode_idx: int | None,
     *,
+    mode_slot_names: list[str] | None = None,
     selected_label: str | None = None,
     other_label: str | None = None,
 ) -> None:
@@ -656,12 +838,14 @@ def _draw_multimodal_trajectories(
     origin_array = np.asarray(origin, dtype=np.float64)
     for mode_i in range(candidates_array.shape[0]):
         full_path = np.vstack([origin_array, candidates_array[mode_i]])
+        rgb = _plot_color_for_mode_index(mode_i, mode_slot_names)
+        mpl_color = tuple(c / 255.0 for c in rgb)
         if selected_mode_idx is not None and mode_i == int(selected_mode_idx):
             ax.plot(
                 full_path[:, 0],
                 full_path[:, 1],
                 "--",
-                color=MULTIMODAL_SELECTED_COLOR,
+                color=mpl_color,
                 linewidth=2.6,
                 alpha=0.95,
                 zorder=4,
@@ -673,85 +857,13 @@ def _draw_multimodal_trajectories(
                 full_path[:, 0],
                 full_path[:, 1],
                 "--",
-                color=MULTIMODAL_OTHER_COLOR,
+                color=mpl_color,
                 linewidth=1.9,
-                alpha=0.65,
+                alpha=0.55,
                 zorder=3,
                 label=other_label,
             )
             other_label = None
-
-
-def _build_topdown_world_to_screen_projector(env, frame: np.ndarray) -> Callable[[np.ndarray], np.ndarray] | None:
-    renderer = getattr(env, "top_down_renderer", None)
-    if renderer is None or frame is None:
-        return None
-
-    screen_size = (int(frame.shape[1]), int(frame.shape[0]))
-    reference_world = None
-    current_track_agent = getattr(renderer, "current_track_agent", None)
-    if current_track_agent is not None:
-        reference_world = np.asarray(getattr(current_track_agent, "position", (0.0, 0.0))[:2], dtype=np.float32)
-    elif getattr(renderer, "position", None) is not None:
-        reference_world = np.asarray(renderer.position[:2], dtype=np.float32)
-    else:
-        reference_world = np.zeros(2, dtype=np.float32)
-
-    def _project_live(world_point_xy: np.ndarray) -> np.ndarray:
-        point = np.asarray(world_point_xy, dtype=np.float32)
-        off = None
-        if not bool(getattr(renderer, "target_agent_heading_up", False)):
-            field = renderer._screen_canvas.get_size()
-            if getattr(renderer, "position", None) is not None or getattr(renderer, "current_track_agent", None) is not None:
-                if getattr(renderer, "center_on_map", False):
-                    frame_canvas_size = renderer._frame_canvas.get_size()
-                    position = (frame_canvas_size[0] / 2, frame_canvas_size[1] / 2)
-                else:
-                    cam_pos = getattr(renderer, "position", None) or tuple(
-                        getattr(renderer.current_track_agent, "position", (0.0, 0.0))
-                    )
-                    position = renderer._frame_canvas.pos2pix(*cam_pos)
-            else:
-                position = (field[0] / 2, field[1] / 2)
-            off = (position[0] - field[0] / 2, position[1] - field[1] / 2)
-        projected = np.asarray(renderer._world_to_screen_position(point, off), dtype=np.float32)
-        if screen_size != tuple(renderer._screen_canvas.get_size()):
-            scale_x = float(screen_size[0]) / float(renderer._screen_canvas.get_size()[0])
-            scale_y = float(screen_size[1]) / float(renderer._screen_canvas.get_size()[1])
-            projected = np.asarray([projected[0] * scale_x, projected[1] * scale_y], dtype=np.float32)
-        return projected
-
-    origin_screen = _project_live(reference_world)
-    unit_x_screen = _project_live(reference_world + np.asarray([1.0, 0.0], dtype=np.float32))
-    unit_y_screen = _project_live(reference_world + np.asarray([0.0, 1.0], dtype=np.float32))
-    basis_x = unit_x_screen - origin_screen
-    basis_y = unit_y_screen - origin_screen
-
-    def _project(world_point: np.ndarray) -> np.ndarray:
-        point = np.asarray(world_point, dtype=np.float32)
-        delta = point[:2] - reference_world
-        return np.asarray(
-            origin_screen + delta[0] * basis_x + delta[1] * basis_y,
-            dtype=np.float32,
-        )
-
-    return _project
-
-
-def _capture_step_plot_render_context(
-    env,
-    enabled: bool,
-) -> tuple[np.ndarray | None, Callable[[np.ndarray], np.ndarray] | None]:
-    if not enabled:
-        return None, None
-    frame = _capture_2d_topdown_frame(env)
-    if frame is None:
-        return None, None
-    return frame, _build_topdown_world_to_screen_projector(env, frame)
-
-
-def _build_step_trajectory_plot_path(output_dir: Path, episode_idx: int, step_idx: int) -> Path:
-    return output_dir / "step_trajectory_plots" / f"episode_{episode_idx:03d}" / f"step_{step_idx:05d}.png"
 
 
 def _format_step_reward_lines(
@@ -803,6 +915,154 @@ def _world_xy_to_local_xy(
         ],
         dtype=np.float64,
     )
+
+
+def _point_or_none(value) -> list[float] | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float64).reshape(-1)
+    if array.size == 0:
+        return None
+    return array.astype(float).tolist()
+
+
+def _local_xy_to_world_list(
+    value,
+    ego_world_position: np.ndarray | None,
+    ego_heading_rad: float | None,
+) -> list[float] | None:
+    if value is None or ego_world_position is None or ego_heading_rad is None:
+        return None
+    array = np.asarray(value, dtype=np.float64).reshape(-1)
+    if array.size < 2:
+        return None
+    world = _local_xy_to_world_xy(array[:2], ego_world_position, float(ego_heading_rad))
+    return world.astype(float).tolist()
+
+
+def _build_coordinate_audit_record(
+    *,
+    episode_idx: int,
+    step_idx: int,
+    agent_id: str,
+    exported_index: int,
+    ego_xy_before_step: np.ndarray | None,
+    ego_heading_before_step: float | None,
+    final_info: dict,
+) -> dict:
+    selected_mode = final_info.get("trajectory_mode_idx")
+    selected_mode_int = int(selected_mode) if selected_mode is not None else None
+    candidates = final_info.get("trajectory_candidates")
+    selected_candidate = None
+    if candidates is not None and selected_mode_int is not None:
+        candidates_array = np.asarray(candidates, dtype=np.float64)
+        if (
+            candidates_array.ndim == 3
+            and 0 <= selected_mode_int < candidates_array.shape[0]
+            and candidates_array.shape[1] > 0
+        ):
+            selected_candidate = candidates_array[selected_mode_int]
+
+    coarse = final_info.get("coarse_trajectories")
+    selected_coarse_endpoint = None
+    if coarse is not None and selected_mode_int is not None:
+        coarse_array = np.asarray(coarse, dtype=np.float64)
+        if (
+            coarse_array.ndim == 3
+            and 0 <= selected_mode_int < coarse_array.shape[0]
+            and coarse_array.shape[1] > 0
+        ):
+            selected_coarse_endpoint = coarse_array[selected_mode_int, -1, :2]
+
+    target_point = final_info.get("target_point")
+    controller_debug = final_info.get("controller_debug", {}) or {}
+    first_local = selected_candidate[0] if selected_candidate is not None and len(selected_candidate) else None
+    endpoint_local = selected_candidate[-1] if selected_candidate is not None and len(selected_candidate) else None
+
+    return {
+        "episode": int(episode_idx),
+        "step": int(step_idx),
+        "agent_id": str(agent_id),
+        "exported_index": int(exported_index),
+        "ego_xy_before_step": _point_or_none(ego_xy_before_step),
+        "ego_heading_before_step": None if ego_heading_before_step is None else float(ego_heading_before_step),
+        "selected_mode": selected_mode_int,
+        "selected_candidate_first_local": _point_or_none(first_local),
+        "selected_candidate_endpoint_local": _point_or_none(endpoint_local),
+        "selected_candidate_first_world": _local_xy_to_world_list(first_local, ego_xy_before_step, ego_heading_before_step),
+        "selected_candidate_endpoint_world": _local_xy_to_world_list(endpoint_local, ego_xy_before_step, ego_heading_before_step),
+        "initial_selected_candidate_endpoint_local": _point_or_none(
+            final_info.get("initial_selected_candidate_endpoint")
+        ),
+        "initial_selected_candidate_endpoint_world": _local_xy_to_world_list(
+            final_info.get("initial_selected_candidate_endpoint"), ego_xy_before_step, ego_heading_before_step
+        ),
+        "guided_selected_candidate_endpoint_local": _point_or_none(
+            final_info.get("guided_selected_candidate_endpoint")
+        ),
+        "guided_selected_candidate_endpoint_world": _local_xy_to_world_list(
+            final_info.get("guided_selected_candidate_endpoint"), ego_xy_before_step, ego_heading_before_step
+        ),
+        "selected_coarse_endpoint_local": _point_or_none(selected_coarse_endpoint),
+        "selected_coarse_endpoint_world": _local_xy_to_world_list(
+            selected_coarse_endpoint, ego_xy_before_step, ego_heading_before_step
+        ),
+        "target_point_local": _point_or_none(target_point),
+        "target_point_world": _local_xy_to_world_list(target_point, ego_xy_before_step, ego_heading_before_step),
+        "controller_waypoint_x": (
+            float(controller_debug["waypoint_x"])
+            if controller_debug.get("waypoint_x") is not None
+            else None
+        ),
+        "controller_waypoint_y": (
+            float(controller_debug["waypoint_y"])
+            if controller_debug.get("waypoint_y") is not None
+            else None
+        ),
+        "controller_waypoint_heading": (
+            float(controller_debug["waypoint_heading"])
+            if controller_debug.get("waypoint_heading") is not None
+            else None
+        ),
+    }
+
+
+def _assert_platoon_candidate_alignment(
+    *,
+    exported_ids: list[str],
+    candidates: np.ndarray,
+    selected_modes: list[int],
+    planner_final_info: dict[str, dict],
+) -> None:
+    candidates_array = np.asarray(candidates, dtype=np.float32)
+    if candidates_array.ndim != 4:
+        raise AssertionError(f"candidates must have shape [N,M,8,3], got {candidates_array.shape}")
+    if len(exported_ids) != candidates_array.shape[0]:
+        raise AssertionError(
+            f"exported_ids length {len(exported_ids)} does not match candidates batch {candidates_array.shape[0]}"
+        )
+    if len(selected_modes) != len(exported_ids):
+        raise AssertionError(
+            f"selected_modes length {len(selected_modes)} does not match exported_ids length {len(exported_ids)}"
+        )
+    for agent_index, agent_id in enumerate(exported_ids):
+        if agent_id not in planner_final_info:
+            raise AssertionError(f"missing planner_final_info for {agent_id}")
+        final_info = planner_final_info[agent_id]
+        agent_candidates = np.asarray(final_info.get("trajectory_candidates"), dtype=np.float32)
+        if agent_candidates.shape != candidates_array[agent_index].shape or not np.allclose(
+            agent_candidates, candidates_array[agent_index]
+        ):
+            raise AssertionError(f"trajectory_candidates mismatch for {agent_id}")
+        mode_idx = int(selected_modes[agent_index])
+        if int(final_info.get("trajectory_mode_idx", -1)) != mode_idx:
+            raise AssertionError(f"trajectory_mode_idx mismatch for {agent_id}")
+        selected_trajectory = np.asarray(final_info.get("predicted_trajectory"), dtype=np.float32)
+        expected_trajectory = candidates_array[agent_index, mode_idx]
+        if selected_trajectory.shape != expected_trajectory.shape or not np.allclose(
+            selected_trajectory, expected_trajectory
+        ):
+            raise AssertionError(f"selected trajectory mismatch for {agent_id}")
 
 
 def _interpolate_reference_point_from_trajectory(
@@ -929,169 +1189,6 @@ def _compute_control_error_record(
     )
 
 
-def _record_step_visualization(
-    ego_before_step,
-    ego_xy_before_step: np.ndarray | None,
-    ego_heading_before_step: float | None,
-    final_info: dict,
-    episode_length: int,
-    save_trajectory_plot: bool,
-    actual_positions: list[np.ndarray],
-    planned_trajectories: list[tuple[int, list[np.ndarray]]],
-    multimodal_trajectories: list[tuple[int, np.ndarray, int]],
-    step_plot_records: list[StepTrajectoryPlotRecord] | None = None,
-    topdown_frame: np.ndarray | None = None,
-    world_to_screen_projector: Callable[[np.ndarray], np.ndarray] | None = None,
-    ego_accel_mps2: float | None = None,
-    agent_label: str | None = None,
-) -> None:
-    if step_plot_records is None:
-        step_plot_records = []
-    if ego_xy_before_step is not None:
-        actual_positions.append(np.asarray(ego_xy_before_step, dtype=np.float64))
-
-    if not save_trajectory_plot or ego_before_step is None:
-        return
-
-    predicted_traj = final_info.get("predicted_trajectory")
-    selected_world_array = None
-    if predicted_traj is not None:
-        planned_world = []
-        for wp in np.asarray(predicted_traj):
-            planned_world.append(
-                _local_xy_to_world_xy(
-                    np.asarray([float(wp[0]), float(wp[1])], dtype=np.float64),
-                    ego_xy_before_step,
-                    float(ego_heading_before_step),
-                )
-            )
-        planned_trajectories.append((episode_length - 1, planned_world))
-        selected_world_array = np.asarray(planned_world, dtype=np.float64)
-
-    trajectory_candidates = final_info.get("trajectory_candidates")
-    mode_idx = final_info.get("trajectory_mode_idx")
-    candidates_world_array = None
-    if trajectory_candidates is not None:
-        candidates_world = []
-        for candidate in np.asarray(trajectory_candidates):
-            candidate_world = []
-            for wp in np.asarray(candidate):
-                candidate_world.append(
-                    _local_xy_to_world_xy(
-                        np.asarray([float(wp[0]), float(wp[1])], dtype=np.float64),
-                        ego_xy_before_step,
-                        float(ego_heading_before_step),
-                    )
-                )
-            candidates_world.append(candidate_world)
-        candidates_world_array = np.asarray(candidates_world, dtype=np.float64)
-
-    dynamic_anchor_candidates = final_info.get("coarse_trajectories")
-    dynamic_anchor_world_array = None
-    multi_point_world_array = None
-    if dynamic_anchor_candidates is not None:
-        anchor_world = []
-        for candidate in np.asarray(dynamic_anchor_candidates):
-            candidate_world = []
-            for wp in np.asarray(candidate):
-                candidate_world.append(
-                    _local_xy_to_world_xy(
-                        np.asarray([float(wp[0]), float(wp[1])], dtype=np.float64),
-                        ego_xy_before_step,
-                        float(ego_heading_before_step),
-                    )
-                )
-            anchor_world.append(candidate_world)
-        dynamic_anchor_world_array = np.asarray(anchor_world, dtype=np.float64)
-        if dynamic_anchor_world_array.ndim == 3 and dynamic_anchor_world_array.shape[1] > 0:
-            multi_point_world_array = dynamic_anchor_world_array[:, -1, :2].copy()
-
-    target_point = final_info.get("target_point")
-    target_point_world = None
-    if target_point is not None:
-        target_point_xy = np.asarray(target_point, dtype=np.float64).reshape(-1)
-        if target_point_xy.size >= 2:
-            target_point_world = _local_xy_to_world_xy(
-                np.asarray([float(target_point_xy[0]), float(target_point_xy[1])], dtype=np.float64),
-                ego_xy_before_step,
-                float(ego_heading_before_step),
-            )
-
-    target_line = final_info.get("target_line")
-    target_line_world = None
-    if target_line is not None:
-        target_line_xy = np.asarray(target_line, dtype=np.float64)
-        if target_line_xy.ndim == 2 and target_line_xy.shape[0] > 0 and target_line_xy.shape[1] >= 2:
-            target_line_world = np.asarray(
-                [
-                    _local_xy_to_world_xy(
-                        np.asarray([float(point[0]), float(point[1])], dtype=np.float64),
-                        ego_xy_before_step,
-                        float(ego_heading_before_step),
-                    )
-                    for point in target_line_xy
-                ],
-                dtype=np.float64,
-            )
-
-    topology_polyline = final_info.get("topology_polyline")
-    topology_polyline_world = None
-    if topology_polyline is not None:
-        topo_xy = np.asarray(topology_polyline, dtype=np.float64)
-        if topo_xy.ndim == 2 and topo_xy.shape[0] > 0 and topo_xy.shape[1] >= 2:
-            topology_polyline_world = np.asarray(
-                [
-                    _local_xy_to_world_xy(
-                        np.asarray([float(point[0]), float(point[1])], dtype=np.float64),
-                        ego_xy_before_step,
-                        float(ego_heading_before_step),
-                    )
-                    for point in topo_xy
-                ],
-                dtype=np.float64,
-            )
-
-    if selected_world_array is not None or candidates_world_array is not None:
-        _ego_speed = float(getattr(ego_before_step, "speed_km_h", 0.0)) if ego_before_step is not None else None
-        step_plot_records.append(
-            StepTrajectoryPlotRecord(
-                step_idx=episode_length,
-                ego_position=np.asarray(ego_xy_before_step, dtype=np.float64),
-                selected_trajectory=selected_world_array,
-                multimodal_trajectories=candidates_world_array,
-                selected_mode_idx=(int(mode_idx) if mode_idx is not None else None),
-                mode_slot_names=list(final_info.get("mode_slot_names", [])) if final_info.get("mode_slot_names") else None,
-                mode_valid_mask=(
-                    np.asarray(final_info.get("mode_valid_mask"), dtype=bool)
-                    if final_info.get("mode_valid_mask") is not None
-                    else None
-                ),
-                dynamic_anchor_trajectories=dynamic_anchor_world_array,
-                multi_point_world=multi_point_world_array,
-                target_point_world=target_point_world,
-                target_line_world=target_line_world,
-                topology_polyline_world=topology_polyline_world,
-                topdown_frame=(None if topdown_frame is None else np.asarray(topdown_frame, dtype=np.uint8).copy()),
-                world_to_screen_projector=world_to_screen_projector,
-                ego_speed_km_h=_ego_speed,
-                ego_acceleration=ego_accel_mps2,
-                env_reward=(
-                    float(final_info["env_reward"])
-                    if final_info.get("env_reward") is not None
-                    else None
-                ),
-                agent_label=agent_label,
-            )
-        )
-
-    if candidates_world_array is None or mode_idx is None:
-        return
-
-    multimodal_trajectories.append(
-        (episode_length - 1, candidates_world_array, int(mode_idx))
-    )
-
-
 def _write_video(video_path: str, frames: list[np.ndarray], fps: int) -> None:
     if not frames:
         return
@@ -1163,367 +1260,6 @@ def _compute_plot_view_bounds(
     return (float(min_xy[0]), float(max_xy[0])), (float(min_xy[1]), float(max_xy[1]))
 
 
-def _save_step_trajectory_plot(
-    *,
-    step_record: StepTrajectoryPlotRecord,
-    road_boundaries: list[np.ndarray],
-    output_path: Path,
-    episode_idx: int,
-    show_topology_polyline: bool = False,
-) -> None:
-    if step_record.topdown_frame is None or step_record.world_to_screen_projector is None:
-        return
-
-    canvas = np.asarray(step_record.topdown_frame, dtype=np.uint8).copy()
-    ego = np.asarray(step_record.ego_position, dtype=np.float64)
-    projector = step_record.world_to_screen_projector
-
-    # ── 1. Zoom: crop the canvas to 1/4 area (1/2 side length) centred on ego ──
-    ego_screen = np.round(projector(ego)).astype(np.int32)
-    h_full, w_full = canvas.shape[:2]
-    crop_w = w_full // 2
-    crop_h = h_full // 2
-    cx, cy = int(ego_screen[0]), int(ego_screen[1])
-    x0 = max(0, min(cx - crop_w // 2, w_full - crop_w))
-    y0 = max(0, min(cy - crop_h // 2, h_full - crop_h))
-    canvas = canvas[y0:y0 + crop_h, x0:x0 + crop_w].copy()
-    canvas = cv2.resize(canvas, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
-    scale_x = float(w_full) / float(crop_w)
-    scale_y = float(h_full) / float(crop_h)
-    agent_label_color = (245, 120, 11)  # RGB orange, matching the original topdown EGO label style.
-
-    def _proj_zoomed(world_point: np.ndarray) -> np.ndarray:
-        """Project world → zoomed canvas pixel."""
-        sp = projector(np.asarray(world_point, dtype=np.float32))
-        return np.asarray(
-            [(sp[0] - x0) * scale_x, (sp[1] - y0) * scale_y],
-            dtype=np.float32,
-        )
-
-    def _draw_world_polyline(world_points: np.ndarray, color: tuple[int, int, int], thickness: int, alpha: float = 1.0):
-        world_points = np.asarray(world_points, dtype=np.float64)
-        if world_points.ndim != 2 or world_points.shape[0] < 2:
-            return
-        screen_xy = np.asarray([_proj_zoomed(p) for p in world_points], dtype=np.float32)
-        polyline = np.round(screen_xy).astype(np.int32).reshape(-1, 1, 2)
-        if alpha >= 0.999:
-            cv2.polylines(canvas, [polyline], False, color, thickness, lineType=cv2.LINE_AA)
-            return
-        overlay = canvas.copy()
-        cv2.polylines(overlay, [polyline], False, color, thickness, lineType=cv2.LINE_AA)
-        cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0.0, dst=canvas)
-
-    def _draw_agent_record(record: StepTrajectoryPlotRecord, *, primary: bool) -> None:
-        record_ego = np.asarray(record.ego_position, dtype=np.float64)
-        valid_mask = (
-            np.asarray(record.mode_valid_mask, dtype=bool)
-            if record.mode_valid_mask is not None
-            else None
-        )
-        if record.dynamic_anchor_trajectories is not None:
-            for mode_i, anchor in enumerate(np.asarray(record.dynamic_anchor_trajectories, dtype=np.float64)):
-                full_path = np.vstack([record_ego, anchor])
-                is_valid = valid_mask is None or mode_i >= len(valid_mask) or bool(valid_mask[mode_i])
-                anchor_color = (
-                    _plot_color_for_mode_index(mode_i, record.mode_slot_names)
-                    if is_valid
-                    else PAPER_INVALID_MODE_COLOR
-                )
-                _draw_world_polyline(full_path, anchor_color, 1, alpha=0.24 if is_valid else 0.16)
-
-        if record.multimodal_trajectories is not None:
-            candidates_array = np.asarray(record.multimodal_trajectories, dtype=np.float64)
-            selected_idx = record.selected_mode_idx
-            for mode_i in range(candidates_array.shape[0]):
-                if selected_idx is not None and mode_i == int(selected_idx):
-                    continue
-                full_path = np.vstack([record_ego, candidates_array[mode_i]])
-                mode_color_i = _plot_color_for_mode_index(mode_i, record.mode_slot_names)
-                _draw_world_polyline(full_path, mode_color_i, 2 if primary else 1, alpha=0.62 if primary else 0.38)
-            if selected_idx is not None and selected_idx < candidates_array.shape[0]:
-                full_path = np.vstack([record_ego, candidates_array[int(selected_idx)]])
-                selected_color = _plot_color_for_mode_index(int(selected_idx), record.mode_slot_names)
-                _draw_world_polyline(full_path, selected_color, 4 if primary else 3, alpha=0.98 if primary else 0.82)
-        elif record.selected_trajectory is not None:
-            selected_path = np.vstack([record_ego, np.asarray(record.selected_trajectory, dtype=np.float64)])
-            _draw_world_polyline(selected_path, PAPER_SELECTED_TRAJ_COLOR, 4 if primary else 3, alpha=0.96 if primary else 0.78)
-
-        if show_topology_polyline and record.topology_polyline_world is not None:
-            topology_world = np.asarray(record.topology_polyline_world, dtype=np.float64)
-            if topology_world.ndim == 2 and topology_world.shape[0] >= 2:
-                _draw_world_polyline(topology_world, PAPER_TOPOLOGY_COLOR, 2, alpha=0.74 if primary else 0.48)
-
-        if record.target_line_world is not None:
-            target_line_world = np.asarray(record.target_line_world, dtype=np.float64)
-            if target_line_world.ndim == 2 and target_line_world.shape[0] >= 1:
-                for target_line_point in target_line_world:
-                    line_xy = np.round(_proj_zoomed(target_line_point)).astype(np.int32)
-                    cv2.circle(
-                        canvas,
-                        tuple(int(v) for v in line_xy),
-                        3,
-                        PAPER_TARGET_LINE_COLOR,
-                        thickness=-1,
-                        lineType=cv2.LINE_AA,
-                    )
-
-        if record.target_point_world is not None:
-            target_xy = np.round(_proj_zoomed(np.asarray(record.target_point_world, dtype=np.float64))).astype(np.int32)
-            cv2.circle(
-                canvas,
-                tuple(int(v) for v in target_xy),
-                5,
-                PAPER_TARGET_POINT_COLOR,
-                thickness=-1,
-                lineType=cv2.LINE_AA,
-            )
-            cv2.circle(
-                canvas,
-                tuple(int(v) for v in target_xy),
-                5,
-                (45, 90, 140),
-                thickness=1,
-                lineType=cv2.LINE_AA,
-            )
-
-        record_ego_zoomed = np.round(_proj_zoomed(record_ego)).astype(np.int32)
-        cv2.circle(
-            canvas,
-            tuple(int(v) for v in record_ego_zoomed),
-            7,
-            PAPER_EGO_FILL_COLOR,
-            thickness=-1,
-            lineType=cv2.LINE_AA,
-        )
-        cv2.circle(
-            canvas,
-            tuple(int(v) for v in record_ego_zoomed),
-            7,
-            PAPER_EGO_EDGE_COLOR,
-            thickness=1,
-            lineType=cv2.LINE_AA,
-        )
-        label = record.agent_label or "EGO"
-        try:
-            label_index = max(int("".join(ch for ch in label if ch.isdigit())) - 1, 0)
-        except Exception:
-            label_index = 0
-        cv2.putText(
-            canvas,
-            label,
-            (int(record_ego_zoomed[0]) - 19, int(record_ego_zoomed[1]) - 15 - 14 * label_index),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
-            (255, 255, 255),
-            4,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            canvas,
-            label,
-            (int(record_ego_zoomed[0]) - 18, int(record_ego_zoomed[1]) - 14 - 14 * label_index),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
-            agent_label_color,
-            2,
-            cv2.LINE_AA,
-        )
-
-    for peer_record in step_record.peer_records or []:
-        _draw_agent_record(peer_record, primary=False)
-
-    if step_record.dynamic_anchor_trajectories is not None:
-        valid_mask = (
-            np.asarray(step_record.mode_valid_mask, dtype=bool)
-            if step_record.mode_valid_mask is not None
-            else None
-        )
-        for mode_i, anchor in enumerate(np.asarray(step_record.dynamic_anchor_trajectories, dtype=np.float64)):
-            full_path = np.vstack([ego, anchor])
-            is_valid = valid_mask is None or mode_i >= len(valid_mask) or bool(valid_mask[mode_i])
-            anchor_color = (
-                _plot_color_for_mode_index(mode_i, step_record.mode_slot_names)
-                if is_valid
-                else PAPER_INVALID_MODE_COLOR
-            )
-            _draw_world_polyline(full_path, anchor_color, 1, alpha=0.24 if is_valid else 0.16)
-
-    if show_topology_polyline and step_record.topology_polyline_world is not None:
-        topology_world = np.asarray(step_record.topology_polyline_world, dtype=np.float64)
-        if topology_world.ndim == 2 and topology_world.shape[0] >= 2:
-            _draw_world_polyline(topology_world, PAPER_TOPOLOGY_COLOR, 2, alpha=0.74)
-
-    # ── 2. Draw non-selected modes first, selected mode last (on top) ──────────
-    selected_mode_idx = step_record.selected_mode_idx
-    if step_record.multimodal_trajectories is not None:
-        candidates_array = np.asarray(step_record.multimodal_trajectories, dtype=np.float64)
-        # Pass 1: non-selected modes
-        for mode_i in range(candidates_array.shape[0]):
-            if selected_mode_idx is not None and mode_i == int(selected_mode_idx):
-                continue
-            full_path = np.vstack([ego, candidates_array[mode_i]])
-            mode_color_i = _plot_color_for_mode_index(mode_i, step_record.mode_slot_names)
-            _draw_world_polyline(full_path, mode_color_i, 2, alpha=0.62)
-        # Pass 2: selected mode drawn last → always on top
-        if selected_mode_idx is not None and selected_mode_idx < candidates_array.shape[0]:
-            full_path = np.vstack([ego, candidates_array[int(selected_mode_idx)]])
-            selected_color = _plot_color_for_mode_index(int(selected_mode_idx), step_record.mode_slot_names)
-            _draw_world_polyline(full_path, selected_color, 4, alpha=0.98)
-    elif step_record.selected_trajectory is not None:
-        selected_path = np.vstack([ego, np.asarray(step_record.selected_trajectory, dtype=np.float64)])
-        _draw_world_polyline(selected_path, PAPER_SELECTED_TRAJ_COLOR, 4, alpha=0.96)
-
-    # Ego dot (draw after trajectories so it's always on top)
-    ego_zoomed = np.round(_proj_zoomed(ego)).astype(np.int32)
-    cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, PAPER_EGO_FILL_COLOR, thickness=-1, lineType=cv2.LINE_AA)
-    cv2.circle(canvas, tuple(int(v) for v in ego_zoomed), 7, PAPER_EGO_EDGE_COLOR, thickness=1, lineType=cv2.LINE_AA)
-    cv2.putText(
-        canvas,
-        step_record.agent_label or "EGO",
-        (int(ego_zoomed[0]) - 19, int(ego_zoomed[1]) - 15),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
-        (255, 255, 255),
-        4,
-        cv2.LINE_AA,
-    )
-    cv2.putText(
-        canvas,
-        step_record.agent_label or "EGO",
-        (int(ego_zoomed[0]) - 18, int(ego_zoomed[1]) - 14),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
-        agent_label_color,
-        2,
-        cv2.LINE_AA,
-    )
-
-    if step_record.target_line_world is not None:
-        target_line_world = np.asarray(step_record.target_line_world, dtype=np.float64)
-        if target_line_world.ndim == 2 and target_line_world.shape[0] >= 1:
-            for target_line_point in target_line_world:
-                line_xy = np.round(_proj_zoomed(target_line_point)).astype(np.int32)
-                cv2.circle(
-                    canvas,
-                    tuple(int(v) for v in line_xy),
-                    3,
-                    PAPER_TARGET_LINE_COLOR,
-                    thickness=-1,
-                    lineType=cv2.LINE_AA,
-                )
-
-    if step_record.target_point_world is not None:
-        target_xy = np.round(_proj_zoomed(np.asarray(step_record.target_point_world, dtype=np.float64))).astype(np.int32)
-        cv2.circle(
-            canvas,
-            tuple(int(v) for v in target_xy),
-            5,
-            PAPER_TARGET_POINT_COLOR,
-            thickness=-1,
-            lineType=cv2.LINE_AA,
-        )
-        cv2.circle(
-            canvas,
-            tuple(int(v) for v in target_xy),
-            5,
-            (45, 90, 140),
-            thickness=1,
-            lineType=cv2.LINE_AA,
-        )
-
-    # ── 3. Info box with selected mode names ───────────────────────────────────
-    def _mode_name_for_record(record: StepTrajectoryPlotRecord) -> str:
-        idx = record.selected_mode_idx
-        if idx is None:
-            return "N/A"
-        if record.mode_slot_names and 0 <= int(idx) < len(record.mode_slot_names):
-            return record.mode_slot_names[int(idx)]
-        try:
-            from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
-            return MODE_SLOTS[int(idx)].name
-        except Exception:
-            return f"mode_{idx}"
-
-    all_agent_records = [step_record] + list(step_record.peer_records or [])
-
-    def _record_sort_key(record: StepTrajectoryPlotRecord) -> int:
-        label = record.agent_label or ""
-        digits = "".join(ch for ch in label if ch.isdigit())
-        return int(digits) if digits else 999
-
-    all_agent_records = sorted(all_agent_records, key=_record_sort_key)
-
-    reward_lines = _format_step_reward_lines(
-        [
-            (record.agent_label or "EGO", record.env_reward)
-            for record in all_agent_records
-        ]
-    )
-    _mode_count = min(len(all_agent_records), 4)
-    _mode_text_end_y = 52 + 18 * _mode_count
-    _reward_text_end_y = _mode_text_end_y + 6 + 18 * len(reward_lines)
-    _speed_text_y = max(118, _reward_text_end_y + 6)
-    _legend_y0 = _speed_text_y + 20
-    box_x1, box_y1, box_x2, box_y2 = 10, 10, 500, max(180, _legend_y0 + 44)
-    overlay = canvas.copy()
-    cv2.rectangle(overlay, (box_x1, box_y1), (box_x2, box_y2), (250, 250, 250), thickness=-1)
-    cv2.addWeighted(overlay, 0.88, canvas, 0.12, 0.0, dst=canvas)
-    cv2.rectangle(canvas, (box_x1, box_y1), (box_x2, box_y2), (210, 214, 220), thickness=1)
-    cv2.putText(
-        canvas,
-        f"Episode {episode_idx}  Step {step_record.step_idx}",
-        (20, 30),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (25, 25, 25), 1, cv2.LINE_AA,
-    )
-    # ── 3a. Selected mode labels for all platoon agents ───
-    mode_text_y = 52
-    for record in all_agent_records[:4]:
-        mode_name = _mode_name_for_record(record)
-        mode_color = (
-            _plot_color_for_mode_index(int(record.selected_mode_idx), record.mode_slot_names)
-            if record.selected_mode_idx is not None
-            else PAPER_SELECTED_TRAJ_COLOR
-        )
-        cv2.putText(
-            canvas,
-            f"{record.agent_label or 'EGO'}: {mode_name}",
-            (20, mode_text_y),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.42, mode_color, 2, cv2.LINE_AA,
-        )
-        mode_text_y += 18
-    reward_text_y = mode_text_y + 6
-    for reward_line in reward_lines:
-        cv2.putText(
-            canvas,
-            reward_line,
-            (20, reward_text_y),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (120, 70, 30), 1, cv2.LINE_AA,
-        )
-        reward_text_y += 18
-
-    # ── 3b. Speed and acceleration ───
-    _speed_str = f"{step_record.ego_speed_km_h:.1f} km/h" if step_record.ego_speed_km_h is not None else "-- km/h"
-    _accel_str = f"{step_record.ego_acceleration:+.2f} m/s\u00b2" if step_record.ego_acceleration is not None else "-- m/s\u00b2"
-    speed_text_y = _speed_text_y
-    cv2.putText(
-        canvas,
-        f"speed: {_speed_str}  accel: {_accel_str}",
-        (20, speed_text_y),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.44, (40, 40, 120), 1, cv2.LINE_AA,
-    )
-    legend_y0 = _legend_y0
-    cv2.putText(canvas, "selected: mode color", (20, legend_y0), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (40, 40, 40), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "others: mode colors", (20, legend_y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (40, 40, 40), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "anchors: same colors, faint", (178, legend_y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (90, 90, 90), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "target line: green", (20, legend_y0 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TARGET_LINE_COLOR, 1, cv2.LINE_AA)
-    cv2.putText(canvas, "target point: blue", (178, legend_y0 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TARGET_POINT_COLOR, 1, cv2.LINE_AA)
-    if show_topology_polyline:
-        cv2.putText(canvas, "topology: purple", (20, legend_y0 + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, PAPER_TOPOLOGY_COLOR, 1, cv2.LINE_AA)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(output_path), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
-
-
 def _save_trajectory_plot(
     actual_positions: list[np.ndarray],
     planned_trajectories: list[tuple[int, list[np.ndarray]]],
@@ -1532,6 +1268,7 @@ def _save_trajectory_plot(
     output_path: str,
     episode_idx: int,
     plot_interval: int = 10,
+    mode_slot_names: list[str] | None = None,
 ) -> None:
     import matplotlib
 
@@ -1566,6 +1303,7 @@ def _save_trajectory_plot(
             origin=origin,
             candidates_world=candidates_array,
             selected_mode_idx=int(best_mode_idx),
+            mode_slot_names=mode_slot_names,
             selected_label=("Selected mode" if first_selected_mode else None),
             other_label=("Other modes" if first_other_modes else None),
         )
@@ -1947,6 +1685,32 @@ def _build_dynamic_mode_features_for_vehicle(vehicle, config) -> dict[str, np.nd
     try:
         current_map = getattr(getattr(vehicle, "engine", None), "current_map", None)
         ctx = build_mode_context_from_vehicle(vehicle, current_map=current_map)
+
+        # Ensure every polyline starts from [0, 0] (the vehicle's actual position in
+        # ego-local frame).  build_mode_context_from_vehicle samples from the lane
+        # centreline projection of the vehicle's longitudinal position, which has a
+        # small lateral offset from the vehicle centre.  Without this correction the
+        # generator produces trajectories whose first point is NOT at the vehicle,
+        # causing a visual gap between ego and the start of the coarse anchor.
+        _origin = np.zeros((1, 2), dtype=np.float32)
+
+        def _fix_poly(p):
+            if p is None:
+                return None
+            p = np.asarray(p, dtype=np.float32)
+            if p.ndim != 2 or p.shape[1] < 2:
+                return p
+            # Replace (or prepend) so the first row is the ego origin.
+            # If the polyline already has many points, keep them all but anchor
+            # the start at [0, 0] to remove the lateral-offset artefact.
+            return np.vstack([_origin, p[1:, :2]])
+
+        ctx.current_lane_polyline = _fix_poly(ctx.current_lane_polyline)
+        ctx.left_lane_polyline    = _fix_poly(ctx.left_lane_polyline)
+        ctx.right_lane_polyline   = _fix_poly(ctx.right_lane_polyline)
+        ctx.left_branch_polyline  = _fix_poly(ctx.left_branch_polyline)
+        ctx.right_branch_polyline = _fix_poly(ctx.right_branch_polyline)
+
         generator = ModeTrajectoryGenerator(
             keep_lane_high_speed_mps=config.mode_keep_high_speed_mps,
             keep_lane_medium_speed_mps=config.mode_keep_medium_speed_mps,
@@ -1976,9 +1740,23 @@ def _attach_platoon_dynamic_mode_features(
     env,
     config,
 ) -> None:
+    from metadrive.policy.diffusion_policy.mode_definitions import mode_slot_count
+    num_slots = mode_slot_count(
+        config.mode_keep_lane_count,
+        config.mode_lane_change_left_count,
+        config.mode_lane_change_right_count,
+        config.mode_emergency_stop_count,
+    )
+    _fallback = {
+        "coarse_trajectories": np.zeros((num_slots, 8, 2), dtype=np.float32),
+        "mode_valid_mask": np.ones((num_slots,), dtype=bool),   # all-True: any action passes mask check
+    }
     for agent_id, sample in planner_batch.items():
         vehicle = env.agents.get(agent_id)
         if vehicle is None:
+            # Vehicle removed (crash/out-of-road) but episode not yet terminated:
+            # write fallback so downstream code never KeyErrors on coarse_trajectories.
+            sample.update(_fallback)
             continue
         sample.update(_build_dynamic_mode_features_for_vehicle(vehicle, config))
 
@@ -2015,13 +1793,16 @@ def _platoon_agent_final_info(
 ) -> dict:
     final_info = dict(base_info or {})
     # Populate target_point from the observation's navigation guidance so that
-    # _record_step_visualization always draws a target_point circle.
+    # Populate target_point from the observation's navigation guidance.
     # When RANDOM_USE_MODE_ENDPOINT_TARGET=1, this default is overwritten below
     # (line that checks target_point_after is not None) with the selected coarse
     # endpoint, making the visual difference between the two modes obvious.
     _obs_target_point = agent_obs.get("target_point")
     if _obs_target_point is not None:
         final_info["target_point"] = np.asarray(_obs_target_point, dtype=np.float32).reshape(-1)
+    _obs_topo = agent_obs.get("topology_polyline")
+    if _obs_topo is not None:
+        final_info["topology_polyline"] = np.asarray(_obs_topo, dtype=np.float32)
     final_info.update(
         {
             "agent_id": agent_id,
@@ -2125,15 +1906,15 @@ def run_platoon_planner_backend(
         )
         ppo_deterministic = bool(getattr(args, "ppo_deterministic", 1))
         selection_policy = "ppo_actor"
-        target_override_enabled = False
+        target_override_enabled = True
         print(f"[test] mode=ppo_actor  ckpt={ppo_actor_ckpt}", flush=True)
         print(f"[test] ppo_deterministic={ppo_deterministic}", flush=True)
     else:
         ppo_deterministic = False
         selection_policy = str(getattr(args, "selection_policy", "argmax"))
-        target_override_enabled = bool(getattr(args, "random_use_mode_endpoint_target", 0))
+        target_override_enabled = True
         print(f"[test] mode=pretrained_planner  selection_policy={selection_policy}", flush=True)
-        print(f"[test] target_override_enabled={target_override_enabled}", flush=True)
+    print(f"[test] selected_mode_guidance_enabled={target_override_enabled}", flush=True)
 
     # random_rng used by pretrained-planner path (argmax does not consume it)
     random_rng = np.random.RandomState(
@@ -2141,6 +1922,7 @@ def run_platoon_planner_backend(
     )
     policy_agent_ids = [f"agent{i}" for i in range(int(args.num_agents))]
     random_action_records: list[dict] = []
+    coordinate_audit_records: list[dict] = []
     summary = {
         "success": 0,
         "crash": 0,
@@ -2180,13 +1962,10 @@ def run_platoon_planner_backend(
             done = False
             episode_reward = 0.0
             episode_length = 0
+            _last_step_reward = 0.0   # reward from previous step, shown on next frame
             final_info = {}
             episode_3d_frames = []
             episode_2d_frames = []
-            actual_positions = []
-            planned_trajectories = []
-            multimodal_trajectories = []
-            step_plot_records = []
             control_error_records: list[ControlErrorRecord] = []
             road_boundaries = _extract_road_topology(env)
             _prev_ego_speed_km_h: float | None = None
@@ -2196,17 +1975,6 @@ def run_platoon_planner_backend(
                 if not active_agent_ids:
                     break
                 primary_agent_id = primary_agent_id if primary_agent_id in active_agent_ids else active_agent_ids[0]
-                pre_step_agent_state = {}
-                for agent_id in active_agent_ids:
-                    vehicle = env.agents.get(agent_id)
-                    if vehicle is None:
-                        continue
-                    pre_step_agent_state[agent_id] = {
-                        "vehicle": vehicle,
-                        "xy": np.asarray(vehicle.position[:2], dtype=np.float64),
-                        "heading": float(getattr(vehicle, "heading_theta", 0.0)),
-                        "speed_km_h": float(getattr(vehicle, "speed_km_h", 0.0)),
-                    }
                 ego_before_step = env.agents.get(primary_agent_id)
                 ego_xy_before_step = (
                     np.asarray(ego_before_step.position[:2], dtype=np.float64)
@@ -2227,10 +1995,6 @@ def run_platoon_planner_backend(
                     else None
                 )
                 _prev_ego_speed_km_h = _cur_ego_speed_km_h
-                step_plot_frame, step_plot_projector = _capture_step_plot_render_context(
-                    env,
-                    bool(args.save_trajectory_plot),
-                )
 
                 planner_batch = _build_platoon_planner_batch(obs, active_agent_ids)
                 _attach_platoon_dynamic_mode_features(planner_batch, env, transfuser_config)
@@ -2273,15 +2037,39 @@ def run_platoon_planner_backend(
                         policy=selection_policy,
                         rng=random_rng,
                     )
-                target_override_metadata: dict[str, dict] = {}
+                for agent_index, agent_id in enumerate(exported_ids):
+                    mode_idx = int(selected_modes[agent_index])
+                    if mode_idx < 0 or mode_idx >= mode_valid_mask.shape[1] or not bool(mode_valid_mask[agent_index, mode_idx]):
+                        raise ValueError(f"Selected invalid mode {mode_idx} for {agent_id}")
+                initial_candidates = candidates.copy()
+                target_override_metadata = _apply_selected_mode_target_overrides(
+                    planner_batch,
+                    agent_ids=exported_ids,
+                    selected_modes=selected_modes,
+                    coarse_by_agent=coarse_by_agent,
+                    config=transfuser_config,
+                )
+                with torch.no_grad():
+                    guided_export = planner.export_mode_selection(planner_batch)
+                guided_exported_ids = list(guided_export["agent_ids"])
+                if guided_exported_ids != exported_ids:
+                    raise RuntimeError(
+                        f"Guided export agent order changed: {guided_exported_ids} != {exported_ids}"
+                    )
+                candidates = np.asarray(guided_export["trajectory_candidates"], dtype=np.float32)
+                masked_logits = np.asarray(guided_export["masked_cls_logits"], dtype=np.float32)
+                raw_logits = np.asarray(guided_export["raw_cls_logits"], dtype=np.float32)
+                mode_valid_mask = np.asarray(guided_export["mode_valid_mask"], dtype=bool)
 
                 low_level_actions: dict[str, np.ndarray] = {}
+                _step_trajectories: dict[str, np.ndarray] = {}
                 planner_final_info: dict[str, dict] = {}
                 for agent_index, agent_id in enumerate(exported_ids):
                     mode_idx = int(selected_modes[agent_index])
                     if mode_idx < 0 or mode_idx >= mode_valid_mask.shape[1] or not bool(mode_valid_mask[agent_index, mode_idx]):
                         raise ValueError(f"Selected invalid mode {mode_idx} for {agent_id}")
                     trajectory = np.asarray(candidates[agent_index, mode_idx], dtype=np.float32)
+                    _step_trajectories[agent_id] = trajectory
                     vehicle = env.agents.get(agent_id)
                     current_speed_km_h = float(getattr(vehicle, "speed_km_h", 0.0)) if vehicle is not None else 0.0
                     action, controller_debug = compute_trajectory_control(
@@ -2312,7 +2100,13 @@ def run_platoon_planner_backend(
                             "selection_policy": selection_policy,
                             "ppo_selected_mode": int(mode_idx),
                             "selected_mode_valid": bool(mode_valid_mask[agent_index, mode_idx]),
-                            "target_point_override_enabled": target_override_enabled,
+                            "target_point_override_enabled": True,
+                            "initial_selected_candidate_endpoint": (
+                                initial_candidates[agent_index, mode_idx, -1, :2].astype(float).tolist()
+                            ),
+                            "guided_selected_candidate_endpoint": (
+                                candidates[agent_index, mode_idx, -1, :2].astype(float).tolist()
+                            ),
                             **target_override_metadata.get(
                                 agent_id,
                                 {
@@ -2329,11 +2123,121 @@ def run_platoon_planner_backend(
                             ),
                         }
                     )
-                    if planner_final_info[agent_id].get("target_point_after") is not None:
-                        planner_final_info[agent_id]["target_point"] = np.asarray(
-                            planner_final_info[agent_id]["target_point_after"],
-                            dtype=np.float32,
+                    for guidance_key in ("target_point", "preference_point", "target_line", "topology_polyline"):
+                        if planner_batch[agent_id].get(guidance_key) is not None:
+                            planner_final_info[agent_id][guidance_key] = np.asarray(
+                                planner_batch[agent_id][guidance_key],
+                                dtype=np.float32,
+                            )
+                # Pass selected trajectories to PlatoonEnv for road_topo_reward.
+                if hasattr(env, "_pending_step_trajectories"):
+                    env._pending_step_trajectories = _step_trajectories
+                if hasattr(env, "_pending_step_all_candidates"):
+                    env._pending_step_all_candidates = {
+                        agent_id: np.asarray(candidates[ai], dtype=np.float32)
+                        for ai, agent_id in enumerate(exported_ids)
+                    }
+                if hasattr(env, "_pending_step_mode_valid_masks"):
+                    env._pending_step_mode_valid_masks = {
+                        agent_id: np.asarray(mode_valid_mask[ai], dtype=bool)
+                        for ai, agent_id in enumerate(exported_ids)
+                    }
+                if hasattr(env, "_pending_step_mode_groups"):
+                    from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots as _bms
+                    _slot_map = {s.index: s for s in _bms(
+                        keep_lane_count=transfuser_config.mode_keep_lane_count,
+                        lane_change_left_count=transfuser_config.mode_lane_change_left_count,
+                        lane_change_right_count=transfuser_config.mode_lane_change_right_count,
+                        emergency_stop_count=transfuser_config.mode_emergency_stop_count,
+                    )}
+                    _mode_groups: dict[str, str] = {}
+                    for _ai, _aid in enumerate(exported_ids):
+                        _slot = _slot_map.get(int(selected_modes[_ai]))
+                        if _slot is None:
+                            _mode_groups[_aid] = "keep"
+                        elif _slot.semantic_group == "STOP":
+                            _mode_groups[_aid] = "stop"
+                        elif _slot.lateral_direction == "left":
+                            _mode_groups[_aid] = "left"
+                        elif _slot.lateral_direction == "right":
+                            _mode_groups[_aid] = "right"
+                        else:
+                            _mode_groups[_aid] = "keep"
+                    env._pending_step_mode_groups = _mode_groups
+                _assert_platoon_candidate_alignment(
+                    exported_ids=exported_ids,
+                    candidates=candidates,
+                    selected_modes=selected_modes,
+                    planner_final_info=planner_final_info,
+                )
+                if bool(getattr(args, "debug_coordinate_audit", 0)):
+                    for audit_index, agent_id in enumerate(exported_ids):
+                        coordinate_audit_records.append(
+                            _build_coordinate_audit_record(
+                                episode_idx=episode_idx,
+                                step_idx=episode_length + 1,
+                                agent_id=agent_id,
+                                exported_index=audit_index,
+                                ego_xy_before_step=ego_xy_before_step if agent_id == primary_agent_id else None,
+                                ego_heading_before_step=ego_heading_before_step if agent_id == primary_agent_id else None,
+                                final_info=planner_final_info[agent_id],
+                            )
                         )
+
+                if bool(getattr(args, "save_combined_traj_frames", 0)) and primary_agent_id in exported_ids:
+                    _pri_idx = exported_ids.index(primary_agent_id)
+                    _peers = []
+                    for _ai, _aid in enumerate(exported_ids):
+                        if _aid == primary_agent_id:
+                            continue
+                        _peer_vehicle = env.agents.get(_aid)
+                        _peer_ego = getattr(_peer_vehicle, "position", None)
+                        if _peer_ego is not None:
+                            _peer_ego = np.asarray(_peer_ego[:2], dtype=np.float64)
+                            _peer_veh = env.agents.get(_aid)
+                            _peer_heading = float(getattr(_peer_veh, "heading_theta", 0.0)) if _peer_veh else 0.0
+                            _peers.append({
+                                "xy": _peer_ego,
+                                "heading_rad": _peer_heading,
+                                "anchors": coarse_by_agent.get(_aid),
+                                "candidates": None,
+                                "selected": int(selected_modes[_ai]),
+                                "valid_mask": mode_valid_mask[_ai] if mode_valid_mask is not None else None,
+                            })
+                    _pri_vehicle = env.agents.get(primary_agent_id)
+                    _pri_ego_xy = np.asarray(_pri_vehicle.position[:2], dtype=np.float64) if _pri_vehicle else np.zeros(2)
+                    _pri_heading = float(getattr(_pri_vehicle, "heading_theta", 0.0)) if _pri_vehicle else 0.0
+                    _overlay = _build_step_overlay_polylines(
+                        ego_xy=_pri_ego_xy,
+                        ego_heading_rad=_pri_heading,
+                        coarse_anchor_trajectories=coarse_by_agent.get(primary_agent_id),
+                        multimodal_trajectories=candidates[_pri_idx] if candidates is not None else None,
+                        selected_mode_idx=int(selected_modes[_pri_idx]),
+                        topology_polyline_world=None,
+                        mode_valid_mask=mode_valid_mask[_pri_idx] if mode_valid_mask is not None else None,
+                        mode_slot_names=mode_slot_names,
+                        peer_ego_data=_peers,
+                    )
+                    _combined = _capture_topdown_frame_with_overlay(
+                        env, _overlay,
+                        screen_size=800, film_size=10000,
+                        camera_position=tuple(_pri_ego_xy),
+                    )
+                    if _combined is not None:
+                        # Draw PPO reward (from previous step) in the top-left corner.
+                        _reward_text = f"step={episode_length}  reward={_last_step_reward:+.3f}  total={episode_reward:.2f}"
+                        cv2.putText(_combined, _reward_text, (10, 22),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 3, cv2.LINE_AA)
+                        cv2.putText(_combined, _reward_text, (10, 22),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (30, 30, 200), 1, cv2.LINE_AA)
+                        _comb_path = (
+                            Path(args.output_dir)
+                            / "combined_traj_frames"
+                            / f"episode_{episode_idx:03d}"
+                            / f"step_{episode_length:05d}.png"
+                        )
+                        _comb_path.parent.mkdir(parents=True, exist_ok=True)
+                        cv2.imwrite(str(_comb_path), cv2.cvtColor(_combined, cv2.COLOR_RGB2BGR))
 
                 t_start = time.time()
                 obs, reward, terminated, truncated, info = env.step(low_level_actions)
@@ -2357,7 +2261,8 @@ def run_platoon_planner_backend(
                     info["missing_agent_ids"] = list(missing_agent_ids)
 
                 reward_vals = [float(v) for v in reward.values() if isinstance(v, (int, float, np.floating))]
-                episode_reward += float(np.mean(reward_vals)) if reward_vals else 0.0
+                _last_step_reward = float(np.mean(reward_vals)) if reward_vals else 0.0
+                episode_reward += _last_step_reward
                 for agent_id, agent_info in info.items():
                     if agent_id in planner_final_info:
                         # Preserve target_point when it was explicitly overridden to the
@@ -2394,6 +2299,10 @@ def run_platoon_planner_backend(
                         },
                         "candidate_endpoints": {
                             agent_id: candidates[idx, :, -1, :2].astype(float).tolist()
+                            for idx, agent_id in enumerate(exported_ids)
+                        },
+                        "initial_selected_candidate_endpoint": {
+                            agent_id: initial_candidates[idx, int(selected_modes[idx]), -1, :2].astype(float).tolist()
                             for idx, agent_id in enumerate(exported_ids)
                         },
                         "selected_candidate_endpoint": {
@@ -2452,44 +2361,6 @@ def run_platoon_planner_backend(
                     if frame_2d is not None:
                         episode_2d_frames.append(frame_2d)
 
-                if bool(args.save_trajectory_plot):
-                    per_agent_step_records: list[StepTrajectoryPlotRecord] = []
-                    for agent_id in exported_ids:
-                        agent_state = pre_step_agent_state.get(agent_id)
-                        agent_final_info = planner_final_info.get(agent_id)
-                        if agent_state is None or agent_final_info is None:
-                            continue
-                        record_actual_positions = actual_positions if agent_id == primary_agent_id else []
-                        record_planned = planned_trajectories if agent_id == primary_agent_id else []
-                        record_multimodal = multimodal_trajectories if agent_id == primary_agent_id else []
-                        before_count = len(per_agent_step_records)
-                        _record_step_visualization(
-                            ego_before_step=agent_state["vehicle"],
-                            ego_xy_before_step=agent_state["xy"],
-                            ego_heading_before_step=agent_state["heading"],
-                            final_info=agent_final_info,
-                            episode_length=episode_length,
-                            save_trajectory_plot=True,
-                            actual_positions=record_actual_positions,
-                            planned_trajectories=record_planned,
-                            multimodal_trajectories=record_multimodal,
-                            step_plot_records=per_agent_step_records,
-                            topdown_frame=step_plot_frame,
-                            world_to_screen_projector=step_plot_projector,
-                            ego_accel_mps2=(_ego_accel_mps2 if agent_id == primary_agent_id else None),
-                            agent_label=f"EGO{exported_ids.index(agent_id) + 1}",
-                        )
-                        if len(per_agent_step_records) == before_count:
-                            continue
-                    if per_agent_step_records:
-                        primary_record_index = exported_ids.index(primary_agent_id) if primary_agent_id in exported_ids else 0
-                        primary_record_index = min(primary_record_index, len(per_agent_step_records) - 1)
-                        primary_record = per_agent_step_records[primary_record_index]
-                        primary_record.peer_records = [
-                            record for index, record in enumerate(per_agent_step_records)
-                            if index != primary_record_index
-                        ]
-                        step_plot_records.append(primary_record)
 
                 if bool(args.save_step_images) and episode_length % max(int(args.step_image_interval), 1) == 0:
                     controller_debug = final_info.get("controller_debug", {})
@@ -2567,23 +2438,6 @@ def run_platoon_planner_backend(
                     episode_2d_frames,
                     fps=args.video_fps,
                 )
-            if args.save_trajectory_plot and actual_positions:
-                _save_trajectory_plot(
-                    actual_positions,
-                    planned_trajectories,
-                    multimodal_trajectories,
-                    road_boundaries,
-                    str(output_dir / "trajectory_plots" / f"episode_{episode_idx:03d}.png"),
-                    episode_idx,
-                )
-                for step_record in step_plot_records:
-                    _save_step_trajectory_plot(
-                        step_record=step_record,
-                        road_boundaries=road_boundaries,
-                        output_path=_build_step_trajectory_plot_path(output_dir, episode_idx, step_record.step_idx),
-                        episode_idx=episode_idx,
-                        show_topology_polyline=bool(args.show_topology_polyline),
-                    )
             if control_error_records:
                 _save_control_error_plots(
                     control_error_records,
@@ -2602,6 +2456,12 @@ def run_platoon_planner_backend(
     with random_records_path.open("w", encoding="utf-8") as handle:
         for record in random_action_records:
             handle.write(json.dumps(record) + "\n")
+    if bool(getattr(args, "debug_coordinate_audit", 0)):
+        coordinate_audit_path = Path(args.output_dir) / "coordinate_audit.jsonl"
+        with coordinate_audit_path.open("w", encoding="utf-8") as handle:
+            for record in coordinate_audit_records:
+                handle.write(json.dumps(record) + "\n")
+        print(f"[coordinate_audit] records_jsonl={coordinate_audit_path}")
     random_summary_path = Path(args.output_dir) / "random_action_reward_summary.json"
     random_summary = _summarize_random_action_rewards(
         random_action_records,
@@ -2764,10 +2624,6 @@ def main():
             final_info = {}
             episode_3d_frames = []
             episode_2d_frames = []
-            actual_positions = []
-            planned_trajectories = []
-            multimodal_trajectories = []
-            step_plot_records = []
             control_error_records: list[ControlErrorRecord] = []
             road_boundaries = _extract_road_topology(env)
             _prev_ego_speed_km_h: float | None = None
@@ -2797,10 +2653,6 @@ def main():
                     else None
                 )
                 _prev_ego_speed_km_h = _cur_ego_speed_km_h
-                step_plot_frame, step_plot_projector = _capture_step_plot_render_context(
-                    env,
-                    bool(args.save_trajectory_plot),
-                )
                 # External actions are ignored when agent_policy is a closed-loop policy.
                 dummy_actions = {
                     agent_id: np.zeros(2, dtype=np.float32)
@@ -2849,21 +2701,39 @@ def main():
                     if frame_2d is not None:
                         episode_2d_frames.append(frame_2d)
 
-                _record_step_visualization(
-                    ego_before_step=ego_before_step,
-                    ego_xy_before_step=ego_xy_before_step,
-                    ego_heading_before_step=ego_heading_before_step,
-                    final_info=final_info,
-                    episode_length=episode_length,
-                    save_trajectory_plot=bool(args.save_trajectory_plot),
-                    actual_positions=actual_positions,
-                    planned_trajectories=planned_trajectories,
-                    multimodal_trajectories=multimodal_trajectories,
-                    step_plot_records=step_plot_records,
-                    topdown_frame=step_plot_frame,
-                    world_to_screen_projector=step_plot_projector,
-                    ego_accel_mps2=_ego_accel_mps2,
-                )
+                if bool(getattr(args, "save_combined_traj_frames", 0)) and ego_xy_before_step is not None:
+                    _coarse = final_info.get("coarse_trajectories")
+                    _cands  = final_info.get("trajectory_candidates")
+                    _sel    = final_info.get("trajectory_mode_idx")
+                    if _cands is not None:
+                        _cands = np.asarray(_cands, dtype=np.float32)
+                        if _cands.ndim == 3 and _cands.shape[2] >= 2:
+                            _cands = _cands[:, :, :2]
+                    _overlay = _build_step_overlay_polylines(
+                        ego_xy=ego_xy_before_step,
+                        ego_heading_rad=float(ego_heading_before_step or 0.0),
+                        coarse_anchor_trajectories=np.asarray(_coarse, dtype=np.float32) if _coarse is not None else None,
+                        multimodal_trajectories=_cands,
+                        selected_mode_idx=int(_sel) if _sel is not None else None,
+                        topology_polyline_world=None,
+                        mode_valid_mask=None,
+                        mode_slot_names=_mode_slot_names_from_config(transfuser_config),
+                        peer_ego_data=None,
+                    )
+                    _combined = _capture_topdown_frame_with_overlay(
+                        env, _overlay,
+                        screen_size=800, film_size=10000,
+                        camera_position=tuple(ego_xy_before_step),
+                    )
+                    if _combined is not None:
+                        _comb_path = (
+                            Path(args.output_dir)
+                            / "combined_traj_frames"
+                            / f"episode_{episode_idx:03d}"
+                            / f"step_{episode_length:05d}.png"
+                        )
+                        _comb_path.parent.mkdir(parents=True, exist_ok=True)
+                        cv2.imwrite(str(_comb_path), cv2.cvtColor(_combined, cv2.COLOR_RGB2BGR))
 
                 if args.save_camera_interval > 0:
                     agent_obs = obs.get(agent_id)
@@ -2950,23 +2820,6 @@ def main():
                     episode_2d_frames,
                     fps=args.video_fps,
                 )
-            if args.save_trajectory_plot and actual_positions:
-                _save_trajectory_plot(
-                    actual_positions,
-                    planned_trajectories,
-                    multimodal_trajectories,
-                    road_boundaries,
-                    str(output_dir / "trajectory_plots" / f"episode_{episode_idx:03d}.png"),
-                    episode_idx,
-                )
-                for step_record in step_plot_records:
-                    _save_step_trajectory_plot(
-                        step_record=step_record,
-                        road_boundaries=road_boundaries,
-                        output_path=_build_step_trajectory_plot_path(output_dir, episode_idx, step_record.step_idx),
-                        episode_idx=episode_idx,
-                        show_topology_polyline=bool(args.show_topology_polyline),
-                    )
             if control_error_records:
                 _save_control_error_plots(
                     control_error_records,

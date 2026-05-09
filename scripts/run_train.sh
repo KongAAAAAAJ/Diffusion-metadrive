@@ -55,11 +55,11 @@ MODE_CLS_CONFIG="${MODE_CLS_CONFIG:-${REPO_ROOT}/configs/train/ppo.yaml}"
 MODE_CLS_OUTPUT_ROOT="${MODE_CLS_OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/ppo}"
 RL_NUM_AGENTS="${RL_NUM_AGENTS:-3}"
 RL_RENDER="${RL_RENDER:-0}"
-RL_STEPS="${RL_STEPS:-200000}"  # SB3 total env steps
+RL_STEPS="${RL_STEPS:-100000}"  # SB3 total env steps
 MODE_CLS_PLANNER_DEVICE="${MODE_CLS_PLANNER_DEVICE:-cuda}"
 # 逗号分隔的场景 ID；默认使用全部场景进行训练
-# MODE_CLS_SCENARIO_IDS="${MODE_CLS_SCENARIO_IDS:-S1_free_cruise_straight,S2_free_cruise_curve,S3_straight_following,S4_curve_following}"
-MODE_CLS_SCENARIO_IDS="${MODE_CLS_SCENARIO_IDS:-}"
+MODE_CLS_SCENARIO_IDS="${MODE_CLS_SCENARIO_IDS:-S2_free_cruise_curve}"
+# MODE_CLS_SCENARIO_IDS="${MODE_CLS_SCENARIO_IDS:-}"
 
 # ---------------------------------------------------------------------------
 # 工具函数

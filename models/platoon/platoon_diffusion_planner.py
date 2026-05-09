@@ -44,6 +44,14 @@ class PlatoonDiffusionPlanner(nn.Module):
             return value.unsqueeze(0)
         return value
 
+    @staticmethod
+    def _ensure_sequence_batch_dim(value: Tensor) -> Tensor:
+        if not torch.is_tensor(value):
+            value = torch.as_tensor(value)
+        if value.ndim == 2:
+            return value.unsqueeze(0)
+        return value
+
     def _device(self) -> torch.device:
         return next(self.parameters()).device
 
@@ -60,6 +68,7 @@ class PlatoonDiffusionPlanner(nn.Module):
         mode_valid_masks = []
         target_points = []
         preference_points = []
+        target_lines = []
         agent_contexts: Dict[str, dict] = {}
         for agent_id in agent_ids:
             sample = batch[agent_id]
@@ -86,6 +95,10 @@ class PlatoonDiffusionPlanner(nn.Module):
             if "preference_point" in sample:
                 preference_points.append(
                     self._ensure_batch_dim(sample["preference_point"]).to(device=device)
+                )
+            if "target_line" in sample:
+                target_lines.append(
+                    self._ensure_sequence_batch_dim(sample["target_line"]).to(device=device)
                 )
             agent_contexts[agent_id] = {
                 "camera": camera_tensor,
@@ -114,6 +127,8 @@ class PlatoonDiffusionPlanner(nn.Module):
             model_inputs["target_point"] = torch.cat(target_points, dim=0).float()
         if len(preference_points) == len(agent_ids):
             model_inputs["preference_point"] = torch.cat(preference_points, dim=0).float()
+        if len(target_lines) == len(agent_ids):
+            model_inputs["target_line"] = torch.cat(target_lines, dim=0).float()
         return agent_ids, model_inputs, agent_contexts
 
     def forward(self, batch: Mapping[str, Mapping[str, Tensor]]) -> Dict[str, Tensor]:

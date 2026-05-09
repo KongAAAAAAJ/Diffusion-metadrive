@@ -20,7 +20,7 @@ from models.mode_selection.sb3_mode_cls_policy import require_sb3
 
 
 DEFAULT_CONFIG_PATH = "configs/train/ppo.yaml"
-DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/mode_cls_ppo")
+DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/ppo")
 _RUN_DIR_RE = re.compile(r"^run_(\d+)$")
 
 
@@ -284,12 +284,13 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train CTDE mode-classification PPO with SB3 MaskablePPO.")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--pretrained-ckpt", default="")
+    parser.add_argument("--pretrained-ckpt",
+        default="/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
-    parser.add_argument("--total-env-steps", type=int, default=0)
-    parser.add_argument("--num-agents", type=int, default=0)
-    parser.add_argument("--planner-device", default="")
-    parser.add_argument("--use-render", type=int, choices=(0, 1), default=-1)
+    parser.add_argument("--total-env-steps", type=int, default=200000)
+    parser.add_argument("--num-agents", type=int, default=3)
+    parser.add_argument("--planner-device", default="cuda")
+    parser.add_argument("--use-render", type=int, choices=(0, 1), default=0)
     parser.add_argument("--scenario-ids", default="")
     return parser.parse_args()
 

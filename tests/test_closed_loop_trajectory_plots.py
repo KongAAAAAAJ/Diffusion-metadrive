@@ -11,6 +11,16 @@ def _install_test_stubs() -> None:
     cv2_module.COLOR_RGB2BGR = 0
     cv2_module.cvtColor = lambda image, code: image
     cv2_module.imwrite = lambda path, image: Path(path).write_bytes(b"fake-image") or True
+    cv2_module.LINE_AA = 16
+    cv2_module.FONT_HERSHEY_SIMPLEX = 0
+    cv2_module.polylines = lambda *args, **kwargs: None
+    cv2_module.addWeighted = lambda overlay, alpha, canvas, beta, gamma, dst=None: None
+    cv2_module.circle = lambda *args, **kwargs: None
+    cv2_module.putText = lambda *args, **kwargs: None
+    cv2_module.getTextSize = lambda *args, **kwargs: ((20, 8), 2)
+    cv2_module.rectangle = lambda *args, **kwargs: None
+    cv2_module.resize = lambda image, size, interpolation=None: image
+    cv2_module.INTER_LINEAR = 1
     sys.modules["cv2"] = cv2_module
 
     torch_module = types.ModuleType("torch")
@@ -27,12 +37,17 @@ def _install_test_stubs() -> None:
     sys.modules["metadrive.policy.diffusion_policy.transfuser_callback"] = callback_module
 
     config_module = types.ModuleType("metadrive.policy.diffusion_policy.transfuser_config")
+    config_module.TransfuserConfig = object
     config_module.build_transfuser_config = lambda *args, **kwargs: types.SimpleNamespace(plan_anchor_path="")
+    config_module.diffusion_model_config_to_overrides = lambda config: {}
+    config_module.load_diffusion_model_config = lambda *args, **kwargs: {}
+    config_module.resolve_model_config_value = lambda config, key, default=None: default
     config_module.transfuser_config_to_dict = lambda config: {}
     sys.modules["metadrive.policy.diffusion_policy.transfuser_config"] = config_module
 
     policy_module = types.ModuleType("metadrive.policy.diffusion_policy.transfuser_policy")
     policy_module.TransfuserPolicy = object
+    policy_module.compute_trajectory_control = lambda *args, **kwargs: (np.zeros((2,), dtype=np.float32), {})
     sys.modules["metadrive.policy.diffusion_policy.transfuser_policy"] = policy_module
 
     run_dir_module = types.ModuleType("metadrive.policy.diffusion_policy.run_dir_utils")
@@ -104,6 +119,8 @@ def test_save_step_trajectory_plot_writes_image(tmp_path: Path):
             dtype=np.float64,
         ),
         selected_mode_idx=0,
+        topdown_frame=np.zeros((100, 100, 3), dtype=np.uint8),
+        world_to_screen_projector=lambda point: np.asarray(point[:2], dtype=np.float32) * 10.0 + 50.0,
     )
     road_boundaries = [
         np.array([[0.0, -1.0], [3.0, -1.0]], dtype=np.float64),
@@ -119,3 +136,36 @@ def test_save_step_trajectory_plot_writes_image(tmp_path: Path):
 
     assert output_path.exists()
     assert output_path.stat().st_size > 0
+
+
+def test_save_step_trajectory_plot_uses_original_topdown_projection(monkeypatch, tmp_path: Path):
+    module = _load_module()
+    projected_polylines = []
+
+    def _record_polyline(canvas, polylines, *args, **kwargs):
+        projected_polylines.append(np.asarray(polylines[0]).reshape(-1, 2).copy())
+
+    monkeypatch.setattr(module.cv2, "polylines", _record_polyline)
+
+    step_record = module.StepTrajectoryPlotRecord(
+        step_idx=1,
+        ego_position=np.array([0.0, 0.0], dtype=np.float64),
+        selected_trajectory=np.array([[1.0, 0.0], [2.0, 0.0]], dtype=np.float64),
+        multimodal_trajectories=None,
+        selected_mode_idx=None,
+        topdown_frame=np.zeros((100, 100, 3), dtype=np.uint8),
+        world_to_screen_projector=lambda point: np.asarray(point[:2], dtype=np.float32) * 10.0 + 50.0,
+    )
+
+    module._save_step_trajectory_plot(
+        step_record=step_record,
+        road_boundaries=[],
+        output_path=tmp_path / "step.png",
+        episode_idx=0,
+    )
+
+    assert projected_polylines
+    np.testing.assert_array_equal(
+        projected_polylines[0],
+        np.array([[50, 50], [60, 50], [70, 50]], dtype=np.int32),
+    )

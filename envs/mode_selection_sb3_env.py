@@ -11,6 +11,7 @@ try:
 except Exception:  # pragma: no cover
     import gym  # type: ignore
 
+from metadrive.policy.diffusion_policy.selected_mode_guidance import apply_selected_mode_guidance
 from metadrive.policy.diffusion_policy.transfuser_policy import compute_trajectory_control
 
 
@@ -28,6 +29,7 @@ class ModeSelectionSB3Env(gym.Env):
         self._agent_ids = [f"agent{i}" for i in range(self.num_agents)]
         self._last_raw_obs: dict[str, Mapping[str, Any]] = {}
         self._last_export: dict[str, Any] | None = None
+        self._last_planner_batch: dict[str, dict] | None = None
         self._last_obs: dict[str, np.ndarray] | None = None
         self._num_modes = int(self.config.get("num_modes", 1))
         self._relation_state_dim = int(self.config.get("relation_state_dim", 12))
@@ -158,13 +160,51 @@ class ModeSelectionSB3Env(gym.Env):
     def step(self, action):
         if self._last_export is None:
             raise RuntimeError("ModeSelectionSB3Env.step() called before reset().")
+        if self._last_planner_batch is None:
+            raise RuntimeError("ModeSelectionSB3Env.step() missing cached planner batch.")
         step_export = self._last_export
         action_arr = np.asarray(action, dtype=np.int64).reshape(-1)
         if action_arr.shape[0] != self.num_agents:
             raise ValueError(f"Expected {self.num_agents} mode actions, got {action_arr.shape[0]}.")
         masks = np.asarray(step_export["mode_valid_mask"], dtype=bool)
-        candidates = np.asarray(step_export["trajectory_candidates"], dtype=np.float32)
         agent_ids = list(step_export["agent_ids"])
+        initial_candidates = np.asarray(step_export["trajectory_candidates"], dtype=np.float32)
+
+        # If any controlled agent has been removed from the environment (crash / out-of-road
+        # during delay_done cooldown), the episode must have already been terminal.  Force an
+        # immediate done rather than proceeding with stale / invalid actions.
+        live_agents = getattr(self.base_env, "agents", {})
+        missing = [aid for aid in agent_ids if aid not in live_agents]
+        if missing:
+            obs = self._last_obs if self._last_obs is not None else self._refresh_mode_export()
+            return obs, 0.0, True, False, {"force_done": True, "missing_agents": missing}
+
+        for idx, (agent_id, mode_idx) in enumerate(zip(agent_ids, action_arr)):
+            if mode_idx < 0 or mode_idx >= masks.shape[1] or not bool(masks[idx, mode_idx]):
+                raise ValueError(f"invalid mode action for {agent_id}: {int(mode_idx)}")
+        planner_batch = {
+            agent_id: dict(self._last_planner_batch[agent_id])
+            for agent_id in agent_ids
+            if agent_id in self._last_planner_batch
+        }
+        coarse_by_agent = {
+            agent_id: np.asarray(planner_batch[agent_id]["coarse_trajectories"], dtype=np.float32)
+            for agent_id in agent_ids
+            if planner_batch.get(agent_id, {}).get("coarse_trajectories") is not None
+        }
+        guidance_metadata = apply_selected_mode_guidance(
+            planner_batch,
+            agent_ids=agent_ids,
+            selected_modes=[int(value) for value in action_arr.tolist()],
+            coarse_by_agent=coarse_by_agent,
+            config=getattr(self.planner, "config", None),
+        )
+        guided_export = self.planner.export_mode_selection(planner_batch)
+        guided_agent_ids = list(guided_export["agent_ids"])
+        if guided_agent_ids != agent_ids:
+            raise RuntimeError(f"Guided export agent order changed: {guided_agent_ids} != {agent_ids}")
+        candidates = np.asarray(guided_export["trajectory_candidates"], dtype=np.float32)
+        masks = np.asarray(guided_export["mode_valid_mask"], dtype=bool)
         vehicle_state_before = self._vehicle_states(agent_ids)
         vehicle_position_before = {
             agent_id: state["position"] for agent_id, state in vehicle_state_before.items()
@@ -173,8 +213,6 @@ class ModeSelectionSB3Env(gym.Env):
         low_level_actions: dict[str, np.ndarray] = {}
         controller_debug: dict[str, dict[str, float]] = {}
         for idx, (agent_id, mode_idx) in enumerate(zip(agent_ids, action_arr)):
-            if mode_idx < 0 or mode_idx >= masks.shape[1] or not bool(masks[idx, mode_idx]):
-                raise ValueError(f"invalid mode action for {agent_id}: {int(mode_idx)}")
             trajectory = np.asarray(candidates[idx, mode_idx], dtype=np.float32)
             if trajectory.shape != (8, 3):
                 raise ValueError(f"selected trajectory for {agent_id} must have shape (8,3), got {trajectory.shape}")
@@ -190,6 +228,47 @@ class ModeSelectionSB3Env(gym.Env):
             )
             low_level_actions[agent_id] = action_2d
             controller_debug[agent_id] = debug
+
+        # Store selected trajectories + semantic mode groups so that
+        # PlatoonEnv._build_trajectory_reward_cache() can compute road_topo_reward
+        # without needing to re-infer the mode group from trajectory shape.
+        if hasattr(self.base_env, "_pending_step_trajectories"):
+            self.base_env._pending_step_trajectories = dict(trajectories)
+        if hasattr(self.base_env, "_pending_step_all_candidates"):
+            self.base_env._pending_step_all_candidates = {
+                agent_id: np.asarray(candidates[idx], dtype=np.float32)
+                for idx, agent_id in enumerate(agent_ids)
+            }
+        if hasattr(self.base_env, "_pending_step_mode_valid_masks"):
+            self.base_env._pending_step_mode_valid_masks = {
+                agent_id: np.asarray(masks[idx], dtype=bool)
+                for idx, agent_id in enumerate(agent_ids)
+            }
+        if hasattr(self.base_env, "_pending_step_mode_groups"):
+            planner_config = getattr(self.planner, "config", None)
+            _mode_groups: dict[str, str] = {}
+            if planner_config is not None:
+                from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots
+                _slots = build_mode_slots(
+                    keep_lane_count=planner_config.mode_keep_lane_count,
+                    lane_change_left_count=planner_config.mode_lane_change_left_count,
+                    lane_change_right_count=planner_config.mode_lane_change_right_count,
+                    emergency_stop_count=planner_config.mode_emergency_stop_count,
+                )
+                _slot_map = {s.index: s for s in _slots}
+                for agent_id, mode_idx in zip(agent_ids, action_arr):
+                    slot = _slot_map.get(int(mode_idx))
+                    if slot is None:
+                        _mode_groups[agent_id] = "keep"
+                    elif slot.semantic_group == "STOP":
+                        _mode_groups[agent_id] = "stop"
+                    elif slot.lateral_direction == "left":
+                        _mode_groups[agent_id] = "left"
+                    elif slot.lateral_direction == "right":
+                        _mode_groups[agent_id] = "right"
+                    else:
+                        _mode_groups[agent_id] = "keep"
+            self.base_env._pending_step_mode_groups = _mode_groups
 
         result = self.base_env.step(low_level_actions)
         if len(result) == 5:
@@ -260,11 +339,24 @@ class ModeSelectionSB3Env(gym.Env):
                 "pretrained_argmax_mode": [int(x) for x in pretrained_argmax.tolist()],
                 "invalid_mode_rate": 0.0,
                 "raw_cls_logits": np.asarray(step_export["raw_cls_logits"], dtype=float).tolist(),
-                "masked_cls_logits": np.asarray(step_export["masked_cls_logits"], dtype=float).tolist(),
+                "guided_raw_cls_logits": np.asarray(guided_export["raw_cls_logits"], dtype=float).tolist(),
+                "masked_cls_logits": np.asarray(guided_export["masked_cls_logits"], dtype=float).tolist(),
                 "mode_valid_mask": masks.astype(bool).tolist(),
+                "initial_selected_trajectory_endpoint": [
+                    initial_candidates[idx, int(action_arr[idx]), -1, :2].astype(float).tolist()
+                    for idx in range(len(agent_ids))
+                ],
                 "selected_trajectory_endpoint": [
                     trajectories[agent_id][-1, :2].astype(float).tolist() for agent_id in agent_ids
                 ],
+                "target_point_after": {
+                    agent_id: guidance_metadata.get(agent_id, {}).get("target_point_after")
+                    for agent_id in agent_ids
+                },
+                "selected_coarse_endpoint": {
+                    agent_id: guidance_metadata.get(agent_id, {}).get("selected_coarse_endpoint")
+                    for agent_id in agent_ids
+                },
                 "selected_low_level_action": {
                     agent_id: low_level_actions[agent_id].astype(float).tolist() for agent_id in agent_ids
                 },
@@ -299,9 +391,13 @@ class ModeSelectionSB3Env(gym.Env):
                 "pretrained_argmax_mode",
                 "invalid_mode_rate",
                 "raw_cls_logits",
+                "guided_raw_cls_logits",
                 "masked_cls_logits",
                 "mode_valid_mask",
+                "initial_selected_trajectory_endpoint",
                 "selected_trajectory_endpoint",
+                "target_point_after",
+                "selected_coarse_endpoint",
                 "selected_low_level_action",
                 "controller_debug",
                 "candidate_endpoints",
@@ -334,6 +430,7 @@ class ModeSelectionSB3Env(gym.Env):
             if agent_id in self._last_raw_obs
         }
         export = self.planner.export_mode_selection(planner_batch)
+        self._last_planner_batch = planner_batch
         self._last_export = export
         self._num_modes = int(np.asarray(export["mode_valid_mask"]).shape[1])
         self.action_space = gym.spaces.MultiDiscrete([self._num_modes] * self.num_agents)
@@ -415,7 +512,27 @@ class ModeSelectionSB3Env(gym.Env):
         vehicle = getattr(self.base_env, "agents", {}).get(agent_id)
         if vehicle is not None:
             sample.update(self._build_dynamic_mode_features(vehicle))
+        else:
+            # Vehicle removed (crash/out-of-road): inject fallback so coarse_trajectories
+            # is always present in _last_planner_batch → prevents KeyError in next step.
+            sample.update(self._build_dynamic_mode_features_fallback())
         return sample
+
+    def _build_dynamic_mode_features_fallback(self) -> dict[str, np.ndarray]:
+        from metadrive.policy.diffusion_policy.mode_definitions import mode_slot_count
+        planner_config = getattr(self.planner, "config", None)
+        if planner_config is None:
+            return {}
+        num_slots = mode_slot_count(
+            planner_config.mode_keep_lane_count,
+            planner_config.mode_lane_change_left_count,
+            planner_config.mode_lane_change_right_count,
+            planner_config.mode_emergency_stop_count,
+        )
+        return {
+            "coarse_trajectories": np.zeros((num_slots, 8, 2), dtype=np.float32),
+            "mode_valid_mask": np.ones((num_slots,), dtype=bool),   # all-True: any action passes mask check
+        }
 
     def _build_dynamic_mode_features(self, vehicle) -> dict[str, np.ndarray]:
         from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle

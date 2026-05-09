@@ -170,6 +170,11 @@ class PlatoonEnv(BaseMultiEnv):
         self._scenario_step_count = 0
         self._pending_low_level_actions: dict[str, np.ndarray] = {}
         self._platoon_reward_cache: Optional[dict[str, object]] = None
+        self._pending_step_trajectories: dict[str, np.ndarray] = {}   # (8,3) local ego frame
+        self._pending_step_mode_groups: dict[str, str] = {}            # "keep"/"left"/"right"/"stop"
+        self._pending_step_all_candidates: dict[str, np.ndarray] = {}  # (num_modes,8,3) local ego frame
+        self._pending_step_mode_valid_masks: dict[str, np.ndarray] = {}   # (num_modes,) bool
+        self._trajectory_reward_cache: Optional[dict[str, object]] = None
         super().__init__(config=self._build_metadrive_config())
         self._install_platoon_runtime_config()
 
@@ -563,7 +568,12 @@ class PlatoonEnv(BaseMultiEnv):
         }
         self._last_info = {}
         self._platoon_reward_cache = None
+        self._trajectory_reward_cache = None
         self._pending_low_level_actions = {}
+        self._pending_step_trajectories = {}
+        self._pending_step_mode_groups = {}
+        self._pending_step_all_candidates = {}
+        self._pending_step_mode_valid_masks = {}
 
         return self._augment_observations(obs)
 
@@ -616,11 +626,21 @@ class PlatoonEnv(BaseMultiEnv):
 
         control_mode = self._infer_control_mode(actions)
         if control_mode == "trajectory":
+            # Store trajectory (local ego frame, 8×3) for road_topo_reward computation.
+            self._pending_step_trajectories = {
+                agent_id: np.asarray(action, dtype=np.float32)
+                for agent_id, action in actions.items()
+            }
             low_level_actions = {
                 agent_id: self.trajectory_to_control(agent_id, np.asarray(action, dtype=np.float32))
                 for agent_id, action in actions.items()
             }
         else:
+            # Do NOT clear _pending_step_trajectories here: ModeSelectionSB3Env may have
+            # pre-populated it (with (8,3) trajectories) before calling base_env.step().
+            # Only reset if nothing was externally provided.
+            if not self._pending_step_trajectories:
+                self._pending_step_trajectories = {}
             low_level_actions = {
                 agent_id: np.asarray(action, dtype=np.float32).reshape(2,)
                 for agent_id, action in actions.items()
@@ -643,6 +663,7 @@ class PlatoonEnv(BaseMultiEnv):
             for agent_id, action in actions.items()
         }
         self._platoon_reward_cache = None
+        self._trajectory_reward_cache = None
         # Tick ScenarioOrchestrator before the physics step (mirrors collect_expert behaviour)
         if getattr(self, "_scenario_orchestrator", None) is not None:
             lead_agent_id = self._agent_ids[0]
@@ -670,10 +691,34 @@ class PlatoonEnv(BaseMultiEnv):
         """
         if not self._cfg_bool("platoon_reward_enabled", True):
             return super().reward_function(vehicle_id)
-        cache = self._get_platoon_reward_cache()
-        per_agent = cache.get("per_agent", {})
-        info = dict(per_agent.get(vehicle_id, {})) if isinstance(per_agent, Mapping) else {}
-        return float(cache.get("reward", 0.0)), info
+        platoon_cache = self._get_platoon_reward_cache()  # 状态的platoon reward
+        traj_cache = self._get_trajectory_reward_cache()  # 动作轨迹的road topology reward
+        form_cache = self._build_traj_form_reward()  # 动作轨迹的form reward
+        w_topo = self._cfg_float("platoon_w_topo_reward", 3.0)
+        w_form = self._cfg_float("platoon_w_traj_form_reward", 0.0)
+        reward = (float(platoon_cache.get("reward", 0.0))
+                  + w_topo * float(traj_cache.get("reward", 0.0))
+                  + w_form * float(form_cache.get("reward", 0.0)))
+        
+        # # 打印platoon_cache和traj_cache的内容
+        # print(f"Platoon reward: {float(platoon_cache.get('reward', 0.0))}")
+        # print(f"Step Trajectory reward: {w_topo * float(traj_cache.get('reward', 0.0))}")
+        # # 打印每个agent的reward_topo
+        # _pa = traj_cache.get("per_agent", {})
+        # print(f"agent0 topo reward: {_pa.get('agent0', {}).get('road_topo_reward', 'N/A')}")
+        # print(f"agent1 topo reward: {_pa.get('agent1', {}).get('road_topo_reward', 'N/A')}")
+        # print(f"agent2 topo reward: {_pa.get('agent2', {}).get('road_topo_reward', 'N/A')}")
+
+
+        per_agent_platoon = platoon_cache.get("per_agent", {})
+        per_agent_traj = traj_cache.get("per_agent", {})
+        per_agent_form = form_cache.get("per_agent", {})
+        info = dict(per_agent_platoon.get(vehicle_id, {})) if isinstance(per_agent_platoon, Mapping) else {}
+        info.update(per_agent_traj.get(vehicle_id, {}) if isinstance(per_agent_traj, Mapping) else {})
+        info.update(per_agent_form.get(vehicle_id, {}) if isinstance(per_agent_form, Mapping) else {})
+        info["reward_topo"] = float(traj_cache.get("reward", 0.0))
+        info["reward_traj_form"] = float(form_cache.get("reward", 0.0))
+        return reward, info
 
     def _get_platoon_reward_cache(self) -> dict[str, object]:
         cache = getattr(self, "_platoon_reward_cache", None)
@@ -681,6 +726,240 @@ class PlatoonEnv(BaseMultiEnv):
             cache = self._build_platoon_reward_cache()
             self._platoon_reward_cache = cache
         return cache
+
+    def _get_trajectory_reward_cache(self) -> dict[str, object]:
+        cache = getattr(self, "_trajectory_reward_cache", None)
+        if cache is None:
+            cache = self._build_trajectory_reward_cache()
+            self._trajectory_reward_cache = cache
+        return cache
+
+    # ------------------------------------------------------------------
+    # Formation consistency reward (semantic mode-group comparison)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _lateral_group(mode_group: str) -> str:
+        """Map mode group to lateral destination: 'stay' | 'left' | 'right'."""
+        if mode_group in ("left",):
+            return "left"
+        if mode_group in ("right",):
+            return "right"
+        return "stay"   # keep / stop / unknown → stays in current lane
+
+    def _build_traj_form_reward(self) -> dict[str, object]:
+        """Evaluate whether consecutive vehicles choose mode trajectories that
+        keep them in the same lane, preserving platoon formation.
+
+        For each consecutive pair (agent[i-1], agent[i]):
+          same lateral destination → 1.0, different → 0.0
+        Team reward = mean over all follower pairs, ∈ [0, 1].
+
+        Per-agent: each follower gets its own pair score; the lead (agent0)
+        gets the team mean (it contributes to all pairs indirectly).
+        """
+        agent_ids = [aid for aid in self._agent_ids if aid in self.agents]
+        if len(agent_ids) < 2:
+            return {"reward": 0.0, "per_agent": {
+                aid: {"traj_form_reward": 0.0, "traj_form_pair_match": None}
+                for aid in agent_ids
+            }}
+
+        mode_groups = getattr(self, "_pending_step_mode_groups", {}) or {}
+
+        pair_scores: list[float] = []
+        follower_scores: dict[str, float] = {}
+
+        for i in range(1, len(agent_ids)):
+            lead_id = agent_ids[i - 1]
+            follower_id = agent_ids[i]
+            lead_lat = self._lateral_group(mode_groups.get(lead_id, "keep"))
+            follower_lat = self._lateral_group(mode_groups.get(follower_id, "keep"))
+            match = float(lead_lat == follower_lat)
+            pair_scores.append(match)
+            follower_scores[follower_id] = match
+
+        team_reward = float(np.mean(pair_scores)) if pair_scores else 0.0
+
+        per_agent: dict[str, dict] = {}
+        for aid in agent_ids:
+            if aid == agent_ids[0]:
+                # Lead: no pair above it; report team mean as its formation reward
+                per_agent[aid] = {"traj_form_reward": team_reward, "traj_form_pair_match": None}
+            else:
+                score = follower_scores.get(aid, 0.0)
+                per_agent[aid] = {"traj_form_reward": score, "traj_form_pair_match": bool(score > 0.5)}
+
+        return {"reward": team_reward, "per_agent": per_agent}
+
+    # ------------------------------------------------------------------
+    # Trajectory quality reward
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_adjacent_lane(vehicle, side: str):
+        """Return the adjacent lane object ('left' or 'right') or None."""
+        lane = getattr(vehicle, "lane", None)
+        if lane is None:
+            return None
+        lane_idx = getattr(lane, "index", None)
+        if lane_idx is None or len(lane_idx) < 3:
+            return None
+        try:
+            engine = getattr(vehicle, "engine", None)
+            current_map = getattr(engine, "current_map", None) if engine is not None else None
+            road_network = getattr(current_map, "road_network", None) if current_map is not None else None
+            if road_network is None:
+                return None
+            lanes_in_road = road_network.graph[lane_idx[0]][lane_idx[1]]
+            current_idx = int(lane_idx[2])
+            # MetaDrive convention: index 0 = leftmost, higher = rightmore.
+            # 'left' → lower index; 'right' → higher index.
+            target_idx = current_idx - 1 if side == "left" else current_idx + 1
+            if 0 <= target_idx < len(lanes_in_road):
+                return lanes_in_road[target_idx]
+        except Exception:
+            pass
+        return None
+
+    def _build_trajectory_reward_cache(self) -> dict[str, object]:
+        """Evaluate how closely each selected trajectory follows its target lane centre.
+
+        road_topo_reward[agent] = max(0, 1 - avg_lateral_deviation / norm_m)
+        norm_m: keep_lane=2 m, lane_change=5 m (configurable)
+        Team reward = mean over active agents, ∈ [0, 1].
+        """
+        agent_ids = [aid for aid in self._agent_ids if aid in self.agents]
+        if not agent_ids:
+            return {"reward": 0.0, "per_agent": {}}
+
+        _norm_keep = max(self._cfg_float("platoon_topo_reward_norm_keep_m", 4.0), 1e-3)
+        _norm_lc   = max(self._cfg_float("platoon_topo_reward_norm_lc_m",   12.0), 1e-3)
+
+        topo_scores: dict[str, float] = {}
+        per_agent: dict[str, dict] = {}
+
+        trajs = getattr(self, "_pending_step_trajectories", {}) or {}
+        mode_groups = getattr(self, "_pending_step_mode_groups", {}) or {}
+        all_cands = getattr(self, "_pending_step_all_candidates", {}) or {}
+        valid_masks = getattr(self, "_pending_step_mode_valid_masks", {}) or {}
+
+        neutral_score = 0
+
+        for agent_id in agent_ids:
+            traj = trajs.get(agent_id)
+            if traj is None:
+                topo_scores[agent_id] = neutral_score   # no trajectory info: neutral score
+                per_agent[agent_id] = {"road_topo_reward": neutral_score, "topo_avg_deviation_m": float("nan")}
+                #!
+                print(f"Agent {agent_id}: No trajectory provided, assigning neutral topo score.")
+                continue
+
+            traj = np.asarray(traj, dtype=np.float32)
+            if traj.ndim != 2 or traj.shape[0] < 1 or traj.shape[1] < 2:
+                topo_scores[agent_id] = neutral_score
+                per_agent[agent_id] = {"road_topo_reward": neutral_score, "topo_avg_deviation_m": float("nan")}
+                #!
+                print(f"Agent {agent_id}: Invalid trajectory shape {traj.shape}, assigning neutral topo score.")
+                continue
+
+            vehicle = self.agents.get(agent_id)
+            if vehicle is None:
+                topo_scores[agent_id] = neutral_score
+                per_agent[agent_id] = {"road_topo_reward": neutral_score, "topo_avg_deviation_m": float("nan")}
+                #!
+                print(f"Agent {agent_id}: Vehicle not found, assigning neutral topo score.")
+                continue
+
+            mode_group = mode_groups.get(agent_id, "keep")
+
+            # Determine target lane for deviation measurement.
+            if mode_group in ("keep", "stop"):
+                target_lane = getattr(vehicle, "lane", None)
+            else:
+                target_lane = self._get_adjacent_lane(vehicle, mode_group)
+                if target_lane is None:
+                    # Adjacent lane not found → fall back to current lane.
+                    target_lane = getattr(vehicle, "lane", None)
+
+            if target_lane is None:
+                topo_scores[agent_id] = neutral_score
+                per_agent[agent_id] = {"road_topo_reward": neutral_score, "topo_avg_deviation_m": float("nan")}
+                #!
+                print(f"Agent {agent_id}: Target lane not found, assigning neutral topo score.")
+                continue
+
+            # Convert trajectory from ego-local frame to world frame.
+            ego_pos = np.asarray(vehicle.position[:2], dtype=np.float64)
+            ego_hdg = float(vehicle.heading_theta)
+            cos_h, sin_h = float(np.cos(ego_hdg)), float(np.sin(ego_hdg))
+            deviations: list[float] = []
+            for pt in traj:
+                lx, ly = float(pt[0]), float(pt[1])
+                wx = ego_pos[0] + cos_h * lx - sin_h * ly
+                wy = ego_pos[1] + sin_h * lx + cos_h * ly
+                try:
+                    _, lat = target_lane.local_coordinates([wx, wy])
+                    deviations.append(abs(float(lat)))
+                except Exception:
+                    pass
+
+            if not deviations:
+                topo_scores[agent_id] = neutral_score
+                per_agent[agent_id] = {"road_topo_reward": neutral_score, "topo_avg_deviation_m": float("nan")}
+                #!
+                print(f"Agent {agent_id}: No valid trajectory points for deviation calculation, assigning neutral topo score.")
+                continue
+
+            avg_dev = float(np.mean(deviations))
+            norm_m = _norm_keep if mode_group in ("keep", "stop") else _norm_lc
+            score = float(max(0.0, 1.0 - avg_dev / norm_m))
+            topo_scores[agent_id] = score
+            per_agent[agent_id] = {
+                "road_topo_reward": score,
+                "topo_avg_deviation_m": avg_dev,
+                "topo_mode_group": mode_group,
+            }
+
+            # ── Debug: compute topo reward for every candidate trajectory ────────────────
+            if agent_id in all_cands and vehicle is not None:
+                cand_all = np.asarray(all_cands[agent_id], dtype=np.float32)  # (M, 8, 3)
+                vmask = valid_masks.get(agent_id)  # (M,) bool or None
+                cand_rewards: list[float] = []
+                for m_i in range(cand_all.shape[0]):
+                    # Skip invalid modes — they won't be selected so comparing is meaningless
+                    if vmask is not None and not bool(vmask[m_i]):
+                        cand_rewards.append(float("nan"))
+                        continue
+                    m_devs: list[float] = []
+                    for pt in cand_all[m_i]:
+                        lx, ly = float(pt[0]), float(pt[1])
+                        wx = ego_pos[0] + cos_h * lx - sin_h * ly
+                        wy = ego_pos[1] + sin_h * lx + cos_h * ly
+                        try:
+                            _, lat = target_lane.local_coordinates([wx, wy])
+                            m_devs.append(abs(float(lat)))
+                        except Exception:
+                            pass
+                    if m_devs:
+                        m_avg = float(np.mean(m_devs))
+                        m_score = float(max(0.0, 1.0 - m_avg / norm_m))
+                    else:
+                        m_score = 0.0
+                    cand_rewards.append(m_score)
+                # Rank among valid modes only: 0 = actor selected the best-topo candidate
+                valid_pairs = [(i, r) for i, r in enumerate(cand_rewards) if not (r != r)]  # skip nan
+                sorted_valid = sorted(valid_pairs, key=lambda t: -t[1])
+                selected_rank = next(
+                    (rank for rank, (i, r) in enumerate(sorted_valid)
+                     if abs(r - score) < 1e-4),
+                    -1,
+                )
+                per_agent[agent_id]["debug_candidate_topo_rewards"] = cand_rewards
+                per_agent[agent_id]["debug_selected_topo_rank"] = selected_rank
+
+        _reward = float(np.mean(list(topo_scores.values()))) if topo_scores else 0.0
+        return {"reward": _reward, "per_agent": per_agent}
 
     # ------------------------------------------------------------------
     # Reward sub-functions (one per component)
@@ -690,7 +969,8 @@ class PlatoonEnv(BaseMultiEnv):
     def _r_safety(crash_count: int, out_count: int, n: int) -> float:
         """Safety: collision penalty + out-of-road penalty, normalised by N."""
         n = max(n, 1)
-        return -100.0 * crash_count / n - 50.0 * out_count / n
+        # return -100.0 * crash_count / n - 50.0 * out_count / n
+        return - 50.0 * out_count / n  # !去掉碰撞惩罚，专注于超出道路的惩罚
 
     @staticmethod
     def _r_spacing(d: float, d_exp: float) -> float:
@@ -832,10 +1112,13 @@ class PlatoonEnv(BaseMultiEnv):
             self._r_comfort(jerk_by_agent[aid], delta_by_agent[aid]) for aid in agent_ids
         ]
         reward_comfort = float(np.mean(comfort_scores)) if comfort_scores else 0.0
+        reward_comfort = 0.0  # !暂时去掉舒适度奖励，专注于安全、车距、速度和进度
 
         reward = reward_safety + reward_spacing + reward_speed + reward_progress + reward_comfort
         clip = self._cfg_float("platoon_reward_clip", 150.0)  
         reward = float(np.clip(reward, -clip, clip)) if clip > 0.0 else float(reward)
+        # 归一化奖励到 [-1, 1] 区间（假设最大绝对值不超过 clip）
+        reward = float(reward / clip) if clip > 0.0 else float(reward)
 
         per_agent: dict[str, dict[str, object]] = {}
         for agent_id in agent_ids:

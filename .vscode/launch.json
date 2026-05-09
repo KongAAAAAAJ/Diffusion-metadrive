@@ -15,9 +15,13 @@
             "request": "launch",
             "program": "${workspaceFolder}/metadrive/policy/diffusion_policy/test_transfuser_policy.py",
             "console": "integratedTerminal",
-            // "args": [
-            //     "--checkpoint", "outputs/diffusion/checkpoints/diffusion-epoch=98.ckpt"
-            // ]
+        },
+        {
+            "name": "TrainPPO",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train/train_mode_cls_sb3.py",
+            "console": "integratedTerminal",
         }
     ]
 }
