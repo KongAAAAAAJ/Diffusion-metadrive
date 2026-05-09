@@ -42,6 +42,12 @@ class ModeSelectionSB3Env(gym.Env):
         self._lookahead_index = int(self.config.get("lookahead_index", 2))
         self._target_speed_km_h = float(self.config.get("target_speed_km_h", 30.0))
         self._controller_type = str(self.config.get("controller_type", "stabilized"))
+        # trajectory_source: "diffusion" (default) → use diffusion planner candidates
+        #                     "coarse"             → skip diffusion, use coarse kinematic trajectory
+        self._trajectory_source = str(self.config.get("trajectory_source", "diffusion"))
+        # use_action_mask: True (default) → MaskablePPO enforces mode_valid_mask
+        #                  False          → all modes selectable; invalid slots filled with keep-lane fallback
+        self._use_action_mask = bool(self.config.get("use_action_mask", True))
 
     def _build_base_env(self):
         if self.config.get("base_env") is not None:
@@ -72,6 +78,8 @@ class ModeSelectionSB3Env(gym.Env):
                 "scenario_index",
                 "local_route_index",
                 "debug_log_path",
+                "trajectory_source",
+                "use_action_mask",
                 "seed_offset",
             }
         }
@@ -179,9 +187,10 @@ class ModeSelectionSB3Env(gym.Env):
             obs = self._last_obs if self._last_obs is not None else self._refresh_mode_export()
             return obs, 0.0, True, False, {"force_done": True, "missing_agents": missing}
 
-        for idx, (agent_id, mode_idx) in enumerate(zip(agent_ids, action_arr)):
-            if mode_idx < 0 or mode_idx >= masks.shape[1] or not bool(masks[idx, mode_idx]):
-                raise ValueError(f"invalid mode action for {agent_id}: {int(mode_idx)}")
+        if self._use_action_mask:
+            for idx, (agent_id, mode_idx) in enumerate(zip(agent_ids, action_arr)):
+                if mode_idx < 0 or mode_idx >= masks.shape[1] or not bool(masks[idx, mode_idx]):
+                    raise ValueError(f"invalid mode action for {agent_id}: {int(mode_idx)}")
         planner_batch = {
             agent_id: dict(self._last_planner_batch[agent_id])
             for agent_id in agent_ids
@@ -192,23 +201,51 @@ class ModeSelectionSB3Env(gym.Env):
             for agent_id in agent_ids
             if planner_batch.get(agent_id, {}).get("coarse_trajectories") is not None
         }
-        guidance_metadata = apply_selected_mode_guidance(
-            planner_batch,
-            agent_ids=agent_ids,
-            selected_modes=[int(value) for value in action_arr.tolist()],
-            coarse_by_agent=coarse_by_agent,
-            config=getattr(self.planner, "config", None),
-        )
-        guided_export = self.planner.export_mode_selection(planner_batch)
-        guided_agent_ids = list(guided_export["agent_ids"])
-        if guided_agent_ids != agent_ids:
-            raise RuntimeError(f"Guided export agent order changed: {guided_agent_ids} != {agent_ids}")
-        candidates = np.asarray(guided_export["trajectory_candidates"], dtype=np.float32)
-        masks = np.asarray(guided_export["mode_valid_mask"], dtype=bool)
         vehicle_state_before = self._vehicle_states(agent_ids)
         vehicle_position_before = {
             agent_id: state["position"] for agent_id, state in vehicle_state_before.items()
         }
+
+        if self._trajectory_source == "coarse":
+            # Skip diffusion model inference entirely; execute the coarse kinematic trajectory.
+            guidance_metadata = {}
+            # Build dummy candidates array from coarse trajectories (padded to (8,3))
+            num_modes_val = next(iter(coarse_by_agent.values())).shape[0] if coarse_by_agent else self._num_modes
+            candidates = np.zeros((len(agent_ids), num_modes_val, 8, 3), dtype=np.float32)
+            for idx, agent_id in enumerate(agent_ids):
+                if agent_id in coarse_by_agent:
+                    coarse = coarse_by_agent[agent_id]  # (num_modes, 8, 2)
+                    candidates[idx, :coarse.shape[0], :, :2] = coarse
+                    # Compute heading from consecutive xy differences for the (8, 2) coarse trajectory
+                    for m_i in range(coarse.shape[0]):
+                        xy = coarse[m_i]  # (8, 2)
+                        headings = np.arctan2(
+                            np.diff(xy[:, 1], prepend=xy[0, 1]),
+                            np.diff(xy[:, 0], prepend=xy[0, 0]),
+                        )
+                        headings[0] = headings[1] if len(headings) > 1 else 0.0
+                        candidates[idx, m_i, :, 2] = headings
+            masks = np.asarray(step_export["mode_valid_mask"], dtype=bool)
+        else:
+            # Default: use guided diffusion planner output.
+            guidance_metadata = apply_selected_mode_guidance(
+                planner_batch,
+                agent_ids=agent_ids,
+                selected_modes=[int(value) for value in action_arr.tolist()],
+                coarse_by_agent=coarse_by_agent,
+                config=getattr(self.planner, "config", None),
+            )
+            guided_export = self.planner.export_mode_selection(planner_batch)
+            guided_agent_ids = list(guided_export["agent_ids"])
+            if guided_agent_ids != agent_ids:
+                raise RuntimeError(f"Guided export agent order changed: {guided_agent_ids} != {agent_ids}")
+            candidates = np.asarray(guided_export["trajectory_candidates"], dtype=np.float32)
+            masks = np.asarray(guided_export["mode_valid_mask"], dtype=bool)
+
+        # initial_candidates: pre-guidance diffusion output (used for logging only)
+        # For coarse mode, use the coarse-derived candidates as both initial and final.
+        if self._trajectory_source == "coarse":
+            initial_candidates = candidates.copy()
         trajectories: dict[str, np.ndarray] = {}
         low_level_actions: dict[str, np.ndarray] = {}
         controller_debug: dict[str, dict[str, float]] = {}
@@ -339,8 +376,14 @@ class ModeSelectionSB3Env(gym.Env):
                 "pretrained_argmax_mode": [int(x) for x in pretrained_argmax.tolist()],
                 "invalid_mode_rate": 0.0,
                 "raw_cls_logits": np.asarray(step_export["raw_cls_logits"], dtype=float).tolist(),
-                "guided_raw_cls_logits": np.asarray(guided_export["raw_cls_logits"], dtype=float).tolist(),
-                "masked_cls_logits": np.asarray(guided_export["masked_cls_logits"], dtype=float).tolist(),
+                "guided_raw_cls_logits": np.asarray(
+                    guided_export["raw_cls_logits"] if self._trajectory_source != "coarse" else step_export["raw_cls_logits"],
+                    dtype=float,
+                ).tolist(),
+                "masked_cls_logits": np.asarray(
+                    guided_export["masked_cls_logits"] if self._trajectory_source != "coarse" else step_export["masked_cls_logits"],
+                    dtype=float,
+                ).tolist(),
                 "mode_valid_mask": masks.astype(bool).tolist(),
                 "initial_selected_trajectory_endpoint": [
                     initial_candidates[idx, int(action_arr[idx]), -1, :2].astype(float).tolist()
@@ -419,6 +462,8 @@ class ModeSelectionSB3Env(gym.Env):
             handle.write(json.dumps(payload) + "\n")
 
     def action_masks(self) -> np.ndarray:
+        if not self._use_action_mask:
+            return np.ones((self.num_agents * self._num_modes,), dtype=bool)
         if self._last_export is None:
             return np.ones((self.num_agents * self._num_modes,), dtype=bool)
         return np.asarray(self._last_export["mode_valid_mask"], dtype=bool).reshape(-1)
@@ -568,7 +613,7 @@ class ModeSelectionSB3Env(gym.Env):
                 emergency_stop_level_count=planner_config.mode_emergency_stop_count,
                 mode_slots=mode_slots,
             )
-            output = generator.generate(ctx)
+            output = generator.generate(ctx, generate_all=not self._use_action_mask)
             return {
                 "coarse_trajectories": np.asarray(output.coarse_trajectories, dtype=np.float32),
                 "mode_valid_mask": np.asarray(output.mode_valid_mask, dtype=bool),

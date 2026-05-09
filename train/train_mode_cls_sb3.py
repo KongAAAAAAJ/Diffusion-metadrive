@@ -118,8 +118,9 @@ def run_oracle_diagnostic(env: ModeSelectionSB3Env, run_dir: Path) -> None:
 
 
 def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: int) -> Path:
-    # Ensure subprocesses (SubprocVecEnv) use spawn, not fork, to avoid CUDA/Panda3D segfaults.
-    multiprocessing.set_start_method("spawn", force=True)
+    # set_start_method("spawn") was needed for SubprocVecEnv to avoid CUDA/Panda3D segfaults.
+    # With DummyVecEnv (num_envs=1) it is not needed and causes spawned subprocesses to inherit
+    # invalid environment variables (e.g. PYTHONUTF8), crashing the child Python interpreter.
 
     MaskablePPO, _Policy = require_sb3()
     from stable_baselines3.common.callbacks import BaseCallback
@@ -135,6 +136,8 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
     env_config.setdefault("lookahead_index", int(config.get("lookahead_index", 2)))
     env_config.setdefault("target_speed_km_h", float(config.get("target_speed_km_h", 30.0)))
     env_config.setdefault("controller_type", str(config.get("controller_type", "stabilized")))
+    env_config.setdefault("trajectory_source", str(config.get("trajectory_source", "diffusion")))
+    env_config.setdefault("use_action_mask", bool(config.get("use_action_mask", True)))
 
     # debug logging: disabled by default in production; enable via debug_logging=true
     if config.get("debug_logging", False):
@@ -170,28 +173,29 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
     # ── build env(s) ────────────────────────────────────────────────────────
     num_envs = int(config.get("num_envs", 1))
     if num_envs > 1:
-        from stable_baselines3.common.vec_env import SubprocVecEnv
+        # DummyVecEnv runs all envs in the main process (no subprocess forking).
+        # SubprocVecEnv causes Panda3D graphicsEngine assertion failures when
+        # RGBCamera.perceive() calls taskMgr.step() across forked processes.
+        # DummyVecEnv is serial so all envs safely share the same planner object.
+        from stable_baselines3.common.vec_env import DummyVecEnv
 
-        # Factory config excludes the main-process planner object (not picklable across
-        # processes); each subprocess builds its own frozen planner.
-        factory_cfg = {k: v for k, v in env_config.items() if k != "planner"}
-
-        def _make_env_fn(env_id: int):
+        def _make_env_fn(env_id: int, _planner=main_planner):
             def _fn():
                 from stable_baselines3.common.monitor import Monitor
-                cfg = dict(factory_cfg)
+                cfg = dict(env_config)
+                cfg["planner"] = _planner     # shared frozen planner (serial env, safe)
                 cfg["seed_offset"] = env_id   # stagger scenario start across envs
-                cfg["debug_log_path"] = ""    # always disabled in multi-env mode
-                cfg["planner"] = build_planner(config, cfg)
+                cfg["debug_log_path"] = ""    # disabled in multi-env mode
                 return Monitor(ModeSelectionSB3Env(cfg))
             return _fn
 
-        env = SubprocVecEnv([_make_env_fn(i) for i in range(num_envs)])
-        print(f"[mode_cls_ppo] parallel_envs={num_envs} (SubprocVecEnv)", flush=True)
+        env = DummyVecEnv([_make_env_fn(i) for i in range(num_envs)])
+        print(f"[mode_cls_ppo] parallel_envs={num_envs} (DummyVecEnv)", flush=True)
 
-        # Oracle diagnostic on a temporary single env (SubprocVecEnv can't run it directly)
-        tmp_cfg = dict(factory_cfg)
+        # Oracle diagnostic on a temporary single env
+        tmp_cfg = dict(env_config)
         tmp_cfg["planner"] = main_planner
+        tmp_cfg["seed_offset"] = 0
         tmp_env = ModeSelectionSB3Env(tmp_cfg)
         run_oracle_diagnostic(tmp_env, run_dir)
         tmp_env.close()

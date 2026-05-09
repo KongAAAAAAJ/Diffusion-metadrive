@@ -243,19 +243,23 @@ class ModeTrajectoryGenerator:
                 return candidate
         return None
 
-    def generate(self, ctx: ModeContext) -> ModeTrajectoryOutput:
+    def generate(self, ctx: ModeContext, generate_all: bool = False) -> ModeTrajectoryOutput:
         feasibility = build_mode_valid_mask(ctx, self.geometric_checker, self.traffic_checker, self.mode_slots)
         valid_mask = feasibility.valid_mask.copy()
         coarse = np.zeros((self.num_mode_slots, self.horizon_steps, 2), dtype=np.float32)
 
         for slot in self.mode_slots:
-            if not bool(valid_mask[slot.index]) and slot.semantic_group != "STOP":
+            if not generate_all and not bool(valid_mask[slot.index]) and slot.semantic_group != "STOP":
                 continue
             trajectory = self._generate_collision_aware_trajectory(ctx, slot, self._desired_speed(ctx, slot))
             if trajectory is None:
-                valid_mask[slot.index] = False
-                continue
+                if not generate_all:
+                    valid_mask[slot.index] = False
+                    continue
+                # generate_all: fall back to keep-lane so no slot stays zero-filled
+                trajectory = self._generate_keep_lane(ctx, self._desired_speed(ctx, slot))
             coarse[slot.index] = trajectory
 
-        coarse[~valid_mask] = 0.0
+        if not generate_all:
+            coarse[~valid_mask] = 0.0
         return ModeTrajectoryOutput(coarse_trajectories=coarse, mode_valid_mask=valid_mask.astype(bool))

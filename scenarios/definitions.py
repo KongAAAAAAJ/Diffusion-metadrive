@@ -67,7 +67,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         code="S2",
         scenario_id="S2_free_cruise_curve",
         # allowed_local_routes=("R2_entry_curve", "R5_ramp_curve", "R9_post_split_curve"),  # !!!!!!!!
-        allowed_local_routes=("R2_entry_curve"),
+        allowed_local_routes=("R2_entry_curve",),
         trigger_by_local_route={
             "R2_entry_curve": TriggerSpec("c0", 10.0, 120.0),
             "R5_ramp_curve": TriggerSpec("c0_ramp0", 5.0, 85.0),

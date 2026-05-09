@@ -694,8 +694,8 @@ class PlatoonEnv(BaseMultiEnv):
         platoon_cache = self._get_platoon_reward_cache()  # 状态的platoon reward
         traj_cache = self._get_trajectory_reward_cache()  # 动作轨迹的road topology reward
         form_cache = self._build_traj_form_reward()  # 动作轨迹的form reward
-        w_topo = self._cfg_float("platoon_w_topo_reward", 3.0)
-        w_form = self._cfg_float("platoon_w_traj_form_reward", 0.0)
+        w_topo = self._cfg_float("platoon_w_topo_reward", 0.0)  # 3.0
+        w_form = self._cfg_float("platoon_w_traj_form_reward", 0.0)  
         reward = (float(platoon_cache.get("reward", 0.0))
                   + w_topo * float(traj_cache.get("reward", 0.0))
                   + w_form * float(form_cache.get("reward", 0.0)))
@@ -969,8 +969,8 @@ class PlatoonEnv(BaseMultiEnv):
     def _r_safety(crash_count: int, out_count: int, n: int) -> float:
         """Safety: collision penalty + out-of-road penalty, normalised by N."""
         n = max(n, 1)
-        # return -100.0 * crash_count / n - 50.0 * out_count / n
-        return - 50.0 * out_count / n  # !去掉碰撞惩罚，专注于超出道路的惩罚
+        return -100.0 * crash_count / n - 50.0 * out_count / n
+        # return - 50.0 * out_count / n  # !去掉碰撞惩罚，专注于超出道路的惩罚
 
     @staticmethod
     def _r_spacing(d: float, d_exp: float) -> float:
@@ -1117,8 +1117,8 @@ class PlatoonEnv(BaseMultiEnv):
         reward = reward_safety + reward_spacing + reward_speed + reward_progress + reward_comfort
         clip = self._cfg_float("platoon_reward_clip", 150.0)  
         reward = float(np.clip(reward, -clip, clip)) if clip > 0.0 else float(reward)
-        # 归一化奖励到 [-1, 1] 区间（假设最大绝对值不超过 clip）
-        reward = float(reward / clip) if clip > 0.0 else float(reward)
+        # # 归一化奖励到 [-1, 1] 区间（假设最大绝对值不超过 clip）
+        # reward = float(reward / clip) if clip > 0.0 else float(reward)
 
         per_agent: dict[str, dict[str, object]] = {}
         for agent_id in agent_ids:
