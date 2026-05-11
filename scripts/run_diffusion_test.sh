@@ -9,7 +9,7 @@ PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
 MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
 SCENARIO_ID="S2_free_cruise_curve"
-NUM_AGENTS="${NUM_AGENTS:-3}"
+NUM_AGENTS="${NUM_AGENTS:-1}"
 EPISODES="${EPISODES:-5}"
 START_SEED="${START_SEED:-0}"
 TRAFFIC_DENSITY="${TRAFFIC_DENSITY:-0.06}"
@@ -34,13 +34,14 @@ LOCAL_ROUTE="${LOCAL_ROUTE:-}"      # e.g. R1_entry_straight; empty = default ra
 MAX_STEPS="${MAX_STEPS:-0}"         # steps per episode limit; 0 = use env horizon
 MODE_CLS_OUTPUT_ROOT="${MODE_CLS_OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/ppo}"
 
-# PPO_ACTOR_CKPT="${PPO_ACTOR_CKPT:-}"  # pretrained diffusion planner argmax (no PPO)
+PPO_ACTOR_CKPT="${PPO_ACTOR_CKPT:-}"  # pretrained diffusion planner argmax (no PPO)
 # PPO_ACTOR_CKPT="${PPO_ACTOR_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/ppo/run_9/checkpoints/step_00020480_score_2678.9948/sb3_model.zip}"
-PPO_ACTOR_CKPT="${PPO_ACTOR_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/ppo/run_10/checkpoints/step_00030720_score_2399.1966/sb3_model.zip}"
+# PPO_ACTOR_CKPT="${PPO_ACTOR_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/ppo/run_10/checkpoints/step_00030720_score_2399.1966/sb3_model.zip}"
 
 
 PPO_RUN_DIR="${PPO_RUN_DIR:-}"
 PPO_DETERMINISTIC="${PPO_DETERMINISTIC:-1}"
+USE_RELATION_ENCODER="${USE_RELATION_ENCODER:-1}"   # 0: skip relation_encoder (pure single-vehicle per agent)
 
 find_latest_run_dir() {
   local output_dir="$1"
@@ -98,6 +99,7 @@ CMD=(
 )
 if [[ "${NUM_AGENTS}" -gt 1 ]]; then
   CMD+=(--ppo-actor-ckpt "${PPO_ACTOR_CKPT}" --ppo-deterministic "${PPO_DETERMINISTIC}")
+  CMD+=(--use-relation-encoder "${USE_RELATION_ENCODER}")
   if [[ -n "${PPO_RUN_DIR}" ]]; then
     CMD+=(--ppo-run-dir "${PPO_RUN_DIR}")
   fi

@@ -26,6 +26,29 @@ def _extract_single_vehicle_state_dict(ckpt_path: str) -> dict[str, torch.Tensor
     return state_dict
 
 
+def is_platoon_grpo_checkpoint(ckpt_path: str) -> bool:
+    """Return True if the checkpoint was saved by the GRPO trainer (PlatoonDiffusionPlanner format)."""
+    ckpt = torch.load(Path(ckpt_path), map_location="cpu")
+    model_state = ckpt.get("model_state", {})
+    return bool(model_state) and any(k.startswith("model.") for k in model_state)
+
+
+def load_platoon_grpo_checkpoint(ckpt_path: str, model: PlatoonDiffusionPlanner) -> PlatoonDiffusionPlanner:
+    """Load a full PlatoonDiffusionPlanner checkpoint saved by the GRPO trainer.
+
+    Unlike migrate_single_to_platoon, this loads the complete platoon state
+    (including relation_encoder and the fine-tuned plan_cls_branch) in one shot.
+    Missing or shape-mismatched keys are silently skipped (strict=False).
+    """
+    ckpt = torch.load(Path(ckpt_path), map_location="cpu")
+    model_state: dict[str, torch.Tensor] = ckpt["model_state"]
+    result = model.load_state_dict(model_state, strict=False)
+    missing = [k for k in result.missing_keys if "relation_encoder" not in k]
+    if missing:
+        print(f"[weight_migration] load_platoon_grpo_checkpoint: {len(missing)} missing keys (first 5: {missing[:5]})")
+    return model
+
+
 def migrate_single_to_platoon(ckpt_path: str, model: PlatoonDiffusionPlanner) -> PlatoonDiffusionPlanner:
     single_state = _extract_single_vehicle_state_dict(ckpt_path)
     target_state = model.model.state_dict()

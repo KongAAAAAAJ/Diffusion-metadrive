@@ -784,6 +784,103 @@ def _densify_polyline(local_points_xy: np.ndarray, max_segment_length: float = 0
     return np.asarray(dense_points, dtype=np.float32)
 
 
+def decide_lane_change_for_vehicle(vehicle, overtake_timer: int = 0) -> "LaneDecision":
+    """Replicates IDMPolicy.lane_change_policy() to decide lane-change direction.
+
+    Uses IDMPolicy class constants directly so the decision logic stays in sync with
+    the expert model used during dataset collection.  An optional overtake_timer mirrors
+    IDM's LANE_CHANGE_FREQ gate: pass a per-vehicle counter incremented each step and
+    reset to 0 after a lane change; the function only considers overtaking when
+    overtake_timer >= IDMPolicy.LANE_CHANGE_FREQ.
+
+    target_point is external conditioning and must be determined before the model runs.
+    MetaDrive lane ordinals: index 0 = leftmost, higher = further right; left overtake has priority.
+    """
+    try:
+        from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
+
+        current_lanes = vehicle.navigation.current_ref_lanes
+        routing_lane = vehicle.lane
+        all_objects = vehicle.lidar.get_surrounding_objects(vehicle)
+
+        surrounding = FrontBackObjects.get_find_front_back_objs(
+            all_objects, routing_lane, vehicle.position,
+            IDMPolicy.MAX_LONG_DIST, current_lanes,
+        )
+
+        # ── routing-forced lane change (matches IDMPolicy lines ~352-386) ──────
+        next_lanes = vehicle.navigation.next_ref_lanes
+        lane_num_diff = len(current_lanes) - len(next_lanes) if next_lanes is not None else 0
+        if lane_num_diff > 0:
+            if current_lanes[0].is_previous_lane_of(next_lanes[0]):
+                index_range = list(range(len(next_lanes)))
+            else:
+                index_range = list(range(lane_num_diff, len(current_lanes)))
+            current_idx = routing_lane.index[-1] if hasattr(routing_lane, "index") else 0
+            if current_idx not in index_range:
+                if current_idx > index_range[-1]:
+                    if (surrounding.left_back_min_distance() >= IDMPolicy.SAFE_LANE_CHANGE_DISTANCE
+                            and surrounding.left_front_min_distance() >= 5):
+                        return LaneDecision.CHANGE_LEFT
+                else:
+                    if (surrounding.right_back_min_distance() >= IDMPolicy.SAFE_LANE_CHANGE_DISTANCE
+                            and surrounding.right_front_min_distance() >= 5):
+                        return LaneDecision.CHANGE_RIGHT
+
+        # ── active overtake (matches IDMPolicy lines ~389-409) ─────────────────
+        # Only attempt when both ego and front vehicle are significantly below NORMAL_SPEED
+        # and the overtake timer has elapsed (prevents oscillation).
+        ego_speed = float(getattr(vehicle, "speed_km_h", 0.0))
+        if (
+            surrounding.has_front_object()
+            and abs(ego_speed - IDMPolicy.NORMAL_SPEED) > 3
+            and abs(surrounding.front_object().speed_km_h - IDMPolicy.NORMAL_SPEED) > 3
+            and int(overtake_timer) >= IDMPolicy.LANE_CHANGE_FREQ
+        ):
+            front_speed = surrounding.front_object().speed_km_h
+            available_range = list(range(len(current_lanes)))
+
+            left_front_speed = None
+            if (
+                surrounding.left_lane_exist()
+                and surrounding.left_front_min_distance() > IDMPolicy.SAFE_LANE_CHANGE_DISTANCE
+                and surrounding.left_back_min_distance() > IDMPolicy.SAFE_LANE_CHANGE_DISTANCE
+            ):
+                left_front_speed = (
+                    surrounding.left_front_object().speed_km_h
+                    if surrounding.has_left_front_object()
+                    else IDMPolicy.MAX_SPEED
+                )
+            right_front_speed = None
+            if (
+                surrounding.right_lane_exist()
+                and surrounding.right_front_min_distance() > IDMPolicy.SAFE_LANE_CHANGE_DISTANCE
+                and surrounding.right_back_min_distance() > IDMPolicy.SAFE_LANE_CHANGE_DISTANCE
+            ):
+                right_front_speed = (
+                    surrounding.right_front_object().speed_km_h
+                    if surrounding.has_right_front_object()
+                    else IDMPolicy.MAX_SPEED
+                )
+
+            current_idx = routing_lane.index[-1] if hasattr(routing_lane, "index") else 0
+            if (
+                left_front_speed is not None
+                and left_front_speed - front_speed > IDMPolicy.LANE_CHANGE_SPEED_INCREASE
+                and current_idx - 1 in available_range
+            ):
+                return LaneDecision.CHANGE_LEFT
+            if (
+                right_front_speed is not None
+                and right_front_speed - front_speed > IDMPolicy.LANE_CHANGE_SPEED_INCREASE
+                and current_idx + 1 in available_range
+            ):
+                return LaneDecision.CHANGE_RIGHT
+    except Exception:
+        pass
+    return LaneDecision.KEEP
+
+
 def compute_target_point(
     vehicle,
     config: TransfuserConfig,
@@ -1271,9 +1368,9 @@ def observation_to_features(
     vehicle=None,
     lane_decision: "LaneDecision" = LaneDecision.KEEP,
 ) -> Dict[str, torch.Tensor]:
-    target_point = compute_target_point(vehicle, config, LaneDecision.KEEP) if vehicle is not None else _zero_target_point()
+    target_point = compute_target_point(vehicle, config, lane_decision) if vehicle is not None else _zero_target_point()
     topology_polyline = (
-        _build_topology_polyline_from_live_vehicle(vehicle, LaneDecision.KEEP)
+        _build_topology_polyline_from_live_vehicle(vehicle, lane_decision)
         if vehicle is not None
         else torch.zeros((0, 2), dtype=torch.float32)
     )
@@ -1284,9 +1381,6 @@ def observation_to_features(
         "lidar_feature": lidar_to_histogram(observation["lidar"], config),
         "status_feature": build_status_feature(observation["ego_state"], config),
         "ego_state": torch.from_numpy(_to_numpy(observation["ego_state"]).astype(np.float32, copy=False)),
-        # Live closed-loop target-point guidance follows the expert/navigation lane
-        # geometry only.  It should not be shifted onto an adjacent lane by the
-        # current lane-decision / mode semantics.
         "target_point": target_point,
         "preference_point": target_point.clone(),
         "target_line": _build_target_line(topology_polyline.numpy(), target_point, config),

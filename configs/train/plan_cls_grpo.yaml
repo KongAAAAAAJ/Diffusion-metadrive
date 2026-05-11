@@ -1,0 +1,27 @@
+pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt
+model_config_path: configs/diffusion/model.yaml
+num_agents: 3
+output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo
+
+total_timesteps: 50000
+learning_rate: 1.0e-4
+max_grad_norm: 1.0
+beta_kl: 0.02           # KL weight vs pretrained cls_branch
+desired_gap_m: 10.0     # desired bumper-to-bumper gap for formation reward
+
+ckpt_top_k: 3
+checkpoint_interval_steps: 5000
+
+env_config:
+  num_agents: 3
+  observation_mode: multimodal
+  use_render: false
+  planner_device: cuda
+  lookahead_index: 2
+  target_speed_km_h: 30.0
+  controller_type: stabilized
+  scenario_ids:
+    - S1_free_cruise_straight
+    - S2_free_cruise_curve
+    - S3_straight_following
+    - S4_curve_following

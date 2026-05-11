@@ -105,6 +105,7 @@ def _build_step_overlay_polylines(
     topology_polyline_world: "np.ndarray | None",
     mode_valid_mask: "np.ndarray | None",
     mode_slot_names: "list[str] | None",
+    target_point_world: "np.ndarray | None" = None,
     peer_ego_data: "list[dict] | None" = None,
 ) -> "list[dict]":
     """Build overlay polyline list for _capture_topdown_frame_with_overlay.
@@ -115,7 +116,9 @@ def _build_step_overlay_polylines(
 
     peer_ego_data dicts must include "heading_rad" alongside "xy".
 
-    Returns list of {"world_points": np.ndarray (N,2), "color": (R,G,B), "width": int}.
+    Returns list of dicts, each either:
+      {"world_points": np.ndarray (N,2), "color": (R,G,B), "width": int}   — polyline
+      {"world_point":  np.ndarray (2,),  "color": (R,G,B), "radius_px": int, "type": "circle"}  — filled dot
     """
     import numpy as np_local
     overlays: list = []
@@ -174,7 +177,7 @@ def _build_step_overlay_polylines(
                     color = _plot_color_for_mode_index(int(a_selected), mode_slot_names if primary else None)
                     _add(path, color, 6 if primary else 3)
 
-    # peer agents first (behind primary)
+    # peer agents first (behind primary) — same drawing style as primary
     for peer in (peer_ego_data or []):
         _draw_agent_overlays(
             peer.get("xy", np_local.zeros(2)),
@@ -183,7 +186,7 @@ def _build_step_overlay_polylines(
             peer.get("candidates"),
             peer.get("selected"),
             peer.get("valid_mask"),
-            primary=False,
+            primary=True,
         )
 
     # primary agent last (on top)
@@ -192,6 +195,13 @@ def _build_step_overlay_polylines(
         coarse_anchor_trajectories, multimodal_trajectories,
         selected_mode_idx, mode_valid_mask, primary=True,
     )
+
+    # target_point — blue filled dot (world frame)
+    if target_point_world is not None:
+        tp = np_local.asarray(target_point_world, dtype=np_local.float64).reshape(-1)
+        if tp.shape[0] >= 2:
+            overlays.append({"world_point": tp[:2], "color": (30, 100, 255), "radius_px": 7, "type": "circle"})
+
     return overlays
 
 
@@ -253,8 +263,21 @@ def _capture_topdown_frame_with_overlay(
         off = (0, 0)
 
     for poly in overlay_polylines:
-        world_pts = np_local.asarray(poly["world_points"], dtype=np_local.float32)
         color = tuple(int(c) for c in poly["color"])
+        if poly.get("type") == "circle":
+            try:
+                wp = np_local.asarray(poly["world_point"], dtype=np_local.float32)
+                sp = renderer._world_to_screen_position(wp[:2], off)
+                if sp is not None:
+                    pygame.draw.circle(
+                        renderer._screen_canvas, color,
+                        (int(sp[0]), int(sp[1])),
+                        int(poly.get("radius_px", 7)),
+                    )
+            except Exception:
+                pass
+            continue
+        world_pts = np_local.asarray(poly["world_points"], dtype=np_local.float32)
         width = max(2.5, int(poly.get("width", 6)))
         screen_pts = []
         for wp in world_pts:
@@ -414,6 +437,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--ppo-run-dir", type=str, default="")
     parser.add_argument("--ppo-deterministic", type=int, choices=(0, 1), default=1)
+    parser.add_argument(
+        "--use-relation-encoder", type=int, choices=(0, 1), default=1,
+        help="0: skip relation_encoder (pure single-vehicle diffusion per agent); 1: use relation_encoder (default).",
+    )
     return parser.parse_args(argv)
 
 
@@ -1550,7 +1577,18 @@ def _write_control_error_summary(
 def infer_model_size_from_checkpoint(checkpoint_path: Path) -> str:
 # 自动推断模型规模（small/base）
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    state_dict = _extract_state_dict(checkpoint)
+
+    # GRPO platoon ckpt: {"model_state": {model.*, relation_encoder.*}, "config": ...}
+    # Keys are prefixed with "model." relative to PlatoonDiffusionPlanner.
+    if "model_state" in checkpoint and any(k.startswith("model.") for k in checkpoint["model_state"]):
+        state_dict = {
+            k.removeprefix("model."): v
+            for k, v in checkpoint["model_state"].items()
+            if k.startswith("model.")
+        }
+    else:
+        state_dict = _extract_state_dict(checkpoint)
+
     for key in (
         "_transfuser_model._query_embedding.weight",
         "agent._transfuser_model._query_embedding.weight",
@@ -1629,14 +1667,26 @@ def build_platoon_env_config(args, scenario_id: str = "", local_route: str = "")
 
 def build_platoon_planner(checkpoint_path: str, args, resolved_model_size: str, model_config: dict):
     from models.platoon.platoon_diffusion_planner import PlatoonDiffusionPlanner
-    from models.platoon.weight_migration import migrate_single_to_platoon
+    from models.platoon.weight_migration import (
+        is_platoon_grpo_checkpoint,
+        load_platoon_grpo_checkpoint,
+        migrate_single_to_platoon,
+    )
 
     transfuser_config = build_transfuser_config(
         resolved_model_size,
         **_model_overrides_from_args(args, model_config),
     )
-    planner = PlatoonDiffusionPlanner(transfuser_config, num_vehicles=int(args.num_agents))
-    planner = migrate_single_to_platoon(checkpoint_path, planner)
+    planner = PlatoonDiffusionPlanner(
+        transfuser_config,
+        num_vehicles=int(args.num_agents),
+        use_relation_encoder=bool(getattr(args, "use_relation_encoder", 1)),
+    )
+    if is_platoon_grpo_checkpoint(checkpoint_path):
+        print(f"[test] detected GRPO platoon checkpoint — loading directly: {checkpoint_path}", flush=True)
+        planner = load_platoon_grpo_checkpoint(checkpoint_path, planner)
+    else:
+        planner = migrate_single_to_platoon(checkpoint_path, planner)
     planner.eval()
     for parameter in planner.parameters():
         parameter.requires_grad_(False)
@@ -2200,13 +2250,21 @@ def run_platoon_planner_backend(
                                 "xy": _peer_ego,
                                 "heading_rad": _peer_heading,
                                 "anchors": coarse_by_agent.get(_aid),
-                                "candidates": None,
+                                "candidates": (
+                                    np.asarray(candidates[_ai], dtype=np.float32)
+                                    if candidates is not None else None
+                                ),
                                 "selected": int(selected_modes[_ai]),
                                 "valid_mask": mode_valid_mask[_ai] if mode_valid_mask is not None else None,
                             })
                     _pri_vehicle = env.agents.get(primary_agent_id)
                     _pri_ego_xy = np.asarray(_pri_vehicle.position[:2], dtype=np.float64) if _pri_vehicle else np.zeros(2)
                     _pri_heading = float(getattr(_pri_vehicle, "heading_theta", 0.0)) if _pri_vehicle else 0.0
+                    _pri_tp_local = planner_final_info.get(primary_agent_id, {}).get("target_point")
+                    _pri_tp_world = (
+                        _local_xy_to_world_list(_pri_tp_local, _pri_ego_xy, _pri_heading)
+                        if _pri_tp_local is not None else None
+                    )
                     _overlay = _build_step_overlay_polylines(
                         ego_xy=_pri_ego_xy,
                         ego_heading_rad=_pri_heading,
@@ -2216,6 +2274,7 @@ def run_platoon_planner_backend(
                         topology_polyline_world=None,
                         mode_valid_mask=mode_valid_mask[_pri_idx] if mode_valid_mask is not None else None,
                         mode_slot_names=mode_slot_names,
+                        target_point_world=np.asarray(_pri_tp_world, dtype=np.float64) if _pri_tp_world is not None else None,
                         peer_ego_data=_peers,
                     )
                     _combined = _capture_topdown_frame_with_overlay(
@@ -2705,6 +2764,11 @@ def main():
                     _coarse = final_info.get("coarse_trajectories")
                     _cands  = final_info.get("trajectory_candidates")
                     _sel    = final_info.get("trajectory_mode_idx")
+                    _tp_local = final_info.get("target_point")
+                    _tp_world = (
+                        _local_xy_to_world_list(_tp_local, ego_xy_before_step, ego_heading_before_step)
+                        if _tp_local is not None else None
+                    )
                     if _cands is not None:
                         _cands = np.asarray(_cands, dtype=np.float32)
                         if _cands.ndim == 3 and _cands.shape[2] >= 2:
@@ -2718,6 +2782,7 @@ def main():
                         topology_polyline_world=None,
                         mode_valid_mask=None,
                         mode_slot_names=_mode_slot_names_from_config(transfuser_config),
+                        target_point_world=np.asarray(_tp_world, dtype=np.float64) if _tp_world is not None else None,
                         peer_ego_data=None,
                     )
                     _combined = _capture_topdown_frame_with_overlay(

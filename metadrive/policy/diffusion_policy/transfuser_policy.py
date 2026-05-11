@@ -10,6 +10,7 @@ from metadrive.policy.base_policy import BasePolicy
 from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig, TrajectorySampling
 from metadrive.policy.diffusion_policy.transfuser_features import (
     LaneDecision,
+    decide_lane_change_for_vehicle,
     observation_to_features,
 )
 from metadrive.policy.diffusion_policy.transfuser_model_v2 import V2TransfuserModel
@@ -137,6 +138,9 @@ class TransfuserPolicy(BasePolicy):
         self._lookahead_index = int(global_config.get("transfuser_lookahead_index", 2))
         self._controller_type = str(global_config.get("transfuser_controller_type", "stabilized"))
         self._trajectory_nodes = []
+        # Mirrors IDMPolicy.overtake_timer: incremented each step, reset to 0
+        # after a lane change so the diffusion planner respects IDM's LANE_CHANGE_FREQ gate.
+        self._lane_change_overtake_timer: int = 0
 
         self._model = V2TransfuserModel(self._model_config)
         self._load_checkpoint(self._checkpoint_path)
@@ -145,6 +149,7 @@ class TransfuserPolicy(BasePolicy):
 
     def reset(self):
         super().reset()
+        self._lane_change_overtake_timer = 0
         self._clear_trajectory_visualization()
 
     def _build_mode_features(self) -> Dict[str, torch.Tensor]:
@@ -189,82 +194,16 @@ class TransfuserPolicy(BasePolicy):
                 "mode_valid_mask": torch.zeros((num_slots,), dtype=torch.bool),
             }
 
-    def _decide_lane_decision(self) -> LaneDecision:
-        """Use an IDM-based oracle to decide the lane change direction BEFORE model inference.
-
-        target_point is external conditioning for the diffusion model — it must NOT be
-        derived from the model's own output.  This oracle is a placeholder; a dedicated
-        decision module can replace it later.
-
-        MetaDrive lane ordinals: index 0 = leftmost, higher = further right.
-        Left overtake has higher priority (mirrors IDMPolicy.lane_change_policy).
-        """
-        try:
-            from metadrive.policy.idm_policy import FrontBackObjects
-
-            vehicle = self.control_object
-            current_lanes = vehicle.navigation.current_ref_lanes
-            routing_lane = vehicle.lane
-            all_objects = vehicle.lidar.get_surrounding_objects(vehicle)
-
-            MAX_LONG_DIST = 30
-            SAFE_LANE_CHANGE_DISTANCE = 15
-            LANE_CHANGE_SPEED_INCREASE = 10
-            MAX_SPEED = 100.0
-
-            surrounding = FrontBackObjects.get_find_front_back_objs(
-                all_objects, routing_lane, vehicle.position, MAX_LONG_DIST, current_lanes
-            )
-
-            front_speed = (
-                surrounding.front_object().speed_km_h
-                if surrounding.has_front_object()
-                else MAX_SPEED
-            )
-
-            # Only consider lane change when there IS a slow front vehicle.
-            if not surrounding.has_front_object():
-                return LaneDecision.KEEP
-
-            # Left lane: lower index (index - 1)
-            left_front_speed = None
-            if (
-                surrounding.left_lane_exist()
-                and surrounding.left_front_min_distance() > SAFE_LANE_CHANGE_DISTANCE
-                and surrounding.left_back_min_distance() > SAFE_LANE_CHANGE_DISTANCE
-            ):
-                left_front_speed = (
-                    surrounding.left_front_object().speed_km_h
-                    if surrounding.has_left_front_object()
-                    else MAX_SPEED
-                )
-
-            # Right lane: higher index (index + 1)
-            right_front_speed = None
-            if (
-                surrounding.right_lane_exist()
-                and surrounding.right_front_min_distance() > SAFE_LANE_CHANGE_DISTANCE
-                and surrounding.right_back_min_distance() > SAFE_LANE_CHANGE_DISTANCE
-            ):
-                right_front_speed = (
-                    surrounding.right_front_object().speed_km_h
-                    if surrounding.has_right_front_object()
-                    else MAX_SPEED
-                )
-
-            # Left has higher priority
-            if left_front_speed is not None and left_front_speed - front_speed > LANE_CHANGE_SPEED_INCREASE:
-                return LaneDecision.CHANGE_LEFT
-            if right_front_speed is not None and right_front_speed - front_speed > LANE_CHANGE_SPEED_INCREASE:
-                return LaneDecision.CHANGE_RIGHT
-        except Exception:
-            pass
-        return LaneDecision.KEEP
-
     def act(self, agent_id=None):
         # lane_decision is external conditioning — decide BEFORE model inference so
         # that target_point (which depends on lane_decision) is fed as model input.
-        lane_decision = self._decide_lane_decision()
+        lane_decision = decide_lane_change_for_vehicle(
+            self.control_object, overtake_timer=self._lane_change_overtake_timer
+        )
+        if lane_decision != LaneDecision.KEEP:
+            self._lane_change_overtake_timer = 0
+        else:
+            self._lane_change_overtake_timer += 1
 
         observation_adapter = self.engine.agent_manager.observations[self.control_object.name]
         observation = getattr(observation_adapter, "current_observation", None)

@@ -15,14 +15,17 @@ from .relation_encoder import RelationEncoder
 
 
 class PlatoonDiffusionPlanner(nn.Module):
-    def __init__(self, config: TransfuserConfig, num_vehicles: int = 3):
+    def __init__(self, config: TransfuserConfig, num_vehicles: int = 3,
+                 use_relation_encoder: bool = True):
         super().__init__()
         self.config = copy.deepcopy(config)
         self.num_vehicles = int(num_vehicles)
         self.inference_seed = 0
+        self.use_relation_encoder = bool(use_relation_encoder)
         self.model = V2TransfuserModel(self.config)
         self.relation_encoder = RelationEncoder(12, 64, 12)
-        self._expand_status_encoding()
+        if self.use_relation_encoder:
+            self._expand_status_encoding()
 
     def _expand_status_encoding(self) -> None:
         old_layer = self.model._status_encoding
@@ -111,8 +114,11 @@ class PlatoonDiffusionPlanner(nn.Module):
         lidar_feature = torch.cat(lidar, dim=0).float()
         status_feature = torch.cat(status, dim=0).float()
         relation_feature = torch.cat(relation, dim=0).float()
-        relation_embedding = self.relation_encoder(relation_feature)
-        fused_status = torch.cat([status_feature, relation_embedding], dim=-1)
+        if self.use_relation_encoder:
+            relation_embedding = self.relation_encoder(relation_feature)
+            fused_status = torch.cat([status_feature, relation_embedding], dim=-1)
+        else:
+            fused_status = status_feature
 
         model_inputs = {
             "camera_feature": camera_feature,
@@ -177,6 +183,78 @@ class PlatoonDiffusionPlanner(nn.Module):
             parameter.requires_grad_(False)
         return self
 
+    def export_for_grpo(
+        self,
+        batch: Mapping[str, Mapping[str, Tensor]],
+        ref_cls_branch: "nn.Module | None" = None,
+    ) -> Dict[str, object]:
+        """Like export_mode_selection but returns cls_branch logits WITH gradients.
+
+        Backbone and diffusion decoder run under torch.no_grad() (not inference_mode)
+        so the resulting cls_feature tensor can be re-fed through the trainable
+        plan_cls_branch.  Only that branch receives gradient signal.
+
+        Parameters
+        ----------
+        batch       : same planner_batch format as export_mode_selection
+        ref_cls_branch : frozen copy of plan_cls_branch for KL reference logits;
+                         if None, ref_logits = logits.detach()
+
+        Returns (dict)
+        --------------
+        agent_ids               : list[str]
+        trajectory_candidates   : np.ndarray  [N, M, 8, 3]
+        logits                  : Tensor [N, M]  — WITH grad through cls_branch
+        ref_logits              : Tensor [N, M]  — no grad
+        mode_valid_mask         : Tensor [N, M]  bool
+        mode_valid_mask_np      : np.ndarray [N, M]  bool
+        pretrained_argmax_mode  : np.ndarray [N,]
+        """
+        if not batch:
+            raise ValueError("export_for_grpo requires a non-empty batch.")
+
+        agent_ids, model_inputs, _ = self._build_model_inputs(batch)
+
+        # Frozen backbone + full diffusion pass — use no_grad (not inference_mode)
+        # so the output cls_feature can later be passed through autograd.
+        outputs = self._forward_model_no_inference_mode(model_inputs, return_multimodal=True)
+
+        candidates = outputs["trajectory_candidates"].detach().cpu()           # [N, M, 8, 3]
+        cls_feature = outputs.get("trajectory_cls_feature", outputs.get("trajectory_mode_embedding"))
+        cls_feature = cls_feature.detach()                                     # [N, M, D] on device
+
+        num_agents, num_modes = candidates.shape[:2]
+        mode_valid_mask = outputs.get("mode_valid_mask")
+        if mode_valid_mask is None:
+            mode_valid_mask = model_inputs.get("mode_valid_mask")
+        if mode_valid_mask is None:
+            mode_valid_mask = torch.ones((num_agents, num_modes), dtype=torch.bool, device=cls_feature.device)
+        else:
+            mode_valid_mask = mode_valid_mask.detach().bool().to(cls_feature.device)
+
+        # Trainable cls_branch forward — autograd is active here
+        cls_branch = self.model._trajectory_head.diff_decoder.layers[-1].task_decoder.plan_cls_branch
+        logits = cls_branch(cls_feature).squeeze(-1)                           # [N, M], has grad
+
+        # Reference logits for KL regularization
+        if ref_cls_branch is not None:
+            with torch.no_grad():
+                ref_logits = ref_cls_branch(cls_feature).squeeze(-1)
+        else:
+            ref_logits = logits.detach()
+
+        pretrained_argmax = ref_logits.masked_fill(~mode_valid_mask, float("-inf")).argmax(dim=-1)
+
+        return {
+            "agent_ids": agent_ids,
+            "trajectory_candidates": candidates.numpy(),                       # [N, M, 8, 3]
+            "logits": logits,                                                  # [N, M] Tensor, grad
+            "ref_logits": ref_logits,                                          # [N, M] Tensor, no grad
+            "mode_valid_mask": mode_valid_mask,                                # [N, M] bool Tensor
+            "mode_valid_mask_np": mode_valid_mask.cpu().numpy(),               # [N, M] bool np
+            "pretrained_argmax_mode": pretrained_argmax.cpu().numpy(),         # [N,]
+        }
+
     def _forward_model(self, model_inputs: Mapping[str, Tensor], return_multimodal: bool = False) -> Dict[str, Tensor]:
         if self.training:
             if return_multimodal:
@@ -187,6 +265,26 @@ class PlatoonDiffusionPlanner(nn.Module):
         if model_inputs["camera_feature"].is_cuda:
             devices = [model_inputs["camera_feature"].device]
         with torch.inference_mode(), torch.random.fork_rng(devices=devices):
+            torch.manual_seed(self.inference_seed)
+            if devices:
+                torch.cuda.manual_seed_all(self.inference_seed)
+            if return_multimodal:
+                return self.model.infer_multimodal(model_inputs)
+            return self.model(model_inputs)
+
+    def _forward_model_no_inference_mode(
+        self, model_inputs: Mapping[str, Tensor], return_multimodal: bool = False
+    ) -> Dict[str, Tensor]:
+        """Like _forward_model but uses torch.no_grad() instead of inference_mode.
+
+        Tensors produced by no_grad can be re-used as inputs to autograd operations
+        outside this context (e.g. feeding cls_feature into plan_cls_branch for GRPO).
+        inference_mode tensors would raise an error in that scenario.
+        """
+        devices = []
+        if model_inputs["camera_feature"].is_cuda:
+            devices = [model_inputs["camera_feature"].device]
+        with torch.no_grad(), torch.random.fork_rng(devices=devices):
             torch.manual_seed(self.inference_seed)
             if devices:
                 torch.cuda.manual_seed_all(self.inference_seed)
