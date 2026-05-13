@@ -151,11 +151,7 @@ env.reset()/env.step()
 # 阶段 1：单车扩散规划预训练
 bash scripts/run_diffusion_train.sh
 
-# 阶段 2：selector MAPPO smoke（320 env steps）
-python -m train.train_selector \
-  --config configs/train/platoon_mappo_smoke.yaml --pretrained-ckpt /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt --total-env-steps 320
-
-# 阶段 3：selector MAPPO 正式训练（示例 8000 env steps）
+# 阶段 2：selector MAPPO 正式训练（示例 8000 env steps）
 python -m train.train_selector \
   --config configs/train/selector.yaml --pretrained-ckpt /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt --total-env-steps 8000
 
@@ -201,7 +197,7 @@ from evaluation.reward_terms import compute_step_reward, compute_team_reward
 | 单车 checkpoint | `/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt` |
 | 编队 checkpoint | `/media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/checkpoints` |
 | plan anchor | `metadrive/exp_dataset/anchors.npy` |
-| 训练配置 | `configs/train/selector.yaml` / `configs/train/platoon_mappo_smoke.yaml` |
+| 训练配置 | `configs/train/selector.yaml` / `configs/train/plan_cls_grpo.yaml` |
 | 训练日志 | `/media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/tb` |
 
 ### 参考代码库
@@ -240,7 +236,7 @@ Diffusion-metadrive/
 ├── configs/
 │   └── train/
 │       ├── selector.yaml                  ← selector MAPPO 正式训练配置
-│       ├── platoon_mappo_smoke.yaml       ← selector MAPPO 冒烟训练配置
+│       ├── plan_cls_grpo.yaml             ← plan_cls_branch GRPO 微调配置
 │       └── platoon_selector_refine.yaml   ← GRPO refinement 训练配置
 ├── docs/
 │   ├── phases/phase0~7.md                 ← 各 Phase 完整说明

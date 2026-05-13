@@ -312,6 +312,7 @@ class V2TransfuserModel(nn.Module):
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
             preference_bias=preference_bias,
+            features_for_occ=features,
         )
         output.update(trajectory)
 
@@ -375,6 +376,7 @@ class V2TransfuserModel(nn.Module):
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
             preference_bias=preference_bias,
+            features_for_occ=features,
         )
         output.update(trajectory)
 
@@ -451,6 +453,10 @@ class DiffMotionPlanningRefinementModule(nn.Module):
             *linear_relu_ln(embed_dims, 1, 2, input_dims=guided_dim),
             nn.Linear(embed_dims, 1),
         )
+        # Optional occupancy adapter — injected externally via set_occupancy_adapter()
+        self.occupancy_adapter = None
+        # Slot for pre-computed matching features [N, M, 6]; set before forward() when adapter is active
+        self._occ_matching_features: "torch.Tensor | None" = None
         if self.trajectory_reg_decoder_type == "mlp":
             self.plan_reg_branch = nn.Sequential(
                 nn.Linear(guided_dim, embed_dims),
@@ -482,6 +488,11 @@ class DiffMotionPlanningRefinementModule(nn.Module):
 
         bias_init = bias_init_with_prob(0.01)
         nn.init.constant_(self.plan_cls_branch[-1].bias, bias_init)
+
+    def set_occupancy_adapter(self, adapter: "nn.Module | None") -> None:
+        """Attach or detach the OccupancyAdapter.  Pass None to disable."""
+        self.occupancy_adapter = adapter
+
     def forward(
         self,
         traj_feature,
@@ -518,6 +529,10 @@ class DiffMotionPlanningRefinementModule(nn.Module):
 
         # 6. get final prediction
         cls_feature = cls_feature.view(bs, ego_fut_mode,-1)
+        # Optional occupancy adapter: augment cls_feature before classification
+        if self.occupancy_adapter is not None and self._occ_matching_features is not None:
+            cls_feature = self.occupancy_adapter(cls_feature, self._occ_matching_features)
+            self._occ_matching_features = None  # consume once, reset for next call
         raw_logits = self.plan_cls_branch(cls_feature).squeeze(-1)  # *轨迹分类分支，输出每个模式的概率
         plan_cls = raw_logits if preference_bias is None else raw_logits + preference_bias.to(
             device=raw_logits.device, dtype=raw_logits.dtype
@@ -864,6 +879,96 @@ class TrajectoryHead(nn.Module):
         self.diff_decoder = CustomTransformerDecoder(diff_decoder_layer, config.trajectory_decoder_layers)
 
         self.loss_computer = LossComputer(config)
+
+        # ── Optional occupancy predictor (controlled by config.use_occupancy_predictor) ──
+        self._occ_loss_weight = float(getattr(config, "occ_loss_weight", 0.1))
+        if bool(getattr(config, "use_occupancy_predictor", False)):
+            from models.occupancy import OccupancyPredictor, OccupancyAdapter
+            guided_dim = d_model + int(getattr(config, "target_point_dim", 0))
+            self.occupancy_predictor = OccupancyPredictor(
+                traj_points=int(getattr(config, "target_line_num_points", 8)),
+                status_dim=int(getattr(config, "status_feature_dim", 19)),
+                hidden_dim=128,
+                grid_h=int(getattr(config, "occ_grid_h", 64)),
+                grid_w=int(getattr(config, "occ_grid_w", 64)),
+                lon_range=tuple(getattr(config, "occ_lon_range", (-2.0, 30.0))),
+                lat_range=tuple(getattr(config, "occ_lat_range", (-10.0, 10.0))),
+                sigma_m=float(getattr(config, "occ_sigma_m", 1.0)),
+                residual_scale=float(getattr(config, "occ_residual_scale", 2.0)),
+            )
+            self.occupancy_adapter = OccupancyAdapter(
+                cls_dim=guided_dim,
+                match_dim=6,
+                hidden_dim=int(getattr(config, "occ_adapter_hidden_dim", 64)),
+            )
+            for layer in self.diff_decoder.layers:
+                layer.task_decoder.set_occupancy_adapter(self.occupancy_adapter)
+        else:
+            self.occupancy_predictor = None
+            self.occupancy_adapter = None
+
+    def _run_occupancy_pipeline(self, features_for_occ, traj_anchors, targets=None):
+        """Run OccupancyPredictor → heatmap → matching → inject into all decoder layers.
+
+        Returns occ_loss if targets["trajectory"] is available, else None.
+        When occupancy_predictor is None or inputs are missing, returns None immediately.
+        """
+        if self.occupancy_predictor is None or features_for_occ is None:
+            return None
+        target_line = features_for_occ.get("target_line")
+        status = features_for_occ.get("status_feature")
+        if target_line is None or status is None:
+            return None
+
+        from models.occupancy import heatmap_matching
+
+        lane_dec = features_for_occ.get(
+            "lane_decision",
+            torch.zeros(status.shape[0], 1, device=status.device, dtype=torch.float32),
+        )
+        occ_out = self.occupancy_predictor(
+            target_line.to(status.device),
+            status,
+            lane_dec,
+            base_feasible_mask=features_for_occ.get("base_feasible_mask"),
+            route_corridor_mask=features_for_occ.get("route_corridor_mask"),
+            reachable_mask=features_for_occ.get("reachable_mask"),
+            dynamic_occupancy_mask=features_for_occ.get("dynamic_occupancy_mask"),
+            formation_prior_mask=features_for_occ.get("formation_prior_mask"),
+        )
+        # Pad heading column so heatmap_matching receives [B, M, T, 3]
+        cands_3d = F.pad(traj_anchors.detach(), (0, 1))
+        occ_pred = self.occupancy_predictor
+        match_feat = heatmap_matching(
+            cands_3d,
+            occ_out["feasible_occupancy_heatmap"],
+            occ_out["corrected_traj"],
+            grid_h=occ_pred.grid_h,
+            grid_w=occ_pred.grid_w,
+            lon_range=occ_pred.lon_range,
+            lat_range=occ_pred.lat_range,
+            route_corridor_mask=features_for_occ.get("route_corridor_mask"),
+            dynamic_occupancy_mask=features_for_occ.get("dynamic_occupancy_mask"),
+        )  # [B, M, 6]
+        for layer in self.diff_decoder.layers:
+            layer.task_decoder._occ_matching_features = match_feat
+
+        if targets is not None and "occupancy_mask" in targets:
+            target_mask = targets["occupancy_mask"].to(
+                device=occ_out["feasible_occupancy_heatmap"].device,
+                dtype=occ_out["feasible_occupancy_heatmap"].dtype,
+            )
+            return F.binary_cross_entropy(
+                occ_out["feasible_occupancy_heatmap"].clamp(1e-5, 1.0 - 1e-5),
+                target_mask.clamp(0.0, 1.0),
+            )
+        if targets is not None and "trajectory" in targets:
+            return F.mse_loss(
+                occ_out["corrected_traj"],
+                targets["trajectory"][:, :, :2].detach(),
+            )
+        return None
+
     def norm_odo(self, odo_info_fut):
         odo_info_fut_x = odo_info_fut[..., 0:1]
         odo_info_fut_y = odo_info_fut[..., 1:2]
@@ -911,6 +1016,7 @@ class TrajectoryHead(nn.Module):
         coarse_trajectories=None,
         mode_valid_mask=None,
         preference_bias=None,
+        features_for_occ=None,
     ) -> Dict[str, torch.Tensor]:
         """Torch module forward pass."""
         if self.training:
@@ -928,6 +1034,7 @@ class TrajectoryHead(nn.Module):
                 coarse_trajectories=coarse_trajectories,
                 mode_valid_mask=mode_valid_mask,
                 preference_bias=preference_bias,
+                features_for_occ=features_for_occ,
             )
         else:
             return self.forward_test(
@@ -944,6 +1051,7 @@ class TrajectoryHead(nn.Module):
                 coarse_trajectories=coarse_trajectories,
                 mode_valid_mask=mode_valid_mask,
                 preference_bias=preference_bias,
+                features_for_occ=features_for_occ,
             )
 
     def infer_multimodal(
@@ -960,6 +1068,7 @@ class TrajectoryHead(nn.Module):
         coarse_trajectories=None,
         mode_valid_mask=None,
         preference_bias=None,
+        features_for_occ=None,
     ) -> Dict[str, torch.Tensor]:
         """Return multimodal trajectory candidates for evaluation/visualization."""
         return self.forward_test(
@@ -976,6 +1085,7 @@ class TrajectoryHead(nn.Module):
             coarse_trajectories=coarse_trajectories,
             mode_valid_mask=mode_valid_mask,
             preference_bias=preference_bias,
+            features_for_occ=features_for_occ,
         )
 
 
@@ -994,6 +1104,7 @@ class TrajectoryHead(nn.Module):
         coarse_trajectories=None,
         mode_valid_mask=None,
         preference_bias=None,
+        features_for_occ=None,
     ) -> Dict[str, torch.Tensor]:
         bs = ego_query.shape[0]
         device = ego_query.device
@@ -1024,6 +1135,9 @@ class TrajectoryHead(nn.Module):
         time_embed = time_embed.view(bs,1,-1)
 
 
+        # 3.5 occupancy predictor: run before decoder so adapter can use matching features
+        occ_loss = self._run_occupancy_pipeline(features_for_occ, plan_anchor, targets)
+
         # 4. begin the stacked decoder  预测去噪轨迹点
         poses_reg_list, poses_cls_list = self.diff_decoder(
             traj_feature,
@@ -1048,6 +1162,9 @@ class TrajectoryHead(nn.Module):
                                                  mode_valid_mask=mode_valid_mask)
             trajectory_loss_dict[f"trajectory_loss_{idx}"] = trajectory_loss
             ret_traj_loss += trajectory_loss
+
+        if occ_loss is not None:
+            ret_traj_loss = ret_traj_loss + self._occ_loss_weight * occ_loss
 
         mode_idx = poses_cls_list[-1].argmax(dim=-1)
         mode_idx = mode_idx[...,None,None,None].repeat(1,1,self._num_poses,3)
@@ -1075,6 +1192,7 @@ class TrajectoryHead(nn.Module):
         coarse_trajectories=None,
         mode_valid_mask=None,
         preference_bias=None,
+        features_for_occ=None,
     ) -> Dict[str, torch.Tensor]:
         step_num = 2
         bs = ego_query.shape[0]
@@ -1086,6 +1204,10 @@ class TrajectoryHead(nn.Module):
 
         # 1. add truncated noise to the plan anchor (or dynamic coarse trajectories)
         plan_anchor = self._get_anchors(bs, device, coarse_trajectories)
+
+        # 1.5 occupancy predictor: run once before diffusion denoising loop
+        self._run_occupancy_pipeline(features_for_occ, plan_anchor)
+
         img = self.norm_odo(plan_anchor)
         noise = torch.randn(img.shape, device=device)
         trunc_timesteps = torch.ones((bs,), device=device, dtype=torch.long) * 8

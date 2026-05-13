@@ -102,6 +102,15 @@ def build_planner_for_grpo(
     planner = planner.to(device)
     planner.eval()
 
+    resume_grpo_ckpt = str(config.get("resume_grpo_ckpt", "") or "")
+    if resume_grpo_ckpt:
+        resume_pt = Path(resume_grpo_ckpt) / "plan_cls_branch.pt"
+        if not resume_pt.exists():
+            raise FileNotFoundError(f"[grpo] resume ckpt not found: {resume_pt}")
+        state = torch.load(str(resume_pt), map_location=device)
+        _get_cls_branch(planner).load_state_dict(state)
+        print(f"[grpo] resumed cls_branch from {resume_pt}", flush=True)
+
     # Freeze everything, then unfreeze cls_branch
     for p in planner.parameters():
         p.requires_grad_(False)
@@ -127,15 +136,24 @@ def build_planner_for_grpo(
 
 # ── reward & loss ─────────────────────────────────────────────────────────────
 
-def _local_to_world_traj(pose: np.ndarray, local_traj: np.ndarray) -> np.ndarray:
-    """Convert (T, 3) ego-local trajectory to (T, 3) world-frame trajectory."""
+def _local_to_world_xy(pose: np.ndarray, local_xy: np.ndarray) -> np.ndarray:
+    """Convert (2,) or (T, 2) ego-local xy to world xy."""
     cos_h = np.cos(pose[2])
     sin_h = np.sin(pose[2])
-    world = np.empty_like(local_traj)
-    world[:, 0] = pose[0] + cos_h * local_traj[:, 0] - sin_h * local_traj[:, 1]
-    world[:, 1] = pose[1] + sin_h * local_traj[:, 0] + cos_h * local_traj[:, 1]
-    world[:, 2] = pose[2] + local_traj[:, 2]
+    lx = local_xy[..., 0]
+    ly = local_xy[..., 1]
+    world = np.empty_like(local_xy)
+    world[..., 0] = pose[0] + cos_h * lx - sin_h * ly
+    world[..., 1] = pose[1] + sin_h * lx + cos_h * ly
     return world
+
+
+def _traj_speed_kmh(traj_local: np.ndarray, dt: float = 0.5) -> float:
+    """Estimate average speed (km/h) from ego-local trajectory arc length."""
+    if traj_local.shape[0] < 2:
+        return 0.0
+    total_m = float(np.linalg.norm(np.diff(traj_local[:, :2], axis=0), axis=1).sum())
+    return total_m / max((traj_local.shape[0] - 1) * dt, 1e-6) * 3.6
 
 
 def compute_pairwise_formation_reward(
@@ -144,31 +162,58 @@ def compute_pairwise_formation_reward(
     leader_traj: np.ndarray,           # [8, 3] ego-local (leader selected)
     leader_pose: np.ndarray,           # [3] world (x, y, heading)
     desired_gap_m: float = 10.0,
+    # longitudinal / lateral (exp-decay, mean over trajectory timesteps)
+    w_lon: float = 0.5,
+    lon_decay_m: float = 5.0,
+    w_lat: float = 0.5,
+    lat_decay_m: float = 1.0,
+    # speed and progress (PPO-style, endpoint-based)
+    w_speed: float = 0,
+    w_progress: float = 0,
+    progress_s_max: float = 15.0,
 ) -> np.ndarray:                       # [M] proxy reward per mode
-    """Pairwise formation reward for all follower candidate modes.
+    """Pairwise formation proxy reward.
 
-    For each candidate, measures how well the follower would maintain
-    desired_gap_m behind the leader at each trajectory timestep, then
-    applies: R = 0.5*exp(-mean_lon/5.0) + 0.5*exp(-mean_lat/1.0)
+    Components (all ∈ [0, w_*]):
+      r_lon      w_lon  * exp(-mean_lon_err / lon_decay_m)
+      r_lat      w_lat  * exp(-mean_lat_err / lat_decay_m)
+      r_speed    w_speed  * clip(v_follower / v_leader, 0, 1)
+      r_progress w_progress * clip(x_endpoint / progress_s_max, 0, 1)
     """
     M, T = follower_candidates.shape[:2]
-    leader_world = _local_to_world_traj(leader_pose, leader_traj)   # [T, 3]
     rewards = np.empty(M, dtype=np.float32)
 
+    leader_world_xy = _local_to_world_xy(leader_pose, leader_traj[:, :2])  # [T, 2]
+    leader_headings = leader_traj[:, 2] if leader_traj.shape[1] > 2 else np.zeros(T)
+    v_leader = max(_traj_speed_kmh(leader_traj), 1e-3)
+
     for m in range(M):
-        fw = _local_to_world_traj(follower_pose, follower_candidates[m])  # [T, 3]
+        cand = follower_candidates[m]   # [T, 3]
+        follower_world_xy = _local_to_world_xy(follower_pose, cand[:, :2])  # [T, 2]
+
+        # ── lon / lat errors over all timesteps ───────────────────────────
         lon_errs = np.empty(T)
         lat_errs = np.empty(T)
         for t in range(T):
-            lx, ly, lh = leader_world[t]
-            # desired position: desired_gap_m behind leader
+            lx, ly = leader_world_xy[t]
+            lh = float(leader_headings[t])
             des_x = lx - desired_gap_m * np.cos(lh)
             des_y = ly - desired_gap_m * np.sin(lh)
-            dx = float(fw[t, 0]) - des_x
-            dy = float(fw[t, 1]) - des_y
+            dx = float(follower_world_xy[t, 0]) - des_x
+            dy = float(follower_world_xy[t, 1]) - des_y
             lon_errs[t] = abs(dx * np.cos(lh) + dy * np.sin(lh))
             lat_errs[t] = abs(-dx * np.sin(lh) + dy * np.cos(lh))
-        rewards[m] = 0.5 * np.exp(-lon_errs.mean() / 5.0) + 0.5 * np.exp(-lat_errs.mean() / 1.0)
+
+        r_lon = w_lon * np.exp(-lon_errs.mean() / lon_decay_m)
+        r_lat = w_lat * np.exp(-lat_errs.mean() / lat_decay_m)
+
+        # ── speed: follower/leader ratio, clamped ─────────────────────────
+        r_speed = w_speed * float(np.clip(_traj_speed_kmh(cand) / v_leader, 0.0, 1.0))
+
+        # ── progress: normalised forward x-displacement ───────────────────
+        r_progress = w_progress * float(np.clip(cand[-1, 0] / progress_s_max, 0.0, 1.0))
+
+        rewards[m] = r_lon + r_lat + r_speed + r_progress
 
     return rewards
 
@@ -308,6 +353,7 @@ def run_training(
     max_grad_norm = float(config.get("max_grad_norm", 1.0))
     beta_kl = float(config.get("beta_kl", 0.02))
     desired_gap_m = float(config.get("desired_gap_m", 10.0))
+    progress_s_max = float(config.get("progress_s_max", 15.0))
     ckpt_interval = int(config.get("checkpoint_interval_steps", 5000))
     ckpt_top_k = int(config.get("ckpt_top_k", 3))
     pretrained_ckpt = str(config.get("pretrained_ckpt", ""))
@@ -394,7 +440,9 @@ def run_training(
                 follower_cands = candidates[i]                                   # [M, 8, 3]
 
                 proxy_rewards = compute_pairwise_formation_reward(
-                    follower_cands, pose_i, leader_selected_traj, pose_prev, desired_gap_m
+                    follower_cands, pose_i, leader_selected_traj, pose_prev,
+                    desired_gap_m=desired_gap_m,
+                    progress_s_max=progress_s_max,
                 )
 
                 # Zero out invalid modes
@@ -497,6 +545,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner-device", default="cuda")
     parser.add_argument("--use-render", type=int, choices=(0, 1), default=0)
     parser.add_argument("--scenario-ids", default="")
+    parser.add_argument(
+        "--resume-grpo-ckpt", default="",
+        help="Path to a saved GRPO checkpoint dir; loads plan_cls_branch.pt as init + ref weights (Strategy B)",
+    )
     return parser.parse_args()
 
 
@@ -505,6 +557,8 @@ def main() -> None:
     config = load_config(args.config)
     if args.pretrained_ckpt:
         config["pretrained_ckpt"] = args.pretrained_ckpt
+    if args.resume_grpo_ckpt:
+        config["resume_grpo_ckpt"] = args.resume_grpo_ckpt
     if args.num_agents > 0:
         config["num_agents"] = int(args.num_agents)
         config.setdefault("env_config", {})["num_agents"] = int(args.num_agents)

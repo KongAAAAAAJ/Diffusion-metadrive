@@ -16,3 +16,15 @@ mode_keep_lane_count: 5
 mode_lane_change_left_count: 5
 mode_lane_change_right_count: 5
 mode_emergency_stop_count: 1
+
+# Future feasible occupancy predictor (disabled by default; set true to enable).
+# It predicts an ego-local feasible driving region for classification re-ranking
+# only; trajectory generation remains unchanged.
+use_occupancy_predictor: false
+# occ_grid_h: 64
+# occ_grid_w: 64
+# occ_sigma_m: 1.0
+# occ_lon_range: [-2.0, 30.0]
+# occ_lat_range: [-10.0, 10.0]
+# occ_residual_scale: 2.0
+# occ_adapter_hidden_dim: 64

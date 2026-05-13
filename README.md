@@ -302,7 +302,7 @@ GRPO refinement 训练示例：
 ### 3. 配置文件
 当前训练入口主要使用：
 - `configs/train/selector.yaml` — selector MAPPO 正式训练
-- `configs/train/platoon_mappo_smoke.yaml` — selector MAPPO 冒烟测试
+- `configs/train/plan_cls_grpo.yaml` — plan_cls_branch GRPO 微调
 - `configs/train/platoon_selector_refine.yaml` — GRPO refinement 训练
 
 `selector.yaml` 用于 Phase 6 的 selector MAPPO 训练，包含：

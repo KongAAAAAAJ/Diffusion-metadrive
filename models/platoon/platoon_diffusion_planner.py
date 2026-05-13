@@ -26,6 +26,8 @@ class PlatoonDiffusionPlanner(nn.Module):
         self.relation_encoder = RelationEncoder(12, 64, 12)
         if self.use_relation_encoder:
             self._expand_status_encoding()
+        # OccupancyPredictor and OccupancyAdapter now live inside V2TransfuserModel._trajectory_head
+        # and are controlled by config.use_occupancy_predictor — no extra setup needed here.
 
     def _expand_status_encoding(self) -> None:
         old_layer = self.model._status_encoding

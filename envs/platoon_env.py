@@ -1014,7 +1014,7 @@ class PlatoonEnv(BaseMultiEnv):
     @staticmethod
     def _r_progress(s: float, s_max: float) -> float:
         """Progress (proximity) reward: 15 * s / s_max."""
-        return 15.0 * s / max(s_max, 1e-6)
+        return 1.0 * s / max(s_max, 1e-6)
 
     @staticmethod
     def _r_comfort(j: float, delta: float) -> float:

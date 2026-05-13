@@ -22,8 +22,11 @@ class ModeSelectionSB3Env(gym.Env):
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None):
         super().__init__()
-        self.config = self._with_selected_scenario(dict(config or {}))
+        self._raw_config = dict(config or {})
+        self._episode_count = 0
+        self.config = self._with_selected_scenario(dict(self._raw_config))
         self.num_agents = int(self.config.get("num_agents", 3))
+        self._env_pool: dict[str, Any] = {}   # unused; kept for close() compatibility
         self.base_env = self._build_base_env()
         self.planner = self._build_planner()
         self._agent_ids = [f"agent{i}" for i in range(self.num_agents)]
@@ -49,40 +52,27 @@ class ModeSelectionSB3Env(gym.Env):
         #                  False          → all modes selectable; invalid slots filled with keep-lane fallback
         self._use_action_mask = bool(self.config.get("use_action_mask", True))
 
-    def _build_base_env(self):
-        if self.config.get("base_env") is not None:
-            return self.config["base_env"]
-        factory = self.config.get("base_env_factory")
-        if callable(factory):
-            return factory(self.config)
-        from envs.platoon_env import PlatoonEnv
+    _BASE_ENV_FILTER_KEYS = frozenset({
+        "base_env", "base_env_factory", "planner", "planner_factory",
+        "num_modes", "relation_state_dim", "global_state_dim",
+        "planner_device", "lookahead_index", "target_speed_km_h",
+        "controller_type", "debug_dynamic_anchor_errors",
+        "scenario_ids", "scenario_index", "local_route_index",
+        "debug_log_path", "trajectory_source", "use_action_mask", "seed_offset",
+    })
 
-        filtered = {
-            key: value
-            for key, value in self.config.items()
-            if key
-            not in {
-                "base_env",
-                "base_env_factory",
-                "planner",
-                "planner_factory",
-                "num_modes",
-                "relation_state_dim",
-                "global_state_dim",
-                "planner_device",
-                "lookahead_index",
-                "target_speed_km_h",
-                "controller_type",
-                "debug_dynamic_anchor_errors",
-                "scenario_ids",
-                "scenario_index",
-                "local_route_index",
-                "debug_log_path",
-                "trajectory_source",
-                "use_action_mask",
-                "seed_offset",
-            }
-        }
+    def _build_base_env(self):
+        return self._build_base_env_with_config(self.config)
+
+    def _build_base_env_with_config(self, resolved_config: dict[str, Any]):
+        """Build PlatoonEnv from an already-resolved config dict."""
+        if resolved_config.get("base_env") is not None:
+            return resolved_config["base_env"]
+        factory = resolved_config.get("base_env_factory")
+        if callable(factory):
+            return factory(resolved_config)
+        from envs.platoon_env import PlatoonEnv
+        filtered = {k: v for k, v in resolved_config.items() if k not in self._BASE_ENV_FILTER_KEYS}
         return PlatoonEnv(filtered)
 
     @staticmethod
@@ -155,6 +145,28 @@ class ModeSelectionSB3Env(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
+        scenario_ids = list(self._raw_config.get("scenario_ids") or [])
+        if len(scenario_ids) > 1:
+            cfg = dict(self._raw_config)
+            cfg["scenario_index"] = self._episode_count % len(scenario_ids)
+            self.config = self._with_selected_scenario(cfg)
+            sid = self.config["scenario_id"]
+            new_route = self.config.get("local_route")
+            # Mutate the single base_env's runtime config in-place.
+            # Panda3D uses a process-wide singleton engine, so multiple PlatoonEnv
+            # instances cannot coexist. We keep one env and patch scenario/route
+            # before each reset so _reposition_platoon_on_route and
+            # _setup_scenario_orchestrator pick up the new values.
+            self.base_env.config["scenario_id"] = sid
+            self.base_env.config["local_route"] = new_route
+            self.base_env.platoon_config.scenario_id = sid
+            self.base_env.platoon_config.local_route = new_route
+            print(
+                f"[env] episode={self._episode_count}  "
+                f"scenario={sid}  local_route={new_route}",
+                flush=True,
+            )
+        self._episode_count += 1
         result = self.base_env.reset()
         self._step_count = 0
         if isinstance(result, tuple) and len(result) == 2:
@@ -460,6 +472,13 @@ class ModeSelectionSB3Env(gym.Env):
         }
         with self._debug_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
+
+    def close(self):
+        try:
+            self.base_env.close()
+        except Exception:
+            pass
+        super().close()
 
     def action_masks(self) -> np.ndarray:
         if not self._use_action_mask:

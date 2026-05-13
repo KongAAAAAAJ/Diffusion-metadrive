@@ -1,4 +1,5 @@
 pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt
+resume_grpo_ckpt: ""  # path to GRPO ckpt dir; overrides cls_branch init and ref weights (Strategy B)
 model_config_path: configs/diffusion/model.yaml
 num_agents: 3
 output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo
@@ -6,8 +7,14 @@ output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo
 total_timesteps: 50000
 learning_rate: 1.0e-4
 max_grad_norm: 1.0
-beta_kl: 0.02           # KL weight vs pretrained cls_branch
-desired_gap_m: 10.0     # desired bumper-to-bumper gap for formation reward
+beta_kl: 0.02             # KL weight vs pretrained cls_branch
+
+# ── proxy reward ────────────────────────────────────────────────────────────
+desired_gap_m: 10.0   # desired follow distance → lon/lat error reference (m)
+progress_s_max: 15.0  # expected max forward x-displacement (m) for r_progress normalisation
+# per-component weights (defaults match function signature):
+# w_lon: 0.5  lon_decay_m: 5.0  w_lat: 0.5  lat_decay_m: 1.0
+# w_speed: 1.0  w_progress: 1.0
 
 ckpt_top_k: 3
 checkpoint_interval_steps: 5000

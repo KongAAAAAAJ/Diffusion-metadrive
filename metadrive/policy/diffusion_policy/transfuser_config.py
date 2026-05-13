@@ -157,6 +157,17 @@ class TransfuserConfig:
     target_point_non_front_overlap_buffer_m: float = 1.0
     target_point_vehicle_prediction_use_constant_accel: bool = True
 
+    # ── Occupancy predictor (optional, default off) ───────────────────────────
+    use_occupancy_predictor: bool = False
+    occ_grid_h: int = 64
+    occ_grid_w: int = 64
+    occ_sigma_m: float = 1.0
+    occ_lon_range: Tuple[float, float] = (-2.0, 30.0)
+    occ_lat_range: Tuple[float, float] = (-10.0, 10.0)
+    occ_residual_scale: float = 2.0
+    occ_adapter_hidden_dim: int = 64
+    occ_loss_weight: float = 0.1   # weight of L_occ added to trajectory_loss during training
+
     weight_decay: float = 1e-4
     lr_steps: Tuple[int, ...] = (70,)
     optimizer_type: str = "AdamW"
@@ -328,6 +339,18 @@ def diffusion_model_config_to_overrides(model_config: Dict[str, Any]) -> Dict[st
             overrides[key] = model_config[key]
     if "preference" in overrides:
         overrides["use_preference_bias"] = bool(overrides["preference"])
+    for key in (
+        "use_occupancy_predictor",
+        "occ_grid_h",
+        "occ_grid_w",
+        "occ_sigma_m",
+        "occ_lon_range",
+        "occ_lat_range",
+        "occ_residual_scale",
+        "occ_adapter_hidden_dim",
+    ):
+        if key in model_config:
+            overrides[key] = model_config[key]
     return overrides
 
 
