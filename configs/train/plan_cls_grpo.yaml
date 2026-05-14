@@ -8,6 +8,10 @@ total_timesteps: 50000
 learning_rate: 1.0e-4
 max_grad_norm: 1.0
 beta_kl: 0.02             # KL weight vs pretrained cls_branch
+use_mode_valid_mask: false  # false: sampling and loss use all M modes without masking
+plan_cls_clip_range: 0.2
+plan_cls_update_epochs: 2
+plan_cls_max_log_ratio: 5.0
 
 # ── proxy reward ────────────────────────────────────────────────────────────
 desired_gap_m: 10.0   # desired follow distance → lon/lat error reference (m)
@@ -23,6 +27,7 @@ env_config:
   num_agents: 3
   observation_mode: multimodal
   use_render: false
+  image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption
   planner_device: cuda
   lookahead_index: 2
   target_speed_km_h: 30.0

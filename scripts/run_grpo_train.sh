@@ -10,7 +10,7 @@ PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 PRETRAINED_CKPT="${PRETRAINED_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
 CONFIG="${CONFIG:-${REPO_ROOT}/configs/train/plan_cls_grpo.yaml}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo}"
-TOTAL_STEPS="${TOTAL_STEPS:-50000}"
+TOTAL_STEPS="${TOTAL_STEPS:-200000}"
 NUM_AGENTS="${NUM_AGENTS:-3}"
 PLANNER_DEVICE="${PLANNER_DEVICE:-cuda}"
 # SCENARIO_IDS="${SCENARIO_IDS:-S2_free_cruise_curve}"
@@ -31,10 +31,23 @@ exec "${PYTHON_BIN}" -m train.train_plan_cls_grpo \
 
 
 
-
+# * run_4: S1场景训练（收敛）
 
 # * run_8（中断）/run_9（失败）/run_10（有上升趋势）/run_11(失败)/run_12（失败）
 # * 直接训S1+S2(失败)/课程学习训练S2（失败）/直接训S2（有上升趋势）/直接训S1+S2（失败）/直接训S1+S2+S3+S4（失败）
 # * S1和S2都只包含1条local route
 
-# ? Target point不对（推理时）
+# ? Target point不对（推理时），更新语义决策偏好Preference point引导 --> 收敛变差
+# * run_13: S1
+# * run_14: S1+S2
+# * run_15: S1+S2+S3+S4 
+
+# ? 收敛的不好,奖励曲线方差大
+# * 添加old log ratio clip限幅后：
+# * run_16: S1    5万
+# * run_17: S1+S2    10万
+
+
+# ! 去掉mask
+# * run_18: S1+S2    10万
+

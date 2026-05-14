@@ -106,6 +106,7 @@ def _build_step_overlay_polylines(
     mode_valid_mask: "np.ndarray | None",
     mode_slot_names: "list[str] | None",
     target_point_world: "np.ndarray | None" = None,
+    preference_point_world: "np.ndarray | None" = None,
     peer_ego_data: "list[dict] | None" = None,
 ) -> "list[dict]":
     """Build overlay polyline list for _capture_topdown_frame_with_overlay.
@@ -139,7 +140,7 @@ def _build_step_overlay_polylines(
         world[:, 1] = oy + sin_h * pts[:, 0] + cos_h * pts[:, 1]
         return world
 
-    def _draw_agent_overlays(a_ego, a_heading, a_coarse, a_candidates, a_selected, a_mask, primary):
+    def _draw_agent_overlays(a_ego, a_heading, a_coarse, a_candidates, a_selected, a_mask, primary, a_pref_world=None):
         ego_world = np_local.asarray(a_ego[:2], dtype=np_local.float64).reshape(1, 2)
 
         # topology (only for leader, already in world frame)
@@ -177,7 +178,13 @@ def _build_step_overlay_polylines(
                     color = _plot_color_for_mode_index(int(a_selected), mode_slot_names if primary else None)
                     _add(path, color, 6 if primary else 3)
 
-    # peer agents first (behind primary) — same drawing style as primary
+        # preference_point — orange dot per agent
+        if a_pref_world is not None:
+            pp = np_local.asarray(a_pref_world, dtype=np_local.float64).reshape(-1)
+            if pp.shape[0] >= 2:
+                overlays.append({"world_point": pp[:2], "color": (255, 140, 0), "radius_px": 7, "type": "circle"})
+
+    # peer agents first (behind primary)
     for peer in (peer_ego_data or []):
         _draw_agent_overlays(
             peer.get("xy", np_local.zeros(2)),
@@ -187,6 +194,7 @@ def _build_step_overlay_polylines(
             peer.get("selected"),
             peer.get("valid_mask"),
             primary=True,
+            a_pref_world=peer.get("preference_point_world"),
         )
 
     # primary agent last (on top)
@@ -194,13 +202,8 @@ def _build_step_overlay_polylines(
         ego_xy, float(ego_heading_rad),
         coarse_anchor_trajectories, multimodal_trajectories,
         selected_mode_idx, mode_valid_mask, primary=True,
+        a_pref_world=preference_point_world,
     )
-
-    # target_point — blue filled dot (world frame)
-    if target_point_world is not None:
-        tp = np_local.asarray(target_point_world, dtype=np_local.float64).reshape(-1)
-        if tp.shape[0] >= 2:
-            overlays.append({"world_point": tp[:2], "color": (30, 100, 255), "radius_px": 7, "type": "circle"})
 
     return overlays
 
@@ -584,6 +587,65 @@ def _coerce_optional_point(value) -> list[float] | None:
     if array.size < 2:
         return None
     return [float(array[0]), float(array[1])]
+
+
+def _inject_semantic_preference_point(
+    planner_batch: dict[str, dict],
+    coarse_by_agent: dict[str, np.ndarray],
+    agent_ids: list[str],
+    env=None,
+    target_speed_km_h: float = 30.0,
+    horizon_s: float = 4.0,
+) -> None:
+    """Inject preference_point as lane-following endpoint at target speed.
+
+    All vehicles in the platoon compute their preference_point along the
+    HEAD vehicle's (agent_ids[0]) current lane, so followers' preference_points
+    are guaranteed to share the same lane as the leader.
+
+    Each vehicle projects its own position onto the leader's lane to get its
+    arc-length s, then advances delta_s = target_speed * horizon along that lane
+    and converts the resulting world point to ego-local coordinates.
+
+    Falls back to keep-lane coarse endpoint (slot 0) if lane info unavailable.
+    """
+    delta_s = (target_speed_km_h / 3.6) * horizon_s
+
+    # Resolve the leader's lane (agent_ids[0] = head vehicle = agent0)
+    leader_lane = None
+    if env is not None and agent_ids:
+        leader_vehicle = getattr(env, "agents", {}).get(agent_ids[0])
+        if leader_vehicle is not None:
+            leader_lane = getattr(leader_vehicle, "lane", None)
+
+    for agent_id in agent_ids:
+        pp = None
+
+        vehicle = getattr(env, "agents", {}).get(agent_id) if env is not None else None
+        if vehicle is not None and leader_lane is not None:
+            try:
+                pos = getattr(vehicle, "position", None)
+                heading = float(getattr(vehicle, "heading_theta", 0.0))
+                if pos is not None:
+                    # Project this vehicle's position onto the leader's lane
+                    s_ego, _ = leader_lane.local_coordinates(pos)
+                    s_target = min(float(s_ego) + delta_s, float(leader_lane.length))
+                    target_world = np.asarray(leader_lane.position(s_target, 0.0), dtype=np.float32)
+                    dx = float(target_world[0]) - float(pos[0])
+                    dy = float(target_world[1]) - float(pos[1])
+                    cos_h, sin_h = np.cos(heading), np.sin(heading)
+                    pp = np.asarray([cos_h * dx + sin_h * dy, -sin_h * dx + cos_h * dy], dtype=np.float32)
+            except Exception:
+                pass
+
+        # Fallback: keep-lane coarse endpoint (slot 0)
+        if pp is None:
+            coarse = coarse_by_agent.get(agent_id)
+            if coarse is not None and coarse.shape[0] > 0:
+                pp = coarse[0, -1, :2].astype(np.float32)
+
+        if pp is not None:
+            planner_batch[agent_id]["preference_point"] = pp
 
 
 def _apply_selected_mode_target_overrides(
@@ -1956,15 +2018,15 @@ def run_platoon_planner_backend(
         )
         ppo_deterministic = bool(getattr(args, "ppo_deterministic", 1))
         selection_policy = "ppo_actor"
-        target_override_enabled = True
+        target_override_enabled = False
         print(f"[test] mode=ppo_actor  ckpt={ppo_actor_ckpt}", flush=True)
         print(f"[test] ppo_deterministic={ppo_deterministic}", flush=True)
     else:
         ppo_deterministic = False
         selection_policy = str(getattr(args, "selection_policy", "argmax"))
-        target_override_enabled = True
+        target_override_enabled = False
         print(f"[test] mode=pretrained_planner  selection_policy={selection_policy}", flush=True)
-    print(f"[test] selected_mode_guidance_enabled={target_override_enabled}", flush=True)
+    print(f"[test] semantic_preference_point_enabled=True  target_override_enabled={target_override_enabled}", flush=True)
 
     # random_rng used by pretrained-planner path (argmax does not consume it)
     random_rng = np.random.RandomState(
@@ -2053,6 +2115,14 @@ def run_platoon_planner_backend(
                     for agent_id, sample in planner_batch.items()
                     if sample.get("coarse_trajectories") is not None
                 }
+                # Inject semantic preference_point (target-speed lane endpoint) before
+                # inference so the diffusion model uses it as a soft semantic target.
+                _inject_semantic_preference_point(
+                    planner_batch, coarse_by_agent, list(planner_batch.keys()),
+                    env=env,
+                    target_speed_km_h=float(getattr(args, "target_speed_km_h", 30.0)),
+                    horizon_s=float(transfuser_config.target_point_prediction_horizon_s),
+                )
                 with torch.no_grad():
                     export = planner.export_mode_selection(planner_batch)
                 exported_ids = list(export["agent_ids"])
@@ -2091,25 +2161,6 @@ def run_platoon_planner_backend(
                     mode_idx = int(selected_modes[agent_index])
                     if mode_idx < 0 or mode_idx >= mode_valid_mask.shape[1] or not bool(mode_valid_mask[agent_index, mode_idx]):
                         raise ValueError(f"Selected invalid mode {mode_idx} for {agent_id}")
-                initial_candidates = candidates.copy()
-                target_override_metadata = _apply_selected_mode_target_overrides(
-                    planner_batch,
-                    agent_ids=exported_ids,
-                    selected_modes=selected_modes,
-                    coarse_by_agent=coarse_by_agent,
-                    config=transfuser_config,
-                )
-                with torch.no_grad():
-                    guided_export = planner.export_mode_selection(planner_batch)
-                guided_exported_ids = list(guided_export["agent_ids"])
-                if guided_exported_ids != exported_ids:
-                    raise RuntimeError(
-                        f"Guided export agent order changed: {guided_exported_ids} != {exported_ids}"
-                    )
-                candidates = np.asarray(guided_export["trajectory_candidates"], dtype=np.float32)
-                masked_logits = np.asarray(guided_export["masked_cls_logits"], dtype=np.float32)
-                raw_logits = np.asarray(guided_export["raw_cls_logits"], dtype=np.float32)
-                mode_valid_mask = np.asarray(guided_export["mode_valid_mask"], dtype=bool)
 
                 low_level_actions: dict[str, np.ndarray] = {}
                 _step_trajectories: dict[str, np.ndarray] = {}
@@ -2150,26 +2201,16 @@ def run_platoon_planner_backend(
                             "selection_policy": selection_policy,
                             "ppo_selected_mode": int(mode_idx),
                             "selected_mode_valid": bool(mode_valid_mask[agent_index, mode_idx]),
-                            "target_point_override_enabled": True,
-                            "initial_selected_candidate_endpoint": (
-                                initial_candidates[agent_index, mode_idx, -1, :2].astype(float).tolist()
-                            ),
-                            "guided_selected_candidate_endpoint": (
+                            "target_point_override_enabled": False,
+                            "selected_candidate_endpoint": (
                                 candidates[agent_index, mode_idx, -1, :2].astype(float).tolist()
                             ),
-                            **target_override_metadata.get(
-                                agent_id,
-                                {
-                                    "target_point_before": _coerce_optional_point(planner_batch[agent_id].get("target_point")),
-                                    "target_point_after": None,
-                                    "selected_coarse_endpoint": (
-                                        np.asarray(coarse_by_agent[agent_id], dtype=np.float32)[mode_idx, -1, :2]
-                                        .astype(float)
-                                        .tolist()
-                                        if agent_id in coarse_by_agent
-                                        else None
-                                    ),
-                                },
+                            "selected_coarse_endpoint": (
+                                np.asarray(coarse_by_agent[agent_id], dtype=np.float32)[mode_idx, -1, :2]
+                                .astype(float)
+                                .tolist()
+                                if agent_id in coarse_by_agent
+                                else None
                             ),
                         }
                     )
@@ -2246,6 +2287,11 @@ def run_platoon_planner_backend(
                             _peer_ego = np.asarray(_peer_ego[:2], dtype=np.float64)
                             _peer_veh = env.agents.get(_aid)
                             _peer_heading = float(getattr(_peer_veh, "heading_theta", 0.0)) if _peer_veh else 0.0
+                            _peer_pp_local = planner_final_info.get(_aid, {}).get("preference_point")
+                            _peer_pp_world = (
+                                _local_xy_to_world_list(_peer_pp_local, _peer_ego, _peer_heading)
+                                if _peer_pp_local is not None else None
+                            )
                             _peers.append({
                                 "xy": _peer_ego,
                                 "heading_rad": _peer_heading,
@@ -2256,6 +2302,9 @@ def run_platoon_planner_backend(
                                 ),
                                 "selected": int(selected_modes[_ai]),
                                 "valid_mask": mode_valid_mask[_ai] if mode_valid_mask is not None else None,
+                                "preference_point_world": (
+                                    np.asarray(_peer_pp_world, dtype=np.float64) if _peer_pp_world is not None else None
+                                ),
                             })
                     _pri_vehicle = env.agents.get(primary_agent_id)
                     _pri_ego_xy = np.asarray(_pri_vehicle.position[:2], dtype=np.float64) if _pri_vehicle else np.zeros(2)
@@ -2264,6 +2313,11 @@ def run_platoon_planner_backend(
                     _pri_tp_world = (
                         _local_xy_to_world_list(_pri_tp_local, _pri_ego_xy, _pri_heading)
                         if _pri_tp_local is not None else None
+                    )
+                    _pri_pp_local = planner_final_info.get(primary_agent_id, {}).get("preference_point")
+                    _pri_pp_world = (
+                        _local_xy_to_world_list(_pri_pp_local, _pri_ego_xy, _pri_heading)
+                        if _pri_pp_local is not None else None
                     )
                     _overlay = _build_step_overlay_polylines(
                         ego_xy=_pri_ego_xy,
@@ -2275,6 +2329,7 @@ def run_platoon_planner_backend(
                         mode_valid_mask=mode_valid_mask[_pri_idx] if mode_valid_mask is not None else None,
                         mode_slot_names=mode_slot_names,
                         target_point_world=np.asarray(_pri_tp_world, dtype=np.float64) if _pri_tp_world is not None else None,
+                        preference_point_world=np.asarray(_pri_pp_world, dtype=np.float64) if _pri_pp_world is not None else None,
                         peer_ego_data=_peers,
                     )
                     _combined = _capture_topdown_frame_with_overlay(
@@ -2324,18 +2379,8 @@ def run_platoon_planner_backend(
                 episode_reward += _last_step_reward
                 for agent_id, agent_info in info.items():
                     if agent_id in planner_final_info:
-                        # Preserve target_point when it was explicitly overridden to the
-                        # selected mode's coarse endpoint (target_point_after is not None).
-                        # env.step() info carries MetaDrive's own navigation target_point
-                        # which would otherwise silently overwrite the override.
-                        _preserve_keys = (
-                            {"target_point"}
-                            if planner_final_info[agent_id].get("target_point_after") is not None
-                            else set()
-                        )
                         for k, v in agent_info.items():
-                            if k not in _preserve_keys:
-                                planner_final_info[agent_id][k] = v
+                            planner_final_info[agent_id][k] = v
                 env_rewards = {
                     agent_id: float(reward.get(agent_id, 0.0))
                     for agent_id in exported_ids
@@ -2360,21 +2405,16 @@ def run_platoon_planner_backend(
                             agent_id: candidates[idx, :, -1, :2].astype(float).tolist()
                             for idx, agent_id in enumerate(exported_ids)
                         },
-                        "initial_selected_candidate_endpoint": {
-                            agent_id: initial_candidates[idx, int(selected_modes[idx]), -1, :2].astype(float).tolist()
-                            for idx, agent_id in enumerate(exported_ids)
-                        },
                         "selected_candidate_endpoint": {
                             agent_id: candidates[idx, int(selected_modes[idx]), -1, :2].astype(float).tolist()
                             for idx, agent_id in enumerate(exported_ids)
                         },
-                        "target_point_override_enabled": target_override_enabled,
-                        "target_point_before": {
-                            agent_id: planner_final_info[agent_id].get("target_point_before")
-                            for agent_id in exported_ids
-                        },
-                        "target_point_after": {
-                            agent_id: planner_final_info[agent_id].get("target_point_after")
+                        "target_point_override_enabled": False,
+                        "semantic_preference_point": {
+                            agent_id: (
+                                np.asarray(planner_batch[agent_id].get("preference_point", [0.0, 0.0]), dtype=np.float32)
+                                .astype(float).tolist()
+                            )
                             for agent_id in exported_ids
                         },
                         "selected_coarse_endpoint": {
@@ -2769,6 +2809,11 @@ def main():
                         _local_xy_to_world_list(_tp_local, ego_xy_before_step, ego_heading_before_step)
                         if _tp_local is not None else None
                     )
+                    _pp_local = final_info.get("preference_point")
+                    _pp_world = (
+                        _local_xy_to_world_list(_pp_local, ego_xy_before_step, ego_heading_before_step)
+                        if _pp_local is not None else None
+                    )
                     if _cands is not None:
                         _cands = np.asarray(_cands, dtype=np.float32)
                         if _cands.ndim == 3 and _cands.shape[2] >= 2:
@@ -2783,6 +2828,7 @@ def main():
                         mode_valid_mask=None,
                         mode_slot_names=_mode_slot_names_from_config(transfuser_config),
                         target_point_world=np.asarray(_tp_world, dtype=np.float64) if _tp_world is not None else None,
+                        preference_point_world=np.asarray(_pp_world, dtype=np.float64) if _pp_world is not None else None,
                         peer_ego_data=None,
                     )
                     _combined = _capture_topdown_frame_with_overlay(

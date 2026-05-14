@@ -171,6 +171,9 @@ def compute_pairwise_formation_reward(
     w_speed: float = 0,
     w_progress: float = 0,
     progress_s_max: float = 15.0,
+    # same_lane: if False (vehicles have different semantic target lanes),
+    # skip formation reward — formation only applies within the same lane.
+    same_lane: bool = True,
 ) -> np.ndarray:                       # [M] proxy reward per mode
     """Pairwise formation proxy reward.
 
@@ -180,7 +183,11 @@ def compute_pairwise_formation_reward(
       r_speed    w_speed  * clip(v_follower / v_leader, 0, 1)
       r_progress w_progress * clip(x_endpoint / progress_s_max, 0, 1)
     """
-    M, T = follower_candidates.shape[:2]
+    M = follower_candidates.shape[0]
+    if not same_lane:
+        return np.zeros(M, dtype=np.float32)
+
+    T = follower_candidates.shape[1]
     rewards = np.empty(M, dtype=np.float32)
 
     leader_world_xy = _local_to_world_xy(leader_pose, leader_traj[:, :2])  # [T, 2]
@@ -223,52 +230,82 @@ def grpo_step_loss(
     ref_logits: torch.Tensor,        # [M] reference logits, no grad
     mode_valid_mask: torch.Tensor,   # [M] bool
     proxy_rewards: np.ndarray,       # [M]
+    old_log_probs: torch.Tensor,     # [M] rollout-time log-probs, detached
     beta_kl: float = 0.02,
     adv_eps: float = 1e-6,
+    clip_range: float = 0.2,
+    max_log_ratio: float = 5.0,
+    use_mask: bool = True,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """GRPO loss for a single follower agent.
+
+    When use_mask=True, only valid modes (mode_valid_mask) participate in
+    softmax and advantage computation. When False, all M modes are used with
+    plain (unmasked) softmax.
 
     Returns (loss_tensor, metrics_dict).
     """
     device = logits.device
     rewards = torch.tensor(proxy_rewards, dtype=torch.float32, device=device)
-    valid_idx = mode_valid_mask.nonzero(as_tuple=False).squeeze(-1)
 
-    if valid_idx.numel() < 2:
-        # Not enough valid modes to compute meaningful advantage
+    if use_mask:
+        valid_idx = mode_valid_mask.nonzero(as_tuple=False).squeeze(-1)
+        n_for_guard = valid_idx.numel()
+    else:
+        valid_idx = torch.arange(logits.shape[0], device=device)
+        n_for_guard = logits.shape[0]
+
+    if n_for_guard < 2:
         zero = logits.sum() * 0.0
-        return zero, {"pg_loss": 0.0, "kl_loss": 0.0, "entropy": 0.0, "n_valid": int(valid_idx.numel())}
+        return zero, {
+            "pg_loss": 0.0,
+            "kl_loss": 0.0,
+            "entropy": 0.0,
+            "ratio_mean": 1.0,
+            "ratio_max": 1.0,
+            "clip_fraction": 0.0,
+            "approx_kl": 0.0,
+            "n_valid": int(mode_valid_mask.sum()),
+        }
 
     r_valid = rewards[valid_idx]
     adv_valid = (r_valid - r_valid.mean()) / (r_valid.std() + adv_eps)
 
-    # Masked softmax — restrict everything to valid indices to avoid 0 * (-inf) = NaN.
-    # F.log_softmax on all-neg-inf invalid positions produces -inf; multiplying by the
-    # zero-advantage or zero-pi values at those positions gives NaN (IEEE 754).
-    # Solution: index into valid_idx first, then compute all quantities.
-    neg_inf = torch.full_like(logits, float("-inf"))
-    masked_logits = torch.where(mode_valid_mask, logits, neg_inf)
-    log_pi_all = F.log_softmax(masked_logits, dim=-1)
+    if use_mask:
+        neg_inf = torch.full_like(logits, float("-inf"))
+        log_pi_all = F.log_softmax(torch.where(mode_valid_mask, logits, neg_inf), dim=-1)
+        log_pi_ref_all = F.log_softmax(torch.where(mode_valid_mask, ref_logits.float(), neg_inf), dim=-1)
+    else:
+        log_pi_all = F.log_softmax(logits, dim=-1)
+        log_pi_ref_all = F.log_softmax(ref_logits.float(), dim=-1)
 
-    log_pi_valid = log_pi_all[valid_idx]           # finite values only
-    pi_new_valid = log_pi_valid.exp()              # equivalent to softmax over valid subset
+    log_pi_valid = log_pi_all[valid_idx]
+    pi_new_valid = log_pi_valid.exp()
 
-    pg_loss = -(adv_valid * log_pi_valid).sum()
+    old_log_pi_valid = old_log_probs.to(device=device, dtype=logits.dtype).detach()[valid_idx]
+    log_ratio = (log_pi_valid - old_log_pi_valid).clamp(-float(max_log_ratio), float(max_log_ratio))
+    ratio = torch.exp(log_ratio)
+    clipped_ratio = ratio.clamp(1.0 - float(clip_range), 1.0 + float(clip_range))
+    surrogate = torch.minimum(ratio * adv_valid, clipped_ratio * adv_valid)
+    pg_loss = -surrogate.mean()
 
-    # KL: pi_ref || pi_new, computed over valid modes only
-    masked_ref = torch.where(mode_valid_mask, ref_logits.float(), neg_inf)
-    log_pi_ref_all = F.log_softmax(masked_ref, dim=-1)
     pi_ref_valid = log_pi_ref_all[valid_idx].exp()
     kl_loss = (pi_ref_valid * (log_pi_ref_all[valid_idx] - log_pi_valid)).sum()
 
     entropy = -(pi_new_valid * log_pi_valid).sum()
     loss = pg_loss + beta_kl * kl_loss
+    clip_fraction = ((ratio - clipped_ratio).abs() > 1e-6).float().mean()
+    approx_kl = (old_log_pi_valid - log_pi_valid).mean()
 
     return loss, {
         "pg_loss": float(pg_loss.detach()),
         "kl_loss": float(kl_loss.detach()),
         "entropy": float(entropy.detach()),
-        "n_valid": int(valid_idx.numel()),
+        "ratio_mean": float(ratio.detach().mean()),
+        "ratio_max": float(ratio.detach().max()),
+        "clip_fraction": float(clip_fraction.detach()),
+        "approx_kl": float(approx_kl.detach()),
+        "n_valid": int(mode_valid_mask.sum()),
     }
 
 
@@ -352,6 +389,10 @@ def run_training(
     lr = float(config.get("learning_rate", 1e-4))
     max_grad_norm = float(config.get("max_grad_norm", 1.0))
     beta_kl = float(config.get("beta_kl", 0.02))
+    plan_cls_clip_range = float(config.get("plan_cls_clip_range", 0.2))
+    plan_cls_update_epochs = int(config.get("plan_cls_update_epochs", 1))
+    plan_cls_max_log_ratio = float(config.get("plan_cls_max_log_ratio", 5.0))
+    use_mode_valid_mask = bool(config.get("use_mode_valid_mask", True))
     desired_gap_m = float(config.get("desired_gap_m", 10.0))
     progress_s_max = float(config.get("progress_s_max", 15.0))
     ckpt_interval = int(config.get("checkpoint_interval_steps", 5000))
@@ -405,6 +446,12 @@ def run_training(
             ref_logits: torch.Tensor = grpo["ref_logits"]             # [N, M]
             mode_valid_mask: torch.Tensor = grpo["mode_valid_mask"]   # [N, M]
             mode_valid_mask_np: np.ndarray = grpo["mode_valid_mask_np"]
+            if use_mode_valid_mask:
+                old_log_probs = F.log_softmax(
+                    logits.masked_fill(~mode_valid_mask, float("-inf")), dim=-1,
+                ).detach()
+            else:
+                old_log_probs = F.log_softmax(logits, dim=-1).detach()
 
             N, M = logits.shape
 
@@ -418,15 +465,16 @@ def run_training(
                     # Head vehicle: pretrained argmax (no learning)
                     mode_actions[i] = int(grpo["pretrained_argmax_mode"][i])
                 else:
-                    # Follower: sample from masked distribution during training
+                    # Follower: sample from distribution during training
                     with torch.no_grad():
-                        masked = logits[i].masked_fill(~mode_valid_mask[i], float("-inf"))
-                        probs = F.softmax(masked, dim=-1)
+                        if use_mode_valid_mask:
+                            probs = F.softmax(logits[i].masked_fill(~mode_valid_mask[i], float("-inf")), dim=-1)
+                        else:
+                            probs = F.softmax(logits[i], dim=-1)
                         mode_actions[i] = int(torch.multinomial(probs, 1).item())
 
-            # ── compute proxy rewards for each follower ───────────────────────
-            follower_step_loss = torch.zeros(1, device=logits.device)
-            step_metrics: list[dict] = []
+            # ── compute proxy rewards for each follower once on rollout policy ─
+            follower_payloads: list[dict] = []
 
             for i in range(1, N):
                 aid = agent_ids[i]
@@ -445,22 +493,47 @@ def run_training(
                     progress_s_max=progress_s_max,
                 )
 
-                # Zero out invalid modes
-                proxy_rewards = proxy_rewards * mode_valid_mask_np[i].astype(np.float32)
+                if use_mode_valid_mask:
+                    proxy_rewards = proxy_rewards * mode_valid_mask_np[i].astype(np.float32)
 
-                loss_i, metrics_i = grpo_step_loss(
-                    logits[i], ref_logits[i], mode_valid_mask[i],
-                    proxy_rewards, beta_kl=beta_kl,
-                )
-                follower_step_loss = follower_step_loss + loss_i
-                step_metrics.append(metrics_i)
+                follower_payloads.append({
+                    "index": i,
+                    "proxy_rewards": proxy_rewards,
+                    "old_log_probs": old_log_probs[i],
+                    "mode_valid_mask": mode_valid_mask[i].detach(),
+                })
 
-            if len(step_metrics) > 0:
-                follower_step_loss = follower_step_loss / len(step_metrics)
-                optimizer.zero_grad()
-                follower_step_loss.backward()
-                torch.nn.utils.clip_grad_norm_(cls_branch.parameters(), max_grad_norm)
-                optimizer.step()
+            step_metrics: list[dict] = []
+            follower_step_loss = torch.zeros(1, device=logits.device)
+            if len(follower_payloads) > 0:
+                for _update_epoch in range(max(1, plan_cls_update_epochs)):
+                    update_grpo = planner.export_for_grpo(planner_batch, ref_cls_branch)
+                    update_logits: torch.Tensor = update_grpo["logits"]
+                    update_ref_logits: torch.Tensor = update_grpo["ref_logits"]
+                    epoch_loss = torch.zeros(1, device=update_logits.device)
+                    epoch_metrics: list[dict] = []
+                    for payload in follower_payloads:
+                        i = int(payload["index"])
+                        loss_i, metrics_i = grpo_step_loss(
+                            update_logits[i],
+                            update_ref_logits[i],
+                            payload["mode_valid_mask"],
+                            payload["proxy_rewards"],
+                            old_log_probs=payload["old_log_probs"],
+                            beta_kl=beta_kl,
+                            clip_range=plan_cls_clip_range,
+                            max_log_ratio=plan_cls_max_log_ratio,
+                            use_mask=use_mode_valid_mask,
+                        )
+                        epoch_loss = epoch_loss + loss_i
+                        epoch_metrics.append(metrics_i)
+                    epoch_loss = epoch_loss / max(1, len(epoch_metrics))
+                    optimizer.zero_grad()
+                    epoch_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(cls_branch.parameters(), max_grad_norm)
+                    optimizer.step()
+                    follower_step_loss = epoch_loss
+                    step_metrics = epoch_metrics
 
             # ── step env ──────────────────────────────────────────────────────
             obs, env_reward, terminated, truncated, info = env.step(mode_actions)
@@ -474,9 +547,15 @@ def run_training(
                 avg_pg = float(np.mean([m["pg_loss"] for m in step_metrics]))
                 avg_kl = float(np.mean([m["kl_loss"] for m in step_metrics]))
                 avg_ent = float(np.mean([m["entropy"] for m in step_metrics]))
+                avg_ratio = float(np.mean([m["ratio_mean"] for m in step_metrics]))
+                avg_clip = float(np.mean([m["clip_fraction"] for m in step_metrics]))
+                avg_approx_kl = float(np.mean([m["approx_kl"] for m in step_metrics]))
                 writer.add_scalar("train/pg_loss", avg_pg, global_step)
                 writer.add_scalar("train/kl_loss", avg_kl, global_step)
                 writer.add_scalar("train/entropy", avg_ent, global_step)
+                writer.add_scalar("train/ratio_mean", avg_ratio, global_step)
+                writer.add_scalar("train/clip_fraction", avg_clip, global_step)
+                writer.add_scalar("train/approx_kl", avg_approx_kl, global_step)
                 writer.add_scalar("train/grpo_loss", float(follower_step_loss.detach()), global_step)
                 writer.add_scalar("train/env_reward_step", float(env_reward), global_step)
 

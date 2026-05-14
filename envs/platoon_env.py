@@ -851,8 +851,6 @@ class PlatoonEnv(BaseMultiEnv):
             if traj is None:
                 topo_scores[agent_id] = neutral_score   # no trajectory info: neutral score
                 per_agent[agent_id] = {"road_topo_reward": neutral_score, "topo_avg_deviation_m": float("nan")}
-                #!
-                print(f"Agent {agent_id}: No trajectory provided, assigning neutral topo score.")
                 continue
 
             traj = np.asarray(traj, dtype=np.float32)

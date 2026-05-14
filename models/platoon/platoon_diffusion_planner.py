@@ -315,12 +315,13 @@ class PlatoonDiffusionPlanner(nn.Module):
 
         # Collect per-agent inputs (same aggregation as forward())
         contexts: Dict[str, dict] = {}
+        device = self._device()
         for agent_id in agent_ids:
             sample = batch[agent_id]
-            camera = self._ensure_batch_dim(sample["camera"]).float()          # [1, 3, H, W]
-            lidar = self._ensure_batch_dim(sample["lidar"]).float()            # [1, 1, H, W]
-            status = self._ensure_batch_dim(sample["status"]).float()          # [1, 8]
-            relation = self._ensure_batch_dim(sample["formation_relation_state"]).float()  # [1, 12]
+            camera = self._ensure_batch_dim(sample["camera"]).to(device=device).float()          # [1, 3, H, W]
+            lidar = self._ensure_batch_dim(sample["lidar"]).to(device=device).float()            # [1, 1, H, W]
+            status = self._ensure_batch_dim(sample["status"]).to(device=device).float()          # [1, 8]
+            relation = self._ensure_batch_dim(sample["formation_relation_state"]).to(device=device).float()  # [1, 12]
 
             relation_emb = self.relation_encoder(relation)
             fused_status = torch.cat([status, relation_emb], dim=-1)           # [1, 20]
@@ -357,6 +358,16 @@ class PlatoonDiffusionPlanner(nn.Module):
                 "status_encoding_token": status_enc[:, None], # [1, 1, D]
             }
         return contexts, agent_ids
+
+    def rollout_selected_refinement(self, context: dict, selected_traj_np, **kwargs) -> Dict[str, Tensor]:
+        """Refine one selected trajectory into local groups for GRPO training.
+
+        Kept as a thin wrapper so callers can access refinement through the
+        planner object without changing the normal diffusion forward path.
+        """
+        from train.train_selected_refine_grpo import rollout_selected_refinement
+
+        return rollout_selected_refinement(self, context, selected_traj_np, **kwargs)
 
     def predict_denoised_traj(
         self,

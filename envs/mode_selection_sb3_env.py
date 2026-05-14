@@ -580,6 +580,10 @@ class ModeSelectionSB3Env(gym.Env):
             # Vehicle removed (crash/out-of-road): inject fallback so coarse_trajectories
             # is always present in _last_planner_batch → prevents KeyError in next step.
             sample.update(self._build_dynamic_mode_features_fallback())
+        # Inject keep-lane coarse endpoint as semantic preference_point (slot 0 = keep-lane).
+        coarse = sample.get("coarse_trajectories")
+        if coarse is not None and coarse.shape[0] > 0:
+            sample["preference_point"] = coarse[0, -1, :2].astype(np.float32)
         return sample
 
     def _build_dynamic_mode_features_fallback(self) -> dict[str, np.ndarray]:
