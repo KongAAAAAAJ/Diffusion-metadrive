@@ -4,13 +4,13 @@ import pytest
 
 from models.diffusion.ddim_with_logprob import DDIMSchedulerWithLogProb
 from train.train_selected_refine_grpo import (
+    ddv2_refine_grpo_loss,
     _execute_trajectories,
     freeze_for_selected_refinement,
     load_cls_grpo_weights_for_refinement,
     normalize_group_advantages,
     recompute_refine_log_probs,
     reconstruct_heading_from_xy,
-    refine_grpo_loss,
     rollout_selected_refinement,
     sample_truncated_refine_noise,
 )
@@ -50,55 +50,50 @@ def test_reconstruct_heading_from_xy_returns_trajectory_shape():
     assert torch.allclose(traj[:, 2], torch.zeros(8), atol=1e-6)
 
 
-def test_refine_grpo_loss_includes_bc_penalty():
+def test_ddv2_refine_grpo_loss_includes_bc_penalty_and_self_detached_ratio():
     new_log_probs = torch.zeros(4, 3, requires_grad=True)
-    old_log_probs = torch.zeros(4, 3)
     advantages = torch.tensor([1.0, -1.0, 0.5, -0.5])
     refined = torch.ones(4, 8, 2, requires_grad=True)
     selected = torch.zeros(8, 2)
 
-    loss, metrics = refine_grpo_loss(
+    loss, metrics = ddv2_refine_grpo_loss(
         new_log_probs=new_log_probs,
-        old_log_probs=old_log_probs,
         advantages=advantages,
         refined_xy=refined,
         selected_xy=selected,
         bc_weight=0.1,
         kl_weight=0.0,
-        clip_range=0.2,
-        max_log_ratio=5.0,
     )
 
     assert loss.requires_grad
     assert metrics["bc_loss"] > 0
     assert abs(metrics["ratio_mean"] - 1.0) < 1e-6
+    assert metrics["clip_fraction"] == 0.0
     loss.backward()
     assert refined.grad is not None
     assert refined.grad.abs().sum() > 0
+    assert new_log_probs.grad is not None
+    assert new_log_probs.grad.abs().sum() > 0
 
 
-def test_refine_grpo_loss_reports_clipped_ratio():
-    new_log_probs = torch.full((4, 3), 2.0, requires_grad=True)
-    old_log_probs = torch.zeros(4, 3)
-    advantages = torch.tensor([1.0, 1.0, -1.0, -1.0])
+def test_ddv2_refine_grpo_loss_uses_positive_advantages_only_when_requested():
+    new_log_probs = torch.zeros(4, 2, requires_grad=True)
+    advantages = torch.tensor([1.0, -2.0, 0.5, -0.5])
     refined = torch.zeros(4, 8, 2, requires_grad=True)
     selected = torch.zeros(8, 2)
 
-    loss, metrics = refine_grpo_loss(
+    _, metrics = ddv2_refine_grpo_loss(
         new_log_probs=new_log_probs,
-        old_log_probs=old_log_probs,
         advantages=advantages,
         refined_xy=refined,
         selected_xy=selected,
         bc_weight=0.0,
         kl_weight=0.0,
-        clip_range=0.2,
-        max_log_ratio=5.0,
+        positive_advantage_only=True,
     )
 
-    assert loss.requires_grad
-    assert metrics["clip_fraction"] > 0.0
-    assert metrics["ratio_max"] > 1.2
+    assert metrics["active_advantage_count"] == 2
+    assert metrics["clip_fraction"] == 0.0
 
 
 def test_ddim_scheduler_with_logprob_shapes_and_gradients():
@@ -196,11 +191,45 @@ def test_rollout_selected_refinement_returns_ddim_step_log_probs():
     )
 
     assert rollout["log_probs"].shape == (3, 4)
-    assert rollout["old_log_probs"].shape == (3, 4)
     assert rollout["chains_norm"].shape == (3, 5, 1, 8, 2)
+    assert torch.allclose(rollout["all_diffusion_output"], rollout["chains_norm"])
     assert rollout["timesteps"].shape == (4,)
+    assert rollout["timesteps"].tolist() == [15, 10, 5, 0]
     assert rollout["log_probs"].requires_grad
-    assert not rollout["old_log_probs"].requires_grad
+    assert "old_log_probs" not in rollout
+
+
+def test_rollout_selected_refinement_initial_chain_uses_scheduler_add_noise(monkeypatch):
+    planner = _TinyRefinePlanner()
+    scheduler = DDIMSchedulerWithLogProb(
+        num_train_timesteps=1000,
+        beta_schedule="scaled_linear",
+        prediction_type="sample",
+    )
+    calls = {"count": 0}
+    original_add_noise = scheduler.add_noise
+
+    def _spy_add_noise(*args, **kwargs):
+        calls["count"] += 1
+        return original_add_noise(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler, "add_noise", _spy_add_noise)
+
+    rollout = rollout_selected_refinement(
+        planner,
+        context={},
+        selected_traj_np=torch.zeros(8, 3).numpy(),
+        num_groups=3,
+        noise_t=8,
+        noise_std=0.02,
+        max_delta_norm=0.05,
+        denoise_steps=2,
+        eta=0.1,
+        scheduler=scheduler,
+    )
+
+    assert calls["count"] == 1
+    assert rollout["chains_norm"].shape == (3, 3, 1, 8, 2)
 
 
 def test_recompute_refine_log_probs_uses_fixed_chain_with_gradients():

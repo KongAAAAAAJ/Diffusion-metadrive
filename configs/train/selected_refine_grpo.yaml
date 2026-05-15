@@ -3,26 +3,27 @@ cls_grpo_ckpt_dir: ""
 cls_grpo_full_ckpt: ""
 model_config_path: configs/diffusion/model.yaml
 num_agents: 3
+use_relation_encoder: false  # keep _status_encoding at [128,19] to match full_platoon_grpo.ckpt format
 output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/selected_refine_grpo
 
-total_timesteps: 50000
+total_timesteps: 100000
 refine_lr: 1.0e-5
 max_grad_norm: 1.0
 
 # Selected-mode local refinement GRPO
 num_refine_groups: 4
 refine_noise_t: 8
-refine_noise_std: 0.02
-refine_max_delta_norm: 0.05
 refine_denoise_steps: 4
 refine_eta: 0.1
 refine_bc_weight: 0.1
 refine_kl_weight: 0.02
-refine_clip_range: 0.2
-refine_update_epochs: 1
-refine_max_log_ratio: 5.0
+refine_ddv2_loss: true
+refine_positive_advantage_only: true
+refine_no_positive_bc_weight: 1.0
 refine_max_delta_m: 1.0
 freeze_cls_branch: true
+# debug_noise_plot_dir: "/media/kong/Elements_SE/Diffusion_Data/outputs/selected_refine_grpo/noise_figure"  # if set, save noise diagnostic plots to this directory
+debug_noise_plot_dir: "" 
 
 # Proxy reward
 desired_gap_m: 10.0

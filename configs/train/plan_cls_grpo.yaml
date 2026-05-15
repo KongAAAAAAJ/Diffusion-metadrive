@@ -4,13 +4,13 @@ model_config_path: configs/diffusion/model.yaml
 num_agents: 3
 output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo
 
-total_timesteps: 50000
+total_timesteps: 100000
 learning_rate: 1.0e-4
 max_grad_norm: 1.0
-beta_kl: 0.02             # KL weight vs pretrained cls_branch
+beta_kl: 0.1             # KL weight vs pretrained cls_branch
 use_mode_valid_mask: false  # false: sampling and loss use all M modes without masking
 plan_cls_clip_range: 0.2
-plan_cls_update_epochs: 2
+plan_cls_update_epochs: 1
 plan_cls_max_log_ratio: 5.0
 
 # ── proxy reward ────────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ env_config:
   num_agents: 3
   observation_mode: multimodal
   use_render: false
-  image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption
+  image_on_cuda: false  # must be false for multi-agent (MetaDrive asserts image_on_cuda=false in multi-agent mode)
   planner_device: cuda
   lookahead_index: 2
   target_speed_km_h: 30.0
@@ -35,5 +35,5 @@ env_config:
   scenario_ids:
     - S1_free_cruise_straight
     - S2_free_cruise_curve
-    - S3_straight_following
-    - S4_curve_following
+    # - S3_straight_following
+    # - S4_curve_following

@@ -93,8 +93,15 @@ def build_planner_for_grpo(
     )
     planner = PlatoonDiffusionPlanner(tf_config, num_vehicles=int(config.get("num_agents", 3)))
 
+    full_platoon_ckpt = str(config.get("full_platoon_ckpt", "") or "")
     pretrained_ckpt = str(config.get("pretrained_ckpt", "") or "")
-    if pretrained_ckpt:
+    if full_platoon_ckpt:
+        # Load complete platoon ckpt (e.g. from a previous refine_grpo run).
+        # Takes priority over pretrained_ckpt; no single→platoon migration needed.
+        from models.platoon.weight_migration import load_platoon_grpo_checkpoint
+        load_platoon_grpo_checkpoint(full_platoon_ckpt, planner)
+        print(f"[grpo] loaded full platoon ckpt: {full_platoon_ckpt}", flush=True)
+    elif pretrained_ckpt:
         planner = migrate_single_to_platoon(pretrained_ckpt, planner)
 
     device_name = str(env_config.get("planner_device", "cpu"))
@@ -368,6 +375,12 @@ def run_training(
     run_dir = create_next_run_dir(output_root)
     print(f"[grpo] run_dir: {run_dir}", flush=True)
 
+    # Save a snapshot of the training config for reproducibility.
+    (run_dir / "train_config.yaml").write_text(
+        yaml.dump(dict(config), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
     # ── env config ────────────────────────────────────────────────────────────
     env_config = dict(config.get("env_config", {}))
     env_config.setdefault("num_agents", int(config.get("num_agents", 3)))
@@ -628,12 +641,18 @@ def parse_args() -> argparse.Namespace:
         "--resume-grpo-ckpt", default="",
         help="Path to a saved GRPO checkpoint dir; loads plan_cls_branch.pt as init + ref weights (Strategy B)",
     )
+    parser.add_argument(
+        "--full-platoon-ckpt", default="",
+        help="Full platoon ckpt path (e.g. full_platoon_refine_grpo.ckpt); loads all weights including refined trajectory head. Takes priority over --pretrained-ckpt.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    if args.full_platoon_ckpt:
+        config["full_platoon_ckpt"] = args.full_platoon_ckpt
     if args.pretrained_ckpt:
         config["pretrained_ckpt"] = args.pretrained_ckpt
     if args.resume_grpo_ckpt:

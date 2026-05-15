@@ -1,10 +1,13 @@
 import numpy as np
+from types import SimpleNamespace
 
 from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     _apply_selected_mode_target_overrides,
     _choose_mode_indices,
+    _episode_reset_seed,
     _format_step_reward_lines,
     _summarize_random_action_rewards,
+    build_platoon_env_config,
 )
 
 
@@ -33,6 +36,27 @@ def test_choose_mode_indices_samples_only_valid_modes_reproducibly():
     assert first == second
     assert masks[0, first[0]]
     assert masks[1, first[1]]
+
+
+def test_episode_reset_seed_cycles_inside_scenario_range():
+    assert [_episode_reset_seed(7, 3, idx) for idx in range(5)] == [7, 8, 9, 7, 8]
+    assert [_episode_reset_seed(7, 0, idx) for idx in range(3)] == [7, 7, 7]
+
+
+def test_build_platoon_env_config_disables_random_traffic_by_default():
+    args = SimpleNamespace(
+        num_agents=3,
+        render=0,
+        start_seed=7,
+        num_scenarios=1,
+        traffic_density=0.04,
+        random_traffic=0,
+        image_on_cuda=0,
+    )
+
+    env_config = build_platoon_env_config(args)
+
+    assert env_config["random_traffic"] is False
 
 
 def test_apply_selected_mode_target_overrides_uses_selected_coarse_endpoints():

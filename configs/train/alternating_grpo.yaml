@@ -1,0 +1,16 @@
+# Alternating GRPO training: cls_head ↔ trajectory_head cycles
+# Each cycle: (1) cls_grpo fine-tuning → (2) refine_grpo fine-tuning → next cycle
+
+n_cycles: 3                    # number of complete alternating cycles
+cls_steps_per_cycle: 30000     # env steps for classification head per cycle
+refine_steps_per_cycle: 20000  # env steps for trajectory head per cycle
+
+# Sub-stage configs (hyperparams managed independently in each yaml)
+cls_config: configs/train/plan_cls_grpo.yaml
+refine_config: configs/train/selected_refine_grpo.yaml
+
+# Starting checkpoint (single-vehicle pretrained model for cycle 1)
+pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt
+
+# Root output directory; each cycle creates cycle_N/cls_grpo/ and cycle_N/refine_grpo/
+output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/alternating_grpo

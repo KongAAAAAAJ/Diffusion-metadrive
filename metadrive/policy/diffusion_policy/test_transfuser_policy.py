@@ -374,6 +374,13 @@ def parse_args(argv=None):
     parser.add_argument("--start-seed", type=int, default=1)
     parser.add_argument("--num-scenarios", type=int, default=1)
     parser.add_argument("--traffic-density", type=float, default=0.06)
+    parser.add_argument(
+        "--random-traffic",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="Use MetaDrive's non-deterministic traffic manager RNG. Keep 0 for fair checkpoint comparisons.",
+    )
     parser.add_argument("--plan-anchor-path", type=str, default=None)
     parser.add_argument("--trajectory-reg-decoder-type", type=str, choices=("mlp", "gru"), default=None)
     parser.add_argument("--target-guidance-type", type=str, choices=("point", "line", "multi_point"), default=None)
@@ -1693,6 +1700,7 @@ def build_env_config(args, resolved_model_size: str, model_config: dict):
         "start_seed": args.start_seed,
         "num_scenarios": args.num_scenarios,
         "traffic_density": args.traffic_density,
+        "random_traffic": bool(getattr(args, "random_traffic", 0)),
         "agent_policy": TransfuserPolicy,
         "show_policy_mark": False,
         "image_on_cuda": bool(args.image_on_cuda),
@@ -1715,6 +1723,7 @@ def build_platoon_env_config(args, scenario_id: str = "", local_route: str = "")
         "start_seed": int(args.start_seed),
         "num_scenarios": int(args.num_scenarios),
         "traffic_density": float(args.traffic_density),
+        "random_traffic": bool(getattr(args, "random_traffic", 0)),
         "image_on_cuda": bool(args.image_on_cuda),
         "allow_respawn": False,
     }
@@ -1975,6 +1984,12 @@ def _resolve_episode_scenario_route(
     )
 
 
+def _episode_reset_seed(start_seed: int, num_scenarios: int, episode_idx: int) -> int:
+    """Deterministically map an episode index to a MetaDrive scenario seed."""
+    scenario_count = max(1, int(num_scenarios))
+    return int(start_seed) + (int(episode_idx) % scenario_count)
+
+
 def _apply_episode_route_config(env, selection: ScenarioRouteSelection) -> None:
     updates = {
         "scenario_id": selection.scenario_id,
@@ -2060,9 +2075,10 @@ def run_platoon_planner_backend(
                 f"scenario_id={selection.scenario_id} "
                 f"local_route={selection.local_route} "
                 f"route_preset={selection.route_preset} "
-                f"ego_main_route_block_ids={list(selection.ego_main_route_block_ids)}"
+                f"ego_main_route_block_ids={list(selection.ego_main_route_block_ids)} "
+                f"reset_seed={_episode_reset_seed(args.start_seed, args.num_scenarios, episode_idx)}"
             )
-            reset_result = env.reset()
+            reset_result = env.reset(seed=_episode_reset_seed(args.start_seed, args.num_scenarios, episode_idx))
             if isinstance(reset_result, tuple) and len(reset_result) == 2:
                 obs, info = reset_result
             else:
@@ -2699,9 +2715,10 @@ def main():
                 f"scenario_id={selection.scenario_id} "
                 f"local_route={selection.local_route} "
                 f"route_preset={selection.route_preset} "
-                f"ego_main_route_block_ids={list(selection.ego_main_route_block_ids)}"
+                f"ego_main_route_block_ids={list(selection.ego_main_route_block_ids)} "
+                f"reset_seed={_episode_reset_seed(args.start_seed, args.num_scenarios, episode_idx)}"
             )
-            obs, info = env.reset()
+            obs, info = env.reset(seed=_episode_reset_seed(args.start_seed, args.num_scenarios, episode_idx))
             primary_agent_id = _get_primary_agent_id(env)
             if bool(args.render) and hasattr(env, "switch_to_third_person_view"):
                 env.switch_to_third_person_view()

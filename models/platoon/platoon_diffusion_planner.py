@@ -323,8 +323,11 @@ class PlatoonDiffusionPlanner(nn.Module):
             status = self._ensure_batch_dim(sample["status"]).to(device=device).float()          # [1, 8]
             relation = self._ensure_batch_dim(sample["formation_relation_state"]).to(device=device).float()  # [1, 12]
 
-            relation_emb = self.relation_encoder(relation)
-            fused_status = torch.cat([status, relation_emb], dim=-1)           # [1, 20]
+            if self.use_relation_encoder:
+                relation_emb = self.relation_encoder(relation)
+                fused_status = torch.cat([status, relation_emb], dim=-1)
+            else:
+                fused_status = status
 
             bs = fused_status.shape[0]  # always 1
             bev_upscale, bev_feat, _ = m._backbone(camera, lidar)

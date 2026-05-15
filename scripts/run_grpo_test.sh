@@ -10,8 +10,17 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
 
-BASELINE_CKPT="${BASELINE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
-GRPO_CKPT="${GRPO_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo/run_9/checkpoints/step_0040000_score_7.1248/full_platoon_grpo.ckpt}"   # e.g. .../plan_cls_grpo/run_1/checkpoints/final/full_platoon_grpo.ckpt
+
+# *单车baseline/微调前
+# BASELINE_CKPT="${BASELINE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
+BASELINE_CKPT="${BASELINE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo/run_13/checkpoints/step_0030000_score_9.7525/full_platoon_grpo.ckpt}"   # e.g. .../plan_cls_grpo/run_1/checkpoints/final/full_platoon_grpo.ckpt
+
+
+# *分类头/轨迹头
+# GRPO_CKPT="${GRPO_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo/run_13/checkpoints/step_0030000_score_9.7525/full_platoon_grpo.ckpt}"   # e.g. .../plan_cls_grpo/run_1/checkpoints/final/full_platoon_grpo.ckpt
+GRPO_CKPT="${GRPO_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/selected_refine_grpo/run_1/checkpoints/step_0045000_score_10.6615/full_platoon_refine_grpo.ckpt}"   # e.g. .../plan_cls_grpo/run_1/checkpoints/final/full_platoon_grpo.ckpt
+
+
 
 # RUN_TAG: set to a unique label when running multiple comparisons simultaneously,
 # e.g. RUN_TAG=run9 in one terminal and RUN_TAG=run10 in another.
@@ -26,12 +35,18 @@ else
 fi
 
 NUM_AGENTS="${NUM_AGENTS:-3}"
-SCENARIO_ID="${SCENARIO_ID:-S2_free_cruise_curve}"
-EPISODES="${EPISODES:-3}"
+SCENARIO_ID="${SCENARIO_ID:-S1_free_cruise_straight}" 
+LOCAL_ROUTE="${LOCAL_ROUTE:-}"
+EPISODES="${EPISODES:-5}"
 START_SEED="${START_SEED:-0}"
+NUM_SCENARIOS="${EPISODES}"
 TRAFFIC_DENSITY="${TRAFFIC_DENSITY:-0.04}"
+RANDOM_TRAFFIC="${RANDOM_TRAFFIC:-0}"  # 确保
+MAX_STEPS="${MAX_STEPS:-0}"
 CONTROLLER_TYPE="${CONTROLLER_TYPE:-stabilized}"
 DEVICE="${DEVICE:-cuda}"
+BASELINE_USE_RELATION_ENCODER="${BASELINE_USE_RELATION_ENCODER:-0}"
+GRPO_USE_RELATION_ENCODER="${GRPO_USE_RELATION_ENCODER:-1}"
 
 if [[ -z "${GRPO_CKPT}" ]]; then
     echo "[ERROR] GRPO_CKPT is not set. Usage:" >&2
@@ -50,30 +65,40 @@ run_test() {
     echo "  ckpt   : ${ckpt}"
     echo "  outdir : ${outdir}"
     echo "  use_relation_encoder=${use_relation_encoder}"
+    echo "  scenario=${SCENARIO_ID} local_route=${LOCAL_ROUTE:-<auto>} start_seed=${START_SEED}"
+    echo "  episodes=${EPISODES} num_scenarios=${NUM_SCENARIOS} traffic_density=${TRAFFIC_DENSITY} random_traffic=${RANDOM_TRAFFIC} max_steps=${MAX_STEPS}"
     echo "================================================================"
-    "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.test_transfuser_policy \
-        --checkpoint "${ckpt}" \
-        --model-config-path "${MODEL_CONFIG_PATH}" \
-        --num-agents "${NUM_AGENTS}" \
-        --scenario-id "${SCENARIO_ID}" \
-        --episodes "${EPISODES}" \
-        --start-seed "${START_SEED}" \
-        --traffic-density "${TRAFFIC_DENSITY}" \
-        --controller-type "${CONTROLLER_TYPE}" \
-        --device "${DEVICE}" \
-        --ppo-actor-ckpt "" \
-        --use-relation-encoder "${use_relation_encoder}" \
-        --output-dir "${outdir}" \
-        --save-trajectory-plot 1 \
-        --save-combined-traj-frames 1 \
+    local cmd=(
+        "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.test_transfuser_policy
+        --checkpoint "${ckpt}"
+        --model-config-path "${MODEL_CONFIG_PATH}"
+        --num-agents "${NUM_AGENTS}"
+        --scenario-id "${SCENARIO_ID}"
+        --episodes "${EPISODES}"
+        --start-seed "${START_SEED}"
+        --num-scenarios "${NUM_SCENARIOS}"
+        --traffic-density "${TRAFFIC_DENSITY}"
+        --random-traffic "${RANDOM_TRAFFIC}"
+        --max-steps "${MAX_STEPS}"
+        --controller-type "${CONTROLLER_TYPE}"
+        --device "${DEVICE}"
+        --ppo-actor-ckpt ""
+        --use-relation-encoder "${use_relation_encoder}"
+        --output-dir "${outdir}"
+        --save-trajectory-plot 1
+        --save-combined-traj-frames 1
         --render 0
+    )
+    if [[ -n "${LOCAL_ROUTE}" ]]; then
+        cmd+=(--local-route "${LOCAL_ROUTE}")
+    fi
+    "${cmd[@]}"
 }
 
 cd "${REPO_ROOT}"
 # Baseline: disable relation_encoder so each vehicle runs the pure single-vehicle diffusion planner
-run_test "BASELINE (pretrained diffusion planner)" "${BASELINE_CKPT}" "${BASELINE_OUTPUT_DIR}" 0
-# GRPO ckpt was trained with relation_encoder enabled
-run_test "GRPO (fine-tuned cls_branch)"            "${GRPO_CKPT}"     "${GRPO_OUTPUT_DIR}"     1
+run_test "BASELINE (pretrained diffusion planner)" "${BASELINE_CKPT}" "${BASELINE_OUTPUT_DIR}" "${BASELINE_USE_RELATION_ENCODER}"
+run_test "GRPO (fine-tuned planner)"               "${GRPO_CKPT}"     "${GRPO_OUTPUT_DIR}"     "${GRPO_USE_RELATION_ENCODER}"
 
 echo ""
 echo "================================================================"
@@ -151,5 +176,10 @@ print("-" * sum(w))
 for row in rows:
     print(fmt.format(*row, w0=w[0], w1=w[1], w2=w[2], w3=w[3]))
 print()
-print(f"episodes={episodes}  scenario=${SCENARIO_ID}  seed=${START_SEED}")
+print(f"episodes={episodes}  scenario=${SCENARIO_ID}  local_route=${LOCAL_ROUTE:-<auto>}  seed=${START_SEED}")
 PYEOF
+
+
+
+
+# * run_9/run_10: grpo_select/grpo_refine

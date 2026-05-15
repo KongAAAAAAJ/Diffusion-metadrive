@@ -38,11 +38,25 @@ def load_platoon_grpo_checkpoint(ckpt_path: str, model: PlatoonDiffusionPlanner)
 
     Unlike migrate_single_to_platoon, this loads the complete platoon state
     (including relation_encoder and the fine-tuned plan_cls_branch) in one shot.
-    Missing or shape-mismatched keys are silently skipped (strict=False).
+    Missing or shape-mismatched keys are silently skipped.
     """
     ckpt = torch.load(Path(ckpt_path), map_location="cpu")
     model_state: dict[str, torch.Tensor] = ckpt["model_state"]
-    result = model.load_state_dict(model_state, strict=False)
+    current_state = model.state_dict()
+    compatible: dict[str, torch.Tensor] = {}
+    skipped_shape: list[str] = []
+    for k, v in model_state.items():
+        if k in current_state and current_state[k].shape == v.shape:
+            compatible[k] = v
+        elif k in current_state:
+            skipped_shape.append(k)
+    if skipped_shape:
+        print(
+            f"[weight_migration] load_platoon_grpo_checkpoint: "
+            f"skipped {len(skipped_shape)} shape-mismatched keys "
+            f"(first 5: {skipped_shape[:5]})"
+        )
+    result = model.load_state_dict(compatible, strict=False)
     missing = [k for k in result.missing_keys if "relation_encoder" not in k]
     if missing:
         print(f"[weight_migration] load_platoon_grpo_checkpoint: {len(missing)} missing keys (first 5: {missing[:5]})")

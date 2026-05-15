@@ -120,7 +120,11 @@ def build_planner_for_selected_refinement(config: Mapping[str, Any], env_config:
         str(model_cfg.get("model_size", "small")),
         **diffusion_model_config_to_overrides(model_cfg),
     )
-    planner = PlatoonDiffusionPlanner(tf_config, num_vehicles=int(config.get("num_agents", 3)))
+    planner = PlatoonDiffusionPlanner(
+        tf_config,
+        num_vehicles=int(config.get("num_agents", 3)),
+        use_relation_encoder=bool(config.get("use_relation_encoder", True)),
+    )
     device_name = str(env_config.get("planner_device", "cpu"))
     device = torch.device(device_name if torch.cuda.is_available() or "cuda" not in device_name else "cpu")
     ckpt_path = str(config.get("pretrained_ckpt", "") or "")
@@ -177,37 +181,77 @@ def _refine_state_dict(planner) -> dict[str, torch.Tensor]:
     return state
 
 
-def sample_truncated_refine_noise(
-    selected_xy_norm: torch.Tensor,
-    num_groups: int,
-    noise_std: float,
-    max_delta_norm: float,
-    generator: torch.Generator | None = None,
-) -> torch.Tensor:
-    """Copy selected trajectory into G groups and add clipped Gaussian noise.
+def _debug_save_noise_plot(
+    base_np: np.ndarray,
+    raw_noise_np: np.ndarray,
+    clamped_noise_np: np.ndarray,
+    noisy_trajs_np: np.ndarray,
+    save_path: Path,
+) -> None:
+    """Save a figure showing base trajectory, raw/clamped noise, and noisy trajectories.
 
     Parameters
     ----------
-    selected_xy_norm : Tensor [1, T, 2] normalized xy trajectory.
-    Returns
-    -------
-    Tensor [G, 1, T, 2].
+    base_np        : [T, 2] normalized xy of the selected (base) trajectory.
+    raw_noise_np   : [G, T, 2] raw Gaussian noise before clamping.
+    clamped_noise_np: [G, T, 2] noise after max_delta_norm clamping.
+    noisy_trajs_np : [G, T, 2] final noisy trajectories (base + clamped_noise).
+    save_path      : full file path to save the PNG to.
     """
-    base = selected_xy_norm.unsqueeze(0).expand(int(num_groups), -1, -1, -1)
-    noise = torch.randn(
-        base.shape,
-        dtype=base.dtype,
-        device=base.device,
-        generator=generator,
-    ) * float(noise_std)
-    noise = noise.clamp(-float(max_delta_norm), float(max_delta_norm))
-    return (base + noise).clamp(-1.0, 1.0)
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    G, _, _ = noisy_trajs_np.shape
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # ── left: base trajectory + noisy variants ─────────────────────────────────
+    ax = axes[0]
+    ax.plot(base_np[:, 0], base_np[:, 1], "k-o", lw=2, ms=4, label="base")
+    colors = plt.cm.tab10(np.linspace(0, 1, G))
+    for g in range(G):
+        ax.plot(noisy_trajs_np[g, :, 0], noisy_trajs_np[g, :, 1],
+                color=colors[g], lw=1, alpha=0.7, label=f"group {g}")
+    ax.set_title("Base + Noisy Trajectories (normalized space)")
+    ax.set_xlabel("x_norm"); ax.set_ylabel("y_norm")
+    ax.legend(fontsize=7); ax.set_aspect("equal"); ax.grid(True, alpha=0.3)
+
+    # ── middle: raw noise scatter (before clamping) ──────────────────────────────
+    ax = axes[1]
+    for g in range(G):
+        ax.scatter(raw_noise_np[g, :, 0], raw_noise_np[g, :, 1],
+                   color=colors[g], alpha=0.6, s=20, label=f"group {g}")
+    ax.axhline(0, color="gray", lw=0.5); ax.axvline(0, color="gray", lw=0.5)
+    ax.set_title(f"Raw Gaussian Noise (std={raw_noise_np.std():.4f})")
+    ax.set_xlabel("noise_x"); ax.set_ylabel("noise_y")
+    ax.legend(fontsize=7); ax.set_aspect("equal"); ax.grid(True, alpha=0.3)
+
+    # ── right: clamped noise scatter (after max_delta_norm) ─────────────────────
+    ax = axes[2]
+    for g in range(G):
+        ax.scatter(clamped_noise_np[g, :, 0], clamped_noise_np[g, :, 1],
+                   color=colors[g], alpha=0.6, s=20, label=f"group {g}")
+    max_val = np.abs(clamped_noise_np).max()
+    ax.axhline(0, color="gray", lw=0.5); ax.axvline(0, color="gray", lw=0.5)
+    ax.set_title(f"Clamped Noise (max |δ|={max_val:.4f})")
+    ax.set_xlabel("noise_x"); ax.set_ylabel("noise_y")
+    ax.legend(fontsize=7); ax.set_aspect("equal"); ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+
 
 
 def normalize_group_advantages(
     rewards: torch.Tensor,
     valid_mask: torch.Tensor | None = None,
     eps: float = 1e-6,
+    positive_only: bool = False,
 ) -> torch.Tensor:
     rewards = rewards.float()
     if valid_mask is None:
@@ -218,7 +262,35 @@ def normalize_group_advantages(
         return out
     vals = rewards[valid]
     out[valid] = (vals - vals.mean()) / (vals.std(unbiased=False) + float(eps))
+    if positive_only:
+        out = out.clamp(min=0.0)
     return out
+
+
+def normalize_multimodal_advantages(
+    rewards: torch.Tensor,      # [G*M]
+    valid_mask: torch.Tensor | None,  # [G*M] bool
+    num_groups: int,
+    num_modes: int,
+    positive_only: bool = True,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Per-mode group-normalized advantage: for each mode, normalize across its G groups."""
+    rewards = rewards.float()
+    r2d = rewards.view(num_groups, num_modes)   # [G, M]
+    v2d = (valid_mask.bool().view(num_groups, num_modes)
+           if valid_mask is not None
+           else torch.ones_like(r2d, dtype=torch.bool))
+    out = torch.zeros_like(r2d)
+    for m in range(num_modes):
+        r_m, v_m = r2d[:, m], v2d[:, m]
+        if int(v_m.sum().item()) < 2:
+            continue
+        vals = r_m[v_m]
+        out[v_m, m] = (vals - vals.mean()) / (vals.std(unbiased=False) + eps)
+    if positive_only:
+        out = out.clamp(min=0.0)
+    return out.view(num_groups * num_modes)     # [G*M]
 
 
 def reconstruct_heading_from_xy(xy: torch.Tensor) -> torch.Tensor:
@@ -231,43 +303,45 @@ def reconstruct_heading_from_xy(xy: torch.Tensor) -> torch.Tensor:
     return torch.cat([xy, heading.unsqueeze(-1)], dim=-1)
 
 
-def refine_grpo_loss(
+def ddv2_refine_grpo_loss(
     new_log_probs: torch.Tensor,
-    old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
     refined_xy: torch.Tensor,
     selected_xy: torch.Tensor,
     bc_weight: float = 0.1,
     kl_weight: float = 0.02,
     ref_mean_xy: torch.Tensor | None = None,
-    clip_range: float = 0.2,
-    max_log_ratio: float = 5.0,
+    positive_advantage_only: bool = True,
+    no_positive_bc_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """GRPO loss for one agent's refinement groups."""
+    """DiffusionDriveV2-style GRPO loss for one agent's refinement groups."""
     adv = advantages.to(device=new_log_probs.device, dtype=new_log_probs.dtype).detach()
-    old_log_probs = old_log_probs.to(device=new_log_probs.device, dtype=new_log_probs.dtype).detach()
-    log_ratio = (new_log_probs - old_log_probs).sum(dim=-1)
-    log_ratio = log_ratio.clamp(-float(max_log_ratio), float(max_log_ratio))
-    ratio = torch.exp(log_ratio)
-    clipped_ratio = ratio.clamp(1.0 - float(clip_range), 1.0 + float(clip_range))
-    surrogate = torch.minimum(ratio * adv, clipped_ratio * adv)
-    pg_loss = -surrogate.mean()
-    bc_loss = F.l1_loss(refined_xy, selected_xy.to(refined_xy.device).unsqueeze(0).expand_as(refined_xy))
+    if positive_advantage_only:
+        adv = adv.clamp(min=0.0)
+    logp_sum = new_log_probs.sum(dim=-1)
+    ratio = torch.exp(logp_sum - logp_sum.detach())
+    pg_loss = -(ratio * adv).mean()
+    # BC loss: each candidate vs its own anchor (ref_mean_xy); fall back to selected_xy if not provided
+    _bc_ref = ref_mean_xy.to(refined_xy.device) if ref_mean_xy is not None else selected_xy.to(refined_xy.device).unsqueeze(0).expand_as(refined_xy)
+    bc_loss = F.l1_loss(refined_xy, _bc_ref)
     if ref_mean_xy is None:
         kl_loss = refined_xy.new_tensor(0.0)
     else:
         kl_loss = F.mse_loss(refined_xy, ref_mean_xy.to(refined_xy.device))
-    loss = pg_loss + float(bc_weight) * bc_loss + float(kl_weight) * kl_loss
-    clip_fraction = ((ratio - clipped_ratio).abs() > 1e-6).to(torch.float32).mean()
-    approx_kl = (old_log_probs - new_log_probs).sum(dim=-1).mean()
+    active_advantage_count = int((adv > 0).sum().detach().item())
+    effective_bc_weight = float(bc_weight) if active_advantage_count > 0 else float(no_positive_bc_weight)
+    loss = pg_loss + effective_bc_weight * bc_loss + float(kl_weight) * kl_loss
+    zero = new_log_probs.new_tensor(0.0)
     return loss, {
         "pg_loss": float(pg_loss.detach()),
         "bc_loss": float(bc_loss.detach()),
         "kl_loss": float(kl_loss.detach()),
         "ratio_mean": float(ratio.detach().mean()),
         "ratio_max": float(ratio.detach().max()),
-        "clip_fraction": float(clip_fraction.detach()),
-        "approx_kl": float(approx_kl.detach()),
+        "clip_fraction": 0.0,
+        "approx_kl": float(zero.detach()),
+        "active_advantage_count": active_advantage_count,
+        "effective_bc_weight": effective_bc_weight,
         "total_loss": float(loss.detach()),
     }
 
@@ -290,6 +364,37 @@ def _selected_norm_xy(planner, selected_traj_np: np.ndarray) -> torch.Tensor:
     return norm.view(1, selected.shape[0], 2)
 
 
+def _ddv2_roll_timesteps(denoise_steps: int, device: torch.device) -> torch.Tensor:
+    step_num = max(1, int(denoise_steps))
+    step_ratio = 20.0 / float(step_num)
+    values = (np.arange(0, step_num) * step_ratio).round()[::-1].copy().astype(np.int64)
+    return torch.from_numpy(values).to(device=device, dtype=torch.long)
+
+
+def _add_ddv2_truncated_noise(
+    scheduler: DDIMSchedulerWithLogProb,
+    selected_xy_norm: torch.Tensor,
+    *,
+    num_groups: int,
+    noise_t: int,
+    debug_save_path: Path | None = None,
+) -> torch.Tensor:
+    base = selected_xy_norm.unsqueeze(0).expand(int(num_groups), -1, -1, -1).contiguous()
+    noise = torch.randn_like(base)
+    timesteps = torch.full((int(num_groups),), int(noise_t), dtype=torch.long, device=base.device)
+    result = scheduler.add_noise(original_samples=base, noise=noise, timesteps=timesteps).clamp(-1.0, 1.0)
+    if debug_save_path is not None:
+        # base: [G,1,T,2] → squeeze dim-1 → [G,T,2]; selected_xy_norm: [1,T,2] → squeeze dim-0 → [T,2]
+        _debug_save_noise_plot(
+            base_np=selected_xy_norm.squeeze(0).detach().cpu().numpy(),
+            raw_noise_np=noise.squeeze(1).detach().cpu().numpy(),
+            clamped_noise_np=(result - base).squeeze(1).detach().cpu().numpy(),
+            noisy_trajs_np=result.squeeze(1).detach().cpu().numpy(),
+            save_path=debug_save_path,
+        )
+    return result
+
+
 def _denorm_xy(planner, norm_xy: torch.Tensor) -> torch.Tensor:
     th = planner.model._trajectory_head
     zeros = torch.zeros((*norm_xy.shape[:-1], 1), dtype=norm_xy.dtype, device=norm_xy.device)
@@ -309,6 +414,7 @@ def rollout_selected_refinement(
     denoise_steps: int,
     eta: float,
     scheduler: DDIMSchedulerWithLogProb | None = None,
+    debug_save_path: Path | None = None,
 ) -> dict[str, torch.Tensor]:
     """Generate local refined groups around one selected trajectory."""
     device = planner._device()
@@ -321,20 +427,21 @@ def rollout_selected_refinement(
     if scheduler.num_inference_steps is None:
         scheduler.set_timesteps(1000, device=device)
     selected_norm = _selected_norm_xy(planner, selected_traj_np)  # [1,T,2]
-    sample = sample_truncated_refine_noise(
+    del noise_std, max_delta_norm
+    sample = _add_ddv2_truncated_noise(
+        scheduler,
         selected_norm,
         num_groups=num_groups,
-        noise_std=noise_std,
-        max_delta_norm=max_delta_norm,
+        noise_t=noise_t,
+        debug_save_path=debug_save_path,
     ).to(device)
     repeated_context = _repeat_context(context, int(num_groups))
     log_probs = []
     chains = [sample.detach()]
     timesteps = []
     last_prev_sample_mean = None
-    for step_idx in range(int(denoise_steps)):
-        timestep_value = max(1, int(noise_t) - step_idx)
-        timestep = torch.tensor(timestep_value, dtype=torch.long, device=device)
+    roll_timesteps = _ddv2_roll_timesteps(denoise_steps, device)
+    for timestep in roll_timesteps:
         timesteps.append(timestep)
         batch_timestep = timestep.expand(int(num_groups))
         model_output = planner.predict_denoised_traj(sample, batch_timestep, repeated_context)  # [G,1,T,2]
@@ -358,15 +465,102 @@ def rollout_selected_refinement(
     refined_traj = reconstruct_heading_from_xy(sampled_xy)
     log_probs_t = torch.stack(log_probs, dim=-1)
     return {
+        "all_diffusion_output": torch.stack(chains, dim=1).detach(),
         "refined_xy": refined_xy_for_loss,
         "sampled_xy": sampled_xy,
         "refined_traj": refined_traj,
         "log_probs": log_probs_t,
-        "old_log_probs": log_probs_t.detach(),
         "chains_norm": torch.stack(chains, dim=1).detach(),
         "timesteps": torch.stack(timesteps).detach(),
         "ref_mean_xy": ref_mean_xy,
         "selected_xy": selected_xy_phys,
+    }
+
+
+def rollout_multimodal_refinement(
+    planner,
+    context: dict[str, Any],
+    *,
+    num_groups: int,
+    noise_t: int,
+    denoise_steps: int,
+    eta: float,
+    scheduler: DDIMSchedulerWithLogProb | None = None,
+) -> dict[str, torch.Tensor]:
+    """Multi-modal rollout: G groups × M plan_anchors = G*M candidate trajectories.
+
+    Aligned with DiffusionDriveV2 forward_train_rl:
+      - all M plan_anchors used as base (instead of 1 selected trajectory)
+      - DDIM truncated additive noise at t=noise_t
+      - multiplicative noise applied in scheduler.step (DDIMSchedulerWithLogProb, eta>0)
+    """
+    device = planner._device()
+    th = planner.model._trajectory_head
+
+    if scheduler is None:
+        scheduler = DDIMSchedulerWithLogProb(
+            num_train_timesteps=1000,
+            beta_schedule="scaled_linear",
+            prediction_type="sample",
+        )
+    if scheduler.num_inference_steps is None:
+        scheduler.set_timesteps(1000, device=device)
+
+    anchor = th.plan_anchor.to(device)                                       # [M, 8, 2] physical
+    M = anchor.shape[0]
+
+    # Normalize (x/50, y/20) — consistent with DiffusionDriveV2 norm_odo, xy-only
+    anchor_norm = torch.stack([anchor[..., 0] / 50.0, anchor[..., 1] / 20.0], dim=-1)  # [M,8,2]
+
+    # Expand G groups → [G*M, 1, 8, 2]
+    base = (anchor_norm.unsqueeze(0)
+            .expand(num_groups, -1, -1, -1)
+            .reshape(num_groups * M, 8, 2)
+            .unsqueeze(1))                                                   # [G*M,1,8,2]
+
+    # DDIM truncated additive noise at t=noise_t: √ᾱ_t·x₀ + √(1-ᾱ_t)·ε
+    noise = torch.randn_like(base)
+    ts = torch.full((num_groups * M,), int(noise_t), dtype=torch.long, device=device)
+    sample = scheduler.add_noise(original_samples=base, noise=noise, timesteps=ts).clamp(-1.0, 1.0)
+
+    repeated_context = _repeat_context(context, num_groups * M)
+
+    log_probs: list[torch.Tensor] = []
+    chains: list[torch.Tensor] = [sample.detach()]
+    timesteps_list: list[torch.Tensor] = []
+    last_prev_sample_mean: torch.Tensor | None = None
+
+    for timestep in _ddv2_roll_timesteps(denoise_steps, device):
+        batch_ts = timestep.expand(num_groups * M)
+        model_output = planner.predict_denoised_traj(sample, batch_ts, repeated_context)
+        next_sample, log_prob, prev_mean = scheduler.step(
+            model_output=model_output, timestep=timestep, sample=sample, eta=float(eta)
+        )
+        last_prev_sample_mean = prev_mean
+        log_probs.append(log_prob.squeeze(-1))   # [G*M]
+        sample = next_sample.detach()
+        chains.append(sample)
+        timesteps_list.append(timestep)
+
+    sampled_xy = _denorm_xy(planner, sample.squeeze(1)).detach()   # [G*M,T,2]
+    _mean_src = last_prev_sample_mean if last_prev_sample_mean is not None else sample
+    refined_xy = _denorm_xy(planner, _mean_src.squeeze(1))         # [G*M,T,2]
+
+    # BC reference: each candidate vs its own anchor (physical space)
+    anchor_ref = (anchor.unsqueeze(0)
+                  .expand(num_groups, -1, -1, -1)
+                  .reshape(num_groups * M, 8, 2))                   # [G*M,T,2]
+
+    return {
+        "sampled_xy":   sampled_xy,
+        "refined_xy":   refined_xy,
+        "refined_traj": reconstruct_heading_from_xy(sampled_xy),    # [G*M,T,3]
+        "log_probs":    torch.stack(log_probs, dim=-1),             # [G*M,steps]
+        "chains_norm":  torch.stack(chains, dim=1).detach(),        # [G*M,steps+1,1,T,2]
+        "timesteps":    torch.stack(timesteps_list).detach(),       # [steps]
+        "ref_mean_xy":  anchor_ref,                                 # [G*M,T,2]
+        "num_modes":    M,
+        "num_groups":   num_groups,
     }
 
 
@@ -403,7 +597,9 @@ def recompute_refine_log_probs(
 
 
 def _trajectory_delta_valid(refined_xy: torch.Tensor, selected_xy: torch.Tensor, max_delta_m: float) -> torch.Tensor:
-    delta = torch.norm(refined_xy - selected_xy.unsqueeze(0), dim=-1).amax(dim=-1)
+    # Same shape: multi-modal [G*M,T,2] vs [G*M,T,2]; different shape: single [G,T,2] vs [T,2]
+    ref = selected_xy if refined_xy.shape == selected_xy.shape else selected_xy.unsqueeze(0)
+    delta = torch.norm(refined_xy - ref, dim=-1).amax(dim=-1)
     finite = torch.isfinite(refined_xy).all(dim=(-1, -2))
     return finite & (delta <= float(max_delta_m))
 
@@ -491,13 +687,14 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
     max_delta_m = float(config.get("refine_max_delta_m", 1.0))
     bc_weight = float(config.get("refine_bc_weight", 0.1))
     kl_weight = float(config.get("refine_kl_weight", 0.02))
-    clip_range = float(config.get("refine_clip_range", 0.2))
-    update_epochs = int(config.get("refine_update_epochs", 1))
-    max_log_ratio = float(config.get("refine_max_log_ratio", 5.0))
+    positive_advantage_only = bool(config.get("refine_positive_advantage_only", True))
+    no_positive_bc_weight = float(config.get("refine_no_positive_bc_weight", 1.0))
     desired_gap_m = float(config.get("desired_gap_m", 10.0))
     progress_s_max = float(config.get("progress_s_max", 15.0))
     ckpt_interval = int(config.get("checkpoint_interval_steps", 5000))
     ckpt_root = run_dir / "checkpoints"
+    _debug_noise_plot_dir_str = str(config.get("debug_noise_plot_dir", "") or "")
+    debug_noise_plot_dir = Path(_debug_noise_plot_dir_str) if _debug_noise_plot_dir_str else None
     refine_scheduler = DDIMSchedulerWithLogProb(
         num_train_timesteps=1000,
         beta_schedule="scaled_linear",
@@ -555,35 +752,38 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                         "chosen_group": -1,
                         "valid_groups": [],
                         "fallback": "leader_uses_selected_trajectory",
-                        "metrics": {
-                            "pg_loss": 0.0,
-                            "bc_loss": 0.0,
-                            "kl_loss": 0.0,
-                            "ratio_mean": 1.0,
-                            "ratio_max": 1.0,
-                            "clip_fraction": 0.0,
-                            "approx_kl": 0.0,
-                            "total_loss": 0.0,
-                        },
-                    })
+                            "metrics": {
+                                "pg_loss": 0.0,
+                                "bc_loss": 0.0,
+                                "kl_loss": 0.0,
+                                "ratio_mean": 1.0,
+                                "ratio_max": 1.0,
+                                "clip_fraction": 0.0,
+                                "approx_kl": 0.0,
+                                "active_advantage_count": 0,
+                                "effective_bc_weight": 0.0,
+                                "total_loss": 0.0,
+                            },
+                        })
                     continue
-                rollout = rollout_selected_refinement(
+                # ── multi-modal rollout: G groups × M plan_anchors ────────────────
+                rollout = rollout_multimodal_refinement(
                     planner,
                     contexts[agent_id],
-                    selected_traj,
                     num_groups=num_groups,
                     noise_t=noise_t,
-                    noise_std=noise_std,
-                    max_delta_norm=max_delta_norm,
                     denoise_steps=denoise_steps,
                     eta=eta,
                     scheduler=refine_scheduler,
                 )
-                refined_xy = rollout["sampled_xy"]
-                selected_xy = rollout["selected_xy"]
-                valid_groups = _trajectory_delta_valid(refined_xy, selected_xy, max_delta_m=max_delta_m)
-                refined_np = rollout["refined_traj"].detach().cpu().numpy().astype(np.float32)
-                rewards = np.zeros((num_groups,), dtype=np.float32)
+                M   = rollout["num_modes"]
+                GxM = num_groups * M
+
+                valid_groups = _trajectory_delta_valid(
+                    rollout["sampled_xy"], rollout["ref_mean_xy"], max_delta_m=max_delta_m
+                )  # [G*M]
+                refined_np = rollout["refined_traj"].detach().cpu().numpy().astype(np.float32)  # [G*M,T,3]
+                rewards = np.zeros(GxM, dtype=np.float32)
                 if poses.get(agent_id) is None or poses.get(agent_ids[idx - 1]) is None:
                     rewards[:] = 0.0
                 else:
@@ -596,39 +796,47 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                         poses[prev_agent],
                         desired_gap_m=desired_gap_m,
                         progress_s_max=progress_s_max,
-                    )
+                    )  # [G*M]
+
+                # per-mode group-normalized advantage [G*M]
                 reward_t = torch.as_tensor(rewards, dtype=torch.float32, device=planner._device())
-                advantages = normalize_group_advantages(reward_t, valid_groups)
-                new_logp_sum_debug = []
-                if int(valid_groups.sum().item()) >= 2:
-                    loss_i = None
-                    metrics_i = {}
-                    for _update_idx in range(max(1, update_epochs)):
-                        new_log_probs = recompute_refine_log_probs(
-                            planner,
-                            contexts[agent_id],
-                            chains_norm=rollout["chains_norm"],
-                            timesteps=rollout["timesteps"],
-                            scheduler=refine_scheduler,
-                            eta=eta,
-                        )
-                        new_logp_sum_debug = (
-                            new_log_probs.sum(dim=-1).detach().cpu().numpy().astype(float).tolist()
-                        )
-                        loss_epoch, metrics_i = refine_grpo_loss(
-                            new_log_probs=new_log_probs,
-                            old_log_probs=rollout["old_log_probs"],
-                            advantages=advantages,
-                            refined_xy=rollout["refined_xy"],
-                            selected_xy=rollout["selected_xy"],
-                            bc_weight=bc_weight,
-                            kl_weight=kl_weight,
-                            ref_mean_xy=rollout["ref_mean_xy"],
-                            clip_range=clip_range,
-                            max_log_ratio=max_log_ratio,
-                        )
-                        loss_i = loss_epoch if loss_i is None else loss_i + loss_epoch
-                    loss_i = loss_i / max(1, update_epochs)
+                advantages = normalize_multimodal_advantages(
+                    reward_t, valid_groups, num_groups, M,
+                    positive_only=positive_advantage_only,
+                )  # [G*M]
+
+                # ── extract selected mode's G slice for loss update ───────────────
+                adv_sel     = advantages.view(num_groups, M)[:, mode]            # [G]
+                chains_sel  = rollout["chains_norm"].view(num_groups, M, *rollout["chains_norm"].shape[1:])[:, mode]
+                # chains_sel: [G, steps+1, 1, T, 2]
+                valid_sel   = valid_groups.view(num_groups, M)[:, mode]          # [G]
+                refined_sel = rollout["refined_xy"].view(num_groups, M, -1, 2)[:, mode]    # [G,T,2]
+                ref_sel     = rollout["ref_mean_xy"].view(num_groups, M, -1, 2)[:, mode]   # [G,T,2]
+
+                new_logp_sum_debug: list[float] = []
+                if int(valid_sel.sum().item()) >= 2:
+                    new_log_probs = recompute_refine_log_probs(
+                        planner,
+                        contexts[agent_id],
+                        chains_norm=chains_sel,          # [G, steps+1, 1, T, 2]
+                        timesteps=rollout["timesteps"],
+                        scheduler=refine_scheduler,
+                        eta=eta,
+                    )  # [G, denoise_steps]
+                    new_logp_sum_debug = (
+                        new_log_probs.sum(dim=-1).detach().cpu().numpy().astype(float).tolist()
+                    )
+                    loss_i, metrics_i = ddv2_refine_grpo_loss(
+                        new_log_probs=new_log_probs,
+                        advantages=adv_sel,
+                        refined_xy=refined_sel,
+                        selected_xy=ref_sel[0],          # API compat placeholder
+                        bc_weight=bc_weight,
+                        kl_weight=kl_weight,
+                        ref_mean_xy=ref_sel,
+                        positive_advantage_only=positive_advantage_only,
+                        no_positive_bc_weight=no_positive_bc_weight,
+                    )
                     step_loss = loss_i if step_loss is None else step_loss + loss_i
                 else:
                     metrics_i = {
@@ -639,25 +847,32 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                         "ratio_max": 1.0,
                         "clip_fraction": 0.0,
                         "approx_kl": 0.0,
+                        "active_advantage_count": 0,
+                        "effective_bc_weight": 0.0,
                         "total_loss": 0.0,
                     }
-                chosen_group = int(np.argmax(np.where(valid_groups.detach().cpu().numpy(), rewards, -np.inf)))
-                if not bool(valid_groups[chosen_group]):
+
+                # ── execute best from selected mode's G groups ───────────────────
+                rewards_sel  = rewards.reshape(num_groups, M)[:, mode]   # [G]
+                valid_sel_np = valid_sel.detach().cpu().numpy()           # [G]
+                chosen_g     = int(np.argmax(np.where(valid_sel_np, rewards_sel, -np.inf)))
+                chosen_gm    = chosen_g * M + mode
+                if valid_sel_np[chosen_g]:
+                    executed[agent_id] = refined_np[chosen_gm]
+                    fallback = ""
+                else:
                     executed[agent_id] = selected_traj
                     fallback = "invalid_refined_groups"
-                else:
-                    executed[agent_id] = refined_np[chosen_group]
-                    fallback = ""
                 debug_rows.append({
                     "agent_id": agent_id,
                     "selected_mode": mode,
-                    "group_rewards": rewards.astype(float).tolist(),
-                    "advantages": advantages.detach().cpu().numpy().astype(float).tolist(),
-                    "chosen_group": chosen_group,
-                    "valid_groups": valid_groups.detach().cpu().numpy().astype(bool).tolist(),
+                    "group_rewards": rewards_sel.tolist(),
+                    "advantages": adv_sel.detach().cpu().numpy().astype(float).tolist(),
+                    "chosen_group": chosen_g,
+                    "valid_groups": valid_sel_np.astype(bool).tolist(),
                     "fallback": fallback,
                     "metrics": metrics_i,
-                    "old_logp_sum": rollout["old_log_probs"].sum(dim=-1).detach().cpu().numpy().astype(float).tolist(),
+                    "rollout_logp_sum": rollout["log_probs"].view(num_groups, M, -1)[:, mode].sum(dim=-1).detach().cpu().numpy().astype(float).tolist(),
                     "new_logp_sum": new_logp_sum_debug,
                 })
 
