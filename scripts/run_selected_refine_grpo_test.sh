@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Compare baseline / GRPO / mixed-agent diffusion planners on the same scenarios.
+# Test a selected-refine-GRPO checkpoint with an execution flow strictly aligned
+# with train/train_selected_refine_grpo.py (ModeSelectionSB3Env + rollout_multimodal_refinement).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +9,7 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
-MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
+REFINE_TRAIN_CONFIG_PATH="${REFINE_TRAIN_CONFIG_PATH:-${REPO_ROOT}/configs/train/selected_refine_grpo.yaml}"
 
 # 单车 baseline / 微调前
 BASELINE_CKPT="${BASELINE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
@@ -22,12 +23,11 @@ fi
 
 # ── 输出目录 ──────────────────────────────────────────────────────────────────
 RUN_TAG="${RUN_TAG:-0523}"
-OUTPUT_BASE="${OUTPUT_BASE:-/media/kong/Elements_SE/Diffusion_Data/outputs/grpo_compare}"
+OUTPUT_BASE="${OUTPUT_BASE:-/media/kong/Elements_SE/Diffusion_Data/outputs/selected_refine_grpo_compare}"
 BASELINE_OUTPUT_DIR="${OUTPUT_BASE}/${RUN_TAG}/baseline"
 GRPO_OUTPUT_DIR="${OUTPUT_BASE}/${RUN_TAG}/grpo"
 
 # ── 场景 / 运行参数 ───────────────────────────────────────────────────────────
-NUM_AGENTS="${NUM_AGENTS:-3}"
 SCENARIO_ID="${SCENARIO_ID:-S1_free_cruise_straight}"
 LOCAL_ROUTE="${LOCAL_ROUTE:-}"
 EPISODES="${EPISODES:-3}"
@@ -36,7 +36,6 @@ NUM_SCENARIOS="${EPISODES}"
 TRAFFIC_DENSITY="${TRAFFIC_DENSITY:-0.04}"
 RANDOM_TRAFFIC="${RANDOM_TRAFFIC:-0}"
 MAX_STEPS="${MAX_STEPS:-0}"
-CONTROLLER_TYPE="${CONTROLLER_TYPE:-stabilized}"
 DEVICE="${DEVICE:-cuda}"
 
 # RUN_MODE: "both" | "baseline" | "grpo"
@@ -51,48 +50,44 @@ run_test() {
     echo "  ckpt   : ${ckpt}"
     echo "  outdir : ${outdir}"
     echo "  scenario=${SCENARIO_ID} local_route=${LOCAL_ROUTE:-<auto>} start_seed=${START_SEED}"
-    echo "  episodes=${EPISODES} num_scenarios=${NUM_SCENARIOS} traffic_density=${TRAFFIC_DENSITY} random_traffic=${RANDOM_TRAFFIC} max_steps=${MAX_STEPS}"
+    echo "  episodes=${EPISODES} traffic_density=${TRAFFIC_DENSITY} max_steps=${MAX_STEPS}"
     echo "================================================================"
 
     local cmd=(
-        "${PYTHON_BIN}" metadrive/policy/diffusion_policy/test_transfuser_policy.py
-        --checkpoint             "${ckpt}"
-        --model-config-path      "${MODEL_CONFIG_PATH}"
-        --num-agents             "${NUM_AGENTS}"
-        --scenario-id            "${SCENARIO_ID}"
-        --episodes               "${EPISODES}"
-        --start-seed             "${START_SEED}"
-        --num-scenarios          "${NUM_SCENARIOS}"
-        --traffic-density        "${TRAFFIC_DENSITY}"
-        --random-traffic         "${RANDOM_TRAFFIC}"
-        --max-steps              "${MAX_STEPS}"
-        --controller-type        "${CONTROLLER_TYPE}"
-        --device                 "${DEVICE}"
-        --ppo-actor-ckpt         ""
-        --use-action-mask        "${USE_ACTION_MASK:-0}"
-        --output-dir             "${outdir}"
-        --refine-train-config-path "${REFINE_TRAIN_CONFIG_PATH:-configs/train/selected_refine_grpo.yaml}"
-        --save-trajectory-plot   1
-        --save-combined-traj-frames 1
-        --render                 0
+        "${PYTHON_BIN}" metadrive/policy/diffusion_policy/test_selected_refine_grpo.py
+        --checkpoint                    "${ckpt}"
+        --refine-train-config-path      "${REFINE_TRAIN_CONFIG_PATH}"
+        --scenario-id                   "${SCENARIO_ID}"
+        --episodes                      "${EPISODES}"
+        --start-seed                    "${START_SEED}"
+        --num-scenarios                 "${NUM_SCENARIOS}"
+        --traffic-density               "${TRAFFIC_DENSITY}"
+        --random-traffic                "${RANDOM_TRAFFIC}"
+        --max-steps                     "${MAX_STEPS}"
+        --device                        "${DEVICE}"
+        --output-dir                    "${outdir}"
+        --save-combined-traj-frames     "${SAVE_COMBINED_TRAJ_FRAMES:-1}"
+        --save-traj-plots               "${SAVE_TRAJ_PLOTS:-1}"
+        --save-trajectory-data          "${SAVE_TRAJECTORY_DATA:-1}"
+        --render                        0
     )
     [[ -n "${LOCAL_ROUTE}" ]] && cmd+=(--local-route "${LOCAL_ROUTE}")
     "${cmd[@]}"
 }
 
-# ── 三轮测试 ──────────────────────────────────────────────────────────────────
+# ── 执行 ──────────────────────────────────────────────────────────────────────
 cd "${REPO_ROOT}"
 
 case "${RUN_MODE}" in
     both)
-        run_test "BASELINE (pretrained, all agents)" "${BASELINE_CKPT}" "${BASELINE_OUTPUT_DIR}"
-        run_test "GRPO    (fine-tuned, all agents)"  "${GRPO_CKPT}"     "${GRPO_OUTPUT_DIR}"
+        run_test "BASELINE (pretrained)"  "${BASELINE_CKPT}" "${BASELINE_OUTPUT_DIR}"
+        run_test "GRPO    (fine-tuned)"   "${GRPO_CKPT}"     "${GRPO_OUTPUT_DIR}"
         ;;
     baseline)
-        run_test "BASELINE (pretrained, all agents)" "${BASELINE_CKPT}" "${BASELINE_OUTPUT_DIR}"
+        run_test "BASELINE (pretrained)"  "${BASELINE_CKPT}" "${BASELINE_OUTPUT_DIR}"
         ;;
     grpo)
-        run_test "GRPO    (fine-tuned, all agents)"  "${GRPO_CKPT}"     "${GRPO_OUTPUT_DIR}"
+        run_test "GRPO    (fine-tuned)"   "${GRPO_CKPT}"     "${GRPO_OUTPUT_DIR}"
         ;;
     *)
         echo "[ERROR] Unknown RUN_MODE='${RUN_MODE}'. Use: both | baseline | grpo" >&2; exit 1
@@ -101,6 +96,7 @@ esac
 
 # ── 汇总对比（仅 both 模式）────────────────────────────────────────────────────
 [[ "${RUN_MODE}" != "both" ]] && exit 0
+
 echo ""
 echo "================================================================"
 echo "  Comparison"
@@ -108,7 +104,6 @@ echo "================================================================"
 
 "${PYTHON_BIN}" - <<PYEOF
 import json, pathlib, re, sys
-from typing import Optional
 
 _SUMMARY_FNAME = "random_action_reward_summary.json"
 _RUN_DIR_RE = re.compile(r"^run_(\d+)$")
@@ -132,33 +127,24 @@ episodes = int("${EPISODES}")
 def pct(base, new):
     return "  n/a" if base == 0 else f"{(new - base) / abs(base) * 100:+.1f}%"
 
-b_pdms  = float(b.get("episode_pdms_reward_per_step_mean",  0));  g_pdms  = float(g.get("episode_pdms_reward_per_step_mean",  0))
-b_succ  = float(b.get("success_rate", 0));                        g_succ  = float(g.get("success_rate", 0))
-b_cr    = float(b.get("crash_rate", 0));                          g_cr    = float(g.get("crash_rate", 0))
-b_oor   = float(b.get("out_of_road_rate", 0));                    g_oor   = float(g.get("out_of_road_rate", 0))
-b_len   = b.get("num_records", 0) / max(1, episodes);             g_len   = g.get("num_records", 0) / max(1, episodes)
+b_pdms = float(b.get("episode_pdms_reward_per_step_mean", 0)); g_pdms = float(g.get("episode_pdms_reward_per_step_mean", 0))
+b_succ = float(b.get("success_rate", 0));                      g_succ = float(g.get("success_rate", 0))
+b_cr   = float(b.get("crash_rate", 0));                        g_cr   = float(g.get("crash_rate", 0))
+b_oor  = float(b.get("out_of_road_rate", 0));                  g_oor  = float(g.get("out_of_road_rate", 0))
+b_len  = b.get("num_records", 0) / max(1, episodes);           g_len  = g.get("num_records", 0) / max(1, episodes)
 
 w = [24, 10, 10, 8]
 fmt = "{:<{w0}}{:>{w1}}{:>{w2}}{:>{w3}}"
 print(fmt.format("metric", "BASELINE", "GRPO", "delta", w0=w[0], w1=w[1], w2=w[2], w3=w[3]))
 print("-" * sum(w))
 for row in [
-    ("pdms_reward_per_step",  f"{b_pdms:.4f}",  f"{g_pdms:.4f}",  pct(b_pdms,  g_pdms)),
-    ("success_rate",          f"{b_succ:.3f}",  f"{g_succ:.3f}",  pct(b_succ,  g_succ)),
-    ("crash_rate",            f"{b_cr:.3f}",    f"{g_cr:.3f}",    pct(b_cr,    g_cr)),
-    ("out_of_road_rate",      f"{b_oor:.3f}",   f"{g_oor:.3f}",   pct(b_oor,   g_oor)),
-    ("mean_ep_length",   f"{b_len:.1f}",  f"{g_len:.1f}",  pct(b_len,  g_len)),
+    ("pdms_reward_per_step",  f"{b_pdms:.4f}", f"{g_pdms:.4f}", pct(b_pdms, g_pdms)),
+    ("success_rate",          f"{b_succ:.3f}", f"{g_succ:.3f}", pct(b_succ, g_succ)),
+    ("crash_rate",            f"{b_cr:.3f}",   f"{g_cr:.3f}",   pct(b_cr,   g_cr)),
+    ("out_of_road_rate",      f"{b_oor:.3f}",  f"{g_oor:.3f}",  pct(b_oor,  g_oor)),
+    ("mean_ep_length",        f"{b_len:.1f}",  f"{g_len:.1f}",  pct(b_len,  g_len)),
 ]:
     print(fmt.format(*row, w0=w[0], w1=w[1], w2=w[2], w3=w[3]))
 print()
 print(f"episodes=${EPISODES}  scenario=${SCENARIO_ID}  local_route=${LOCAL_ROUTE:-<auto>}  seed=${START_SEED}")
 PYEOF
-
-# ── 轨迹对比帧（BASELINE vs GRPO） ───────────────────────────────────────────
-_COMPARISON_DIR="${OUTPUT_BASE}/comparison${RUN_TAG:+_${RUN_TAG}}"
-echo ""
-echo "Building trajectory comparison frames → ${_COMPARISON_DIR}"
-"${PYTHON_BIN}" "${REPO_ROOT}/scripts/make_grpo_comparison_frames.py" \
-    --baseline-dir "${BASELINE_OUTPUT_DIR}" \
-    --grpo-dir     "${GRPO_OUTPUT_DIR}" \
-    --output-dir   "${_COMPARISON_DIR}"

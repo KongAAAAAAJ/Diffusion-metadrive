@@ -7,7 +7,7 @@ the log-probability of that transition, and the deterministic DDIM mean.
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 from diffusers.schedulers import DDIMScheduler
@@ -27,6 +27,7 @@ class DDIMSchedulerWithLogProb(DDIMScheduler):
         generator: Optional[torch.Generator] = None,
         variance_noise: Optional[torch.Tensor] = None,
         prev_sample: Optional[torch.Tensor] = None,
+        mean_guidance_fn: Optional[Callable[[torch.Tensor, Union[int, torch.Tensor]], torch.Tensor]] = None,
         return_dict: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         del return_dict
@@ -71,6 +72,8 @@ class DDIMSchedulerWithLogProb(DDIMScheduler):
 
         pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2).clamp(min=0).sqrt() * pred_epsilon
         prev_sample_mean = alpha_prod_t_prev.sqrt() * pred_original_sample + pred_sample_direction
+        if mean_guidance_fn is not None:
+            prev_sample_mean = mean_guidance_fn(prev_sample_mean, timestep)
 
         if prev_sample is None:
             prev_sample = self._sample_prev_state(

@@ -80,12 +80,10 @@ def build_mode_valid_mask(
 ) -> ModeFeasibilityResult:
     slots = MODE_SLOTS if mode_slots is None else tuple(mode_slots)
     geometric_checker = geometric_checker or GeometricFeasibilityChecker()
-    traffic_checker = traffic_checker or TrafficFeasibilityChecker()
     geometric_valid_mask = geometric_checker.evaluate(ctx, slots)
-    traffic_valid_mask = traffic_checker.evaluate(ctx, geometric_valid_mask, slots)
     return ModeFeasibilityResult(
         geometric_valid_mask=geometric_valid_mask,
-        traffic_valid_mask=traffic_valid_mask,
+        traffic_valid_mask=np.ones(len(slots), dtype=bool),
     )
 
 

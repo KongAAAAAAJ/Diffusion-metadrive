@@ -75,3 +75,23 @@ def test_grpo_compare_passes_fixed_route_and_max_steps_to_both_runs() -> None:
     assert output.count("--local-route R2_entry_curve") == 2
     assert output.count("--max-steps 12") == 2
     assert output.count("--random-traffic 0") == 2
+
+
+def test_alternating_grpo_resolves_best_step_checkpoint_before_final(tmp_path) -> None:
+    run_dir = tmp_path / "run_1"
+    final_dir = run_dir / "checkpoints" / "final"
+    low_dir = run_dir / "checkpoints" / "step_0001000_score_1.2500"
+    high_dir = run_dir / "checkpoints" / "step_0002000_score_3.5000"
+    for ckpt_dir in (final_dir, low_dir, high_dir):
+        ckpt_dir.mkdir(parents=True)
+        (ckpt_dir / "full_platoon_grpo.ckpt").write_text(ckpt_dir.name)
+
+    output = _run_script(
+        "scripts/run_alternating_grpo_train.sh",
+        {},
+        "--resolve-ckpt",
+        str(run_dir),
+        "full_platoon_grpo.ckpt",
+    )
+
+    assert output.strip() == str(high_dir / "full_platoon_grpo.ckpt")

@@ -396,6 +396,19 @@ class PlatoonDiffusionPlanner(nn.Module):
 
         time_embed = th.time_mlp(timestep).view(bs, 1, -1)             # [B, 1, D]
 
+        # Compute target_point_embed from anchor endpoints (same as forward_test)
+        target_point_embed = None
+        cfg = self.model._config
+        if getattr(cfg, "target_guidance_type", None) == "multi_point":
+            try:
+                endpoints = noisy_pts[:, :, -1, :2]                  # [B, num_modes, 2]
+                ep_embed = self.model._target_point_mlp(
+                    endpoints.reshape(bs * num_modes, 2)
+                )
+                target_point_embed = ep_embed.reshape(bs, num_modes, -1)
+            except Exception:
+                pass  # skip if _target_point_mlp unavailable
+
         poses_reg_list, _ = th.diff_decoder(
             traj_feat,
             noisy_pts,
@@ -405,7 +418,8 @@ class PlatoonDiffusionPlanner(nn.Module):
             context["ego_query"],
             time_embed,
             context["status_encoding_token"],
-            None,  # global_img
+            target_point_embed=target_point_embed,
+            global_img=None,
         )
         x_start = poses_reg_list[-1][..., :2]                          # [B, num_modes, 8, 2]
         return th.norm_odo(x_start)[..., :2]                           # normalized xy only

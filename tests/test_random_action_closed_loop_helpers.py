@@ -1,10 +1,11 @@
 import numpy as np
 from types import SimpleNamespace
 
+from metadrive.policy.diffusion_policy.selected_mode_guidance import apply_selected_mode_guidance
 from metadrive.policy.diffusion_policy.test_transfuser_policy import (
-    _apply_selected_mode_target_overrides,
     _choose_mode_indices,
     _episode_reset_seed,
+    _format_combined_frame_reward_text,
     _format_step_reward_lines,
     _summarize_random_action_rewards,
     build_platoon_env_config,
@@ -59,6 +60,23 @@ def test_build_platoon_env_config_disables_random_traffic_by_default():
     assert env_config["random_traffic"] is False
 
 
+def test_build_platoon_env_config_does_not_pass_action_mask_to_platoon_env():
+    args = SimpleNamespace(
+        num_agents=3,
+        render=0,
+        start_seed=7,
+        num_scenarios=1,
+        traffic_density=0.04,
+        random_traffic=0,
+        image_on_cuda=0,
+        use_action_mask=0,
+    )
+
+    env_config = build_platoon_env_config(args)
+
+    assert "use_action_mask" not in env_config
+
+
 def test_apply_selected_mode_target_overrides_uses_selected_coarse_endpoints():
     planner_batch = {
         "agent0": {},
@@ -81,11 +99,12 @@ def test_apply_selected_mode_target_overrides_uses_selected_coarse_endpoints():
         ),
     }
 
-    metadata = _apply_selected_mode_target_overrides(
+    metadata = apply_selected_mode_guidance(
         planner_batch,
         agent_ids=["agent0", "agent1"],
         selected_modes=[1, 0],
         coarse_by_agent=coarse_by_agent,
+        config=SimpleNamespace(target_line_num_points=8),
     )
 
     assert np.allclose(planner_batch["agent0"]["target_point"], [2.0, 2.0])
@@ -97,9 +116,9 @@ def test_apply_selected_mode_target_overrides_uses_selected_coarse_endpoints():
 
 def test_summarize_random_action_rewards_groups_by_mode():
     records = [
-        {"selected_mode": {"agent0": 1}, "env_reward": {"agent0": 2.0}},
-        {"selected_mode": {"agent0": 1}, "env_reward": {"agent0": 4.0}},
-        {"selected_mode": {"agent0": 2}, "env_reward": {"agent0": -1.0}},
+        {"selected_mode": {"agent0": 1}, "env_reward": {"agent0": 2.0}, "pdms_reward_mean": 0.5},
+        {"selected_mode": {"agent0": 1}, "env_reward": {"agent0": 4.0}, "pdms_reward_mean": 1.5},
+        {"selected_mode": {"agent0": 2}, "env_reward": {"agent0": -1.0}, "pdms_reward_mean": 2.0},
     ]
 
     summary = _summarize_random_action_rewards(
@@ -116,6 +135,7 @@ def test_summarize_random_action_rewards_groups_by_mode():
     assert summary["per_mode"]["1"]["env_reward_mean"] == 3.0
     assert "selector_reward_mean" not in summary["per_mode"]["1"]
     assert summary["per_mode"]["2"]["selected_count"] == 1
+    assert summary["episode_pdms_reward_per_step_mean"] == (0.5 + 1.5 + 2.0) / 3.0
     assert summary["crash_rate"] == 1.0
 
 
@@ -128,3 +148,10 @@ def test_format_step_reward_lines_includes_only_env_rewards():
     )
 
     assert lines == ["env reward: EGO1=+1.25 EGO2=-0.75"]
+
+
+def test_format_combined_frame_reward_text_uses_pdms_not_env():
+    text = _format_combined_frame_reward_text(step=3, pdms_reward=0.3751)
+
+    assert text == "step=3  pdms=+0.375"
+    assert "env" not in text

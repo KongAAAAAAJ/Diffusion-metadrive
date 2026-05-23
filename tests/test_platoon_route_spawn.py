@@ -19,8 +19,8 @@ class _FakeTrafficVehicle:
 
 
 class _FakeEnv:
-    _route_spawn_min_tail_buffer_m = staticmethod(PlatoonEnv._route_spawn_min_tail_buffer_m)
-    _route_spawn_min_front_buffer_m = staticmethod(PlatoonEnv._route_spawn_min_front_buffer_m)
+    _route_spawn_min_tail_buffer_m = PlatoonEnv._route_spawn_min_tail_buffer_m
+    _route_spawn_min_front_buffer_m = PlatoonEnv._route_spawn_min_front_buffer_m
     _route_spawn_reference_lead_long_m = staticmethod(PlatoonEnv._route_spawn_reference_lead_long_m)
     _route_spawn_lead_long_bounds = PlatoonEnv._route_spawn_lead_long_bounds
     _route_spawn_vehicle_longitude = PlatoonEnv._route_spawn_vehicle_longitude
@@ -35,6 +35,13 @@ class _FakeEnv:
             (),
             {"traffic_manager": type("TrafficManager", (), {"_traffic_vehicles": vehicles})()},
         )()
+        self.config = {}
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        return float(self.config.get(key, default))
+
+    def _cfg_bool(self, key: str, default: bool = False) -> bool:
+        return bool(self.config.get(key, default))
 
 
 def _build_env(num_agents: int = 3, traffic_positions: list[float] | None = None) -> _FakeEnv:

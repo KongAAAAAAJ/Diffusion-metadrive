@@ -18,15 +18,30 @@ CONFIG="${CONFIG:-${REPO_ROOT}/configs/train/plan_cls_grpo.yaml}"
 
 cd "${REPO_ROOT}"
 
-exec "${PYTHON_BIN}" -m train.train_plan_cls_grpo \
-    --config "${CONFIG}" \
-    # --pretrained-ckpt "${PRETRAINED_CKPT}" \
-    # --output-root "${OUTPUT_ROOT}" \
-    # --total-env-steps "${TOTAL_STEPS}" \
-    # --num-agents "${NUM_AGENTS}" \
-    # --planner-device "${PLANNER_DEVICE}" \
-    # ${SCENARIO_IDS:+--scenario-ids "${SCENARIO_IDS}"} \
-    # ${RESUME_GRPO_CKPT:+--resume-grpo-ckpt "${RESUME_GRPO_CKPT}"}
+cmd=("${PYTHON_BIN}" -m train.train_plan_cls_grpo --config "${CONFIG}")
+if [[ -n "${PRETRAINED_CKPT:-}" ]]; then
+    cmd+=(--pretrained-ckpt "${PRETRAINED_CKPT}")
+fi
+if [[ -n "${OUTPUT_ROOT:-}" ]]; then
+    cmd+=(--output-root "${OUTPUT_ROOT}")
+fi
+if [[ -n "${TOTAL_STEPS:-}" ]]; then
+    cmd+=(--total-env-steps "${TOTAL_STEPS}")
+fi
+if [[ -n "${NUM_AGENTS:-}" ]]; then
+    cmd+=(--num-agents "${NUM_AGENTS}")
+fi
+if [[ -n "${PLANNER_DEVICE:-}" ]]; then
+    cmd+=(--planner-device "${PLANNER_DEVICE}")
+fi
+if [[ -n "${SCENARIO_IDS:-}" ]]; then
+    cmd+=(--scenario-ids "${SCENARIO_IDS}")
+fi
+if [[ -n "${RESUME_GRPO_CKPT:-}" ]]; then
+    cmd+=(--resume-grpo-ckpt "${RESUME_GRPO_CKPT}")
+fi
+
+exec "${cmd[@]}"
 
 
 
@@ -51,4 +66,3 @@ exec "${PYTHON_BIN}" -m train.train_plan_cls_grpo \
 # !!!!!!
 # * run_18: S1+S2    10万    use_mode_valid_mask:false
 # * run_19: S1+S2    10万    use_mode_valid_mask:false, beta_kl=0.1
-

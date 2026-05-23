@@ -263,10 +263,94 @@ class RouteAwareSpawnManager(SpawnManager):
                 }
             )
 
+    def _fixed_route_spawn_enabled(self) -> bool:
+        return bool(self.engine.global_config.get("platoon_fixed_route_spawn", False))
+
+    def _fixed_route_spawn_lane_idx(self, lane_count: int) -> int:
+        probabilities = self._get_spawn_lane_probabilities()
+        if probabilities:
+            positive = {
+                str(lane_label): float(weight)
+                for lane_label, weight in probabilities.items()
+                if float(weight) > 0.0
+            }
+            if positive:
+                # Fixed ego spawn should not depend on RNG.  When a scenario
+                # supplies probabilities, use its most likely lane deterministically.
+                lane_label = max(sorted(positive), key=lambda key: positive[key])
+                return self._resolve_named_lane_index(lane_count, lane_label)
+        preference = self._get_spawn_lane_preference()
+        if preference in {"rightmost", "leftmost", "middle"}:
+            return self._resolve_named_lane_index(lane_count, str(preference))
+        return 0
+
+    def _fixed_route_spawn_lead_longitude(self, lane_length: float, gap_m: float) -> float:
+        tail_buffer = float(self.engine.global_config.get("platoon_spawn_tail_buffer_m", 6.0))
+        front_buffer = float(self.engine.global_config.get("platoon_spawn_front_buffer_m", 8.0))
+        num_agents = int(self.engine.global_config.get("num_agents", 1))
+        min_lead = gap_m * max(num_agents - 1, 0) + tail_buffer
+        max_lead = max(float(lane_length) - front_buffer, 2.0)
+        return float(min(min_lead, max_lead))
+
+    def _apply_fixed_route_spawn_configs(self) -> bool:
+        """Place all ego agents at deterministic positions on the first route road.
+
+        This makes ``ego_spawn_zones`` represent the final platoon start before
+        the traffic manager generates background vehicles, so traffic can avoid
+        the real start positions instead of the temporary default spawn slots.
+        """
+        if not self._fixed_route_spawn_enabled():
+            return False
+        current_map = getattr(self.engine, "current_map", None)
+        if current_map is None:
+            return False
+        route_roads = self.get_main_route_spawn_roads(current_map)
+        if not route_roads:
+            return False
+        road = route_roads[0]
+        try:
+            lanes = current_map.road_network.graph[road.start_node][road.end_node]
+        except (AttributeError, KeyError, TypeError):
+            return False
+        if not lanes:
+            return False
+
+        lane_idx = max(0, min(self._fixed_route_spawn_lane_idx(len(lanes)), len(lanes) - 1))
+        lane = lanes[lane_idx]
+        lane_index = tuple(road.lane_index(lane_idx))
+        num_agents = int(self.engine.global_config.get("num_agents", 1))
+        gap_m = float(self.engine.global_config.get("platoon_spawn_gap_m", self.DEFAULT_TRAFFIC_GAP))
+        lead_long = self._fixed_route_spawn_lead_longitude(float(getattr(lane, "length", 0.0)), gap_m)
+        speed_m_s = float(self.engine.global_config.get("initial_speed_km_h", 25.0)) / 3.6
+
+        existing_configs = self.engine.global_config.get("agent_configs", {}) or {}
+        agent_configs = {}
+        for idx in range(num_agents):
+            agent_id = f"agent{idx}"
+            spawn_longitude = max(float(lead_long) - idx * gap_m, 2.0)
+            config = dict(existing_configs.get(agent_id, {}))
+            config.update(
+                {
+                    "spawn_lane_index": lane_index,
+                    "spawn_longitude": float(spawn_longitude),
+                    "spawn_lateral": 0.0,
+                    "spawn_velocity": (speed_m_s, 0.0),
+                    "spawn_velocity_car_frame": True,
+                    "_specified_spawn_lane": True,
+                }
+            )
+            if not config.get("destination", None):
+                config = self.update_destination_for(agent_id, config)
+            agent_configs[agent_id] = config
+
+        self.engine.global_config["agent_configs"] = agent_configs
+        return True
+
     def reset(self):
         self._refresh_main_route_spawn_roads()
         super().reset()
         self._apply_spawn_lane_preference()
+        self._apply_fixed_route_spawn_configs()
         self._cache_ego_spawn_zones()
 
     def _get_spawn_lane_preference(self) -> str | None:

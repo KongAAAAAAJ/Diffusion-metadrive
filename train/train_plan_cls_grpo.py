@@ -170,10 +170,10 @@ def compute_pairwise_formation_reward(
     leader_pose: np.ndarray,           # [3] world (x, y, heading)
     desired_gap_m: float = 10.0,
     # longitudinal / lateral (exp-decay, mean over trajectory timesteps)
-    w_lon: float = 0.5,
-    lon_decay_m: float = 5.0,
-    w_lat: float = 0.5,
-    lat_decay_m: float = 1.0,
+    w_lon: float = 0.1,
+    lon_decay_m: float = 10.0,
+    w_lat: float = 0.9,
+    lat_decay_m: float = 0.5,
     # speed and progress (PPO-style, endpoint-based)
     w_speed: float = 0,
     w_progress: float = 0,
@@ -185,7 +185,7 @@ def compute_pairwise_formation_reward(
     """Pairwise formation proxy reward.
 
     Components (all ∈ [0, w_*]):
-      r_lon      w_lon  * exp(-mean_lon_err / lon_decay_m)
+      r_lon      w_lon  * exp(-mean_lon_err / lon_decay_m)  exp(-1)=0.37
       r_lat      w_lat  * exp(-mean_lat_err / lat_decay_m)
       r_speed    w_speed  * clip(v_follower / v_leader, 0, 1)
       r_progress w_progress * clip(x_endpoint / progress_s_max, 0, 1)
@@ -218,7 +218,7 @@ def compute_pairwise_formation_reward(
             lon_errs[t] = abs(dx * np.cos(lh) + dy * np.sin(lh))
             lat_errs[t] = abs(-dx * np.sin(lh) + dy * np.cos(lh))
 
-        r_lon = w_lon * np.exp(-lon_errs.mean() / lon_decay_m)
+        r_lon = w_lon * np.exp(-(lon_errs.mean() - 10) / lon_decay_m)
         r_lat = w_lat * np.exp(-lat_errs.mean() / lat_decay_m)
 
         # ── speed: follower/leader ratio, clamped ─────────────────────────
@@ -391,7 +391,7 @@ def run_training(
     env_config.setdefault("target_speed_km_h", float(config.get("target_speed_km_h", 30.0)))
     env_config.setdefault("controller_type", str(config.get("controller_type", "stabilized")))
     # GRPO uses coarse for actual env execution (fast) while proxy rewards use diffusion
-    env_config["trajectory_source"] = "coarse"
+    env_config["trajectory_source"] = "diffusion"  # 
     env_config["use_action_mask"] = False
 
     # ── planner ───────────────────────────────────────────────────────────────
@@ -549,7 +549,29 @@ def run_training(
                     step_metrics = epoch_metrics
 
             # ── step env ──────────────────────────────────────────────────────
-            obs, env_reward, terminated, truncated, info = env.step(mode_actions)
+            try:
+                obs, env_reward, terminated, truncated, info = env.step(mode_actions)
+            except AssertionError as _panda3d_err:
+                # Panda3D RenderState hash-map corruption (simpleHashMap assertion).
+                # After catching, the Panda3D global state is corrupted; any further
+                # call (including normal Python exit / GC) will SIGSEGV.
+                # Save the current checkpoint then hard-exit to let the caller restart.
+                print(
+                    f"[grpo] Panda3D rendering crash at step={global_step}: {_panda3d_err}\n"
+                    f"[grpo] Saving emergency checkpoint and exiting with os._exit(0).",
+                    flush=True,
+                )
+                _emergency_dir = ckpt_root / "final"
+                save_grpo_checkpoint(
+                    planner, pretrained_ckpt, _emergency_dir, config,
+                    {"note": "panda3d crash exit", "total_steps": global_step, "total_episodes": episode_idx},
+                )
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                os._exit(0)  # skip Python destructors to prevent SIGSEGV
             done = bool(terminated) or bool(truncated)
             episode_env_reward += float(env_reward)
             episode_step += 1
@@ -632,7 +654,7 @@ def parse_args() -> argparse.Namespace:
         default="/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt",
     )
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
-    parser.add_argument("--total-env-steps", type=int, default=50000)
+    parser.add_argument("--total-env-steps", type=int, default=None)
     parser.add_argument("--num-agents", type=int, default=3)
     parser.add_argument("--planner-device", default="cuda")
     parser.add_argument("--use-render", type=int, choices=(0, 1), default=0)
@@ -646,6 +668,12 @@ def parse_args() -> argparse.Namespace:
         help="Full platoon ckpt path (e.g. full_platoon_refine_grpo.ckpt); loads all weights including refined trajectory head. Takes priority over --pretrained-ckpt.",
     )
     return parser.parse_args()
+
+
+def resolve_total_timesteps(cli_total_env_steps: int | None, config: Mapping[str, Any]) -> int:
+    if cli_total_env_steps is not None:
+        return int(cli_total_env_steps)
+    return int(config.get("total_timesteps", 50000))
 
 
 def main() -> None:
@@ -668,7 +696,7 @@ def main() -> None:
         if ids:
             config.setdefault("env_config", {})["scenario_ids"] = ids
 
-    total_steps = int(args.total_env_steps or config.get("total_timesteps", 50000))
+    total_steps = resolve_total_timesteps(args.total_env_steps, config)
     run_dir = run_training(config, Path(args.output_root), total_steps)
     print(f"[grpo] outputs: {run_dir}", flush=True)
     sys.stdout.flush()

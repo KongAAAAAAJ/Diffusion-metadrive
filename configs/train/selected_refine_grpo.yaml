@@ -6,22 +6,43 @@ num_agents: 3
 use_relation_encoder: false  # keep _status_encoding at [128,19] to match full_platoon_grpo.ckpt format
 output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/selected_refine_grpo
 
-total_timesteps: 100000
-refine_lr: 1.0e-5
+seed: 10                # 全局随机种子；~ = null 表示不固定（非确定性）
+start_seed: 10          # 场景起始种子
+
+total_timesteps: 50000
+refine_lr: 1.0e-3  # 1.0e-4
 max_grad_norm: 1.0
 
 # Selected-mode local refinement GRPO
-num_refine_groups: 4
-refine_noise_t: 8
+num_refine_groups: 20
+rollout_chunk_size: 240  # max trajectories per forward pass; reduce if CUDA OOM
+refine_noise_t: 8  # *与forward_test一致
 refine_denoise_steps: 4
 refine_eta: 0.1
+refine_cls_weight: 1.0  # 关掉分类监督损失，可能会误导训练过程   1.0
 refine_bc_weight: 0.1
-refine_kl_weight: 0.02
+refine_kl_weight: 0.1
 refine_ddv2_loss: true
 refine_positive_advantage_only: true
+refine_advantage_baseline: pretrain_reward  # pretrain_reward | group_mean
 refine_no_positive_bc_weight: 1.0
-refine_max_delta_m: 1.0
-freeze_cls_branch: true
+refine_discount_gamma: 0.8      # denoising-step discount γ; discount[i]=γ^(steps-1-i)
+traj_dt_s: 0.5                  # seconds per trajectory waypoint (for safety checks)
+safety_max_accel_mps2: 5.0      # |accel| > this → unsafe (m/s²)
+safety_max_heading_diff_deg: 45.0  # |Δheading| between adjacent waypoints → unsafe (degrees)
+refine_print_all_mode_debug: true  # *终端输出reward等信息。正式训练时改为false
+refine_print_all_mode_debug_interval: 1  # 输出间隔步数
+refine_debug_agent_indices: []           # 限制调试输出的 agent 下标，如 [1, 2]；空列表 = 所有 agent
+refine_debug_ddim_chains: true           # *保存每个 DDIM step 的中间噪声轨迹散点图（GT mode，颜色区分 step）
+freeze_cls_branch: false
+refine_barrier_guidance_enabled: true  # !barrier guidance
+refine_barrier_guidance_scale: 0.05
+refine_barrier_sigma_multiplier: 3.0
+refine_barrier_delta_x_m: 8.0  # >0 时覆盖由 refine_noise_t 自动换算的 x 椭圆半径
+refine_barrier_delta_y_m: 2.0  # >0 时覆盖由 refine_noise_t 自动换算的 y 椭圆半径
+refine_barrier_eps: 1.0e-4
+refine_barrier_outside_weight: 1.0
+refine_barrier_grad_clip_norm: 1.0
 # debug_noise_plot_dir: "/media/kong/Elements_SE/Diffusion_Data/outputs/selected_refine_grpo/noise_figure"  # if set, save noise diagnostic plots to this directory
 debug_noise_plot_dir: "" 
 
@@ -36,12 +57,13 @@ env_config:
   num_agents: 3
   observation_mode: multimodal
   use_render: false
+  image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption
   planner_device: cuda
   lookahead_index: 2
   target_speed_km_h: 30.0
   controller_type: stabilized
   scenario_ids:
     - S1_free_cruise_straight
-    - S2_free_cruise_curve
+    # - S2_free_cruise_curve
     # - S3_straight_following
     # - S4_curve_following

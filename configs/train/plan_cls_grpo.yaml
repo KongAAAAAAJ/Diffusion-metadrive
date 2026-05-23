@@ -4,7 +4,7 @@ model_config_path: configs/diffusion/model.yaml
 num_agents: 3
 output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/plan_cls_grpo
 
-total_timesteps: 100000
+total_timesteps: 200000
 learning_rate: 1.0e-4
 max_grad_norm: 1.0
 beta_kl: 0.1             # KL weight vs pretrained cls_branch
@@ -27,7 +27,7 @@ env_config:
   num_agents: 3
   observation_mode: multimodal
   use_render: false
-  image_on_cuda: false  # must be false for multi-agent (MetaDrive asserts image_on_cuda=false in multi-agent mode)
+  image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption
   planner_device: cuda
   lookahead_index: 2
   target_speed_km_h: 30.0

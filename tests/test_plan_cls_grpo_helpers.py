@@ -2,11 +2,19 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from train.train_plan_cls_grpo import grpo_step_loss
+from train.train_plan_cls_grpo import grpo_step_loss, resolve_total_timesteps
 
 
 def _masked_log_probs(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return F.log_softmax(logits.masked_fill(~mask, float("-inf")), dim=-1).detach()
+
+
+def test_resolve_total_timesteps_uses_yaml_when_cli_not_provided():
+    assert resolve_total_timesteps(None, {"total_timesteps": 200000}) == 200000
+
+
+def test_resolve_total_timesteps_prefers_explicit_cli_value():
+    assert resolve_total_timesteps(50000, {"total_timesteps": 200000}) == 50000
 
 
 def test_grpo_step_loss_ratio_is_one_when_old_matches_new_policy():

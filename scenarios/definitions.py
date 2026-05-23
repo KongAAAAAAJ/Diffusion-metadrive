@@ -53,9 +53,9 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         scenario_id="S1_free_cruise_straight",
         allowed_local_routes=("R1_entry_straight", "R3_mainline_straight", "R3_post_transition_straight"),
         trigger_by_local_route={
-            "R1_entry_straight": TriggerSpec("s0", 60.0, 220.0),
+            # "R1_entry_straight": TriggerSpec("s0", 60.0, 220.0),
             "R3_mainline_straight": TriggerSpec("s_main0", 25.0, 170.0),
-            "R3_post_transition_straight": TriggerSpec("s_main1", 20.0, 120.0),
+            # "R3_post_transition_straight": TriggerSpec("s_main1", 20.0, 120.0),
         },
         traffic_recipes=tuple(),
         ego_spawn_lane_preference=None,

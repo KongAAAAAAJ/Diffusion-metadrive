@@ -14,8 +14,8 @@ from routes.route_definitions import get_required_preset, get_route_blocks
 from scenarios.definitions import SCENARIO_BY_ID, get_scenario_definition
 from scenarios.orchestrator import ScenarioOrchestrator
 from metadrive.envs.diffusion_envs.base_multi_env import DatasetCollectEnv
+from metadrive.policy.diffusion_policy.preference_guidance import inject_external_preference_point
 from metadrive.policy.diffusion_policy.run_dir_utils import create_numbered_run_dir
-from metadrive.policy.diffusion_policy.selected_mode_guidance import apply_selected_mode_guidance
 from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
 from metadrive.policy.diffusion_policy.transfuser_config import (
     build_transfuser_config,
@@ -36,6 +36,7 @@ DEFAULT_CHECKPOINT_PATH = "/media/kong/Elements_SE/Diffusion_Data/outputs/diffus
 DEFAULT_CAMERA_OUTPUT_DIR = "/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed/cameras"
 DEFAULT_OUTPUT_DIR = "/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/eval/closed"
 DEFAULT_PPO_ACTOR_CKPT = "/media/kong/Elements_SE/Diffusion_Data/outputs/mode_cls_ppo/run_4/checkpoints/final/sb3_model.zip"
+DEFAULT_REFINE_TRAIN_CONFIG_PATH = "configs/train/selected_refine_grpo.yaml"
 
 PAPER_SELECTED_TRAJ_COLOR = (0, 94, 213)  # Okabe-Ito vermillion in BGR
 PAPER_OTHER_TRAJ_COLOR = (178, 114, 86)  # sky blue
@@ -451,6 +452,25 @@ def parse_args(argv=None):
         "--use-relation-encoder", type=int, choices=(0, 1), default=1,
         help="0: skip relation_encoder (pure single-vehicle diffusion per agent); 1: use relation_encoder (default).",
     )
+    parser.add_argument(
+        "--use-action-mask", type=int, choices=(0, 1), default=0,
+        help="0: generate all dynamic anchors, matching refine_grpo training; 1: zero invalid anchors.",
+    )
+    parser.add_argument(
+        "--per-agent-ckpt", type=str, default="",
+        help=(
+            "Per-agent checkpoint overrides, comma-separated 'agent_idx:ckpt_path' pairs. "
+            "Example: '0:/path/baseline.ckpt,1:/path/grpo.ckpt'. "
+            "Agents not listed fall back to --checkpoint."
+        ),
+    )
+    parser.add_argument(
+        "--refine-train-config-path",
+        type=str,
+        default=DEFAULT_REFINE_TRAIN_CONFIG_PATH,
+        help="Refine-GRPO training yaml used to compute aligned PDMS rewards during evaluation.",
+    )
+    parser.add_argument("--desired-gap-m",            type=float, default=10.0)
     return parser.parse_args(argv)
 
 
@@ -462,9 +482,25 @@ def _normalize_visualization_args(args):
     return args
 
 
+def _cuda_actually_works() -> bool:
+    """torch.cuda.is_available() only checks the driver DLL; this verifies runtime init."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        torch.zeros(1, device="cuda")
+        return True
+    except Exception:
+        return False
+
+
 def resolve_device(device: str) -> str:
-    if device == "auto":
-        return "cuda" if torch.cuda.is_available() else "cpu"
+    if device in ("auto", "cuda"):
+        if _cuda_actually_works():
+            return "cuda"
+        if device == "cuda":
+            print("[resolve_device] CUDA requested but failed runtime init; falling back to CPU.",
+                  flush=True)
+        return "cpu"
     return device
 
 
@@ -603,75 +639,15 @@ def _inject_semantic_preference_point(
     env=None,
     target_speed_km_h: float = 30.0,
     horizon_s: float = 4.0,
-) -> None:
-    """Inject preference_point as lane-following endpoint at target speed.
-
-    All vehicles in the platoon compute their preference_point along the
-    HEAD vehicle's (agent_ids[0]) current lane, so followers' preference_points
-    are guaranteed to share the same lane as the leader.
-
-    Each vehicle projects its own position onto the leader's lane to get its
-    arc-length s, then advances delta_s = target_speed * horizon along that lane
-    and converts the resulting world point to ego-local coordinates.
-
-    Falls back to keep-lane coarse endpoint (slot 0) if lane info unavailable.
-    """
-    delta_s = (target_speed_km_h / 3.6) * horizon_s
-
-    # Resolve the leader's lane (agent_ids[0] = head vehicle = agent0)
-    leader_lane = None
-    if env is not None and agent_ids:
-        leader_vehicle = getattr(env, "agents", {}).get(agent_ids[0])
-        if leader_vehicle is not None:
-            leader_lane = getattr(leader_vehicle, "lane", None)
-
-    for agent_id in agent_ids:
-        pp = None
-
-        vehicle = getattr(env, "agents", {}).get(agent_id) if env is not None else None
-        if vehicle is not None and leader_lane is not None:
-            try:
-                pos = getattr(vehicle, "position", None)
-                heading = float(getattr(vehicle, "heading_theta", 0.0))
-                if pos is not None:
-                    # Project this vehicle's position onto the leader's lane
-                    s_ego, _ = leader_lane.local_coordinates(pos)
-                    s_target = min(float(s_ego) + delta_s, float(leader_lane.length))
-                    target_world = np.asarray(leader_lane.position(s_target, 0.0), dtype=np.float32)
-                    dx = float(target_world[0]) - float(pos[0])
-                    dy = float(target_world[1]) - float(pos[1])
-                    cos_h, sin_h = np.cos(heading), np.sin(heading)
-                    pp = np.asarray([cos_h * dx + sin_h * dy, -sin_h * dx + cos_h * dy], dtype=np.float32)
-            except Exception:
-                pass
-
-        # Fallback: keep-lane coarse endpoint (slot 0)
-        if pp is None:
-            coarse = coarse_by_agent.get(agent_id)
-            if coarse is not None and coarse.shape[0] > 0:
-                pp = coarse[0, -1, :2].astype(np.float32)
-
-        if pp is not None:
-            planner_batch[agent_id]["preference_point"] = pp
-
-
-def _apply_selected_mode_target_overrides(
-    planner_batch: dict[str, dict],
-    *,
-    agent_ids: list[str],
-    selected_modes: list[int],
-    coarse_by_agent: dict[str, np.ndarray],
-    config=None,
 ) -> dict[str, dict]:
-    """Write selected dynamic-anchor endpoints as target/preference points."""
-    if config is None:
-        config = build_transfuser_config()
-    return apply_selected_mode_guidance(
+    """Inject the shared external preference prior before planner export."""
+    return inject_external_preference_point(
         planner_batch,
-        agent_ids=agent_ids,
-        selected_modes=selected_modes,
         coarse_by_agent=coarse_by_agent,
-        config=config,
+        agent_ids=agent_ids,
+        env=env,
+        target_speed_km_h=target_speed_km_h,
+        horizon_s=horizon_s,
     )
 
 
@@ -681,6 +657,150 @@ def _safe_mean(values: list[float]) -> float:
 
 def _safe_std(values: list[float]) -> float:
     return float(np.std(values)) if values else 0.0
+
+
+def _load_refine_train_config(path: str | os.PathLike | None) -> dict:
+    if not path:
+        return {}
+    cfg_path = Path(path)
+    if not cfg_path.exists():
+        print(f"[pdms_reward] WARNING: refine train config not found: {cfg_path}", flush=True)
+        return {}
+    try:
+        import yaml
+
+        return dict(yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {})
+    except Exception as exc:
+        print(f"[pdms_reward] WARNING: failed to load {cfg_path}: {exc}", flush=True)
+        return {}
+
+
+def _build_pdms_reward_params(config: dict, args) -> dict:
+    env_config = dict(config.get("env_config") or {})
+    return {
+        "gate_collision_dist_m": float(config.get("gate_collision_dist_m", 1.0)),
+        "gate_ttc_s": float(config.get("gate_ttc_s", 0.5)),
+        "gate_road_half_width_m": float(config.get("gate_road_half_width_m", 3.0)),
+        "gate_max_dh_rad": float(config.get("gate_max_dh_rad", 0.6)),
+        "w_progress": float(config.get("w_progress", 0.2)),
+        "w_formation": float(config.get("w_formation", 0.4)),
+        "w_speed": float(config.get("w_speed", 0.2)),
+        "w_lane": float(config.get("w_lane", 0.15)),
+        "w_comfort": float(config.get("w_comfort", 0.05)),
+        "w_pretrain": float(config.get("w_pretrain", 0.0)),
+        "progress_s_max": float(config.get("progress_s_max", 15.0)),
+        "target_speed_kmh": float(env_config.get("target_speed_km_h", getattr(args, "target_speed_km_h", 30.0))),
+        "lane_decay_m": float(config.get("lane_decay_m", 1.0)),
+        "comfort_decay_rad": float(config.get("comfort_decay_rad", 0.1)),
+        "consistency_decay_m": float(config.get("consistency_decay_m", 1.0)),
+        "desired_gap_m": float(config.get("desired_gap_m", getattr(args, "desired_gap_m", 10.0))),
+        "vehicle_length_m": float(config.get("vehicle_length_m", 4.8)),
+        "gate_horizon_steps": int(config.get("gate_horizon_steps", 2)),
+    }
+
+
+def _rebuild_heading_from_xy(traj: np.ndarray) -> np.ndarray:
+    """Reconstruct heading channel from atan2(Δy, Δx), matching training PDMS computation.
+
+    Training calls reconstruct_heading_from_xy before _compute_pdms_reward_batch so that
+    smoothness_gate sees consistent heading deltas.  Eval uses the raw model heading output
+    (tanh * π) which can oscillate ±0.4 rad between steps, causing dh.max() > gate_max_dh_rad
+    (0.6 rad) and zeroing every reward.
+    """
+    xy = traj[:, :2]
+    dxy = np.diff(xy, axis=0)
+    h_tail = np.arctan2(dxy[:, 1], dxy[:, 0]).astype(np.float32)
+    heading = np.concatenate([h_tail[:1], h_tail])
+    result = traj.copy()
+    result[:, 2] = heading
+    return result
+
+
+def _compute_selected_pdms_rewards(
+    *,
+    env,
+    agent_ids: list[str],
+    trajectories: dict[str, np.ndarray],
+    selected_modes: list[int],
+    coarse_by_agent: dict[str, np.ndarray],
+    mode_slot_names: list[str],
+    params: dict,
+) -> dict[str, float]:
+    """Evaluate executed trajectories with the same PDMS helper used by refine-GRPO training."""
+    from train.train_plan_cls_grpo import compute_pairwise_formation_reward
+    from train.train_selected_refine_grpo import _compute_pdms_reward_batch
+
+    rewards: dict[str, float] = {}
+    poses: dict[str, np.ndarray | None] = {}
+    for agent_id in agent_ids:
+        vehicle = env.agents.get(agent_id)
+        poses[agent_id] = (
+            np.array(
+                [
+                    vehicle.position[0],
+                    vehicle.position[1],
+                    float(getattr(vehicle, "heading_theta", 0.0)),
+                ],
+                dtype=np.float64,
+            )
+            if vehicle is not None else None
+        )
+
+    for agent_index, agent_id in enumerate(agent_ids):
+        traj = np.asarray(trajectories[agent_id], dtype=np.float32)
+        pose = poses.get(agent_id)
+        if pose is None:
+            rewards[agent_id] = 0.0
+            continue
+
+        is_leader = agent_index == 0
+        prev_traj = None if is_leader else np.asarray(trajectories[agent_ids[agent_index - 1]], dtype=np.float32)
+        prev_pose = None if is_leader else poses.get(agent_ids[agent_index - 1])
+
+        # Reconstruct heading from xy so smoothness_gate matches training behavior.
+        traj = _rebuild_heading_from_xy(traj)
+        if prev_traj is not None:
+            prev_traj = _rebuild_heading_from_xy(prev_traj)
+
+        if is_leader:
+            formation_scores = np.ones(1, dtype=np.float32)
+        elif prev_pose is not None:
+            formation_scores = compute_pairwise_formation_reward(
+                traj[None],
+                pose,
+                prev_traj,
+                prev_pose,
+                desired_gap_m=float(params["desired_gap_m"]),
+                progress_s_max=float(params["progress_s_max"]),
+            )
+        else:
+            formation_scores = np.zeros(1, dtype=np.float32)
+
+        mode_idx = int(selected_modes[agent_index])
+        mode_name = mode_slot_names[mode_idx] if 0 <= mode_idx < len(mode_slot_names) else ""
+        road_half_width = float(params["gate_road_half_width_m"]) * (2.0 if "LC" in mode_name else 1.0)
+        coarse = coarse_by_agent.get(agent_id)
+        lane_y = 0.0
+        if coarse is not None:
+            coarse_np = np.asarray(coarse, dtype=np.float32)
+            if coarse_np.ndim == 3 and 0 <= mode_idx < coarse_np.shape[0] and coarse_np.shape[2] >= 2:
+                lane_y = float(coarse_np[mode_idx, -1, 1])
+
+        reward = _compute_pdms_reward_batch(
+            traj[None],
+            pose,
+            prev_traj,
+            prev_pose,
+            traj,
+            is_leader,
+            formation_scores,
+            params,
+            road_half_widths=np.asarray([road_half_width], dtype=np.float32),
+            lane_y_targets=np.asarray([lane_y], dtype=np.float32),
+        )[0]
+        rewards[agent_id] = float(reward)
+
+    return rewards
 
 
 def _summarize_random_action_rewards(
@@ -694,9 +814,12 @@ def _summarize_random_action_rewards(
 ) -> dict:
     by_mode: dict[int, dict[str, list[float] | int]] = {}
     episode_env_rewards: dict[int, list[float]] = {}
+    episode_pdms_rewards: dict[int, list[float]] = {}
     for record in records:
         episode_idx = int(record.get("episode", 0))
         episode_env_rewards.setdefault(episode_idx, []).append(float(record.get("env_reward_mean", 0.0)))
+        if "pdms_reward_mean" in record:
+            episode_pdms_rewards.setdefault(episode_idx, []).append(float(record.get("pdms_reward_mean", 0.0)))
         selected_modes = dict(record.get("selected_mode", {}))
         env_rewards = dict(record.get("env_reward", {}))
         for agent_id, mode_idx in selected_modes.items():
@@ -722,6 +845,10 @@ def _summarize_random_action_rewards(
         float(sum(values)) / max(len(values), 1)
         for _, values in sorted(episode_env_rewards.items())
     ]
+    episode_pdms_per_step = [
+        float(sum(values)) / max(len(values), 1)
+        for _, values in sorted(episode_pdms_rewards.items())
+    ]
     num_episodes = max(int(episodes), 1)
     return {
         "metadata": dict(metadata),
@@ -730,6 +857,8 @@ def _summarize_random_action_rewards(
         "episode_env_reward_per_step_std": _safe_std(episode_per_step),
         "episode_env_reward_per_step_min": float(min(episode_per_step)) if episode_per_step else 0.0,
         "episode_env_reward_per_step_max": float(max(episode_per_step)) if episode_per_step else 0.0,
+        "episode_pdms_reward_per_step_mean": _safe_mean(episode_pdms_per_step),
+        "episode_pdms_reward_per_step_std": _safe_std(episode_pdms_per_step),
         "success_rate": float(success) / num_episodes,
         "crash_rate": float(crash) / num_episodes,
         "out_of_road_rate": float(out_of_road) / num_episodes,
@@ -974,6 +1103,10 @@ def _format_step_reward_lines(
     if env_parts:
         lines.append("env reward: " + " ".join(env_parts))
     return lines
+
+
+def _format_combined_frame_reward_text(step: int, pdms_reward: float) -> str:
+    return f"step={int(step)}  pdms={float(pdms_reward):+.3f}"
 
 
 def _local_xy_to_world_xy(
@@ -1764,6 +1897,94 @@ def build_platoon_planner(checkpoint_path: str, args, resolved_model_size: str, 
     return planner.to(torch.device(resolve_device(args.device)))
 
 
+def _parse_per_agent_ckpt(arg: str) -> dict[int, str]:
+    """Parse '0:/path/a.ckpt,1:/path/b.ckpt' → {0: '/path/a.ckpt', 1: '/path/b.ckpt'}."""
+    result: dict[int, str] = {}
+    if not arg.strip():
+        return result
+    for token in arg.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        colon = token.index(":")
+        idx = int(token[:colon].strip())
+        path = token[colon + 1:].strip()
+        result[idx] = path
+    return result
+
+
+def _build_per_agent_planner_map(
+    per_agent_ckpt: dict[int, str],
+    default_planner,
+    args,
+    resolved_model_size: str,
+    model_config: dict,
+) -> dict[int, object]:
+    """Return {agent_idx: planner}, re-using default_planner for indices not in per_agent_ckpt."""
+    planner_cache: dict[str, object] = {}
+    result: dict[int, object] = {}
+    for idx, ckpt_path in per_agent_ckpt.items():
+        if ckpt_path not in planner_cache:
+            print(f"[test] per-agent planner agent_idx={idx}: {ckpt_path}", flush=True)
+            planner_cache[ckpt_path] = build_platoon_planner(
+                ckpt_path, args, resolved_model_size, model_config
+            )
+        result[idx] = planner_cache[ckpt_path]
+    return result
+
+
+def _export_per_agent_mode_selection(
+    planner_batch: dict,
+    agent_ids: list[str],
+    per_agent_planner_map: dict[int, object],
+    default_planner,
+) -> dict:
+    """Dispatch export_mode_selection per-planner, merge results in original agent order."""
+    from collections import defaultdict
+
+    # Map agent_id → planner (by position index)
+    planner_for: dict[str, object] = {}
+    for i, aid in enumerate(agent_ids):
+        planner_for[aid] = per_agent_planner_map.get(i, default_planner)
+
+    # Group agent_ids by planner identity
+    groups: dict[int, list[str]] = defaultdict(list)
+    planner_by_key: dict[int, object] = {}
+    for aid in agent_ids:
+        p = planner_for[aid]
+        key = id(p)
+        groups[key].append(aid)
+        planner_by_key[key] = p
+
+    # Call each planner on its subset
+    results_by_agent: dict[str, dict] = {}
+    for key, group_aids in groups.items():
+        p = planner_by_key[key]
+        sub_batch = {aid: planner_batch[aid] for aid in group_aids if aid in planner_batch}
+        if not sub_batch:
+            continue
+        with torch.no_grad():
+            sub_export = p.export_mode_selection(sub_batch)
+        for i, aid in enumerate(sub_export["agent_ids"]):
+            results_by_agent[aid] = {
+                k: v[i] for k, v in sub_export.items() if k != "agent_ids"
+            }
+
+    # Reassemble in original order
+    valid_ids = [aid for aid in agent_ids if aid in results_by_agent]
+    if not valid_ids:
+        raise RuntimeError("_export_per_agent_mode_selection: no results produced")
+    return {
+        "agent_ids": valid_ids,
+        "trajectory_candidates":  np.stack([results_by_agent[a]["trajectory_candidates"]  for a in valid_ids]),
+        "cls_feature":            np.stack([results_by_agent[a]["cls_feature"]             for a in valid_ids]),
+        "raw_cls_logits":         np.stack([results_by_agent[a]["raw_cls_logits"]          for a in valid_ids]),
+        "masked_cls_logits":      np.stack([results_by_agent[a]["masked_cls_logits"]       for a in valid_ids]),
+        "mode_valid_mask":        np.stack([results_by_agent[a]["mode_valid_mask"]         for a in valid_ids]),
+        "pretrained_argmax_mode": np.stack([results_by_agent[a]["pretrained_argmax_mode"]  for a in valid_ids]),
+    }
+
+
 def _build_platoon_planner_batch(obs: dict, agent_ids: list[str]) -> dict[str, dict[str, np.ndarray]]:
     required_keys = ("camera", "lidar", "status", "formation_relation_state")
     # Optional keys passed through when present so the model receives full guidance:
@@ -1786,7 +2007,7 @@ def _build_platoon_planner_batch(obs: dict, agent_ids: list[str]) -> dict[str, d
     return batch
 
 
-def _build_dynamic_mode_features_for_vehicle(vehicle, config) -> dict[str, np.ndarray]:
+def _build_dynamic_mode_features_for_vehicle(vehicle, config, *, generate_all: bool = True) -> dict[str, np.ndarray]:
     from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
     from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots, mode_slot_count
     from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
@@ -1843,7 +2064,7 @@ def _build_dynamic_mode_features_for_vehicle(vehicle, config) -> dict[str, np.nd
             emergency_stop_level_count=config.mode_emergency_stop_count,
             mode_slots=mode_slots,
         )
-        output = generator.generate(ctx)
+        output = generator.generate(ctx, generate_all=bool(generate_all))
         return {
             "coarse_trajectories": np.asarray(output.coarse_trajectories, dtype=np.float32),
             "mode_valid_mask": np.asarray(output.mode_valid_mask, dtype=bool),
@@ -1860,6 +2081,8 @@ def _attach_platoon_dynamic_mode_features(
     planner_batch: dict[str, dict[str, np.ndarray]],
     env,
     config,
+    *,
+    generate_all: bool = True,
 ) -> None:
     from metadrive.policy.diffusion_policy.mode_definitions import mode_slot_count
     num_slots = mode_slot_count(
@@ -1879,7 +2102,7 @@ def _attach_platoon_dynamic_mode_features(
             # write fallback so downstream code never KeyErrors on coarse_trajectories.
             sample.update(_fallback)
             continue
-        sample.update(_build_dynamic_mode_features_for_vehicle(vehicle, config))
+        sample.update(_build_dynamic_mode_features_for_vehicle(vehicle, config, generate_all=generate_all))
 
 
 def _mode_slot_names_from_config(config) -> list[str]:
@@ -2011,14 +2234,31 @@ def run_platoon_planner_backend(
     resolved_model_size: str,
     model_config: dict,
     transfuser_config,
-    anchors: np.ndarray | None,
 ) -> None:
     from envs.platoon_env import PlatoonEnv
 
+    refine_train_config = _load_refine_train_config(getattr(args, "refine_train_config_path", ""))
+    if "use_relation_encoder" in refine_train_config:
+        args.use_relation_encoder = int(bool(refine_train_config["use_relation_encoder"]))
     env_config = build_platoon_env_config(args, scenario_id=args.scenario_id, local_route=args.local_route)
     env = PlatoonEnv(env_config)
     planner = build_platoon_planner(str(checkpoint_path), args, resolved_model_size, model_config)
     mode_slot_names = _mode_slot_names_from_config(transfuser_config)
+
+    # Per-agent planner overrides (e.g. "0:baseline.ckpt,1:grpo.ckpt")
+    _per_agent_ckpt_str = str(getattr(args, "per_agent_ckpt", "") or "")
+    _per_agent_ckpt_map = _parse_per_agent_ckpt(_per_agent_ckpt_str)
+    _per_agent_planner_map = (
+        _build_per_agent_planner_map(_per_agent_ckpt_map, planner, args, resolved_model_size, model_config)
+        if _per_agent_ckpt_map else {}
+    )
+    if _per_agent_planner_map:
+        _label_map = {i: p for i, p in _per_agent_planner_map.items()}
+        print(
+            f"[test] per-agent planner override active: "
+            + ", ".join(f"agent_idx={i}→{id(p)}" for i, p in _label_map.items()),
+            flush=True,
+        )
     ppo_actor_ckpt = _resolve_ppo_actor_checkpoint(
         str(getattr(args, "ppo_actor_ckpt", "") or ""),
         str(getattr(args, "ppo_run_dir", "") or ""),
@@ -2050,6 +2290,7 @@ def run_platoon_planner_backend(
     policy_agent_ids = [f"agent{i}" for i in range(int(args.num_agents))]
     random_action_records: list[dict] = []
     coordinate_audit_records: list[dict] = []
+    pdms_reward_params = _build_pdms_reward_params(refine_train_config, args)
     summary = {
         "success": 0,
         "crash": 0,
@@ -2090,7 +2331,7 @@ def run_platoon_planner_backend(
             done = False
             episode_reward = 0.0
             episode_length = 0
-            _last_step_reward = 0.0   # reward from previous step, shown on next frame
+            _last_step_reward = 0.0
             final_info = {}
             episode_3d_frames = []
             episode_2d_frames = []
@@ -2125,7 +2366,12 @@ def run_platoon_planner_backend(
                 _prev_ego_speed_km_h = _cur_ego_speed_km_h
 
                 planner_batch = _build_platoon_planner_batch(obs, active_agent_ids)
-                _attach_platoon_dynamic_mode_features(planner_batch, env, transfuser_config)
+                _attach_platoon_dynamic_mode_features(
+                    planner_batch,
+                    env,
+                    transfuser_config,
+                    generate_all=not bool(getattr(args, "use_action_mask", 0)),
+                )
                 coarse_by_agent = {
                     agent_id: np.asarray(sample.get("coarse_trajectories"), dtype=np.float32)
                     for agent_id, sample in planner_batch.items()
@@ -2139,8 +2385,13 @@ def run_platoon_planner_backend(
                     target_speed_km_h=float(getattr(args, "target_speed_km_h", 30.0)),
                     horizon_s=float(transfuser_config.target_point_prediction_horizon_s),
                 )
-                with torch.no_grad():
-                    export = planner.export_mode_selection(planner_batch)
+                if _per_agent_planner_map:
+                    export = _export_per_agent_mode_selection(
+                        planner_batch, active_agent_ids, _per_agent_planner_map, planner
+                    )
+                else:
+                    with torch.no_grad():
+                        export = planner.export_mode_selection(planner_batch)
                 exported_ids = list(export["agent_ids"])
                 candidates = np.asarray(export["trajectory_candidates"], dtype=np.float32)
                 masked_logits = np.asarray(export["masked_cls_logits"], dtype=np.float32)
@@ -2236,6 +2487,23 @@ def run_platoon_planner_backend(
                                 planner_batch[agent_id][guidance_key],
                                 dtype=np.float32,
                             )
+                _step_pdms_rewards: dict[str, float] = {}
+                try:
+                    _step_pdms_rewards = _compute_selected_pdms_rewards(
+                        env=env,
+                        agent_ids=exported_ids,
+                        trajectories=_step_trajectories,
+                        selected_modes=selected_modes,
+                        coarse_by_agent=coarse_by_agent,
+                        mode_slot_names=mode_slot_names,
+                        params=pdms_reward_params,
+                    )
+                except Exception as _pdms_exc:
+                    import traceback
+                    print(f"[pdms_reward] WARNING: {_pdms_exc}\n{traceback.format_exc()}", flush=True)
+                _pdms_mean = (float(np.mean(list(_step_pdms_rewards.values())))
+                              if _step_pdms_rewards else 0.0)
+
                 # Pass selected trajectories to PlatoonEnv for road_topo_reward.
                 if hasattr(env, "_pending_step_trajectories"):
                     env._pending_step_trajectories = _step_trajectories
@@ -2354,8 +2622,11 @@ def run_platoon_planner_backend(
                         camera_position=tuple(_pri_ego_xy),
                     )
                     if _combined is not None:
-                        # Draw PPO reward (from previous step) in the top-left corner.
-                        _reward_text = f"step={episode_length}  reward={_last_step_reward:+.3f}  total={episode_reward:.2f}"
+                        # Draw the PDMS reward aligned with refine-GRPO training.
+                        _reward_text = _format_combined_frame_reward_text(
+                            step=episode_length,
+                            pdms_reward=_pdms_mean,
+                        )
                         cv2.putText(_combined, _reward_text, (10, 22),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 3, cv2.LINE_AA)
                         cv2.putText(_combined, _reward_text, (10, 22),
@@ -2368,6 +2639,54 @@ def run_platoon_planner_backend(
                         )
                         _comb_path.parent.mkdir(parents=True, exist_ok=True)
                         cv2.imwrite(str(_comb_path), cv2.cvtColor(_combined, cv2.COLOR_RGB2BGR))
+
+                    # ── save per-step trajectory data in world coords ─────────
+                    def _local_to_world_2d(pts, ego_xy, hdg):
+                        """[M, T, 2] or [T, 2] local → world."""
+                        cos_h, sin_h = float(np.cos(hdg)), float(np.sin(hdg))
+                        ex, ey = float(ego_xy[0]), float(ego_xy[1])
+                        out = np.asarray(pts, dtype=np.float32).copy()
+                        out[..., 0] = ex + cos_h * pts[..., 0] - sin_h * pts[..., 1]
+                        out[..., 1] = ey + sin_h * pts[..., 0] + cos_h * pts[..., 1]
+                        return out
+
+                    _traj_agents: dict = {}
+                    for _tai, _taid in enumerate(exported_ids):
+                        _tveh = env.agents.get(_taid)
+                        _texy = np.asarray(_tveh.position[:2], dtype=np.float64) if _tveh else np.zeros(2)
+                        _tehd = float(getattr(_tveh, "heading_theta", 0.0)) if _tveh else 0.0
+                        _tcands = candidates[_tai] if candidates is not None else None
+                        _tcands_w: list = []
+                        if _tcands is not None:
+                            _tcands_w = _local_to_world_2d(
+                                _tcands[..., :2].astype(np.float32), _texy, _tehd
+                            ).tolist()
+                        _traj_agents[_taid] = {
+                            "ego_world_xy": _texy.tolist(),
+                            "heading_rad": _tehd,
+                            "candidate_trajs_world": _tcands_w,
+                            "selected_mode": int(selected_modes[_tai]),
+                            "valid_mask": (
+                                mode_valid_mask[_tai].tolist()
+                                if mode_valid_mask is not None else []
+                            ),
+                        }
+                    _tdata_path = (
+                        Path(args.output_dir)
+                        / "trajectory_data"
+                        / f"episode_{episode_idx:03d}"
+                        / f"step_{episode_length:05d}.json"
+                    )
+                    _tdata_path.parent.mkdir(parents=True, exist_ok=True)
+                    _tdata_path.write_text(
+                        json.dumps({
+                            "episode": episode_idx,
+                            "step": episode_length,
+                            "primary_agent_id": primary_agent_id,
+                            "agents": _traj_agents,
+                        }),
+                        encoding="utf-8",
+                    )
 
                 t_start = time.time()
                 obs, reward, terminated, truncated, info = env.step(low_level_actions)
@@ -2439,6 +2758,8 @@ def run_platoon_planner_backend(
                         },
                         "env_reward": env_rewards,
                         "env_reward_mean": float(np.mean(list(env_rewards.values()))) if env_rewards else 0.0,
+                        "pdms_reward": _step_pdms_rewards,
+                        "pdms_reward_mean": _pdms_mean,
                     }
                 )
                 final_info = planner_final_info.get(primary_agent_id, next(iter(planner_final_info.values()), {}))
@@ -2495,7 +2816,10 @@ def run_platoon_planner_backend(
                         output_dir=Path(args.output_dir),
                         episode_idx=episode_idx,
                         step_idx=episode_length,
-                        anchors=anchors,
+                        anchors=(
+                            np.asarray(final_info["coarse_trajectories"], dtype=np.float32)
+                            if final_info.get("coarse_trajectories") is not None else None
+                        ),
                         overlay_all_anchors=True,
                         metadata_text=metadata_text,
                     )
@@ -2594,6 +2918,7 @@ def run_platoon_planner_backend(
             "ppo_actor_ckpt": str(ppo_actor_ckpt),
             "ppo_deterministic": bool(ppo_deterministic),
             "num_agents": int(args.num_agents),
+            "refine_train_config_path": str(getattr(args, "refine_train_config_path", "")),
         },
     )
     random_summary_path.write_text(json.dumps(random_summary, indent=2), encoding="utf-8")
@@ -2643,13 +2968,13 @@ def main():
     resolved_device = resolve_device(args.device)
     print(f"[test] checkpoint={checkpoint_path}")
     print(f"[test] model_config_path={args.model_config_path}")
-    print(f"[test] model_size={resolved_model_size}")
+    # print(f"[test] model_size={resolved_model_size}")
     print(f"[test] device={resolved_device}")
     print(f"[test] num_agents={int(args.num_agents)}")
-    print(f"[test] controller_type={args.controller_type}")
-    print(
-        f"[test] requested_model_size={requested_model_size}"
-    )
+    # print(f"[test] controller_type={args.controller_type}")
+    # print(
+    #     f"[test] requested_model_size={requested_model_size}"
+    # )
     print(f"[test] image_on_cuda={bool(args.image_on_cuda)}")
     print(
         f"[test] render={bool(args.render)} save_3d_video={bool(args.save_3d_video)} "
@@ -2672,22 +2997,17 @@ def main():
         f"{transfuser_config.mode_emergency_stop_count} "
         f"ego_fut_mode={transfuser_config.ego_fut_mode}"
     )
-    anchors = None
-    anchor_path = Path(transfuser_config.plan_anchor_path)
-    if anchor_path.exists():
-        anchors = np.load(anchor_path)
     if int(args.num_agents) > 1:
-        print("[test] backend=platoon_planner + external PPO actor")
+        # print("[test] backend=platoon_planner + external PPO actor")
         run_platoon_planner_backend(
             args=args,
             checkpoint_path=checkpoint_path,
             resolved_model_size=resolved_model_size,
             model_config=model_config,
             transfuser_config=transfuser_config,
-            anchors=anchors,
         )
         return
-    print("[test] backend=single_policy (DatasetCollectEnv + TransfuserPolicy)")
+    # print("[test] backend=single_policy (DatasetCollectEnv + TransfuserPolicy)")
     env_config = build_env_config(args, resolved_model_size, model_config)
     env = DatasetCollectEnv(env_config)
     summary = {
@@ -2890,7 +3210,10 @@ def main():
                         output_dir=Path(args.output_dir),
                         episode_idx=episode_idx,
                         step_idx=episode_length,
-                        anchors=anchors,
+                        anchors=(
+                            np.asarray(final_info["coarse_trajectories"], dtype=np.float32)
+                            if final_info.get("coarse_trajectories") is not None else None
+                        ),
                         overlay_all_anchors=True,
                         metadata_text=metadata_text,
                     )

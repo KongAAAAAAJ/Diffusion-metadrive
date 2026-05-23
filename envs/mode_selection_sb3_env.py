@@ -11,7 +11,7 @@ try:
 except Exception:  # pragma: no cover
     import gym  # type: ignore
 
-from metadrive.policy.diffusion_policy.selected_mode_guidance import apply_selected_mode_guidance
+from metadrive.policy.diffusion_policy.preference_guidance import inject_external_preference_point
 from metadrive.policy.diffusion_policy.transfuser_policy import compute_trajectory_control
 
 
@@ -33,6 +33,7 @@ class ModeSelectionSB3Env(gym.Env):
         self._last_raw_obs: dict[str, Mapping[str, Any]] = {}
         self._last_export: dict[str, Any] | None = None
         self._last_planner_batch: dict[str, dict] | None = None
+        self._last_preference_metadata: dict[str, dict] = {}
         self._last_obs: dict[str, np.ndarray] | None = None
         self._num_modes = int(self.config.get("num_modes", 1))
         self._relation_state_dim = int(self.config.get("relation_state_dim", 12))
@@ -59,6 +60,7 @@ class ModeSelectionSB3Env(gym.Env):
         "controller_type", "debug_dynamic_anchor_errors",
         "scenario_ids", "scenario_index", "local_route_index",
         "debug_log_path", "trajectory_source", "use_action_mask", "seed_offset",
+        "seed", "start_seed",
     })
 
     def _build_base_env(self):
@@ -145,6 +147,7 @@ class ModeSelectionSB3Env(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
+        episode_seed = self._resolve_episode_seed(seed)
         scenario_ids = list(self._raw_config.get("scenario_ids") or [])
         if len(scenario_ids) > 1:
             cfg = dict(self._raw_config)
@@ -167,7 +170,10 @@ class ModeSelectionSB3Env(gym.Env):
                 flush=True,
             )
         self._episode_count += 1
-        result = self.base_env.reset()
+        if episode_seed is None:
+            result = self.base_env.reset()
+        else:
+            result = self.base_env.reset(seed=episode_seed)
         self._step_count = 0
         if isinstance(result, tuple) and len(result) == 2:
             raw_obs, info = result
@@ -176,6 +182,21 @@ class ModeSelectionSB3Env(gym.Env):
         self._last_raw_obs = self._normalize_raw_obs(raw_obs or {}, previous_obs=None)
         obs = self._refresh_mode_export()
         return obs, dict(info or {})
+
+    def _resolve_episode_seed(self, reset_seed) -> int | None:
+        base_seed = reset_seed
+        if base_seed is None:
+            base_seed = self._raw_config.get("seed", self._raw_config.get("start_seed", None))
+        if base_seed is None:
+            return None
+        episode_seed = int(base_seed) + int(self._raw_config.get("seed_offset", 0)) + int(self._episode_count)
+        start_index = getattr(self.base_env, "start_index", None)
+        num_scenarios = getattr(self.base_env, "num_scenarios", None)
+        if start_index is not None and num_scenarios is not None and int(num_scenarios) > 0:
+            start = int(start_index)
+            count = int(num_scenarios)
+            return start + ((episode_seed - start) % count)
+        return episode_seed
 
     def step(self, action):
         if self._last_export is None:
@@ -220,7 +241,7 @@ class ModeSelectionSB3Env(gym.Env):
 
         if self._trajectory_source == "coarse":
             # Skip diffusion model inference entirely; execute the coarse kinematic trajectory.
-            guidance_metadata = {}
+            guidance_metadata = dict(self._last_preference_metadata)
             # Build dummy candidates array from coarse trajectories (padded to (8,3))
             num_modes_val = next(iter(coarse_by_agent.values())).shape[0] if coarse_by_agent else self._num_modes
             candidates = np.zeros((len(agent_ids), num_modes_val, 8, 3), dtype=np.float32)
@@ -239,20 +260,14 @@ class ModeSelectionSB3Env(gym.Env):
                         candidates[idx, m_i, :, 2] = headings
             masks = np.asarray(step_export["mode_valid_mask"], dtype=bool)
         else:
-            # Default: use guided diffusion planner output.
-            guidance_metadata = apply_selected_mode_guidance(
-                planner_batch,
-                agent_ids=agent_ids,
-                selected_modes=[int(value) for value in action_arr.tolist()],
-                coarse_by_agent=coarse_by_agent,
-                config=getattr(self.planner, "config", None),
-            )
-            guided_export = self.planner.export_mode_selection(planner_batch)
-            guided_agent_ids = list(guided_export["agent_ids"])
-            if guided_agent_ids != agent_ids:
-                raise RuntimeError(f"Guided export agent order changed: {guided_agent_ids} != {agent_ids}")
-            candidates = np.asarray(guided_export["trajectory_candidates"], dtype=np.float32)
-            masks = np.asarray(guided_export["mode_valid_mask"], dtype=bool)
+            # Default: execute candidates from the same planner export that
+            # produced the policy observation/action mask. ``preference_point``
+            # is an external decision prior injected before that export; the
+            # selected mode must not rewrite planner inputs or trigger a second
+            # inference pass.
+            guidance_metadata = dict(self._last_preference_metadata)
+            candidates = initial_candidates
+            masks = np.asarray(step_export["mode_valid_mask"], dtype=bool)
 
         # initial_candidates: pre-guidance diffusion output (used for logging only)
         # For coarse mode, use the coarse-derived candidates as both initial and final.
@@ -389,11 +404,11 @@ class ModeSelectionSB3Env(gym.Env):
                 "invalid_mode_rate": 0.0,
                 "raw_cls_logits": np.asarray(step_export["raw_cls_logits"], dtype=float).tolist(),
                 "guided_raw_cls_logits": np.asarray(
-                    guided_export["raw_cls_logits"] if self._trajectory_source != "coarse" else step_export["raw_cls_logits"],
+                    step_export["raw_cls_logits"],
                     dtype=float,
                 ).tolist(),
                 "masked_cls_logits": np.asarray(
-                    guided_export["masked_cls_logits"] if self._trajectory_source != "coarse" else step_export["masked_cls_logits"],
+                    step_export["masked_cls_logits"],
                     dtype=float,
                 ).tolist(),
                 "mode_valid_mask": masks.astype(bool).tolist(),
@@ -408,8 +423,24 @@ class ModeSelectionSB3Env(gym.Env):
                     agent_id: guidance_metadata.get(agent_id, {}).get("target_point_after")
                     for agent_id in agent_ids
                 },
+                "external_preference_point": {
+                    agent_id: guidance_metadata.get(agent_id, {}).get("preference_point")
+                    for agent_id in agent_ids
+                },
+                "external_preference_source": {
+                    agent_id: guidance_metadata.get(agent_id, {}).get("preference_source")
+                    for agent_id in agent_ids
+                },
                 "selected_coarse_endpoint": {
-                    agent_id: guidance_metadata.get(agent_id, {}).get("selected_coarse_endpoint")
+                    agent_id: (
+                        coarse_by_agent[agent_id][int(action_arr[idx]), -1, :2].astype(float).tolist()
+                        if agent_id in coarse_by_agent and 0 <= int(action_arr[idx]) < coarse_by_agent[agent_id].shape[0]
+                        else None
+                    )
+                    for idx, agent_id in enumerate(agent_ids)
+                },
+                "selected_coarse_endpoint_written_to_preference": {
+                    agent_id: False
                     for agent_id in agent_ids
                 },
                 "selected_low_level_action": {
@@ -452,7 +483,10 @@ class ModeSelectionSB3Env(gym.Env):
                 "initial_selected_trajectory_endpoint",
                 "selected_trajectory_endpoint",
                 "target_point_after",
+                "external_preference_point",
+                "external_preference_source",
                 "selected_coarse_endpoint",
+                "selected_coarse_endpoint_written_to_preference",
                 "selected_low_level_action",
                 "controller_debug",
                 "candidate_endpoints",
@@ -493,6 +527,19 @@ class ModeSelectionSB3Env(gym.Env):
             for agent_id in self._agent_ids
             if agent_id in self._last_raw_obs
         }
+        coarse_by_agent = {
+            agent_id: np.asarray(sample.get("coarse_trajectories"), dtype=np.float32)
+            for agent_id, sample in planner_batch.items()
+            if sample.get("coarse_trajectories") is not None
+        }
+        self._last_preference_metadata = inject_external_preference_point(
+            planner_batch,
+            coarse_by_agent,
+            list(planner_batch.keys()),
+            env=self.base_env,
+            target_speed_km_h=self._target_speed_km_h,
+            horizon_s=float(getattr(getattr(self.planner, "config", None), "target_point_prediction_horizon_s", 4.0)),
+        )
         export = self.planner.export_mode_selection(planner_batch)
         self._last_planner_batch = planner_batch
         self._last_export = export
@@ -580,10 +627,6 @@ class ModeSelectionSB3Env(gym.Env):
             # Vehicle removed (crash/out-of-road): inject fallback so coarse_trajectories
             # is always present in _last_planner_batch → prevents KeyError in next step.
             sample.update(self._build_dynamic_mode_features_fallback())
-        # Inject keep-lane coarse endpoint as semantic preference_point (slot 0 = keep-lane).
-        coarse = sample.get("coarse_trajectories")
-        if coarse is not None and coarse.shape[0] > 0:
-            sample["preference_point"] = coarse[0, -1, :2].astype(np.float32)
         return sample
 
     def _build_dynamic_mode_features_fallback(self) -> dict[str, np.ndarray]:

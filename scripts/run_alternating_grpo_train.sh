@@ -12,6 +12,48 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 CONFIG="${CONFIG:-${REPO_ROOT}/configs/train/alternating_grpo.yaml}"
 
+resolve_best_or_final_ckpt() {
+    local run_dir="$1"
+    local ckpt_name="$2"
+    local best_path=""
+    local best_score=""
+    local ckpt_dir score
+
+    shopt -s nullglob
+    for ckpt_dir in "${run_dir%/}"/checkpoints/step_*_score_*; do
+        [[ -d "${ckpt_dir}" && -f "${ckpt_dir}/${ckpt_name}" ]] || continue
+        score="${ckpt_dir##*_score_}"
+        if [[ -z "${best_score}" ]] || awk "BEGIN { exit !(${score} > ${best_score}) }"; then
+            best_score="${score}"
+            best_path="${ckpt_dir}/${ckpt_name}"
+        fi
+    done
+    shopt -u nullglob
+
+    if [[ -n "${best_path}" ]]; then
+        echo "${best_path}"
+        return 0
+    fi
+
+    local final_path="${run_dir%/}/checkpoints/final/${ckpt_name}"
+    if [[ -f "${final_path}" ]]; then
+        echo "${final_path}"
+        return 0
+    fi
+
+    echo "[ERROR] no checkpoint '${ckpt_name}' found under ${run_dir}/checkpoints/{step_*_score_*,final}" >&2
+    return 1
+}
+
+if [[ "${1:-}" == "--resolve-ckpt" ]]; then
+    if [[ $# -ne 3 ]]; then
+        echo "Usage: $0 --resolve-ckpt <run_dir> <ckpt_name>" >&2
+        exit 2
+    fi
+    resolve_best_or_final_ckpt "$2" "$3"
+    exit $?
+fi
+
 # ── read values from yaml (env-vars override) ────────────────────────────────
 _yaml() {
     "${PYTHON_BIN}" -c "
@@ -85,7 +127,8 @@ for cycle in $(seq 1 "${N_CYCLES}"); do
         echo "[ERROR] no run directory found under ${CLS_OUT}" >&2
         exit 1
     fi
-    current_ckpt="${cls_run_dir}checkpoints/final/full_platoon_grpo.ckpt"
+    current_ckpt="$(resolve_best_or_final_ckpt "${cls_run_dir}" "full_platoon_grpo.ckpt")"
+    cls_ckpt="${current_ckpt}"
     echo "[alternating] cls  ckpt : ${current_ckpt}"
 
     # ── Stage 2: trajectory head fine-tuning ─────────────────────────────────
@@ -105,7 +148,7 @@ for cycle in $(seq 1 "${N_CYCLES}"); do
         echo "[ERROR] no run directory found under ${REFINE_OUT}" >&2
         exit 1
     fi
-    current_ckpt="${refine_run_dir}checkpoints/final/full_platoon_refine_grpo.ckpt"
+    current_ckpt="$(resolve_best_or_final_ckpt "${refine_run_dir}" "full_platoon_refine_grpo.ckpt")"
     echo "[alternating] refine ckpt : ${current_ckpt}"
 
     # ── append cycle record to summary JSON ──────────────────────────────────
@@ -117,7 +160,7 @@ p = pathlib.Path('${SUMMARY_JSON}')
 d = json.loads(p.read_text())
 d['cycles'].append({
     'cycle': ${cycle},
-    'cls_grpo':    {'run': '${cls_run_name}',    'ckpt': '${cls_run_dir}checkpoints/final/full_platoon_grpo.ckpt'},
+    'cls_grpo':    {'run': '${cls_run_name}',    'ckpt': '${cls_ckpt}'},
     'refine_grpo': {'run': '${refine_run_name}', 'ckpt': '${current_ckpt}'},
 })
 p.write_text(json.dumps(d, indent=2))

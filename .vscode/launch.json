@@ -17,10 +17,10 @@
             "console": "integratedTerminal",
         },
         {
-            "name": "TrainPPO",
+            "name": "Train",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/train/train_mode_cls_sb3.py",
+            "program": "${workspaceFolder}/train/train_selected_refine_grpo.py",
             "console": "integratedTerminal",
         }
     ]

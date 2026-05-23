@@ -361,6 +361,11 @@ class PlatoonEnv(BaseMultiEnv):
             "on_continuous_line_done": False,
             "on_broken_line_done": False,
             "agent_configs": agent_configs,
+            "platoon_fixed_route_spawn": True,
+            "platoon_spawn_gap_m": float(gap_m),
+            "platoon_spawn_tail_buffer_m": 6.0,
+            "platoon_spawn_front_buffer_m": 8.0,
+            "initial_speed_km_h": self.platoon_config.initial_speed_km_h,
             "horizon": self.platoon_config.horizon,
             **self._build_observation_config(),
             **self._env_overrides,
@@ -422,9 +427,24 @@ class PlatoonEnv(BaseMultiEnv):
 
         speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
         gap_m = self._desired_center_spacing_m()
+        fixed_agent0_config = None
+        if self._cfg_bool("platoon_fixed_route_spawn", False):
+            fixed_agent0_config = (
+                getattr(getattr(self, "engine", None), "global_config", {})
+                .get("agent_configs", {})
+                .get("agent0")
+            )
         lane_idx = 0
+        if fixed_agent0_config is not None:
+            fixed_lane_index = tuple(fixed_agent0_config.get("spawn_lane_index", ()))
+            if len(fixed_lane_index) == 3 and tuple(fixed_lane_index[:2]) == (road.start_node, road.end_node):
+                lane_idx = int(fixed_lane_index[2])
+        lane_idx = max(0, min(lane_idx, len(lanes) - 1))
         lane = lanes[lane_idx]
-        lead_long = self._select_route_spawn_lead_long(lane, gap_m)
+        if fixed_agent0_config is not None:
+            lead_long = float(fixed_agent0_config.get("spawn_longitude", self._select_route_spawn_lead_long(lane, gap_m)))
+        else:
+            lead_long = self._select_route_spawn_lead_long(lane, gap_m)
         for i, agent_id in enumerate(self._agent_ids):
             vehicle = self.agents.get(agent_id)
             if vehicle is None:
@@ -453,13 +473,11 @@ class PlatoonEnv(BaseMultiEnv):
                 except Exception:
                     pass
 
-    @staticmethod
-    def _route_spawn_min_tail_buffer_m() -> float:
-        return 6.0
+    def _route_spawn_min_tail_buffer_m(self) -> float:
+        return self._cfg_float("platoon_spawn_tail_buffer_m", 6.0)
 
-    @staticmethod
-    def _route_spawn_min_front_buffer_m() -> float:
-        return 8.0
+    def _route_spawn_min_front_buffer_m(self) -> float:
+        return self._cfg_float("platoon_spawn_front_buffer_m", 8.0)
 
     @staticmethod
     def _route_spawn_reference_lead_long_m() -> float:
@@ -499,6 +517,8 @@ class PlatoonEnv(BaseMultiEnv):
         min_lead, max_lead = self._route_spawn_lead_long_bounds(lane_length, gap_m)
         reference = self._route_spawn_reference_lead_long_m()
         base_lead = float(np.clip(reference, min_lead, max_lead))
+        if self._cfg_bool("platoon_fixed_route_spawn", False):
+            return float(min(min_lead, max_lead))
         if max_lead <= min_lead + 1e-3:
             return base_lead
 
