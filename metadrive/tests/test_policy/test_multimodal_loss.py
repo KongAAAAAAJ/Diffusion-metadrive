@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from metadrive.policy.diffusion_policy.modules.multimodal_loss import LossComputer
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
+from models.diffusion.modules.multimodal_loss import LossComputer
+from models.diffusion.transfuser_config import build_transfuser_config
 
 
 def _make_loss_computer() -> LossComputer:

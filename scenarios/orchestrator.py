@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Tuple
 
-from scenarios.definitions import ScenarioDefinition
+from scenarios.definitions import ScenarioDefinition, TriggerSpec
 from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
 
 if TYPE_CHECKING:
@@ -92,24 +92,26 @@ class ScenarioOrchestrator:
         self._road_to_block_id: Dict[Tuple[str, str], str] = {}
         self._speed_profiles: Dict[str, Dict[str, float]] = {}
         self._lead_vehicle_name: str | None = None
+        self._completed_recipe_keys: set[str] = set()
+        self._spawned_adjacent_vehicle_keys: set[str] = set()
 
     def reset(self, env, agent_id: str) -> None:
         self.summary = ScenarioEpisodeSummary(scenario_id=self.definition.scenario_id)
         self._road_to_block_id = self._build_road_to_block_id(env)
         self._speed_profiles = {}
         self._lead_vehicle_name = None
+        self._completed_recipe_keys = set()
+        self._spawned_adjacent_vehicle_keys = set()
 
     def before_step(self, env, agent_id: str, step_count: int) -> None:
         self._apply_speed_profiles(env)
-        if self.summary.scenario_triggered:
-            return
-        if not self._trigger_evaluator.is_triggered(env, agent_id, self):
-            return
-        self.summary.scenario_triggered = True
-        self.summary.trigger_step = int(step_count)
         ego_vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
         if ego_vehicle is None:
             return
+        triggered_now = self._trigger_evaluator.is_triggered(env, agent_id, self)
+        if triggered_now and not self.summary.scenario_triggered:
+            self.summary.scenario_triggered = True
+            self.summary.trigger_step = int(step_count)
         self._execute_recipe(env, ego_vehicle, step_count)
 
     def get_episode_summary(self) -> Dict[str, object]:
@@ -127,14 +129,26 @@ class ScenarioOrchestrator:
             self._mark_realized(step_count, "no-op")
             return
         realized = False
-        for recipe in self.definition.traffic_recipes:
+        considered = False
+        for recipe_index, recipe in enumerate(self.definition.traffic_recipes):
+            recipe_key = f"{recipe_index}:{recipe.operation}"
+            if recipe_key in self._completed_recipe_keys:
+                continue
+            if not self._recipe_triggered(env, ego_vehicle, recipe.params):
+                continue
+            considered = True
+            if not self.summary.scenario_triggered:
+                self.summary.scenario_triggered = True
+                self.summary.trigger_step = int(step_count)
             handler = getattr(self, f"_handle_{recipe.operation}", None)
             if handler is None:
                 self.summary.notes.append(f"unsupported_recipe:{recipe.operation}")
+                self._completed_recipe_keys.add(recipe_key)
                 continue
             if handler(env, ego_vehicle, recipe.params, step_count):
                 realized = True
-        if not realized:
+                self._completed_recipe_keys.add(recipe_key)
+        if considered and not realized:
             self.summary.notes.append("recipe_not_realized")
 
     def _handle_ensure_lead_vehicle(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
@@ -221,8 +235,53 @@ class ScenarioOrchestrator:
         if spawned is None:
             self.summary.notes.append(f"inject_failed:{reference_kind}")
             return False
+        setattr(spawned, "scenario_warning_marker", "!")
+        setattr(spawned, "scenario_vehicle_role", "injected_background")
         self._mark_realized(step_count, f"injected:{reference_kind}")
         return True
+
+    def _handle_inject_adjacent_lane_vehicles(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
+        vehicles = params.get("vehicles", ())
+        if not isinstance(vehicles, (list, tuple)):
+            self.summary.notes.append("adjacent_config_invalid")
+            return False
+        realized = False
+        for vehicle_index, vehicle_params in enumerate(vehicles):
+            if not isinstance(vehicle_params, dict):
+                self.summary.notes.append(f"adjacent_vehicle_invalid:{vehicle_index}")
+                continue
+            vehicle_name = str(vehicle_params.get("name", f"vehicle_{vehicle_index}"))
+            spawn_key = f"{self.local_route}:{vehicle_name}"
+            if spawn_key in self._spawned_adjacent_vehicle_keys:
+                continue
+            lane_side = str(vehicle_params.get("lane_side", "left"))
+            lane_tuple = self._resolve_adjacent_lane_index(env, ego_vehicle, lane_side=lane_side)
+            if lane_tuple is None:
+                self.summary.notes.append(f"adjacent_lane_missing:{vehicle_name}")
+                self._spawned_adjacent_vehicle_keys.add(spawn_key)
+                continue
+            spawned = self._spawn_on_lane_tuple(
+                env,
+                ego_vehicle,
+                lane_tuple=lane_tuple,
+                spawn_longitude_offset=float(vehicle_params.get("spawn_longitude_offset_m", 12.0)),
+                target_speed_kmh=float(vehicle_params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0))),
+                min_clearance_m=vehicle_params.get("min_agent_clearance_m"),
+                clearance_scope=str(vehicle_params.get("clearance_scope", params.get("clearance_scope", "all_agents"))),
+            )
+            if spawned is None:
+                self.summary.notes.append(f"adjacent_spawn_failed:{vehicle_name}")
+                continue
+            self._spawned_adjacent_vehicle_keys.add(spawn_key)
+            spawned_name = getattr(spawned, "name", None)
+            if spawned_name is not None:
+                self._speed_profiles[spawned_name] = {
+                    "remaining_steps": float(vehicle_params.get("speed_profile_duration_steps", float("inf"))),
+                    "target_speed_kmh": float(vehicle_params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0))),
+                }
+            self._mark_realized(step_count, f"adjacent_spawned:{vehicle_name}")
+            realized = True
+        return realized
 
     def _apply_speed_profiles(self, env) -> None:
         if not self._speed_profiles:
@@ -301,6 +360,29 @@ class ScenarioOrchestrator:
         )
         if lane_tuple is None:
             return None
+        return self._spawn_on_lane_tuple(
+            env,
+            ego_vehicle,
+            lane_tuple=lane_tuple,
+            spawn_longitude=spawn_longitude,
+            spawn_longitude_offset=spawn_longitude_offset,
+            target_speed_kmh=target_speed_kmh,
+            reference_kind=reference_kind,
+        )
+
+    def _spawn_on_lane_tuple(
+        self,
+        env,
+        ego_vehicle,
+        *,
+        lane_tuple,
+        spawn_longitude: float = 0.0,
+        spawn_longitude_offset: float = 0.0,
+        target_speed_kmh: float = 20.0,
+        reference_kind: str = "ego_lane",
+        min_clearance_m=None,
+        clearance_scope: str = "all_agents",
+    ):
         current_map = getattr(getattr(env, "engine", None), "current_map", None)
         if current_map is None:
             return None
@@ -308,8 +390,18 @@ class ScenarioOrchestrator:
         ego_long = lane.local_coordinates(ego_vehicle.position)[0] if reference_kind == "ego_lane" else 0.0
         spawn_long = min(max(spawn_longitude + spawn_longitude_offset + ego_long, 2.0), max(lane.length - 2.0, 2.0))
         spawn_position = lane.position(float(spawn_long), 0.0)
-        min_clearance = float(getattr(env, "config", {}).get("scenario_spawn_min_agent_clearance_m", 10.0))
-        if not self._spawn_position_clear_of_agents(env, spawn_position, min_clearance):
+        min_clearance = (
+            float(min_clearance_m)
+            if min_clearance_m is not None
+            else float(getattr(env, "config", {}).get("scenario_spawn_min_agent_clearance_m", 10.0))
+        )
+        if not self._spawn_position_clear_of_agents(
+            env,
+            spawn_position,
+            min_clearance,
+            spawn_lane_index=lane_tuple,
+            clearance_scope=clearance_scope,
+        ):
             self.summary.notes.append("spawn_blocked:agent_clearance")
             return None
         traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
@@ -325,16 +417,57 @@ class ScenarioOrchestrator:
             self._set_vehicle_target_speed(env, spawned, target_speed_kmh)
         return spawned
 
+    def _resolve_adjacent_lane_index(self, env, ego_vehicle, *, lane_side: str):
+        ego_lane_index = getattr(ego_vehicle, "lane_index", None)
+        if ego_lane_index is None:
+            lane = _select_reference_lane(ego_vehicle)
+            ego_lane_index = getattr(lane, "index", None)
+        if ego_lane_index is None:
+            return None
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        if current_map is None:
+            return None
+        road_network = getattr(current_map, "road_network", None)
+        graph = getattr(road_network, "graph", {}) if road_network is not None else {}
+        start_node, end_node, lane_id = tuple(ego_lane_index)
+        lanes = graph.get(start_node, {}).get(end_node)
+        if not lanes:
+            return None
+        if lane_side == "left":
+            adjacent_lane_id = int(lane_id) - 1
+        elif lane_side == "right":
+            adjacent_lane_id = int(lane_id) + 1
+        else:
+            return None
+        if adjacent_lane_id < 0 or adjacent_lane_id >= len(lanes):
+            return None
+        return (start_node, end_node, adjacent_lane_id)
+
     @staticmethod
-    def _spawn_position_clear_of_agents(env, spawn_position, min_clearance_m: float) -> bool:
+    def _spawn_position_clear_of_agents(
+        env,
+        spawn_position,
+        min_clearance_m: float,
+        *,
+        spawn_lane_index=None,
+        clearance_scope: str = "all_agents",
+    ) -> bool:
         agents = getattr(env, "agents", {}) or {}
         try:
             spawn_xy = (float(spawn_position[0]), float(spawn_position[1]))
         except Exception:
             return False
         min_clearance_m = max(float(min_clearance_m), 0.0)
+        target_lane = tuple(spawn_lane_index) if spawn_lane_index is not None else None
         for agent in agents.values():
             try:
+                if clearance_scope == "same_lane":
+                    agent_lane = getattr(agent, "lane_index", None)
+                    if agent_lane is None:
+                        lane = _select_reference_lane(agent)
+                        agent_lane = getattr(lane, "index", None)
+                    if target_lane is None or agent_lane is None or tuple(agent_lane) != target_lane:
+                        continue
                 agent_pos = getattr(agent, "position", None)
                 if agent_pos is None:
                     continue
@@ -420,6 +553,36 @@ class ScenarioOrchestrator:
         if current_block_id != self.trigger_spec.block_id or longitudinal is None:
             return False
         return self.trigger_spec.longitudinal_min <= longitudinal <= self.trigger_spec.longitudinal_max
+
+    def _recipe_triggered(self, env, ego_vehicle, params: Dict[str, object]) -> bool:
+        if bool(params.get("trigger_on_start", False)):
+            return True
+        trigger_by_local_route = params.get("trigger_by_local_route")
+        if not trigger_by_local_route:
+            return self._is_in_trigger_window(ego_vehicle)
+        trigger_spec = self._parse_recipe_trigger(trigger_by_local_route)
+        if trigger_spec is None:
+            return False
+        current_block_id, longitudinal = self._resolve_ego_position(ego_vehicle)
+        if current_block_id != trigger_spec.block_id or longitudinal is None:
+            return False
+        return trigger_spec.longitudinal_min <= longitudinal <= trigger_spec.longitudinal_max
+
+    def _parse_recipe_trigger(self, trigger_by_local_route) -> TriggerSpec | None:
+        if not isinstance(trigger_by_local_route, dict):
+            return None
+        raw_spec = trigger_by_local_route.get(self.local_route)
+        if raw_spec is None:
+            return None
+        if isinstance(raw_spec, TriggerSpec):
+            return raw_spec
+        if isinstance(raw_spec, dict):
+            return TriggerSpec(
+                str(raw_spec["block_id"]),
+                float(raw_spec["longitudinal_min"]),
+                float(raw_spec["longitudinal_max"]),
+            )
+        return None
 
     def _resolve_ego_position(self, ego_vehicle):
         lane = _select_reference_lane(ego_vehicle)

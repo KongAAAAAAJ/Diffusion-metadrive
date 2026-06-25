@@ -2,9 +2,9 @@ import numpy as np
 import pytest
 import torch
 
-from metadrive.policy.diffusion_policy import preprocess_transfuser_dataset as preprocess
-from metadrive.policy.diffusion_policy import transfuser_features as features_mod
-from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig
+from models.diffusion import preprocess_transfuser_dataset as preprocess
+from models.diffusion import transfuser_features as features_mod
+from models.diffusion.transfuser_config import TransfuserConfig
 
 
 def test_preprocess_keeps_recomputed_gt_mode_label_and_preserves_expert_decision(

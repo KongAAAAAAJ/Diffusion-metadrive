@@ -215,8 +215,8 @@ bash scripts/run_abstract_anchors.sh
 注意：该流程要求输入 shard 已包含语义判定字段，需使用补采字段后的新数据重新采集。
 
 默认输出位置通常为：
-- `metadrive/exp_dataset/metadrive_anchors_ppo.npy`
-- `metadrive/exp_dataset/metadrive_anchors_ppo.png`
+- `expert_dataset/metadrive_anchors_ppo.npy`
+- `expert_dataset/metadrive_anchors_ppo.png`
 
 ## 单车扩散训练
 ### 1. 直接使用训练脚本
@@ -227,10 +227,10 @@ bash scripts/run_diffusion_train.sh
 ```
 
 默认脚本会调用：
-- 模块：`metadrive.policy.diffusion_policy.train_transfuser`
+- 模块：`models.diffusion.train_transfuser`
 - 默认 model size：`small`
 - 默认 dataset root：`/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_ppo_preprocessed`
-- 默认 anchor 路径：`metadrive/exp_dataset/metadrive_anchors_ppo.npy`
+- 默认 anchor 路径：`expert_dataset/metadrive_anchors_ppo.npy`
 
 例如：
 
@@ -239,7 +239,7 @@ PYTHON_BIN=/home/kong/anaconda3/envs/meta_drive/bin/python \
 MODEL_SIZE=small \
 EXPERT_NAME=ppo \
 DATASET_ROOT=/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/metadrive_ppo_preprocessed \
-PLAN_ANCHOR_PATH=metadrive/exp_dataset/metadrive_anchors_ppo.npy \
+PLAN_ANCHOR_PATH=expert_dataset/metadrive_anchors_ppo.npy \
 MAX_EPOCHS=10 \
 NUM_WORKERS=8 \
 bash scripts/run_diffusion_train.sh
@@ -302,8 +302,7 @@ GRPO refinement 训练示例：
 ### 3. 配置文件
 当前训练入口主要使用：
 - `configs/train/selector.yaml` — selector MAPPO 正式训练
-- `configs/train/plan_cls_grpo.yaml` — plan_cls_branch GRPO 微调
-- `configs/train/platoon_selector_refine.yaml` — GRPO refinement 训练
+- `configs/train/refine_grpo.yaml` — selected-mode GRPO refinement 训练
 
 `selector.yaml` 用于 Phase 6 的 selector MAPPO 训练，包含：
 - 冻结 planner 配置
@@ -364,12 +363,12 @@ Diffusion-metadrive/
 │   ├── phases/                       # Phase 0~7 的正式任务说明
 │   └── phases2/                      # Phase 5v2 升级任务说明
 ├── envs/
-│   └── platoon_env.py                # 编队环境、状态恢复、轨迹执行接口
-├── scenarios/
-│   └── hazard_scenarios.py           # 危险工况配置
-├── evaluation/
-│   ├── platoon_metrics.py            # 编队指标
+│   ├── platoon_env.py                # 编队环境、状态恢复、轨迹执行接口
 │   └── reward_terms.py               # step reward / team reward
+├── evaluation/
+│   └── platoon_metrics.py            # 编队指标
+├── scenarios/
+│   └── definitions.py                # S1~S12 场景定义与触发配置
 ├── models/
 │   ├── platoon/                      # 编队 planner、关系编码、权重迁移、trajectory refiner
 │   ├── selector/                     # intent selector actor/critic 与 RLlib adapter
@@ -378,8 +377,7 @@ Diffusion-metadrive/
 │   ├── train_selector.py             # selector MAPPO 训练入口
 │   ├── selector_callbacks.py         # RLlib platoon callbacks
 │   └── selector_callbacks.py         # RLlib 自定义指标回调
-├── metadrive/
-│   └── exp_dataset/                  # 数据采集、anchor 抽取等
+├── expert_dataset/                   # 数据采集、anchor 抽取等
 ├── scripts/                          # 运行脚本与辅助脚本
 ├── configs/                          # 训练配置
 ├── tests/acceptance/                 # 分阶段验收测试
@@ -411,7 +409,7 @@ Diffusion-metadrive/
 - 数据集目录：`/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets`
 - 单车 checkpoint：`/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt`
 - 编队 checkpoint：`/media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/checkpoints/`
-- plan anchor：`metadrive/exp_dataset/anchors.npy`
+- plan anchor：`expert_dataset/anchors.npy`
 
 ## 已知问题与注意事项
 - Panda3D 退出时可能出现 segfault 139，通常不影响训练与测试逻辑。

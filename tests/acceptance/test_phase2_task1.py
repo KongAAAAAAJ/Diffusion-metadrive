@@ -57,13 +57,13 @@ def test_dataset_contains_required_fields():
 
 
 def test_rollout_episode_uses_expert_idm_policy():
-    source_path = Path(__file__).resolve().parents[2] / "metadrive/exp_dataset/collect_expert.py"
+    source_path = Path(__file__).resolve().parents[2] / "expert_dataset/collect_expert.py"
     source = source_path.read_text(encoding="utf-8")
     module = ast.parse(source)
 
     imported_names = set()
     for node in module.body:
-        if isinstance(node, ast.ImportFrom) and node.module == "metadrive.exp_dataset.expert_idm_policy":
+        if isinstance(node, ast.ImportFrom) and node.module == "expert_dataset.expert_idm_policy":
             imported_names.update(alias.name for alias in node.names)
 
     assert "ExpertIDMPolicy" in imported_names

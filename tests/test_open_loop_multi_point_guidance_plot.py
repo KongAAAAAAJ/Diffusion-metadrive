@@ -1,11 +1,11 @@
 import numpy as np
 
-from metadrive.policy.diffusion_policy.eval_transfuser_open_loop import (
+from models.diffusion.eval_transfuser_open_loop import (
     _extract_multi_point_guidance_points,
     _matplotlib_color,
     _mode_name,
 )
-from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots
+from models.diffusion.mode_definitions import build_mode_slots
 
 
 def test_extract_multi_point_guidance_points_uses_anchor_endpoints() -> None:

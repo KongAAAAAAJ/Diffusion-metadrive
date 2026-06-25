@@ -20,7 +20,7 @@ matplotlib.use("Agg", force=True)
 import numpy as np
 import torch
 
-from metadrive.policy.diffusion_policy.test_transfuser_policy import (
+from models.diffusion.test_transfuser_policy import (
     _apply_episode_route_config,
     _build_platoon_planner_batch,
     _build_step_trajectory_plot_path,
@@ -33,12 +33,12 @@ from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     _resolve_episode_scenario_route,
     _save_step_trajectory_plot,
 )
-from metadrive.policy.diffusion_policy.transfuser_config import (
+from models.diffusion.transfuser_config import (
     build_transfuser_config,
     diffusion_model_config_to_overrides,
     load_diffusion_model_config,
 )
-from metadrive.policy.diffusion_policy.transfuser_policy import compute_trajectory_control
+from models.diffusion.transfuser_policy import compute_trajectory_control
 
 
 DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/single_step_manual_test")
@@ -144,8 +144,8 @@ def _build_env_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _build_platoon_planner(checkpoint_path: str, args: argparse.Namespace, model_config: dict[str, Any]):
-    from models.platoon.platoon_diffusion_planner import PlatoonDiffusionPlanner
-    from models.platoon.weight_migration import migrate_single_to_platoon
+    from models.platoon_planner.platoon_diffusion_planner import PlatoonDiffusionPlanner
+    from models.platoon_planner._weight_migration import migrate_single_to_platoon
 
     model_size = str(model_config.get("model_size", "small"))
     transfuser_config = build_transfuser_config(
@@ -161,8 +161,8 @@ def _build_platoon_planner(checkpoint_path: str, args: argparse.Namespace, model
 
 
 def _attach_dynamic_mode_features(planner_batch: dict[str, dict[str, Any]], env, config) -> None:
-    from metadrive.policy.diffusion_policy.test_transfuser_policy import _build_dynamic_mode_features_for_vehicle
-    from metadrive.policy.diffusion_policy.transfuser_features import compute_target_point
+    from models.diffusion.test_transfuser_policy import _build_dynamic_mode_features_for_vehicle
+    from models.diffusion.transfuser_features import compute_target_point
 
     for agent_id, sample in planner_batch.items():
         vehicle = env.agents.get(agent_id)
@@ -245,7 +245,7 @@ def run_manual_single_step(args: argparse.Namespace) -> Path:
             candidates = np.asarray(export["trajectory_candidates"], dtype=np.float32)
             raw_logits = np.asarray(export["raw_cls_logits"], dtype=np.float32)
             masked_logits = np.asarray(export["masked_cls_logits"], dtype=np.float32)
-            mode_valid_mask = np.asarray(export["mode_valid_mask"], dtype=bool)
+            mode_valid_mask = np.asarray(export["lane_valid_mask"], dtype=bool)
             validate_manual_modes(exported_ids, selected_modes, mode_valid_mask)
 
             coarse_by_agent = {
@@ -279,7 +279,7 @@ def run_manual_single_step(args: argparse.Namespace) -> Path:
                 candidates = np.asarray(export["trajectory_candidates"], dtype=np.float32)
                 raw_logits = np.asarray(export["raw_cls_logits"], dtype=np.float32)
                 masked_logits = np.asarray(export["masked_cls_logits"], dtype=np.float32)
-                mode_valid_mask = np.asarray(export["mode_valid_mask"], dtype=bool)
+                mode_valid_mask = np.asarray(export["lane_valid_mask"], dtype=bool)
                 validate_manual_modes(exported_ids, selected_modes, mode_valid_mask)
 
             step_plot_frame, step_plot_projector = _capture_step_plot_render_context(env, enabled=bool(args.save_trajectory_plot))

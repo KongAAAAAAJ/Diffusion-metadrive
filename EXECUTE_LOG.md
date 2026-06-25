@@ -10,17 +10,17 @@
   - `docs/io_spec.md`
   - `docs/metrics_spec.md`
   - `envs/platoon_env.py`
-  - `evaluation/platoon_metrics.py`
-  - `scenarios/hazard_scenarios.py`
+  - `envs/platoon_metrics.py`
+  - `scenarios/definitions.py`
   - `scripts/verify_phase1.py`
   - `tools/check_dataset_stats.py`
   - `models/platoon/relation_encoder.py`
-  - `models/diffusion/diffusion_rl_scheduler.py`
-  - `evaluation/reward_terms.py`
+  - `models/refine_grpo/diffusion_rl_scheduler.py`
+  - `envs/reward_terms.py`
 - Current code baseline:
-  - single-vehicle expert collection in `metadrive/exp_dataset/collect_expert.py`
-  - single-vehicle diffusion training in `metadrive/policy/diffusion_policy/train_transfuser.py`
-  - single-vehicle closed-loop testing in `metadrive/policy/diffusion_policy/test_transfuser_policy.py`
+  - single-vehicle expert collection in `expert_dataset/collect_expert.py`
+  - single-vehicle diffusion training in `models/diffusion/train_transfuser.py`
+  - single-vehicle closed-loop testing in `models/diffusion/test_transfuser_policy.py`
 
 ## Current Status
 
@@ -110,14 +110,14 @@
 ### 2026-03-21 — Phase 1 platoon environment skeleton
 
 - 修改目标:
-  落地 `AGENTS.md` 的 Phase 1 最小骨架，包括 3 车编队环境、5 项指标、危险场景注册表和 IDM 验证脚本，并保持日志同步
+  落地 `AGENTS.md` 的 Phase 1 最小骨架，包括 3 车编队环境、5 项指标、早期危险场景注册表和 IDM 验证脚本，并保持日志同步
 - 涉及文件:
   - `envs/__init__.py`
   - `envs/platoon_env.py`
-  - `evaluation/__init__.py`
-  - `evaluation/platoon_metrics.py`
+  - 早期 `evaluation` 包初始化文件（后续指标/reward 已内聚到 `envs/`）
+  - `envs/platoon_metrics.py`
   - `scenarios/__init__.py`
-  - `scenarios/hazard_scenarios.py`
+  - 早期危险场景注册表（后续已由 `scenarios/definitions.py` 取代）
   - `scripts/verify_phase1.py`
   - `metadrive/tests/test_policy/test_phase1_platoon_interfaces.py`
   - `AGENTS.md`
@@ -128,7 +128,7 @@
   - 为了在轻量测试环境下保持接口可验证，`PlatoonEnv` 增加了 `stub_mode` 回退路径
 - 最小测试方式:
   - `pytest metadrive/tests/test_policy/test_phase1_platoon_interfaces.py -q`
-  - `python -m py_compile envs/platoon_env.py evaluation/platoon_metrics.py scenarios/hazard_scenarios.py scripts/verify_phase1.py`
+  - `python -m py_compile envs/platoon_env.py envs/platoon_metrics.py scripts/verify_phase1.py`
   - `python scripts/verify_phase1.py --help`
   - `python scripts/verify_phase1.py --episodes 1 --render 0`
   - `python scripts/verify_phase1.py --episodes 5 --render 0`
@@ -215,10 +215,10 @@
 ### 2026-03-22 — Phase 1 tasks 1.6~1.7 completion
 
 - 修改目标:
-  完成 `1.6` 的奖励函数对接字段补充，以及 `1.7` 的 `hazard_scenario` 到 `PlatoonEnv` 的真实集成，并按 `phase1.md` 要求完成验收
+  完成 `1.6` 的奖励函数对接字段补充，以及 `1.7` 的早期危险场景别名到 `PlatoonEnv` 的真实集成，并按 `phase1.md` 要求完成验收
 - 涉及文件:
   - `envs/platoon_env.py`
-  - `scenarios/hazard_scenarios.py`
+  - 早期危险场景注册表（后续已由 `scenarios/definitions.py` 取代）
   - `tests/acceptance/test_phase1_task6.py`
   - `tests/acceptance/test_phase1_task7.py`
   - `AGENTS.md`
@@ -227,10 +227,10 @@
   - `info` 中新增并真实计算 `progress`、`jerk`、`delta_steering`、`speed_km_h`
   - `progress` 采用“同 lane 用纵向坐标差、跨 lane 用平面位移兜底”的方式，保证 3 步 IDM rollout 后为正
   - `jerk` 与 `delta_steering` 基于连续两步低层控制动作差分得到，确保为有限 float
-  - `hazard_scenario` 在环境初始化前解析并应用 `env_overrides`，不再把该字段错误透传给 MetaDrive 原生配置
+  - 早期危险场景别名在环境初始化前解析并应用 `env_overrides`，不再把该字段错误透传给 MetaDrive 原生配置
   - `static_obstacle_detour` 的 `traffic_density` 按 `phase1.md` 验收要求固定为 `0.15`
 - 最小测试方式:
-  - `python -m py_compile envs/platoon_env.py scenarios/hazard_scenarios.py tests/acceptance/test_phase1_task6.py tests/acceptance/test_phase1_task7.py`
+  - `python -m py_compile envs/platoon_env.py tests/acceptance/test_phase1_task6.py`
   - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase1_task6.py -v`
   - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase1_task7.py -v`
   - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase1_task3.py -v`
@@ -244,8 +244,8 @@
 - 修改目标:
   在不修改 `phase2.md` 的前提下推进 `2.1` 采集入口验证与 `2.2` 数据统计脚本
 - 涉及文件:
-  - `metadrive/exp_dataset/collect_expert.py`
-  - `metadrive/envs/diffusion_envs/base_multi_env.py`
+  - `expert_dataset/collect_expert.py`
+  - `envs/diffusion_envs/base_multi_env.py`
   - `metadrive/obs/diff_obs/top_down_state_obs_multi_channel.py`
   - `tools/check_dataset_stats.py`
   - `tests/acceptance/test_phase2_task1.py`
@@ -258,8 +258,8 @@
   - 现已把代码恢复到真实 RGB 采集链路：`DatasetCollectEnv` 使用 `rgb_camera`，`collect_expert.py` 直接读取 `rgb_left/rgb_front/rgb_right`
   - 额外写入 `collection_wall_time_sec` 到 manifest，便于检查 “50 样本 < 10 分钟”
 - 最小测试方式:
-  - `python -m py_compile metadrive/exp_dataset/collect_expert.py metadrive/envs/diffusion_envs/base_multi_env.py metadrive/obs/diff_obs/top_down_state_obs_multi_channel.py tools/check_dataset_stats.py tests/acceptance/test_phase2_task1.py tests/acceptance/test_phase2_task2.py`
-  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m metadrive.exp_dataset.collect_expert --target-samples 50 --output-root /tmp/phase2_test --dataset-name test_run --expert-type idm --trajectory-correction-enabled 0`
+  - `python -m py_compile expert_dataset/collect_expert.py envs/diffusion_envs/base_multi_env.py metadrive/obs/diff_obs/top_down_state_obs_multi_channel.py tools/check_dataset_stats.py tests/acceptance/test_phase2_task1.py tests/acceptance/test_phase2_task2.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m expert_dataset.collect_expert --target-samples 50 --output-root /tmp/phase2_test --dataset-name test_run --expert-type idm --trajectory-correction-enabled 0`
 - 实际结果:
   - 在当前 sandbox 中，真实 RGB 采集命令失败，报错点为 `simplepbr` 的 `tonemap_quad.set_shader(...)`
   - 额外最小复现表明这不是 `collect_expert.py` 独有问题，`MetaDriveEnv + RGBCamera + use_render=False + image_observation=True` 也会在同一位置失败
@@ -274,7 +274,7 @@
 - 修改目标:
   完成 `phase2.md` 的 `2.3~2.4`，并顺带在目标 `meta_drive` 环境中重新核实 `2.1~2.2` 的真实 RGB 采集与统计验收
 - 涉及文件:
-  - `metadrive/exp_dataset/collect_expert.py`
+  - `expert_dataset/collect_expert.py`
   - `scripts/run_dataset_collect.sh`
   - `tools/check_dataset_stats.py`
   - `tests/acceptance/test_phase2_task3.py`
@@ -298,7 +298,7 @@
     - 总体验收通过标志
 - 最小测试方式:
   - `TARGET_SAMPLES=8 OUTPUT_ROOT=/tmp/phase2_run_script DATASET_NAME=test_run EXPERT_TYPE=idm TRAJECTORY_CORRECTION_ENABLED=0 TRAJECTORY_VISUALIZATION_ENABLED=0 bash scripts/run_dataset_collect.sh`
-  - `rm -rf /tmp/phase2_test && mkdir -p /tmp/phase2_test && PYTHONPATH="$PWD:$PYTHONPATH" /home/kong/anaconda3/envs/meta_drive/bin/python -m metadrive.exp_dataset.collect_expert --target-samples 50 --output-root /tmp/phase2_test --dataset-name test_run --expert-type idm --trajectory-correction-enabled 0 2>&1 | tee /tmp/phase2_test/collect_command.log`
+  - `rm -rf /tmp/phase2_test && mkdir -p /tmp/phase2_test && PYTHONPATH="$PWD:$PYTHONPATH" /home/kong/anaconda3/envs/meta_drive/bin/python -m expert_dataset.collect_expert --target-samples 50 --output-root /tmp/phase2_test --dataset-name test_run --expert-type idm --trajectory-correction-enabled 0 2>&1 | tee /tmp/phase2_test/collect_command.log`
   - `pytest tests/acceptance/test_phase2_task1.py -q`
   - `pytest tests/acceptance/test_phase2_task2.py -q`
   - `pytest tests/acceptance/test_phase2_task3.py -q`
@@ -401,9 +401,9 @@
 - 修改目标:
   完成 `phase5.md` 的 `5.1` 奖励函数和 `5.2` 带 log_prob 的 diffusion RL scheduler，并在真实 `meta_drive` 环境下通过验收
 - 涉及文件:
-  - `evaluation/reward_terms.py`
-  - `models/diffusion/__init__.py`
-  - `models/diffusion/diffusion_rl_scheduler.py`
+  - `envs/reward_terms.py`
+  - `models/refine_grpo/__init__.py`
+  - `models/refine_grpo/diffusion_rl_scheduler.py`
   - `tests/acceptance/test_phase5_task1.py`
   - `tests/acceptance/test_phase5_task2.py`
   - `AGENTS.md`
@@ -415,8 +415,8 @@
   - `DiffusionRLScheduler` 采用“两阶段一致”设计：采样阶段缓存 `diffusion_chain`，回放阶段用同一条链重算可反传的 log_prob
   - 为满足 `5.2` 的随机性要求，`sample_with_log_prob()` 不固定种子；为满足 replay 一致性，`replay_with_log_prob()` 使用缓存的 `x_t -> x_{t-1}` 链
 - 最小测试方式:
-  - `python -m py_compile evaluation/reward_terms.py tests/acceptance/test_phase5_task1.py`
-  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile models/diffusion/diffusion_rl_scheduler.py models/diffusion/__init__.py tests/acceptance/test_phase5_task2.py`
+  - `python -m py_compile envs/reward_terms.py tests/acceptance/test_phase5_task1.py`
+  - `/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile models/refine_grpo/diffusion_rl_scheduler.py models/refine_grpo/__init__.py tests/acceptance/test_phase5_task2.py`
   - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task1.py -v`
   - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task2.py -v`
 - 实际结果:
@@ -463,7 +463,7 @@
 - 修改目标:
   完成 `phase5.md` 的 `5.5` toy-single GRPO 训练和 `5.6` 3 车 platoon GRPO 训练启动，并在 `meta_drive` 环境中通过硬性验收
 - 涉及文件:
-  - `models/diffusion/diffusion_rl_scheduler.py`
+  - `models/refine_grpo/diffusion_rl_scheduler.py`
   - `train/train_platoon_rl.py`
   - `tests/acceptance/test_phase5_task5.py`
   - `tests/acceptance/test_phase5_task6.py`
@@ -477,7 +477,7 @@
   - `train_platoon_rl.py` 按 `toy-single` / `platoon` 分别设置更稳的学习率、`ddim_eta`、梯度裁剪和 KL 超阈值学习率衰减
   - `ToyEnv` 的 target progress 与 crash threshold 调整到与当前轨迹尺度一致，使 `mean_reward`、`formation_error` 和 `collision_rate` 形成可学习趋势
 - 最小测试方式:
-  - `python -m py_compile models/diffusion/diffusion_rl_scheduler.py train/train_platoon_rl.py`
+  - `python -m py_compile models/refine_grpo/diffusion_rl_scheduler.py train/train_platoon_rl.py`
   - `/home/kong/anaconda3/envs/meta_drive/bin/python train/train_platoon_rl.py --mode toy-single --steps 100 --render 0`
   - `/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/acceptance/test_phase5_task5.py -v`
   - `/home/kong/anaconda3/envs/meta_drive/bin/python train/train_platoon_rl.py --config configs/train/platoon_grpo.yaml --mode platoon --steps 500 --render 0`
@@ -548,7 +548,7 @@
   - `logs/platoon_rl_real/`
 - 关键设计选择:
   - 在 `PlatoonEnv` 中新增 `evaluate_trajectory_group()`，采用“代理奖励 + 几何碰撞/出界检测 + 不推进 env.step”的方式评估同一初始状态下的 G 条轨迹，满足 GRPO 组内比较需要
-  - 不修改 `models/diffusion/diffusion_rl_scheduler.py`、`evaluation/reward_terms.py`、`PlatoonDiffusionPlanner.extract_rl_context/predict_denoised_traj` 和 GRPO 数学核心，只在环境评估、训练入口和 rollout 推进上补全真实链路
+  - 不修改 `models/refine_grpo/diffusion_rl_scheduler.py`、`envs/reward_terms.py`、`PlatoonDiffusionPlanner.extract_rl_context/predict_denoised_traj` 和 GRPO 数学核心，只在环境评估、训练入口和 rollout 推进上补全真实链路
   - `MultiAgentGRPOTrainer.collect_group_samples()` 新增 `obs` 参数，训练循环改为 `collect -> update -> step_env_with_best -> next_obs`，不再每步强制 `env.reset()`
   - `train_platoon_rl.py --mode platoon` 现在真实构建 `PlatoonEnv(observation_mode='multimodal')` 与 `PlatoonDiffusionPlanner`，并通过单车 checkpoint 迁移初始化
   - 为了让 100 步真实 platoon 训练稳定满足 `5.10`，增加了受限 rollout 长度 `max_env_steps_per_rollout=20`，避免长期单 episode 漂移把 reward 趋势拖垮

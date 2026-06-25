@@ -5,7 +5,7 @@ import copy
 import numpy as np
 
 from envs.platoon_env import PlatoonEnv
-from evaluation.reward_terms import compute_trajectory_reward
+from envs.reward_terms import compute_trajectory_reward
 
 
 def _build_env() -> PlatoonEnv:

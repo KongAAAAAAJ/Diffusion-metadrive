@@ -1,9 +1,9 @@
 import numpy as np
 
-from metadrive.policy.diffusion_policy.mode_context import ModeContext
-from metadrive.policy.diffusion_policy.mode_definitions import build_mode_slots
-from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
-from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig
+from models.diffusion.mode_context import ModeContext
+from models.diffusion.mode_definitions import build_mode_slots
+from models.diffusion.mode_trajectory_generator import ModeTrajectoryGenerator
+from models.diffusion.transfuser_config import TransfuserConfig
 
 
 def _straight_polyline(offset_y: float = 0.0) -> np.ndarray:

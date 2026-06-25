@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from metadrive.policy.diffusion_policy.eval_transfuser_open_loop import (
+from models.diffusion.eval_transfuser_open_loop import (
     _build_even_scenario_subset_indices,
     _predict_open_loop,
     build_eval_dataloader,
@@ -16,14 +16,14 @@ from metadrive.policy.diffusion_policy.eval_transfuser_open_loop import (
     save_trajectory_comparison_plot,
     summarize_open_loop_records,
 )
-from metadrive.policy.diffusion_policy.preprocess_transfuser_dataset import (
+from models.diffusion.preprocess_transfuser_dataset import (
     OUTPUT_FORMAT_DIR,
     _write_output_splits,
     output_shard_path,
     preprocess_shard,
 )
-from metadrive.policy.diffusion_policy.transfuser_callback import render_open_loop_prediction
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_callback import render_open_loop_prediction
+from models.diffusion.transfuser_config import build_transfuser_config
 
 
 def _write_split(dataset_root: Path, split: str, shard_names) -> None:
@@ -341,7 +341,7 @@ def test_build_eval_dataloader_uses_even_scenario_sampling(tmp_path: Path):
 
 
 def test_save_trajectory_comparison_plot_marks_target_point_and_modes(tmp_path: Path):
-    from metadrive.policy.diffusion_policy.eval_transfuser_open_loop import save_trajectory_comparison_plot
+    from models.diffusion.eval_transfuser_open_loop import save_trajectory_comparison_plot
 
     output_path = tmp_path / "traj.png"
     save_trajectory_comparison_plot(

@@ -11,7 +11,7 @@ MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yam
 resolve_model_config_anchor_method() {
     "${PYTHON_BIN}" - "${MODEL_CONFIG_PATH}" <<'PY'
 import sys
-from metadrive.policy.diffusion_policy.transfuser_config import load_diffusion_model_config
+from models.diffusion.transfuser_config import load_diffusion_model_config
 
 config = load_diffusion_model_config(sys.argv[1])
 print(config.get("anchor_method", "dynamic"))
@@ -48,8 +48,8 @@ IDM_VARIANT_WEIGHTS=${IDM_VARIANT_WEIGHTS:-'{"default": 1.0}'}
 
 # Derived paths (auto-chained between stages)
 COLLECT_OUTPUT="${OUTPUT_ROOT}/${DATASET_NAME}"
-ANCHORS_OUTPUT="${ANCHORS_OUTPUT:-${REPO_ROOT}/metadrive/exp_dataset/anchors.npy}"
-ANCHORS_FIGURE="${ANCHORS_FIGURE:-${REPO_ROOT}/metadrive/exp_dataset/anchors.png}"
+ANCHORS_OUTPUT="${ANCHORS_OUTPUT:-${REPO_ROOT}/expert_dataset/anchors.npy}"
+ANCHORS_FIGURE="${ANCHORS_FIGURE:-${REPO_ROOT}/expert_dataset/anchors.png}"
 PREPROCESS_OUTPUT="${PREPROCESS_OUTPUT:-${COLLECT_OUTPUT}_pp}"
 
 # Collection parameters
@@ -88,7 +88,7 @@ run_collect_once() {
     local density_max="$6"
     local log_path="${OUTPUT_ROOT}/collect_command_${DATASET_NAME}.log"
 
-    "${PYTHON_BIN}" -m metadrive.exp_dataset.collect_expert \
+    "${PYTHON_BIN}" -m expert_dataset.collect_expert \
         --target-samples "${TARGET_SAMPLES}" \
         --output-root "${OUTPUT_ROOT}" \
         --dataset-name "${DATASET_NAME}" \
@@ -150,7 +150,7 @@ run_anchors() {
 
     case "${ANCHOR_METHOD}" in
         k_means)
-            "${PYTHON_BIN}" -m metadrive.exp_dataset.abstract_anchors_default \
+            "${PYTHON_BIN}" -m expert_dataset.abstract_anchors_default \
                 --dataset-root "${COLLECT_OUTPUT}" \
                 --output-path "${ANCHORS_OUTPUT}" \
                 --trajectory-key "${TRAJECTORY_KEY}" \
@@ -174,7 +174,7 @@ run_anchors() {
 # ── Stage 3: Diffusion Preprocess ───────────────────────────────────────────
 run_preprocess() {
     echo "=== [3/3] Diffusion Preprocess ==="
-    "${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.preprocess_transfuser_dataset \
+    "${PYTHON_BIN}" -m models.diffusion.preprocess_transfuser_dataset \
         --input-root "${COLLECT_OUTPUT}" \
         --output-root "${PREPROCESS_OUTPUT}" \
         --output-format "${OUTPUT_FORMAT}" \

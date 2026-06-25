@@ -19,10 +19,10 @@ ROUTE_BLOCK_IDS = ("g0", "s_ramp0", "c0_ramp0")
 
 
 def main():
-    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
-    from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
-    from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
-    from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
+    from envs.diffusion_envs.base_multi_env import BaseMultiEnv
+    from models.diffusion.mode_context import build_mode_context_from_vehicle
+    from models.diffusion.mode_trajectory_generator import ModeTrajectoryGenerator
+    from models.diffusion.mode_definitions import MODE_SLOTS
 
     env_config = {
         "use_render": False,

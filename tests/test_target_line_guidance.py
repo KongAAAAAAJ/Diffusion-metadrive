@@ -1,7 +1,7 @@
 import numpy as np
 
-from metadrive.policy.diffusion_policy.transfuser_config import TransfuserConfig
-from metadrive.policy.diffusion_policy.transfuser_features import (
+from models.diffusion.transfuser_config import TransfuserConfig
+from models.diffusion.transfuser_features import (
     _build_target_line_from_polyline,
     processed_sample_to_features_targets,
 )

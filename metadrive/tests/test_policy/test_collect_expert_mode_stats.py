@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from metadrive.exp_dataset.collect_expert import build_trajectory_mode_summary, trajectory_mode_name
+from expert_dataset.collect_expert import build_trajectory_mode_summary, trajectory_mode_name
 
 
 def test_trajectory_mode_name_matches_enum_encoding():

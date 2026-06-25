@@ -16,7 +16,7 @@ cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_ROOT}"
 mkdir -p "${REPORT_DIR}"
 
-"${PYTHON_BIN}" -m metadrive.exp_dataset.collect_expert \
+"${PYTHON_BIN}" -m expert_dataset.collect_expert \
     --target-samples 2000 \
     --output-root "${OUTPUT_ROOT}" \
     --dataset-name "${DATASET_NAME}" \

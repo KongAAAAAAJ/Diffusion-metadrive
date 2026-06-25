@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from models.diffusion.diffusion_rl_scheduler import DDIMSchedulerWithLogProb, DiffusionRLScheduler
+from models.refine_grpo.diffusion_rl_scheduler import DDIMSchedulerWithLogProb, DiffusionRLScheduler
 
 
 # ---------------------------------------------------------------------------

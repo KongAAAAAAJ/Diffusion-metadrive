@@ -67,7 +67,7 @@ def dump_road_network(env):
 
 
 def dump_mode_context(vehicle, current_map, step_label=""):
-    from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
+    from models.diffusion.mode_context import build_mode_context_from_vehicle
 
     route_block_ids = ["g0", "s_ramp0", "c0_ramp0"]
 
@@ -106,8 +106,8 @@ def dump_mode_context(vehicle, current_map, step_label=""):
         else:
             print(f"  {name}: None")
 
-    from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
-    from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
+    from models.diffusion.mode_trajectory_generator import ModeTrajectoryGenerator
+    from models.diffusion.mode_definitions import MODE_SLOTS
     gen = ModeTrajectoryGenerator()
     out = gen.generate(ctx)
     for slot in MODE_SLOTS:
@@ -138,7 +138,7 @@ class FakeVehicle:
 
 def test_specific_positions(env):
     """Test mode_context at specific lane positions relevant to S8 problems."""
-    from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
+    from models.diffusion.mode_context import build_mode_context_from_vehicle
 
     current_map = env.current_map
     rn = current_map.road_network
@@ -241,8 +241,8 @@ def test_specific_positions(env):
             else:
                 print(f"  {name}: None")
 
-        from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
-        from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
+        from models.diffusion.mode_trajectory_generator import ModeTrajectoryGenerator
+        from models.diffusion.mode_definitions import MODE_SLOTS
         gen = ModeTrajectoryGenerator()
         out = gen.generate(ctx)
         for slot in MODE_SLOTS:
@@ -288,7 +288,7 @@ def test_specific_positions(env):
 
 
 def main():
-    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
+    from envs.diffusion_envs.base_multi_env import BaseMultiEnv
 
     env_config = {
         "use_render": False,

@@ -1,0 +1,122 @@
+pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt
+model_config_path: configs/diffusion/model.yaml
+# target_guidance_type override for GRPO training.
+# external_point: target_point is computed each step by RuleMaker (models/decision_model/rule_maker.py).
+# rule_maker_type: multi_agent currently uses a simple multi-agent lane-decision rule maker.
+# It enumerates left/keep/right coarse trajectories for every agent, scores joint action combinations,
+# and injects the selected trajectory endpoint as target_point.
+# rule_maker_horizon_s: coarse-trajectory look-ahead horizon (seconds)
+target_guidance_type: external_point  # Options: multi_point | point | external_point
+rule_maker_type: multi_agent
+rule_maker_horizon_s: 4.0
+# Optional tuning:
+# rule_maker_lane_change_preference: 0.0
+# rule_maker_traffic_safety_distance_m: 8.0
+# rule_maker_agent_safety_distance_m: 7.0
+
+num_agents: 3
+use_relation_encoder: false  # keep _status_encoding at [128,19] for legacy diffusion checkpoints
+output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo
+
+seed: 10                # 全局随机种子；~ = null 表示不固定（非确定性）
+start_seed: 10          # 场景起始种子
+
+total_timesteps: 50000
+refine_lr: 1.0e-3  # 1.0e-4
+max_grad_norm: 1.0
+
+# Selected-mode local refinement GRPO
+num_refine_groups: 30
+rollout_chunk_size: 240  # max trajectories per forward pass; reduce if CUDA OOM
+refine_noise_t: 8  # *与forward_test一致
+refine_denoise_steps: 4
+refine_eta: 0.1  # 造成各组之间差异的噪声规模；过大可能导致训练不稳定，过小可能导致不足的探索
+refine_cls_weight: 0.0  # !关掉分类监督损失，可能会误导训练过程   1.0
+refine_bc_weight: 0.1
+refine_kl_weight: 0.1
+refine_ddv2_loss: true
+refine_positive_advantage_only: true
+refine_advantage_baseline: group_mean  # pretrain_reward | group_mean
+refine_advantage_mode: global            # *mode_wise | global
+refine_no_positive_bc_weight: 1.0
+refine_discount_gamma: 0.8      # denoising-step discount γ; discount[i]=γ^(steps-1-i)
+traj_dt_s: 0.5                  # seconds per trajectory waypoint (for safety checks)
+safety_max_accel_mps2: 5.0      # |accel| > this → unsafe (m/s²)
+safety_max_heading_diff_deg: 45.0  # |Δheading| between adjacent waypoints → unsafe (degrees)
+refine_print_all_mode_debug: true  # *终端输出reward等信息。正式训练时改为false
+refine_print_all_mode_debug_interval: 1  # 输出间隔步数
+refine_debug_agent_indices: []           # 限制调试输出的 agent 下标，如 [1, 2]；空列表 = 所有 agent
+refine_debug_ddim_chains: true           # *保存每个 DDIM step 的中间噪声轨迹散点图（GT mode，颜色区分 step）
+freeze_cls_branch: false
+train_followers_only: false  # *if true: only train follower vehicles; leader always executes frozen pretrained planner
+joint_agent_update: true     # *if true: accumulate loss across all agents per step, one optimizer update; false: update per agent
+# Collision safety guidance (follower avoids leader trajectory)
+safe_guidance_enabled: false
+safe_guidance_scale: 0.1
+safe_guidance_semi_lon_m: 6.0
+safe_guidance_semi_lat_m: 2.0
+safe_guidance_eps: 0.001
+safe_guidance_outside_weight: 2.0
+safe_guidance_grad_clip_norm: 1.0
+# debug_noise_plot_dir: "/media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo/noise_figure"  # if set, save noise diagnostic plots to this directory
+debug_noise_plot_dir: "" 
+
+# ************** PDMS proxy reward ─────────────────────────────────────────────────────────
+# Gate thresholds
+gate_road_half_width_m: 3.0   # max lateral displacement (m) in ego-local frame; doubled for LC modes
+gate_max_dh_rad: 0.6           # max heading change between adjacent waypoints (rad)
+gate_collision_dist_m: 1.0    # min bumper-to-bumper distance to preceding vehicle (m); unused when env_crashed overrides
+vehicle_length_m: 4.8          # vehicle body length used for bumper distance calculation (m)
+lane_change_width_m: 3.5       # lateral lane offset target for LC modes (m)
+
+# Quality weights  (must sum to 1.0 for interpretability, but not enforced)
+w_progress:       2   # forward progress (leader only)
+w_formation_lon:  5   # longitudinal gap tracking (followers only): exp(-|lon_err - desired_gap| / lon_decay_m)
+w_formation_lat:  20   # lateral alignment (followers only): exp(-lat_err / lat_decay_m)
+w_speed:          3   # speed matching
+w_anchor:         5   # anchor reward: L2 distance to coarse trajectory (exp(-dist/anchor_decay_m))
+w_comfort:        6   # heading smoothness
+w_consistency:    0   # consistency with selected trajectory (set >0 to penalize deviation)
+w_preference:     15   # leader preference-point proximity (set >0 to reward leader approaching target point)
+
+# Quality decay parameters
+progress_s_max: 15.0            # longitudinal distance (m) at which progress reward saturates
+desired_gap_m: 10.0             # desired bumper-to-bumper gap for formation reward (m)
+lon_decay_m: 5.0                # longitudinal gap error scale: exp(-|lon_err - desired_gap| / lon_decay_m)
+lat_decay_m: 0.5                # lateral alignment error scale: exp(-lat_err / lat_decay_m)
+waypoint_decay_gamma: 0.9       # temporal decay γ for per-waypoint weights; earlier steps weighted higher
+anchor_decay_m: 0.5             # distance scale for anchor reward: exp(-(dist/anchor_decay_m)^anchor_power)
+anchor_power: 2.0               # exponent for anchor reward; >1 makes dropoff sharper (2=Gaussian)
+comfort_decay_rad: 0.1          # heading-change scale for comfort reward exp(-dh/comfort_decay_rad)
+consistency_decay_m: 1.0        # xy deviation scale for pretrain consistency reward
+preference_decay_m: 5.0         # distance scale for leader preference-point proximity reward exp(-dist/preference_decay_m)
+
+
+
+
+ckpt_top_k: 3
+checkpoint_interval_steps: 2500
+
+env_config:
+  num_agents: 3
+  horizon: 300  # max steps per episode
+  observation_mode: multimodal
+  use_render: false
+  image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption
+  planner_device: cuda
+  lookahead_index: 2
+  target_speed_km_h: 30.0
+  controller_type: stabilized
+  scenario_ids:
+    # - S1_free_cruise_straight
+    # - S2_free_cruise_curve
+    # - S3_straight_following
+    # - S4_curve_following
+    - S5_hard_brake_lead  # 前车突然急刹
+    - S6_background_merge_in  # 背景车从匝道合流入主路，与ego编队发生冲突
+    - S7_ego_merge_from_ramp  # ego编队从匝道合流入主路，与后车发生冲突
+    - S8_ego_exit_to_ramp  # ego编队从主路分流到匝道，与后车发生冲突
+    - S9_narrow_channel_negotiation  # 狭道会车，双车道变单车道，考验跟驰和避碰能力
+    # - S10_straight_lane_change  
+    # - S11_curve_lane_change
+    - S12_cut_in_from_adjacent_lane  # 编队横向被切入，考验避碰能力

@@ -11,15 +11,13 @@ try:
 except Exception:  # pragma: no cover - fallback for older setups
     import gym  # type: ignore
 
-from maps.map_presets import DEFAULT_HYBRID_MAP_CONFIG  # noqa: E402
-
 try:  # pragma: no cover - exercised only in real MetaDrive runtime
     from metadrive.component.sensors.rgb_camera import RGBCamera
     from metadrive.component.pgblock.first_block import FirstPGBlock
-    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
+    from envs.diffusion_envs.base_multi_env import BaseMultiEnv, DEFAULT_HYBRID_MAP_CONFIG
     from metadrive.obs.diff_obs.top_down_state_obs_multi_channel import DatasetCollectObservation
-    from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-    from metadrive.policy.diffusion_policy.transfuser_features import observation_to_features
+    from models.diffusion.transfuser_config import build_transfuser_config
+    from models.diffusion.transfuser_features import observation_to_features
 
     _METADRIVE_IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # pragma: no cover - import errors are surfaced at runtime
@@ -27,11 +25,12 @@ except Exception as exc:  # pragma: no cover - import errors are surfaced at run
     FirstPGBlock = None  # type: ignore
     _METADRIVE_IMPORT_ERROR = exc
     BaseMultiEnv = object  # type: ignore
+    DEFAULT_HYBRID_MAP_CONFIG = ()  # type: ignore
     DatasetCollectObservation = object  # type: ignore
 
 
 from evaluation.platoon_metrics import PlatoonMetrics
-from scenarios.hazard_scenarios import get_hazard_scenario_config
+from scenarios.definitions import SCENARIO_BY_ID
 
 
 def _wrap_to_pi(angle: float) -> float:
@@ -111,6 +110,9 @@ class PlatoonEnvConfig:
         platoon_d_norm: float = 10.0,
         platoon_delta_s_max: float = 5.0,
         platoon_reward_clip: float = 20.0,
+        lqr_lat_q1: float = 1.0,
+        lqr_lat_q2: float = 1.0,
+        lqr_lat_r: float = 0.1,
     ) -> None:
         self.num_agents = int(num_agents)
         self.use_render = bool(use_render)
@@ -145,6 +147,9 @@ class PlatoonEnvConfig:
         self.platoon_d_norm = float(platoon_d_norm)
         self.platoon_delta_s_max = float(platoon_delta_s_max)
         self.platoon_reward_clip = float(platoon_reward_clip)
+        self.lqr_lat_q1 = float(lqr_lat_q1)
+        self.lqr_lat_q2 = float(lqr_lat_q2)
+        self.lqr_lat_r = float(lqr_lat_r)
 
 
 class PlatoonEnv(BaseMultiEnv):
@@ -156,13 +161,25 @@ class PlatoonEnv(BaseMultiEnv):
                 "PlatoonEnv requires the full MetaDrive runtime. "
                 "Please install/run the AGENTS.md environment dependencies before using this environment."
             ) from _METADRIVE_IMPORT_ERROR
-        merged = self._resolve_hazard_scenario(self._merge_config(config))
+        explicit_config_keys = set(dict(config or {}).keys())
+        removed_alias_key = "hazard_" + "scenario"
+        if removed_alias_key in explicit_config_keys:
+            raise ValueError(
+                "The legacy scenario alias config key was removed. "
+                "Select scenarios with scenario_id/local_route or scenario_ids instead."
+            )
+        merged = self._merge_config(config)
+        merged = self._apply_scenario_definition_defaults(merged, explicit_config_keys)
         self._env_overrides = self._extract_env_overrides(merged)
         self._runtime_flags = self._extract_runtime_flags(merged)
         self.platoon_config = PlatoonEnvConfig(**self._extract_platoon_config(merged))
         self._metrics = PlatoonMetrics(formation_error_threshold=self.platoon_config.formation_error_threshold)
         self._last_info: dict[str, dict] = {}
         self._agent_ids = [f"agent{i}" for i in range(self.platoon_config.num_agents)]
+        self._agent_roles: dict[str, str] = {
+            agent_id: ("leader" if i == 0 else "follower")
+            for i, agent_id in enumerate(self._agent_ids)
+        }
         self._last_actions: dict[str, np.ndarray] = {}
         self._last_progress_refs: dict[str, tuple[object, float, np.ndarray]] = {}
         self._multimodal_config = build_transfuser_config("base")
@@ -202,6 +219,28 @@ class PlatoonEnv(BaseMultiEnv):
     def _cfg_bool(self, key: str, default: bool = False) -> bool:
         return bool(self._cfg(key, default))
 
+    @property
+    def agent_roles(self) -> dict[str, str]:
+        """Mapping from agent_id to role: 'leader' (agent0) or 'follower'."""
+        return dict(self._agent_roles)
+
+    def get_agent_role(self, agent_id: str) -> str:
+        """Return 'leader' or 'follower' for the given agent_id."""
+        return self._agent_roles.get(agent_id, "follower")
+
+    def apply_dynamic_roles(self, roles: Mapping[str, str]) -> None:
+        """Update per-agent roles for the current step.
+
+        Unknown agent ids are ignored. agent0 remains leader unless explicitly
+        omitted from roles, in which case its current role is preserved.
+        """
+        if not roles:
+            return
+        for agent_id in self._agent_ids:
+            if agent_id in roles:
+                role = str(roles[agent_id]).strip().lower()
+                self._agent_roles[agent_id] = "follower" if role == "follower" else "leader"
+
     def _platoon_runtime_config(self) -> dict[str, object]:
         return {
             "initial_speed_km_h": self.platoon_config.initial_speed_km_h,
@@ -222,6 +261,9 @@ class PlatoonEnv(BaseMultiEnv):
             "platoon_d_norm": self.platoon_config.platoon_d_norm,
             "platoon_delta_s_max": self.platoon_config.platoon_delta_s_max,
             "platoon_reward_clip": self.platoon_config.platoon_reward_clip,
+            "lqr_lat_q1": self.platoon_config.lqr_lat_q1,
+            "lqr_lat_q2": self.platoon_config.lqr_lat_q2,
+            "lqr_lat_r": self.platoon_config.lqr_lat_r,
         }
 
     def _install_platoon_runtime_config(self) -> None:
@@ -240,17 +282,20 @@ class PlatoonEnv(BaseMultiEnv):
         return defaults
 
     @staticmethod
-    def _resolve_hazard_scenario(config: Mapping[str, object]) -> dict[str, object]:
+    def _apply_scenario_definition_defaults(
+        config: Mapping[str, object],
+        explicit_config_keys: set[str],
+    ) -> dict[str, object]:
         resolved = dict(config)
-        scenario_name = resolved.get("hazard_scenario", None)
-        scenario_config = get_hazard_scenario_config(scenario_name)
-        if scenario_config is not None:
-            resolved.update(dict(scenario_config.get("env_overrides", {})))
-            # Propagate scenario_id / local_route from hazard config only when the
-            # caller has not already set them explicitly.
-            for field in ("scenario_id", "local_route"):
-                if resolved.get(field) is None and scenario_config.get(field) is not None:
-                    resolved[field] = scenario_config[field]
+        scenario_id = resolved.get("scenario_id")
+        if not scenario_id:
+            return resolved
+        scenario = SCENARIO_BY_ID.get(str(scenario_id))
+        if scenario is None:
+            return resolved
+        scenario_initial_speed = getattr(scenario, "ego_initial_speed_km_h", None)
+        if scenario_initial_speed is not None and "initial_speed_km_h" not in explicit_config_keys:
+            resolved["initial_speed_km_h"] = float(scenario_initial_speed)
         return resolved
 
     @staticmethod
@@ -284,6 +329,9 @@ class PlatoonEnv(BaseMultiEnv):
             "platoon_d_norm",
             "platoon_delta_s_max",
             "platoon_reward_clip",
+            "lqr_lat_q1",
+            "lqr_lat_q2",
+            "lqr_lat_r",
         }
         return {key: config[key] for key in keys if key in config}
 
@@ -316,15 +364,18 @@ class PlatoonEnv(BaseMultiEnv):
             "platoon_d_norm",
             "platoon_delta_s_max",
             "platoon_reward_clip",
+            "lqr_lat_q1",
+            "lqr_lat_q2",
+            "lqr_lat_r",
             # scenario_id / local_route are intentionally excluded here so they pass
             # through to the MetaDrive config via _build_metadrive_config explicitly.
         }
-        runtime_only_keys = {"enable_idm_lane_change", "hazard_scenario", "scenario_id", "local_route"}
+        runtime_only_keys = {"enable_idm_lane_change", "scenario_id", "local_route"}
         return {key: value for key, value in config.items() if key not in platoon_keys and key not in runtime_only_keys}
 
     @staticmethod
     def _extract_runtime_flags(config: Mapping[str, object]) -> dict[str, object]:
-        runtime_only_keys = {"enable_idm_lane_change", "hazard_scenario"}
+        runtime_only_keys = {"enable_idm_lane_change"}
         return {key: value for key, value in config.items() if key in runtime_only_keys}
 
     def _build_metadrive_config(self) -> dict:
@@ -417,9 +468,23 @@ class PlatoonEnv(BaseMultiEnv):
             return
         if not route_roads:
             return
+        fixed_agent0_config = None
+        fixed_lane_index = ()
+        if self._cfg_bool("platoon_fixed_route_spawn", False):
+            fixed_agent0_config = (
+                getattr(getattr(self, "engine", None), "global_config", {})
+                .get("agent_configs", {})
+                .get("agent0")
+            )
+            if fixed_agent0_config is not None:
+                fixed_lane_index = tuple(fixed_agent0_config.get("spawn_lane_index", ()))
         road = route_roads[0]
+        road_start = road.start_node
+        road_end = road.end_node
+        if len(fixed_lane_index) == 3:
+            road_start, road_end = fixed_lane_index[:2]
         try:
-            lanes = current_map.road_network.graph[road.start_node][road.end_node]
+            lanes = current_map.road_network.graph[road_start][road_end]
         except (KeyError, AttributeError, TypeError):
             return
         if not lanes:
@@ -427,17 +492,9 @@ class PlatoonEnv(BaseMultiEnv):
 
         speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
         gap_m = self._desired_center_spacing_m()
-        fixed_agent0_config = None
-        if self._cfg_bool("platoon_fixed_route_spawn", False):
-            fixed_agent0_config = (
-                getattr(getattr(self, "engine", None), "global_config", {})
-                .get("agent_configs", {})
-                .get("agent0")
-            )
         lane_idx = 0
         if fixed_agent0_config is not None:
-            fixed_lane_index = tuple(fixed_agent0_config.get("spawn_lane_index", ()))
-            if len(fixed_lane_index) == 3 and tuple(fixed_lane_index[:2]) == (road.start_node, road.end_node):
+            if len(fixed_lane_index) == 3 and tuple(fixed_lane_index[:2]) == (road_start, road_end):
                 lane_idx = int(fixed_lane_index[2])
         lane_idx = max(0, min(lane_idx, len(lanes) - 1))
         lane = lanes[lane_idx]
@@ -691,7 +748,7 @@ class PlatoonEnv(BaseMultiEnv):
             self._scenario_orchestrator.before_step(self, lead_agent_id, self._scenario_step_count)
 
         obs, reward, terminated, truncated, info = super().step(actions)
-        self._clear_traffic_vehicles_near_platoon()
+        # self._clear_traffic_vehicles_near_platoon()  # 只在reset时清除一次，避免step中频繁操作影响性能
         info = self._build_info_dict(control_mode, actions=actions, base_info=info)
         terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
         obs = self._augment_observations(obs)
@@ -1289,6 +1346,10 @@ class PlatoonEnv(BaseMultiEnv):
         base_info: Optional[Mapping[str, dict]] = None,
     ) -> dict[str, dict]:
         info = {}
+        scenario_summary = {}
+        scenario_orchestrator = getattr(self, "_scenario_orchestrator", None)
+        if scenario_orchestrator is not None and hasattr(scenario_orchestrator, "get_episode_summary"):
+            scenario_summary = dict(scenario_orchestrator.get_episode_summary())
         reward_cache = self._platoon_reward_cache if self._cfg_bool("platoon_reward_enabled", True) else None
         reward_per_agent = (
             reward_cache.get("per_agent", {})
@@ -1312,6 +1373,7 @@ class PlatoonEnv(BaseMultiEnv):
             )
             delta_steering = float(cached_agent_reward.get("delta_steering", current_action[0] - previous_action[0]))
             jerk = float(cached_agent_reward.get("jerk", current_action[1] - previous_action[1]))
+            agent_info["role"] = self.get_agent_role(agent_id)
             agent_info["formation_relation_state"] = self.get_formation_relation_state(agent_id)
             if "formation_error" in cached_agent_reward:
                 formation_error = cached_agent_reward["formation_error"]
@@ -1349,6 +1411,8 @@ class PlatoonEnv(BaseMultiEnv):
             ):
                 if reward_key in cached_agent_reward:
                     agent_info[reward_key] = cached_agent_reward[reward_key]
+            if scenario_summary:
+                agent_info.update(scenario_summary)
             self._last_actions[agent_id] = current_action
             info[agent_id] = agent_info
         return info

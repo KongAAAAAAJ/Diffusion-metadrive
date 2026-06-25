@@ -15,9 +15,9 @@ def _load_script_module():
         stubbed[name] = sys.modules.get(name)
         sys.modules[name] = module
 
-    base_multi_env_module = types.ModuleType("metadrive.envs.diffusion_envs.base_multi_env")
+    base_multi_env_module = types.ModuleType("envs.diffusion_envs.base_multi_env")
     base_multi_env_module.BaseMultiEnv = _FakeEnv
-    register("metadrive.envs.diffusion_envs.base_multi_env", base_multi_env_module)
+    register("envs.diffusion_envs.base_multi_env", base_multi_env_module)
 
     draw_module = types.ModuleType("metadrive.utils.draw_top_down_map")
     draw_module.draw_top_down_map = lambda current_map, resolution: [[1]]
@@ -65,6 +65,7 @@ class _FakeEnv:
 
 class _FakePlt:
     saved_paths = []
+    labels = []
 
     @classmethod
     def imshow(cls, image, cmap=None):
@@ -80,8 +81,54 @@ class _FakePlt:
         Path(path).write_bytes(b"fake-map")
 
     @classmethod
+    def text(cls, x, y, text, **kwargs):
+        cls.labels.append((x, y, text, kwargs))
+
+    @classmethod
     def close(cls):
         return None
+
+
+class _FakeLane:
+    def __init__(self, length=20.0):
+        self.length = float(length)
+
+    def position(self, longitudinal, lateral):
+        return (float(longitudinal), float(lateral))
+
+
+class _FakeRoad:
+    def __init__(self, start_node, end_node):
+        self.start_node = start_node
+        self.end_node = end_node
+
+
+class _FakeBlock:
+    def __init__(self, graph_block_id, road):
+        self.graph_block_id = graph_block_id
+        self._road = road
+
+    def get_respawn_roads(self):
+        return [self._road]
+
+    def get_socket_list(self):
+        return []
+
+
+class _FakeRoadNetwork:
+    graph = {"n0": {"n1": [_FakeLane()]}, "n1": {"n2": [_FakeLane()]}}
+
+    def get_bounding_box(self):
+        return (0.0, 100.0, 0.0, 100.0)
+
+
+class _FakeMapWithBlocks:
+    def __init__(self):
+        self.road_network = _FakeRoadNetwork()
+        self.blocks = [
+            _FakeBlock("g1", _FakeRoad("n0", "n1")),
+            _FakeBlock("c1", _FakeRoad("n1", "n2")),
+        ]
 
 
 def test_save_base_multi_env_map_creates_png_and_closes_env(tmp_path, monkeypatch):
@@ -179,3 +226,23 @@ def test_save_base_multi_env_map_passes_blocks_config_override(tmp_path, monkeyp
 
     assert exit_code == 0
     assert _FakeEnv.last_config["hybrid_map_blocks_config"] == blocks_config
+
+
+def test_save_base_multi_env_map_labels_graph_block_ids(tmp_path, monkeypatch):
+    module = _load_script_module()
+    output_path = tmp_path / "map.png"
+
+    class EnvWithBlocks(_FakeEnv):
+        def __init__(self, config):
+            super().__init__(config)
+            self.current_map = _FakeMapWithBlocks()
+
+    monkeypatch.setattr(module, "BaseMultiEnv", EnvWithBlocks)
+    monkeypatch.setattr(module, "draw_top_down_map", lambda current_map, resolution: [[0] * 100 for _ in range(100)])
+    monkeypatch.setattr(module, "plt", _FakePlt)
+
+    _FakePlt.labels = []
+    exit_code = module.main(["--output", str(output_path), "--resolution", "100"])
+
+    assert exit_code == 0
+    assert {label[2] for label in _FakePlt.labels} == {"g1", "c1"}

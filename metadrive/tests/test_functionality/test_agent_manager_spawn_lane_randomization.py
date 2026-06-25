@@ -66,9 +66,9 @@ def _load_agent_manager_module():
     replay_module.ReplayTrafficParticipantPolicy = type("ReplayTrafficParticipantPolicy", (), {})
     register("metadrive.policy.replay_policy", replay_module)
 
-    scenario_module = types.ModuleType("metadrive.exp_dataset.scenario_definitions")
+    scenario_module = types.ModuleType("scenarios.definitions")
     scenario_module.SCENARIO_BY_ID = {}
-    register("metadrive.exp_dataset.scenario_definitions", scenario_module)
+    register("scenarios.definitions", scenario_module)
 
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
@@ -130,15 +130,15 @@ def test_random_spawn_lane_in_single_agent_still_randomizes_on_multilane_roads()
 
 def test_random_spawn_lane_in_single_agent_respects_scenario_spawn_lane_configuration():
     module = _load_agent_manager_module()
-    scenario_module = types.ModuleType("metadrive.exp_dataset.scenario_definitions")
+    scenario_module = types.ModuleType("scenarios.definitions")
     scenario_module.SCENARIO_BY_ID = {
         "S9_narrow_channel_negotiation": SimpleNamespace(
             ego_spawn_lane_preference=None,
             ego_spawn_lane_probabilities={"rightmost": 0.4, "middle": 0.4, "leftmost": 0.2},
         )
     }
-    previous = sys.modules.get("metadrive.exp_dataset.scenario_definitions")
-    sys.modules["metadrive.exp_dataset.scenario_definitions"] = scenario_module
+    previous = sys.modules.get("scenarios.definitions")
+    sys.modules["scenarios.definitions"] = scenario_module
     manager = module.VehicleAgentManager.__new__(module.VehicleAgentManager)
     manager.np_random = np.random.RandomState(1)
     manager.engine = SimpleNamespace(
@@ -158,6 +158,6 @@ def test_random_spawn_lane_in_single_agent_respects_scenario_spawn_lane_configur
         assert manager.engine.global_config["agent_configs"]["agent0"]["spawn_lane_index"] == ("A", "B", 2)
     finally:
         if previous is None:
-            sys.modules.pop("metadrive.exp_dataset.scenario_definitions", None)
+            sys.modules.pop("scenarios.definitions", None)
         else:
-            sys.modules["metadrive.exp_dataset.scenario_definitions"] = previous
+            sys.modules["scenarios.definitions"] = previous

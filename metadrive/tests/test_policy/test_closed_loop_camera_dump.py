@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from metadrive.policy.diffusion_policy.test_transfuser_policy import save_triplet_cameras
+from models.diffusion.test_transfuser_policy import save_triplet_cameras
 
 
 def test_save_triplet_cameras_writes_three_views(tmp_path: Path):

@@ -13,15 +13,22 @@
             "name": "Test",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/metadrive/policy/diffusion_policy/test_transfuser_policy.py",
+            "program": "${workspaceFolder}/models/diffusion/test_refine_grpo.py",
             "console": "integratedTerminal",
         },
         {
             "name": "Train",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/train/train_selected_refine_grpo.py",
+            "program": "${workspaceFolder}/train/train_refine_grpo.py",
             "console": "integratedTerminal",
-        }
+        },
+        {
+            "name": "Preview_scenario",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/evaluation/preview_and_evaluation.py",
+            "console": "integratedTerminal",
+        },
     ]
 }

@@ -13,14 +13,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _load_route_traffic_manager_module():
     module_name = "route_traffic_manager_test"
-    path = REPO_ROOT / "metadrive/envs/diffusion_envs/route_traffic_manager.py"
+    path = REPO_ROOT / "envs/diffusion_envs/route_traffic_manager.py"
     stubbed = {}
 
     def register(name: str, module: types.ModuleType) -> None:
         stubbed[name] = sys.modules.get(name)
         sys.modules[name] = module
 
-    custom_module = types.ModuleType("metadrive.envs.diffusion_envs.traffic_manager")
+    custom_module = types.ModuleType("envs.diffusion_envs.traffic_manager")
 
     class _CustomTrafficManager:
         VEHICLE_GAP = 10.0
@@ -29,7 +29,7 @@ def _load_route_traffic_manager_module():
             self.engine = SimpleNamespace(spawn_manager=None, global_config={})
 
     custom_module.CustomTrafficManager = _CustomTrafficManager
-    register("metadrive.envs.diffusion_envs.traffic_manager", custom_module)
+    register("envs.diffusion_envs.traffic_manager", custom_module)
 
     traffic_module = types.ModuleType("metadrive.manager.traffic_manager")
     traffic_module.BlockVehicles = namedtuple("block_vehicles", "trigger_road vehicles")

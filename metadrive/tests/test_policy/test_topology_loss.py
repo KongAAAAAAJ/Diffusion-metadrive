@@ -5,19 +5,19 @@ import pytest
 import torch
 import torch.nn as nn
 
-import metadrive.policy.diffusion_policy.transfuser_loss as transfuser_loss_module
-from metadrive.policy.diffusion_policy.preprocess_transfuser_dataset import PROCESSED_FIELDS
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-from metadrive.policy.diffusion_policy.transfuser_features import (
+import models.diffusion.transfuser_loss as transfuser_loss_module
+from models.diffusion.preprocess_transfuser_dataset import PROCESSED_FIELDS
+from models.diffusion.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_features import (
     PROCESSED_DIR_FIELDS,
     processed_sample_to_features_targets,
     sample_to_features_targets,
 )
-from metadrive.policy.diffusion_policy.transfuser_loss import (
+from models.diffusion.transfuser_loss import (
     _topology_consistency_loss,
     transfuser_loss,
 )
-from metadrive.policy.diffusion_policy.transfuser_model_v2 import TrajectoryHead
+from models.diffusion.transfuser_model_v2 import TrajectoryHead
 
 
 def _raw_sample() -> dict:

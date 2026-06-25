@@ -1,0 +1,187 @@
+# Rule-maker decision parameters.
+#
+# Structure:
+#   default:           baseline params used for all scenarios
+#   scenario_overrides:
+#     <SCENARIO_ID>:   keys here are merged on top of default for that scenario
+#
+# make_rule_maker() loads this file automatically; pass scenario_id to activate
+# the matching override section.
+
+# ─────────────────────────────────────────────────────────────────────────────
+default:
+  # ── Trajectory generation ──────────────────────────────────────────────────
+  target_speed_km_h: 30.0       # desired cruise speed
+  horizon_s: 4.0                # look-ahead horizon (seconds)
+  num_waypoints: 8              # trajectory sample count
+  locked_on_reset: true         # platoon starts locked; unlock only after risk trigger
+  risk_front_gap_trigger_m: 12.0
+  risk_side_gap_trigger_m: 6.0
+
+  # ── IDM longitudinal model ─────────────────────────────────────────────────
+  idm_time_headway_s: 1.2       # desired time gap to front vehicle
+  idm_min_gap_m: 6.0            # minimum standstill gap
+  idm_max_accel_mps2: 1.8       # free-road maximum acceleration
+  idm_comfortable_brake_mps2: 2.5
+  idm_delta: 4.0                # acceleration exponent
+
+  # ── MOBIL lane-change model ────────────────────────────────────────────────
+  mobil_lane_change_threshold: 0.2   # min acceleration gain to justify LC (m/s²)
+  mobil_keep_bias: 0.15              # fixed MOBIL gain assigned to keep-lane
+  mobil_rear_base_penalty: 3.0       # base penalty when rear car must brake hard
+  mobil_rear_slope_penalty: 4.0      # per-(m/s²) excess-brake penalty
+
+  # ── Safety distance thresholds ─────────────────────────────────────────────
+  # Distances are centre-to-centre (vehicle length NOT subtracted).
+  # Rule of thumb: add ~4.5 m per vehicle to get bumper-to-bumper equivalent.
+  traffic_safety_distance_m: 8.0    # agent vs background vehicle
+  agent_safety_distance_m: 7.0      # agent vs agent (platoon members)
+
+  # ── Score weights ──────────────────────────────────────────────────────────
+  # Per-agent terms (summed over all agents in the combo):
+  w_progress: 0.04              # forward progress reward coefficient
+  w_mobil: 1.1                  # MOBIL gain weight
+  w_keep_bias: 0.30             # bonus for choosing keep-lane
+  lc_cost: 0.75                 # base cost of any lane change
+  lane_change_preference: 0.0   # optional positive bias added to every LC score
+  force_lane_change: 0.0        # S8-only route-lane alignment weight
+
+  # Background traffic clearance (per background vehicle):
+  w_traffic_clearance: 0.03     # coefficient for clearance reward (≥ safety dist)
+  traffic_clearance_cap: 1.5    # max clearance reward per vehicle
+
+  # Formation consistency (per consecutive agent pair):
+  w_formation_consistent: 0.50       # bonus when adjacent agents choose same action
+  w_formation_inconsistent_cost: 0.75  # penalty when adjacent agents choose different actions
+
+  # Close-pair formation terms (applied when same lane AND centre dist ≤ threshold):
+  close_pair_threshold_m: 12.0
+  w_close_keep: 1.5             # bonus: both keep-lane while close
+  w_close_lc_same_cost: 0.5     # penalty: same-direction LC while close
+  w_close_lc_diff_cost: 1.0     # penalty: different-direction LC while close
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# scenario_overrides 调参速查
+#
+# 每条 override 只需列出需要改动的键，其余自动继承 default。
+#
+# ── 权重含义与典型范围 ────────────────────────────────────────────────────────
+#
+# [纵向跟驰 / IDM]
+#   idm_time_headway_s   期望跟车时距(s)     典型: 0.8–2.5  大→保守跟车
+#   idm_min_gap_m        静止最小间距(m)     典型: 4–12     大→保守
+#   idm_max_accel_mps2   最大自由加速(m/s²)  典型: 1.0–3.0
+#   idm_comfortable_brake_mps2  舒适减速(m/s²) 典型: 1.5–4.0  大→允许更急刹
+#   idm_delta            加速指数            通常固定 4.0
+#
+# [换道决策 / MOBIL]
+#   mobil_lane_change_threshold  执行换道所需最小加速度增益(m/s²)
+#                                典型: 0.05–1.0  大→换道更保守
+#   mobil_keep_bias              赋予"保持"动作的虚拟MOBIL增益
+#                                典型: 0.05–0.3  大→偏向保持
+#   mobil_rear_base_penalty      后车急刹时的基础惩罚(加分制负值)
+#                                典型: 1.0–5.0  大→更保护后车
+#   mobil_rear_slope_penalty     后车每超出舒适刹车1 m/s²的额外惩罚
+#                                典型: 2.0–8.0
+#
+# [安全距离]
+#   traffic_safety_distance_m    与背景车的中心距阈值(m，非保险杠距离)
+#                                典型: 6–14  触发时施加硬性大惩罚
+#   agent_safety_distance_m      编队内部中心距阈值(m)  典型: 5–12
+#
+# [得分权重]
+#   w_progress        纵向行驶进度奖励系数   典型: 0.02–0.10
+#                     (进度≈每步前进距离，30km/h→4s≈33m → 单项约1.3分)
+#   w_mobil           MOBIL增益权重         典型: 0.5–2.0
+#                     (MOBIL增益范围约 -3~+1 m/s²，乘以权重后约 -3~+2 分)
+#   w_keep_bias       保持车道奖励          典型: 0.1–2.0
+#                     (直接加分，范围即 w_keep_bias 本身)
+#   lc_cost           换道基础代价          典型: 0.3–3.0
+#                     (直接减分；与 w_keep_bias 差值决定换道倾向)
+#   lane_change_preference  额外换道偏好奖励 典型: -2.0–1.0
+#                           (正→鼓励换道；负→强烈抑制)
+#   w_traffic_clearance     背景车间距奖励系数  典型: 0.01–0.08
+#                           (间距超阈值时 += min(cap, coeff*dist))
+#   traffic_clearance_cap   单辆背景车间距奖励上限  典型: 0.5–3.0
+#   w_formation_consistent  相邻agent动作相同时的奖励  典型: 0.2–1.5
+#   w_formation_inconsistent_cost  相邻agent动作不同时的惩罚  典型: 0.3–2.0
+#   close_pair_threshold_m  触发close-pair项的中心距阈值(m)  典型: 8–20
+#   w_close_keep            近距同保持额外奖励  典型: 0.5–4.0
+#   w_close_lc_same_cost    近距同向换道惩罚    典型: 0.2–1.5
+#   w_close_lc_diff_cost    近距异向换道惩罚    典型: 0.5–2.0
+#
+# ── 调参策略速记 ──────────────────────────────────────────────────────────────
+#   想让编队更倾向保持：  ↑w_keep_bias  ↑lc_cost  ↑mobil_lane_change_threshold
+#   想让编队主动换道：    ↑lane_change_preference  ↓lc_cost  ↓mobil_keep_bias
+#   想拉大跟车间距：      ↑idm_time_headway_s  ↑idm_min_gap_m
+#   想保护后方来车：      ↑mobil_rear_base_penalty  ↑mobil_rear_slope_penalty
+#   想让编队更整齐划一：  ↑w_formation_consistent  ↑w_close_keep
+# ─────────────────────────────────────────────────────────────────────────────
+scenario_overrides:
+
+  # S5: 前车急刹 — 拉大间距，强化保持车道，抑制换道
+  S5_hard_brake_lead:
+    idm_time_headway_s: 2.0
+    idm_min_gap_m: 9.0
+    idm_comfortable_brake_mps2: 3.0
+    traffic_safety_distance_m: 10.0
+    agent_safety_distance_m: 9.0
+    w_keep_bias: 0.6
+    lc_cost: 1.5
+    w_close_keep: 2.5
+    mobil_lane_change_threshold: 0.5
+    w_formation_consistent: 0.1  # * 弱化编队一致性
+    lane_change_preference: 2  # * 强化主动换道
+
+  # S6: 背景车从匝道合流 — 强化侧方安全，允许适度换道躲避
+  S6_background_merge_in:
+    traffic_safety_distance_m: 10.0
+    agent_safety_distance_m: 8.0
+    lane_change_preference: 0.3
+    lc_cost: 0.5
+    w_mobil: 1.4
+    mobil_lane_change_threshold: 0.1
+
+  # S7: ego编队从匝道合流 — 主动执行左换道汇入主路
+  S7_ego_merge_from_ramp:
+    lane_change_preference: 8
+    lc_cost: 0.3
+    w_mobil: 1.5
+    mobil_lane_change_threshold: 0.05
+    mobil_keep_bias: 0.05
+    w_keep_bias: 0.1
+    w_formation_consistent: 0.8   # 编队需要统一换道
+
+  # S8: ego编队从主路分流到匝道 — 主动执行右换道
+  S8_ego_exit_to_ramp:
+    lane_change_preference: 0.0
+    force_lane_change: 800
+    lc_cost: 0.3
+    w_mobil: 1.5
+    mobil_lane_change_threshold: 0.05
+    mobil_keep_bias: 0.05
+    w_keep_bias: 0.1
+    w_formation_consistent: 0.8
+
+  # S9: 狭道会车 — 极度保守，绝不换道
+  S9_narrow_channel_negotiation:
+    traffic_safety_distance_m: 12.0
+    agent_safety_distance_m: 10.0
+    idm_time_headway_s: 2.0
+    idm_min_gap_m: 10.0
+    w_keep_bias: 1.5
+    lc_cost: 3.0
+    lane_change_preference: -2.0
+    mobil_lane_change_threshold: 1.0
+    w_close_keep: 3.0
+
+  # S12: 被横向切入 — 快速制动响应，不主动换道
+  S12_cut_in_from_adjacent_lane:
+    traffic_safety_distance_m: 11.0
+    agent_safety_distance_m: 9.0
+    idm_time_headway_s: 1.8
+    idm_comfortable_brake_mps2: 3.5
+    w_keep_bias: 0.8
+    lc_cost: 1.2
+    mobil_lane_change_threshold: 0.4

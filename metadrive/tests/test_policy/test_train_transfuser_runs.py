@@ -4,15 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from metadrive.policy.diffusion_policy.train_transfuser import (
+from models.diffusion.train_transfuser import (
     build_checkpoint_callback,
     create_next_run_dir,
     resolve_resume_max_epochs,
     resolve_training_run_dir,
     validate_runtime_paths,
 )
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-from metadrive.policy.diffusion_policy.transfuser_model_v2 import TrajectoryHead
+from models.diffusion.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_model_v2 import TrajectoryHead
 
 
 def test_create_next_run_dir_uses_existing_run_count(tmp_path: Path):

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from envs.mode_selection_sb3_env import ModeSelectionSB3Env
+from envs.wrap_platoon_env import ModeSelectionSB3Env
 
 
 class _FakeVehicle:

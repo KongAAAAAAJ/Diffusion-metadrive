@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from metadrive.policy.diffusion_policy.mode_context import DynamicObstacle, ModeContext, build_mode_context_from_sample
-from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
+from models.diffusion.mode_context import DynamicObstacle, ModeContext, build_mode_context_from_sample
+from models.diffusion.mode_trajectory_generator import ModeTrajectoryGenerator
 
 
 def _straight_polyline(y_offset: float = 0.0, length: float = 60.0, num_points: int = 31) -> np.ndarray:

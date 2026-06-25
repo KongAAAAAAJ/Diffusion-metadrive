@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from metadrive.policy.diffusion_policy.preference_guidance import inject_external_preference_point
+from models.diffusion.preference_guidance import inject_external_preference_point
 
 
 class _StraightLane:

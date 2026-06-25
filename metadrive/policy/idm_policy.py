@@ -361,7 +361,7 @@ class IDMPolicy(BasePolicy):
                 if self.routing_target_lane.index[-1] > index_range[-1]:
                     # change to left
                     if surrounding_objects.left_back_min_distance(
-                    ) < self.SAFE_LANE_CHANGE_DISTANCE or surrounding_objects.left_front_min_distance() < 5:
+                    ) < self.SAFE_LANE_CHANGE_DISTANCE or surrounding_objects.left_front_min_distance() < 25:  # !5
                         # creep to wait
                         self.target_speed = self.CREEP_SPEED
                         return surrounding_objects.front_object(), surrounding_objects.front_min_distance(
@@ -374,7 +374,7 @@ class IDMPolicy(BasePolicy):
                 else:
                     # change to right
                     if surrounding_objects.right_back_min_distance(
-                    ) < self.SAFE_LANE_CHANGE_DISTANCE or surrounding_objects.right_front_min_distance() < 5:
+                    ) < self.SAFE_LANE_CHANGE_DISTANCE or surrounding_objects.right_front_min_distance() < 25:  #! 5
                         # unsafe, creep and wait
                         self.target_speed = self.CREEP_SPEED
                         return surrounding_objects.front_object(), surrounding_objects.front_min_distance(

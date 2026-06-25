@@ -6,14 +6,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from metadrive.policy.diffusion_policy.preprocess_transfuser_dataset import (
+from models.diffusion.preprocess_transfuser_dataset import (
     OUTPUT_FORMAT_DIR,
     output_shard_path,
     preprocess_shard,
 )
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-from metadrive.policy.diffusion_policy.transfuser_features import MetaDriveTransfuserDataset, sample_to_features_targets
-from metadrive.policy.diffusion_policy.verify_transfuser_dataset import (
+from models.diffusion.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_features import MetaDriveTransfuserDataset, sample_to_features_targets
+from models.diffusion.verify_transfuser_dataset import (
     AUTO_DATASET_FORMAT,
     PROCESSED_DIR_DATASET_FORMAT,
     PROCESSED_NPZ_LEGACY_DATASET_FORMAT,

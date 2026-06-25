@@ -21,7 +21,7 @@ class _StubConfig(dict):
 
 def _load_base_multi_env_module():
     module_name = "base_multi_env_teleport_test"
-    path = REPO_ROOT / "metadrive/envs/diffusion_envs/base_multi_env.py"
+    path = REPO_ROOT / "envs/diffusion_envs/base_multi_env.py"
     stubbed = {}
 
     def register(name: str, module: types.ModuleType) -> None:
@@ -42,9 +42,9 @@ def _load_base_multi_env_module():
     multi_agent_module.MultiAgentMetaDrive = _MultiAgentMetaDrive
     register("metadrive.envs.marl_envs.multi_agent_metadrive", multi_agent_module)
 
-    hybrid_module = types.ModuleType("metadrive.envs.diffusion_envs.custom_hybrid_map")
+    hybrid_module = types.ModuleType("envs.diffusion_envs.custom_hybrid_map")
     hybrid_module.MAHybridPGMapManager = object
-    register("metadrive.envs.diffusion_envs.custom_hybrid_map", hybrid_module)
+    register("envs.diffusion_envs.custom_hybrid_map", hybrid_module)
 
     state_obs_module = types.ModuleType("metadrive.obs.state_obs")
     state_obs_module.LidarStateObservation = object
@@ -72,10 +72,10 @@ def _load_base_multi_env_module():
     engine_utils_module.initialize_global_config = lambda config: None
     register("metadrive.engine.engine_utils", engine_utils_module)
 
-    transfuser_module = types.ModuleType("metadrive.policy.diffusion_policy.transfuser_config")
+    transfuser_module = types.ModuleType("models.diffusion.transfuser_config")
     transfuser_module.build_transfuser_config = lambda size: {"size": size}
     transfuser_module.transfuser_config_to_dict = lambda config: dict(config)
-    register("metadrive.policy.diffusion_policy.transfuser_config", transfuser_module)
+    register("models.diffusion.transfuser_config", transfuser_module)
 
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)

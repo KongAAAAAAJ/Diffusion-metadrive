@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from evaluation.reward_terms import compute_team_reward
+from envs.reward_terms import compute_team_reward
 from train.joint_group import build_joint_groups, extract_joint_trajectories, select_top_k_candidates
 
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
-from metadrive.policy.diffusion_policy.mode_visualization import (
+from models.diffusion.mode_definitions import MODE_SLOTS
+from models.diffusion.mode_visualization import (
     ModeOverlayRenderContext,
     _world_to_screen,
     overlay_mode_trajectories_on_frame,

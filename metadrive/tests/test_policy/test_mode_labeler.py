@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from metadrive.policy.diffusion_policy.mode_definitions import NUM_MODE_SLOTS
-from metadrive.policy.diffusion_policy.mode_labeler import label_hierarchical_mode
+from models.diffusion.mode_definitions import NUM_MODE_SLOTS
+from models.diffusion.mode_labeler import label_hierarchical_mode
 
 
 def _zeros() -> np.ndarray:

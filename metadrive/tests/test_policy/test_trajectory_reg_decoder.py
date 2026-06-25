@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-from metadrive.policy.diffusion_policy.transfuser_model_v2 import DiffMotionPlanningRefinementModule, V2TransfuserModel
+from models.diffusion.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_model_v2 import DiffMotionPlanningRefinementModule, V2TransfuserModel
 
 
 def _build_inputs(

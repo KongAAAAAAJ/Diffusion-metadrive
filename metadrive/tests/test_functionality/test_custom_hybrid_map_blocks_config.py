@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _load_custom_hybrid_map_module():
     module_name = "custom_hybrid_map_blocks_config_test"
-    path = REPO_ROOT / "metadrive/envs/diffusion_envs/custom_hybrid_map.py"
+    path = REPO_ROOT / "envs/diffusion_envs/custom_hybrid_map.py"
     stubbed = {}
 
     def register(name: str, module: types.ModuleType) -> None:

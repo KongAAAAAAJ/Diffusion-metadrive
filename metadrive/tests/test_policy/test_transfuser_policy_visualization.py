@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import pytest
 
-from metadrive.policy.diffusion_policy.test_transfuser_policy import (
+from models.diffusion.test_transfuser_policy import (
     MULTIMODAL_OTHER_COLOR,
     MULTIMODAL_SELECTED_COLOR,
     PAPER_TARGET_POINT_COLOR,
@@ -38,8 +38,8 @@ from metadrive.policy.diffusion_policy.test_transfuser_policy import (
     parse_args,
 )
 from metadrive.obs.diff_obs.top_down_state_obs_multi_channel import DatasetCollectObservation
-from metadrive.policy.diffusion_policy.transfuser_callback import render_closed_loop_prediction
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_callback import render_closed_loop_prediction
+from models.diffusion.transfuser_config import build_transfuser_config
 
 
 def test_parse_args_defaults_enable_headless_2d_outputs():
@@ -526,11 +526,11 @@ def test_capture_step_plot_render_context_uses_same_pre_step_frame_for_projectio
         return fake_projector
 
     monkeypatch.setattr(
-        "metadrive.policy.diffusion_policy.test_transfuser_policy._capture_2d_topdown_frame",
+        "models.diffusion.test_transfuser_policy._capture_2d_topdown_frame",
         _fake_capture,
     )
     monkeypatch.setattr(
-        "metadrive.policy.diffusion_policy.test_transfuser_policy._build_topdown_world_to_screen_projector",
+        "models.diffusion.test_transfuser_policy._build_topdown_world_to_screen_projector",
         _fake_projector_builder,
     )
 

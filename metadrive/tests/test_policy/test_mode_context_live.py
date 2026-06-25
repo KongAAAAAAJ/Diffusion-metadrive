@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
+from models.diffusion.mode_context import build_mode_context_from_vehicle
 
 
 class _FakeLane:
@@ -322,7 +322,7 @@ class _FakeGBlock:
 
 def test_get_all_positive_roads_from_block_returns_all_roads():
     """_get_all_positive_roads_from_block should return all roads in a G-block."""
-    from metadrive.policy.diffusion_policy.mode_context import _get_all_positive_roads_from_block
+    from models.diffusion.mode_context import _get_all_positive_roads_from_block
 
     block = _FakeGBlock()
     roads = _get_all_positive_roads_from_block(block)

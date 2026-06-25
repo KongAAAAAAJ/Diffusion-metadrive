@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from envs.platoon_env import PlatoonEnv
-from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
+from envs.diffusion_envs.base_multi_env import BaseMultiEnv
 
 
 def _build_env() -> PlatoonEnv:

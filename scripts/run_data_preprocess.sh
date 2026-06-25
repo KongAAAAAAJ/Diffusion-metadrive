@@ -18,7 +18,7 @@ OUTPUT_FORMAT="${OUTPUT_FORMAT:-dir}"
 OVERWRITE="${OVERWRITE:-1}"
 SKIP_EXISTING="${SKIP_EXISTING:-0}"
 
-"${PYTHON_BIN}" -m metadrive.policy.diffusion_policy.preprocess_transfuser_dataset \
+"${PYTHON_BIN}" -m models.diffusion.preprocess_transfuser_dataset \
     --input-root "${INPUT_ROOT}" \
     --output-root "${OUTPUT_ROOT}" \
     --output-format "${OUTPUT_FORMAT}" \

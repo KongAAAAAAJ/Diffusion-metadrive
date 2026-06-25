@@ -68,13 +68,13 @@ def build_platoon_env(env_config: dict):
 
 def build_platoon_planner(ckpt_path: str, num_agents: int, model_config_path: str, device: str = "cpu"):
     import torch
-    from metadrive.policy.diffusion_policy.transfuser_config import (
+    from models.diffusion.transfuser_config import (
         build_transfuser_config,
         diffusion_model_config_to_overrides,
         load_diffusion_model_config,
     )
-    from models.platoon.platoon_diffusion_planner import PlatoonDiffusionPlanner
-    from models.platoon.weight_migration import migrate_single_to_platoon
+    from models.platoon_planner.platoon_diffusion_planner import PlatoonDiffusionPlanner
+    from models.platoon_planner._weight_migration import migrate_single_to_platoon
 
     model_cfg = load_diffusion_model_config(model_config_path)
     tf_config = build_transfuser_config(
@@ -131,7 +131,7 @@ def run_platoon_episode(
     import cv2
 
     try:
-        from metadrive.policy.diffusion_policy.test_transfuser_policy import (
+        from models.diffusion.test_transfuser_policy import (
             _build_topdown_world_to_screen_projector,
             _capture_2d_topdown_frame,
         )
@@ -160,7 +160,7 @@ def run_platoon_episode(
             export = planner.export_mode_selection(planner_batch)
 
         candidates = np.asarray(export["trajectory_candidates"], dtype=np.float32)  # (N, M, 8, 3)
-        masks = np.asarray(export["mode_valid_mask"], dtype=bool)                   # (N, M)
+        masks = np.asarray(export["lane_valid_mask"], dtype=bool)                   # (N, M)
         masked_logits = np.asarray(export["masked_cls_logits"], dtype=np.float32)   # (N, M)
         exported_ids: list[str] = list(export["agent_ids"])
 

@@ -9,11 +9,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 
-def _run_script(script_name: str, **env_overrides) -> str:
+def _run_script(script_name: str, *args: str, **env_overrides) -> str:
     env = os.environ.copy()
     env.update(env_overrides)
     completed = subprocess.run(
-        ["bash", str(SCRIPTS_DIR / script_name)],
+        ["bash", str(SCRIPTS_DIR / script_name), *args],
         cwd=REPO_ROOT,
         env=env,
         check=True,
@@ -26,6 +26,24 @@ def _run_script(script_name: str, **env_overrides) -> str:
 def test_scripts_are_bash_syntax_valid():
     for script in sorted(SCRIPTS_DIR.glob("*.sh")):
         subprocess.run(["bash", "-n", str(script)], cwd=REPO_ROOT, check=True)
+
+
+def test_run_train_script_no_longer_exposes_ppo_stage():
+    content = (SCRIPTS_DIR / "run_train.sh").read_text(encoding="utf-8")
+
+    assert "train_mode_cls_sb3" not in content
+    assert "configs/train/ppo.yaml" not in content
+    assert "MaskablePPO" not in content
+    assert "PPO actor" not in content
+
+
+def test_only_refine_grpo_scripts_are_exposed():
+    assert not (SCRIPTS_DIR / "run_grpo_train.sh").exists()
+    assert not (SCRIPTS_DIR / "run_grpo_test.sh").exists()
+    assert (SCRIPTS_DIR / "run_refine_grpo_train.sh").exists()
+    assert (SCRIPTS_DIR / "run_refine_grpo_test.sh").exists()
+    legacy_refine_test = "run_" + "selected_" + "refine_grpo_test.sh"
+    assert not (SCRIPTS_DIR / legacy_refine_test).exists()
 
 
 def test_run_diffusion_test_script_passes_explicit_render_flag():
@@ -67,20 +85,71 @@ def test_run_diffusion_test_script_supports_periodic_camera_saves():
     assert "--camera-output-dir /tmp/closed_loop_cameras" in stdout
 
 
-def test_preview_scenario_script_supports_mode_generate():
+def test_preview_scenario_script_invokes_platoon_preview_entrypoint():
     stdout = _run_script(
         "preview_scenario.sh",
+        "--scenario-id",
+        "S8_ego_exit_to_ramp",
+        "--num-episodes",
+        "1",
+        "--num-agents",
+        "4",
+        "--expert",
+        "rule_maker",
+        "--output-root",
+        "/tmp/scenario_preview",
         PYTHON_BIN="/bin/echo",
-        OUTPUT_ROOT="/tmp/scenario_preview",
-        MANIFEST_PATH="/tmp/does_not_exist.json",
-        SCENARIO_ID="S8_ego_exit_to_ramp",
-        NUM_EPISODES="1",
-        MODE_GENERATE="1",
-        MODE_FRAME_LIMIT="5",
     )
 
-    assert "--mode-generate-enabled true" in stdout
-    assert "--mode-generate-frame-limit 5" in stdout
+    assert "-m evaluation.preview_and_evaluation" in stdout
+    assert "--scenario-id S8_ego_exit_to_ramp" in stdout
+    assert "--num-agents 4" in stdout
+    assert "--expert rule_maker" in stdout
+    assert "--output-root /tmp/scenario_preview" in stdout
+    assert "--heading-up" not in stdout
+
+
+def test_preview_scenario_script_supports_explicit_heading_up_and_local_route():
+    stdout = _run_script(
+        "preview_scenario.sh",
+        "--scenario-id",
+        "S6_background_merge_in",
+        "--num-episodes",
+        "2",
+        "--num-agents",
+        "5",
+        "--expert",
+        "idm",
+        "--heading-up",
+        "--local-route",
+        "R6_mainline_merge_approach",
+        "--output-root",
+        "/tmp/scenario_preview",
+        PYTHON_BIN="/bin/echo",
+    )
+
+    assert "--num-episodes 2" in stdout
+    assert "--heading-up" in stdout
+    assert "--local-route R6_mainline_merge_approach" in stdout
+    assert "--expert idm" in stdout
+    assert "--num-agents 5" in stdout
+
+
+def test_preview_scenario_script_all_scenarios_omits_scenario_id():
+    stdout = _run_script(
+        "preview_scenario.sh",
+        "--all-scenarios",
+        "--num-agents",
+        "3",
+        "--expert",
+        "lqr",
+        "--output-root",
+        "/tmp/scenario_preview",
+        PYTHON_BIN="/bin/echo",
+    )
+
+    assert "--all-scenarios" in stdout
+    assert "--scenario-id" not in stdout
 
 
 def test_run_dataset_collect_script_uses_single_output_root():
@@ -194,7 +263,7 @@ def test_run_diffusion_train_script_keeps_plan_anchor_in_k_means_mode():
     )
 
     assert "--anchor-method k_means" in stdout
-    assert "--plan-anchor-path metadrive/exp_dataset/anchors.npy" in stdout
+    assert "--plan-anchor-path expert_dataset/anchors.npy" in stdout
 
 
 def test_run_diffusion_convert_camera_layout_is_legacy_but_invocable():

@@ -2,9 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(python3)",
-      "Bash(python -m py_compile metadrive/policy/diffusion_policy/test_transfuser_policy.py)",
-      "Bash(python -m py_compile /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive/metadrive/policy/diffusion_policy/test_transfuser_policy.py)",
-      "Bash(/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile metadrive/policy/diffusion_policy/test_transfuser_policy.py)"
+      "Bash(python -m py_compile models/diffusion/test_transfuser_policy.py)",
+      "Bash(python -m py_compile /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive/models/diffusion/test_transfuser_policy.py)",
+      "Bash(/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile models/diffusion/test_transfuser_policy.py)"
     ]
   }
 }

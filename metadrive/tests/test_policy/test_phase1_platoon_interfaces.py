@@ -226,12 +226,11 @@ def test_platoon_metrics_compute_expected_keys():
     }
 
 
-def test_hazard_scenarios_return_three_named_configs():
-    module = _load_module("phase1_hazard_scenarios", REPO_ROOT / "scenarios/hazard_scenarios.py")
+def test_scenario_registry_exposes_phase1_hazard_equivalents():
+    from scenarios.definitions import SCENARIO_BY_ID
 
-    configs = module.get_hazard_scenario_configs()
-    names = {cfg["name"] for cfg in configs}
-    assert {"static_obstacle_detour", "dynamic_cut_in", "bottleneck_narrow_bridge"} <= names
+    assert "S6_background_merge_in" in SCENARIO_BY_ID
+    assert "S9_narrow_channel_negotiation" in SCENARIO_BY_ID
 
 
 def test_verify_phase1_parse_args_supports_episodes_render_and_top_down():

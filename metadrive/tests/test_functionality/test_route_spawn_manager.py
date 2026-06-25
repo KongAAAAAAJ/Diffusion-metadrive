@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _load_route_spawn_manager_module():
     module_name = "route_spawn_manager_test"
-    path = REPO_ROOT / "metadrive/envs/diffusion_envs/route_spawn_manager.py"
+    path = REPO_ROOT / "envs/diffusion_envs/route_spawn_manager.py"
     stubbed = {}
 
     def register(name: str, module: types.ModuleType) -> None:

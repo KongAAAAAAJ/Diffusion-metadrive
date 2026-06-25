@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
+from envs.diffusion_envs.base_multi_env import BaseMultiEnv
 
 
 class StubLane:

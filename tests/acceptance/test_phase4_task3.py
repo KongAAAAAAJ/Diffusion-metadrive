@@ -4,9 +4,9 @@ from pathlib import Path
 
 import torch
 
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-from models.platoon.platoon_diffusion_planner import PlatoonDiffusionPlanner
-from models.platoon.weight_migration import migrate_single_to_platoon
+from models.diffusion.transfuser_config import build_transfuser_config
+from models.platoon_planner.platoon_diffusion_planner import PlatoonDiffusionPlanner
+from models.platoon_planner._weight_migration import migrate_single_to_platoon
 
 
 CKPT_PATH = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_3/checkpoints/diffusion-epoch=97.ckpt")
@@ -32,7 +32,7 @@ def _dummy_batch(config):
 
 def test_weight_migration_contract():
     assert CKPT_PATH.exists(), CKPT_PATH
-    config = build_transfuser_config("small", plan_anchor_path="metadrive/exp_dataset/metadrive_anchors_ppo.npy")
+    config = build_transfuser_config("small", plan_anchor_path="expert_dataset/metadrive_anchors_ppo.npy")
     planner = PlatoonDiffusionPlanner(config, num_vehicles=3).eval()
     planner = migrate_single_to_platoon(str(CKPT_PATH), planner)
 

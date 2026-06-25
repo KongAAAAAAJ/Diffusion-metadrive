@@ -3,7 +3,7 @@
 # multi_point uses each mode anchor endpoint as that mode's local guidance point.
 model_size: small
 anchor_method: dynamic  # dynamic | k_means
-plan_anchor_path: metadrive/exp_dataset/anchors.npy
+plan_anchor_path: expert_dataset/anchors.npy
 trajectory_reg_decoder_type: gru  # mlp | gru
 target_guidance_type: multi_point  # point | # !line删掉 | multi_point
 target_line_num_points: 8  # 对应line类型的target_guidance，表示每条线使用多少个点进行表示

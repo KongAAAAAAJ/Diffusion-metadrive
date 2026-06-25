@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-from metadrive.policy.diffusion_policy.transfuser_model_v2 import (
+from models.diffusion.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_model_v2 import (
     DiffMotionPlanningRefinementModule,
     V2TransfuserModel,
     compute_preference_bias,

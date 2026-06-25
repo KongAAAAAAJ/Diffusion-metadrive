@@ -4,15 +4,15 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 import numpy as np
-from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy
+from expert_dataset.expert_idm_policy import ExpertIDMPolicy
 from scenarios.definitions import get_scenario_definition, SCENARIO_BY_ID
 from routes.route_definitions import ROUTE_BY_NAME, get_route_blocks
 
 
 def run_scenario(scenario_id, route_name, max_steps=400):
-    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
-    from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
-    from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
+    from envs.diffusion_envs.base_multi_env import BaseMultiEnv
+    from models.diffusion.mode_context import build_mode_context_from_vehicle
+    from models.diffusion.mode_trajectory_generator import ModeTrajectoryGenerator
 
     sdef = get_scenario_definition(scenario_id)
     route_block_ids = tuple(get_route_blocks(route_name))

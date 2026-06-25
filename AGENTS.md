@@ -185,9 +185,9 @@ from models.platoon.relation_encoder import RelationEncoder
 from models.platoon.weight_migration import migrate_single_to_platoon
 from models.selector.intent_selector import IntentSelectorActor, IntentSelectorCritic
 from models.platoon.trajectory_refiner import TrajectoryRefiner
-from models.diffusion.diffusion_rl_scheduler import DiffusionRLScheduler
+from models.refine_grpo.ddim_with_logprob import DDIMSchedulerWithLogProb
 from train.train_selector import run_training
-from evaluation.reward_terms import compute_step_reward, compute_team_reward
+from envs.reward_terms import compute_step_reward, compute_team_reward
 ```
 
 ### 默认路径
@@ -196,8 +196,8 @@ from evaluation.reward_terms import compute_step_reward, compute_team_reward
 | 数据集 | `$DATA_DIR` 默认 `/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets` |
 | 单车 checkpoint | `/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_6/checkpoints/diffusion-epoch=52.ckpt` |
 | 编队 checkpoint | `/media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/checkpoints` |
-| plan anchor | `metadrive/exp_dataset/anchors.npy` |
-| 训练配置 | `configs/train/selector.yaml` / `configs/train/plan_cls_grpo.yaml` |
+| plan anchor | `expert_dataset/anchors.npy` |
+| 训练配置 | `configs/train/selector.yaml` / `configs/train/refine_grpo.yaml` |
 | 训练日志 | `/media/kong/Elements_SE/Diffusion_Data/outputs/selector/run_x/tb` |
 
 ### 参考代码库
@@ -236,8 +236,7 @@ Diffusion-metadrive/
 ├── configs/
 │   └── train/
 │       ├── selector.yaml                  ← selector MAPPO 正式训练配置
-│       ├── plan_cls_grpo.yaml             ← plan_cls_branch GRPO 微调配置
-│       └── platoon_selector_refine.yaml   ← GRPO refinement 训练配置
+│       └── refine_grpo.yaml      ← GRPO refinement 训练配置
 ├── docs/
 │   ├── phases/phase0~7.md                 ← 各 Phase 完整说明
 │   ├── phases2/                           ← Phase 5v2 子任务说明
@@ -254,13 +253,13 @@ Diffusion-metadrive/
 │       ├── task7_train_entry.md           ← 训练入口升级
 │       └── task8_integration_test.md      ← 集成冒烟测试
 ├── envs/
-│   └── platoon_env.py                     ← 编队环境（含 get/set_state）
-├── evaluation/
-│   ├── platoon_metrics.py
+│   ├── platoon_env.py                     ← 编队环境（含 get/set_state）
 │   └── reward_terms.py                    ← compute_trajectory_reward + compute_team_reward
+├── evaluation/
+│   └── platoon_metrics.py                 ← 编队指标
 ├── models/
-│   ├── diffusion/
-│   │   └── diffusion_rl_scheduler.py      ← sample/replay/ref log_prob（从 git 恢复）
+│   ├── refine_grpo/
+│   │   └── ddim_with_logprob.py           ← DDIM transition log_prob
 │   ├── platoon/
 │   │   ├── platoon_diffusion_planner.py
 │   │   ├── trajectory_refiner.py          ← GRPO refinement 封装（截断噪声 + DDIM + advantage）
@@ -277,8 +276,8 @@ Diffusion-metadrive/
 │   ├── test_phase4_task{0~4}.py
 │   ├── test_phase5_task{1~10}.py + test_phase5_integration.py
 │   └── test_phase5v2_task{1~7}.py + test_phase5v2_integration.py  ← Phase 5v2 验收
-├── metadrive/exp_dataset/                 ← 专家数据与 anchor
-├── scenarios/hazard_scenarios.py
+├── expert_dataset/                 ← 专家数据与 anchor
+├── scenarios/definitions.py
 ├── scripts/run_acceptance.sh              ← 统一验收入口
 ├── logs/ outputs/ checkpoints/
 ```

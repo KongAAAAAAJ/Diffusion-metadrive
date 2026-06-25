@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from models.platoon.relation_encoder import RelationEncoder
+from models.platoon_planner._relation_encoder import RelationEncoder
 
 
 def test_relation_encoder_contract_and_stability():

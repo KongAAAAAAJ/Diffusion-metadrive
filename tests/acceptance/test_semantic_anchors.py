@@ -5,8 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-from metadrive.exp_dataset.abstract_anchors import generate_plan_anchors, resolve_shard_paths
-from metadrive.exp_dataset.semantic_labeler import BehaviorMode, label_dataset
+from expert_dataset.abstract_anchors import generate_plan_anchors, resolve_shard_paths
+from expert_dataset.semantic_labeler import BehaviorMode, label_dataset
 
 
 def _trajectory(end_x: float, end_y: float, delta_heading: float = 0.0) -> np.ndarray:

@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _load_custom_traffic_manager_module():
     module_name = "custom_traffic_manager_test"
-    path = REPO_ROOT / "metadrive/envs/diffusion_envs/traffic_manager.py"
+    path = REPO_ROOT / "envs/diffusion_envs/traffic_manager.py"
     stubbed = {}
 
     def register(name: str, module: types.ModuleType) -> None:

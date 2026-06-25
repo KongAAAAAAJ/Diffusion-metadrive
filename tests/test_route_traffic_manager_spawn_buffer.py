@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import metadrive.envs.diffusion_envs.route_traffic_manager as route_traffic_manager
-from metadrive.envs.diffusion_envs.route_traffic_manager import (
+import envs.diffusion_envs.route_traffic_manager as route_traffic_manager
+from envs.diffusion_envs.route_traffic_manager import (
     ROUTE_TRAFFIC_SPAWN_LONGITUDE_BUFFER,
     RouteAwareTrafficManager,
 )

@@ -33,18 +33,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # ── imports ───────────────────────────────────────────────────────────────────
-from metadrive.envs.diffusion_envs.base_multi_env import (
+from envs.diffusion_envs.base_multi_env import (
     DatasetCollectEnv,
     DEFAULT_HYBRID_MAP_CONFIG,
     ROUTE_PRESET_BLOCK_IDS,
 )
-from metadrive.exp_dataset.collect_expert import (
+from expert_dataset.collect_expert import (
     ExpertCollectorConfig,
     build_episode_samples,
     build_frame,
 )
-from metadrive.exp_dataset.expert_idm_policy import ExpertIDMPolicy as Expert
-from metadrive.policy.diffusion_policy.mode_definitions import MODE_SLOTS
+from expert_dataset.expert_idm_policy import ExpertIDMPolicy as Expert
+from models.diffusion.mode_definitions import MODE_SLOTS
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 PASS = "\033[32mPASS\033[0m"

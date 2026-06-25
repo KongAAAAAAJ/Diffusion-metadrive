@@ -8,7 +8,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 import numpy as np
-from metadrive.exp_dataset.expert_idm_policy import ExpertIDMConfig, ExpertIDMPolicy
+from expert_dataset.expert_idm_policy import ExpertIDMConfig, ExpertIDMPolicy
 
 HYBRID_MAP = [
     {"block_id": "s0", "id": "S", "parent_block_id": "root", "parent_socket_index": 0, "length": 300.0},
@@ -25,7 +25,7 @@ ROUTE_BLOCK_IDS = ("g0", "s_ramp0", "c0_ramp0")
 
 def _debug_branch_source(vehicle, current_map, env, route_block_ids):
     """Replay branch resolution logic with verbose output to identify which road is selected."""
-    from metadrive.policy.diffusion_policy.mode_context import (
+    from models.diffusion.mode_context import (
         _get_route_blocks, _get_all_positive_roads_from_block,
         _sample_lane_polyline, _sample_lane_polyline_from_vehicle_position,
         _world_to_local_xy, _build_reachable_nodes, _build_diverged_branch_starts,
@@ -124,8 +124,8 @@ RAMP_KEYS = [
 
 
 def main():
-    from metadrive.envs.diffusion_envs.base_multi_env import BaseMultiEnv
-    from metadrive.policy.diffusion_policy.mode_context import build_mode_context_from_vehicle
+    from envs.diffusion_envs.base_multi_env import BaseMultiEnv
+    from models.diffusion.mode_context import build_mode_context_from_vehicle
 
     env_config = {
         "use_render": False,
@@ -248,7 +248,7 @@ def main():
                             ep = ctx.left_branch_polyline[-1]
                             print(f"      left_br endpoint lateral = {ep[1]:.2f} (expect ~3.50 for adjacent)")
                         # Generate trajectories and check LC_L_H world endpoint
-                        from metadrive.policy.diffusion_policy.mode_trajectory_generator import ModeTrajectoryGenerator
+                        from models.diffusion.mode_trajectory_generator import ModeTrajectoryGenerator
                         gen = ModeTrajectoryGenerator()
                         traj_out = gen.generate(ctx)
                         # LC_L_H is slot index 3

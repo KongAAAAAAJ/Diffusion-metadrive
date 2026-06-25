@@ -5,10 +5,10 @@ import time
 import torch
 from torch import nn
 
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-from metadrive.policy.diffusion_policy.transfuser_model_v2 import V2TransfuserModel
-from models.platoon.platoon_diffusion_planner import PlatoonDiffusionPlanner
-from models.platoon.relation_encoder import RelationEncoder
+from models.diffusion.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_model_v2 import V2TransfuserModel
+from models.platoon_planner.platoon_diffusion_planner import PlatoonDiffusionPlanner
+from models.platoon_planner._relation_encoder import RelationEncoder
 
 
 def _dummy_batch(config, num_vehicles: int = 3):
@@ -24,7 +24,7 @@ def _dummy_batch(config, num_vehicles: int = 3):
 
 
 def test_platoon_diffusion_planner_contract():
-    config = build_transfuser_config("small", plan_anchor_path="metadrive/exp_dataset/metadrive_anchors_ppo.npy")
+    config = build_transfuser_config("small", plan_anchor_path="expert_dataset/metadrive_anchors_ppo.npy")
     planner = PlatoonDiffusionPlanner(config, num_vehicles=3).eval()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     planner = planner.to(device)

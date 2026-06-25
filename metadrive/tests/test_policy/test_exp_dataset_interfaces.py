@@ -19,7 +19,7 @@ def _load_module(module_name: str, path: Path):
 
 
 def test_abstract_anchors_loads_selected_trajectory_key(tmp_path: Path):
-    module = _load_module("abstract_anchors_test", REPO_ROOT / "metadrive/exp_dataset/abstract_anchors.py")
+    module = _load_module("abstract_anchors_test", REPO_ROOT / "expert_dataset/abstract_anchors.py")
     shard_path = tmp_path / "shard_000000.npz"
     np.savez(
         shard_path,
@@ -52,7 +52,7 @@ def test_abstract_anchors_loads_selected_trajectory_key(tmp_path: Path):
 
 
 def test_abstract_anchors_reports_available_keys_for_missing_trajectory_key(tmp_path: Path):
-    module = _load_module("abstract_anchors_test_missing", REPO_ROOT / "metadrive/exp_dataset/abstract_anchors.py")
+    module = _load_module("abstract_anchors_test_missing", REPO_ROOT / "expert_dataset/abstract_anchors.py")
     shard_path = tmp_path / "shard_000000.npz"
     np.savez(
         shard_path,
@@ -81,7 +81,7 @@ def test_abstract_anchors_reports_available_keys_for_missing_trajectory_key(tmp_
 
 
 def test_generate_plan_anchors_exports_xy_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    module = _load_module("abstract_anchors_generate_xy", REPO_ROOT / "metadrive/exp_dataset/abstract_anchors.py")
+    module = _load_module("abstract_anchors_generate_xy", REPO_ROOT / "expert_dataset/abstract_anchors.py")
     output_path = tmp_path / "anchors.npy"
     trajectory = np.stack(
         [
@@ -155,7 +155,7 @@ def test_generate_plan_anchors_exports_xy_only(tmp_path: Path, monkeypatch: pyte
 
 
 def test_generate_plan_anchors_empty_output_is_xy_shaped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    module = _load_module("abstract_anchors_generate_empty", REPO_ROOT / "metadrive/exp_dataset/abstract_anchors.py")
+    module = _load_module("abstract_anchors_generate_empty", REPO_ROOT / "expert_dataset/abstract_anchors.py")
     output_path = tmp_path / "anchors.npy"
     dataset = {
         "trajectory_output": np.zeros((0, 8, 3), dtype=np.float32),
@@ -202,7 +202,7 @@ def test_generate_plan_anchors_empty_output_is_xy_shaped(tmp_path: Path, monkeyp
 def test_generate_plan_anchors_temp_flattens_selected_modes_to_zero_y(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     module = _load_module(
         "abstract_anchors_default_temp_test",
-        REPO_ROOT / "metadrive/exp_dataset/abstract_anchors_default_temp.py",
+        REPO_ROOT / "expert_dataset/abstract_anchors_default_temp.py",
     )
     output_path = tmp_path / "anchors.npy"
     base_anchors = np.stack(
@@ -261,7 +261,7 @@ def test_generate_plan_anchors_temp_flattens_selected_modes_to_zero_y(tmp_path: 
 
 
 def test_run_expert_parse_args_supports_expert_type_and_debug_flag():
-    module = _load_module("run_expert_test", REPO_ROOT / "metadrive/exp_dataset/run_expert.py")
+    module = _load_module("run_expert_test", REPO_ROOT / "expert_dataset/run_expert.py")
 
     args = module.parse_args([
         "--expert-type", "idm",

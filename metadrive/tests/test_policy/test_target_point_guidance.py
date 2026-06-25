@@ -4,9 +4,9 @@ import numpy as np
 import torch
 from types import SimpleNamespace
 
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-import metadrive.policy.diffusion_policy.transfuser_features as transfuser_features
-from metadrive.policy.diffusion_policy.transfuser_features import (
+from models.diffusion.transfuser_config import build_transfuser_config
+import models.diffusion.transfuser_features as transfuser_features
+from models.diffusion.transfuser_features import (
     LaneDecision,
     _build_live_target_lane_polyline,
     _build_topology_polyline_from_live_vehicle,
@@ -15,7 +15,7 @@ from metadrive.policy.diffusion_policy.transfuser_features import (
     observation_to_features,
     sample_to_features_targets,
 )
-from metadrive.policy.diffusion_policy.transfuser_model_v2 import DiffMotionPlanningRefinementModule
+from models.diffusion.transfuser_model_v2 import DiffMotionPlanningRefinementModule
 
 
 class _FakeLane:

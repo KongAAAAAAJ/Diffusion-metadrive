@@ -3,9 +3,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from metadrive.policy.diffusion_policy.transfuser_config import build_transfuser_config
-from metadrive.policy.diffusion_policy.transfuser_features import build_status_feature
-from metadrive.policy.diffusion_policy.transfuser_policy import TransfuserPolicy, compute_trajectory_control
+from models.diffusion.transfuser_config import build_transfuser_config
+from models.diffusion.transfuser_features import build_status_feature
+from models.diffusion.transfuser_policy import TransfuserPolicy, compute_trajectory_control
 
 
 def test_build_status_feature_keeps_navigation_intent():
@@ -147,7 +147,7 @@ def test_transfuser_policy_act_uses_multimodal_inference_and_exposes_candidates(
     fake_status = torch.zeros((19,), dtype=torch.float32)
     fake_ego_state = torch.zeros((19,), dtype=torch.float32)
     monkeypatch.setattr(
-        "metadrive.policy.diffusion_policy.transfuser_policy.observation_to_features",
+        "models.diffusion.transfuser_policy.observation_to_features",
         lambda observation, config, vehicle=None: (
             {
                 "camera_feature": fake_camera,

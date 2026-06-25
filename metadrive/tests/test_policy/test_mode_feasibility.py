@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from metadrive.policy.diffusion_policy.mode_context import ModeContext
-from metadrive.policy.diffusion_policy.mode_feasibility import (
+from models.diffusion.mode_context import ModeContext
+from models.diffusion.mode_feasibility import (
     GeometricFeasibilityChecker,
     TrafficFeasibilityChecker,
     build_mode_valid_mask,

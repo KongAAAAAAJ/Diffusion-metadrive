@@ -21,7 +21,7 @@ class SurrogateHarness:
 
 
 def _load_anchor_trajectories() -> np.ndarray:
-    anchors = np.load("metadrive/exp_dataset/metadrive_anchors.npy").astype(np.float32)
+    anchors = np.load("expert_dataset/metadrive_anchors.npy").astype(np.float32)
     headings = np.zeros((anchors.shape[0], anchors.shape[1], 1), dtype=np.float32)
     return np.concatenate([anchors, headings], axis=-1)
 

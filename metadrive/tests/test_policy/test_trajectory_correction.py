@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from metadrive.exp_dataset.trajectory_correction import (
+from expert_dataset.trajectory_correction import (
     TrajectoryCorrectionContext,
     TrajectoryMode,
     classify_trajectory_mode,

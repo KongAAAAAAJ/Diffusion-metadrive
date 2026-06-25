@@ -28,31 +28,31 @@ def _install_test_stubs() -> None:
     torch_module.load = lambda *args, **kwargs: {}
     sys.modules["torch"] = torch_module
 
-    dataset_module = types.ModuleType("metadrive.envs.diffusion_envs.base_multi_env")
+    dataset_module = types.ModuleType("envs.diffusion_envs.base_multi_env")
     dataset_module.DatasetCollectEnv = object
-    sys.modules["metadrive.envs.diffusion_envs.base_multi_env"] = dataset_module
+    sys.modules["envs.diffusion_envs.base_multi_env"] = dataset_module
 
-    callback_module = types.ModuleType("metadrive.policy.diffusion_policy.transfuser_callback")
+    callback_module = types.ModuleType("models.diffusion.transfuser_callback")
     callback_module.render_closed_loop_prediction = lambda *args, **kwargs: np.zeros((8, 8, 3), dtype=np.uint8)
-    sys.modules["metadrive.policy.diffusion_policy.transfuser_callback"] = callback_module
+    sys.modules["models.diffusion.transfuser_callback"] = callback_module
 
-    config_module = types.ModuleType("metadrive.policy.diffusion_policy.transfuser_config")
+    config_module = types.ModuleType("models.diffusion.transfuser_config")
     config_module.TransfuserConfig = object
     config_module.build_transfuser_config = lambda *args, **kwargs: types.SimpleNamespace(plan_anchor_path="")
     config_module.diffusion_model_config_to_overrides = lambda config: {}
     config_module.load_diffusion_model_config = lambda *args, **kwargs: {}
     config_module.resolve_model_config_value = lambda config, key, default=None: default
     config_module.transfuser_config_to_dict = lambda config: {}
-    sys.modules["metadrive.policy.diffusion_policy.transfuser_config"] = config_module
+    sys.modules["models.diffusion.transfuser_config"] = config_module
 
-    policy_module = types.ModuleType("metadrive.policy.diffusion_policy.transfuser_policy")
+    policy_module = types.ModuleType("models.diffusion.transfuser_policy")
     policy_module.TransfuserPolicy = object
     policy_module.compute_trajectory_control = lambda *args, **kwargs: (np.zeros((2,), dtype=np.float32), {})
-    sys.modules["metadrive.policy.diffusion_policy.transfuser_policy"] = policy_module
+    sys.modules["models.diffusion.transfuser_policy"] = policy_module
 
-    run_dir_module = types.ModuleType("metadrive.policy.diffusion_policy.run_dir_utils")
+    run_dir_module = types.ModuleType("models.diffusion.run_dir_utils")
     run_dir_module.create_numbered_run_dir = lambda path: Path(path) / "run_1"
-    sys.modules["metadrive.policy.diffusion_policy.run_dir_utils"] = run_dir_module
+    sys.modules["models.diffusion.run_dir_utils"] = run_dir_module
 
 
 def _load_module():

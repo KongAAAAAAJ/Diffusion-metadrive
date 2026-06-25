@@ -1,8 +1,8 @@
 import numpy as np
 from types import SimpleNamespace
 
-from metadrive.policy.diffusion_policy.selected_mode_guidance import apply_selected_mode_guidance
-from metadrive.policy.diffusion_policy.test_transfuser_policy import (
+from models.diffusion.selected_mode_guidance import apply_selected_mode_guidance
+from models.diffusion.test_transfuser_policy import (
     _choose_mode_indices,
     _episode_reset_seed,
     _format_combined_frame_reward_text,

@@ -1,5 +1,11 @@
-"""Diffusion utilities used by platoon refinement training."""
+"""MetaDrive TransFuser package."""
 
-from .ddim_with_logprob import DDIMSchedulerWithLogProb
+from models.diffusion.transfuser_config import TransfuserConfig
+from models.diffusion.transfuser_policy import TransfuserPolicy
 
-__all__ = ["DDIMSchedulerWithLogProb"]
+try:
+    from models.diffusion.transfuser_agent import TransfuserAgent
+except ModuleNotFoundError:
+    TransfuserAgent = None
+
+__all__ = ["TransfuserAgent", "TransfuserConfig", "TransfuserPolicy"]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from evaluation.reward_terms import compute_step_reward
+from envs.reward_terms import compute_step_reward
 
 
 def test_reward_contract():
@@ -42,4 +42,3 @@ def test_reward_contract():
 
     missing_key_reward = compute_step_reward({"progress": 1.0}, config)
     assert isinstance(missing_key_reward, float)
-

@@ -124,3 +124,28 @@ def test_build_info_reuses_reward_cache_without_recomputing_progress():
     assert info["agent1"]["platoon_reward"] == reward
     assert info["agent0"]["progress"] == 2.0
     assert info["agent1"]["progress"] == 2.0
+
+
+def test_build_info_includes_scenario_orchestrator_summary():
+    env = _fake_env()
+    env._scenario_orchestrator = SimpleNamespace(
+        get_episode_summary=lambda: {
+            "scenario_id": "S7_ego_merge_from_ramp",
+            "scenario_triggered": True,
+            "scenario_realized": False,
+            "scenario_trigger_step": 1,
+            "scenario_realized_step": None,
+            "scenario_notes": ["recipe_not_realized"],
+        }
+    )
+
+    info = env._build_info_dict(
+        "low_level",
+        actions=env._pending_low_level_actions,
+        base_info={},
+    )
+
+    assert info["agent0"]["scenario_id"] == "S7_ego_merge_from_ramp"
+    assert info["agent0"]["scenario_triggered"] is True
+    assert info["agent0"]["scenario_realized"] is False
+    assert info["agent0"]["scenario_notes"] == ["recipe_not_realized"]
