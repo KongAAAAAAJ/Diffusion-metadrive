@@ -15,14 +15,14 @@ REFINE_TRAIN_CONFIG_PATH="${REFINE_TRAIN_CONFIG_PATH:-${REPO_ROOT}/configs/train
 BASELINE_CKPT="${BASELINE_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt}"
 
 # 分类头 / 轨迹头 GRPO
-GRPO_CKPT="${GRPO_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo/run_71/checkpoints/step_0010000_score_25.7364/full_platoon_refine_grpo.ckpt}"
+GRPO_CKPT="${GRPO_CKPT:-/media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo/run_1/checkpoints/step_0005000_score_25.1007/full_platoon_refine_grpo.ckpt}"
 
 if [[ -z "${GRPO_CKPT}" ]]; then
     echo "[ERROR] GRPO_CKPT is not set." >&2; exit 1
 fi
 
 # ── 输出目录 ──────────────────────────────────────────────────────────────────
-RUN_TAG="${RUN_TAG:-0601}"
+RUN_TAG="${RUN_TAG:-test_0708}"
 OUTPUT_BASE="${OUTPUT_BASE:-/media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo_compare}"
 BASELINE_BASE="${OUTPUT_BASE}/${RUN_TAG}/baseline"
 GRPO_BASE="${OUTPUT_BASE}/${RUN_TAG}/grpo"

@@ -439,7 +439,7 @@ def run_test(args):
     )
     _rule_maker = None
     if _target_guidance_type == "external_point":
-        from models.decision.rule_decisioner import make_rule_maker
+        from models.decisioner.rule_decisioner import make_rule_maker
         _rule_maker = make_rule_maker(dict(config))
         print(f"[test-refine-grpo] RuleMaker enabled: {_rule_maker.__class__.__name__}", flush=True)
 
@@ -515,8 +515,8 @@ def run_test(args):
             # Inject external target_point before extract_rl_context so it flows
             # into model features automatically (external_point guidance mode).
             if _rule_maker is not None:
-                from models.decision.rule_decisioner import inject_rule_maker_target_points
-                inject_rule_maker_target_points(_rule_maker, env, agent_ids, planner_batch)
+                from models.decisioner.rule_decisioner import compute_target_points
+                compute_target_points(_rule_maker, env, agent_ids, planner_batch)
 
             # Context extraction (identical to training line 1861)
             with torch.no_grad():

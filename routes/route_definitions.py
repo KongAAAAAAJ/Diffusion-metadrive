@@ -23,9 +23,10 @@ ROUTE_DEFINITIONS: Tuple[RouteDefinition, ...] = (
     RouteDefinition("R4_mainline_transition", ("x0",), "transition", "mainline", "主线右偏过渡段"),
     RouteDefinition("R5_ramp_curve", ("s_ramp0", "c0_ramp0", "s_ramp1", "c1_ramp0"), "curve", "ramp_merge", "匝道弯道段"),
     RouteDefinition("R6_mainline_merge_approach", ("c2", "g1", "c3"), "merge", "mainline", "主线并入干扰观察段"),
+    RouteDefinition("R6_mainline_curve", ("s_main1", "c2", "g1", "c3"), "curve", "mainline", "匝道前弯道段"),
     RouteDefinition("R6_exit_to_ramp", ("g0", "s_ramp0", "c0_ramp0"), "exit", "ramp_merge", "主线驶离/汇出段"),
     RouteDefinition("R7_merge_core", ("h_ramp0", "g1", "c3"), "merge", "ramp_merge", "匝道汇入主线核心段"),
-    RouteDefinition("R8_narrow_channel", ("merge0", "s_main2", "split0"), "constrained", "mainline", "合流-分流受限通道段"),
+    RouteDefinition("R8_narrow_channel", ("c3", "merge0", "s_main2", "split0"), "constrained", "mainline", "合流-分流受限通道段"),
     RouteDefinition("R9_post_split_curve", ("c4",), "curve", "mainline", "分流后曲线段"),
 )
 

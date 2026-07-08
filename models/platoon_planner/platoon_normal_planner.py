@@ -19,6 +19,8 @@ class PlatoonNormalPlanner:
         safety_weight: float = 8.0,
         ttc_threshold_s: float = 3.0,
         ttc_weight: float = 4.0,
+        hard_collision_check_enabled: bool = True,
+        collision_margin_m: float = 0.2,
     ) -> None:
         self.num_output_points = int(num_output_points)
         self.sample_points = int(sample_points)
@@ -28,6 +30,8 @@ class PlatoonNormalPlanner:
         self.safety_weight = float(safety_weight)
         self.ttc_threshold_s = float(ttc_threshold_s)
         self.ttc_weight = float(ttc_weight)
+        self.hard_collision_check_enabled = bool(hard_collision_check_enabled)
+        self.collision_margin_m = float(collision_margin_m)
         self._last_debug: dict | None = None
 
     def plan(self, env, agent_decisions) -> dict[str, np.ndarray]:
@@ -63,7 +67,7 @@ class PlatoonNormalPlanner:
             }
 
         target_world = self._ego_local_to_world(vehicle, target_point)
-        start_s, start_d = source_lane.local_coordinates(np.asarray(vehicle.position[:2], dtype=np.float32))
+        start_s, start_d = source_lane.local_coordinates(np.asarray(vehicle.position[:2], dtype=np.float32))  # 车辆当前位置映射
         target_lane = self._resolve_target_lane(env, source_lane, action)
         effective_action = int(action) if target_lane is not None else 0
         if target_lane is None:
@@ -72,9 +76,7 @@ class PlatoonNormalPlanner:
         continuation_lane = self._get_continuation_lane(env, vehicle, source_lane)
         source_length = float(getattr(source_lane, "length", 0.0))
 
-        # If vehicle.lane hasn't updated yet after crossing a segment boundary,
-        # start_s can exceed source_lane.length by 1 step. Roll forward into the
-        # continuation so that trajectory planning starts in the correct lane.
+        # 车辆可能刚跨过路段边界但 vehicle.lane 还没更新，planner 会尝试切到 continuation_lane，然后重新计算start_s, start_d
         if start_s > source_length and continuation_lane is not None:
             cont_length_tmp = float(getattr(continuation_lane, "length", 0.0))
             try:
@@ -109,16 +111,20 @@ class PlatoonNormalPlanner:
         remaining_cont = max(cont_length - cont_s_base, 0.0)
         total_length = source_length + remaining_cont
 
-        desired_end_s = float(source_lane.local_coordinates(target_world)[0])
-        desired_end_s = max(float(start_s) + 5.0, desired_end_s)
-        desired_end_s = min(desired_end_s, total_length)
+        desired_end_s = float(source_lane.local_coordinates(target_world)[0])  # 取target_point作为desired_end_s
+        desired_end_s = max(float(start_s) + 5.0, desired_end_s)  # 至少前进5m
+        desired_end_s = min(desired_end_s, total_length) # 不超出total_length
         desired_end_d = self._desired_end_lateral(source_lane, target_lane, effective_action, desired_end_s, target_world, start_d)
 
+        'lattice轨迹采样过程，从时间、纵向距离、横向距离三个维度采样，生成候选轨迹，并对每条候选轨迹进行打分，选择最优轨迹'
         candidates: list[np.ndarray] = []
         scores: list[float] = []
-        for duration in self._candidate_durations():
+        # 1. 时间维度
+        for duration in self._candidate_durations(): 
+            # 2. 纵向距离维度
             for s_offset in self._candidate_longitudinal_offsets():
                 s_end = float(np.clip(desired_end_s + s_offset, float(start_s) + 3.0, total_length))
+                # 3. 横向距离维度
                 for d_end in self._candidate_lateral_targets(effective_action, desired_end_d, source_lane):
                     candidate = self._build_frenet_candidate(
                         source_lane=source_lane,
@@ -132,8 +138,20 @@ class PlatoonNormalPlanner:
                         cont_s_base=cont_s_base,
                         cont_d_offset=cont_d_offset,
                     )
+
                     if candidate is None:
                         continue
+                    # !碰撞检测!!!效果待验证
+                    if self._candidate_collides_with_predicted_vehicles(
+                        candidate,
+                        env=env,
+                        vehicle=vehicle,
+                        duration=float(duration),
+                    ):
+                        candidate = None
+                        continue
+                    # !动力学检测!!!待添加
+                    
                     score = self._score_candidate(
                         candidate,
                         target_world=target_world,
@@ -194,7 +212,8 @@ class PlatoonNormalPlanner:
         return (3.0, 4.0, 5.0)
 
     def _candidate_longitudinal_offsets(self) -> tuple[float, ...]:
-        return (-4.0, 0.0, 4.0)
+        # return (-8.0, -4.0, 0.0, 4.0, 8.0)
+        return range(-60, 60, 2)  # (-60, -19, ..., 0, ..., 18, 59)
 
     def _candidate_lateral_targets(self, action: int, desired_end_d: float, source_lane) -> tuple[float, ...]:
         lane_half_width = 0.5 * float(getattr(source_lane, "width", 3.5) or 3.5)
@@ -556,6 +575,120 @@ class PlatoonNormalPlanner:
             if distances.size:
                 min_dist = min(min_dist, float(np.min(distances)))
         return float(min_dist)
+
+    def _candidate_collides_with_predicted_vehicles(
+        self,
+        candidate: np.ndarray,
+        *,
+        env=None,
+        vehicle=None,
+        duration: float | None = None,
+    ) -> bool:
+        if not self.hard_collision_check_enabled or env is None or vehicle is None:
+            return False
+        if candidate is None or candidate.shape[0] == 0:
+            return False
+
+        ego_length, ego_width = self._vehicle_dimensions(vehicle)
+        times = np.linspace(
+            0.0,
+            max(float(duration or 0.0), 0.0),
+            int(candidate.shape[0]),
+            dtype=np.float64,
+        )
+        margin = max(float(self.collision_margin_m), 0.0)
+        ego_name = getattr(vehicle, "name", None)
+
+        for other_id, other in self._surrounding_vehicles(env):
+            if other is vehicle or getattr(other, "name", None) == ego_name or other_id == ego_name:
+                continue
+            other_pos = getattr(other, "position", None)
+            if other_pos is None:
+                continue
+            try:
+                other_xy0 = np.asarray(other_pos[:2], dtype=np.float64)
+            except Exception:
+                continue
+            if other_xy0.shape[0] < 2 or not np.all(np.isfinite(other_xy0[:2])):
+                continue
+
+            other_velocity = self._vehicle_velocity_xy(other)
+            other_length, other_width = self._vehicle_dimensions(other)
+            half_length_sum = 0.5 * (ego_length + other_length) + margin
+            half_width_sum = 0.5 * (ego_width + other_width) + margin
+            predicted_xy = other_xy0[None, :2] + times[:, None] * other_velocity[None, :]
+            deltas = np.asarray(candidate[:, :2], dtype=np.float64) - predicted_xy
+            if np.any((np.abs(deltas[:, 0]) <= half_length_sum) & (np.abs(deltas[:, 1]) <= half_width_sum)):
+                return True
+        return False
+
+    @staticmethod
+    def _surrounding_vehicles(env) -> list[tuple[object, object]]:
+        vehicles: list[tuple[object, object]] = []
+        seen: set[int] = set()
+
+        agents = getattr(env, "agents", {}) or {}
+        if isinstance(agents, dict):
+            iterable = agents.items()
+        else:
+            iterable = enumerate(agents)
+        for vehicle_id, other in iterable:
+            if other is None or id(other) in seen:
+                continue
+            seen.add(id(other))
+            vehicles.append((vehicle_id, other))
+
+        traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
+        if traffic_manager is None:
+            return vehicles
+        traffic_vehicles = getattr(traffic_manager, "traffic_vehicles", None)
+        if traffic_vehicles is None:
+            traffic_vehicles = getattr(traffic_manager, "_traffic_vehicles", []) or []
+        try:
+            traffic_iterable = list(traffic_vehicles)
+        except TypeError:
+            traffic_iterable = []
+        for idx, other in enumerate(traffic_iterable):
+            if other is None or id(other) in seen:
+                continue
+            seen.add(id(other))
+            vehicles.append((getattr(other, "name", f"traffic_{idx}"), other))
+        return vehicles
+
+    @staticmethod
+    def _vehicle_dimensions(vehicle) -> tuple[float, float]:
+        length = getattr(vehicle, "LENGTH", None)
+        if length is None:
+            length = getattr(vehicle, "length", 5.74)
+        width = getattr(vehicle, "WIDTH", None)
+        if width is None:
+            width = getattr(vehicle, "width", 2.3)
+        try:
+            length = float(length)
+        except (TypeError, ValueError):
+            length = 5.74
+        try:
+            width = float(width)
+        except (TypeError, ValueError):
+            width = 2.3
+        if not np.isfinite(length) or length <= 0.0:
+            length = 5.74
+        if not np.isfinite(width) or width <= 0.0:
+            width = 2.3
+        return float(length), float(width)
+
+    @staticmethod
+    def _vehicle_velocity_xy(vehicle) -> np.ndarray:
+        velocity = getattr(vehicle, "velocity", None)
+        if velocity is None:
+            return np.zeros((2,), dtype=np.float64)
+        try:
+            velocity_xy = np.asarray(velocity[:2], dtype=np.float64)
+        except Exception:
+            return np.zeros((2,), dtype=np.float64)
+        if velocity_xy.shape[0] < 2 or not np.all(np.isfinite(velocity_xy[:2])):
+            return np.zeros((2,), dtype=np.float64)
+        return velocity_xy[:2]
 
     @staticmethod
     def _same_lane(other, source_lane) -> bool:

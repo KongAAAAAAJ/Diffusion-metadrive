@@ -119,4 +119,3 @@ env_config:
     - S9_narrow_channel_negotiation  # 狭道会车，双车道变单车道，考验跟驰和避碰能力
     # - S10_straight_lane_change  
     # - S11_curve_lane_change
-    - S12_cut_in_from_adjacent_lane  # 编队横向被切入，考验避碰能力

@@ -181,6 +181,7 @@ class ScenarioOrchestrator:
         return True
 
     def _handle_hard_brake_lead(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
+        params = self._resolve_hard_brake_params(env, params)
         front_vehicle, front_distance = self._find_front_vehicle_with_distance(ego_vehicle)
         min_distance = float(params.get("front_distance_min_m", 10.0))
         max_distance = float(params.get("front_distance_max_m", float(params.get("lead_distance_m", 20.0)) + 10.0))
@@ -227,6 +228,7 @@ class ScenarioOrchestrator:
             reference_kind=reference_kind,
             block_id=params.get("block_id"),
             socket_index=params.get("socket_index"),
+            internal_road_index=params.get("internal_road_index"),
             lane_index=int(params.get("lane_index", 0)),
             spawn_longitude=float(params.get("spawn_longitude", 15.0)),
             spawn_longitude_offset=float(params.get("spawn_longitude_offset", 0.0)),
@@ -254,6 +256,7 @@ class ScenarioOrchestrator:
             spawn_key = f"{self.local_route}:{vehicle_name}"
             if spawn_key in self._spawned_adjacent_vehicle_keys:
                 continue
+            vehicle_params = self._resolve_adjacent_vehicle_params(env, vehicle_params)
             lane_side = str(vehicle_params.get("lane_side", "left"))
             lane_tuple = self._resolve_adjacent_lane_index(env, ego_vehicle, lane_side=lane_side)
             if lane_tuple is None:
@@ -282,6 +285,55 @@ class ScenarioOrchestrator:
             self._mark_realized(step_count, f"adjacent_spawned:{vehicle_name}")
             realized = True
         return realized
+
+    def _resolve_hard_brake_params(self, env, params: Dict[str, object]) -> Dict[str, object]:
+        resolved = dict(params)
+        if "lead_distance_range_m" in params:
+            resolved["lead_distance_m"] = self._sample_float_range(env, params["lead_distance_range_m"])
+        if "lead_target_speed_range_kmh" in params:
+            resolved["lead_target_speed_kmh"] = self._sample_float_range(env, params["lead_target_speed_range_kmh"])
+        if "brake_target_speed_range_kmh" in params:
+            resolved["brake_target_speed_kmh"] = self._sample_float_range(env, params["brake_target_speed_range_kmh"])
+        if "brake_duration_steps_range" in params:
+            resolved["brake_duration_steps"] = self._sample_int_range(env, params["brake_duration_steps_range"])
+        return resolved
+
+    def _resolve_adjacent_vehicle_params(self, env, params: Dict[str, object]) -> Dict[str, object]:
+        resolved = dict(params)
+        if "spawn_longitude_offset_range_m" in params:
+            resolved["spawn_longitude_offset_m"] = self._sample_float_range(env, params["spawn_longitude_offset_range_m"])
+        if "target_speed_range_kmh" in params:
+            resolved["target_speed_kmh"] = self._sample_float_range(env, params["target_speed_range_kmh"])
+        return resolved
+
+    @staticmethod
+    def _rng_from_env(env):
+        traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
+        rng = getattr(traffic_manager, "np_random", None)
+        if rng is not None:
+            return rng
+        rng = getattr(env, "np_random", None)
+        if rng is not None:
+            return rng
+        return getattr(getattr(env, "engine", None), "np_random", None)
+
+    def _sample_float_range(self, env, value_range) -> float:
+        low, high = value_range
+        rng = self._rng_from_env(env)
+        if rng is not None and hasattr(rng, "uniform"):
+            return float(rng.uniform(float(low), float(high)))
+        return float((float(low) + float(high)) * 0.5)
+
+    def _sample_int_range(self, env, value_range) -> int:
+        low, high = value_range
+        low_i = int(low)
+        high_i = int(high)
+        rng = self._rng_from_env(env)
+        if rng is not None and hasattr(rng, "randint"):
+            return int(rng.randint(low_i, high_i + 1))
+        if rng is not None and hasattr(rng, "integers"):
+            return int(rng.integers(low_i, high_i + 1))
+        return int(round((low_i + high_i) * 0.5))
 
     def _apply_speed_profiles(self, env) -> None:
         if not self._speed_profiles:
@@ -345,6 +397,7 @@ class ScenarioOrchestrator:
         *,
         block_id=None,
         socket_index=None,
+        internal_road_index=None,
         lane_index: int = 0,
         spawn_longitude: float = 10.0,
         spawn_longitude_offset: float = 0.0,
@@ -356,6 +409,7 @@ class ScenarioOrchestrator:
             reference_kind=reference_kind,
             block_id=block_id,
             socket_index=socket_index,
+            internal_road_index=internal_road_index,
             lane_index=lane_index,
         )
         if lane_tuple is None:
@@ -488,7 +542,17 @@ class ScenarioOrchestrator:
             target_speed_kmh=float(params.get("lead_target_speed_kmh", 20.0)),
         )
 
-    def _resolve_lane_index(self, env, ego_vehicle, *, reference_kind: str, block_id=None, socket_index=None, lane_index: int = 0):
+    def _resolve_lane_index(
+        self,
+        env,
+        ego_vehicle,
+        *,
+        reference_kind: str,
+        block_id=None,
+        socket_index=None,
+        internal_road_index=None,
+        lane_index: int = 0,
+    ):
         if reference_kind == "ego_lane":
             lane_idx = getattr(ego_vehicle, "lane_index", None)
             return tuple(lane_idx) if lane_idx is not None else None
@@ -513,6 +577,21 @@ class ScenarioOrchestrator:
             lanes = current_map.road_network.graph[road.start_node][road.end_node]
             resolved_lane = min(max(int(lane_index), 0), len(lanes) - 1)
             return (road.start_node, road.end_node, resolved_lane)
+        if reference_kind == "block_internal_road":
+            lane_groups = getattr(getattr(block, "block_network", None), "get_positive_lanes", lambda: [])() or []
+            try:
+                internal_group = lane_groups[int(internal_road_index or 0)]
+            except (IndexError, TypeError, ValueError):
+                return None
+            if not internal_group:
+                return None
+            road_lane_index = getattr(internal_group[0], "index", None)
+            if road_lane_index is None:
+                return None
+            start_node, end_node = road_lane_index[:2]
+            lanes = current_map.road_network.graph[start_node][end_node]
+            resolved_lane = min(max(int(lane_index), 0), len(lanes) - 1)
+            return (start_node, end_node, resolved_lane)
         return None
 
     def _find_traffic_vehicle(self, env, vehicle_name: str):

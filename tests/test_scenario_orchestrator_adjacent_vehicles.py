@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
+
+from scenarios.definitions import SCENARIO_BY_ID
 from scenarios.definitions import RecipeSpec, ScenarioDefinition, TriggerSpec
 from scenarios.orchestrator import ScenarioOrchestrator
 
@@ -28,9 +31,11 @@ class FakeRoadNetwork:
 
 
 class FakeTrafficManager:
-    def __init__(self) -> None:
+    def __init__(self, rng=None) -> None:
         self._traffic_vehicles = []
         self.spawn_calls = []
+        self.np_random = rng
+        self.policies = {}
 
     def random_vehicle_type(self):
         return "vehicle"
@@ -40,10 +45,11 @@ class FakeTrafficManager:
         vehicle = SimpleNamespace(name=name, spawn_config=config)
         self._traffic_vehicles.append(vehicle)
         self.spawn_calls.append((vehicle_type, config))
+        self.policies[name] = SimpleNamespace(target_speed=0.0)
         return vehicle
 
 
-def make_env_and_ego(lane_count: int = 3, ego_lane_index: int = 1):
+def make_env_and_ego(lane_count: int = 3, ego_lane_index: int = 1, rng=None):
     lanes = [FakeLane(index) for index in range(lane_count)]
     road_network = FakeRoadNetwork(lanes)
     block = SimpleNamespace(
@@ -52,12 +58,12 @@ def make_env_and_ego(lane_count: int = 3, ego_lane_index: int = 1):
         get_socket_list=lambda: [],
         get_respawn_roads=lambda: [],
     )
-    traffic_manager = FakeTrafficManager()
+    traffic_manager = FakeTrafficManager(rng=rng)
     current_map = SimpleNamespace(road_network=road_network, blocks=[block])
     engine = SimpleNamespace(
         current_map=current_map,
         traffic_manager=traffic_manager,
-        get_policy=lambda _name: None,
+        get_policy=lambda name: traffic_manager.policies.get(name),
     )
     ego_lane = lanes[ego_lane_index]
     ego = SimpleNamespace(
@@ -117,6 +123,109 @@ def test_adjacent_lane_recipe_spawns_left_and_right_once() -> None:
     assert orchestrator.summary.scenario_realized is True
     assert orchestrator.summary.notes.count("adjacent_spawned:left_side") == 1
     assert orchestrator.summary.notes.count("adjacent_spawned:right_side") == 1
+
+
+def test_s5_hard_brake_recipe_randomizes_from_traffic_manager_rng(monkeypatch) -> None:
+    rng = np.random.RandomState(123)
+    env, ego, _traffic_manager = make_env_and_ego(rng=rng)
+    ego.speed_km_h = 30.0
+    orchestrator = ScenarioOrchestrator(SCENARIO_BY_ID["S5_hard_brake_lead"], "R3_mainline_straight")
+    orchestrator.reset(env, "agent0")
+    orchestrator._road_to_block_id = {("road_a", "road_b"): "s_main0"}
+    monkeypatch.setattr(orchestrator, "_find_front_vehicle_with_distance", lambda vehicle: (None, None))
+
+    captured_params = {}
+
+    def fake_spawn(env_arg, ego_arg, params):
+        captured_params.update(params)
+        return SimpleNamespace(name="spawned_lead")
+
+    monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", fake_spawn)
+
+    orchestrator.before_step(env, "agent0", 1)
+
+    expected_rng = np.random.RandomState(123)
+    assert captured_params["lead_distance_m"] == float(expected_rng.uniform(45.0, 55.0))
+    assert captured_params["lead_target_speed_kmh"] == float(expected_rng.uniform(19.0, 23.0))
+    assert captured_params["brake_target_speed_kmh"] == float(expected_rng.uniform(0.5, 2.0))
+    assert captured_params["brake_duration_steps"] == int(expected_rng.randint(450, 551))
+    assert SCENARIO_BY_ID["S5_hard_brake_lead"].traffic_recipes[0].params["lead_distance_m"] == 50.0
+
+
+def test_s5_adjacent_recipe_randomizes_each_vehicle_from_traffic_manager_rng() -> None:
+    rng = np.random.RandomState(321)
+    env, ego, traffic_manager = make_env_and_ego(rng=rng)
+    ego.position = (20.0, ego.position[1])
+    orchestrator = ScenarioOrchestrator(SCENARIO_BY_ID["S5_hard_brake_lead"], "R3_mainline_straight")
+    orchestrator.reset(env, "agent0")
+    orchestrator._road_to_block_id = {("road_a", "road_b"): "s_main0"}
+
+    orchestrator.before_step(env, "agent0", 1)
+
+    expected_rng = np.random.RandomState(321)
+    left_offset = float(expected_rng.uniform(-10.0, -6.0))
+    left_speed = float(expected_rng.uniform(16.0, 20.0))
+    right_offset = float(expected_rng.uniform(4.0, 8.0))
+    right_speed = float(expected_rng.uniform(17.0, 21.0))
+
+    assert [call[1]["spawn_lane_index"] for call in traffic_manager.spawn_calls] == [
+        ("road_a", "road_b", 0),
+        ("road_a", "road_b", 2),
+    ]
+    assert [call[1]["spawn_longitude"] for call in traffic_manager.spawn_calls] == [
+        20.0 + left_offset,
+        20.0 + right_offset,
+    ]
+    assert [traffic_manager.policies[vehicle.name].target_speed for vehicle in traffic_manager._traffic_vehicles] == [
+        left_speed,
+        right_speed,
+    ]
+
+
+def test_hard_brake_recipe_without_ranges_keeps_static_params(monkeypatch) -> None:
+    rng = np.random.RandomState(123)
+    env, _ego, _traffic_manager = make_env_and_ego(rng=rng)
+    definition = ScenarioDefinition(
+        code="T",
+        scenario_id="test_static_hard_brake",
+        allowed_local_routes=("R1_entry_straight",),
+        trigger_by_local_route={"R1_entry_straight": TriggerSpec("s0", 80.0, 120.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "hard_brake_lead",
+                {
+                    "lead_distance_m": 10.0,
+                    "lead_target_speed_kmh": 21.0,
+                    "front_distance_min_m": 10.0,
+                    "front_distance_max_m": 24.0,
+                    "brake_target_speed_kmh": 1.0,
+                    "brake_duration_steps": 200,
+                },
+            ),
+        ),
+        ego_spawn_lane_preference=None,
+        ego_spawn_lane_probabilities=None,
+        expert_recipe="test",
+        description="test",
+    )
+    orchestrator = ScenarioOrchestrator(definition, "R1_entry_straight")
+    orchestrator.reset(env, "agent0")
+    monkeypatch.setattr(orchestrator, "_find_front_vehicle_with_distance", lambda vehicle: (None, None))
+
+    captured_params = {}
+
+    def fake_spawn(env_arg, ego_arg, params):
+        captured_params.update(params)
+        return SimpleNamespace(name="spawned_lead")
+
+    monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", fake_spawn)
+
+    orchestrator.before_step(env, "agent0", 1)
+
+    assert captured_params["lead_distance_m"] == 10.0
+    assert captured_params["lead_target_speed_kmh"] == 21.0
+    assert captured_params["brake_target_speed_kmh"] == 1.0
+    assert captured_params["brake_duration_steps"] == 200
 
 
 def test_adjacent_lane_recipe_skips_missing_side_lane() -> None:
@@ -281,5 +390,5 @@ def test_injected_background_vehicle_gets_topdown_marker() -> None:
     assert len(traffic_manager._traffic_vehicles) == 1
     spawned = traffic_manager._traffic_vehicles[0]
     assert spawned.scenario_managed_vehicle is True
-    assert spawned.scenario_warning_marker == "BG"
+    assert spawned.scenario_warning_marker == "!"
     assert spawned.scenario_vehicle_role == "injected_background"

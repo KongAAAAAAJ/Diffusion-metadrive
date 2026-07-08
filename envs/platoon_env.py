@@ -90,8 +90,8 @@ class PlatoonEnvConfig:
         num_scenarios: int = 1,
         traffic_density: float = 0.04,
         horizon: int = 1000,
-        initial_speed_km_h: float = 25.0,
-        target_speed_km_h: float = 25.0,
+        initial_speed_km_h: float = 80.0,
+        target_speed_km_h: float = 90.0,
         headway_time_s: float = 0.5,
         trajectory_dt: float = 0.5,
         vehicle_length_m: float = 5.74,
@@ -418,6 +418,7 @@ class PlatoonEnv(BaseMultiEnv):
             "platoon_spawn_front_buffer_m": 8.0,
             "initial_speed_km_h": self.platoon_config.initial_speed_km_h,
             "horizon": self.platoon_config.horizon,
+            "traffic_target_speed": (60.0, 90.0),  # km/h
             **self._build_observation_config(),
             **self._env_overrides,
         }

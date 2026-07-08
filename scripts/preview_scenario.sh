@@ -29,7 +29,11 @@ echo "--- python: ${PYTHON_BIN} ---"
     --num-agents 3 \
     --decision-policy rule_maker \
     --planning-policy lattice \
-    --control-policy pid \
+    --control-policy adaptive \
     --num-episodes 5 \
     --evaluate \
     "$@"
+
+# TODO:
+#   - 调一下横向控制  150‘ --> 60'
+#   - 检查一下5场景baseline的表现，保存典型视频、数据和日志，便于与后续的模型对比  180‘

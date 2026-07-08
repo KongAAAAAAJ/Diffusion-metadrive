@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from models.controller.base_controller import BaseController
+from models.controller.controller_helper import save_pid_debug_plot
 
 
 def _wrap_to_pi(angle: float) -> float:
@@ -83,9 +84,9 @@ class PIDTrajectoryController(BaseController):
         waypoint = trajectory_local[valid_idx]
         forward = max(float(waypoint[0]), 1e-3)
         lateral_angle_error = float(np.arctan2(float(waypoint[1]), forward))
-        heading_error = float(waypoint[2]) if waypoint.shape[0] > 2 else 0.0
+        # heading_error = float(waypoint[2]) if waypoint.shape[0] > 2 else 0.0
         steering = self._pid(agent_id, "lat", lateral_angle_error, self.lateral_kp, self.lateral_ki, self.lateral_kd)
-        steering += self._pid(agent_id, "heading", heading_error, self.heading_kp, self.heading_ki, self.heading_kd)
+        # steering += self._pid(agent_id, "heading", heading_error, self.heading_kp, self.heading_ki, self.heading_kd)
 
         segment_distances = np.linalg.norm(np.diff(trajectory_local[:, :2], axis=0), axis=1)
         if segment_distances.size > 0:

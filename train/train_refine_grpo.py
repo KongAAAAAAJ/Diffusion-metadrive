@@ -1976,7 +1976,7 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
     )
     _rule_maker = None
     if _target_guidance_type == "external_point":
-        from models.decision.rule_decisioner import make_rule_maker
+        from models.decisioner.rule_decisioner import make_rule_maker
         _rule_maker = make_rule_maker(dict(config))
         print(f"[refine-grpo] RuleMaker enabled: {_rule_maker.__class__.__name__}", flush=True)
 
@@ -2024,8 +2024,8 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
             # Inject external target_point before extract_rl_context so it flows
             # into model features automatically (external_point guidance mode).
             if _rule_maker is not None:
-                from models.decision.rule_decisioner import inject_rule_maker_target_points
-                inject_rule_maker_target_points(_rule_maker, env, agent_ids, planner_batch)
+                from models.decisioner.rule_decisioner import compute_target_points
+                compute_target_points(_rule_maker, env, agent_ids, planner_batch)
             candidates = np.asarray(export["trajectory_candidates"], dtype=np.float32)
             fix_candidates_heading_inplace(candidates)   # tanh*π → atan2(Δy,Δx)
             masks = np.asarray(export["lane_valid_mask"], dtype=bool)

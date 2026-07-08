@@ -144,20 +144,20 @@ def test_s5_hard_brake_lead_randomizes_lead_spawn_params_from_env_seed(monkeypat
     orchestrator.before_step(env, "default_agent", 11)
 
     expected_rng = np.random.RandomState(123)
-    expected_distance = float(expected_rng.uniform(5.0, 12.0))
-    expected_target = float(max(30.0 - expected_rng.uniform(2.0, 5.0), 1e-3))
+    expected_distance = float(expected_rng.uniform(45.0, 55.0))
+    expected_target = float(expected_rng.uniform(19.0, 23.0))
     assert captured_params["lead_distance_m"] == expected_distance
     assert captured_params["lead_target_speed_kmh"] == expected_target
-    assert 5.0 <= captured_params["lead_distance_m"] <= 12.0
-    assert 0.0 < captured_params["lead_target_speed_kmh"] < ego.speed_km_h
+    assert 45.0 <= captured_params["lead_distance_m"] <= 55.0
+    assert 19.0 <= captured_params["lead_target_speed_kmh"] <= 23.0
 
 
 def test_s5_hard_brake_random_ranges_are_declared_in_definition():
     scenario = get_scenario_definition("S5_hard_brake_lead")
     params = scenario.traffic_recipes[0].params
 
-    assert tuple(params["lead_distance_range_m"]) == (5.0, 12.0)
-    assert tuple(params["lead_speed_delta_range_kmh"]) == (2.0, 5.0)
+    assert tuple(params["lead_distance_range_m"]) == (45.0, 55.0)
+    assert tuple(params["lead_target_speed_range_kmh"]) == (19.0, 23.0)
 
 
 def test_inject_background_vehicle_randomizes_spawn_and_speed_from_env_seed(monkeypatch):
@@ -494,7 +494,7 @@ def test_s8_injects_right_adjacent_background_vehicle_near_ego_spawn():
     assert recipe.params["max_spawn_attempts"] == 6
 
 
-def test_block_route_road_lane_index_can_select_rightmost_lane(monkeypatch):
+def test_block_route_road_lane_index_can_select_numeric_lane(monkeypatch):
     lanes = [
         SimpleNamespace(index=("G1_START", "G1_END", 0)),
         SimpleNamespace(index=("G1_START", "G1_END", 1)),
@@ -526,7 +526,7 @@ def test_block_route_road_lane_index_can_select_rightmost_lane(monkeypatch):
         ego_vehicle=None,
         reference_kind="block_route_road",
         block_id="g1",
-        lane_index="rightmost",
+        lane_index=2,
     )
 
     assert lane_tuple == ("G1_START", "G1_END", 2)
@@ -575,11 +575,11 @@ def test_block_internal_road_can_select_numeric_lane_on_internal_road():
         ego_vehicle=None,
         reference_kind="block_internal_road",
         block_id="g1",
-        internal_road_index=1,
+        internal_road_index=0,
         lane_index=2,
     )
 
-    assert lane_tuple == ("MAIN_START", "MAIN_END", 2)
+    assert lane_tuple == ("ENTRY_START", "ENTRY_END", 2)
 
 
 def test_non_s5_hard_brake_lead_keeps_static_recipe_params(monkeypatch):

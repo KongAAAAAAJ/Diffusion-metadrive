@@ -54,12 +54,23 @@ class S8HardcodedTargetFakeRoadNetwork:
         return self._lanes[tuple(lane_index)]
 
 
-def _vehicle(name: str, x: float, y: float, lane, speed_km_h: float = 18.0):
+def _vehicle(
+    name: str,
+    x: float,
+    y: float,
+    lane,
+    speed_km_h: float = 18.0,
+    velocity: tuple[float, float] = (0.0, 0.0),
+    heading_theta: float = 0.0,
+):
     return SimpleNamespace(
         name=name,
         position=np.asarray([x, y], dtype=np.float32),
-        heading_theta=0.0,
+        heading_theta=float(heading_theta),
         speed_km_h=float(speed_km_h),
+        velocity=np.asarray(velocity, dtype=np.float32),
+        LENGTH=5.74,
+        WIDTH=2.3,
         lane=lane,
         lane_index=lane.index,
     )
@@ -290,3 +301,109 @@ def test_score_candidate_adds_ttc_penalty_for_slow_lead_vehicle():
     )
 
     assert slow_score > fast_score + 3.0
+
+
+def test_candidate_collision_detects_static_vehicle_aabb_overlap():
+    env = _env(agent_lane_id=1)
+    ego = env.agents["agent0"]
+    lane = ego.lane
+    env.agents["stopped"] = _vehicle("stopped", 18.0, 0.0, lane, velocity=(0.0, 0.0))
+    planner = PlatoonNormalPlanner(collision_margin_m=0.0)
+    candidate = np.asarray(
+        [
+            [10.0, 0.0, 0.0],
+            [14.0, 0.0, 0.0],
+            [18.0, 0.0, 0.0],
+            [22.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    assert planner._candidate_collides_with_predicted_vehicles(candidate, env=env, vehicle=ego, duration=3.0)
+
+
+def test_candidate_collision_uses_velocity_without_heading_fallback():
+    env = _env(agent_lane_id=1)
+    ego = env.agents["agent0"]
+    lane = ego.lane
+    env.agents["crossing"] = _vehicle(
+        "crossing",
+        18.0,
+        -8.0,
+        lane,
+        velocity=(0.0, 4.0),
+        heading_theta=np.pi,
+    )
+    planner = PlatoonNormalPlanner(collision_margin_m=0.0)
+    candidate = np.asarray(
+        [
+            [10.0, 0.0, 0.0],
+            [14.0, 0.0, 0.0],
+            [18.0, 0.0, 0.0],
+            [22.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    assert planner._candidate_collides_with_predicted_vehicles(candidate, env=env, vehicle=ego, duration=2.0)
+
+
+def test_candidate_collision_ignores_vehicle_outside_aabb_width():
+    env = _env(agent_lane_id=1)
+    ego = env.agents["agent0"]
+    lane = ego.lane
+    env.agents["adjacent"] = _vehicle("adjacent", 18.0, 4.0, lane, velocity=(0.0, 0.0))
+    planner = PlatoonNormalPlanner(collision_margin_m=0.0)
+    candidate = np.asarray(
+        [
+            [10.0, 0.0, 0.0],
+            [14.0, 0.0, 0.0],
+            [18.0, 0.0, 0.0],
+            [22.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    assert not planner._candidate_collides_with_predicted_vehicles(candidate, env=env, vehicle=ego, duration=3.0)
+
+
+def test_candidate_collision_checks_traffic_manager_vehicles():
+    env = _env(agent_lane_id=1)
+    ego = env.agents["agent0"]
+    lane = ego.lane
+    traffic_vehicle = _vehicle("traffic", 18.0, 0.0, lane, velocity=(0.0, 0.0))
+    env.engine.traffic_manager = SimpleNamespace(_traffic_vehicles=[traffic_vehicle])
+    planner = PlatoonNormalPlanner(collision_margin_m=0.0)
+    candidate = np.asarray(
+        [
+            [10.0, 0.0, 0.0],
+            [14.0, 0.0, 0.0],
+            [18.0, 0.0, 0.0],
+            [22.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    assert planner._candidate_collides_with_predicted_vehicles(candidate, env=env, vehicle=ego, duration=3.0)
+
+
+def test_plan_filters_colliding_candidates_before_scoring_and_falls_back():
+    env = _env(agent_lane_id=1)
+    ego = env.agents["agent0"]
+    lane = ego.lane
+    blocker = _vehicle("blocker", 30.0, 0.0, lane, velocity=(0.0, 0.0))
+    blocker.LENGTH = 200.0
+    blocker.WIDTH = 20.0
+    env.agents["blocker"] = blocker
+    planner = PlatoonNormalPlanner(collision_margin_m=0.0)
+
+    result = planner.plan(
+        env,
+        {"agent0": {"action": 0, "target_point": np.asarray([25.0, 0.0], dtype=np.float32)}},
+    )
+    debug = planner.get_last_debug()
+
+    assert result["agent0"].shape == (8, 3)
+    assert debug is not None
+    assert debug["agent0"]["fallback_used"] is True
+    assert debug["agent0"]["fallback_reason"] == "no_valid_candidates"

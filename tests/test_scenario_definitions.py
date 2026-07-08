@@ -29,15 +29,31 @@ def test_s5_declares_adjacent_lane_side_vehicle_recipe() -> None:
             "name": "left_side",
             "lane_side": "left",
             "spawn_longitude_offset_m": -8.0,
+            "spawn_longitude_offset_range_m": (-10.0, -6.0),
             "target_speed_kmh": 18.0,
+            "target_speed_range_kmh": (16.0, 20.0),
         },
         {
             "name": "right_side",
             "lane_side": "right",
             "spawn_longitude_offset_m": 6.0,
+            "spawn_longitude_offset_range_m": (4.0, 8.0),
             "target_speed_kmh": 19.0,
+            "target_speed_range_kmh": (17.0, 21.0),
         },
     )
+
+
+def test_s5_declares_hard_brake_random_ranges() -> None:
+    scenario = SCENARIO_BY_ID["S5_hard_brake_lead"]
+    recipes = [recipe for recipe in scenario.traffic_recipes if recipe.operation == "hard_brake_lead"]
+
+    assert len(recipes) == 1
+    params = recipes[0].params
+    assert params["lead_distance_range_m"] == (45.0, 55.0)
+    assert params["lead_target_speed_range_kmh"] == (19.0, 23.0)
+    assert params["brake_target_speed_range_kmh"] == (0.5, 2.0)
+    assert params["brake_duration_steps_range"] == (450, 550)
 
 
 def test_s9_declares_safe_internal_spawn_road() -> None:
@@ -63,4 +79,8 @@ def test_s8_injected_background_recipes_declare_lane_index() -> None:
 
     assert recipes
     for recipe in recipes:
-        assert recipe.params["lane_index"] == 0
+        assert recipe.params["reference_kind"] == "block_internal_road"
+        assert recipe.params["block_id"] == "g0"
+        assert "socket_index" not in recipe.params
+        assert recipe.params["internal_road_index"] == 0
+        assert recipe.params["lane_index"] == 2

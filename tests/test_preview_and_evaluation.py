@@ -13,6 +13,7 @@ from evaluation import preview_and_evaluation as module
 class _FakeVehicle:
     def __init__(self) -> None:
         self.position = np.asarray([0.0, 0.0], dtype=np.float32)
+        self.velocity = np.asarray([0.0, 0.0], dtype=np.float32)
         self.heading_theta = 0.0
         self.speed_km_h = 0.0
 
@@ -26,6 +27,11 @@ class _FakeEnv:
         self.spawn_seeds = []
         self.applied_roles = []
         self.agents = {}
+        self.config = {
+            "pid_dt": 0.5,
+            "physics_world_step_size": 0.02,
+            "decision_repeat": 5,
+        }
         self.engine = type(
             "Engine",
             (),
@@ -53,6 +59,7 @@ class _FakeEnv:
             action = np.asarray(actions.get(agent_id, np.zeros(2, dtype=np.float32)), dtype=np.float32)
             vehicle.position = vehicle.position + np.asarray([1.0 + idx, 0.1 * idx], dtype=np.float32)
             vehicle.speed_km_h = float(vehicle.speed_km_h + 3.6 * float(action[1]) + 1.0)
+            vehicle.velocity = vehicle.velocity + np.asarray([float(action[1]) + 0.1, 0.0], dtype=np.float32)
             vehicle.heading_theta = float(vehicle.heading_theta + 0.01 * float(action[0]))
         info = {
             "agent0": {"crash": False, "crash_vehicle": False},
@@ -501,13 +508,7 @@ def test_main_defaults_match_preview_scenario_script(monkeypatch) -> None:
     assert captured["control_policy"] == "adaptive"
 
 
-def test_main_accepts_lqr_lateral_override_args(monkeypatch) -> None:
-    captured = {}
-
-    def fake_run_scenario(**kwargs):
-        captured.update(kwargs)
-        return Path("/tmp/videos")
-
+def test_main_rejects_lqr_lateral_override_args(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
@@ -521,13 +522,38 @@ def test_main_accepts_lqr_lateral_override_args(monkeypatch) -> None:
             "0.2",
         ],
     )
+
+    with pytest.raises(SystemExit):
+        module.main()
+
+
+def test_main_accepts_horizon_override_arg(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run_scenario(**kwargs):
+        captured.update(kwargs)
+        return Path("/tmp/videos")
+
+    monkeypatch.setattr(sys, "argv", ["preview_platoon.py", "--horizon", "456"])
     monkeypatch.setattr(module, "run_scenario", fake_run_scenario)
 
     module.main()
 
-    assert captured["lqr_lat_q1"] == pytest.approx(2.0)
-    assert captured["lqr_lat_q2"] == pytest.approx(3.0)
-    assert captured["lqr_lat_r"] == pytest.approx(0.2)
+    assert captured["horizon"] == 456
+
+
+def test_main_forwards_horizon_override_to_all_scenarios(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run_all_scenarios(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(sys, "argv", ["preview_platoon.py", "--all-scenarios", "--horizon", "456"])
+    monkeypatch.setattr(module, "run_all_scenarios", fake_run_all_scenarios)
+
+    module.main()
+
+    assert captured["horizon"] == 456
 
 
 def test_run_preview_uses_start_seed_for_each_episode(monkeypatch, tmp_path: Path) -> None:
@@ -559,6 +585,36 @@ def test_run_preview_uses_start_seed_for_each_episode(monkeypatch, tmp_path: Pat
     assert fake_env.reset_seeds == [None, None]
     assert video_dir.exists()
     assert len(written) == 2
+
+
+def test_run_scenario_forwards_horizon_to_env_config(monkeypatch, tmp_path: Path) -> None:
+    fake_env = _FakeEnv([{"done_step": 1}])
+    captured_config = {}
+
+    monkeypatch.setattr(module, "_pick_local_route", lambda scenario_id: "R0")
+    monkeypatch.setattr(module, "_capture_topdown_frame", lambda *args, **kwargs: np.zeros((8, 8, 3), dtype=np.uint8))
+    monkeypatch.setattr(module, "_write_video", lambda path, frames, fps: None)
+    monkeypatch.setattr(
+        module,
+        "_build_pipeline_factory",
+        lambda *args, **kwargs: (lambda env, agent_ids, seed: (lambda env: {aid: np.zeros(2, dtype=np.float32) for aid in agent_ids})),
+    )
+
+    module.run_scenario(
+        scenario_id="S1_free_cruise_straight",
+        local_route=None,
+        num_agents=3,
+        num_episodes=1,
+        output_root=tmp_path,
+        heading_up=False,
+        traffic_density=0.10,
+        start_seed=59,
+        fps=10,
+        env_factory=lambda config: (captured_config.update(config) or fake_env),
+        horizon=123,
+    )
+
+    assert captured_config["horizon"] == 123
 
 
 def test_run_preview_retries_episode_when_it_ends_immediately(monkeypatch, tmp_path: Path) -> None:
@@ -647,6 +703,38 @@ def test_run_single_episode_prints_stop_reason(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "Episode stopped: step=0 reason=crash" in captured.out
     assert "crash_agents=agent1" in captured.out
+
+
+def test_run_single_episode_records_with_metadrive_low_level_step_dt(monkeypatch) -> None:
+    fake_env = _FakeEnv([{"done_step": 0}])
+    fake_env.config = {
+        "pid_dt": 0.5,
+        "physics_world_step_size": 0.03,
+        "decision_repeat": 4,
+    }
+    recorded_dts = []
+
+    def fake_collect_episode_step_record(**kwargs):
+        recorded_dts.append(kwargs["dt"])
+        return {"step_idx": kwargs["step_idx"], "vehicles": {}}
+
+    monkeypatch.setattr(module, "_capture_topdown_frame", lambda *args, **kwargs: np.zeros((8, 8, 3), dtype=np.uint8))
+    monkeypatch.setattr(module, "_collect_episode_step_record", fake_collect_episode_step_record)
+    action_fn_factory = lambda env, agent_ids, seed: (  # noqa: E731
+        lambda env: {aid: np.zeros(2, dtype=np.float32) for aid in agent_ids}
+    )
+
+    module._run_single_episode(
+        fake_env,
+        ["agent0", "agent1", "agent2"],
+        "agent0",
+        False,
+        59,
+        action_fn_factory,
+        episode_step_records=[],
+    )
+
+    assert recorded_dts == [pytest.approx(0.12)]
 
 
 def test_run_preview_raises_when_no_frames_are_captured(monkeypatch, tmp_path: Path) -> None:
@@ -761,6 +849,7 @@ def test_evaluate_writes_episode_metrics_json_and_plots(monkeypatch, tmp_path: P
         "speed_time.png",
         "accel_time.png",
         "heading_time.png",
+        "distance.png",
         "steer_time.png",
         "throttle_time.png",
     ]:

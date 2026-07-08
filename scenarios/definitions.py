@@ -47,6 +47,7 @@ class ScenarioDefinition:
     ego_spawn_lane_id: int | None = None
     # Backward-compatible alternative: distance from selected road end.
     ego_spawn_distance_to_route_end_m: float | None = None
+    ego_initial_speed_km_h: float | None = None
 
     @property
     def allowed_route_presets(self) -> Tuple[str, ...]:
@@ -69,6 +70,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         traffic_recipes=tuple(),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=30.0,
         expert_recipe="平稳巡航",
         description="直道自由巡航",
     ),
@@ -76,7 +78,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         code="S2",
         scenario_id="S2_free_cruise_curve",
         # allowed_local_routes=("R2_entry_curve", "R5_ramp_curve", "R9_post_split_curve"),  # !!!!!!!!
-        allowed_local_routes=("R2_entry_curve",),
+        allowed_local_routes=("R6_mainline_curve",),
         trigger_by_local_route={
             "R2_entry_curve": TriggerSpec("c0", 10.0, 120.0),
             "R5_ramp_curve": TriggerSpec("c0_ramp0", 5.0, 85.0),
@@ -85,6 +87,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         traffic_recipes=tuple(),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=25.0,
         expert_recipe="稍保守速度",
         description="弯道自由巡航",
     ),
@@ -102,6 +105,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=26.0,
         expert_recipe="偏纵向跟驰",
         description="直道跟驰",
     ),
@@ -118,6 +122,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=22.0,
         expert_recipe="偏保守跟驰",
         description="弯道跟驰",
     ),
@@ -132,18 +137,22 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         },
         traffic_recipes=(
             RecipeSpec(
-                "hard_brake_lead",
+                "hard_brake_lead",  # 急刹车
                 {
-                    "lead_distance_m": 10.0,
+                    "lead_distance_m": 50.0,  # 50m 前方触发急刹
+                    "lead_distance_range_m": (45.0, 55.0),
                     "lead_target_speed_kmh": 21.0,
+                    "lead_target_speed_range_kmh": (19.0, 23.0),
                     "front_distance_min_m": 10.0,
                     "front_distance_max_m": 24.0,
                     "brake_target_speed_kmh": 1.0,
+                    "brake_target_speed_range_kmh": (0.5, 2.0),
                     "brake_duration_steps": 500,
+                    "brake_duration_steps_range": (450, 550),
                 },
             ),
             RecipeSpec(
-                "inject_adjacent_lane_vehicles",
+                "inject_adjacent_lane_vehicles",  # 相邻车道车
                 {
                     "trigger_on_start": True,
                     "clearance_scope": "same_lane",
@@ -151,14 +160,18 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                         {
                             "name": "left_side",
                             "lane_side": "left",
-                            "spawn_longitude_offset_m": -8.0,
+                            "spawn_longitude_offset_m": -8.0,  # 相对于编队头车的位置
+                            "spawn_longitude_offset_range_m": (-10.0, -6.0),
                             "target_speed_kmh": 18.0,
+                            "target_speed_range_kmh": (16.0, 20.0),
                         },
                         {
                             "name": "right_side",
                             "lane_side": "right",
                             "spawn_longitude_offset_m": 6.0,
+                            "spawn_longitude_offset_range_m": (4.0, 8.0),
                             "target_speed_kmh": 19.0,
+                            "target_speed_range_kmh": (17.0, 21.0),
                         },
                     ),
                 },
@@ -166,6 +179,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ),
         ego_spawn_lane_preference="middle",
         ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=24.0,
         expert_recipe="提高安全时距",
         description="前车急减速",
     ),
@@ -192,6 +206,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",
         ego_spawn_longitude_m=12,
+        ego_initial_speed_km_h=22.0,
         expert_recipe="保守让行",
         description="背景车并入 ego 所在主线",
     ),
@@ -215,6 +230,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=22.0,
         expert_recipe="汇入博弈",
         description="ego 从匝道汇入主线",
     ),
@@ -229,9 +245,9 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
             RecipeSpec(
                 "inject_background_vehicle",
                 {
-                    "reference_kind": "block_socket_road",
+                    "reference_kind": "block_internal_road",
                     "block_id": "g0",
-                    "socket_index": 0,
+                    "internal_road_index": 0,
                     "lane_index": 2,
                     "spawn_longitude": 20.0,
                     "target_speed_kmh": 18.0,
@@ -240,9 +256,9 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
             RecipeSpec(
                 "inject_background_vehicle",
                 {
-                    "reference_kind": "block_socket_road",
+                    "reference_kind": "block_internal_road",
                     "block_id": "g0",
-                    "socket_index": 0,
+                    "internal_road_index": 0,
                     "lane_index": 2,
                     "spawn_longitude": 50.0,
                     "target_speed_kmh": 18.0,
@@ -254,6 +270,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_reference_block_id="g0",
         ego_spawn_longitude_m=30,
         ego_spawn_lane_id=1,
+        ego_initial_speed_km_h=24.0,
         expert_recipe="提前换道驶离",
         description="ego 从主线驶出",
     ),
@@ -290,10 +307,11 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
             "middle": 0.4,
             "leftmost": 0.2,
         },
-        ego_spawn_reference_block_id="merge0",
+        ego_spawn_reference_block_id="c3",
         ego_spawn_reference_kind="block_internal_road",
-        ego_spawn_internal_road_index=3,
+        ego_spawn_internal_road_index=1,
         ego_spawn_longitude_m=10.0,
+        ego_initial_speed_km_h=18.0,
         expert_recipe="保守通过",
         description="合流-分流窄通道博弈",
     ),
@@ -317,6 +335,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=24.0,
         expert_recipe="激进换道",
         description="直道前方低速车插入，ego 主动换道绕行",
         trim_to_lane_change=True,
@@ -342,6 +361,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=20.0,
         expert_recipe="弯道换道",
         description="弯道前方低速车插入，ego 主动换道绕行",
         trim_to_lane_change=True,

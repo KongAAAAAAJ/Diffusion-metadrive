@@ -39,13 +39,24 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 import numpy as np
 
+from evaluation.evaluation_helper import (
+    _aggregate_pdms_across_episodes,
+    _aggregate_pdms_records,
+    _collect_episode_step_record,
+    _extract_team_pdms_series,
+    _plot_average_episode_pdms,
+    _plot_episode_pdms,
+    _plot_episode_results,
+    _publication_agent_color,
+    _save_episode_metrics_json,
+    _save_publication_figure,
+)
 from evaluation.platoon_performance import (
     build_platoon_metric_params,
     compute_pairwise_formation_reward,
@@ -72,9 +83,10 @@ DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/run_r
 DEFAULT_TRAFFIC_DENSITY = 0.10
 DEFAULT_START_SEED = 59
 DEFAULT_VIDEO_FPS = 10
+DEFAULT_HORIZON = 600
 DEFAULT_DECISION_POLICY = "rule_maker"
 DEFAULT_PLANNING_POLICY = "lattice"
-DEFAULT_CONTROL_POLICY = "pid"
+DEFAULT_CONTROL_POLICY = "adaptive"
 
 
 # ---------------------------------------------------------------------------
@@ -323,543 +335,6 @@ def _compute_step_pdms(env, agent_ids: list[str], debug, info, pdms_params: dict
     return results
 
 
-def _aggregate_pdms_records(pdms_records: list[dict[str, dict[str, float]]]) -> dict[str, dict[str, float]]:
-    """Average per-agent PDMS components over an episode, plus a `__team__` cross-agent mean."""
-    per_agent: dict[str, list[dict[str, float]]] = {}
-    for step in pdms_records:
-        for agent_id, vals in step.items():
-            per_agent.setdefault(agent_id, []).append(vals)
-
-    result: dict[str, dict[str, float]] = {}
-    for agent_id, steps in per_agent.items():
-        keys = steps[0].keys()
-        result[agent_id] = {k: float(np.mean([s[k] for s in steps])) for k in keys}
-
-    if result:
-        agent_rows = list(result.values())
-        keys = agent_rows[0].keys()
-        result["__team__"] = {k: float(np.mean([row[k] for row in agent_rows])) for k in keys}
-
-    return result
-
-
-def _json_safe(value):
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return _json_safe(value.item())
-    if isinstance(value, float):
-        return float(value) if np.isfinite(value) else None
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    return str(value)
-
-
-def _action_to_record(action) -> dict[str, float | None]:
-    arr = np.asarray(action if action is not None else [np.nan, np.nan], dtype=np.float32).reshape(-1)
-    steer = float(arr[0]) if arr.size > 0 else float("nan")
-    throttle = float(arr[1]) if arr.size > 1 else float("nan")
-    return _json_safe({"steer": steer, "throttle": throttle})
-
-
-def _collect_episode_step_record(
-    *,
-    env,
-    agent_ids: list[str],
-    step_idx: int,
-    actions: dict[str, np.ndarray],
-    info: dict,
-    pdms: dict[str, dict[str, float]],
-    planning_debug: dict | None,
-    previous_speed_mps: dict[str, float],
-    dt: float,
-) -> dict:
-    vehicles: dict[str, dict] = {}
-    actions_record: dict[str, dict] = {}
-    agents = getattr(env, "agents", {}) or {}
-    for agent_id in agent_ids:
-        action = actions.get(agent_id) if isinstance(actions, dict) else None
-        action_record = _action_to_record(action)
-        actions_record[agent_id] = action_record
-
-        vehicle = agents.get(agent_id)
-        if vehicle is None:
-            vehicles[agent_id] = {
-                "x": None,
-                "y": None,
-                "speed_km_h": None,
-                "accel_mps2": None,
-                "heading_theta": None,
-                "steer": action_record["steer"],
-                "throttle": action_record["throttle"],
-            }
-            continue
-
-        position = np.asarray(getattr(vehicle, "position", [np.nan, np.nan])[:2], dtype=np.float32)
-        speed_km_h = float(getattr(vehicle, "speed_km_h", np.nan))
-        speed_mps = speed_km_h / 3.6 if np.isfinite(speed_km_h) else float("nan")
-        prev_speed = previous_speed_mps.get(agent_id)
-        accel_mps2 = float("nan") if prev_speed is None or not np.isfinite(speed_mps) else (speed_mps - prev_speed) / max(dt, 1e-6)
-        if np.isfinite(speed_mps):
-            previous_speed_mps[agent_id] = speed_mps
-
-        vehicles[agent_id] = _json_safe(
-            {
-                "x": float(position[0]) if position.size > 0 else float("nan"),
-                "y": float(position[1]) if position.size > 1 else float("nan"),
-                "speed_km_h": speed_km_h,
-                "accel_mps2": accel_mps2,
-                "heading_theta": float(getattr(vehicle, "heading_theta", np.nan)),
-                "steer": action_record["steer"],
-                "throttle": action_record["throttle"],
-            }
-        )
-
-    planning_debug = planning_debug or {}
-    planning_record = {
-        "planning_policy": planning_debug.get("planning_policy"),
-        "agent_ids": planning_debug.get("agent_ids", list(agent_ids)),
-        "trajectories_by_agent": planning_debug.get("trajectories_by_agent", {}),
-        "candidates_by_agent": planning_debug.get("candidates_by_agent", {}),
-    }
-    control_debug = getattr(env, "_preview_control_debug", None) or {}
-    return _json_safe(
-        {
-            "step_idx": step_idx,
-            "actions": actions_record,
-            "info": info or {},
-            "pdms": pdms or {},
-            "planning": planning_record,
-            "control_debug": control_debug,
-            "vehicles": vehicles,
-        }
-    )
-
-
-def _save_episode_metrics_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_json_safe(payload), indent=2), encoding="utf-8")
-
-
-def _write_plot_placeholder(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xff"
-        b"\xff?\x00\x05\xfe\x02\xfeA\xbd\xb1\x0f\x00\x00\x00\x00IEND\xaeB`\x82"
-    )
-
-
-def _get_pyplot():
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        return plt
-    except Exception:
-        return None
-
-
-_PUBLICATION_AGENT_COLORS = (
-    "#0072B2",  # blue
-    "#D55E00",  # vermillion
-    "#009E73",  # green
-    "#CC79A7",  # reddish purple
-    "#E69F00",  # orange
-    "#56B4E9",  # sky blue
-    "#F0E442",  # yellow
-    "#000000",  # black
-)
-_PUBLICATION_TEAM_COLOR = "#333333"
-_PUBLICATION_RC = {
-    "figure.dpi": 120,
-    "savefig.dpi": 300,
-    "savefig.facecolor": "white",
-    "axes.facecolor": "white",
-    "figure.facecolor": "white",
-    "font.family": "DejaVu Sans",
-    "font.size": 8,
-    "axes.labelsize": 8,
-    "axes.titlesize": 8,
-    "xtick.labelsize": 7,
-    "ytick.labelsize": 7,
-    "legend.fontsize": 7,
-    "axes.linewidth": 0.8,
-    "xtick.major.width": 0.8,
-    "ytick.major.width": 0.8,
-    "xtick.major.size": 3,
-    "ytick.major.size": 3,
-    "lines.linewidth": 1.5,
-    "pdf.fonttype": 42,
-    "ps.fonttype": 42,
-}
-_PDMS_LABELS = {
-    "reward": "Reward",
-    "progress": "Progress",
-    "formation_lon": "Formation longitudinal",
-    "formation_lat": "Formation lateral",
-    "speed": "Speed",
-    "comfort": "Comfort",
-    "consistency": "Consistency",
-    "gate": "Gate",
-}
-_PDMS_ORDER = (
-    "reward",
-    "progress",
-    "formation_lon",
-    "formation_lat",
-    "speed",
-    "comfort",
-    "consistency",
-    "gate",
-)
-
-
-def _publication_agent_color(agent_id: str) -> str:
-    if agent_id == "__team__":
-        return _PUBLICATION_TEAM_COLOR
-    digits = "".join(ch for ch in str(agent_id) if ch.isdigit())
-    index = int(digits) if digits else sum(ord(ch) for ch in str(agent_id))
-    return _PUBLICATION_AGENT_COLORS[index % len(_PUBLICATION_AGENT_COLORS)]
-
-
-def _save_publication_figure(fig, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white", edgecolor="none")
-
-
-def _style_publication_axis(ax, *, grid_axis: str = "y") -> None:
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_linewidth(0.8)
-    ax.spines["bottom"].set_linewidth(0.8)
-    ax.tick_params(direction="out", length=3, width=0.8, pad=2)
-    if grid_axis:
-        ax.grid(True, axis=grid_axis, color="#D0D0D0", alpha=0.45, linewidth=0.5)
-
-
-def _publication_legend(ax, *, outside: bool = False) -> None:
-    handles, labels = ax.get_legend_handles_labels()
-    if not handles:
-        return
-    if outside:
-        ax.legend(
-            handles,
-            labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 1.18),
-            ncol=min(max(len(labels), 1), 4),
-            frameon=False,
-            handlelength=1.8,
-            columnspacing=1.0,
-        )
-    else:
-        ax.legend(handles, labels, loc="best", frameon=False, handlelength=1.8)
-
-
-def _ordered_pdms_keys(pdms_keys: set[str]) -> list[str]:
-    ordered = [key for key in _PDMS_ORDER if key in pdms_keys]
-    ordered.extend(sorted(key for key in pdms_keys if key not in _PDMS_ORDER))
-    return ordered
-
-
-def _pdms_team_mean(step_pdms: dict, key: str) -> float:
-    values = [
-        float(vals[key])
-        for agent_id, vals in (step_pdms or {}).items()
-        if agent_id != "__team__"
-        and isinstance(vals, dict)
-        and key in vals
-        and vals[key] is not None
-        and np.isfinite(float(vals[key]))
-    ]
-    return float(np.mean(values)) if values else float("nan")
-
-
-def _plot_episode_pdms(path: Path, step_records: list[dict]) -> None:
-    plt = _get_pyplot()
-    if plt is None or not step_records:
-        _write_plot_placeholder(path)
-        return
-
-    pdms_keys = sorted(
-        {
-            key
-            for record in step_records
-            for vals in (record.get("pdms", {}) or {}).values()
-            if isinstance(vals, dict)
-            for key in vals.keys()
-        }
-    )
-    if not pdms_keys:
-        _write_plot_placeholder(path)
-        return
-
-    times = [record.get("step_idx", idx) for idx, record in enumerate(step_records)]
-    pdms_keys = _ordered_pdms_keys(pdms_keys)
-    ncols = 2 if len(pdms_keys) > 1 else 1
-    nrows = int(np.ceil(len(pdms_keys) / ncols))
-    with plt.rc_context(_PUBLICATION_RC):
-        fig, axes = plt.subplots(
-            nrows,
-            ncols,
-            figsize=(7.2, max(2.4, 1.85 * nrows)),
-            sharex=True,
-            squeeze=False,
-        )
-        flat_axes = list(axes.reshape(-1))
-        for ax, key in zip(flat_axes, pdms_keys):
-            agent_ids = sorted(
-                {
-                    agent_id
-                    for record in step_records
-                    for agent_id, vals in (record.get("pdms", {}) or {}).items()
-                    if agent_id != "__team__" and isinstance(vals, dict) and key in vals
-                }
-            )
-            for agent_id in agent_ids:
-                values = [
-                    (record.get("pdms", {}) or {}).get(agent_id, {}).get(key, np.nan)
-                    for record in step_records
-                ]
-                ax.plot(
-                    times,
-                    values,
-                    color=_publication_agent_color(agent_id),
-                    linewidth=1.4,
-                    label=agent_id,
-                )
-            team_values = [
-                (record.get("pdms", {}) or {}).get("__team__", {}).get(key, _pdms_team_mean(record.get("pdms", {}), key))
-                for record in step_records
-            ]
-            if np.any(np.isfinite(np.asarray(team_values, dtype=np.float32))):
-                ax.plot(
-                    times,
-                    team_values,
-                    color=_publication_agent_color("__team__"),
-                    linewidth=1.3,
-                    linestyle=(0, (3, 2)),
-                    label="team mean",
-                )
-            ax.set_ylabel(_PDMS_LABELS.get(key, key.replace("_", " ").title()))
-            _style_publication_axis(ax)
-        for ax in flat_axes[len(pdms_keys):]:
-            ax.set_visible(False)
-        for ax in flat_axes[-ncols:]:
-            if ax.get_visible():
-                ax.set_xlabel("Step")
-        _publication_legend(flat_axes[0], outside=True)
-        fig.tight_layout(pad=0.7)
-        _save_publication_figure(fig, path)
-        plt.close(fig)
-
-
-def _extract_team_pdms_series(episode_step_records: list[dict], key: str) -> np.ndarray:
-    values: list[float] = []
-    for record in episode_step_records or []:
-        step_pdms = record.get("pdms", {}) or {}
-        team_vals = step_pdms.get("__team__", {}) if isinstance(step_pdms, dict) else {}
-        if isinstance(team_vals, dict) and key in team_vals and team_vals[key] is not None:
-            values.append(float(team_vals[key]))
-            continue
-        values.append(_pdms_team_mean(step_pdms, key))
-    return np.asarray(values, dtype=np.float32)
-
-
-def _aggregate_pdms_across_episodes(all_episode_step_records: list[list[dict]]) -> dict:
-    episodes = [episode for episode in (all_episode_step_records or []) if episode]
-    pdms_keys = {
-        key
-        for episode in episodes
-        for record in episode
-        for vals in (record.get("pdms", {}) or {}).values()
-        if isinstance(vals, dict)
-        for key in vals.keys()
-    }
-    pdms_keys = _ordered_pdms_keys(pdms_keys)
-    max_len = max((len(episode) for episode in episodes), default=0)
-    metrics: dict[str, dict[str, np.ndarray]] = {}
-    if max_len <= 0 or not pdms_keys:
-        return {"steps": [], "metrics": metrics}
-
-    for key in pdms_keys:
-        stacked = np.full((len(episodes), max_len), np.nan, dtype=np.float32)
-        for ep_idx, episode in enumerate(episodes):
-            series = _extract_team_pdms_series(episode, key)
-            stacked[ep_idx, : min(max_len, series.size)] = series[:max_len]
-        mean = np.nanmean(stacked, axis=0)
-        std = np.nanstd(stacked, axis=0)
-        metrics[key] = {"mean": mean.astype(np.float32), "std": std.astype(np.float32)}
-    return {"steps": list(range(max_len)), "metrics": metrics}
-
-
-def _plot_average_episode_pdms(path: Path, all_episode_step_records: list[list[dict]]) -> None:
-    plt = _get_pyplot()
-    aggregated = _aggregate_pdms_across_episodes(all_episode_step_records)
-    metrics = aggregated.get("metrics", {})
-    steps = aggregated.get("steps", [])
-    if plt is None or not steps or not metrics:
-        _write_plot_placeholder(path)
-        return
-
-    metric_keys = _ordered_pdms_keys(set(metrics.keys()))
-    ncols = 2 if len(metric_keys) > 1 else 1
-    nrows = int(np.ceil(len(metric_keys) / ncols))
-    x = np.asarray(steps, dtype=np.float32)
-    with plt.rc_context(_PUBLICATION_RC):
-        fig, axes = plt.subplots(
-            nrows,
-            ncols,
-            figsize=(7.2, max(2.4, 1.85 * nrows)),
-            sharex=True,
-            squeeze=False,
-        )
-        flat_axes = list(axes.reshape(-1))
-        for ax, key in zip(flat_axes, metric_keys):
-            mean = np.asarray(metrics[key]["mean"], dtype=np.float32)
-            std = np.asarray(metrics[key]["std"], dtype=np.float32)
-            lower = mean - std
-            upper = mean + std
-            ax.fill_between(
-                x,
-                lower,
-                upper,
-                color=_PUBLICATION_TEAM_COLOR,
-                alpha=0.16,
-                linewidth=0.0,
-                label="Mean ± SD",
-            )
-            ax.plot(
-                x,
-                mean,
-                color=_PUBLICATION_TEAM_COLOR,
-                linewidth=1.6,
-                label="Mean",
-            )
-            ax.set_ylabel(_PDMS_LABELS.get(key, key.replace("_", " ").title()))
-            _style_publication_axis(ax)
-        for ax in flat_axes[len(metric_keys):]:
-            ax.set_visible(False)
-        for ax in flat_axes[-ncols:]:
-            if ax.get_visible():
-                ax.set_xlabel("Step")
-        _publication_legend(flat_axes[0], outside=True)
-        fig.tight_layout(pad=0.7)
-        _save_publication_figure(fig, path)
-        plt.close(fig)
-
-
-def _plot_time_series(path: Path, step_records: list[dict], agent_ids: list[str], key: str, ylabel: str) -> None:
-    plt = _get_pyplot()
-    if plt is None or not step_records:
-        _write_plot_placeholder(path)
-        return
-    times = [record.get("step_idx", idx) for idx, record in enumerate(step_records)]
-    with plt.rc_context(_PUBLICATION_RC):
-        fig, ax = plt.subplots(figsize=(5.2, 2.8))
-        agent_ids = sorted(
-            {
-                agent_id for agent_id in agent_ids
-                if any(agent_id in (record.get("vehicles", {}) or {}) for record in step_records)
-            }
-        )
-        for agent_id in agent_ids:
-            values = [
-                (record.get("vehicles", {}) or {}).get(agent_id, {}).get(key, np.nan)
-                for record in step_records
-            ]
-            ax.plot(times, values, color=_publication_agent_color(agent_id), linewidth=1.5, label=agent_id)
-        ax.set_xlabel("Step")
-        ax.set_ylabel(ylabel)
-        _style_publication_axis(ax)
-        _publication_legend(ax)
-        fig.tight_layout(pad=0.7)
-        _save_publication_figure(fig, path)
-        plt.close(fig)
-
-
-def _plot_episode_results(results_dir: Path, step_records: list[dict], agent_ids: list[str]) -> None:
-    results_dir.mkdir(parents=True, exist_ok=True)
-    plt = _get_pyplot()
-    if plt is None or not step_records:
-        for name in [
-            "planned_trajectories.png",
-            "xy.png",
-            "speed_time.png",
-            "accel_time.png",
-            "heading_time.png",
-            "steer_time.png",
-            "throttle_time.png",
-        ]:
-            _write_plot_placeholder(results_dir / name)
-        return
-
-    with plt.rc_context(_PUBLICATION_RC):
-        fig, ax = plt.subplots(figsize=(4.8, 4.3))
-        last_step_idx = step_records[-1].get("step_idx", len(step_records) - 1)
-        for record in step_records:
-            is_last = record.get("step_idx") == last_step_idx
-            trajectories = (record.get("planning", {}) or {}).get("trajectories_by_agent", {}) or {}
-            for agent_id in agent_ids:
-                traj = np.asarray(trajectories.get(agent_id, []), dtype=np.float32)
-                if traj.ndim != 2 or traj.shape[0] == 0 or traj.shape[1] < 2:
-                    continue
-                ax.plot(
-                    traj[:, 0],
-                    traj[:, 1],
-                    color=_publication_agent_color(agent_id),
-                    linewidth=2.2 if is_last else 0.65,
-                    alpha=0.95 if is_last else 0.12,
-                    label=agent_id if is_last else None,
-                )
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("y (m)")
-        _style_publication_axis(ax, grid_axis="both")
-        ax.axis("equal")
-        _publication_legend(ax)
-        fig.tight_layout(pad=0.7)
-        _save_publication_figure(fig, results_dir / "planned_trajectories.png")
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(4.8, 4.3))
-        for agent_id in agent_ids:
-            xs = np.asarray(
-                [(record.get("vehicles", {}) or {}).get(agent_id, {}).get("x", np.nan) for record in step_records],
-                dtype=np.float32,
-            )
-            ys = np.asarray(
-                [(record.get("vehicles", {}) or {}).get(agent_id, {}).get("y", np.nan) for record in step_records],
-                dtype=np.float32,
-            )
-            color = _publication_agent_color(agent_id)
-            ax.plot(xs, ys, color=color, linewidth=1.6, label=agent_id)
-            finite = np.where(np.isfinite(xs) & np.isfinite(ys))[0]
-            if finite.size:
-                start_idx = int(finite[0])
-                end_idx = int(finite[-1])
-                ax.scatter(xs[start_idx], ys[start_idx], s=22, facecolors="white", edgecolors=color, linewidths=1.0, zorder=3)
-                ax.scatter(xs[end_idx], ys[end_idx], s=24, facecolors=color, edgecolors=color, linewidths=1.0, zorder=3)
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("y (m)")
-        _style_publication_axis(ax, grid_axis="both")
-        ax.axis("equal")
-        _publication_legend(ax)
-        fig.tight_layout(pad=0.7)
-        _save_publication_figure(fig, results_dir / "xy.png")
-        plt.close(fig)
-
-    _plot_time_series(results_dir / "speed_time.png", step_records, agent_ids, "speed_km_h", "Speed (km/h)")
-    _plot_time_series(results_dir / "accel_time.png", step_records, agent_ids, "accel_mps2", "Acceleration (m/s$^2$)")
-    _plot_time_series(results_dir / "heading_time.png", step_records, agent_ids, "heading_theta", "Heading (rad)")
-    _plot_time_series(results_dir / "steer_time.png", step_records, agent_ids, "steer", "Steering")
-    _plot_time_series(results_dir / "throttle_time.png", step_records, agent_ids, "throttle", "Throttle")
-
-
 # ---------------------------------------------------------------------------
 # Episode runner
 # ---------------------------------------------------------------------------
@@ -954,10 +429,12 @@ def _run_single_episode(
         episode_step_records.clear()
 
     env_config = dict(getattr(env, "config", {}) or {})
-    pid_dt = float(env_config.get("pid_dt", 0.5))
-    previous_speed_mps: dict[str, float] = {}
+    physics_world_step_size = float(env_config.get("physics_world_step_size", 2e-2))
+    decision_repeat = int(env_config.get("decision_repeat", 5))
+    low_level_step_dt = physics_world_step_size * max(decision_repeat, 1)
+    previous_velocity_mps: dict[str, np.ndarray] = {}
 
-    for _step in range(600):
+    for _step in range(1000):
         actions = action_fn(env)
         if not actions:
             break
@@ -993,8 +470,8 @@ def _run_single_episode(
                     info=info,
                     pdms=step_pdms,
                     planning_debug=planning_debug,
-                    previous_speed_mps=previous_speed_mps,
-                    dt=pid_dt,
+                    previous_speed_mps=previous_velocity_mps,
+                    dt=low_level_step_dt,
                 )
             )
 
@@ -1055,9 +532,7 @@ def run_scenario(
     env_factory: Optional[Callable] = None,
     evaluate: bool = False,
     metric_params: Optional[dict] = None,
-    lqr_lat_q1: Optional[float] = None,
-    lqr_lat_q2: Optional[float] = None,
-    lqr_lat_r: Optional[float] = None,
+    horizon: int = DEFAULT_HORIZON,
 ) -> Path:
     if local_route is None:
         local_route = _pick_local_route(scenario_id)
@@ -1079,14 +554,8 @@ def run_scenario(
         "local_route": local_route,
         "crash_done": False,
         "out_of_road_done": False,
-        "horizon": 300,
+        "horizon": int(horizon),
     }
-    if lqr_lat_q1 is not None:
-        env_config["lqr_lat_q1"] = float(lqr_lat_q1)
-    if lqr_lat_q2 is not None:
-        env_config["lqr_lat_q2"] = float(lqr_lat_q2)
-    if lqr_lat_r is not None:
-        env_config["lqr_lat_r"] = float(lqr_lat_r)
     if env_factory is not None:
         env = env_factory(env_config)
     else:
@@ -1188,9 +657,7 @@ def run_all_scenarios(
     control_policy: str = DEFAULT_CONTROL_POLICY,
     evaluate: bool = False,
     metric_params: Optional[dict] = None,
-    lqr_lat_q1: Optional[float] = None,
-    lqr_lat_q2: Optional[float] = None,
-    lqr_lat_r: Optional[float] = None,
+    horizon: int = DEFAULT_HORIZON,
 ) -> None:
     """Evaluate all defined scenarios (one env per scenario to avoid map conflicts)."""
     pairs = _all_scenario_route_pairs()
@@ -1218,9 +685,7 @@ def run_all_scenarios(
                 control_policy=control_policy,
                 evaluate=evaluate,
                 metric_params=metric_params,
-                lqr_lat_q1=lqr_lat_q1,
-                lqr_lat_q2=lqr_lat_q2,
-                lqr_lat_r=lqr_lat_r,
+                horizon=horizon,
             )
             results.append((scenario_id, route, f"OK  -> {video_dir}"))
         except Exception as exc:
@@ -1258,23 +723,20 @@ def main() -> None:
     parser.add_argument("--traffic-density", type=float, default=DEFAULT_TRAFFIC_DENSITY)
     parser.add_argument("--start-seed", type=int, default=DEFAULT_START_SEED)
     parser.add_argument("--video-fps", type=int, default=DEFAULT_VIDEO_FPS)
+    parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON,
+                        help=f"Override environment horizon / max steps per agent (default: {DEFAULT_HORIZON})")
     parser.add_argument("--decision-policy", default=DEFAULT_DECISION_POLICY, choices=["rule_maker"],
                         help=f"Decision policy (default: {DEFAULT_DECISION_POLICY})")
     parser.add_argument("--planning-policy", default=DEFAULT_PLANNING_POLICY, choices=["lattice"],
                         help=f"Planning policy (default: {DEFAULT_PLANNING_POLICY})")
     parser.add_argument("--control-policy", default=DEFAULT_CONTROL_POLICY, choices=["pid", "adaptive"],
                         help=f"Control policy (default: {DEFAULT_CONTROL_POLICY})")
-    parser.add_argument("--lqr-lat-q1", type=float, default=None,
-                        help="Override adaptive follower lateral LQR lateral-error weight")
-    parser.add_argument("--lqr-lat-q2", type=float, default=None,
-                        help="Override adaptive follower lateral LQR heading-error weight")
-    parser.add_argument("--lqr-lat-r", type=float, default=None,
-                        help="Override adaptive follower lateral LQR steering-effort weight")
     # Evaluation
     parser.add_argument("--evaluate", action="store_true",
                         help="Compute PDMS reward from planner trajectories, "
                              "saving per-episode metrices files")
     args = parser.parse_args()
+    args.evaluate = True
 
     heading_up = args.heading_up.lower() in ("true", "1", "yes")
     output_root = Path(args.output_root)
@@ -1292,9 +754,7 @@ def main() -> None:
             planning_policy=args.planning_policy,
             control_policy=args.control_policy,
             evaluate=args.evaluate,
-            lqr_lat_q1=args.lqr_lat_q1,
-            lqr_lat_q2=args.lqr_lat_q2,
-            lqr_lat_r=args.lqr_lat_r,
+            horizon=args.horizon,
         )
     else:
         if not args.scenario_id:
@@ -1313,9 +773,7 @@ def main() -> None:
             planning_policy=args.planning_policy,
             control_policy=args.control_policy,
             evaluate=args.evaluate,
-            lqr_lat_q1=args.lqr_lat_q1,
-            lqr_lat_q2=args.lqr_lat_q2,
-            lqr_lat_r=args.lqr_lat_r,
+            horizon=args.horizon,
         )
         print(f"\n=== Videos saved to: {video_dir} ===")
 

@@ -223,6 +223,8 @@ class MultiAgentRuleMaker(RuleMaker):
 
         ordered_agent_ids = [agent_id for agent_id in agent_ids if agent_id in candidates_by_agent]
         risk_info = {"triggered": False, "reasons": [], "per_agent": {}}
+
+        # !!!!!!!!!!!!!!!!!!注释后，不解锁platoon!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         if self._formation_locked:
             risk_info = self._risk_detector.detect(env, ordered_agent_ids, traffic_vehicles)
             if bool(risk_info.get("triggered")):
@@ -250,6 +252,12 @@ class MultiAgentRuleMaker(RuleMaker):
                     best_combo = combo
 
         result: dict[str, dict] = {}
+
+        # !!!!!!!!!【DEBUG】
+        if best_combo[0]['action'] != 1:
+            debug = 1
+
+
         if best_combo is None:
             return result
         best_actions: dict[str, int] = {}
@@ -259,6 +267,26 @@ class MultiAgentRuleMaker(RuleMaker):
                 "target_point": np.asarray(selected["target_point"], dtype=np.float32).reshape(2),
             }
             best_actions[agent_id] = int(selected["action"])
+
+
+
+
+        # !!!!!!!!!!!!!!!!!!!!!!!固定动作都为0,测试控制(删)!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        # for agent_id, selected in zip(ordered_agent_ids, best_combo):
+        #     keep_candidate = self._candidate_for_action(candidates_by_agent.get(agent_id, []), 0)
+        #     if keep_candidate is not None:
+        #         selected = keep_candidate
+
+        #     result[agent_id] = {
+        #         "action": 0,
+        #         "target_point": np.asarray(selected["target_point"], dtype=np.float32).reshape(2),
+        #     }
+        #     best_actions[agent_id] = 0
+        # -----------------------------------------------------------------------------
+
+
+
+
         if self._formation_locked:
             dynamic_roles = self._locked_roles(ordered_agent_ids)
         else:
@@ -467,6 +495,7 @@ class MultiAgentRuleMaker(RuleMaker):
         return candidates
 
     def _build_coarse_trajectory(self, env, vehicle, action: int, other_vehicles: list) -> dict | None:
+        # Step 1: 计算当前车辆所在lane和目标lane
         source_lane = getattr(vehicle, "lane", None)
         target_lane = self._target_lane(env, vehicle, source_lane, action)
 
@@ -485,9 +514,12 @@ class MultiAgentRuleMaker(RuleMaker):
         if source_lane is None or target_lane is None:
             return None
         try:
+            # Step 2: 将车辆当前位置映射到source_lane的s坐标，计算fallback_progress
             pos = np.asarray(vehicle.position[:2], dtype=np.float32)
             s_ego, _ = source_lane.local_coordinates(pos)
             fallback_progress = self._target_progress(vehicle)
+
+            # Step 3: 将source_lane和target_lane映射到lane_chain，计算总长度，计算start_s
             source_lane_chain = self._reference_lane_chain(env, vehicle, source_lane)
             target_lane_chain = self._reference_lane_chain(env, vehicle, target_lane)
             total_reference_length = max(
@@ -496,6 +528,8 @@ class MultiAgentRuleMaker(RuleMaker):
             )
             lane_len = max(float(s_ego) + fallback_progress, total_reference_length)
             start_s = float(np.clip(float(s_ego), 0.0, lane_len))
+
+            # Step 4: 根据前车和后车的距离，计算terminal_accel_mps2和terminal_speed_km_h
             target_s, _ = target_lane.local_coordinates(pos)
             front_vehicle, front_gap_m = self._front_vehicle_on_lane(
                 target_lane,
@@ -509,9 +543,12 @@ class MultiAgentRuleMaker(RuleMaker):
                 other_vehicles,
                 ego_length=float(getattr(vehicle, "LENGTH", 4.5) or 4.5),
             )
+
             terminal_accel_mps2 = self._idm_acceleration(vehicle, front_vehicle, front_gap_m)
             terminal_speed_km_h = self._terminal_speed_km_h(vehicle, terminal_accel_mps2)
             rear_vehicle_post_accel_mps2 = self._rear_vehicle_post_accel(vehicle, rear_vehicle, rear_gap_m)
+
+            # Step 5: 积分加速度得到车辆纵向轨迹
             longs = self._integrate_longitudinal_profile(
                 start_s=start_s,
                 speed_km_h=float(getattr(vehicle, "speed_km_h", 0.0) or 0.0),
@@ -519,13 +556,18 @@ class MultiAgentRuleMaker(RuleMaker):
                 lane_len=lane_len,
             )
             end_s = float(longs[-1]) if longs.size > 0 else start_s
+
+            # Step 6: 转换成世界坐标
             trajectory = self._build_world_trajectory_from_lane_chains(
                 source_lane_chain=source_lane_chain,
                 target_lane_chain=target_lane_chain,
                 longitudinals=longs,
                 action=action,
             )
+
+            # Step 7: 计算目标点在车辆坐标系下的坐标
             target_point = self._world_to_ego_local(vehicle, trajectory[-1])
+
             candidate = {
                 "action": int(action),
                 "valid": True,
@@ -566,7 +608,7 @@ class MultiAgentRuleMaker(RuleMaker):
     ) -> np.ndarray:
         if self.num_waypoints <= 1:
             return np.asarray([start_s], dtype=np.float32)
-        v = max(0.0, float(speed_km_h) / 3.6)
+        v = np.clip(float(speed_km_h) / 3.6, 0.0, float(self.target_speed_km_h) / 3.6)  # 速度上下限
         dt = float(self.horizon_s) / float(self.num_waypoints - 1)
         longs = [float(start_s)]
         s = float(start_s)
