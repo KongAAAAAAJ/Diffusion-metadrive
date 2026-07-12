@@ -16,6 +16,58 @@ class _Writer:
         self.frames.append(np.asarray(frame).copy())
 
 
+def test_format_episode_end_reason_reports_agents_from_base_crash_flags():
+    message = module._format_episode_end_reason(
+        episode_idx=1,
+        step_idx=52,
+        info={
+            "base_crash_flags": {
+                "agent0": {"crash_vehicle": True, "out_of_road": False},
+                "agent1": {"crash": False, "out_of_road": False},
+                "agent2": {"crash": True, "out_of_road": True},
+            }
+        },
+        fallback_reason="terminated",
+    )
+
+    assert message == (
+        "[test-refine-grpo] episode=1 ended: step=52 reason=crash,out_of_road "
+        "crash_agents=agent0,agent2 out_of_road_agents=agent2"
+    )
+
+
+def test_format_episode_end_reason_falls_back_to_per_agent_info_and_reports_arrival():
+    message = module._format_episode_end_reason(
+        episode_idx=2,
+        step_idx=18,
+        info={
+            "agent0": {"arrive_dest": True},
+            "agent1": {"arrive_dest": True},
+        },
+        fallback_reason="unknown",
+    )
+
+    assert message.endswith("reason=arrive_dest arrive_agents=agent0,agent1")
+
+
+def test_format_episode_end_reason_uses_non_vehicle_fallback_reason():
+    for reason in (
+        "max_steps",
+        "planner_data_missing",
+        "env_step_error",
+        "terminated",
+        "truncated",
+        "unknown",
+    ):
+        message = module._format_episode_end_reason(
+            episode_idx=0,
+            step_idx=7,
+            info={},
+            fallback_reason=reason,
+        )
+        assert message == f"[test-refine-grpo] episode=0 ended: step=7 reason={reason}"
+
+
 def test_save_step_outputs_locked_uses_plain_2d_frame_and_writes_once(tmp_path, monkeypatch):
     plain_rgb = np.full((4, 5, 3), 17, dtype=np.uint8)
     capture_calls = []

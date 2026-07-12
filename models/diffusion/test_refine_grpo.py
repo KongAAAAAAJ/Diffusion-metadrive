@@ -528,6 +528,64 @@ def _capture_plain_2d_frame(base_env) -> "np.ndarray | None":
     return _capture_2d_topdown_frame(base_env)
 
 
+def _format_episode_end_reason(
+    *,
+    episode_idx: int,
+    step_idx: int,
+    info: Mapping | None,
+    fallback_reason: str,
+) -> str:
+    """Format one episode-end line with per-agent safety details."""
+    info_dict = dict(info or {})
+    base_flags = info_dict.get("base_crash_flags")
+    agent_ids = {
+        str(agent_id)
+        for agent_id, agent_info in info_dict.items()
+        if str(agent_id).startswith("agent") and isinstance(agent_info, Mapping)
+    }
+    if isinstance(base_flags, Mapping):
+        agent_ids.update(str(agent_id) for agent_id in base_flags)
+
+    crash_keys = ("crash", "crash_vehicle", "crash_human", "crash_object", "crash_building")
+    crash_agents: list[str] = []
+    out_of_road_agents: list[str] = []
+    arrive_agents: list[str] = []
+    for agent_id in sorted(agent_ids):
+        direct = info_dict.get(agent_id)
+        direct = dict(direct) if isinstance(direct, Mapping) else {}
+        base = base_flags.get(agent_id) if isinstance(base_flags, Mapping) else None
+        base = dict(base) if isinstance(base, Mapping) else {}
+        merged = {**direct, **base}
+        if any(bool(merged.get(key, False)) for key in crash_keys):
+            crash_agents.append(agent_id)
+        if bool(merged.get("out_of_road", False)):
+            out_of_road_agents.append(agent_id)
+        if bool(direct.get("arrive_dest", False)):
+            arrive_agents.append(agent_id)
+
+    reasons: list[str] = []
+    if crash_agents:
+        reasons.append("crash")
+    if out_of_road_agents:
+        reasons.append("out_of_road")
+    if arrive_agents:
+        reasons.append("arrive_dest")
+    if not reasons:
+        reasons.append(str(fallback_reason or "unknown"))
+
+    parts = [
+        f"[test-refine-grpo] episode={int(episode_idx)} ended: "
+        f"step={int(step_idx)} reason={','.join(reasons)}"
+    ]
+    if crash_agents:
+        parts.append(f"crash_agents={','.join(crash_agents)}")
+    if out_of_road_agents:
+        parts.append(f"out_of_road_agents={','.join(out_of_road_agents)}")
+    if arrive_agents:
+        parts.append(f"arrive_agents={','.join(arrive_agents)}")
+    return " ".join(parts)
+
+
 def _save_step_outputs(
     *,
     env,
@@ -835,14 +893,17 @@ def run_test(args):
         # None at the start of an episode (no prior step executed).
         prev_env_crash_flags: dict[str, dict] = {}
         info: dict = {}
+        stop_reason = "unknown"
 
         while not done:
             if max_steps > 0 and episode_step >= max_steps:
+                stop_reason = "max_steps"
                 break
 
             planner_batch = env._last_planner_batch
             export        = env._last_export
             if not planner_batch or export is None:
+                stop_reason = "planner_data_missing"
                 break
 
             agent_ids        = list(export["agent_ids"])
@@ -890,6 +951,7 @@ def run_test(args):
                 except AssertionError as e:
                     print(f"[test-refine-grpo] locked-follow env step error: {e}", flush=True)
                     done = True
+                    stop_reason = "env_step_error"
                     env_reward = 0.0
                     info = {}
                     locked_local_trajs = {}
@@ -900,6 +962,11 @@ def run_test(args):
                     for flags in prev_env_crash_flags.values()
                 ):
                     done = True
+                if done and stop_reason == "unknown":
+                    if bool((info or {}).get("truncated", False)):
+                        stop_reason = "truncated"
+                    elif bool((info or {}).get("terminated", False)):
+                        stop_reason = "terminated"
 
                 episode_env_reward += float(env_reward)
                 episode_pdms_reward += 0.0
@@ -1111,6 +1178,7 @@ def run_test(args):
             except AssertionError as e:
                 print(f"[test-refine-grpo] env step error: {e}", flush=True)
                 done = True
+                stop_reason = "env_step_error"
                 env_reward = 0.0
                 info = {}
 
@@ -1122,6 +1190,11 @@ def run_test(args):
                 for flags in prev_env_crash_flags.values()
             ):
                 done = True
+            if done and stop_reason == "unknown":
+                if bool((info or {}).get("truncated", False)):
+                    stop_reason = "truncated"
+                elif bool((info or {}).get("terminated", False)):
+                    stop_reason = "terminated"
 
             episode_env_reward  += float(env_reward)
             episode_pdms_reward += step_pdms_mean
@@ -1158,6 +1231,16 @@ def run_test(args):
         if vid_3d is not None:
             vid_3d.release()
             vid_3d = None
+
+        print(
+            _format_episode_end_reason(
+                episode_idx=episode_idx,
+                step_idx=episode_step,
+                info=info,
+                fallback_reason=stop_reason,
+            ),
+            flush=True,
+        )
 
         # Episode-end stats
         _info_flat = {k: v for k, v in info.items() if not isinstance(v, dict)}
