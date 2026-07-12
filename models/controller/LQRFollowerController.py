@@ -25,8 +25,8 @@ from models.controller.PIDController import (
     _wrap_to_pi,
 )
 
-LQR_LON_Q1 = 100.0  # s
-LQR_LON_Q2 = 20.0  # v
+LQR_LON_Q1 = 10.0  # s
+LQR_LON_Q2 = 0.1  # v
 LQR_LON_Q3 = 0.01  # a
 LQR_LON_R = 100  # a
 LQR_LON_TS = 0.1  # engine/actuator lag
