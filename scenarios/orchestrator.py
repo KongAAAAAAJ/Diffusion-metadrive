@@ -108,10 +108,11 @@ class ScenarioOrchestrator:
         ego_vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
         if ego_vehicle is None:
             return
-        triggered_now = self._trigger_evaluator.is_triggered(env, agent_id, self)
-        if triggered_now and not self.summary.scenario_triggered:
-            self.summary.scenario_triggered = True
-            self.summary.trigger_step = int(step_count)
+        if self.definition.scenario_id != "S5_hard_brake_lead":
+            triggered_now = self._trigger_evaluator.is_triggered(env, agent_id, self)
+            if triggered_now and not self.summary.scenario_triggered:
+                self.summary.scenario_triggered = True
+                self.summary.trigger_step = int(step_count)
         self._execute_recipe(env, ego_vehicle, step_count)
 
     def get_episode_summary(self) -> Dict[str, object]:
@@ -134,10 +135,10 @@ class ScenarioOrchestrator:
             recipe_key = f"{recipe_index}:{recipe.operation}"
             if recipe_key in self._completed_recipe_keys:
                 continue
-            if not self._recipe_triggered(env, ego_vehicle, recipe.params):
+            if not self._recipe_triggered(env, ego_vehicle, recipe.params, step_count):
                 continue
             considered = True
-            if not self.summary.scenario_triggered:
+            if not self.summary.scenario_triggered and not self._is_s5_startup_support_recipe(recipe):
                 self.summary.scenario_triggered = True
                 self.summary.trigger_step = int(step_count)
             handler = getattr(self, f"_handle_{recipe.operation}", None)
@@ -195,6 +196,7 @@ class ScenarioOrchestrator:
             if spawned is None:
                 self.summary.notes.append("lead_brake_failed")
                 return False
+            self._mark_hard_brake_lead_vehicle(spawned)
             self._lead_vehicle_name = getattr(spawned, "name", None)
             self.summary.notes.append("lead_spawned")
         elif not self._has_controllable_policy(env, front_vehicle):
@@ -203,10 +205,11 @@ class ScenarioOrchestrator:
             if spawned is None:
                 self.summary.notes.append("lead_brake_failed")
                 return False
+            self._mark_hard_brake_lead_vehicle(spawned)
             self._lead_vehicle_name = getattr(spawned, "name", None)
             self.summary.notes.append("lead_spawned")
         else:
-            setattr(front_vehicle, "scenario_managed_vehicle", True)
+            self._mark_hard_brake_lead_vehicle(front_vehicle)
             self._lead_vehicle_name = getattr(front_vehicle, "name", None)
             self.summary.notes.append("lead_present")
 
@@ -219,6 +222,12 @@ class ScenarioOrchestrator:
         }
         self._mark_realized(step_count, "lead_brake_profile")
         return True
+
+    def _mark_hard_brake_lead_vehicle(self, vehicle) -> None:
+        setattr(vehicle, "scenario_managed_vehicle", True)
+        setattr(vehicle, "scenario_warning_marker", "!")
+        setattr(vehicle, "scenario_id", self.definition.scenario_id)
+        setattr(vehicle, "scenario_role", "hard_brake_lead")
 
     def _handle_inject_background_vehicle(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         reference_kind = str(params.get("reference_kind", "ego_lane"))
@@ -633,7 +642,9 @@ class ScenarioOrchestrator:
             return False
         return self.trigger_spec.longitudinal_min <= longitudinal <= self.trigger_spec.longitudinal_max
 
-    def _recipe_triggered(self, env, ego_vehicle, params: Dict[str, object]) -> bool:
+    def _recipe_triggered(self, env, ego_vehicle, params: Dict[str, object], step_count: int | None = None) -> bool:
+        if "trigger_after_s" in params:
+            return self._trigger_after_seconds_reached(env, params["trigger_after_s"], step_count)
         if bool(params.get("trigger_on_start", False)):
             return True
         trigger_by_local_route = params.get("trigger_by_local_route")
@@ -646,6 +657,41 @@ class ScenarioOrchestrator:
         if current_block_id != trigger_spec.block_id or longitudinal is None:
             return False
         return trigger_spec.longitudinal_min <= longitudinal <= trigger_spec.longitudinal_max
+
+    def _trigger_after_seconds_reached(self, env, trigger_after_s: object, step_count: int | None) -> bool:
+        if step_count is None:
+            return False
+        dt = self._scenario_step_dt_s(env)
+        return float(step_count) * dt >= float(trigger_after_s)
+
+    @staticmethod
+    def _scenario_step_dt_s(env) -> float:
+        engine = getattr(env, "engine", None)
+        config = getattr(engine, "global_config", None)
+        if config is None:
+            config = getattr(env, "config", None)
+
+        def _get_config_value(key: str, default: float) -> float:
+            if config is None:
+                return default
+            try:
+                return float(config.get(key, default))
+            except Exception:
+                pass
+            try:
+                return float(config[key])
+            except Exception:
+                pass
+            return float(getattr(config, key, default))
+
+        return _get_config_value("physics_world_step_size", 0.02) * _get_config_value("decision_repeat", 5.0)
+
+    def _is_s5_startup_support_recipe(self, recipe: RecipeSpec) -> bool:
+        return (
+            self.definition.scenario_id == "S5_hard_brake_lead"
+            and recipe.operation == "inject_adjacent_lane_vehicles"
+            and bool(recipe.params.get("trigger_on_start", False))
+        )
 
     def _parse_recipe_trigger(self, trigger_by_local_route) -> TriggerSpec | None:
         if not isinstance(trigger_by_local_route, dict):

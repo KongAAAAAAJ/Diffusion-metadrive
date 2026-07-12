@@ -84,6 +84,114 @@ def _env(agents, traffic):
     )
 
 
+def test_risk_detector_unlocks_when_leader_ttc_is_below_threshold():
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0),
+            "agent1": _vehicle("agent1", 0.0, 0.0, 1, speed_km_h=36.0),
+        },
+        traffic=[_vehicle("front", 28.0, 0.0, 1, speed_km_h=18.0)],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(env, ["agent0", "agent1"], env.engine.traffic_manager._traffic_vehicles, "LOCKED")
+
+    assert result["triggered"] is True
+    assert result["transition"] == "LOCKED_TO_UNLOCKED"
+    assert result["next_state"] == "UNLOCKED"
+    assert result["leader"]["front_net_gap_m"] == pytest.approx(13.5)
+    assert result["leader"]["closing_speed_mps"] == pytest.approx(5.0)
+    assert result["leader"]["ttc_s"] == pytest.approx(2.7)
+
+
+@pytest.mark.parametrize(
+    ("front_x", "front_speed_km_h"),
+    [
+        (29.5, 18.0),  # TTC is exactly 3 seconds.
+        (31.0, 18.0),  # TTC is greater than 3 seconds.
+        (20.0, 36.0),  # No positive closing speed.
+    ],
+)
+def test_risk_detector_keeps_locked_at_or_above_ttc_threshold(front_x, front_speed_km_h):
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0)},
+        traffic=[_vehicle("front", front_x, 0.0, 1, speed_km_h=front_speed_km_h)],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(env, ["agent0"], env.engine.traffic_manager._traffic_vehicles, "LOCKED")
+
+    assert result["triggered"] is False
+    assert result["next_state"] == "LOCKED"
+
+
+def test_risk_detector_ignores_close_vehicle_in_adjacent_lane_for_ttc():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0)},
+        traffic=[_vehicle("adjacent", 12.0, 3.5, 0, speed_km_h=0.0)],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(env, ["agent0"], env.engine.traffic_manager._traffic_vehicles, "LOCKED")
+
+    assert result["triggered"] is False
+    assert result["leader"]["front_vehicle_id"] is None
+
+
+def test_risk_detector_relocks_when_follower_gap_is_below_threshold():
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 30.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 12.0, 0.0, 1),
+            "agent2": _vehicle("agent2", -1.0, 0.0, 1),
+        },
+        traffic=[],
+    )
+    detector = SimpleRuleRiskDetector(ideal_following_distance_m=10.0, relock_gap_ratio=1.5)
+
+    result = detector.detect(env, ["agent0", "agent1", "agent2"], [], "UNLOCKED")
+
+    assert result["triggered"] is True
+    assert result["transition"] == "UNLOCKED_TO_LOCKED"
+    assert result["next_state"] == "LOCKED"
+    assert result["min_follower_gap_m"] == pytest.approx(8.5)
+
+
+def test_risk_detector_keeps_unlocked_at_exact_relock_threshold():
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 29.5, 0.0, 1),
+            "agent1": _vehicle("agent1", 10.0, 0.0, 1),
+        },
+        traffic=[],
+    )
+    detector = SimpleRuleRiskDetector(ideal_following_distance_m=10.0, relock_gap_ratio=1.5)
+
+    result = detector.detect(env, ["agent0", "agent1"], [], "UNLOCKED")
+
+    assert result["triggered"] is False
+    assert result["next_state"] == "UNLOCKED"
+    assert result["min_follower_gap_m"] == pytest.approx(15.0)
+
+
+@pytest.mark.parametrize("follower_x,follower_lane", [(20.0, 2), (40.0, 1)])
+def test_risk_detector_keeps_unlocked_without_valid_follower_pair(follower_x, follower_lane):
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 30.0, 0.0, 1),
+            "agent1": _vehicle("agent1", follower_x, -3.5 if follower_lane == 2 else 0.0, follower_lane),
+        },
+        traffic=[],
+    )
+    detector = SimpleRuleRiskDetector(ideal_following_distance_m=10.0, relock_gap_ratio=1.5)
+
+    result = detector.detect(env, ["agent0", "agent1"], [], "UNLOCKED")
+
+    assert result["triggered"] is False
+    assert result["next_state"] == "UNLOCKED"
+    assert result["min_follower_gap_m"] is None
+
+
 class ConnectedFakeLane(FakeLane):
     def __init__(self, lane_id: int, y: float, x_offset: float, from_node: str, to_node: str, length: float = 30.0, width: float = 3.5):
         super().__init__(lane_id=lane_id, y=y, length=length, width=width)
@@ -342,7 +450,12 @@ def test_rule_maker_marks_rear_agent_as_leader_when_blocked_between_agents():
         },
         traffic=[_vehicle("blocker", 5.0, 0.0, 1)],
     )
-    rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0)
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        locked_on_reset=False,
+        ideal_following_distance_m=0.0,
+    )
 
     rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
     debug = rule_maker.get_last_debug()
@@ -770,8 +883,7 @@ def test_rule_maker_starts_locked_with_shared_action_and_fixed_roles():
         horizon_s=2.0,
         lane_change_preference=2.0,
         locked_on_reset=True,
-        risk_front_gap_trigger_m=0.0,
-        risk_side_gap_trigger_m=0.0,
+        risk_ttc_trigger_s=3.0,
     )
     rule_maker.reset(env, ["agent0", "agent1"])
 
@@ -790,14 +902,13 @@ def test_rule_maker_unlocks_after_risk_trigger_and_recovers_dynamic_roles():
             "agent0": _vehicle("agent0", 10.0, 0.0, 1),
             "agent1": _vehicle("agent1", 2.0, -3.5, 2),
         },
-        traffic=[_vehicle("front_risk", 16.0, 0.0, 1)],
+        traffic=[_vehicle("front_risk", 16.0, 0.0, 1, speed_km_h=0.0)],
     )
     rule_maker = MultiAgentRuleMaker(
         target_speed_km_h=30.0,
         horizon_s=2.0,
         locked_on_reset=True,
-        risk_front_gap_trigger_m=100.0,
-        risk_side_gap_trigger_m=100.0,
+        risk_ttc_trigger_s=3.0,
     )
     rule_maker.reset(env, ["agent0", "agent1"])
 
@@ -807,5 +918,37 @@ def test_rule_maker_unlocks_after_risk_trigger_and_recovers_dynamic_roles():
     assert debug is not None
     assert debug["formation_locked"] is False
     assert debug["risk_triggered"] is True
+    assert debug["state_transition"] == "LOCKED_TO_UNLOCKED"
     assert debug["dynamic_roles"]["agent0"] == "leader"
     assert debug["dynamic_roles"]["agent1"] == "leader"
+
+
+def test_rule_maker_relocks_on_next_step_when_follower_gap_is_small():
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0),
+            "agent1": _vehicle("agent1", 0.0, -3.5, 2, speed_km_h=36.0),
+        },
+        traffic=[_vehicle("front_risk", 16.0, 0.0, 1, speed_km_h=0.0)],
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        locked_on_reset=True,
+        risk_ttc_trigger_s=3.0,
+        ideal_following_distance_m=10.0,
+        relock_gap_ratio=1.5,
+    )
+    rule_maker.reset(env, ["agent0", "agent1"])
+
+    rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    assert rule_maker.is_formation_locked is False
+
+    env.agents["agent1"] = _vehicle("agent1", 0.0, 0.0, 1, speed_km_h=36.0)
+    rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert debug is not None
+    assert debug["formation_locked"] is True
+    assert debug["risk_triggered"] is True
+    assert debug["state_transition"] == "UNLOCKED_TO_LOCKED"

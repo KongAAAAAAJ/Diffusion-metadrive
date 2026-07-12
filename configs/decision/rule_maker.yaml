@@ -14,9 +14,10 @@ default:
   target_speed_km_h: 30.0       # desired cruise speed
   horizon_s: 4.0                # look-ahead horizon (seconds)
   num_waypoints: 8              # trajectory sample count
-  locked_on_reset: true         # platoon starts locked; unlock only after risk trigger
-  risk_front_gap_trigger_m: 12.0
-  risk_side_gap_trigger_m: 6.0
+  locked_on_reset: true         # platoon starts locked
+  risk_ttc_trigger_s: 3.0       # LOCKED -> UNLOCKED when leader TTC is below this
+  ideal_following_distance_m: 10.0
+  relock_gap_ratio: 1.5         # UNLOCKED -> LOCKED below ratio * ideal distance
 
   # ── IDM longitudinal model ─────────────────────────────────────────────────
   idm_time_headway_s: 1.2       # desired time gap to front vehicle

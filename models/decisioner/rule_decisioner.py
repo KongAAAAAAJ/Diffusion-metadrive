@@ -134,8 +134,9 @@ class MultiAgentRuleMaker(RuleMaker):
         w_close_lc_same_cost: float = 0.5,
         w_close_lc_diff_cost: float = 1.0,
         locked_on_reset: bool = True,
-        risk_front_gap_trigger_m: float = 12.0,
-        risk_side_gap_trigger_m: float = 6.0,
+        risk_ttc_trigger_s: float = 3.0,
+        ideal_following_distance_m: float = 10.0,
+        relock_gap_ratio: float = 1.5,
     ) -> None:
         self.target_speed_km_h = float(target_speed_km_h)
         self.horizon_s = float(horizon_s)
@@ -166,12 +167,14 @@ class MultiAgentRuleMaker(RuleMaker):
         self.w_close_lc_same_cost = float(w_close_lc_same_cost)
         self.w_close_lc_diff_cost = float(w_close_lc_diff_cost)
         self.locked_on_reset = bool(locked_on_reset)
-        self.risk_front_gap_trigger_m = float(risk_front_gap_trigger_m)
-        self.risk_side_gap_trigger_m = float(risk_side_gap_trigger_m)
+        self.risk_ttc_trigger_s = float(risk_ttc_trigger_s)
+        self.ideal_following_distance_m = float(ideal_following_distance_m)
+        self.relock_gap_ratio = float(relock_gap_ratio)
         self._formation_locked = bool(self.locked_on_reset)
         self._risk_detector = SimpleRuleRiskDetector(
-            front_gap_trigger_m=self.risk_front_gap_trigger_m,
-            side_gap_trigger_m=self.risk_side_gap_trigger_m,
+            ttc_trigger_s=self.risk_ttc_trigger_s,
+            ideal_following_distance_m=self.ideal_following_distance_m,
+            relock_gap_ratio=self.relock_gap_ratio,
         )
         self._last_debug: dict | None = None
         self._candidate_debug_plot_counter = 0
@@ -222,13 +225,14 @@ class MultiAgentRuleMaker(RuleMaker):
             return {}
 
         ordered_agent_ids = [agent_id for agent_id in agent_ids if agent_id in candidates_by_agent]
-        risk_info = {"triggered": False, "reasons": [], "per_agent": {}}
-
-        # !!!!!!!!!!!!!!!!!!注释后，不解锁platoon!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        if self._formation_locked:
-            risk_info = self._risk_detector.detect(env, ordered_agent_ids, traffic_vehicles)
-            if bool(risk_info.get("triggered")):
-                self._formation_locked = False
+        current_state = "LOCKED" if self._formation_locked else "UNLOCKED"
+        risk_info = self._risk_detector.detect(
+            env,
+            ordered_agent_ids,
+            traffic_vehicles,
+            current_state,
+        )
+        self._formation_locked = risk_info["next_state"] == "LOCKED"
 
         if self._formation_locked:
             best_combo, best_score = self._best_locked_combo(
@@ -302,6 +306,7 @@ class MultiAgentRuleMaker(RuleMaker):
             "best_score": float(best_score),
             "formation_locked": bool(self._formation_locked),
             "risk_triggered": bool(risk_info.get("triggered", False)),
+            "state_transition": risk_info.get("transition"),
             "risk_info": risk_info,
             "dynamic_roles": dynamic_roles,
             "candidates_by_agent": {
@@ -916,6 +921,7 @@ class MultiAgentRuleMaker(RuleMaker):
         combo,
         traffic_vehicles: list,
     ) -> float:
+        # !!!!!!!!只保留 效率评分
         score = 0.0
         agents = getattr(env, "agents", {}) or {}
 
@@ -925,53 +931,53 @@ class MultiAgentRuleMaker(RuleMaker):
                 continue
             action = int(candidate.get("action", 0))
             progress = float(np.linalg.norm(trajectory[-1] - trajectory[0]))
-            score += self.w_progress * progress
+            # score += self.w_progress * progress
             score += self.w_mobil * float(candidate.get("mobil_gain", 0.0))
             s8_force_score = candidate.get("force_lane_score")
-            if self._is_s8_exit_route(env) and s8_force_score is not None:
-                score += float(s8_force_score)
-            if action == 0:
-                score += self.w_keep_bias
-            else:
-                if not (self._is_s8_exit_route(env) and s8_force_score is not None):
-                    score += self.lane_change_preference
-                score -= self.lc_cost
+            # if self._is_s8_exit_route(env) and s8_force_score is not None:
+            #     score += float(s8_force_score)
+            # if action == 0:
+            #     score += self.w_keep_bias
+            # else:
+            #     if not (self._is_s8_exit_route(env) and s8_force_score is not None):
+            #         score += self.lane_change_preference
+            #     score -= self.lc_cost
 
-            for traffic_vehicle in traffic_vehicles:
-                traffic_pos = np.asarray(getattr(traffic_vehicle, "position", (0.0, 0.0))[:2], dtype=np.float32)
-                min_dist = float(np.min(np.linalg.norm(trajectory - traffic_pos.reshape(1, 2), axis=1)))
-                if min_dist < self.traffic_safety_distance_m:
-                    score -= 100.0 * (self.traffic_safety_distance_m - min_dist + 1.0)
-                else:
-                    score += min(self.traffic_clearance_cap, self.w_traffic_clearance * min_dist)
+        #     for traffic_vehicle in traffic_vehicles:
+        #         traffic_pos = np.asarray(getattr(traffic_vehicle, "position", (0.0, 0.0))[:2], dtype=np.float32)
+        #         min_dist = float(np.min(np.linalg.norm(trajectory - traffic_pos.reshape(1, 2), axis=1)))
+        #         if min_dist < self.traffic_safety_distance_m:
+        #             score -= 100.0 * (self.traffic_safety_distance_m - min_dist + 1.0)
+        #         else:
+        #             score += min(self.traffic_clearance_cap, self.w_traffic_clearance * min_dist)
 
-        score += self._joint_agent_safety_score(combo)
+        # score += self._joint_agent_safety_score(combo)
 
-        for idx in range(1, len(ordered_agent_ids)):
-            prev_agent_id = ordered_agent_ids[idx - 1]
-            agent_id = ordered_agent_ids[idx]
-            prev_candidate = combo[idx - 1]
-            candidate = combo[idx]
-            prev_vehicle = agents.get(prev_agent_id)
-            vehicle = agents.get(agent_id)
-            if prev_vehicle is None or vehicle is None:
-                continue
-            prev_action = int(prev_candidate.get("action", 0))
-            action = int(candidate.get("action", 0))
-            if prev_action == action:
-                score += self.w_formation_consistent
-            else:
-                score -= self.w_formation_inconsistent_cost
+        # for idx in range(1, len(ordered_agent_ids)):
+        #     prev_agent_id = ordered_agent_ids[idx - 1]
+        #     agent_id = ordered_agent_ids[idx]
+        #     prev_candidate = combo[idx - 1]
+        #     candidate = combo[idx]
+        #     prev_vehicle = agents.get(prev_agent_id)
+        #     vehicle = agents.get(agent_id)
+        #     if prev_vehicle is None or vehicle is None:
+        #         continue
+        #     prev_action = int(prev_candidate.get("action", 0))
+        #     action = int(candidate.get("action", 0))
+        #     if prev_action == action:
+        #         score += self.w_formation_consistent
+        #     else:
+        #         score -= self.w_formation_inconsistent_cost
 
-            same_source_lane = tuple(prev_candidate.get("source_lane_index", ())) == tuple(candidate.get("source_lane_index", ()))
-            close_pair = self._current_pair_distance(prev_vehicle, vehicle) <= self.close_pair_threshold_m
-            if same_source_lane and close_pair:
-                if prev_action == 0 and action == 0:
-                    score += self.w_close_keep
-                elif prev_action == action:
-                    score -= self.w_close_lc_same_cost
-                else:
-                    score -= self.w_close_lc_diff_cost
+        #     same_source_lane = tuple(prev_candidate.get("source_lane_index", ())) == tuple(candidate.get("source_lane_index", ()))
+        #     close_pair = self._current_pair_distance(prev_vehicle, vehicle) <= self.close_pair_threshold_m
+        #     if same_source_lane and close_pair:
+        #         if prev_action == 0 and action == 0:
+        #             score += self.w_close_keep
+        #         elif prev_action == action:
+        #             score -= self.w_close_lc_same_cost
+        #         else:
+        #             score -= self.w_close_lc_diff_cost
 
         return float(score)
 
@@ -1198,8 +1204,9 @@ def make_rule_maker(config: dict) -> RuleMaker:
         "traffic_safety_distance_m": config.get("rule_maker_traffic_safety_distance_m"),
         "agent_safety_distance_m": config.get("rule_maker_agent_safety_distance_m"),
         "locked_on_reset": config.get("rule_maker_locked_on_reset"),
-        "risk_front_gap_trigger_m": config.get("rule_maker_risk_front_gap_trigger_m"),
-        "risk_side_gap_trigger_m": config.get("rule_maker_risk_side_gap_trigger_m"),
+        "risk_ttc_trigger_s": config.get("rule_maker_risk_ttc_trigger_s"),
+        "ideal_following_distance_m": config.get("rule_maker_ideal_following_distance_m"),
+        "relock_gap_ratio": config.get("rule_maker_relock_gap_ratio"),
     }
     for k, v in _overrides.items():
         if v is not None:
@@ -1236,8 +1243,9 @@ def make_rule_maker(config: dict) -> RuleMaker:
             w_close_lc_same_cost=float(yaml_params.get("w_close_lc_same_cost", 0.5)),
             w_close_lc_diff_cost=float(yaml_params.get("w_close_lc_diff_cost", 1.0)),
             locked_on_reset=bool(yaml_params.get("locked_on_reset", True)),
-            risk_front_gap_trigger_m=float(yaml_params.get("risk_front_gap_trigger_m", 12.0)),
-            risk_side_gap_trigger_m=float(yaml_params.get("risk_side_gap_trigger_m", 6.0)),
+            risk_ttc_trigger_s=float(yaml_params.get("risk_ttc_trigger_s", 3.0)),
+            ideal_following_distance_m=float(yaml_params.get("ideal_following_distance_m", 10.0)),
+            relock_gap_ratio=float(yaml_params.get("relock_gap_ratio", 1.5)),
         )
     raise ValueError(
         f"Unknown rule_maker_type: {rule_maker_type!r}. "

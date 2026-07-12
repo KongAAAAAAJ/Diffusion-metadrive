@@ -130,6 +130,8 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         code="S5",
         scenario_id="S5_hard_brake_lead",
         allowed_local_routes=("R1_entry_straight", "R3_mainline_straight", "R3_post_transition_straight"),
+        # S5 no longer uses this window for hard-brake timing.
+        # Kept only for local_route validation / legacy orchestrator compatibility.
         trigger_by_local_route={
             "R1_entry_straight": TriggerSpec("s0", 50.0, 220.0),  # 80-220m 之间触发，确保有足够距离完成急刹
             "R3_mainline_straight": TriggerSpec("s_main0", 60.0, 160.0),
@@ -139,6 +141,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
             RecipeSpec(
                 "hard_brake_lead",  # 急刹车
                 {
+                    "trigger_after_s": 3.0,
                     "lead_distance_m": 50.0,  # 50m 前方触发急刹
                     "lead_distance_range_m": (45.0, 55.0),
                     "lead_target_speed_kmh": 21.0,

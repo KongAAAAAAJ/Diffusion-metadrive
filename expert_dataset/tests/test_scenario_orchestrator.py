@@ -54,6 +54,7 @@ def test_hard_brake_lead_installs_speed_profile(monkeypatch):
         agents={"default_agent": ego},
         engine=SimpleNamespace(
             current_map=SimpleNamespace(blocks=[]),
+            global_config={"physics_world_step_size": 0.02, "decision_repeat": 5},
             get_policy=lambda name: SimpleNamespace() if name == "lead_vehicle" else None,
         ),
     )
@@ -68,10 +69,16 @@ def test_hard_brake_lead_installs_speed_profile(monkeypatch):
 
     orchestrator.before_step(env, "default_agent", 7)
 
+    assert "lead_vehicle" not in orchestrator._speed_profiles
+    assert orchestrator.get_episode_summary()["scenario_triggered"] is False
+
+    orchestrator.before_step(env, "default_agent", 30)
+
     summary = orchestrator.get_episode_summary()
     assert summary["scenario_triggered"] is True
     assert summary["scenario_realized"] is True
-    assert orchestrator._speed_profiles["lead_vehicle"]["target_speed_kmh"] == 1.0
+    assert summary["scenario_trigger_step"] == 30
+    assert orchestrator._speed_profiles["lead_vehicle"]["target_speed_kmh"] == 1.25
     assert getattr(lead, "scenario_managed_vehicle") is True
     assert getattr(lead, "scenario_warning_marker") == "!"
     assert getattr(lead, "scenario_id") == "S5_hard_brake_lead"
@@ -98,7 +105,7 @@ def test_hard_brake_lead_spawns_dedicated_lead_when_front_vehicle_is_out_of_rang
     monkeypatch.setattr(orchestrator, "_find_front_vehicle_with_distance", lambda vehicle: (front, 32.0))
     monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", lambda *args, **kwargs: spawned)
 
-    orchestrator.before_step(env, "default_agent", 11)
+    orchestrator.before_step(env, "default_agent", 30)
 
     summary = orchestrator.get_episode_summary()
     assert summary["scenario_realized"] is True
@@ -141,7 +148,7 @@ def test_s5_hard_brake_lead_randomizes_lead_spawn_params_from_env_seed(monkeypat
 
     monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", fake_spawn)
 
-    orchestrator.before_step(env, "default_agent", 11)
+    orchestrator.before_step(env, "default_agent", 30)
 
     expected_rng = np.random.RandomState(123)
     expected_distance = float(expected_rng.uniform(45.0, 55.0))
@@ -656,7 +663,7 @@ def test_hard_brake_lead_spawns_dedicated_lead_when_existing_front_vehicle_polic
     monkeypatch.setattr(orchestrator, "_find_front_vehicle_with_distance", lambda vehicle: (front, 18.0))
     monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", lambda *args, **kwargs: spawned)
 
-    orchestrator.before_step(env, "default_agent", 9)
+    orchestrator.before_step(env, "default_agent", 30)
 
     summary = orchestrator.get_episode_summary()
     assert summary["scenario_realized"] is True
@@ -668,6 +675,32 @@ def test_hard_brake_lead_spawns_dedicated_lead_when_existing_front_vehicle_polic
     assert getattr(spawned, "scenario_warning_marker") == "!"
     assert getattr(spawned, "scenario_id") == "S5_hard_brake_lead"
     assert getattr(spawned, "scenario_role") == "hard_brake_lead"
+
+
+def test_s5_adjacent_start_recipe_does_not_mark_main_trigger(monkeypatch):
+    lane = _Lane(("n0", "n1", 1))
+    ego = _Vehicle(lane, position_x=120.0)
+    env = SimpleNamespace(
+        agents={"default_agent": ego},
+        engine=SimpleNamespace(current_map=SimpleNamespace(blocks=[]), get_policy=lambda name: SimpleNamespace()),
+    )
+
+    orchestrator = ScenarioOrchestrator(
+        get_scenario_definition("S5_hard_brake_lead"),
+        "R1_entry_straight",
+    )
+    orchestrator.reset(env, "default_agent")
+    orchestrator._road_to_block_id = {("n0", "n1"): "s0"}
+    monkeypatch.setattr(orchestrator, "_find_front_vehicle_with_distance", lambda vehicle: (None, None))
+    monkeypatch.setattr(orchestrator, "_resolve_adjacent_lane_index", lambda *args, **kwargs: ("n0", "n1", 0))
+    monkeypatch.setattr(orchestrator, "_spawn_on_lane_tuple", lambda *args, **kwargs: SimpleNamespace(name="side_vehicle"))
+
+    orchestrator.before_step(env, "default_agent", 1)
+
+    summary = orchestrator.get_episode_summary()
+    assert summary["scenario_triggered"] is False
+    assert "0:hard_brake_lead" not in orchestrator._completed_recipe_keys
+    assert "1:inject_adjacent_lane_vehicles" in orchestrator._completed_recipe_keys
 
 
 def test_apply_speed_profiles_directly_brakes_vehicle_and_marks_warning(monkeypatch):

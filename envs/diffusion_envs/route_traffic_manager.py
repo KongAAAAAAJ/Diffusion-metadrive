@@ -327,8 +327,8 @@ class RouteAwareTrafficManager(CustomTrafficManager):
         v_to_remove = []
         for v in self._traffic_vehicles:
             v.after_step()
-            if not v.on_lane:
-                v_to_remove.append(v)
+            # if not v.on_lane:  # !!!!!!!!不移除超出道路范围车辆
+            #     v_to_remove.append(v)
 
         for v in v_to_remove:
             vehicle_type = type(v)
