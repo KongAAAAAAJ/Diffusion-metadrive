@@ -1,4 +1,6 @@
-pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt
+# pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/diffusion/run_20/checkpoints/diffusion-epoch=25.ckpt
+pretrained_ckpt: /media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo/run_1/checkpoints/step_0005000_score_25.1007/full_platoon_refine_grpo.ckpt
+
 model_config_path: configs/diffusion/model.yaml
 # target_guidance_type override for GRPO training.
 # external_point: target_point is computed each step by RuleMaker (models/decision_model/rule_maker.py).
@@ -17,6 +19,18 @@ rule_maker_horizon_s: 4.0
 num_agents: 3
 use_relation_encoder: false  # keep _status_encoding at [128,19] for legacy diffusion checkpoints
 output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo
+
+test_config:
+  episodes: 5
+  max_steps: 0
+  output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo_test
+  run_tag: test_0712
+  save_combined_traj_frames: true
+  save_traj_plots: true
+  save_trajectory_data: true
+  save_2d_video: true
+  save_3d_video: false
+  video_fps: 10
 
 seed: 10                # 全局随机种子；~ = null 表示不固定（非确定性）
 start_seed: 10          # 场景起始种子
@@ -104,6 +118,9 @@ env_config:
   use_render: false
   image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption
   planner_device: cuda
+  num_scenarios: 3
+  traffic_density: 0.04
+  random_traffic: false
   lookahead_index: 2
   target_speed_km_h: 30.0
   controller_type: stabilized

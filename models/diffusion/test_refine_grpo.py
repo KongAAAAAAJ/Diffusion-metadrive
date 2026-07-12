@@ -55,40 +55,16 @@ from models.refine_grpo.ddim_with_logprob import DDIMSchedulerWithLogProb
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _DEFAULT_CONFIG = str(_REPO_ROOT / "configs" / "train" / "refine_grpo.yaml")
-_DEFAULT_OUTPUT = str(_REPO_ROOT / "outputs" / "refine_grpo_test")
+_DEFAULT_OUTPUT_ROOT = str(_REPO_ROOT / "outputs" / "refine_grpo_test")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Test selected-refine-GRPO checkpoint (training-aligned)")
-    p.add_argument("--checkpoint",               type=str, default="/media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo/run_25/checkpoints/step_0035000_score_0.6398/full_platoon_refine_grpo.ckpt",
-                   help="Path to full_platoon_refine_grpo.ckpt (overrides pretrained_ckpt in YAML)")
     p.add_argument("--refine-train-config-path", type=str, default=_DEFAULT_CONFIG)
-    p.add_argument("--scenario-id",              type=str, default="S1_free_cruise_straight")
-    p.add_argument("--local-route",              type=str, default="")
-    p.add_argument("--episodes",                 type=int, default=3)
-    p.add_argument("--start-seed",               type=int, default=0)
-    p.add_argument("--num-scenarios",            type=int, default=1)
-    p.add_argument("--traffic-density",          type=float, default=0.04)
-    p.add_argument("--random-traffic",           type=int, default=0,   choices=[0, 1])
-    p.add_argument("--max-steps",                type=int, default=0,
-                   help="Max steps per episode (0 = unlimited)")
-    p.add_argument("--device",                   type=str, default="cuda")
-    p.add_argument("--output-dir",               type=str, default=_DEFAULT_OUTPUT)
-    p.add_argument("--save-combined-traj-frames", type=int, default=1, choices=[0, 1])
-    p.add_argument("--save-traj-plots",          type=int, default=0, choices=[0, 1],
-                   help="Save per-vehicle matplotlib trajectory plots to traj_plots/{agent_id}/")
-    p.add_argument("--save-trajectory-data",     type=int, default=1, choices=[0, 1])
-    p.add_argument("--save-2d-video",            type=int, default=1, choices=[0, 1],
-                   help="Compile topdown frames into per-episode MP4 (videos/2d/episode_XXX.mp4)")
-    p.add_argument("--save-3d-video",            type=int, default=0, choices=[0, 1],
-                   help="Capture MetaDrive 3D render into per-episode MP4 (videos/3d/episode_XXX.mp4). Forces use_render=True.")
-    p.add_argument("--video-fps",                type=int, default=10,
-                   help="FPS for output MP4 videos")
-    p.add_argument("--render",                   type=int, default=0, choices=[0, 1])
     return p.parse_args(argv)
 
 
@@ -104,14 +80,52 @@ def _load_config(path: str) -> dict:
     return cfg
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _resolve_test_config(config: Mapping[str, Any]) -> dict:
+    raw = dict(config.get("test_config", {}) or {})
+    return {
+        "episodes": int(raw.get("episodes", 3)),
+        "max_steps": int(raw.get("max_steps", 0)),
+        "output_root": str(raw.get("output_root", _DEFAULT_OUTPUT_ROOT)),
+        "run_tag": str(raw.get("run_tag", "test")),
+        "save_combined_traj_frames": _as_bool(raw.get("save_combined_traj_frames", True)),
+        "save_traj_plots": _as_bool(raw.get("save_traj_plots", False)),
+        "save_trajectory_data": _as_bool(raw.get("save_trajectory_data", True)),
+        "save_2d_video": _as_bool(raw.get("save_2d_video", True)),
+        "save_3d_video": _as_bool(raw.get("save_3d_video", False)),
+        "video_fps": int(raw.get("video_fps", 10)),
+    }
+
+
+def _create_next_run_dir(parent: pathlib.Path) -> pathlib.Path:
+    parent.mkdir(parents=True, exist_ok=True)
+    existing = []
+    for item in parent.iterdir():
+        if not item.is_dir() or not item.name.startswith("run_"):
+            continue
+        suffix = item.name[len("run_"):]
+        if suffix.isdigit():
+            existing.append(int(suffix))
+    run_dir = parent / f"run_{max(existing) + 1 if existing else 1}"
+    run_dir.mkdir()
+    return run_dir
+
+
 # ── Env config builder (mirrors run_training in train_refine_grpo.py) ─
 
-def _build_env_config(config: dict, args, planner) -> dict:
+def _build_env_config(config: dict, test_config: Mapping[str, Any], planner) -> dict:
     env_config = dict(config.get("env_config", {}))
     env_config.setdefault("num_agents",          int(config.get("num_agents", 3)))
     env_config.setdefault("observation_mode",    "multimodal")
-    env_config.setdefault("use_render",          bool(args.render) or bool(args.save_3d_video))
-    env_config.setdefault("planner_device",      args.device)
+    env_config.setdefault("use_render",          False)
+    if bool(test_config.get("save_3d_video", False)):
+        env_config["use_render"] = True
+    env_config.setdefault("planner_device",      "cuda")
     env_config.setdefault("lookahead_index",     int(config.get("lookahead_index", 2)))
     env_config.setdefault("target_speed_km_h",   float(config.get("target_speed_km_h", 30.0)))
     env_config.setdefault("controller_type",     str(config.get("controller_type", "stabilized")))
@@ -119,29 +133,210 @@ def _build_env_config(config: dict, args, planner) -> dict:
     env_config["trajectory_source"] = "diffusion"
     env_config["planner"]            = planner
 
-    # Scenario / seed
-    if args.scenario_id:
+    if env_config.get("scenario_id") and not env_config.get("local_route"):
         from scenarios.definitions import SCENARIO_BY_ID
 
-        env_config.pop("scenario_ids", None)
-        env_config["scenario_id"] = args.scenario_id
-        if not args.local_route:
-            if args.scenario_id not in SCENARIO_BY_ID:
-                raise ValueError(f"Unknown scenario_id in selected-refine test config: {args.scenario_id}")
-            allowed_routes = tuple(SCENARIO_BY_ID[args.scenario_id].allowed_local_routes)
-            if not allowed_routes:
-                raise ValueError(f"Scenario {args.scenario_id} has no allowed local routes.")
-            env_config["local_route"] = allowed_routes[0]
-    if args.local_route:
-        env_config["local_route"] = args.local_route
-    env_config.setdefault("start_seed",       args.start_seed)
-    env_config.setdefault("num_scenarios",    args.num_scenarios)
-    env_config.setdefault("traffic_density",  args.traffic_density)
-    env_config.setdefault("random_traffic",   bool(args.random_traffic))
+        scenario_id = str(env_config["scenario_id"])
+        if scenario_id not in SCENARIO_BY_ID:
+            raise ValueError(f"Unknown scenario_id in selected-refine test config: {scenario_id}")
+        allowed_routes = tuple(SCENARIO_BY_ID[scenario_id].allowed_local_routes)
+        if not allowed_routes:
+            raise ValueError(f"Scenario {scenario_id} has no allowed local routes.")
+        env_config["local_route"] = allowed_routes[0]
+
+    if "start_seed" not in env_config and "seed" not in env_config:
+        top_start_seed = config.get("start_seed", None)
+        if top_start_seed is not None:
+            env_config["start_seed"] = int(top_start_seed)
+    env_config.setdefault("num_scenarios",    1)
+    env_config.setdefault("traffic_density",  0.04)
+    env_config.setdefault("random_traffic",   False)
     return env_config
 
 
 # ── PDMS param dict (mirrors run_training) ────────────────────────────────────
+
+
+# ── Locked-follow helpers ─────────────────────────────────────────────────────
+
+def _call_rule_maker_locked(rule_maker) -> bool:
+    locked = getattr(rule_maker, "is_formation_locked", False)
+    return bool(locked() if callable(locked) else locked)
+
+
+def _inject_rule_maker_targets(planner_batch: dict, decisions: Mapping[str, Mapping]) -> None:
+    for agent_id, decision in (decisions or {}).items():
+        if agent_id not in planner_batch or not isinstance(decision, Mapping):
+            continue
+        if "target_point" not in decision:
+            continue
+        planner_batch[agent_id]["target_point"] = np.asarray(
+            decision["target_point"], dtype=np.float32
+        ).reshape(2)
+
+
+def _apply_rule_maker_roles(base_env, rule_maker_debug: dict | None) -> None:
+    dynamic_roles = (rule_maker_debug or {}).get("dynamic_roles", {}) if rule_maker_debug else {}
+    if not dynamic_roles:
+        return
+    apply_roles = getattr(base_env, "apply_dynamic_roles", None)
+    if callable(apply_roles):
+        apply_roles(dynamic_roles)
+    else:
+        setattr(base_env, "_agent_roles", dict(dynamic_roles))
+
+
+def _locked_follow_decision(rule_maker, env, agent_ids: list[str], planner_batch: dict) -> dict:
+    """Update RuleMaker and return the locked-follow decision state."""
+    if rule_maker is None:
+        return {
+            "use_locked_follow": False,
+            "formation_locked": False,
+            "decisions": {},
+            "rule_maker_debug": None,
+        }
+    base_env = getattr(env, "base_env", env)
+    decisions = rule_maker.compute(base_env, agent_ids, planner_batch)
+    _inject_rule_maker_targets(planner_batch, decisions)
+    get_debug = getattr(rule_maker, "get_last_debug", None)
+    rule_maker_debug = get_debug() if callable(get_debug) else None
+    _apply_rule_maker_roles(base_env, rule_maker_debug)
+    formation_locked = _call_rule_maker_locked(rule_maker)
+    return {
+        "use_locked_follow": formation_locked,
+        "formation_locked": formation_locked,
+        "decisions": decisions,
+        "rule_maker_debug": rule_maker_debug,
+    }
+
+
+def _execute_locked_follow_step(
+    *,
+    env,
+    agent_ids: list[str],
+    normal_planner,
+    follow_controller,
+    decisions: Mapping[str, Mapping],
+    rule_maker_debug: dict | None,
+) -> tuple[float, bool, dict, dict[str, np.ndarray]]:
+    from models.controller.PIDController import _world_trajectory_to_ego_local
+
+    base_env = env.base_env
+    trajectories_world = normal_planner.plan(base_env, decisions)
+    low_level_actions = follow_controller.compute_actions(base_env, trajectories_world)
+    controller_debug = (
+        follow_controller.get_last_debug()
+        if callable(getattr(follow_controller, "get_last_debug", None))
+        else {}
+    )
+    normal_planner_debug = (
+        normal_planner.get_last_debug()
+        if callable(getattr(normal_planner, "get_last_debug", None))
+        else {}
+    )
+
+    trajectories_local: dict[str, np.ndarray] = {}
+    for agent_id in agent_ids:
+        vehicle = getattr(base_env, "agents", {}).get(agent_id)
+        trajectory_world = trajectories_world.get(agent_id)
+        trajectories_local[agent_id] = (
+            _world_trajectory_to_ego_local(vehicle, trajectory_world)
+            if vehicle is not None and trajectory_world is not None
+            else np.zeros((0, 3), dtype=np.float32)
+        )
+
+    if hasattr(base_env, "_pending_step_trajectories"):
+        base_env._pending_step_trajectories = dict(trajectories_local)
+
+    vehicle_state_before = env._vehicle_states(agent_ids) if hasattr(env, "_vehicle_states") else {}
+    result = base_env.step(low_level_actions)
+    if len(result) == 5:
+        raw_obs, env_reward, terminated, truncated, info = result
+        done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
+    else:
+        raw_obs, env_reward, done_dict, info = result
+        terminated = done_dict
+        truncated = {agent_id: False for agent_id in done_dict}
+        done = bool(done_dict.get("__all__", False))
+
+    info = dict(info or {})
+    missing_agent_ids = [agent_id for agent_id in agent_ids if agent_id not in (raw_obs or {})]
+    if missing_agent_ids:
+        terminated = dict(terminated)
+        truncated = dict(truncated)
+        for agent_id in agent_ids:
+            terminated[agent_id] = True
+        terminated["__all__"] = True
+        truncated["__all__"] = False
+        done = True
+        info["missing_agent_ids"] = list(missing_agent_ids)
+
+    env_reward = dict(env_reward or {})
+    reward_values = [float(env_reward.get(agent_id, 0.0)) for agent_id in agent_ids]
+    scalar_reward = float(np.mean(reward_values)) if reward_values else 0.0
+
+    vehicle_state_after = env._vehicle_states(agent_ids) if hasattr(env, "_vehicle_states") else {}
+    base_crash_flags = {}
+    safety_flags = {}
+    for agent_id in agent_ids:
+        agent_info = dict(info.get(agent_id, {}))
+        base_crash_flags[agent_id] = {
+            "crash": bool(agent_info.get("crash", False)),
+            "crash_vehicle": bool(agent_info.get("crash_vehicle", False)),
+            "crash_human": bool(agent_info.get("crash_human", False)),
+            "crash_object": bool(agent_info.get("crash_object", False)),
+            "crash_building": bool(agent_info.get("crash_building", False)),
+            "crash_sidewalk": bool(agent_info.get("crash_sidewalk", False)),
+            "out_of_road": bool(agent_info.get("out_of_road", False)),
+        }
+        safety_flags[agent_id] = {
+            "crash": bool(agent_info.get("crash", False)),
+            "terminal_crash": bool(
+                agent_info.get("crash_vehicle", False)
+                or agent_info.get("crash_human", False)
+                or agent_info.get("crash_object", False)
+                or agent_info.get("crash_building", False)
+            ),
+            "out_of_road": bool(agent_info.get("out_of_road", False)),
+        }
+
+    env._last_raw_obs = env._normalize_raw_obs(raw_obs or {}, previous_obs=env._last_raw_obs)
+    env._last_obs = env._refresh_mode_export() if env._last_raw_obs else env._last_obs
+    info.update(
+        {
+            "step": int(getattr(env, "_step_count", 0)),
+            "control_backend": "locked_lqr_follow",
+            "formation_locked": True,
+            "rule_maker_debug": rule_maker_debug,
+            "normal_planner_debug": normal_planner_debug,
+            "controller_debug": controller_debug,
+            "selected_low_level_action": {
+                agent_id: np.asarray(low_level_actions[agent_id], dtype=float).tolist()
+                for agent_id in agent_ids
+                if agent_id in low_level_actions
+            },
+            "reward": scalar_reward,
+            "terminated": bool(terminated.get("__all__", False)),
+            "truncated": bool(truncated.get("__all__", False)),
+            "termination_flags": {
+                **{agent_id: bool(terminated.get(agent_id, False)) for agent_id in agent_ids},
+                "__all__": bool(terminated.get("__all__", False)),
+            },
+            "truncation_flags": {
+                **{agent_id: bool(truncated.get(agent_id, False)) for agent_id in agent_ids},
+                "__all__": bool(truncated.get("__all__", False)),
+            },
+            "safety_flags": safety_flags,
+            "base_crash_flags": base_crash_flags,
+            "vehicle_state_before": vehicle_state_before,
+            "vehicle_state_after": vehicle_state_after,
+        }
+    )
+    if hasattr(env, "_write_debug_log"):
+        env._write_debug_log(info)
+    if hasattr(env, "_step_count"):
+        env._step_count += 1
+    return scalar_reward, done, info, trajectories_local
 
 
 
@@ -205,6 +400,7 @@ def _save_combined_traj_frame_topdown(
     mode_names: list[str],
     pdms_reward: float,
     episode_step: int,
+    rule_maker_debug: dict | None = None,
 ):
     from models.diffusion.test_transfuser_policy import (
         _build_step_overlay_polylines,
@@ -262,6 +458,7 @@ def _save_combined_traj_frame_topdown(
         base_env, overlay,
         screen_size=800, film_size=10000,
         camera_position=tuple(pri_ego_xy),
+        rule_maker_debug=rule_maker_debug,
     )
     if frame is None:
         return
@@ -387,25 +584,22 @@ def _summarize_results(
 
 def run_test(args):
     config = _load_config(args.refine_train_config_path)
+    test_config = _resolve_test_config(config)
 
     train_followers_only = bool(config.get("train_followers_only", False))
 
-    # When train_followers_only: keep the original pretrained_ckpt for the leader planner,
-    # then override config["pretrained_ckpt"] with the GRPO ckpt for followers.
+    # When train_followers_only: keep the original pretrained_ckpt for the leader planner.
     _original_pretrained_ckpt = str(config.get("pretrained_ckpt", "") or "")
 
-    # CLI checkpoint overrides YAML pretrained_ckpt
-    if args.checkpoint:
-        config["pretrained_ckpt"] = args.checkpoint
-
-    # Env config device override from CLI
+    # Env config used to build the planner before the env wrapper owns it.
     config.setdefault("num_agents", 3)
     env_config_pre = dict(config.get("env_config", {}))
-    env_config_pre["planner_device"] = args.device
+    planner_device = str(env_config_pre.get("planner_device", "cuda"))
+    env_config_pre["planner_device"] = planner_device
 
     # Build planner (same as training) — used by followers and env mode selection
     print("[test-refine-grpo] building planner ...", flush=True)
-    planner = build_planner_for_selected_refinement(config, {**env_config_pre, "planner_device": args.device})
+    planner = build_planner_for_selected_refinement(config, {**env_config_pre, "planner_device": planner_device})
     planner.eval()
     for p in planner.parameters():
         p.requires_grad_(False)
@@ -416,7 +610,7 @@ def run_test(args):
         _pretrain_config = dict(config)
         _pretrain_config["pretrained_ckpt"] = _original_pretrained_ckpt
         pretrain_planner = build_planner_for_selected_refinement(
-            _pretrain_config, {**env_config_pre, "planner_device": args.device}
+            _pretrain_config, {**env_config_pre, "planner_device": planner_device}
         )
         pretrain_planner.eval()
         for p in pretrain_planner.parameters():
@@ -427,7 +621,7 @@ def run_test(args):
 
     # Build env (same as training)
     from envs.wrap_platoon_env import ModeSelectionSB3Env
-    env_config = _build_env_config(config, args, planner)
+    env_config = _build_env_config(config, test_config, planner)
     env = ModeSelectionSB3Env(env_config)
     print(f"[test-refine-grpo] env ready: {type(env).__name__}", flush=True)
 
@@ -438,10 +632,28 @@ def run_test(args):
         else config.get("target_guidance_type", "multi_point")
     )
     _rule_maker = None
+    _normal_planner = None
+    _follow_controller = None
     if _target_guidance_type == "external_point":
-        from models.decisioner.rule_decisioner import make_rule_maker
-        _rule_maker = make_rule_maker(dict(config))
-        print(f"[test-refine-grpo] RuleMaker enabled: {_rule_maker.__class__.__name__}", flush=True)
+        try:
+            from models.controller import LQRFollowerController
+            from models.decisioner.rule_decisioner import make_rule_maker
+            from models.platoon_planner import PlatoonNormalPlanner
+
+            rule_config = dict(config)
+            rule_config.update(dict(config.get("env_config") or {}))
+            _rule_maker = make_rule_maker(rule_config)
+            _normal_planner = PlatoonNormalPlanner()
+            _follow_controller = LQRFollowerController(env_config)
+            _follow_controller.reset()
+            print(
+                "[test-refine-grpo] RuleMaker locked-follow enabled: "
+                f"rule_maker={_rule_maker.__class__.__name__} "
+                "planner=PlatoonNormalPlanner controller=LQRFollowerController",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[test-refine-grpo] WARNING: locked-follow backend disabled: {exc}", flush=True)
 
     # Test-time overrides: single group for memory/speed efficiency
     config["num_refine_groups"] = 1
@@ -471,8 +683,8 @@ def run_test(args):
     mode_names = mode_names_from_planner(planner, None)
 
     # Output paths
-    output_dir = pathlib.Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_base = pathlib.Path(test_config["output_root"]) / str(test_config["run_tag"])
+    output_dir = _create_next_run_dir(output_base)
     records_path = output_dir / "random_action_step_records.jsonl"
     summary_path = output_dir / "random_action_reward_summary.json"
 
@@ -480,11 +692,17 @@ def run_test(args):
     episode_idx = 0
     success = crash = out_of_road = 0
 
-    for episode_idx in range(args.episodes):
-        print(f"[test-refine-grpo] episode {episode_idx}/{args.episodes}", flush=True)
+    episodes = int(test_config["episodes"])
+    max_steps = int(test_config["max_steps"])
+    video_fps = int(test_config["video_fps"])
+
+    for episode_idx in range(episodes):
+        print(f"[test-refine-grpo] episode {episode_idx}/{episodes}", flush=True)
         env.reset()
         if _rule_maker is not None:
-            _rule_maker.reset(env, list(getattr(env, "_agent_ids", [])))
+            _rule_maker.reset(env.base_env, list(getattr(env, "_agent_ids", [])))
+        if _follow_controller is not None:
+            _follow_controller.reset()
 
         done = False
         episode_step = 0
@@ -495,9 +713,10 @@ def run_test(args):
         # Real collision/road flags from the previous env step, keyed by agent_id.
         # None at the start of an episode (no prior step executed).
         prev_env_crash_flags: dict[str, dict] = {}
+        info: dict = {}
 
         while not done:
-            if args.max_steps > 0 and episode_step >= args.max_steps:
+            if max_steps > 0 and episode_step >= max_steps:
                 break
 
             planner_batch = env._last_planner_batch
@@ -514,9 +733,114 @@ def run_test(args):
 
             # Inject external target_point before extract_rl_context so it flows
             # into model features automatically (external_point guidance mode).
+            rule_maker_debug = None
+            locked_follow = {
+                "use_locked_follow": False,
+                "formation_locked": False,
+                "decisions": {},
+                "rule_maker_debug": None,
+            }
             if _rule_maker is not None:
-                from models.decisioner.rule_decisioner import compute_target_points
-                compute_target_points(_rule_maker, env, agent_ids, planner_batch)
+                locked_follow = _locked_follow_decision(_rule_maker, env, agent_ids, planner_batch)
+                rule_maker_debug = locked_follow.get("rule_maker_debug")
+
+            '如果 LOCKED，直接FOLLOW CONTROL，不通过diffusion planner规划'
+            if (
+                bool(locked_follow.get("use_locked_follow", False))
+                and _normal_planner is not None
+                and _follow_controller is not None
+            ):
+                try:
+                    t_start = time.time()
+                    env_reward, done, info, locked_local_trajs = _execute_locked_follow_step(
+                        env=env,
+                        agent_ids=agent_ids,
+                        normal_planner=_normal_planner,
+                        follow_controller=_follow_controller,
+                        decisions=locked_follow.get("decisions", {}),
+                        rule_maker_debug=rule_maker_debug,
+                    )
+                    t_end = time.time()
+                    print(
+                        f"[test-refine-grpo] episode={episode_idx} step={episode_step} "
+                        f"control_backend=locked_lqr_follow step_time={t_end - t_start:.4f}s",
+                        flush=True,
+                    )
+                except AssertionError as e:
+                    print(f"[test-refine-grpo] locked-follow env step error: {e}", flush=True)
+                    done = True
+                    env_reward = 0.0
+                    info = {}
+                    locked_local_trajs = {}
+
+                prev_env_crash_flags = (info or {}).get("base_crash_flags", {})
+                if not done and any(
+                    flags.get("crash", False) or flags.get("out_of_road", False)
+                    for flags in prev_env_crash_flags.values()
+                ):
+                    done = True
+
+                if test_config["save_trajectory_data"]:
+                    poses = {aid: _get_vehicle_pose(env, aid) for aid in agent_ids}
+                    tdata = {
+                        "episode": episode_idx,
+                        "step": episode_step,
+                        "control_backend": "locked_lqr_follow",
+                        "formation_locked": True,
+                        "agents": {},
+                    }
+                    for _aid in agent_ids:
+                        _pose = poses.get(_aid)
+                        tdata["agents"][_aid] = {
+                            "pose": _pose.tolist() if _pose is not None else None,
+                            "selected_mode": None,
+                            "gt_mode": None,
+                            "executed_traj_local": locked_local_trajs.get(
+                                _aid, np.zeros((0, 3), dtype=np.float32)
+                            ).tolist(),
+                        }
+                    tdata_path = (output_dir / "trajectory_data"
+                                  / f"episode_{episode_idx:03d}"
+                                  / f"step_{episode_step:05d}.json")
+                    tdata_path.parent.mkdir(parents=True, exist_ok=True)
+                    tdata_path.write_text(json.dumps(tdata), encoding="utf-8")
+
+                if test_config["save_3d_video"]:
+                    try:
+                        _frame_3d = env.render(mode="rgb_array")
+                        if _frame_3d is not None and isinstance(_frame_3d, np.ndarray):
+                            _bgr_3d = (cv2.cvtColor(_frame_3d, cv2.COLOR_RGB2BGR)
+                                       if _frame_3d.ndim == 3 and _frame_3d.shape[2] == 3
+                                       else _frame_3d)
+                            if vid_3d is None:
+                                h3d, w3d = _bgr_3d.shape[:2]
+                                _vpath_3d = output_dir / "videos" / "3d" / f"episode_{episode_idx:03d}.mp4"
+                                vid_3d = _open_video_writer(_vpath_3d, video_fps, w3d, h3d)
+                            vid_3d.write(_bgr_3d)
+                    except Exception:
+                        pass
+
+                episode_env_reward += float(env_reward)
+                episode_pdms_reward += 0.0
+                episode_step += 1
+
+                record = {
+                    "episode": episode_idx,
+                    "step": episode_step,
+                    "control_backend": "locked_lqr_follow",
+                    "formation_locked": True,
+                    "env_reward": float(env_reward),
+                    "pdms_reward": 0.0,
+                    "pdms_by_agent": {},
+                    "selected_modes": [],
+                    "gt_modes": [],
+                    "mode_valid_mask": masks.tolist(),
+                    "all_rewards": [],
+                }
+                all_records.append(record)
+                with records_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record) + "\n")
+                continue
 
             # Context extraction (identical to training line 1861)
             with torch.no_grad():
@@ -651,7 +975,7 @@ def run_test(args):
                 }
 
                 # Per-vehicle matplotlib plot (local-frame, no renderer needed)
-                if args.save_traj_plots:
+                if test_config["save_traj_plots"]:
                     plot_path = (output_dir / "traj_plots" / agent_id
                                  / f"episode_{episode_idx:03d}"
                                  / f"step_{episode_step:05d}.png")
@@ -668,7 +992,7 @@ def run_test(args):
             # Combined traj frame: topdown + overlay
             # Captured BEFORE execute so agents are still at current positions.
             _frame_2d_rgb: "np.ndarray | None" = None
-            if args.save_combined_traj_frames or args.save_2d_video:
+            if test_config["save_combined_traj_frames"] or test_config["save_2d_video"]:
                 frame_path = (output_dir / "combined_traj_frames"
                               / f"episode_{episode_idx:03d}"
                               / f"step_{episode_step:05d}.png")
@@ -684,26 +1008,27 @@ def run_test(args):
                         mode_names=mode_names or [],
                         pdms_reward=step_pdms_mean,
                         episode_step=episode_step,
+                        rule_maker_debug=rule_maker_debug,
                     )
-                    if not args.save_combined_traj_frames and frame_path.exists():
+                    if not test_config["save_combined_traj_frames"] and frame_path.exists():
                         frame_path.unlink(missing_ok=True)
                 except Exception as _fe:
                     print(f"[test-refine-grpo] frame save failed: {_fe}", flush=True)
 
             # Write 2D frame to video
-            if args.save_2d_video and _frame_2d_rgb is not None:
+            if test_config["save_2d_video"] and _frame_2d_rgb is not None:
                 try:
                     _bgr_2d = cv2.cvtColor(_frame_2d_rgb, cv2.COLOR_RGB2BGR)
                     if vid_2d is None:
                         h2d, w2d = _bgr_2d.shape[:2]
                         _vpath_2d = output_dir / "videos" / "2d" / f"episode_{episode_idx:03d}.mp4"
-                        vid_2d = _open_video_writer(_vpath_2d, args.video_fps, w2d, h2d)
+                        vid_2d = _open_video_writer(_vpath_2d, video_fps, w2d, h2d)
                     vid_2d.write(_bgr_2d)
                 except Exception as _ve:
                     print(f"[test-refine-grpo] 2D video write failed: {_ve}", flush=True)
 
             # Trajectory data: all agents in one JSON
-            if args.save_trajectory_data:
+            if test_config["save_trajectory_data"]:
                 tdata = {
                     "episode": episode_idx,
                     "step": episode_step,
@@ -744,7 +1069,7 @@ def run_test(args):
                 done = True
 
             # Capture 3D frame after env step (requires use_render=True)
-            if args.save_3d_video:
+            if test_config["save_3d_video"]:
                 try:
                     _frame_3d = env.render(mode="rgb_array")
                     if _frame_3d is not None and isinstance(_frame_3d, np.ndarray):
@@ -754,7 +1079,7 @@ def run_test(args):
                         if vid_3d is None:
                             h3d, w3d = _bgr_3d.shape[:2]
                             _vpath_3d = output_dir / "videos" / "3d" / f"episode_{episode_idx:03d}.mp4"
-                            vid_3d = _open_video_writer(_vpath_3d, args.video_fps, w3d, h3d)
+                            vid_3d = _open_video_writer(_vpath_3d, video_fps, w3d, h3d)
                         vid_3d.write(_bgr_3d)
                 except Exception as _ve3:
                     pass  # 3D render unavailable in this env config
@@ -803,17 +1128,19 @@ def run_test(args):
 
     # Write summary
     metadata = {
-        "checkpoint":            args.checkpoint,
+        "checkpoint":            str(config.get("pretrained_ckpt", "") or ""),
         "refine_train_config_path": args.refine_train_config_path,
-        "scenario_id":           args.scenario_id,
-        "local_route":           args.local_route,
+        "scenario_id":           env_config.get("scenario_id"),
+        "scenario_ids":          env_config.get("scenario_ids"),
+        "local_route":           env_config.get("local_route"),
         "num_agents":            int(config.get("num_agents", 3)),
-        "episodes":              args.episodes,
-        "start_seed":            args.start_seed,
+        "episodes":              episodes,
+        "start_seed":            env_config.get("start_seed", env_config.get("seed")),
+        "output_dir":            str(output_dir),
     }
     summary = _summarize_results(
         all_records,
-        episodes=args.episodes,
+        episodes=episodes,
         success=success,
         crash=crash,
         out_of_road=out_of_road,

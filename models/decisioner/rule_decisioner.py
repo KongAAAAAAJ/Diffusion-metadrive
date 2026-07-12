@@ -254,8 +254,8 @@ class MultiAgentRuleMaker(RuleMaker):
         result: dict[str, dict] = {}
 
         # !!!!!!!!!【DEBUG】
-        if best_combo[0]['action'] != 1:
-            debug = 1
+        # if best_combo[0]['action'] != 1:
+        #     debug = 1
 
 
         if best_combo is None:

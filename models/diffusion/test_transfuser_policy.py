@@ -220,6 +220,7 @@ def _capture_topdown_frame_with_overlay(
     screen_size: int = 800,
     film_size: int = 3000,
     camera_position: "tuple[float, float] | None" = None,
+    rule_maker_debug: "dict | None" = None,
 ) -> "np.ndarray | None":
     """Capture topdown frame and draw trajectory overlays using the renderer's
     own coordinate system (renderer._world_to_screen_position), avoiding the
@@ -316,7 +317,9 @@ def _capture_topdown_frame_with_overlay(
     frame = np_local.asarray(frame)
     if frame.ndim == 3 and frame.shape[2] > 3:
         frame = frame[:, :, :3]
-    return frame
+    from tools.topdown_view import overlay_rule_maker_debug
+    frame = overlay_rule_maker_debug(frame, env, rule_maker_debug)
+    return np_local.ascontiguousarray(frame)
 
 
 
@@ -522,6 +525,81 @@ def _choose_mode_indices(
             raise ValueError(f"No valid trajectory mode for agent index {agent_index}.")
         selected.append(int(rng.choice(valid_indices)))
     return selected
+
+
+def _call_rule_maker_locked(rule_maker) -> bool:
+    locked = getattr(rule_maker, "is_formation_locked", False)
+    return bool(locked() if callable(locked) else locked)
+
+
+def _apply_rule_maker_roles(env, rule_maker_debug: dict | None) -> None:
+    dynamic_roles = (rule_maker_debug or {}).get("dynamic_roles", {}) if rule_maker_debug else {}
+    if not dynamic_roles:
+        return
+    apply_roles = getattr(env, "apply_dynamic_roles", None)
+    if callable(apply_roles):
+        apply_roles(dynamic_roles)
+    else:
+        setattr(env, "_agent_roles", dict(dynamic_roles))
+
+
+def _inject_rule_maker_targets(planner_batch: dict, decisions: Mapping[str, Mapping]) -> None:
+    for agent_id, decision in (decisions or {}).items():
+        if agent_id not in planner_batch or not isinstance(decision, Mapping):
+            continue
+        if "target_point" not in decision:
+            continue
+        planner_batch[agent_id]["target_point"] = np.asarray(
+            decision["target_point"], dtype=np.float32
+        ).reshape(2)
+
+
+def _compute_locked_follow_backend(
+    *,
+    rule_maker,
+    normal_planner,
+    follow_controller,
+    env,
+    active_agent_ids: list[str],
+    planner_batch: dict,
+) -> dict:
+    """Update RuleMaker state and optionally produce locked-follow low-level actions."""
+    if rule_maker is None:
+        return {
+            "use_locked_follow": False,
+            "formation_locked": False,
+            "decisions": {},
+            "rule_maker_debug": None,
+        }
+
+    decisions = rule_maker.compute(env, active_agent_ids, planner_batch)
+    _inject_rule_maker_targets(planner_batch, decisions)
+    get_debug = getattr(rule_maker, "get_last_debug", None)
+    rule_maker_debug = get_debug() if callable(get_debug) else None
+    _apply_rule_maker_roles(env, rule_maker_debug)
+    formation_locked = _call_rule_maker_locked(rule_maker)
+    if not formation_locked or normal_planner is None or follow_controller is None:
+        return {
+            "use_locked_follow": False,
+            "formation_locked": formation_locked,
+            "decisions": decisions,
+            "rule_maker_debug": rule_maker_debug,
+        }
+
+    trajectories_world = normal_planner.plan(env, decisions)
+    low_level_actions = follow_controller.compute_actions(env, trajectories_world)
+    get_control_debug = getattr(follow_controller, "get_last_debug", None)
+    controller_debug = get_control_debug() if callable(get_control_debug) else {}
+    return {
+        "use_locked_follow": bool(low_level_actions),
+        "formation_locked": formation_locked,
+        "decisions": decisions,
+        "rule_maker_debug": rule_maker_debug,
+        "trajectories_world": trajectories_world,
+        "low_level_actions": low_level_actions,
+        "controller_debug": controller_debug,
+        "control_backend": "locked_lqr_follow",
+    }
 
 
 def _missing_controlled_agents(obs: Mapping[str, Mapping] | None, expected_agent_ids: list[str]) -> list[str]:
@@ -2136,6 +2214,32 @@ def run_platoon_planner_backend(
     env = PlatoonEnv(env_config)
     planner = build_platoon_planner(str(checkpoint_path), args, resolved_model_size, model_config)
     mode_slot_names = _mode_slot_names_from_config(transfuser_config)
+    rule_maker = None
+    normal_planner = None
+    follow_controller = None
+    target_guidance_types = {
+        str(getattr(transfuser_config, "target_guidance_type", "") or ""),
+        str(refine_train_config.get("target_guidance_type", "") or ""),
+    }
+    if "external_point" in target_guidance_types:
+        try:
+            from models.controller import LQRFollowerController
+            from models.decisioner.rule_decisioner import make_rule_maker
+            from models.platoon_planner import PlatoonNormalPlanner
+
+            rule_config = dict(refine_train_config)
+            rule_config.update(dict(refine_train_config.get("env_config") or {}))
+            rule_maker = make_rule_maker(rule_config)
+            normal_planner = PlatoonNormalPlanner()
+            follow_controller = LQRFollowerController(env_config)
+            follow_controller.reset()
+            print(
+                "[test] locked-follow backend enabled: "
+                f"rule_maker={rule_maker.__class__.__name__} controller=LQRFollowerController",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[test] WARNING: locked-follow backend disabled: {exc}", flush=True)
 
     # Per-agent planner overrides (e.g. "0:baseline.ckpt,1:grpo.ckpt")
     _per_agent_ckpt_str = str(getattr(args, "per_agent_ckpt", "") or "")
@@ -2200,6 +2304,11 @@ def run_platoon_planner_backend(
             primary_agent_id = _get_primary_agent_id(env)
             if bool(args.render) and hasattr(env, "switch_to_third_person_view"):
                 env.switch_to_third_person_view()
+            if rule_maker is not None:
+                reset_agent_ids = list(getattr(env, "_agent_ids", [])) or policy_agent_ids
+                rule_maker.reset(env, reset_agent_ids)
+            if follow_controller is not None:
+                follow_controller.reset()
 
             done = False
             episode_reward = 0.0
@@ -2250,6 +2359,177 @@ def run_platoon_planner_backend(
                     for agent_id, sample in planner_batch.items()
                     if sample.get("coarse_trajectories") is not None
                 }
+                locked_follow = _compute_locked_follow_backend(
+                    rule_maker=rule_maker,
+                    normal_planner=normal_planner,
+                    follow_controller=follow_controller,
+                    env=env,
+                    active_agent_ids=active_agent_ids,
+                    planner_batch=planner_batch,
+                )
+                if bool(locked_follow.get("use_locked_follow", False)):
+                    from models.controller.PIDController import _world_trajectory_to_ego_local
+
+                    exported_ids = [
+                        agent_id for agent_id in active_agent_ids
+                        if agent_id in locked_follow.get("low_level_actions", {})
+                    ]
+                    low_level_actions = {
+                        agent_id: np.asarray(
+                            locked_follow["low_level_actions"][agent_id], dtype=np.float32
+                        ).reshape(2,)
+                        for agent_id in exported_ids
+                    }
+                    trajectories_world = dict(locked_follow.get("trajectories_world") or {})
+                    controller_debug_by_agent = dict(locked_follow.get("controller_debug") or {})
+                    planner_final_info: dict[str, dict] = {}
+                    _step_trajectories: dict[str, np.ndarray] = {}
+                    for agent_index, agent_id in enumerate(exported_ids):
+                        vehicle = env.agents.get(agent_id)
+                        trajectory_world = trajectories_world.get(agent_id)
+                        trajectory_local = (
+                            _world_trajectory_to_ego_local(vehicle, trajectory_world)
+                            if vehicle is not None and trajectory_world is not None
+                            else np.zeros((0, 3), dtype=np.float32)
+                        )
+                        _step_trajectories[agent_id] = trajectory_local
+                        controller_debug = dict(controller_debug_by_agent.get(agent_id, {}) or {})
+                        if "steering" not in controller_debug and "clipped_steering" in controller_debug:
+                            controller_debug["steering"] = controller_debug.get("clipped_steering")
+                        if "throttle" not in controller_debug and "clipped_throttle" in controller_debug:
+                            controller_debug["throttle"] = controller_debug.get("clipped_throttle")
+                        planner_final_info[agent_id] = {
+                            "agent_id": agent_id,
+                            "camera_feature": obs.get(agent_id, {}).get("camera"),
+                            "lidar_feature": obs.get(agent_id, {}).get("lidar"),
+                            "status_feature": obs.get(agent_id, {}).get("status"),
+                            "predicted_trajectory": trajectory_local,
+                            "trajectory_mode_idx": None,
+                            "controller_debug": controller_debug,
+                            "control_backend": str(locked_follow.get("control_backend", "locked_lqr_follow")),
+                            "formation_locked": True,
+                            "rule_maker_debug": locked_follow.get("rule_maker_debug"),
+                        }
+                        for guidance_key in ("target_point", "preference_point", "target_line", "topology_polyline"):
+                            if planner_batch.get(agent_id, {}).get(guidance_key) is not None:
+                                planner_final_info[agent_id][guidance_key] = np.asarray(
+                                    planner_batch[agent_id][guidance_key],
+                                    dtype=np.float32,
+                                )
+                    if hasattr(env, "_pending_step_trajectories"):
+                        env._pending_step_trajectories = _step_trajectories
+
+                    t_start = time.time()
+                    obs, reward, terminated, truncated, info = env.step(low_level_actions)
+                    t_end = time.time()
+                    print(
+                        f"[episode={episode_idx} step={episode_length}] "
+                        f"control_backend=locked_lqr_follow step_time={t_end - t_start:.4f}s",
+                        flush=True,
+                    )
+                    episode_length += 1
+                    missing_agent_ids = _missing_controlled_agents(obs, policy_agent_ids)
+                    if missing_agent_ids:
+                        print(
+                            f"[episode={episode_idx} step={episode_length}] terminating because controlled agents disappeared: "
+                            f"{missing_agent_ids}",
+                            flush=True,
+                        )
+                        terminated = dict(terminated)
+                        truncated = dict(truncated)
+                        for agent_id in policy_agent_ids:
+                            terminated[agent_id] = True
+                        terminated["__all__"] = True
+                        truncated["__all__"] = False
+                        info = dict(info or {})
+                        info["missing_agent_ids"] = list(missing_agent_ids)
+
+                    reward_vals = [float(v) for v in reward.values() if isinstance(v, (int, float, np.floating))]
+                    _last_step_reward = float(np.mean(reward_vals)) if reward_vals else 0.0
+                    episode_reward += _last_step_reward
+                    for agent_id, agent_info in info.items():
+                        if agent_id in planner_final_info:
+                            for k, v in agent_info.items():
+                                planner_final_info[agent_id][k] = v
+                    env_rewards = {
+                        agent_id: float(reward.get(agent_id, 0.0))
+                        for agent_id in exported_ids
+                    }
+                    for agent_id in exported_ids:
+                        if agent_id in planner_final_info:
+                            planner_final_info[agent_id]["env_reward"] = env_rewards.get(agent_id)
+                    random_action_records.append(
+                        {
+                            "episode": int(episode_idx),
+                            "step": int(episode_length),
+                            "selection_policy": selection_policy,
+                            "control_backend": "locked_lqr_follow",
+                            "formation_locked": True,
+                            "selected_mode": {},
+                            "env_reward": env_rewards,
+                            "env_reward_mean": float(np.mean(list(env_rewards.values()))) if env_rewards else 0.0,
+                        }
+                    )
+                    final_info = planner_final_info.get(primary_agent_id, next(iter(planner_final_info.values()), {}))
+
+                    ego_after_step = env.agents.get(primary_agent_id) if primary_agent_id is not None else None
+                    ego_xy_after_step = (
+                        np.asarray(ego_after_step.position[:2], dtype=np.float64)
+                        if ego_after_step is not None else None
+                    )
+                    control_error_record = _compute_control_error_record(
+                        episode_idx=episode_idx,
+                        step_idx=episode_length,
+                        ego_xy_before_step=ego_xy_before_step,
+                        ego_heading_before_step=ego_heading_before_step,
+                        ego_xy_after_step=ego_xy_after_step,
+                        final_info=final_info,
+                        step_dt_s=_step_dt,
+                        ego_speed_km_h=_cur_ego_speed_km_h,
+                        ego_accel_mps2=_ego_accel_mps2,
+                    )
+                    if control_error_record is not None:
+                        control_error_records.append(control_error_record)
+
+                    done = bool(terminated.get("__all__", False) or truncated.get("__all__", False))
+                    _max_steps = int(getattr(args, "max_steps", 0))
+                    if _max_steps > 0 and episode_length >= _max_steps:
+                        done = True
+
+                    if args.save_3d_video:
+                        frame_3d = _capture_3d_topdown_frame(env, args.topdown_camera_height)
+                        if frame_3d is not None:
+                            episode_3d_frames.append(frame_3d)
+                    if args.save_2d_video:
+                        frame_2d = _capture_2d_topdown_frame(env)
+                        if frame_2d is not None:
+                            episode_2d_frames.append(frame_2d)
+
+                    controller_debug = final_info.get("controller_debug")
+                    if controller_debug:
+                        summary["lookahead_y"].append(float(controller_debug.get("waypoint_y", 0.0)))
+                        summary["lookahead_heading"].append(float(controller_debug.get("waypoint_heading", 0.0)))
+                        summary["steering"].append(float(controller_debug.get("steering", 0.0)))
+                        if bool(args.print_trajectory_debug):
+                            print(
+                                f"[analysis episode={episode_idx} step={episode_length}] "
+                                f"control_backend=locked_lqr_follow "
+                                f"steering={controller_debug.get('steering', 0.0):+.3f} "
+                                f"throttle={controller_debug.get('throttle', 0.0):+.3f}",
+                                flush=True,
+                            )
+
+                    if bool(args.render):
+                        env.render(
+                            text={
+                                "episode": episode_idx,
+                                "step": episode_length,
+                                "reward": f"{episode_reward:.2f}",
+                                "backend": "locked_lqr_follow",
+                            }
+                        )
+                    continue
+
                 # Inject semantic preference_point (target-speed lane endpoint) before
                 # inference so the diffusion model uses it as a soft semantic target.
                 _inject_semantic_preference_point(
