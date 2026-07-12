@@ -135,6 +135,7 @@ class MultiAgentRuleMaker(RuleMaker):
         w_close_lc_diff_cost: float = 1.0,
         locked_on_reset: bool = True,
         risk_ttc_trigger_s: float = 3.0,
+        relock_ttc_threshold_s: float = 5.0,
         ideal_following_distance_m: float = 10.0,
         relock_gap_ratio: float = 1.5,
     ) -> None:
@@ -168,11 +169,13 @@ class MultiAgentRuleMaker(RuleMaker):
         self.w_close_lc_diff_cost = float(w_close_lc_diff_cost)
         self.locked_on_reset = bool(locked_on_reset)
         self.risk_ttc_trigger_s = float(risk_ttc_trigger_s)
+        self.relock_ttc_threshold_s = float(relock_ttc_threshold_s)
         self.ideal_following_distance_m = float(ideal_following_distance_m)
         self.relock_gap_ratio = float(relock_gap_ratio)
         self._formation_locked = bool(self.locked_on_reset)
         self._risk_detector = SimpleRuleRiskDetector(
             ttc_trigger_s=self.risk_ttc_trigger_s,
+            relock_ttc_threshold_s=self.relock_ttc_threshold_s,
             ideal_following_distance_m=self.ideal_following_distance_m,
             relock_gap_ratio=self.relock_gap_ratio,
         )
@@ -1205,6 +1208,7 @@ def make_rule_maker(config: dict) -> RuleMaker:
         "agent_safety_distance_m": config.get("rule_maker_agent_safety_distance_m"),
         "locked_on_reset": config.get("rule_maker_locked_on_reset"),
         "risk_ttc_trigger_s": config.get("rule_maker_risk_ttc_trigger_s"),
+        "relock_ttc_threshold_s": config.get("rule_maker_relock_ttc_threshold_s"),
         "ideal_following_distance_m": config.get("rule_maker_ideal_following_distance_m"),
         "relock_gap_ratio": config.get("rule_maker_relock_gap_ratio"),
     }
@@ -1244,6 +1248,7 @@ def make_rule_maker(config: dict) -> RuleMaker:
             w_close_lc_diff_cost=float(yaml_params.get("w_close_lc_diff_cost", 1.0)),
             locked_on_reset=bool(yaml_params.get("locked_on_reset", True)),
             risk_ttc_trigger_s=float(yaml_params.get("risk_ttc_trigger_s", 3.0)),
+            relock_ttc_threshold_s=float(yaml_params.get("relock_ttc_threshold_s", 5.0)),
             ideal_following_distance_m=float(yaml_params.get("ideal_following_distance_m", 10.0)),
             relock_gap_ratio=float(yaml_params.get("relock_gap_ratio", 1.5)),
         )

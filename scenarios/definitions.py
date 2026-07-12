@@ -146,8 +146,8 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "lead_distance_range_m": (3.0, 4.0),  # 控制新生成急刹车相对 leader 的位置
                     "lead_target_speed_kmh": 21.0,
                     "lead_target_speed_range_kmh": (19.0, 23.0),
-                    "front_distance_min_m": 5.0,  # 急刹触发距离最小范围
-                    "front_distance_max_m": 8.0,
+                    "front_distance_min_m": 10.0,  # 急刹触发距离最小范围
+                    "front_distance_max_m": 15.0,
                     "brake_target_speed_kmh": 1.0,
                     "brake_target_speed_range_kmh": (0.5, 2.0),
                     "brake_duration_steps": 500,

@@ -31,10 +31,12 @@ class SimpleRuleRiskDetector(RiskDetector):
         self,
         *,
         ttc_trigger_s: float = 3.0,
+        relock_ttc_threshold_s: float = 5.0,
         ideal_following_distance_m: float = 10.0,
         relock_gap_ratio: float = 1.5,
     ) -> None:
         self.ttc_trigger_s = float(ttc_trigger_s)
+        self.relock_ttc_threshold_s = float(relock_ttc_threshold_s)
         self.ideal_following_distance_m = float(ideal_following_distance_m)
         self.relock_gap_ratio = float(relock_gap_ratio)
 
@@ -52,32 +54,10 @@ class SimpleRuleRiskDetector(RiskDetector):
         agents = getattr(env, "agents", {}) or {}
         if state == LOCKED:
             return self._detect_unlock(agents, agent_ids, traffic_vehicles)
-        return self._detect_relock(agents, agent_ids)
+        return self._detect_relock(agents, agent_ids, traffic_vehicles)
 
     def _detect_unlock(self, agents: dict, agent_ids: list[str], traffic_vehicles: list) -> dict:
-        leader = agents.get(agent_ids[0]) if agent_ids else None
-        leader_metrics = {
-            "agent_id": agent_ids[0] if agent_ids else None,
-            "front_vehicle_id": None,
-            "front_net_gap_m": None,
-            "closing_speed_mps": None,
-            "ttc_s": None,
-        }
-        if leader is not None:
-            front_vehicle, net_gap = self._nearest_front_vehicle(leader, traffic_vehicles)
-            if front_vehicle is not None:
-                leader_speed = self._speed_mps(leader)
-                front_speed = self._speed_mps(front_vehicle)
-                closing_speed = leader_speed - front_speed
-                ttc = max(net_gap, 0.0) / closing_speed if closing_speed > 0.0 else math.inf
-                leader_metrics.update(
-                    {
-                        "front_vehicle_id": self._vehicle_id(front_vehicle),
-                        "front_net_gap_m": max(net_gap, 0.0),
-                        "closing_speed_mps": closing_speed,
-                        "ttc_s": ttc,
-                    }
-                )
+        leader_metrics = self._leader_ttc_metrics(agents, agent_ids, traffic_vehicles)
 
         ttc = leader_metrics["ttc_s"]
         transitioned = ttc is not None and ttc < self.ttc_trigger_s
@@ -96,7 +76,7 @@ class SimpleRuleRiskDetector(RiskDetector):
             min_follower_gap_m=None,
         )
 
-    def _detect_relock(self, agents: dict, agent_ids: list[str]) -> dict:
+    def _detect_relock(self, agents: dict, agent_ids: list[str], traffic_vehicles: list) -> dict:
         pairs = []
         valid_gaps = []
         for index in range(1, len(agent_ids)):
@@ -118,17 +98,53 @@ class SimpleRuleRiskDetector(RiskDetector):
 
         min_gap = min(valid_gaps) if valid_gaps else None
         relock_threshold = self.relock_gap_ratio * self.ideal_following_distance_m
-        transitioned = min_gap is not None and min_gap < relock_threshold
+        leader_metrics = self._leader_ttc_metrics(agents, agent_ids, traffic_vehicles)
+        follower_gap_condition_met = min_gap is not None and min_gap < relock_threshold
+        leader_ttc_condition_met = leader_metrics["ttc_s"] > self.relock_ttc_threshold_s
+        transitioned = follower_gap_condition_met and leader_ttc_condition_met
         return self._result(
             current_state=UNLOCKED,
             next_state=LOCKED if transitioned else UNLOCKED,
             transition="UNLOCKED_TO_LOCKED" if transitioned else None,
-            reason=f"min_follower_gap<{relock_threshold:.1f}m" if transitioned else None,
-            leader=None,
+            reason=(
+                f"min_follower_gap<{relock_threshold:.1f}m_and_"
+                f"leader_ttc>{self.relock_ttc_threshold_s:.1f}s"
+                if transitioned
+                else None
+            ),
+            leader=leader_metrics,
             follower_pairs=pairs,
             min_follower_gap_m=min_gap,
             relock_threshold_m=relock_threshold,
+            relock_ttc_threshold_s=self.relock_ttc_threshold_s,
+            follower_gap_condition_met=follower_gap_condition_met,
+            leader_ttc_condition_met=leader_ttc_condition_met,
         )
+
+    def _leader_ttc_metrics(self, agents: dict, agent_ids: list[str], traffic_vehicles: list) -> dict:
+        leader = agents.get(agent_ids[0]) if agent_ids else None
+        metrics = {
+            "agent_id": agent_ids[0] if agent_ids else None,
+            "front_vehicle_id": None,
+            "front_net_gap_m": None,
+            "closing_speed_mps": None,
+            "ttc_s": math.inf,
+        }
+        if leader is None:
+            return metrics
+        front_vehicle, net_gap = self._nearest_front_vehicle(leader, traffic_vehicles)
+        if front_vehicle is None:
+            return metrics
+        closing_speed = self._speed_mps(leader) - self._speed_mps(front_vehicle)
+        metrics.update(
+            {
+                "front_vehicle_id": self._vehicle_id(front_vehicle),
+                "front_net_gap_m": max(net_gap, 0.0),
+                "closing_speed_mps": closing_speed,
+                "ttc_s": max(net_gap, 0.0) / closing_speed if closing_speed > 0.0 else math.inf,
+            }
+        )
+        return metrics
 
     @staticmethod
     def _result(*, current_state: str, next_state: str, transition, reason, **metrics) -> dict:

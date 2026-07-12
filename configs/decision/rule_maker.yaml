@@ -16,6 +16,7 @@ default:
   num_waypoints: 8              # trajectory sample count
   locked_on_reset: true         # platoon starts locked
   risk_ttc_trigger_s: 3.0       # LOCKED -> UNLOCKED when leader TTC is below this
+  relock_ttc_threshold_s: 5.0   # UNLOCKED -> LOCKED only when leader TTC is above this
   ideal_following_distance_m: 10.0
   relock_gap_ratio: 1.5         # UNLOCKED -> LOCKED below ratio * ideal distance
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +34,14 @@ def test_rule_maker_factory_uses_multi_agent_type_without_legacy_alias():
         assert "keep_lane_fallback" in str(exc)
     else:
         raise AssertionError("legacy keep_lane_fallback rule_maker_type should be rejected")
+
+
+def test_rule_maker_factory_configures_relock_ttc_threshold():
+    default_rule_maker = make_rule_maker({})
+    overridden_rule_maker = make_rule_maker({"rule_maker_relock_ttc_threshold_s": 7.5})
+
+    assert default_rule_maker.relock_ttc_threshold_s == pytest.approx(5.0)
+    assert overridden_rule_maker.relock_ttc_threshold_s == pytest.approx(7.5)
 
 
 class FakeLane:
@@ -155,6 +164,87 @@ def test_risk_detector_relocks_when_follower_gap_is_below_threshold():
     assert result["transition"] == "UNLOCKED_TO_LOCKED"
     assert result["next_state"] == "LOCKED"
     assert result["min_follower_gap_m"] == pytest.approx(8.5)
+    assert result["leader"]["ttc_s"] == math.inf
+    assert result["follower_gap_condition_met"] is True
+    assert result["leader_ttc_condition_met"] is True
+    assert result["relock_ttc_threshold_s"] == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(
+    ("front_x", "expected_ttc"),
+    [
+        (55.0, 4.1),
+        (59.5, 5.0),
+    ],
+)
+def test_risk_detector_keeps_unlocked_when_leader_ttc_is_not_above_relock_threshold(
+    front_x,
+    expected_ttc,
+):
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 30.0, 0.0, 1, speed_km_h=36.0),
+            "agent1": _vehicle("agent1", 12.0, 0.0, 1, speed_km_h=36.0),
+        },
+        traffic=[_vehicle("front", front_x, 0.0, 1, speed_km_h=18.0)],
+    )
+    detector = SimpleRuleRiskDetector(relock_ttc_threshold_s=5.0)
+
+    result = detector.detect(
+        env,
+        ["agent0", "agent1"],
+        env.engine.traffic_manager._traffic_vehicles,
+        "UNLOCKED",
+    )
+
+    assert result["triggered"] is False
+    assert result["next_state"] == "UNLOCKED"
+    assert result["leader"]["ttc_s"] == pytest.approx(expected_ttc)
+    assert result["follower_gap_condition_met"] is True
+    assert result["leader_ttc_condition_met"] is False
+
+
+def test_risk_detector_relocks_when_follower_gap_and_leader_ttc_are_safe():
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 30.0, 0.0, 1, speed_km_h=36.0),
+            "agent1": _vehicle("agent1", 12.0, 0.0, 1, speed_km_h=36.0),
+        },
+        traffic=[_vehicle("front", 60.0, 0.0, 1, speed_km_h=18.0)],
+    )
+    detector = SimpleRuleRiskDetector(relock_ttc_threshold_s=5.0)
+
+    result = detector.detect(
+        env,
+        ["agent0", "agent1"],
+        env.engine.traffic_manager._traffic_vehicles,
+        "UNLOCKED",
+    )
+
+    assert result["triggered"] is True
+    assert result["leader"]["ttc_s"] == pytest.approx(5.1)
+    assert result["leader_ttc_condition_met"] is True
+
+
+def test_risk_detector_treats_non_closing_front_vehicle_as_safe_for_relock():
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 30.0, 0.0, 1, speed_km_h=36.0),
+            "agent1": _vehicle("agent1", 12.0, 0.0, 1, speed_km_h=36.0),
+        },
+        traffic=[_vehicle("front", 40.0, 0.0, 1, speed_km_h=36.0)],
+    )
+    detector = SimpleRuleRiskDetector(relock_ttc_threshold_s=5.0)
+
+    result = detector.detect(
+        env,
+        ["agent0", "agent1"],
+        env.engine.traffic_manager._traffic_vehicles,
+        "UNLOCKED",
+    )
+
+    assert result["triggered"] is True
+    assert result["leader"]["ttc_s"] == math.inf
 
 
 def test_risk_detector_keeps_unlocked_at_exact_relock_threshold():
@@ -945,6 +1035,7 @@ def test_rule_maker_relocks_on_next_step_when_follower_gap_is_small():
     assert rule_maker.is_formation_locked is False
 
     env.agents["agent1"] = _vehicle("agent1", 0.0, 0.0, 1, speed_km_h=36.0)
+    env.engine.traffic_manager._traffic_vehicles = []
     rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
     debug = rule_maker.get_last_debug()
 
