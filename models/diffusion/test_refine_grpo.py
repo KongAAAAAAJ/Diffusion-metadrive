@@ -521,6 +521,124 @@ def _open_video_writer(path: pathlib.Path, fps: int, width: int, height: int) ->
     return writer
 
 
+def _capture_plain_2d_frame(base_env) -> "np.ndarray | None":
+    """Capture a top-down RGB frame without trajectory or debug overlays."""
+    from models.diffusion.test_transfuser_policy import _capture_2d_topdown_frame
+
+    return _capture_2d_topdown_frame(base_env)
+
+
+def _save_step_outputs(
+    *,
+    env,
+    output_dir: pathlib.Path,
+    records_path: pathlib.Path,
+    all_records: list[dict],
+    test_config: dict,
+    video_fps: int,
+    vid_2d,
+    vid_3d,
+    episode_idx: int,
+    step_idx: int,
+    agent_ids: list[str],
+    control_backend: str,
+    formation_locked: bool,
+    env_reward: float,
+    pdms_reward: float,
+    pdms_by_agent: dict,
+    selected_modes: list[int],
+    gt_modes: list[int],
+    mode_valid_mask,
+    all_rewards: list,
+    executed_trajs: dict[str, np.ndarray],
+    diffusion_2d_frame: "np.ndarray | None",
+):
+    """Persist exactly one step's trajectory, videos, and JSONL record."""
+    post_step_poses = {aid: _get_vehicle_pose(env, aid) for aid in agent_ids}
+
+    if test_config["save_trajectory_data"]:
+        trajectory_data = {
+            "episode": episode_idx,
+            "step": step_idx,
+            "control_backend": control_backend,
+            "formation_locked": bool(formation_locked),
+            "agents": {},
+        }
+        for index, agent_id in enumerate(agent_ids):
+            pose = post_step_poses.get(agent_id)
+            selected_mode = selected_modes[index] if index < len(selected_modes) else None
+            gt_mode = gt_modes[index] if index < len(gt_modes) else None
+            trajectory = executed_trajs.get(agent_id)
+            trajectory_data["agents"][agent_id] = {
+                "pose": pose.tolist() if pose is not None else None,
+                "selected_mode": int(selected_mode) if selected_mode is not None else None,
+                "gt_mode": int(gt_mode) if gt_mode is not None else None,
+                "executed_traj_local": (
+                    np.asarray(trajectory, dtype=np.float32).tolist() if trajectory is not None else []
+                ),
+            }
+        trajectory_path = (
+            output_dir / "trajectory_data" / f"episode_{episode_idx:03d}" / f"step_{step_idx:05d}.json"
+        )
+        trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        trajectory_path.write_text(json.dumps(trajectory_data), encoding="utf-8")
+
+    if test_config["save_2d_video"]:
+        frame_2d_rgb = (
+            _capture_plain_2d_frame(env.base_env)
+            if formation_locked
+            else diffusion_2d_frame
+        )
+        if frame_2d_rgb is not None:
+            try:
+                bgr_2d = cv2.cvtColor(frame_2d_rgb, cv2.COLOR_RGB2BGR)
+                if vid_2d is None:
+                    h2d, w2d = bgr_2d.shape[:2]
+                    path_2d = output_dir / "videos" / "2d" / f"episode_{episode_idx:03d}.mp4"
+                    vid_2d = _open_video_writer(path_2d, video_fps, w2d, h2d)
+                vid_2d.write(bgr_2d)
+            except Exception as error:
+                print(f"[test-refine-grpo] 2D video write failed: {error}", flush=True)
+
+    if test_config["save_3d_video"]:
+        try:
+            frame_3d = env.render(mode="rgb_array")
+            if frame_3d is not None and isinstance(frame_3d, np.ndarray):
+                bgr_3d = (
+                    cv2.cvtColor(frame_3d, cv2.COLOR_RGB2BGR)
+                    if frame_3d.ndim == 3 and frame_3d.shape[2] == 3
+                    else frame_3d
+                )
+                if vid_3d is None:
+                    h3d, w3d = bgr_3d.shape[:2]
+                    path_3d = output_dir / "videos" / "3d" / f"episode_{episode_idx:03d}.mp4"
+                    vid_3d = _open_video_writer(path_3d, video_fps, w3d, h3d)
+                vid_3d.write(bgr_3d)
+        except Exception:
+            pass
+
+    record = {
+        "episode": episode_idx,
+        "step": step_idx,
+        "control_backend": control_backend,
+        "formation_locked": bool(formation_locked),
+        "env_reward": float(env_reward),
+        "pdms_reward": float(pdms_reward),
+        "pdms_by_agent": pdms_by_agent,
+        "selected_modes": selected_modes,
+        "gt_modes": gt_modes,
+        "mode_valid_mask": (
+            mode_valid_mask.tolist() if hasattr(mode_valid_mask, "tolist") else mode_valid_mask
+        ),
+        "all_rewards": all_rewards,
+    }
+    all_records.append(record)
+    with records_path.open("a", encoding="utf-8") as file_handle:
+        file_handle.write(json.dumps(record) + "\n")
+
+    return vid_2d, vid_3d
+
+
 # ── Summary builder (same structure as _summarize_random_action_rewards) ──────
 
 def _summarize_results(
@@ -783,66 +901,33 @@ def run_test(args):
                 ):
                     done = True
 
-                if test_config["save_trajectory_data"]:
-                    poses = {aid: _get_vehicle_pose(env, aid) for aid in agent_ids}
-                    tdata = {
-                        "episode": episode_idx,
-                        "step": episode_step,
-                        "control_backend": "locked_lqr_follow",
-                        "formation_locked": True,
-                        "agents": {},
-                    }
-                    for _aid in agent_ids:
-                        _pose = poses.get(_aid)
-                        tdata["agents"][_aid] = {
-                            "pose": _pose.tolist() if _pose is not None else None,
-                            "selected_mode": None,
-                            "gt_mode": None,
-                            "executed_traj_local": locked_local_trajs.get(
-                                _aid, np.zeros((0, 3), dtype=np.float32)
-                            ).tolist(),
-                        }
-                    tdata_path = (output_dir / "trajectory_data"
-                                  / f"episode_{episode_idx:03d}"
-                                  / f"step_{episode_step:05d}.json")
-                    tdata_path.parent.mkdir(parents=True, exist_ok=True)
-                    tdata_path.write_text(json.dumps(tdata), encoding="utf-8")
-
-                if test_config["save_3d_video"]:
-                    try:
-                        _frame_3d = env.render(mode="rgb_array")
-                        if _frame_3d is not None and isinstance(_frame_3d, np.ndarray):
-                            _bgr_3d = (cv2.cvtColor(_frame_3d, cv2.COLOR_RGB2BGR)
-                                       if _frame_3d.ndim == 3 and _frame_3d.shape[2] == 3
-                                       else _frame_3d)
-                            if vid_3d is None:
-                                h3d, w3d = _bgr_3d.shape[:2]
-                                _vpath_3d = output_dir / "videos" / "3d" / f"episode_{episode_idx:03d}.mp4"
-                                vid_3d = _open_video_writer(_vpath_3d, video_fps, w3d, h3d)
-                            vid_3d.write(_bgr_3d)
-                    except Exception:
-                        pass
-
                 episode_env_reward += float(env_reward)
                 episode_pdms_reward += 0.0
                 episode_step += 1
-
-                record = {
-                    "episode": episode_idx,
-                    "step": episode_step,
-                    "control_backend": "locked_lqr_follow",
-                    "formation_locked": True,
-                    "env_reward": float(env_reward),
-                    "pdms_reward": 0.0,
-                    "pdms_by_agent": {},
-                    "selected_modes": [],
-                    "gt_modes": [],
-                    "mode_valid_mask": masks.tolist(),
-                    "all_rewards": [],
-                }
-                all_records.append(record)
-                with records_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(record) + "\n")
+                vid_2d, vid_3d = _save_step_outputs(
+                    env=env,
+                    output_dir=output_dir,
+                    records_path=records_path,
+                    all_records=all_records,
+                    test_config=test_config,
+                    video_fps=video_fps,
+                    vid_2d=vid_2d,
+                    vid_3d=vid_3d,
+                    episode_idx=episode_idx,
+                    step_idx=episode_step,
+                    agent_ids=agent_ids,
+                    control_backend="locked_lqr_follow",
+                    formation_locked=True,
+                    env_reward=env_reward,
+                    pdms_reward=0.0,
+                    pdms_by_agent={},
+                    selected_modes=[],
+                    gt_modes=[],
+                    mode_valid_mask=masks,
+                    all_rewards=[],
+                    executed_trajs=locked_local_trajs,
+                    diffusion_2d_frame=None,
+                )
                 continue
 
             # Context extraction (identical to training line 1861)
@@ -1018,39 +1103,6 @@ def run_test(args):
                 except Exception as _fe:
                     print(f"[test-refine-grpo] frame save failed: {_fe}", flush=True)
 
-            # Write 2D frame to video
-            if test_config["save_2d_video"] and _frame_2d_rgb is not None:
-                try:
-                    _bgr_2d = cv2.cvtColor(_frame_2d_rgb, cv2.COLOR_RGB2BGR)
-                    if vid_2d is None:
-                        h2d, w2d = _bgr_2d.shape[:2]
-                        _vpath_2d = output_dir / "videos" / "2d" / f"episode_{episode_idx:03d}.mp4"
-                        vid_2d = _open_video_writer(_vpath_2d, video_fps, w2d, h2d)
-                    vid_2d.write(_bgr_2d)
-                except Exception as _ve:
-                    print(f"[test-refine-grpo] 2D video write failed: {_ve}", flush=True)
-
-            # Trajectory data: all agents in one JSON
-            if test_config["save_trajectory_data"]:
-                tdata = {
-                    "episode": episode_idx,
-                    "step": episode_step,
-                    "agents": {},
-                }
-                for _idx2, _aid2 in enumerate(agent_ids):
-                    _pose = poses.get(_aid2)
-                    tdata["agents"][_aid2] = {
-                        "pose": _pose.tolist() if _pose is not None else None,
-                        "selected_mode": int(step_selected_modes[_idx2]),
-                        "gt_mode": int(step_gt_modes[_idx2]),
-                        "executed_traj_local": executed[_aid2].tolist() if _aid2 in executed else [],
-                    }
-                tdata_path = (output_dir / "trajectory_data"
-                              / f"episode_{episode_idx:03d}"
-                              / f"step_{episode_step:05d}.json")
-                tdata_path.parent.mkdir(parents=True, exist_ok=True)
-                tdata_path.write_text(json.dumps(tdata), encoding="utf-8")
-                      
             # Execute selected trajectories (identical to training line 2298)
             try:
                 _, env_reward, done, info = _execute_trajectories(
@@ -1071,41 +1123,33 @@ def run_test(args):
             ):
                 done = True
 
-            # Capture 3D frame after env step (requires use_render=True)
-            if test_config["save_3d_video"]:
-                try:
-                    _frame_3d = env.render(mode="rgb_array")
-                    if _frame_3d is not None and isinstance(_frame_3d, np.ndarray):
-                        _bgr_3d = (cv2.cvtColor(_frame_3d, cv2.COLOR_RGB2BGR)
-                                   if _frame_3d.ndim == 3 and _frame_3d.shape[2] == 3
-                                   else _frame_3d)
-                        if vid_3d is None:
-                            h3d, w3d = _bgr_3d.shape[:2]
-                            _vpath_3d = output_dir / "videos" / "3d" / f"episode_{episode_idx:03d}.mp4"
-                            vid_3d = _open_video_writer(_vpath_3d, video_fps, w3d, h3d)
-                        vid_3d.write(_bgr_3d)
-                except Exception as _ve3:
-                    pass  # 3D render unavailable in this env config
-
             episode_env_reward  += float(env_reward)
             episode_pdms_reward += step_pdms_mean
             episode_step += 1
-
-            record = {
-                "episode":        episode_idx,
-                "step":           episode_step,
-                "env_reward":     float(env_reward),
-                "pdms_reward":    step_pdms_mean,
-                "pdms_by_agent":  step_pdms_by_agent,
-                "selected_modes": step_selected_modes,
-                "gt_modes":       step_gt_modes,
-                "mode_valid_mask": masks.tolist(),
-                "all_rewards":    step_all_rewards,
-            }
-            all_records.append(record)
-
-            with records_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
+            vid_2d, vid_3d = _save_step_outputs(
+                env=env,
+                output_dir=output_dir,
+                records_path=records_path,
+                all_records=all_records,
+                test_config=test_config,
+                video_fps=video_fps,
+                vid_2d=vid_2d,
+                vid_3d=vid_3d,
+                episode_idx=episode_idx,
+                step_idx=episode_step,
+                agent_ids=agent_ids,
+                control_backend="diffusion_planner",
+                formation_locked=False,
+                env_reward=env_reward,
+                pdms_reward=step_pdms_mean,
+                pdms_by_agent=step_pdms_by_agent,
+                selected_modes=step_selected_modes,
+                gt_modes=step_gt_modes,
+                mode_valid_mask=masks,
+                all_rewards=step_all_rewards,
+                executed_trajs=executed,
+                diffusion_2d_frame=_frame_2d_rgb,
+            )
 
         # Release per-episode video writers
         if vid_2d is not None:
