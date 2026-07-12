@@ -76,7 +76,7 @@ from tools.topdown_view import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-DEFAULT_SCENARIO_ID = "S8_ego_exit_to_ramp"
+DEFAULT_SCENARIO_ID = "S5_hard_brake_lead"
 DEFAULT_NUM_AGENTS = 3
 DEFAULT_NUM_EPISODES = 3
 DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/run_results")

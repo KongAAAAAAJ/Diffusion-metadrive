@@ -25,7 +25,7 @@ echo "--- repo: ${REPO_ROOT} ---"
 echo "--- python: ${PYTHON_BIN} ---"
 
 "${PYTHON_BIN}" -m evaluation.preview_and_evaluation \
-    --scenario-id S8_ego_exit_to_ramp \
+    --scenario-id S5_hard_brake_lead \
     --num-agents 3 \
     --decision-policy rule_maker \
     --planning-policy lattice \
@@ -34,6 +34,3 @@ echo "--- python: ${PYTHON_BIN} ---"
     --evaluate \
     "$@"
 
-# TODO:
-#   - 调一下横向控制  150‘ --> 60'
-#   - 检查一下5场景baseline的表现，保存典型视频、数据和日志，便于与后续的模型对比  180‘

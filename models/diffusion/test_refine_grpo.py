@@ -406,6 +406,7 @@ def _save_combined_traj_frame_topdown(
         _build_step_overlay_polylines,
         _capture_topdown_frame_with_overlay,
     )
+    from tools.topdown_view import overlay_rule_maker_debug
 
     primary_id = agent_ids[0]
     primary_pose = poses.get(primary_id)
@@ -458,10 +459,11 @@ def _save_combined_traj_frame_topdown(
         base_env, overlay,
         screen_size=800, film_size=10000,
         camera_position=tuple(pri_ego_xy),
-        rule_maker_debug=rule_maker_debug,
+        rule_maker_debug=None,
     )
     if frame is None:
         return
+    frame = np.ascontiguousarray(overlay_rule_maker_debug(frame, base_env, rule_maker_debug))
 
     def _gc(v: float) -> str:
         return "pass" if v >= 1.0 else "FAIL"
@@ -470,39 +472,40 @@ def _save_combined_traj_frame_topdown(
         cv2.putText(frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (30, 30, 200), 1, cv2.LINE_AA)
 
-    step_text = f"step={episode_step}  pdms_mean={pdms_reward:+.3f}"
-    _put(step_text, 20, scale=0.48)
+    # step_text = f"step={episode_step}  pdms_mean={pdms_reward:+.3f}"
+    # _put(step_text, 20, scale=0.48)
 
-    y_cursor = 44
-    line_h = 20
-    for agent_id in agent_ids:
-        rd = frame_data_by_agent.get(agent_id, {})
-        dbg = rd.get("reward_debug", {})
-        gm = rd.get("on_training_mode", 0)
+    # *标记reward信息
+    # y_cursor = 44
+    # line_h = 20
+    # for agent_id in agent_ids:
+    #     rd = frame_data_by_agent.get(agent_id, {})
+    #     dbg = rd.get("reward_debug", {})
+    #     gm = rd.get("on_training_mode", 0)
 
-        def _gv(key, default=0.0):
-            v = dbg.get(key, default)
-            return float(v[gm]) if hasattr(v, "__len__") else float(v)
+    #     def _gv(key, default=0.0):
+    #         v = dbg.get(key, default)
+    #         return float(v[gm]) if hasattr(v, "__len__") else float(v)
 
-        label = agent_id.replace("agent", "A")
-        header = f"{label}: pdms={_gv('reward'):+.3f}  qual={_gv('quality'):.3f}"
-        gate_line = (
-            f"  gate: col={_gc(_gv('collision_gate', 1))}"
-            f" road={_gc(_gv('road_gate', 1))}"
-            f" smth={_gc(_gv('smoothness_gate', 1))}"
-        )
-        qual_line = (
-            f"  qual: prog={_gv('progress'):.2f}"
-            f" form={_gv('formation'):.2f}"
-            f" spd={_gv('speed'):.2f}"
-            f" lane={_gv('lane'):.2f}"
-            f" cmft={_gv('comfort'):.2f}"
-            f" cons={_gv('consistency'):.2f}"
-        )
-        for text in (header, gate_line, qual_line):
-            _put(text, y_cursor)
-            y_cursor += line_h
-        y_cursor += 2
+    #     label = agent_id.replace("agent", "A")
+    #     header = f"{label}: pdms={_gv('reward'):+.3f}  qual={_gv('quality'):.3f}"
+    #     gate_line = (
+    #         f"  gate: col={_gc(_gv('collision_gate', 1))}"
+    #         f" road={_gc(_gv('road_gate', 1))}"
+    #         f" smth={_gc(_gv('smoothness_gate', 1))}"
+    #     )
+    #     qual_line = (
+    #         f"  qual: prog={_gv('progress'):.2f}"
+    #         f" form={_gv('formation'):.2f}"
+    #         f" spd={_gv('speed'):.2f}"
+    #         f" lane={_gv('lane'):.2f}"
+    #         f" cmft={_gv('comfort'):.2f}"
+    #         f" cons={_gv('consistency'):.2f}"
+    #     )
+    #     for text in (header, gate_line, qual_line):
+    #         _put(text, y_cursor)
+    #         y_cursor += line_h
+    #     y_cursor += 2
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
