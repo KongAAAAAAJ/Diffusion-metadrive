@@ -528,6 +528,19 @@ def _capture_plain_2d_frame(base_env) -> "np.ndarray | None":
     return _capture_2d_topdown_frame(base_env)
 
 
+def _has_terminal_safety_event(base_crash_flags: Mapping | None) -> bool:
+    """Return whether run_test should stop early for a configured safety event."""
+    return any(
+        isinstance(flags, Mapping)
+        and bool(
+            flags.get("crash_vehicle", False)
+            or flags.get("crash_object", False)
+            or flags.get("out_of_road", False)
+        )
+        for flags in (base_crash_flags or {}).values()
+    )
+
+
 def _format_episode_end_reason(
     *,
     episode_idx: int,
@@ -546,7 +559,7 @@ def _format_episode_end_reason(
     if isinstance(base_flags, Mapping):
         agent_ids.update(str(agent_id) for agent_id in base_flags)
 
-    crash_keys = ("crash", "crash_vehicle", "crash_human", "crash_object", "crash_building")
+    crash_keys = ("crash_vehicle", "crash_object")
     crash_agents: list[str] = []
     out_of_road_agents: list[str] = []
     arrive_agents: list[str] = []
@@ -957,10 +970,7 @@ def run_test(args):
                     locked_local_trajs = {}
 
                 prev_env_crash_flags = (info or {}).get("base_crash_flags", {})
-                if not done and any(
-                    flags.get("crash", False) or flags.get("out_of_road", False)
-                    for flags in prev_env_crash_flags.values()
-                ):
+                if not done and _has_terminal_safety_event(prev_env_crash_flags):
                     done = True
                 if done and stop_reason == "unknown":
                     if bool((info or {}).get("truncated", False)):
@@ -1184,11 +1194,8 @@ def run_test(args):
 
             # Store real collision/road flags for use as gates in the NEXT step's reward computation.
             prev_env_crash_flags = (info or {}).get("base_crash_flags", {})
-            # Early termination: if any agent crashed or went out of road, end this episode immediately.
-            if not done and any(
-                flags.get("crash", False) or flags.get("out_of_road", False)
-                for flags in prev_env_crash_flags.values()
-            ):
+            # Early termination only for vehicle/object collisions or road departure.
+            if not done and _has_terminal_safety_event(prev_env_crash_flags):
                 done = True
             if done and stop_reason == "unknown":
                 if bool((info or {}).get("truncated", False)):
