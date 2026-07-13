@@ -161,6 +161,25 @@ def test_platoon_env_does_not_terminate_on_sidewalk_crash_only():
     assert truncated["__all__"] is False
 
 
+def test_platoon_env_team_failure_preserves_original_agent_flags():
+    env = PlatoonEnv.__new__(PlatoonEnv)
+    env._agent_ids = ["agent0", "agent1", "agent2"]
+
+    terminated, truncated = PlatoonEnv._enforce_platoon_episode_end(
+        env,
+        {"agent0": False, "agent1": False, "agent2": False, "__all__": False},
+        {"agent0": False, "agent1": False, "agent2": False, "__all__": False},
+        {
+            "agent0": {},
+            "agent1": {"crash_vehicle": True},
+            "agent2": {},
+        },
+    )
+
+    assert terminated == {"agent0": False, "agent1": True, "agent2": False, "__all__": True}
+    assert truncated == {"agent0": False, "agent1": False, "agent2": False, "__all__": False}
+
+
 def test_reward_terms_do_not_treat_sidewalk_as_vehicle_collision():
     config = {"w_collision": 10.0, "w_team_collision": 10.0, "reward_clip": 0.0}
     sidewalk_info = {"crash": True, "crash_sidewalk": True, "out_of_road": False, "progress": 0.0}

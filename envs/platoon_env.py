@@ -692,6 +692,7 @@ class PlatoonEnv(BaseMultiEnv):
             }
             self._platoon_reward_cache = None
             obs, reward, terminated, truncated, info = super().step(actions)
+
             info = self._build_info_dict("teleport", actions=actions, base_info=info)
             terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
             obs = self._augment_observations(obs)
@@ -752,6 +753,12 @@ class PlatoonEnv(BaseMultiEnv):
         # self._clear_traffic_vehicles_near_platoon()  # 只在reset时清除一次，避免step中频繁操作影响性能
         info = self._build_info_dict(control_mode, actions=actions, base_info=info)
         terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
+
+        if terminated['agent0'] or terminated['agent1'] or terminated['agent2']:
+            debug = 1
+        if truncated['agent0'] or truncated['agent1'] or truncated['agent2']:
+            debug = 1
+
         obs = self._augment_observations(obs)
         self._metrics.update(info)
         if terminated.get("__all__", False) or truncated.get("__all__", False):
@@ -1286,18 +1293,19 @@ class PlatoonEnv(BaseMultiEnv):
             terminated["__all__"] = True
             truncated["__all__"] = False
             return terminated, truncated
-        any_failure = any(
-            bool(
+        failure_ids = [
+            agent_id
+            for agent_id in active_ids
+            if bool(
                 info[agent_id].get("crash_vehicle", False)
                 or info[agent_id].get("crash_object", False)
                 or info[agent_id].get("crash_building", False)
                 or info[agent_id].get("crash_human", False)
                 or info[agent_id].get("out_of_road", False)
             )
-            for agent_id in active_ids
-        )
-        if any_failure:
-            for agent_id in active_ids:
+        ]
+        if failure_ids:
+            for agent_id in failure_ids:
                 terminated[agent_id] = True
             terminated["__all__"] = True
             truncated["__all__"] = False

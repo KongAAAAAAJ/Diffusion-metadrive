@@ -264,7 +264,7 @@ def _execute_locked_follow_step(
     if missing_agent_ids:
         terminated = dict(terminated)
         truncated = dict(truncated)
-        for agent_id in agent_ids:
+        for agent_id in missing_agent_ids:
             terminated[agent_id] = True
         terminated["__all__"] = True
         truncated["__all__"] = False
@@ -276,30 +276,6 @@ def _execute_locked_follow_step(
     scalar_reward = float(np.mean(reward_values)) if reward_values else 0.0
 
     vehicle_state_after = env._vehicle_states(agent_ids) if hasattr(env, "_vehicle_states") else {}
-    base_crash_flags = {}
-    safety_flags = {}
-    for agent_id in agent_ids:
-        agent_info = dict(info.get(agent_id, {}))
-        base_crash_flags[agent_id] = {
-            "crash": bool(agent_info.get("crash", False)),
-            "crash_vehicle": bool(agent_info.get("crash_vehicle", False)),
-            "crash_human": bool(agent_info.get("crash_human", False)),
-            "crash_object": bool(agent_info.get("crash_object", False)),
-            "crash_building": bool(agent_info.get("crash_building", False)),
-            "crash_sidewalk": bool(agent_info.get("crash_sidewalk", False)),
-            "out_of_road": bool(agent_info.get("out_of_road", False)),
-        }
-        safety_flags[agent_id] = {
-            "crash": bool(agent_info.get("crash", False)),
-            "terminal_crash": bool(
-                agent_info.get("crash_vehicle", False)
-                or agent_info.get("crash_human", False)
-                or agent_info.get("crash_object", False)
-                or agent_info.get("crash_building", False)
-            ),
-            "out_of_road": bool(agent_info.get("out_of_road", False)),
-        }
-
     env._last_raw_obs = env._normalize_raw_obs(raw_obs or {}, previous_obs=env._last_raw_obs)
     env._last_obs = env._refresh_mode_export() if env._last_raw_obs else env._last_obs
     info.update(
@@ -326,8 +302,6 @@ def _execute_locked_follow_step(
                 **{agent_id: bool(truncated.get(agent_id, False)) for agent_id in agent_ids},
                 "__all__": bool(truncated.get("__all__", False)),
             },
-            "safety_flags": safety_flags,
-            "base_crash_flags": base_crash_flags,
             "vehicle_state_before": vehicle_state_before,
             "vehicle_state_after": vehicle_state_after,
         }
@@ -528,19 +502,6 @@ def _capture_plain_2d_frame(base_env) -> "np.ndarray | None":
     return _capture_2d_topdown_frame(base_env)
 
 
-def _has_terminal_safety_event(base_crash_flags: Mapping | None) -> bool:
-    """Return whether run_test should stop early for a configured safety event."""
-    return any(
-        isinstance(flags, Mapping)
-        and bool(
-            flags.get("crash_vehicle", False)
-            or flags.get("crash_object", False)
-            or flags.get("out_of_road", False)
-        )
-        for flags in (base_crash_flags or {}).values()
-    )
-
-
 def _format_episode_end_reason(
     *,
     episode_idx: int,
@@ -548,41 +509,28 @@ def _format_episode_end_reason(
     info: Mapping | None,
     fallback_reason: str,
 ) -> str:
-    """Format one episode-end line with per-agent safety details."""
+    """Format one episode-end line without inferring a physical failure cause."""
     info_dict = dict(info or {})
-    base_flags = info_dict.get("base_crash_flags")
-    agent_ids = {
+    termination_flags = info_dict.get("termination_flags")
+    truncation_flags = info_dict.get("truncation_flags")
+    termination_flags = dict(termination_flags) if isinstance(termination_flags, Mapping) else {}
+    truncation_flags = dict(truncation_flags) if isinstance(truncation_flags, Mapping) else {}
+    terminated_agents = sorted(
         str(agent_id)
-        for agent_id, agent_info in info_dict.items()
-        if str(agent_id).startswith("agent") and isinstance(agent_info, Mapping)
-    }
-    if isinstance(base_flags, Mapping):
-        agent_ids.update(str(agent_id) for agent_id in base_flags)
-
-    crash_keys = ("crash_vehicle", "crash_object")
-    crash_agents: list[str] = []
-    out_of_road_agents: list[str] = []
-    arrive_agents: list[str] = []
-    for agent_id in sorted(agent_ids):
-        direct = info_dict.get(agent_id)
-        direct = dict(direct) if isinstance(direct, Mapping) else {}
-        base = base_flags.get(agent_id) if isinstance(base_flags, Mapping) else None
-        base = dict(base) if isinstance(base, Mapping) else {}
-        merged = {**direct, **base}
-        if any(bool(merged.get(key, False)) for key in crash_keys):
-            crash_agents.append(agent_id)
-        if bool(merged.get("out_of_road", False)):
-            out_of_road_agents.append(agent_id)
-        if bool(direct.get("arrive_dest", False)):
-            arrive_agents.append(agent_id)
+        for agent_id, flag in termination_flags.items()
+        if agent_id != "__all__" and bool(flag)
+    )
+    truncated_agents = sorted(
+        str(agent_id)
+        for agent_id, flag in truncation_flags.items()
+        if agent_id != "__all__" and bool(flag)
+    )
 
     reasons: list[str] = []
-    if crash_agents:
-        reasons.append("crash")
-    if out_of_road_agents:
-        reasons.append("out_of_road")
-    if arrive_agents:
-        reasons.append("arrive_dest")
+    if terminated_agents:
+        reasons.append("terminated")
+    if truncated_agents:
+        reasons.append("truncated")
     if not reasons:
         reasons.append(str(fallback_reason or "unknown"))
 
@@ -590,12 +538,10 @@ def _format_episode_end_reason(
         f"[test-refine-grpo] episode={int(episode_idx)} ended: "
         f"step={int(step_idx)} reason={','.join(reasons)}"
     ]
-    if crash_agents:
-        parts.append(f"crash_agents={','.join(crash_agents)}")
-    if out_of_road_agents:
-        parts.append(f"out_of_road_agents={','.join(out_of_road_agents)}")
-    if arrive_agents:
-        parts.append(f"arrive_agents={','.join(arrive_agents)}")
+    if terminated_agents:
+        parts.append(f"terminated_agents={','.join(terminated_agents)}")
+    if truncated_agents:
+        parts.append(f"truncated_agents={','.join(truncated_agents)}")
     return " ".join(parts)
 
 
@@ -902,9 +848,6 @@ def run_test(args):
         episode_pdms_reward = 0.0
         vid_2d: "cv2.VideoWriter | None" = None
         vid_3d: "cv2.VideoWriter | None" = None
-        # Real collision/road flags from the previous env step, keyed by agent_id.
-        # None at the start of an episode (no prior step executed).
-        prev_env_crash_flags: dict[str, dict] = {}
         info: dict = {}
         stop_reason = "unknown"
 
@@ -969,9 +912,6 @@ def run_test(args):
                     info = {}
                     locked_local_trajs = {}
 
-                prev_env_crash_flags = (info or {}).get("base_crash_flags", {})
-                if not done and _has_terminal_safety_event(prev_env_crash_flags):
-                    done = True
                 if done and stop_reason == "unknown":
                     if bool((info or {}).get("truncated", False)):
                         stop_reason = "truncated"
@@ -1102,11 +1042,6 @@ def run_test(args):
                             and _coarse_np.ndim == 3 and _coarse_np.shape[2] >= 2):
                         _anchor_trajs_gm[_m::M] = _coarse_np[_m, :, :2]
 
-                # Real collision/road flags from the previous env step for this agent.
-                _prev_flags = prev_env_crash_flags.get(agent_id, {})
-                _env_crashed = bool(_prev_flags.get("crash", False)) if _prev_flags else None
-                _env_out_of_road = bool(_prev_flags.get("out_of_road", False)) if _prev_flags else None
-
                 rewards, reward_debug = _compute_pdms_reward_batch(
                     refined_np, poses[agent_id],
                     _prev_traj_arg, _prev_pose_arg,
@@ -1114,8 +1049,6 @@ def run_test(args):
                     _formation_lon_scores, _formation_lat_scores, pdms_params,
                     road_half_widths=_road_hw_gm,
                     anchor_trajs=_anchor_trajs_gm,
-                    env_crashed=_env_crashed,
-                    env_out_of_road=_env_out_of_road,
                 )  # rewards: [G*M]; reward_debug arrays are [G*M]
 
                 executed_traj = refined_np[on_training_mode]           # [T, 3]
@@ -1153,6 +1086,12 @@ def run_test(args):
                         print(f"[test-refine-grpo] traj_plot failed ({agent_id}): {_pe}", flush=True)
 
             step_pdms_mean = float(np.mean(list(step_pdms_by_agent.values()))) if step_pdms_by_agent else 0.0
+
+            print(
+                f"[test-refine-grpo] episode={episode_idx} step={episode_step} "
+                f"control_backend=unlocked_diffusion step_time={t_end - t_start:.4f}s",
+                flush=True,
+            )
 
             # Combined traj frame: topdown + overlay
             # Captured BEFORE execute so agents are still at current positions.
@@ -1192,11 +1131,6 @@ def run_test(args):
                 env_reward = 0.0
                 info = {}
 
-            # Store real collision/road flags for use as gates in the NEXT step's reward computation.
-            prev_env_crash_flags = (info or {}).get("base_crash_flags", {})
-            # Early termination only for vehicle/object collisions or road departure.
-            if not done and _has_terminal_safety_event(prev_env_crash_flags):
-                done = True
             if done and stop_reason == "unknown":
                 if bool((info or {}).get("truncated", False)):
                     stop_reason = "truncated"

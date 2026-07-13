@@ -16,73 +16,48 @@ class _Writer:
         self.frames.append(np.asarray(frame).copy())
 
 
-def test_format_episode_end_reason_reports_agents_from_base_crash_flags():
+def test_format_episode_end_reason_reports_terminated_agents_without_inferring_cause():
     message = module._format_episode_end_reason(
         episode_idx=1,
         step_idx=52,
         info={
-            "base_crash_flags": {
-                "agent0": {"crash_vehicle": True, "out_of_road": False},
-                "agent1": {"crash": False, "out_of_road": False},
-                "agent2": {"crash": True, "out_of_road": True},
-            }
+            "termination_flags": {
+                "agent0": True,
+                "agent1": False,
+                "agent2": False,
+                "__all__": True,
+            },
+            "truncation_flags": {
+                "agent0": False,
+                "agent1": False,
+                "agent2": False,
+                "__all__": False,
+            },
         },
         fallback_reason="terminated",
     )
 
     assert message == (
-        "[test-refine-grpo] episode=1 ended: step=52 reason=crash,out_of_road "
-        "crash_agents=agent0 out_of_road_agents=agent2"
+        "[test-refine-grpo] episode=1 ended: step=52 reason=terminated "
+        "terminated_agents=agent0"
     )
 
 
-def test_terminal_safety_event_only_accepts_vehicle_object_and_out_of_road():
-    assert module._has_terminal_safety_event({"agent0": {"crash_vehicle": True}}) is True
-    assert module._has_terminal_safety_event({"agent0": {"crash_object": True}}) is True
-    assert module._has_terminal_safety_event({"agent0": {"out_of_road": True}}) is True
-    assert module._has_terminal_safety_event(
-        {"agent0": {"crash": True, "crash_sidewalk": True}}
-    ) is False
-    assert module._has_terminal_safety_event({"agent0": {"crash_human": True}}) is False
-    assert module._has_terminal_safety_event({"agent0": {"crash_building": True}}) is False
-
-
-def test_terminal_safety_event_checks_all_agents():
-    flags = {
-        "agent0": {"crash": True, "crash_sidewalk": True},
-        "agent1": {"crash_object": True},
-    }
-
-    assert module._has_terminal_safety_event(flags) is True
-
-
-def test_format_episode_end_reason_does_not_report_sidewalk_as_crash():
+def test_format_episode_end_reason_reports_terminated_and_truncated_agents():
     message = module._format_episode_end_reason(
         episode_idx=0,
-        step_idx=46,
+        step_idx=300,
         info={
-            "base_crash_flags": {
-                "agent0": {"crash": True, "crash_sidewalk": True, "out_of_road": False}
-            }
+            "termination_flags": {"agent0": False, "agent1": True, "__all__": True},
+            "truncation_flags": {"agent0": False, "agent1": True, "__all__": True},
         },
-        fallback_reason="max_steps",
+        fallback_reason="terminated",
     )
 
-    assert message == "[test-refine-grpo] episode=0 ended: step=46 reason=max_steps"
-
-
-def test_format_episode_end_reason_falls_back_to_per_agent_info_and_reports_arrival():
-    message = module._format_episode_end_reason(
-        episode_idx=2,
-        step_idx=18,
-        info={
-            "agent0": {"arrive_dest": True},
-            "agent1": {"arrive_dest": True},
-        },
-        fallback_reason="unknown",
+    assert message == (
+        "[test-refine-grpo] episode=0 ended: step=300 reason=terminated,truncated "
+        "terminated_agents=agent1 truncated_agents=agent1"
     )
-
-    assert message.endswith("reason=arrive_dest arrive_agents=agent0,agent1")
 
 
 def test_format_episode_end_reason_uses_non_vehicle_fallback_reason():

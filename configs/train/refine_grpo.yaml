@@ -129,7 +129,7 @@ env_config:
     # - S2_free_cruise_curve
     # - S3_straight_following
     # - S4_curve_following
-    # - S5_hard_brake_lead  # 前车突然急刹
+    - S5_hard_brake_lead  # 前车突然急刹
     - S6_background_merge_in  # 背景车从匝道合流入主路，与ego编队发生冲突
     - S7_ego_merge_from_ramp  # ego编队从匝道合流入主路，与后车发生冲突
     - S8_ego_exit_to_ramp  # ego编队从主路分流到匝道，与后车发生冲突

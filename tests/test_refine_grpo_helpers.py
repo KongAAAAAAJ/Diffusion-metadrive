@@ -637,7 +637,13 @@ def test_execute_trajectories_populates_pending_trajectory_reward_inputs(monkeyp
 
         def step(self, actions):
             self.pending_seen_by_step = dict(self._pending_step_trajectories)
-            return {}, {"agent0": 1.0, "agent1": 1.0}, {"__all__": True}, {"__all__": False}, {}
+            return (
+                {"agent0": {}, "agent1": {}},
+                {"agent0": 1.0, "agent1": 1.0},
+                {"agent0": False, "agent1": True, "__all__": True},
+                {"agent0": False, "agent1": False, "__all__": False},
+                {},
+            )
 
     class _Env:
         def __init__(self):
@@ -657,7 +663,7 @@ def test_execute_trajectories_populates_pending_trajectory_reward_inputs(monkeyp
         "agent1": torch.ones(8, 3).numpy().astype("float32"),
     }
 
-    _execute_trajectories(
+    _, _, done, info = _execute_trajectories(
         env,
         planner=None,
         agent_ids=["agent0", "agent1"],
@@ -669,3 +675,59 @@ def test_execute_trajectories_populates_pending_trajectory_reward_inputs(monkeyp
     for agent_id, trajectory in trajectories.items():
         assert env.base_env.pending_seen_by_step[agent_id].shape == (8, 3)
         assert (env.base_env.pending_seen_by_step[agent_id] == trajectory).all()
+    assert done is True
+    assert info["terminated"] is True
+    assert info["truncated"] is False
+    assert info["termination_flags"] == {"agent0": False, "agent1": True, "__all__": True}
+    assert info["truncation_flags"] == {"agent0": False, "agent1": False, "__all__": False}
+    assert "base_crash_flags" not in info
+
+
+def test_execute_trajectories_marks_missing_agent_as_generic_termination(monkeypatch):
+    import train.train_refine_grpo as refine_mod
+
+    monkeypatch.setattr(
+        refine_mod,
+        "compute_trajectory_control",
+        lambda **kwargs: (torch.zeros(2).numpy().astype("float32"), {}),
+    )
+
+    class _Vehicle:
+        speed_km_h = 0.0
+
+    class _BaseEnv:
+        agents = {"agent0": _Vehicle(), "agent1": _Vehicle()}
+        _pending_step_trajectories = {}
+
+        def step(self, actions):
+            return (
+                {"agent0": {}},
+                {"agent0": 0.0, "agent1": 0.0},
+                {"agent0": False, "agent1": False, "__all__": False},
+                {"agent0": False, "agent1": False, "__all__": False},
+                {},
+            )
+
+    class _Env:
+        base_env = _BaseEnv()
+        _last_raw_obs = {}
+        _last_obs = {}
+
+        def _normalize_raw_obs(self, raw_obs, previous_obs=None):
+            return raw_obs
+
+        def _refresh_mode_export(self):
+            return {}
+
+    trajectories = {
+        "agent0": torch.zeros(8, 3).numpy().astype("float32"),
+        "agent1": torch.zeros(8, 3).numpy().astype("float32"),
+    }
+    _, _, done, info = _execute_trajectories(
+        _Env(), None, ["agent0", "agent1"], trajectories, {}
+    )
+
+    assert done is True
+    assert info["missing_agent_ids"] == ["agent1"]
+    assert info["termination_flags"] == {"agent0": False, "agent1": True, "__all__": True}
+    assert "base_crash_flags" not in info

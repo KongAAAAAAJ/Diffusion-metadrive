@@ -1737,33 +1737,32 @@ def _execute_trajectories(env, planner, agent_ids: list[str], trajectories: dict
     if missing_agent_ids:
         terminated = dict(terminated)
         truncated = dict(truncated)
-        for agent_id in agent_ids:
+        for agent_id in missing_agent_ids:
             terminated[agent_id] = True
         terminated["__all__"] = True
         truncated["__all__"] = False
         done = True
         info["missing_agent_ids"] = list(missing_agent_ids)
+    termination_flags = {
+        **{agent_id: bool(terminated.get(agent_id, False)) for agent_id in agent_ids},
+        "__all__": bool(terminated.get("__all__", False)),
+    }
+    truncation_flags = {
+        **{agent_id: bool(truncated.get(agent_id, False)) for agent_id in agent_ids},
+        "__all__": bool(truncated.get("__all__", False)),
+    }
+    info.update(
+        {
+            "terminated": termination_flags["__all__"],
+            "truncated": truncation_flags["__all__"],
+            "termination_flags": termination_flags,
+            "truncation_flags": truncation_flags,
+        }
+    )
     reward_values = [float((reward or {}).get(agent_id, 0.0)) for agent_id in agent_ids]
     scalar_reward = float(np.mean(reward_values)) if reward_values else 0.0
     env._last_raw_obs = env._normalize_raw_obs(raw_obs or {}, previous_obs=env._last_raw_obs)
     obs = env._refresh_mode_export() if env._last_raw_obs else env._last_obs
-    # Build base_crash_flags from raw per-agent info (mirrors ModeSelectionSB3Env.step).
-    if "base_crash_flags" not in info:
-        base_crash_flags = {}
-        for agent_id in agent_ids:
-            agent_info = dict((info or {}).get(agent_id, {}))
-            missing_after_step = agent_id in missing_agent_ids
-            base_crash_flags[agent_id] = {
-                "crash":           bool(agent_info.get("crash", False) or missing_after_step),
-                "crash_vehicle":   bool(agent_info.get("crash_vehicle", False)),
-                "crash_human":     bool(agent_info.get("crash_human", False)),
-                "crash_object":    bool(agent_info.get("crash_object", False)),
-                "crash_building":  bool(agent_info.get("crash_building", False)),
-                "crash_sidewalk":  bool(agent_info.get("crash_sidewalk", False)),
-                "out_of_road":     bool(agent_info.get("out_of_road", False)),
-                "missing_after_step": bool(missing_after_step),
-            }
-        info["base_crash_flags"] = base_crash_flags
     return obs, scalar_reward, done, info
 
 
@@ -2012,9 +2011,6 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
         done = False
         episode_reward = 0.0
         episode_step = 0
-        # Real collision/road flags from the previous env step, keyed by agent_id.
-        # None at the start of an episode (no prior step executed).
-        prev_env_crash_flags: dict[str, dict] = {}
         while not done and global_step < int(total_timesteps):
             planner_batch = env._last_planner_batch
             export = env._last_export
@@ -2191,11 +2187,6 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                     M, GxM, on_training_mode, mode_names_for_debug,
                     gate_road_half_width_m, coarse_traj_by_agent, agent_id,
                 )
-                # Real collision/road flags from the previous env step for this agent.
-                _prev_flags = prev_env_crash_flags.get(agent_id, {})
-                _env_crashed = bool(_prev_flags.get("crash", False)) if _prev_flags else None
-                _env_out_of_road = bool(_prev_flags.get("out_of_road", False)) if _prev_flags else None
-
                 rewards, _batch_debug = _compute_pdms_reward_batch(
                     refined_np, poses[agent_id],
                     _prev_traj_arg, _prev_pose_arg,
@@ -2203,8 +2194,6 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                     _formation_lon_scores, _formation_lat_scores, pdms_params,
                     road_half_widths=_road_hw_gm,
                     anchor_trajs=_anchor_trajs_gm,
-                    env_crashed=_env_crashed,
-                    env_out_of_road=_env_out_of_road,
                     preference_point=preference_points_by_agent.get(agent_id),
                 )
                 reward_t = torch.as_tensor(rewards, dtype=torch.float32, device=planner._device())
@@ -2288,8 +2277,6 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                             _pt_form_lon_all[_m:_m+1], _pt_form_lat_all[_m:_m+1], pdms_params,
                             road_half_widths=_pt_road_hw,
                             anchor_trajs=_pt_anchor,
-                            env_crashed=_env_crashed,
-                            env_out_of_road=_env_out_of_road,
                             preference_point=preference_points_by_agent.get(agent_id),
                         )[0][0])
                         if advantage_mode == "global":
@@ -2561,9 +2548,6 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
             for _ridx, _raid in enumerate(agent_ids):
                 if train_followers_only and _ridx == 0:
                     continue  # leader unchanged, reward gain is always 0
-                _flags  = prev_env_crash_flags.get(_raid, {})
-                _ec     = bool(_flags.get("crash",       False))
-                _eor    = bool(_flags.get("out_of_road", False))
                 _is_ldr_r   = (_ridx == 0)
                 _prev_raid   = agent_ids[_ridx - 1] if _ridx > 0 else None
                 _prev_pose_r = poses.get(_prev_raid) if _prev_raid else None
@@ -2615,7 +2599,6 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                         _traj_r, _is_ldr_r,
                         _form_lon_r, _form_lat_r, pdms_params,
                         road_half_widths=_rhw_r, anchor_trajs=_ly_r,
-                        env_crashed=_ec, env_out_of_road=_eor,
                         preference_point=preference_points_by_agent.get(_raid),
                     )
                     _out_list.append(float(_rval[0]))
@@ -2672,7 +2655,6 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                             _traj_m, _is_ldr_r,
                             _form_lon_m, _form_lat_m, pdms_params,
                             road_half_widths=_rhw_m, anchor_trajs=_ly_m,
-                            env_crashed=_ec, env_out_of_road=_eor,
                             preference_point=preference_points_by_agent.get(_raid),
                         )
                         _per_mode_r.append(float(_rv_m[0]))
@@ -2728,14 +2710,6 @@ def run_training(config: Mapping[str, Any], output_root: Path, total_timesteps: 
                     except Exception:
                         pass
                 os._exit(0)
-            # Store real collision/road flags for use as gates in the NEXT step's reward computation.
-            prev_env_crash_flags = (info or {}).get("base_crash_flags", {})
-            # Early termination: if any agent crashed or went out of road, end this episode immediately.
-            if not done and any(
-                flags.get("crash", False) or flags.get("out_of_road", False)
-                for flags in prev_env_crash_flags.values()
-            ):
-                done = True
             step_eval_reward = float(np.mean(_tb_eval_r)) if _tb_eval_r else float("nan")
             episode_reward += step_eval_reward if not np.isnan(step_eval_reward) else 0.0
             episode_step += 1
