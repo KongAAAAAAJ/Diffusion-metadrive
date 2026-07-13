@@ -1,4 +1,5 @@
 import numpy as np
+from types import SimpleNamespace
 
 try:
     import gymnasium as gym
@@ -6,7 +7,7 @@ except Exception:  # pragma: no cover
     import gym  # type: ignore
 
 from envs.wrap_platoon_env import ModeSelectionSB3Env
-from envs.platoon_env import PlatoonEnv
+from envs.platoon_env import BaseMultiEnv, PlatoonEnv
 from envs.reward_terms import compute_step_reward, compute_team_reward
 from models.diffusion.test_transfuser_policy import _missing_controlled_agents
 
@@ -178,6 +179,31 @@ def test_platoon_env_team_failure_preserves_original_agent_flags():
 
     assert terminated == {"agent0": False, "agent1": True, "agent2": False, "__all__": True}
     assert truncated == {"agent0": False, "agent1": False, "agent2": False, "__all__": False}
+
+
+def test_low_level_step_accepts_episode_flags_without_per_agent_keys(monkeypatch):
+    env = PlatoonEnv.__new__(PlatoonEnv)
+    env._pending_low_level_actions = {}
+    env._platoon_reward_cache = None
+    env._trajectory_reward_cache = None
+    env._scenario_orchestrator = None
+    env._metrics = SimpleNamespace(update=lambda info: None, end_episode=lambda: None)
+    env._build_info_dict = lambda control_mode, actions, base_info: {}
+    env._enforce_platoon_episode_end = lambda terminated, truncated, info: (terminated, truncated)
+    env._augment_observations = lambda obs: obs
+
+    monkeypatch.setattr(
+        BaseMultiEnv,
+        "step",
+        lambda self, actions: ({}, {}, {"__all__": True}, {"__all__": False}, {}),
+    )
+
+    _, _, terminated, truncated, _ = env.low_level_step(
+        {"agent0": np.zeros((2,), dtype=np.float32)}
+    )
+
+    assert terminated == {"__all__": True}
+    assert truncated == {"__all__": False}
 
 
 def test_reward_terms_do_not_treat_sidewalk_as_vehicle_collision():

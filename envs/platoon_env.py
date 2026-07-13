@@ -754,9 +754,7 @@ class PlatoonEnv(BaseMultiEnv):
         info = self._build_info_dict(control_mode, actions=actions, base_info=info)
         terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
 
-        if terminated['agent0'] or terminated['agent1'] or terminated['agent2']:
-            debug = 1
-        if truncated['agent0'] or truncated['agent1'] or truncated['agent2']:
+        if terminated.get("__all__", True) or truncated.get("__all__", True):
             debug = 1
 
         obs = self._augment_observations(obs)
@@ -1286,6 +1284,15 @@ class PlatoonEnv(BaseMultiEnv):
         truncated: Mapping[str, bool],
         info: Mapping[str, Mapping[str, object]],
     ) -> tuple[dict[str, bool], dict[str, bool]]:
+        
+        if terminated["agent0"] or terminated["agent1"] or terminated["agent2"]:
+            debug = 1
+        if truncated["agent0"] or truncated["agent1"] or truncated["agent2"]:
+            debug = 1
+
+
+
+
         terminated = dict(terminated)
         truncated = dict(truncated)
         active_ids = [agent_id for agent_id in self._agent_ids if agent_id in info]
