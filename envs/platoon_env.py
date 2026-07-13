@@ -754,9 +754,6 @@ class PlatoonEnv(BaseMultiEnv):
         info = self._build_info_dict(control_mode, actions=actions, base_info=info)
         terminated, truncated = self._enforce_platoon_episode_end(terminated, truncated, info)
 
-        if terminated.get("__all__", True) or truncated.get("__all__", True):
-            debug = 1
-
         obs = self._augment_observations(obs)
         self._metrics.update(info)
         if terminated.get("__all__", False) or truncated.get("__all__", False):
@@ -1284,25 +1281,16 @@ class PlatoonEnv(BaseMultiEnv):
         truncated: Mapping[str, bool],
         info: Mapping[str, Mapping[str, object]],
     ) -> tuple[dict[str, bool], dict[str, bool]]:
-        
-        if terminated["agent0"] or terminated["agent1"] or terminated["agent2"]:
-            debug = 1
-        if truncated["agent0"] or truncated["agent1"] or truncated["agent2"]:
-            debug = 1
-
-
-
-
         terminated = dict(terminated)
         truncated = dict(truncated)
-        active_ids = [agent_id for agent_id in self._agent_ids if agent_id in info]
-        if not active_ids:
+        info_ids = [agent_id for agent_id in self._agent_ids if agent_id in info]
+        if not info_ids:
             terminated["__all__"] = True
             truncated["__all__"] = False
             return terminated, truncated
         failure_ids = [
             agent_id
-            for agent_id in active_ids
+            for agent_id in info_ids
             if bool(
                 info[agent_id].get("crash_vehicle", False)
                 or info[agent_id].get("crash_object", False)
@@ -1314,16 +1302,15 @@ class PlatoonEnv(BaseMultiEnv):
         if failure_ids:
             for agent_id in failure_ids:
                 terminated[agent_id] = True
-            terminated["__all__"] = True
-            truncated["__all__"] = False
-            return terminated, truncated
 
         terminated["__all__"] = bool(terminated.get("__all__", False)) or any(
-            bool(terminated.get(agent_id, False)) for agent_id in active_ids
+            bool(terminated.get(agent_id, False)) for agent_id in self._agent_ids
         )
         truncated["__all__"] = bool(truncated.get("__all__", False)) or all(
-            bool(truncated.get(agent_id, False)) for agent_id in active_ids
+            bool(truncated.get(agent_id, False)) for agent_id in self._agent_ids
         )
+        if failure_ids:
+            truncated["__all__"] = False
         return terminated, truncated
 
     def _capture_progress_reference(self, agent_id: str) -> tuple[object, float, np.ndarray]:
@@ -1361,7 +1348,12 @@ class PlatoonEnv(BaseMultiEnv):
         actions: Mapping[str, np.ndarray],
         base_info: Optional[Mapping[str, dict]] = None,
     ) -> dict[str, dict]:
-        info = {}
+        base_info = base_info or {}
+        info = {
+            agent_id: dict(base_info[agent_id])
+            for agent_id in self._agent_ids
+            if agent_id in base_info
+        }
         scenario_summary = {}
         scenario_orchestrator = getattr(self, "_scenario_orchestrator", None)
         if scenario_orchestrator is not None and hasattr(scenario_orchestrator, "get_episode_summary"):
@@ -1373,9 +1365,9 @@ class PlatoonEnv(BaseMultiEnv):
             else {}
         )
         min_gap = self._compute_min_gap()
-        active_ids = list(self.agents.keys())
+        active_ids = [agent_id for agent_id in self._agent_ids if agent_id in self.agents]
         for agent_id in active_ids:
-            agent_info = dict((base_info or {}).get(agent_id, {}))
+            agent_info = dict(info.get(agent_id, {}))
             raw_action = np.asarray(actions.get(agent_id, np.zeros((2,), dtype=np.float32)), dtype=np.float32)
             if raw_action.shape == (2,):
                 current_action = raw_action
@@ -1427,10 +1419,11 @@ class PlatoonEnv(BaseMultiEnv):
             ):
                 if reward_key in cached_agent_reward:
                     agent_info[reward_key] = cached_agent_reward[reward_key]
-            if scenario_summary:
-                agent_info.update(scenario_summary)
             self._last_actions[agent_id] = current_action
             info[agent_id] = agent_info
+        if scenario_summary:
+            for agent_info in info.values():
+                agent_info.update(scenario_summary)
         return info
 
     def _agent_pose(self, agent_id: str) -> Optional[np.ndarray]:

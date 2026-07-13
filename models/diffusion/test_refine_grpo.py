@@ -852,6 +852,9 @@ def run_test(args):
         stop_reason = "unknown"
 
         while not done:
+            if episode_step == 40:
+                debug = 1
+                
             if max_steps > 0 and episode_step >= max_steps:
                 stop_reason = "max_steps"
                 break

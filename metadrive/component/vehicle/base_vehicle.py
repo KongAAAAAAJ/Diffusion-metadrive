@@ -806,6 +806,7 @@ class BaseVehicle(BaseObject, BaseVehicleState):
             CollisionGroup.Sidewalk,
             in_static_world=False  # Sidewalk will be hosted in the dynamic_world. So here we set to False.
         )
+
         if res.hasHit() and res.getNode().getName() == MetaDriveType.BOUNDARY_LINE:
             self.crash_sidewalk = True
             contacts.add(MetaDriveType.BOUNDARY_LINE)
@@ -818,8 +819,8 @@ class BaseVehicle(BaseObject, BaseVehicleState):
             self.crash_sidewalk = True
             contacts.add(MetaDriveType.GUARDRAIL)
 
-        # elif res.hasHit():
-        #     print("Unclassified collision: ", res.getNode().getName())
+        elif res.hasHit():
+            print("Unclassified collision: ", res.getNode().getName())
 
         # only for visualization detection
         if self.render:

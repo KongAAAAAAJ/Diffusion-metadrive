@@ -181,6 +181,37 @@ def test_platoon_env_team_failure_preserves_original_agent_flags():
     assert truncated == {"agent0": False, "agent1": False, "agent2": False, "__all__": False}
 
 
+def test_platoon_env_terminates_when_removed_agent_flag_is_true_but_info_is_missing():
+    env = PlatoonEnv.__new__(PlatoonEnv)
+    env._agent_ids = ["agent0", "agent1", "agent2"]
+
+    terminated, truncated = PlatoonEnv._enforce_platoon_episode_end(
+        env,
+        {"agent0": True, "agent1": False, "agent2": False, "__all__": False},
+        {"agent0": False, "agent1": False, "agent2": False, "__all__": False},
+        {"agent1": {}, "agent2": {}},
+    )
+
+    assert terminated["agent0"] is True
+    assert terminated["__all__"] is True
+    assert truncated["__all__"] is False
+
+
+def test_platoon_env_enforcement_accepts_only_episode_level_flags():
+    env = PlatoonEnv.__new__(PlatoonEnv)
+    env._agent_ids = ["agent0", "agent1", "agent2"]
+
+    terminated, truncated = PlatoonEnv._enforce_platoon_episode_end(
+        env,
+        {"__all__": True},
+        {"__all__": False},
+        {},
+    )
+
+    assert terminated == {"__all__": True}
+    assert truncated == {"__all__": False}
+
+
 def test_low_level_step_accepts_episode_flags_without_per_agent_keys(monkeypatch):
     env = PlatoonEnv.__new__(PlatoonEnv)
     env._pending_low_level_actions = {}

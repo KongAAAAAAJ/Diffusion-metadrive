@@ -149,3 +149,29 @@ def test_build_info_includes_scenario_orchestrator_summary():
     assert info["agent0"]["scenario_triggered"] is True
     assert info["agent0"]["scenario_realized"] is False
     assert info["agent0"]["scenario_notes"] == ["recipe_not_realized"]
+
+
+def test_build_info_preserves_terminal_info_for_removed_agent():
+    env = _fake_env()
+    env._agent_roles = {"agent0": "leader", "agent1": "follower"}
+    env._fake_agents.pop("agent0")
+
+    info = env._build_info_dict(
+        "low_level",
+        actions={"agent1": env._pending_low_level_actions["agent1"]},
+        base_info={
+            "agent0": {
+                "crash_vehicle": True,
+                "out_of_road": False,
+                "episode_length": 17,
+            },
+            "agent1": {"crash_vehicle": False},
+        },
+    )
+
+    assert info["agent0"] == {
+        "crash_vehicle": True,
+        "out_of_road": False,
+        "episode_length": 17,
+    }
+    assert "formation_relation_state" in info["agent1"]
