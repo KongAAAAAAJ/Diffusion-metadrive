@@ -29,7 +29,7 @@ class RouteAwareSpawnManager(SpawnManager):
     按顺序写死的 graph_block_id 列表（例如 s0 -> c0 -> ... -> c4）。
     """
 
-    DEFAULT_TRAFFIC_GAP = 10.0
+    DEFAULT_TRAFFIC_GAP = 15.0
 
     def __init__(self):
         super().__init__()

@@ -30,6 +30,7 @@ except Exception as exc:  # pragma: no cover - import errors are surfaced at run
 
 
 from evaluation.platoon_metrics import PlatoonMetrics
+from routes.route_definitions import ROUTE_BY_NAME, get_required_preset, get_route_blocks
 from scenarios.definitions import SCENARIO_BY_ID
 
 
@@ -162,6 +163,7 @@ class PlatoonEnv(BaseMultiEnv):
                 "Please install/run the AGENTS.md environment dependencies before using this environment."
             ) from _METADRIVE_IMPORT_ERROR
         explicit_config_keys = set(dict(config or {}).keys())
+        self._explicit_config_keys = frozenset(explicit_config_keys)
         removed_alias_key = "hazard_" + "scenario"
         if removed_alias_key in explicit_config_keys:
             raise ValueError(
@@ -273,6 +275,47 @@ class PlatoonEnv(BaseMultiEnv):
         global_config = getattr(engine, "global_config", None)
         if global_config is not None:
             global_config.update(updates)
+
+    def set_runtime_scenario_route(self, scenario_id: str, local_route: str) -> None:
+        """Switch the scenario route before reset and invalidate stale destinations."""
+        scenario_id = str(scenario_id)
+        local_route = str(local_route)
+        scenario = SCENARIO_BY_ID.get(scenario_id)
+        if scenario is None:
+            raise ValueError(f"Unknown scenario_id: {scenario_id}")
+        if local_route not in ROUTE_BY_NAME:
+            raise ValueError(f"Unknown local_route: {local_route}")
+        if local_route not in scenario.allowed_local_routes:
+            raise ValueError(f"Scenario {scenario_id} does not allow local route {local_route}")
+
+        updates: dict[str, object] = {
+            "scenario_id": scenario_id,
+            "local_route": local_route,
+            "ego_main_route_block_ids": get_route_blocks(local_route),
+            "route_preset": get_required_preset(local_route),
+        }
+        if "initial_speed_km_h" not in self._explicit_config_keys:
+            scenario_speed = getattr(scenario, "ego_initial_speed_km_h", None)
+            if scenario_speed is not None:
+                updates["initial_speed_km_h"] = float(scenario_speed)
+
+        self.platoon_config.scenario_id = scenario_id
+        self.platoon_config.local_route = local_route
+        if "initial_speed_km_h" in updates:
+            self.platoon_config.initial_speed_km_h = float(updates["initial_speed_km_h"])
+        self.config.update(updates)
+
+        engine = getattr(self, "engine", None)
+        global_config = getattr(engine, "global_config", None)
+        if global_config is not None:
+            global_config.update(updates)
+
+        config_owners = [self.config]
+        if global_config is not None and global_config is not self.config:
+            config_owners.append(global_config)
+        for config_owner in config_owners:
+            for agent_config in (config_owner.get("agent_configs", {}) or {}).values():
+                agent_config["destination"] = None
 
     @classmethod
     def _merge_config(cls, config: Optional[Mapping[str, object]]) -> dict:

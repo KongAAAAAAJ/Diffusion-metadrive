@@ -16,7 +16,7 @@ class _FakeBaseEnv:
     def __init__(self, config=None, drop_agent_after_step=None):
         self.config = dict(config or {})
         self.last_actions = None
-        self.agents = {}
+        self.agents = {f"agent{i}": SimpleNamespace(speed_km_h=0.0) for i in range(3)}
         self.drop_agent_after_step = drop_agent_after_step
         self._obs = {
             f"agent{i}": {
@@ -29,6 +29,7 @@ class _FakeBaseEnv:
         }
 
     def reset(self):
+        self.agents = {f"agent{i}": SimpleNamespace(speed_km_h=0.0) for i in range(3)}
         return self._obs
 
     def step(self, actions):
@@ -36,6 +37,7 @@ class _FakeBaseEnv:
         obs = dict(self._obs)
         if self.drop_agent_after_step is not None:
             obs.pop(self.drop_agent_after_step, None)
+            self.agents.pop(self.drop_agent_after_step, None)
         return obs, {agent_id: float(idx) for idx, agent_id in enumerate(actions)}, {
             **{agent_id: False for agent_id in actions},
             "__all__": False,
@@ -76,6 +78,7 @@ class _FakePlanner:
             "raw_cls_logits": np.stack(logits, axis=0),
             "masked_cls_logits": np.where(np.stack(masks, axis=0), np.stack(logits, axis=0), -1e9),
             "mode_valid_mask": np.stack(masks, axis=0),
+            "lane_valid_mask": np.stack(masks, axis=0),
             "pretrained_argmax_mode": np.argmax(np.where(np.stack(masks, axis=0), np.stack(logits, axis=0), -1e9), axis=-1),
         }
 
@@ -123,8 +126,9 @@ def test_mode_selection_env_masks_and_executes_selected_candidates(tmp_path):
     assert info["safety_flags"]["agent0"] == {"crash": False, "terminal_crash": False, "out_of_road": False}
     assert info["base_crash_flags"]["agent0"]["crash"] is False
     assert "crash_sidewalk" in info["base_crash_flags"]["agent0"]
-    assert info["vehicle_position_before"] == {}
-    assert info["vehicle_position_after"] == {}
+    expected_positions = {f"agent{i}": [0.0, 0.0] for i in range(3)}
+    assert info["vehicle_position_before"] == expected_positions
+    assert info["vehicle_position_after"] == expected_positions
     assert info["candidate_endpoints"][1][3] == [3.0, 1.0]
     assert '"executed_mode": [2, 1, 3]' in debug_log_path.read_text(encoding="utf-8")
     assert '"safety_flags"' in debug_log_path.read_text(encoding="utf-8")
@@ -306,6 +310,38 @@ def test_mode_selection_env_applies_configured_s1_s4_scenario_before_base_env_bu
     assert captured["scenario_id"] == "S4_curve_following"
     assert captured["local_route"] == "R2_entry_curve"
     env.reset()
+
+
+def test_mode_selection_env_uses_runtime_route_api_for_each_scenario() -> None:
+    base_env = _FakeBaseEnv()
+    route_switches = []
+
+    def set_runtime_scenario_route(scenario_id, local_route):
+        route_switches.append((scenario_id, local_route))
+
+    base_env.set_runtime_scenario_route = set_runtime_scenario_route
+    env = ModeSelectionSB3Env(
+        {
+            "base_env": base_env,
+            "planner": _FakePlanner(),
+            "num_agents": 3,
+            "scenario_ids": [
+                "S5_hard_brake_lead",
+                "S6_background_merge_in",
+                "S7_ego_merge_from_ramp",
+            ],
+        }
+    )
+
+    env.reset()
+    env.reset()
+    env.reset()
+
+    assert route_switches == [
+        ("S5_hard_brake_lead", "R1_entry_straight"),
+        ("S6_background_merge_in", "R6_mainline_merge_approach"),
+        ("S7_ego_merge_from_ramp", "R7_merge_core"),
+    ]
 
 
 def test_missing_controlled_agents_detects_disappeared_platoon_member():

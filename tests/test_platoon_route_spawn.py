@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 
 from envs.platoon_env import PlatoonEnv
+from metadrive.engine import engine_utils
 
 
 class _FakeLane:
@@ -64,3 +68,67 @@ def test_select_route_spawn_lead_moves_away_from_nearby_traffic() -> None:
     lead_long = env._select_route_spawn_lead_long(lane, gap_m=9.2)
 
     assert lead_long > 30.0
+
+
+def _build_runtime_route_env(monkeypatch, *, explicit_initial_speed: bool = False) -> PlatoonEnv:
+    env = PlatoonEnv.__new__(PlatoonEnv)
+    env._explicit_config_keys = {"initial_speed_km_h"} if explicit_initial_speed else set()
+    env.platoon_config = SimpleNamespace(
+        scenario_id="S5_hard_brake_lead",
+        local_route="R1_entry_straight",
+        initial_speed_km_h=31.0 if explicit_initial_speed else 24.0,
+    )
+    env.config = {
+        "scenario_id": "S5_hard_brake_lead",
+        "local_route": "R1_entry_straight",
+        "ego_main_route_block_ids": ("s0",),
+        "route_preset": "mainline",
+        "initial_speed_km_h": env.platoon_config.initial_speed_km_h,
+    }
+    engine = SimpleNamespace(
+        global_config={
+            **env.config,
+            "agent_configs": {
+                "agent0": {"destination": "1S0_0_"},
+                "agent1": {"destination": "1S0_0_"},
+                "agent2": {"destination": "1S0_0_"},
+            },
+        }
+    )
+    monkeypatch.setattr(engine_utils, "get_engine", lambda: engine)
+    return env
+
+
+def test_runtime_scenario_route_replaces_route_and_invalidates_old_destinations(monkeypatch) -> None:
+    env = _build_runtime_route_env(monkeypatch)
+
+    env.set_runtime_scenario_route("S6_background_merge_in", "R6_mainline_merge_approach")
+
+    assert env.platoon_config.scenario_id == "S6_background_merge_in"
+    assert env.platoon_config.local_route == "R6_mainline_merge_approach"
+    assert env.config["ego_main_route_block_ids"] == ("c2", "g1", "c3")
+    assert env.engine.global_config["ego_main_route_block_ids"] == ("c2", "g1", "c3")
+    assert env.config["route_preset"] == "mainline"
+    assert env.platoon_config.initial_speed_km_h == pytest.approx(22.0)
+    assert env.engine.global_config["initial_speed_km_h"] == pytest.approx(22.0)
+    assert all(
+        agent_config["destination"] is None
+        for agent_config in env.engine.global_config["agent_configs"].values()
+    )
+
+
+def test_runtime_scenario_route_preserves_explicit_initial_speed(monkeypatch) -> None:
+    env = _build_runtime_route_env(monkeypatch, explicit_initial_speed=True)
+
+    env.set_runtime_scenario_route("S6_background_merge_in", "R6_mainline_merge_approach")
+
+    assert env.platoon_config.initial_speed_km_h == pytest.approx(31.0)
+    assert env.config["initial_speed_km_h"] == pytest.approx(31.0)
+    assert env.engine.global_config["initial_speed_km_h"] == pytest.approx(31.0)
+
+
+def test_runtime_scenario_route_rejects_route_not_allowed_by_scenario(monkeypatch) -> None:
+    env = _build_runtime_route_env(monkeypatch)
+
+    with pytest.raises(ValueError, match="does not allow local route"):
+        env.set_runtime_scenario_route("S6_background_merge_in", "R1_entry_straight")

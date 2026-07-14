@@ -160,10 +160,16 @@ class ModeSelectionSB3Env(gym.Env):
             # instances cannot coexist. We keep one env and patch scenario/route
             # before each reset so _reposition_platoon_on_route and
             # _setup_scenario_orchestrator pick up the new values.
-            self.base_env.config["scenario_id"] = sid
-            self.base_env.config["local_route"] = new_route
-            self.base_env.platoon_config.scenario_id = sid
-            self.base_env.platoon_config.local_route = new_route
+            set_runtime_route = getattr(self.base_env, "set_runtime_scenario_route", None)
+            if callable(set_runtime_route):
+                set_runtime_route(sid, new_route)
+            else:
+                self.base_env.config["scenario_id"] = sid
+                self.base_env.config["local_route"] = new_route
+                platoon_config = getattr(self.base_env, "platoon_config", None)
+                if platoon_config is not None:
+                    platoon_config.scenario_id = sid
+                    platoon_config.local_route = new_route
             print(
                 f"[env] episode={self._episode_count}  "
                 f"scenario={sid}  local_route={new_route}",
