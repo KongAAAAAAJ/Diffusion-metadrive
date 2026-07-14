@@ -231,6 +231,7 @@ class ScenarioOrchestrator:
 
     def _handle_inject_background_vehicle(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         reference_kind = str(params.get("reference_kind", "ego_lane"))
+        policy_class, policy_kwargs, vehicle_config_overrides = self._resolve_injected_background_policy(params)
         spawned = self._spawn_on_reference(
             env,
             ego_vehicle,
@@ -242,6 +243,9 @@ class ScenarioOrchestrator:
             spawn_longitude=float(params.get("spawn_longitude", 15.0)),
             spawn_longitude_offset=float(params.get("spawn_longitude_offset", 0.0)),
             target_speed_kmh=float(params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0))),
+            policy_class=policy_class,
+            policy_kwargs=policy_kwargs,
+            vehicle_config_overrides=vehicle_config_overrides,
         )
         if spawned is None:
             self.summary.notes.append(f"inject_failed:{reference_kind}")
@@ -250,6 +254,28 @@ class ScenarioOrchestrator:
         setattr(spawned, "scenario_vehicle_role", "injected_background")
         self._mark_realized(step_count, f"injected:{reference_kind}")
         return True
+
+    @staticmethod
+    def _resolve_injected_background_policy(params: Dict[str, object]):
+        policy_name = params.get("policy")
+        if policy_name is None:
+            return None, None, None
+        if str(policy_name) != "idm_merge":
+            raise ValueError(f"Unknown injected background policy: {policy_name!r}")
+
+        from envs.diffusion_envs.idm_merge_policy import IDMMergePolicy, StartEdgeNodeNavigation
+
+        cruise_speed = float(params.get("target_speed_kmh", 24.0))
+        return (
+            IDMMergePolicy,
+            {
+                "merge_front_gap_m": float(params.get("merge_front_gap_m", 25.0)),
+                "merge_rear_gap_m": float(params.get("merge_rear_gap_m", 15.0)),
+                "merge_creep_speed_kmh": float(params.get("merge_creep_speed_kmh", 5.0)),
+                "merge_cruise_speed_kmh": cruise_speed,
+            },
+            {"navigation_module": StartEdgeNodeNavigation},
+        )
 
     def _handle_inject_adjacent_lane_vehicles(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         vehicles = params.get("vehicles", ())
@@ -411,6 +437,9 @@ class ScenarioOrchestrator:
         spawn_longitude: float = 10.0,
         spawn_longitude_offset: float = 0.0,
         target_speed_kmh: float = 20.0,
+        policy_class=None,
+        policy_kwargs=None,
+        vehicle_config_overrides=None,
     ):
         lane_tuple = self._resolve_lane_index(
             env,
@@ -431,6 +460,9 @@ class ScenarioOrchestrator:
             spawn_longitude_offset=spawn_longitude_offset,
             target_speed_kmh=target_speed_kmh,
             reference_kind=reference_kind,
+            policy_class=policy_class,
+            policy_kwargs=policy_kwargs,
+            vehicle_config_overrides=vehicle_config_overrides,
         )
 
     def _spawn_on_lane_tuple(
@@ -445,6 +477,9 @@ class ScenarioOrchestrator:
         reference_kind: str = "ego_lane",
         min_clearance_m=None,
         clearance_scope: str = "all_agents",
+        policy_class=None,
+        policy_kwargs=None,
+        vehicle_config_overrides=None,
     ):
         current_map = getattr(getattr(env, "engine", None), "current_map", None)
         if current_map is None:
@@ -474,6 +509,9 @@ class ScenarioOrchestrator:
         spawned = traffic_manager._spawn_traffic_vehicle_if_safe(
             vehicle_type,
             {"spawn_lane_index": lane_tuple, "spawn_longitude": float(spawn_long)},
+            policy_class=policy_class,
+            policy_kwargs=policy_kwargs,
+            vehicle_config_overrides=vehicle_config_overrides,
         )
         if spawned is not None:
             setattr(spawned, "scenario_managed_vehicle", True)

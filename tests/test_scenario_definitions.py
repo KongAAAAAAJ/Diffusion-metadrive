@@ -12,6 +12,18 @@ def test_s6_declares_ego_spawn_reference_block_and_start_longitude() -> None:
     assert scenario.ego_spawn_longitude_m == pytest.approx(12.0)
 
 
+def test_s6_declares_merge_aware_background_policy() -> None:
+    scenario = SCENARIO_BY_ID["S6_background_merge_in"]
+    recipe = next(recipe for recipe in scenario.traffic_recipes if recipe.operation == "inject_background_vehicle")
+
+    assert scenario.trigger_by_local_route["R6_mainline_merge_approach"].block_id == "g1"
+    assert recipe.params["policy"] == "idm_merge"
+    assert recipe.params["merge_front_gap_m"] == pytest.approx(25.0)
+    assert recipe.params["merge_rear_gap_m"] == pytest.approx(15.0)
+    assert recipe.params["merge_creep_speed_kmh"] == pytest.approx(5.0)
+    assert recipe.params["target_speed_kmh"] == pytest.approx(24.0)
+
+
 def test_s5_declares_adjacent_lane_side_vehicle_recipe() -> None:
     scenario = SCENARIO_BY_ID["S5_hard_brake_lead"]
 

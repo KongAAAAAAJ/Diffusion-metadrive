@@ -191,7 +191,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         scenario_id="S6_background_merge_in",
         allowed_local_routes=("R6_mainline_merge_approach",),
         trigger_by_local_route={
-            "R6_mainline_merge_approach": TriggerSpec("c2", 10.0, 95.0),
+            "R6_mainline_merge_approach": TriggerSpec("g1", 10.0, 95.0),
         },
         traffic_recipes=(
             RecipeSpec(
@@ -202,6 +202,10 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "socket_index": 1,
                     "spawn_longitude": 0.0,
                     "target_speed_kmh": 24.0,
+                    "policy": "idm_merge",
+                    "merge_front_gap_m": 25.0,
+                    "merge_rear_gap_m": 15.0,
+                    "merge_creep_speed_kmh": 5.0,
                 },
             ),
         ),

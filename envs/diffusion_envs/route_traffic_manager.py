@@ -201,6 +201,8 @@ class RouteAwareTrafficManager(CustomTrafficManager):
         traffic_v_config,
         add_to_active_traffic=True,
         policy_class=None,
+        policy_kwargs=None,
+        vehicle_config_overrides=None,
     ):
         if self._conflicts_with_ego_spawn(traffic_v_config):
             return None
@@ -211,6 +213,7 @@ class RouteAwareTrafficManager(CustomTrafficManager):
         if not traffic_v_config.get("destination", None):
             traffic_v_config = self._apply_fixed_destination(traffic_v_config)
         traffic_v_config.update(self.engine.global_config["traffic_vehicle_config"])
+        traffic_v_config.update(vehicle_config_overrides or {})
         try:
             random_v = self.spawn_object(vehicle_type, vehicle_config=traffic_v_config)
         except (AssertionError, Exception):
@@ -220,7 +223,13 @@ class RouteAwareTrafficManager(CustomTrafficManager):
         if policy_class is None:
             from metadrive.policy.idm_policy import IDMPolicy
             policy_class = IDMPolicy
-        self.add_policy(random_v.id, policy_class, random_v, self.generate_seed())
+        self.add_policy(
+            random_v.id,
+            policy_class,
+            random_v,
+            self.generate_seed(),
+            **(policy_kwargs or {}),
+        )
         if add_to_active_traffic:
             self._traffic_vehicles.append(random_v)
         return random_v

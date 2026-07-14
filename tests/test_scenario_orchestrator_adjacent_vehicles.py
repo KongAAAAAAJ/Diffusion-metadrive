@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from scenarios.definitions import SCENARIO_BY_ID
 from scenarios.definitions import RecipeSpec, ScenarioDefinition, TriggerSpec
@@ -40,11 +41,21 @@ class FakeTrafficManager:
     def random_vehicle_type(self):
         return "vehicle"
 
-    def _spawn_traffic_vehicle_if_safe(self, vehicle_type, config):
+    def _spawn_traffic_vehicle_if_safe(
+        self,
+        vehicle_type,
+        config,
+        *,
+        policy_class=None,
+        policy_kwargs=None,
+        vehicle_config_overrides=None,
+    ):
         name = f"traffic_{len(self._traffic_vehicles)}"
         vehicle = SimpleNamespace(name=name, spawn_config=config)
         self._traffic_vehicles.append(vehicle)
-        self.spawn_calls.append((vehicle_type, config))
+        self.spawn_calls.append(
+            (vehicle_type, config, policy_class, policy_kwargs or {}, vehicle_config_overrides or {})
+        )
         self.policies[name] = SimpleNamespace(target_speed=0.0)
         return vehicle
 
@@ -392,3 +403,72 @@ def test_injected_background_vehicle_gets_topdown_marker() -> None:
     assert spawned.scenario_managed_vehicle is True
     assert spawned.scenario_warning_marker == "!"
     assert spawned.scenario_vehicle_role == "injected_background"
+
+
+def test_s6_injected_background_uses_merge_policy_and_start_edge_navigation() -> None:
+    from envs.diffusion_envs.idm_merge_policy import IDMMergePolicy, StartEdgeNodeNavigation
+
+    env, _ego, traffic_manager = make_env_and_ego()
+    definition = ScenarioDefinition(
+        code="T",
+        scenario_id="test_merge_background",
+        allowed_local_routes=("R1_entry_straight",),
+        trigger_by_local_route={"R1_entry_straight": TriggerSpec("s0", 80.0, 120.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "inject_background_vehicle",
+                {
+                    "reference_kind": "ego_lane",
+                    "spawn_longitude": 15.0,
+                    "target_speed_kmh": 24.0,
+                    "policy": "idm_merge",
+                    "merge_front_gap_m": 25.0,
+                    "merge_rear_gap_m": 15.0,
+                    "merge_creep_speed_kmh": 5.0,
+                },
+            ),
+        ),
+        ego_spawn_lane_preference=None,
+        ego_spawn_lane_probabilities=None,
+        expert_recipe="test",
+        description="test",
+    )
+    orchestrator = ScenarioOrchestrator(definition, "R1_entry_straight")
+    orchestrator.reset(env, "agent0")
+
+    orchestrator.before_step(env, "agent0", 5)
+
+    call = traffic_manager.spawn_calls[0]
+    assert call[2] is IDMMergePolicy
+    assert call[3] == {
+        "merge_front_gap_m": 25.0,
+        "merge_rear_gap_m": 15.0,
+        "merge_creep_speed_kmh": 5.0,
+        "merge_cruise_speed_kmh": 24.0,
+    }
+    assert call[4]["navigation_module"] is StartEdgeNodeNavigation
+
+
+def test_unknown_injected_background_policy_is_rejected() -> None:
+    env, _ego, _traffic_manager = make_env_and_ego()
+    definition = ScenarioDefinition(
+        code="T",
+        scenario_id="test_unknown_policy",
+        allowed_local_routes=("R1_entry_straight",),
+        trigger_by_local_route={"R1_entry_straight": TriggerSpec("s0", 80.0, 120.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "inject_background_vehicle",
+                {"reference_kind": "ego_lane", "policy": "does_not_exist"},
+            ),
+        ),
+        ego_spawn_lane_preference=None,
+        ego_spawn_lane_probabilities=None,
+        expert_recipe="test",
+        description="test",
+    )
+    orchestrator = ScenarioOrchestrator(definition, "R1_entry_straight")
+    orchestrator.reset(env, "agent0")
+
+    with pytest.raises(ValueError, match="Unknown injected background policy"):
+        orchestrator.before_step(env, "agent0", 5)

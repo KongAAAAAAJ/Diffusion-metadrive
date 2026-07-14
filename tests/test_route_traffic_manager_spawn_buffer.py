@@ -118,6 +118,44 @@ def test_spawn_if_safe_does_not_call_spawn_object_for_unnavigable_candidate(monk
     assert result is None
 
 
+def test_spawn_if_safe_applies_scenario_overrides_and_policy_kwargs(monkeypatch):
+    lane = _FakeLane()
+    manager = _manager_with_engine(monkeypatch, lane)
+    default_navigation = object()
+    scenario_navigation = object()
+    manager._test_engine.global_config["traffic_vehicle_config"] = {"navigation_module": default_navigation}
+    monkeypatch.setattr(manager, "_conflicts_with_ego_spawn", lambda config: False)
+    monkeypatch.setattr(manager, "_passes_final_spawn_guard", lambda config: True)
+    monkeypatch.setattr(manager, "_apply_fixed_destination", lambda config: {**config, "destination": "D"})
+    captured = {}
+
+    def _spawn_object(vehicle_type, vehicle_config):
+        captured["vehicle_config"] = vehicle_config
+        return SimpleNamespace(id="traffic-merge")
+
+    def _add_policy(object_id, policy_class, vehicle, seed, **kwargs):
+        captured["policy"] = (object_id, policy_class, vehicle, seed, kwargs)
+
+    policy_class = object()
+    manager.spawn_object = _spawn_object
+    manager.add_policy = _add_policy
+    manager.generate_seed = lambda: 7
+
+    vehicle = manager._spawn_traffic_vehicle_if_safe(
+        object,
+        {"spawn_lane_index": lane.index, "spawn_longitude": 4.0},
+        policy_class=policy_class,
+        policy_kwargs={"merge_front_gap_m": 25.0},
+        vehicle_config_overrides={"navigation_module": scenario_navigation},
+    )
+
+    assert vehicle is not None
+    assert captured["vehicle_config"]["destination"] == "D"
+    assert captured["vehicle_config"]["navigation_module"] is scenario_navigation
+    assert captured["policy"][1] is policy_class
+    assert captured["policy"][4] == {"merge_front_gap_m": 25.0}
+
+
 def test_create_basic_vehicles_uses_buffered_spawn_proposals(monkeypatch):
     lane = _FakeLane()
     manager = _manager_with_engine(monkeypatch, lane)
