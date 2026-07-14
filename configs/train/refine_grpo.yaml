@@ -21,7 +21,7 @@ use_relation_encoder: false  # keep _status_encoding at [128,19] for legacy diff
 output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo
 
 test_config:
-  episodes: 5
+  episodes: 1
   max_steps: 0
   output_root: /media/kong/Elements_SE/Diffusion_Data/outputs/refine_grpo_test
   run_tag: test_0712
@@ -113,7 +113,7 @@ checkpoint_interval_steps: 2500
 
 env_config:
   num_agents: 3
-  horizon: 300  # max steps per episode
+  horizon: 50  # max steps per episode
   observation_mode: multimodal
   use_render: false
   image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption

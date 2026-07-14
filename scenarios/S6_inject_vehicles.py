@@ -7,13 +7,13 @@ from typing import Callable
 
 _SAME_LANE_VEHICLES = (
     ("ego_lane_front_1", 30.0, 25.0),
-    ("ego_lane_front_2", 55.0, 26.0),
-    ("ego_lane_front_3", 80.0, 24.0),
-    ("ego_lane_front_4", 115.0, 28.0),
-    ("ego_lane_rear_1", -20.0, 26.0),
-    ("ego_lane_rear_2", -45.0, 23.0),
-    ("ego_lane_rear_3", -80.0, 24.0),
-    ("ego_lane_rear_4", -115.0, 21.0),
+    # ("ego_lane_front_2", 55.0, 26.0),
+    # ("ego_lane_front_3", 80.0, 24.0),
+    # ("ego_lane_front_4", 115.0, 28.0),
+    # ("ego_lane_rear_1", -20.0, 26.0),
+    # ("ego_lane_rear_2", -45.0, 23.0),
+    # ("ego_lane_rear_3", -80.0, 24.0),
+    # ("ego_lane_rear_4", -115.0, 21.0),
 )
 
 _ADJACENT_LANE_OFFSETS = (-40.0, -10.0, 15.0, 35.0)
@@ -75,5 +75,4 @@ def build_s6_traffic_recipes(recipe_factory: Callable[..., object]) -> tuple[obj
         },
     )
 
-    # return (merge_vehicle, *same_lane_vehicles, adjacent_lane_traffic)
-    return (merge_vehicle)
+    return (merge_vehicle, *same_lane_vehicles, adjacent_lane_traffic)

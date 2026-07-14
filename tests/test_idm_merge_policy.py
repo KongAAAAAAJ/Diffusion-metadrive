@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from envs.diffusion_envs.idm_merge_policy import IDMMergePolicy, StartEdgeNodeNavigation
+from metadrive.component.navigation_module.node_network_navigation import NodeNetworkNavigation
+from metadrive.engine.base_engine import BaseEngine
 from metadrive.policy.idm_policy import IDMPolicy
 
 
@@ -48,6 +50,22 @@ def test_start_edge_navigation_prepends_actual_spawn_edge() -> None:
     assert checkpoints == ["A", "B", "C", "D"]
 
 
+def test_start_edge_navigation_records_force_merge_road(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    navigation = object.__new__(StartEdgeNodeNavigation)
+    monkeypatch.setattr(
+        BaseEngine,
+        "singleton",
+        SimpleNamespace(current_map=SimpleNamespace(road_network=road_network)),
+    )
+    navigation.checkpoints = []
+    monkeypatch.setattr(NodeNetworkNavigation, "set_route", lambda self, lane_index, destination: None)
+
+    navigation.set_route(road_network.ramp.index, "D")
+
+    assert navigation.merge_force_road == ("B", "C")
+
+
 def _make_policy(road_network: _RoadNetwork, vehicle_lane, objects):
     policy = object.__new__(IDMMergePolicy)
     policy.control_object = SimpleNamespace(
@@ -57,6 +75,7 @@ def _make_policy(road_network: _RoadNetwork, vehicle_lane, objects):
             checkpoints=["A", "B", "C", "D"],
             map=SimpleNamespace(road_network=road_network),
             merge_branch_roads={("A", "B"), ("B", "C")},
+            merge_force_road=("B", "C"),
             merge_target_lane=road_network.mainline[-1],
         ),
     )
@@ -85,6 +104,19 @@ def test_merge_policy_creeps_when_front_or_rear_gap_is_unsafe(monkeypatch) -> No
     assert policy.action_info["merge_front_gap"] == 20.0
     assert policy.action_info["merge_rear_gap"] == 10.0
     assert policy.action_info["merge_gap_accepted"] is False
+    assert policy.action_info["merge_force_active"] is False
+
+
+def test_merge_policy_does_not_force_target_lane_before_connector(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    policy = _make_policy(road_network, road_network.ramp, [])
+    sentinel = (object(), 30.0, road_network.ramp)
+    monkeypatch.setattr(IDMPolicy, "lane_change_policy", lambda self, objects: sentinel)
+
+    result = policy.lane_change_policy([])
+
+    assert result is sentinel
+    assert policy.action_info["merge_force_active"] is False
 
 
 def test_merge_policy_restores_cruise_speed_when_gap_is_safe(monkeypatch) -> None:
@@ -95,10 +127,32 @@ def test_merge_policy_restores_cruise_speed_when_gap_is_safe(monkeypatch) -> Non
     policy = _make_policy(road_network, road_network.connector, [front, rear])
     monkeypatch.setattr(IDMPolicy, "lane_change_policy", lambda self, objects: (None, 30.0, self.control_object.lane))
 
-    policy.lane_change_policy([front, rear])
+    result = policy.lane_change_policy([front, rear])
 
     assert policy.target_speed == 24.0
     assert policy.action_info["merge_gap_accepted"] is True
+    assert policy.action_info["merge_force_active"] is True
+    assert result[2] is target_lane
+
+
+def test_merge_policy_holds_connector_lane_when_gap_is_unsafe(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    target_lane = road_network.mainline[-1]
+    rear = SimpleNamespace(lane=target_lane, position=np.asarray([-10.0, 0.0]))
+    policy = _make_policy(road_network, road_network.connector, [rear])
+    sentinel_front = object()
+    monkeypatch.setattr(
+        IDMPolicy,
+        "lane_change_policy",
+        lambda self, objects: (sentinel_front, 12.0, self.control_object.lane),
+    )
+
+    result = policy.lane_change_policy([rear])
+
+    assert policy.target_speed == 5.0
+    assert policy.action_info["merge_gap_accepted"] is False
+    assert policy.action_info["merge_force_active"] is True
+    assert result == (sentinel_front, 12.0, road_network.connector)
 
 
 def test_merge_policy_delegates_after_entering_mainline(monkeypatch) -> None:
@@ -113,3 +167,4 @@ def test_merge_policy_delegates_after_entering_mainline(monkeypatch) -> None:
     assert result is sentinel
     assert policy.target_speed == 17.0
     assert policy.action_info["merge_active"] is False
+    assert policy.action_info["merge_force_active"] is False

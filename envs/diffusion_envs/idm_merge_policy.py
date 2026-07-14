@@ -27,6 +27,7 @@ class StartEdgeNodeNavigation(NodeNetworkNavigation):
         # Let the parent initialize markers and destination information first.
         super().set_route(current_lane_index, destination)
         self.merge_branch_roads = set()
+        self.merge_force_road = None
         self.merge_target_lane = None
         checkpoints = self._build_start_edge_checkpoints(
             self.map.road_network,
@@ -69,6 +70,7 @@ class StartEdgeNodeNavigation(NodeNetworkNavigation):
             mainline_lanes = graph.get(start, {}).get(merge)
             if mainline_lanes:
                 self.merge_branch_roads = {(start, branch), (branch, merge)}
+                self.merge_force_road = (branch, merge)
                 self.merge_target_lane = mainline_lanes[-1]
 
 
@@ -95,11 +97,13 @@ class IDMMergePolicy(IDMPolicy):
 
     def lane_change_policy(self, all_objects):
         parent_result = super().lane_change_policy(all_objects)
-        self._record_merge_state(active=False)
+        self._record_merge_state(active=False, force_active=False)
 
         target_lane = self._find_merge_target_lane()
         if target_lane is None:
             return parent_result
+
+        force_active = self._is_force_merge_road()
 
         search_distance = max(
             float(self.MAX_LONG_DIST),
@@ -118,11 +122,26 @@ class IDMMergePolicy(IDMPolicy):
         self.target_speed = self.merge_cruise_speed_kmh if gap_accepted else self.merge_creep_speed_kmh
         self._record_merge_state(
             active=True,
+            force_active=force_active,
             front_gap=front_gap,
             rear_gap=rear_gap,
             accepted=gap_accepted,
         )
+        if force_active and gap_accepted:
+            return surrounding.front_object(), surrounding.front_min_distance(), target_lane
+        if force_active:
+            return parent_result[0], parent_result[1], self.control_object.lane
         return parent_result
+
+    def _is_force_merge_road(self) -> bool:
+        vehicle = self.control_object
+        navigation = getattr(vehicle, "navigation", None)
+        current_lane = getattr(vehicle, "lane", None)
+        current_index = getattr(current_lane, "index", None)
+        if current_index is None:
+            return False
+        force_road = getattr(navigation, "merge_force_road", None)
+        return force_road is not None and tuple(current_index[:2]) == tuple(force_road)
 
     def _find_merge_target_lane(self):
         vehicle = self.control_object
@@ -141,11 +160,13 @@ class IDMMergePolicy(IDMPolicy):
         self,
         *,
         active: bool,
+        force_active: bool = False,
         front_gap: float = inf,
         rear_gap: float = inf,
         accepted: bool = False,
     ) -> None:
         self.action_info["merge_active"] = bool(active)
+        self.action_info["merge_force_active"] = bool(force_active)
         self.action_info["merge_front_gap"] = float(front_gap)
         self.action_info["merge_rear_gap"] = float(rear_gap)
         self.action_info["merge_gap_accepted"] = bool(accepted)
