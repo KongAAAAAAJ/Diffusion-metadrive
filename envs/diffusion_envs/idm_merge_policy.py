@@ -95,12 +95,16 @@ class IDMMergePolicy(IDMPolicy):
         self.NORMAL_SPEED = self.merge_cruise_speed_kmh
         self.target_speed = self.merge_cruise_speed_kmh
         self.merge_completed = False
+        self.merge_policy_step = 0
 
     def reset(self):
         super().reset()
         self.merge_completed = False
+        self.merge_policy_step = 0
 
     def lane_change_policy(self, all_objects):
+        current_step = self.merge_policy_step
+        self.merge_policy_step += 1
         parent_result = super().lane_change_policy(all_objects)
         self._update_merge_completed()
         self._record_merge_state(
@@ -115,7 +119,7 @@ class IDMMergePolicy(IDMPolicy):
         if target_lane is None:
             return parent_result
 
-        force_active = self._is_force_merge_road()
+        force_active = current_step > 10  # !第几个step开启强制合流
 
         search_distance = max(
             float(self.MAX_LONG_DIST),
@@ -130,9 +134,10 @@ class IDMMergePolicy(IDMPolicy):
         )
         front_gap = float(surrounding.front_min_distance()) if surrounding.has_front_object() else inf
         rear_gap = float(surrounding.back_min_distance()) if surrounding.has_back_object() else inf
-        gap_accepted = front_gap >= 5 and rear_gap >= 5  # 前后间距 5m 5m
+        rear_ttc = self._rear_ttc_s(surrounding.back_object(), rear_gap)
+        gap_accepted = front_gap >= 10 and rear_gap >= 10 and rear_ttc >= 2.0  # 前后间距 10m 10m, 后车TTC >= 2s
 
-        print(f"Front gap: {front_gap:.2f} m, Rear gap: {rear_gap:.2f} m, Gap accepted: {gap_accepted}, Force active: {force_active}")
+        print(f"Front gap: {front_gap:.2f} m, Rear gap: {rear_gap:.2f} m, Rear TTC: {rear_ttc:.2f} s, Gap accepted: {gap_accepted}, Force active: {force_active}")
 
         self.target_speed = self.merge_cruise_speed_kmh if gap_accepted else self.merge_creep_speed_kmh
         self._record_merge_state(
@@ -140,6 +145,7 @@ class IDMMergePolicy(IDMPolicy):
             force_active=force_active,
             front_gap=front_gap,
             rear_gap=rear_gap,
+            rear_ttc=rear_ttc,
             accepted=gap_accepted,
             completed=self.merge_completed,
         )
@@ -172,6 +178,29 @@ class IDMMergePolicy(IDMPolicy):
             return None
         return getattr(navigation, "merge_target_lane", None)
 
+    def _rear_ttc_s(self, rear_object, rear_gap: float) -> float:
+        if rear_object is None or rear_gap == inf:
+            return inf
+        ego_speed = self._vehicle_speed_mps(self.control_object)
+        rear_speed = self._vehicle_speed_mps(rear_object)
+        closing_speed = rear_speed - ego_speed
+        if closing_speed <= 1e-6:
+            return inf
+        return float(rear_gap) / float(closing_speed)
+
+    @staticmethod
+    def _vehicle_speed_mps(vehicle) -> float:
+        speed_km_h = getattr(vehicle, "speed_km_h", None)
+        if speed_km_h is not None:
+            return float(speed_km_h) / 3.6
+        speed = getattr(vehicle, "speed", None)
+        if speed is not None:
+            return float(speed)
+        velocity = getattr(vehicle, "velocity", None)
+        if velocity is not None:
+            return float((float(velocity[0]) ** 2 + float(velocity[1]) ** 2) ** 0.5)
+        return 0.0
+
     def _update_merge_completed(self) -> None:
         if self.merge_completed:
             return
@@ -192,6 +221,7 @@ class IDMMergePolicy(IDMPolicy):
         force_active: bool = False,
         front_gap: float = inf,
         rear_gap: float = inf,
+        rear_ttc: float = inf,
         accepted: bool = False,
         completed: bool = False,
     ) -> None:
@@ -199,5 +229,6 @@ class IDMMergePolicy(IDMPolicy):
         self.action_info["merge_force_active"] = bool(force_active)
         self.action_info["merge_front_gap"] = float(front_gap)
         self.action_info["merge_rear_gap"] = float(rear_gap)
+        self.action_info["merge_rear_ttc_s"] = float(rear_ttc)
         self.action_info["merge_gap_accepted"] = bool(accepted)
         self.action_info["merge_completed"] = bool(completed)
