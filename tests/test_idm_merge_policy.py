@@ -162,6 +162,22 @@ def test_merge_policy_restores_cruise_speed_when_gap_is_safe(monkeypatch) -> Non
     assert result[2] is target_lane
 
 
+def test_merge_policy_uses_rear_speed_when_safe_rear_vehicle_is_faster(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    target_lane = road_network.mainline[-1]
+    rear = SimpleNamespace(lane=target_lane, position=np.asarray([-20.0, 0.0]), speed_km_h=30.0)
+    policy = _make_policy(road_network, road_network.connector, [rear])
+    policy.merge_policy_step = 11
+    monkeypatch.setattr(IDMPolicy, "lane_change_policy", lambda self, objects: (None, 30.0, self.control_object.lane))
+
+    result = policy.lane_change_policy([rear])
+
+    assert policy.action_info["merge_gap_accepted"] is True
+    assert policy.action_info["merge_rear_ttc_s"] == pytest.approx(12.0)
+    assert policy.target_speed == pytest.approx(30.0)
+    assert result[2] is target_lane
+
+
 def test_merge_policy_holds_connector_lane_when_gap_is_unsafe(monkeypatch) -> None:
     road_network = _RoadNetwork()
     target_lane = road_network.mainline[-1]
