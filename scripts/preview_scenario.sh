@@ -25,7 +25,7 @@ echo "--- repo: ${REPO_ROOT} ---"
 echo "--- python: ${PYTHON_BIN} ---"
 
 "${PYTHON_BIN}" -m evaluation.preview_and_evaluation \
-    --scenario-id S5_hard_brake_lead \
+    --scenario-id S6_background_merge_in \
     --num-agents 3 \
     --decision-policy rule_maker \
     --planning-policy lattice \

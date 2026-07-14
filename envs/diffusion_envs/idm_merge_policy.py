@@ -141,7 +141,7 @@ class IDMMergePolicy(IDMPolicy):
 
         if gap_accepted:
             rear_speed_kmh = self._vehicle_speed_mps(surrounding.back_object()) * 3.6
-            self.target_speed = max(rear_speed_kmh, self.merge_cruise_speed_kmh)
+            self.target_speed = max(0.6 * rear_speed_kmh, self.merge_cruise_speed_kmh)
         else:
             self.target_speed = self.merge_creep_speed_kmh
         self._record_merge_state(

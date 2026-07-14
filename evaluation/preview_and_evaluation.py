@@ -46,6 +46,7 @@ from typing import Callable, Mapping, Optional
 import numpy as np
 
 from evaluation.evaluation_helper import (
+    FormationUnlockTracker,
     _aggregate_pdms_across_episodes,
     _aggregate_pdms_records,
     _collect_episode_step_record,
@@ -56,6 +57,7 @@ from evaluation.evaluation_helper import (
     _publication_agent_color,
     _save_episode_metrics_json,
     _save_publication_figure,
+    summarize_formation_unlock_records,
 )
 from evaluation.platoon_performance import (
     build_platoon_metric_params,
@@ -76,12 +78,12 @@ from tools.topdown_view import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-DEFAULT_SCENARIO_ID = "S5_hard_brake_lead"
+DEFAULT_SCENARIO_ID = "S6_background_merge_in"
 DEFAULT_NUM_AGENTS = 3
-DEFAULT_NUM_EPISODES = 3
+DEFAULT_NUM_EPISODES = 5
 DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/run_results")
-DEFAULT_TRAFFIC_DENSITY = 0.10
-DEFAULT_START_SEED = 59
+DEFAULT_TRAFFIC_DENSITY = 0
+DEFAULT_START_SEED = 11
 DEFAULT_VIDEO_FPS = 10
 DEFAULT_HORIZON = 600
 DEFAULT_DECISION_POLICY = "rule_maker"
@@ -413,6 +415,7 @@ def _run_single_episode(
     platoon_metrics: Optional[object] = None,
     pdms_records: Optional[list] = None,
     episode_step_records: Optional[list] = None,
+    unlock_tracker: FormationUnlockTracker | None = None,
 ):
     spawn_manager = getattr(getattr(env, "engine", None), "spawn_manager", None)
     if spawn_manager is not None and hasattr(spawn_manager, "set_episode_spawn_seed"):
@@ -440,10 +443,16 @@ def _run_single_episode(
         if not actions:
             break
         planning_debug = getattr(env, "_preview_planning_debug", None)
+        rule_maker_debug = getattr(env, "_preview_rule_maker_debug", None)
+        if unlock_tracker is not None:
+            unlock_tracker.update(
+                step_idx=_step,
+                formation_locked=bool((rule_maker_debug or {}).get("formation_locked", True)),
+            )
 
         frame = _capture_topdown_frame(
             env, lead_id, heading_up, agent_ids,
-            rule_maker_debug=getattr(env, "_preview_rule_maker_debug", None),
+            rule_maker_debug=rule_maker_debug,
             planning_debug=planning_debug,
         )
         if frame is not None:
@@ -454,7 +463,7 @@ def _run_single_episode(
         if platoon_metrics is not None:
             platoon_metrics.update(info)
         if pdms_params is not None and pdms_records is not None:
-            debug = getattr(env, "_preview_rule_maker_debug", None)
+            debug = rule_maker_debug
             step_pdms = _compute_step_pdms(env, agent_ids, debug, info, pdms_params)
             if step_pdms:
                 pdms_records.append(step_pdms)
@@ -574,6 +583,7 @@ def run_scenario(
         )
     metrics_dir = output_root / scenario_id / "metrices"
     all_episode_step_records: list[list[dict]] = []
+    formation_unlock_records: list[dict] = []
 
     try:
         for ep_idx in range(num_episodes):
@@ -581,15 +591,19 @@ def run_scenario(
             used_seed = start_seed + ep_idx
             pdms_records: Optional[list] = [] if pdms_params is not None else None
             episode_step_records: Optional[list] = [] if evaluate else None
+            episode_unlock_record: dict | None = None
             for retry in range(max(1, int(max_episode_retries))):
                 episode_seed = used_seed + retry
+                unlock_tracker = FormationUnlockTracker(ep_idx)
                 frames, terminated, truncated, info = _run_single_episode(
                     env, agent_ids, lead_id, heading_up, episode_seed, action_fn_factory,
                     pdms_params=pdms_params,
                     platoon_metrics=platoon_metrics,
                     pdms_records=pdms_records,
                     episode_step_records=episode_step_records,
+                    unlock_tracker=unlock_tracker,
                 )
+                episode_unlock_record = unlock_tracker.finalize(len(frames) - 1)
                 if not _episode_failed_immediately(frames, terminated, truncated, info):
                     used_seed = episode_seed
                     break
@@ -607,6 +621,9 @@ def run_scenario(
                 f"  [{scenario_id}] ep {ep_idx + 1}/{num_episodes} -> {video_path.name} "
                 f"({len(frames)} frames, seed={used_seed})"
             )
+            if episode_unlock_record is None:
+                episode_unlock_record = FormationUnlockTracker(ep_idx).finalize()
+            formation_unlock_records.append(episode_unlock_record)
 
             if evaluate:
                 episode_pdms = {}
@@ -624,6 +641,7 @@ def run_scenario(
                     "episode": ep_idx,
                     "seed": used_seed,
                     "video_path": str(video_path),
+                    "formation_unlock": episode_unlock_record,
                     "pdms": episode_pdms,
                     "steps": episode_steps,
                 }
@@ -640,6 +658,8 @@ def run_scenario(
             pass
 
     if evaluate:
+        unlock_summary = summarize_formation_unlock_records(formation_unlock_records)
+        _save_episode_metrics_json(metrics_dir / "formation_unlock_summary.json", unlock_summary)
         _plot_average_episode_pdms(metrics_dir / "ave_metrice.png", all_episode_step_records)
 
     return video_dir

@@ -200,8 +200,8 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_lane_preference="rightmost",
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",
-        ego_spawn_longitude_m=(25.0, 90.0),
-        ego_initial_speed_km_h=(20.0, 26.0),
+        ego_spawn_longitude_m=(60.0, 90.0), # *
+        ego_initial_speed_km_h=(20.0, 26.0), # *
         override_traffic_density=0.03,
         env_overrides={
             "traffic_spawn_exclusion_ahead_m": 100.0,

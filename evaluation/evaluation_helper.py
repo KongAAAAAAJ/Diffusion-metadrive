@@ -8,6 +8,63 @@ from pathlib import Path
 import numpy as np
 
 
+class FormationUnlockTracker:
+    """Track continuous unlocked formation step ranges for one episode."""
+
+    def __init__(self, episode_idx: int):
+        self.episode_idx = int(episode_idx)
+        self.unlocked_triggered = False
+        self.unlocked_ranges: list[dict[str, int]] = []
+        self._active_start: int | None = None
+        self._last_step: int | None = None
+
+    def update(self, *, step_idx: int, formation_locked: bool) -> None:
+        step_idx = int(step_idx)
+        self._last_step = step_idx
+        is_unlocked = not bool(formation_locked)
+        if is_unlocked:
+            self.unlocked_triggered = True
+            if self._active_start is None:
+                self._active_start = step_idx
+            return
+        if self._active_start is not None:
+            self.unlocked_ranges.append(
+                {"start_step": int(self._active_start), "end_step": step_idx - 1}
+            )
+            self._active_start = None
+
+    def finalize(self, final_step_idx: int | None = None) -> dict:
+        if final_step_idx is None:
+            end_step = self._last_step
+        else:
+            end_step = int(final_step_idx)
+        if self._active_start is not None:
+            if end_step is None:
+                end_step = self._active_start
+            self.unlocked_ranges.append(
+                {"start_step": int(self._active_start), "end_step": int(end_step)}
+            )
+            self._active_start = None
+        return {
+            "episode": self.episode_idx,
+            "unlocked_triggered": bool(self.unlocked_triggered),
+            "unlocked_ranges": list(self.unlocked_ranges),
+        }
+
+
+def summarize_formation_unlock_records(records: list[dict]) -> dict:
+    safe_records = [_json_safe(record) for record in (records or [])]
+    episodes = max(len(safe_records), 1)
+    triggered_count = sum(
+        1 for record in safe_records if bool(record.get("unlocked_triggered", False))
+    )
+    return {
+        "formation_unlock_events": safe_records,
+        "formation_unlock_trigger_count": int(triggered_count),
+        "formation_unlock_trigger_rate": float(triggered_count / episodes),
+    }
+
+
 def _aggregate_pdms_records(pdms_records: list[dict[str, dict[str, float]]]) -> dict[str, dict[str, float]]:
     """Average per-agent PDMS components over an episode, plus a `__team__` cross-agent mean."""
     per_agent: dict[str, list[dict[str, float]]] = {}

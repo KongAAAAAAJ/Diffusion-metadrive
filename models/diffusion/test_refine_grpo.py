@@ -51,7 +51,12 @@ from evaluation.platoon_performance import (
     compute_pairwise_formation_reward,
     compute_pdms_reward_batch as _compute_pdms_reward_batch,
 )
-from evaluation.evaluation_helper import _collect_episode_step_record, _json_safe
+from evaluation.evaluation_helper import (
+    FormationUnlockTracker,
+    _collect_episode_step_record,
+    _json_safe,
+    summarize_formation_unlock_records,
+)
 from models.refine_grpo.ddim_with_logprob import DDIMSchedulerWithLogProb
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1041,6 +1046,7 @@ def run_test(args):
     summary_path = output_dir / "random_action_reward_summary.json"
 
     all_records: list[dict] = []
+    formation_unlock_records: list[dict] = []
     episode_idx = 0
     success = crash = out_of_road = 0
 
@@ -1061,6 +1067,7 @@ def run_test(args):
         episode_step = 0
         episode_env_reward = 0.0
         episode_pdms_reward = 0.0
+        unlock_tracker = FormationUnlockTracker(episode_idx)
         vid_2d: "cv2.VideoWriter | None" = None
         vid_3d: "cv2.VideoWriter | None" = None
         info: dict = {}
@@ -1110,6 +1117,10 @@ def run_test(args):
             if _rule_maker is not None:
                 locked_follow = _locked_follow_decision(_rule_maker, env, agent_ids, planner_batch)
                 rule_maker_debug = locked_follow.get("rule_maker_debug")
+            unlock_tracker.update(
+                step_idx=episode_step,
+                formation_locked=bool(locked_follow.get("formation_locked", False)),
+            )
 
             # Locked formation: directly execute normal-planner + LQR follow
             # control, bypassing diffusion refinement for this environment step.
@@ -1567,6 +1578,7 @@ def run_test(args):
 
         ep_pdms_per_step = episode_pdms_reward / max(1, episode_step)
         ep_env_per_step  = episode_env_reward  / max(1, episode_step)
+        formation_unlock_records.append(unlock_tracker.finalize(episode_step - 1))
         print(f"[test-refine-grpo] episode={episode_idx} steps={episode_step} "
               f"pdms/step={ep_pdms_per_step:.4f} env/step={ep_env_per_step:.4f}", flush=True)
 
@@ -1590,6 +1602,7 @@ def run_test(args):
         out_of_road=out_of_road,
         metadata=metadata,
     )
+    summary.update(summarize_formation_unlock_records(formation_unlock_records))
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"\n[test-refine-grpo] summary saved → {summary_path}", flush=True)
     print(f"  pdms/step  = {summary['episode_pdms_reward_per_step_mean']:.4f}", flush=True)

@@ -71,7 +71,7 @@ class FakeRoadNetwork:
         return self._lanes[tuple(lane_index)]
 
 
-def _vehicle(name: str, x: float, y: float, lane_id: int, speed_km_h: float = 20.0):
+def _vehicle(name: str, x: float, y: float, lane_id: int, speed_km_h: float = 20.0, width: float = 1.8):
     return SimpleNamespace(
         name=name,
         position=np.asarray([x, y], dtype=np.float32),
@@ -79,7 +79,7 @@ def _vehicle(name: str, x: float, y: float, lane_id: int, speed_km_h: float = 20
         lane=FakeLane(lane_id, y),
         speed_km_h=float(speed_km_h),
         LENGTH=4.5,
-        WIDTH=1.8,
+        WIDTH=float(width),
     )
 
 
@@ -134,10 +134,68 @@ def test_risk_detector_keeps_locked_at_or_above_ttc_threshold(front_x, front_spe
     assert result["next_state"] == "LOCKED"
 
 
-def test_risk_detector_ignores_close_vehicle_in_adjacent_lane_for_ttc():
+def test_risk_detector_ignores_close_vehicle_in_adjacent_lane_without_intrusion_for_ttc():
     env = _env(
         agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0)},
         traffic=[_vehicle("adjacent", 12.0, 3.5, 0, speed_km_h=0.0)],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(env, ["agent0"], env.engine.traffic_manager._traffic_vehicles, "LOCKED")
+
+    assert result["triggered"] is False
+    assert result["leader"]["front_vehicle_id"] is None
+
+
+def test_risk_detector_counts_adjacent_vehicle_intruding_into_leader_lane_for_ttc():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0)},
+        traffic=[_vehicle("intruder", 22.0, 2.5, 0, speed_km_h=18.0)],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(env, ["agent0"], env.engine.traffic_manager._traffic_vehicles, "LOCKED")
+
+    assert result["triggered"] is True
+    assert result["leader"]["front_vehicle_id"] == "intruder"
+    assert result["leader"]["front_net_gap_m"] == pytest.approx(7.5)
+    assert result["leader"]["ttc_s"] == pytest.approx(1.5)
+
+
+def test_risk_detector_chooses_nearest_front_between_same_lane_and_intruding_vehicle():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0)},
+        traffic=[
+            _vehicle("same_lane_front", 28.0, 0.0, 1, speed_km_h=18.0),
+            _vehicle("intruder", 24.0, 2.5, 0, speed_km_h=18.0),
+        ],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(env, ["agent0"], env.engine.traffic_manager._traffic_vehicles, "LOCKED")
+
+    assert result["leader"]["front_vehicle_id"] == "intruder"
+    assert result["leader"]["front_net_gap_m"] == pytest.approx(9.5)
+
+
+def test_risk_detector_intruding_vehicle_with_no_closing_speed_has_infinite_ttc():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0)},
+        traffic=[_vehicle("intruder", 22.0, 2.5, 0, speed_km_h=40.0)],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(env, ["agent0"], env.engine.traffic_manager._traffic_vehicles, "LOCKED")
+
+    assert result["triggered"] is False
+    assert result["leader"]["front_vehicle_id"] == "intruder"
+    assert result["leader"]["ttc_s"] == math.inf
+
+
+def test_risk_detector_ignores_intruding_vehicle_behind_leader_for_ttc():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0)},
+        traffic=[_vehicle("behind_intruder", 8.0, 2.5, 0, speed_km_h=0.0)],
     )
     detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
 

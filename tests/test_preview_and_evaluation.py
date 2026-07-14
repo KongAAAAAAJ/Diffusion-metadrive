@@ -896,6 +896,11 @@ def test_evaluate_writes_episode_metrics_json_and_plots(monkeypatch, tmp_path: P
     assert data["episode"] == 0
     assert data["seed"] == 59
     assert data["video_path"].endswith("episode_0000.mp4")
+    assert data["formation_unlock"] == {
+        "episode": 0,
+        "unlocked_triggered": False,
+        "unlocked_ranges": [],
+    }
     assert data["pdms"]["agent0"]["reward"] == 1.0
     first_step = data["steps"][0]
     assert first_step["pdms"]["agent0"]["reward"] == 1.0
@@ -903,6 +908,10 @@ def test_evaluate_writes_episode_metrics_json_and_plots(monkeypatch, tmp_path: P
     assert first_step["actions"]["agent0"]["throttle"] == pytest.approx(0.2)
     assert "agent0" in first_step["planning"]["trajectories_by_agent"]
     assert "accel_mps2" in first_step["vehicles"]["agent0"]
+    unlock_summary = json.loads((metrics_dir / "formation_unlock_summary.json").read_text())
+    assert unlock_summary["formation_unlock_trigger_count"] == 0
+    assert unlock_summary["formation_unlock_trigger_rate"] == 0.0
+    assert len(unlock_summary["formation_unlock_events"]) == 2
     assert not (tmp_path / "S1_free_cruise_straight" / "reports" / "metrics").exists()
 
 

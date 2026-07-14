@@ -27,6 +27,68 @@ def test_evaluation_helper_aggregates_pdms_records_with_team_mean() -> None:
     assert aggregated["__team__"] == {"reward": 4.0, "progress": 5.0}
 
 
+def test_formation_unlock_tracker_records_no_unlock_when_always_locked() -> None:
+    tracker = helper.FormationUnlockTracker(episode_idx=3)
+    tracker.update(step_idx=0, formation_locked=True)
+    tracker.update(step_idx=1, formation_locked=True)
+
+    record = tracker.finalize()
+
+    assert record == {
+        "episode": 3,
+        "unlocked_triggered": False,
+        "unlocked_ranges": [],
+    }
+
+
+def test_formation_unlock_tracker_records_single_middle_range() -> None:
+    tracker = helper.FormationUnlockTracker(episode_idx=0)
+    for step_idx, locked in [(0, True), (1, False), (2, False), (3, True)]:
+        tracker.update(step_idx=step_idx, formation_locked=locked)
+
+    record = tracker.finalize()
+
+    assert record["unlocked_triggered"] is True
+    assert record["unlocked_ranges"] == [{"start_step": 1, "end_step": 2}]
+
+
+def test_formation_unlock_tracker_records_multiple_ranges() -> None:
+    tracker = helper.FormationUnlockTracker(episode_idx=0)
+    for step_idx, locked in [(0, False), (1, True), (2, False), (3, True)]:
+        tracker.update(step_idx=step_idx, formation_locked=locked)
+
+    record = tracker.finalize()
+
+    assert record["unlocked_ranges"] == [
+        {"start_step": 0, "end_step": 0},
+        {"start_step": 2, "end_step": 2},
+    ]
+
+
+def test_formation_unlock_tracker_closes_open_range_on_finalize() -> None:
+    tracker = helper.FormationUnlockTracker(episode_idx=0)
+    tracker.update(step_idx=4, formation_locked=True)
+    tracker.update(step_idx=5, formation_locked=False)
+    tracker.update(step_idx=6, formation_locked=False)
+
+    record = tracker.finalize()
+
+    assert record["unlocked_ranges"] == [{"start_step": 5, "end_step": 6}]
+
+
+def test_summarize_formation_unlock_records_counts_trigger_rate() -> None:
+    summary = helper.summarize_formation_unlock_records(
+        [
+            {"episode": 0, "unlocked_triggered": True, "unlocked_ranges": [{"start_step": 1, "end_step": 2}]},
+            {"episode": 1, "unlocked_triggered": False, "unlocked_ranges": []},
+        ]
+    )
+
+    assert summary["formation_unlock_trigger_count"] == 1
+    assert summary["formation_unlock_trigger_rate"] == pytest.approx(0.5)
+    assert summary["formation_unlock_events"][0]["unlocked_ranges"] == [{"start_step": 1, "end_step": 2}]
+
+
 class _FakeLane:
     def local_coordinates(self, position):
         return float(position[0]) * 2.0, float(position[1])

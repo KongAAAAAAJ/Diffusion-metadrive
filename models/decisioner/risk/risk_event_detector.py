@@ -168,7 +168,9 @@ class SimpleRuleRiskDetector(RiskDetector):
         nearest = None
         nearest_center_gap = math.inf
         for traffic_vehicle in traffic_vehicles:
-            if traffic_vehicle is leader or not cls._same_lane(leader, traffic_vehicle):
+            if traffic_vehicle is leader:
+                continue
+            if not cls._same_lane(leader, traffic_vehicle) and not cls._intrudes_lane_corridor(lane, traffic_vehicle):
                 continue
             traffic_s = cls._longitudinal(lane, traffic_vehicle)
             if traffic_s is None or traffic_s <= leader_s:
@@ -193,6 +195,24 @@ class SimpleRuleRiskDetector(RiskDetector):
         if lane is None or not hasattr(lane, "local_coordinates"):
             return None
         return float(lane.local_coordinates(getattr(vehicle, "position", (0.0, 0.0)))[0])
+
+    @classmethod
+    def _intrudes_lane_corridor(cls, lane, vehicle) -> bool:
+        if lane is None or not hasattr(lane, "local_coordinates"):
+            return False
+        try:
+            _longitudinal, lateral = lane.local_coordinates(getattr(vehicle, "position", (0.0, 0.0)))
+        except Exception:
+            return False
+        return abs(float(lateral)) <= 0.5 * cls._lane_width(lane) + 0.5 * cls._vehicle_width(vehicle)
+
+    @staticmethod
+    def _lane_width(lane) -> float:
+        return float(getattr(lane, "width", 3.5) or 3.5)
+
+    @staticmethod
+    def _vehicle_width(vehicle) -> float:
+        return float(getattr(vehicle, "WIDTH", 2.0) or 2.0)
 
     @staticmethod
     def _speed_mps(vehicle) -> float:
