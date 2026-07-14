@@ -683,6 +683,63 @@ def test_execute_trajectories_populates_pending_trajectory_reward_inputs(monkeyp
     assert "base_crash_flags" not in info
 
 
+def test_execute_trajectories_exports_actions_and_controller_debug(monkeypatch):
+    import train.train_refine_grpo as refine_mod
+
+    monkeypatch.setattr(
+        refine_mod,
+        "compute_trajectory_control",
+        lambda **kwargs: (
+            torch.tensor([0.25, 0.75], dtype=torch.float32).numpy(),
+            {"lookahead_index": kwargs["lookahead_index"], "source": "trajectory_control"},
+        ),
+    )
+
+    class _Vehicle:
+        speed_km_h = 12.0
+
+    class _BaseEnv:
+        agents = {"agent0": _Vehicle()}
+        _pending_step_trajectories = {}
+
+        def step(self, actions):
+            return (
+                {"agent0": {}},
+                {"agent0": 1.0},
+                {"agent0": False, "__all__": False},
+                {"agent0": False, "__all__": False},
+                {},
+            )
+
+    class _Env:
+        base_env = _BaseEnv()
+        _last_raw_obs = {}
+        _last_obs = {}
+
+        def _normalize_raw_obs(self, raw_obs, previous_obs=None):
+            return raw_obs
+
+        def _refresh_mode_export(self):
+            return {}
+
+    execution_debug = {}
+    result = _execute_trajectories(
+        _Env(),
+        None,
+        ["agent0"],
+        {"agent0": torch.zeros(8, 3).numpy().astype("float32")},
+        {"lookahead_index": 3},
+        execution_debug=execution_debug,
+    )
+
+    assert len(result) == 4
+    np.testing.assert_allclose(execution_debug["actions"]["agent0"], [0.25, 0.75])
+    assert execution_debug["control_debug"]["agent0"] == {
+        "lookahead_index": 3,
+        "source": "trajectory_control",
+    }
+
+
 def test_execute_trajectories_marks_missing_agent_as_generic_termination(monkeypatch):
     import train.train_refine_grpo as refine_mod
 

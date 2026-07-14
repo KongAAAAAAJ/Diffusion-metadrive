@@ -296,6 +296,7 @@ def test_pipeline_factory_runs_decision_lattice_and_pid_control(monkeypatch) -> 
     assert np.allclose(fake_planner.calls[0]["agent0"]["target_point"], [5.0, 0.0])
     assert getattr(env, "_preview_rule_maker_debug", None) is not None
     assert getattr(env, "_preview_planning_debug", None)["planning_policy"] == "lattice"
+    assert getattr(env, "_preview_planning_debug", None)["coordinate_frame"] == "world"
     assert np.asarray(env._preview_planning_debug["trajectories_by_agent"]["agent0"]).shape == (8, 3)
     assert env.applied_roles == [{"agent0": "leader"}]
 
@@ -331,6 +332,42 @@ def test_collect_episode_step_record_includes_control_debug() -> None:
 
     assert record["control_debug"]["agent0"]["mode"] == "follower_lqr"
     assert record["control_debug"]["agent0"]["lat_error"] == pytest.approx(0.25)
+
+
+def test_collect_episode_step_record_prefers_explicit_control_and_preserves_planning_debug() -> None:
+    env = type(
+        "Env",
+        (),
+        {
+            "agents": {"agent0": _FakeVehicle()},
+            "_preview_control_debug": {"agent0": {"source": "preview"}},
+        },
+    )()
+    planning_debug = {
+        "planning_policy": "diffusion_refine_grpo",
+        "coordinate_frame": "world",
+        "agent_ids": ["agent0"],
+        "trajectories_by_agent": {"agent0": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]},
+        "candidates_by_agent": {"agent0": [{"mode": 0, "selected": True}]},
+        "planner_debug": {"agent0": {"selected_mode": 0}},
+    }
+
+    record = module._collect_episode_step_record(
+        env=env,
+        agent_ids=["agent0"],
+        step_idx=0,
+        actions={"agent0": np.asarray([0.1, 0.2], dtype=np.float32)},
+        info={"agent0": {"crash": False}},
+        pdms={},
+        planning_debug=planning_debug,
+        control_debug={"agent0": {"source": "explicit"}},
+        previous_speed_mps={},
+        dt=0.5,
+    )
+
+    assert record["control_debug"] == {"agent0": {"source": "explicit"}}
+    assert record["planning"]["coordinate_frame"] == "world"
+    assert record["planning"]["planner_debug"] == {"agent0": {"selected_mode": 0}}
 
 
 def test_overlay_planning_debug_draws_lattice_candidates_and_selected_trajectory() -> None:

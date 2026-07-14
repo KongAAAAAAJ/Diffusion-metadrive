@@ -51,6 +51,7 @@ from evaluation.platoon_performance import (
     compute_pairwise_formation_reward,
     compute_pdms_reward_batch as _compute_pdms_reward_batch,
 )
+from evaluation.evaluation_helper import _collect_episode_step_record, _json_safe
 from models.refine_grpo.ddim_with_logprob import DDIMSchedulerWithLogProb
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,6 +219,8 @@ def _execute_locked_follow_step(
     follow_controller,
     decisions: Mapping[str, Mapping],
     rule_maker_debug: dict | None,
+    pdms_params: Mapping[str, Any] | None = None,
+    execution_debug: dict | None = None,
 ) -> tuple[float, bool, dict, dict[str, np.ndarray]]:
     from models.controller.PIDController import _world_trajectory_to_ego_local
 
@@ -236,6 +239,7 @@ def _execute_locked_follow_step(
     )
 
     trajectories_local: dict[str, np.ndarray] = {}
+    planning_poses = {agent_id: _get_vehicle_pose(env, agent_id) for agent_id in agent_ids}
     for agent_id in agent_ids:
         vehicle = getattr(base_env, "agents", {}).get(agent_id)
         trajectory_world = trajectories_world.get(agent_id)
@@ -243,6 +247,34 @@ def _execute_locked_follow_step(
             _world_trajectory_to_ego_local(vehicle, trajectory_world)
             if vehicle is not None and trajectory_world is not None
             else np.zeros((0, 3), dtype=np.float32)
+        )
+
+    locked_pdms = (
+        _score_planned_trajectories_pdms(
+            agent_ids,
+            trajectories_local,
+            planning_poses,
+            dict(pdms_params),
+        )
+        if pdms_params is not None
+        else {}
+    )
+    if execution_debug is not None:
+        execution_debug.update(
+            {
+                "actions": {
+                    agent_id: np.asarray(action, dtype=np.float32).copy()
+                    for agent_id, action in low_level_actions.items()
+                },
+                "control_debug": controller_debug,
+                "trajectories_world": {
+                    agent_id: np.asarray(trajectory, dtype=np.float32).copy()
+                    for agent_id, trajectory in trajectories_world.items()
+                },
+                "planner_debug": normal_planner_debug,
+                "planning_poses": planning_poses,
+                "pdms": locked_pdms,
+            }
         )
 
     if hasattr(base_env, "_pending_step_trajectories"):
@@ -545,6 +577,149 @@ def _format_episode_end_reason(
     return " ".join(parts)
 
 
+_PDMS_COMPONENT_KEYS = (
+    "reward",
+    "progress",
+    "formation_lon",
+    "formation_lat",
+    "speed",
+    "comfort",
+    "consistency",
+    "gate",
+)
+_GRPO_PDMS_DEBUG_KEYS = (
+    "anchor",
+    "preference",
+    "quality",
+    "collision_gate",
+    "road_gate",
+    "smoothness_gate",
+    "plan_road_gate",
+    "plan_collision_gate",
+)
+
+
+def _debug_value_at(value, index: int) -> float | None:
+    array = np.asarray(value)
+    if array.size == 0:
+        return None
+    if array.ndim == 0:
+        scalar = float(array.item())
+    else:
+        flat = array.reshape(-1)
+        if index < 0 or index >= flat.size:
+            return None
+        scalar = float(flat[index])
+    return scalar if np.isfinite(scalar) else None
+
+
+def _extract_pdms_components(reward_debug: Mapping[str, Any], index: int) -> dict[str, float | None]:
+    return {
+        key: _debug_value_at(reward_debug.get(key, []), index)
+        for key in _PDMS_COMPONENT_KEYS
+    }
+
+
+def _extract_grpo_pdms_debug(reward_debug: Mapping[str, Any], index: int) -> dict[str, float | None]:
+    return {
+        key: _debug_value_at(reward_debug.get(key, []), index)
+        for key in _GRPO_PDMS_DEBUG_KEYS
+    }
+
+
+def _score_planned_trajectories_pdms(
+    agent_ids: list[str],
+    trajectories_local: Mapping[str, np.ndarray],
+    poses: Mapping[str, np.ndarray | None],
+    pdms_params: Mapping[str, Any],
+) -> dict[str, dict[str, float | None]]:
+    results: dict[str, dict[str, float | None]] = {}
+    trajectory_cache: dict[str, np.ndarray] = {}
+    for index, agent_id in enumerate(agent_ids):
+        trajectory = np.asarray(trajectories_local.get(agent_id, []), dtype=np.float32)
+        pose = poses.get(agent_id)
+        if trajectory.ndim != 2 or trajectory.shape[0] < 2 or trajectory.shape[1] < 3 or pose is None:
+            continue
+
+        is_leader = index == 0
+        prev_traj = None
+        prev_pose = None
+        formation_lon = np.ones(1, dtype=np.float32)
+        formation_lat = np.ones(1, dtype=np.float32)
+        if not is_leader:
+            previous_id = agent_ids[index - 1]
+            prev_traj = trajectory_cache.get(previous_id)
+            prev_pose = poses.get(previous_id)
+            if prev_traj is None or prev_pose is None:
+                continue
+            formation_lon, formation_lat = compute_pairwise_formation_reward(
+                trajectory[None],
+                np.asarray(pose),
+                prev_traj,
+                np.asarray(prev_pose),
+                desired_gap_m=float(pdms_params["desired_gap_m"]),
+                lon_decay_m=float(pdms_params["lon_decay_m"]),
+                lat_decay_m=float(pdms_params["lat_decay_m"]),
+                waypoint_decay_gamma=float(pdms_params["waypoint_decay_gamma"]),
+            )
+
+        _, reward_debug = _compute_pdms_reward_batch(
+            trajectory[None],
+            np.asarray(pose),
+            prev_traj,
+            np.asarray(prev_pose) if prev_pose is not None else None,
+            trajectory,
+            is_leader,
+            formation_lon,
+            formation_lat,
+            dict(pdms_params),
+        )
+        results[agent_id] = _extract_pdms_components(reward_debug, 0)
+        trajectory_cache[agent_id] = trajectory
+    return results
+
+
+def _local_trajectory_to_world(trajectory: np.ndarray, pose: np.ndarray) -> np.ndarray:
+    local = np.asarray(trajectory, dtype=np.float32)
+    origin = np.asarray(pose, dtype=np.float32).reshape(-1)
+    if local.ndim != 2 or local.shape[1] < 2 or origin.size < 3:
+        return np.zeros((0, 3), dtype=np.float32)
+    heading = float(origin[2])
+    cos_h, sin_h = np.cos(heading), np.sin(heading)
+    world = np.zeros((local.shape[0], 3), dtype=np.float32)
+    world[:, 0] = float(origin[0]) + cos_h * local[:, 0] - sin_h * local[:, 1]
+    world[:, 1] = float(origin[1]) + sin_h * local[:, 0] + cos_h * local[:, 1]
+    if local.shape[1] >= 3:
+        world[:, 2] = (local[:, 2] + heading + np.pi) % (2.0 * np.pi) - np.pi
+    else:
+        world[:, 2] = heading
+    return world
+
+
+def _compact_planner_debug(value):
+    if isinstance(value, Mapping):
+        compact = {}
+        for key, item in value.items():
+            if key in {"trajectory_world", "trajectory_local", "trajectory"}:
+                trajectory = np.asarray(item)
+                point_count = int(trajectory.shape[0]) if trajectory.ndim >= 1 else 0
+                compact[f"{key}_points"] = point_count
+                endpoint_key = (
+                    "endpoint_world"
+                    if key == "trajectory_world"
+                    else "endpoint_local" if key == "trajectory_local" else "endpoint"
+                )
+                compact[endpoint_key] = (
+                    trajectory[-1].tolist() if trajectory.ndim >= 2 and point_count > 0 else None
+                )
+            else:
+                compact[str(key)] = _compact_planner_debug(item)
+        return compact
+    if isinstance(value, (list, tuple)):
+        return [_compact_planner_debug(item) for item in value]
+    return value
+
+
 def _save_step_outputs(
     *,
     env,
@@ -562,11 +737,13 @@ def _save_step_outputs(
     formation_locked: bool,
     env_reward: float,
     pdms_reward: float,
-    pdms_by_agent: dict,
-    selected_modes: list[int],
-    gt_modes: list[int],
-    mode_valid_mask,
-    all_rewards: list,
+    info: dict,
+    pdms: dict[str, dict[str, float]],
+    planning_debug: dict,
+    execution_debug: dict,
+    grpo_debug: dict,
+    previous_speed_mps: dict[str, np.ndarray],
+    dt: float,
     executed_trajs: dict[str, np.ndarray],
     diffusion_2d_frame: "np.ndarray | None",
 ):
@@ -583,8 +760,8 @@ def _save_step_outputs(
         }
         for index, agent_id in enumerate(agent_ids):
             pose = post_step_poses.get(agent_id)
-            selected_mode = selected_modes[index] if index < len(selected_modes) else None
-            gt_mode = gt_modes[index] if index < len(gt_modes) else None
+            selected_mode = (grpo_debug.get("selected_mode") or {}).get(agent_id)
+            gt_mode = (grpo_debug.get("best_mode") or {}).get(agent_id)
             trajectory = executed_trajs.get(agent_id)
             trajectory_data["agents"][agent_id] = {
                 "pose": pose.tolist() if pose is not None else None,
@@ -634,21 +811,30 @@ def _save_step_outputs(
         except Exception:
             pass
 
-    record = {
-        "episode": episode_idx,
-        "step": step_idx,
-        "control_backend": control_backend,
-        "formation_locked": bool(formation_locked),
-        "env_reward": float(env_reward),
-        "pdms_reward": float(pdms_reward),
-        "pdms_by_agent": pdms_by_agent,
-        "selected_modes": selected_modes,
-        "gt_modes": gt_modes,
-        "mode_valid_mask": (
-            mode_valid_mask.tolist() if hasattr(mode_valid_mask, "tolist") else mode_valid_mask
-        ),
-        "all_rewards": all_rewards,
-    }
+    record = _collect_episode_step_record(
+        env=env.base_env,
+        agent_ids=agent_ids,
+        step_idx=step_idx,
+        actions=execution_debug.get("actions", {}),
+        info=info,
+        pdms=pdms,
+        planning_debug=planning_debug,
+        control_debug=execution_debug.get("control_debug", {}),
+        previous_speed_mps=previous_speed_mps,
+        dt=dt,
+    )
+    record.update(
+        {
+            "episode_idx": int(episode_idx),
+            "algorithm": "refine_grpo",
+            "control_backend": control_backend,
+            "formation_locked": bool(formation_locked),
+            "env_reward": float(env_reward),
+            "pdms_reward": float(pdms_reward),
+            "grpo": grpo_debug,
+        }
+    )
+    record = _json_safe(record)
     all_records.append(record)
     with records_path.open("a", encoding="utf-8") as file_handle:
         file_handle.write(json.dumps(record) + "\n")
@@ -687,11 +873,22 @@ def _summarize_results(
 
     per_mode: dict[str, dict] = {}
     for r in records:
-        for idx, m in enumerate(r.get("selected_modes", [])):
+        grpo_selected = ((r.get("grpo") or {}).get("selected_mode") or {})
+        if grpo_selected:
+            selected_by_agent = dict(grpo_selected)
+        else:
+            selected_by_agent = {
+                f"agent{idx}": mode for idx, mode in enumerate(r.get("selected_modes", []))
+            }
+        for agent_id, m in selected_by_agent.items():
             key = str(m)
             per_mode.setdefault(key, {"selected_count": 0, "pdms_rewards": [], "env_rewards": []})
             per_mode[key]["selected_count"] += 1
-            per_mode[key]["pdms_rewards"].append(r.get("pdms_by_agent", {}).get(f"agent{idx}", 0.0))
+            new_pdms = ((r.get("pdms") or {}).get(agent_id) or {}).get("reward")
+            legacy_pdms = (r.get("pdms_by_agent") or {}).get(agent_id, 0.0)
+            per_mode[key]["pdms_rewards"].append(
+                float(new_pdms) if new_pdms is not None else float(legacy_pdms)
+            )
             per_mode[key]["env_rewards"].append(r["env_reward"])
 
     per_mode_out = {}
@@ -868,10 +1065,16 @@ def run_test(args):
         vid_3d: "cv2.VideoWriter | None" = None
         info: dict = {}
         stop_reason = "unknown"
+        previous_speed_mps: dict[str, np.ndarray] = {}
+        base_config = dict(getattr(env.base_env, "config", {}) or {})
+        step_dt = float(base_config.get("physics_world_step_size", 2e-2)) * max(
+            int(base_config.get("decision_repeat", 5)), 1
+        )
 
         # Step 10: Run one closed-loop planning/control cycle until the environment
         # terminates, truncates, or a script-level stop condition is reached.
         while not done:
+            step_started_at = time.time()
             # if episode_step == 40:
             #     debug = 1
                 
@@ -915,8 +1118,8 @@ def run_test(args):
                 and _normal_planner is not None
                 and _follow_controller is not None
             ):
+                locked_execution_debug: dict = {}
                 try:
-                    t_start = time.time()
                     env_reward, done, info, locked_local_trajs = _execute_locked_follow_step(
                         env=env,
                         agent_ids=agent_ids,
@@ -924,11 +1127,13 @@ def run_test(args):
                         follow_controller=_follow_controller,
                         decisions=locked_follow.get("decisions", {}),
                         rule_maker_debug=rule_maker_debug,
+                        pdms_params=pdms_params,
+                        execution_debug=locked_execution_debug,
                     )
-                    t_end = time.time()
                     print(
                         f"[test-refine-grpo] episode={episode_idx} step={episode_step} "
-                        f"control_backend=locked_lqr_follow step_time={t_end - t_start:.4f}s",
+                        f"control_backend=locked_lqr_follow "
+                        f"step_time={time.time() - step_started_at:.4f}s",
                         flush=True,
                     )
                 except AssertionError as e:
@@ -945,9 +1150,54 @@ def run_test(args):
                     elif bool((info or {}).get("terminated", False)):
                         stop_reason = "terminated"
 
+                locked_pdms = dict(locked_execution_debug.get("pdms", {}) or {})
+                locked_pdms_values = [
+                    float(components.get("reward", 0.0) or 0.0)
+                    for components in locked_pdms.values()
+                ]
+                locked_pdms_mean = (
+                    float(np.mean(locked_pdms_values)) if locked_pdms_values else 0.0
+                )
+                locked_world = dict(locked_execution_debug.get("trajectories_world", {}) or {})
+                locked_planning = {
+                    "planning_policy": "normal_lqr_follow",
+                    "coordinate_frame": "world",
+                    "agent_ids": list(agent_ids),
+                    "trajectories_by_agent": locked_world,
+                    "candidates_by_agent": {
+                        agent_id: [
+                            {
+                                "selected": True,
+                                "reward": (locked_pdms.get(agent_id) or {}).get("reward"),
+                                "endpoint_world": (
+                                    np.asarray(trajectory)[-1].tolist()
+                                    if np.asarray(trajectory).ndim == 2 and len(trajectory) > 0
+                                    else None
+                                ),
+                            }
+                        ]
+                        for agent_id, trajectory in locked_world.items()
+                    },
+                    "planner_debug": {
+                        "normal_planner": _compact_planner_debug(
+                            locked_execution_debug.get("planner_debug", {})
+                        ),
+                        "rule_maker": _compact_planner_debug(rule_maker_debug),
+                    },
+                }
+                locked_grpo = {
+                    "enabled": False,
+                    "selected_mode": {},
+                    "best_group": {},
+                    "best_mode": {},
+                    "best_reward": {},
+                    "valid_mask": {},
+                    "rewards": {},
+                    "pdms_debug": {},
+                }
+                record_step_idx = episode_step
                 episode_env_reward += float(env_reward)
-                episode_pdms_reward += 0.0
-                episode_step += 1
+                episode_pdms_reward += locked_pdms_mean
                 vid_2d, vid_3d = _save_step_outputs(
                     env=env,
                     output_dir=output_dir,
@@ -958,20 +1208,23 @@ def run_test(args):
                     vid_2d=vid_2d,
                     vid_3d=vid_3d,
                     episode_idx=episode_idx,
-                    step_idx=episode_step,
+                    step_idx=record_step_idx,
                     agent_ids=agent_ids,
                     control_backend="locked_lqr_follow",
                     formation_locked=True,
                     env_reward=env_reward,
-                    pdms_reward=0.0,
-                    pdms_by_agent={},
-                    selected_modes=[],
-                    gt_modes=[],
-                    mode_valid_mask=masks,
-                    all_rewards=[],
+                    pdms_reward=locked_pdms_mean,
+                    info=info,
+                    pdms=locked_pdms,
+                    planning_debug=locked_planning,
+                    execution_debug=locked_execution_debug,
+                    grpo_debug=locked_grpo,
+                    previous_speed_mps=previous_speed_mps,
+                    dt=step_dt,
                     executed_trajs=locked_local_trajs,
                     diffusion_2d_frame=None,
                 )
+                episode_step += 1
                 continue
 
             # Step 12: Unlocked formation. Extract neural context and collect each
@@ -993,10 +1246,16 @@ def run_test(args):
             poses = {aid: _get_vehicle_pose(env, aid) for aid in agent_ids}
 
             executed:           dict[str, np.ndarray] = {}
-            step_pdms_by_agent: dict[str, float]     = {}
-            step_selected_modes: list[int]            = []
-            step_gt_modes:       list[int]            = []
-            step_all_rewards:    list[list[float]]    = []
+            step_pdms: dict[str, dict[str, float | None]] = {}
+            step_world_trajectories: dict[str, np.ndarray] = {}
+            step_candidate_summaries: dict[str, list[dict]] = {}
+            step_selected_modes: dict[str, int] = {}
+            step_best_groups: dict[str, int] = {}
+            step_best_modes: dict[str, int] = {}
+            step_best_rewards: dict[str, float] = {}
+            step_valid_masks: dict[str, list[bool]] = {}
+            step_all_rewards: dict[str, list[list[float]]] = {}
+            step_grpo_pdms_debug: dict[str, dict[str, float | None]] = {}
             frame_data_by_agent: dict[str, dict]      = {}  # for combined_traj_frames
 
             # Step 13: Refine and score every controlled vehicle independently.
@@ -1092,17 +1351,58 @@ def run_test(args):
                 executed_traj = refined_np[on_training_mode]           # [T, 3]
                 executed_reward = float(rewards[on_training_mode])
 
-                # gt_mode: best mode from group 0 (for analysis only, not executed)
+                # Best group/mode is an analysis target only; execution still uses
+                # group 0's planner-selected mode.
                 reward_2d = rewards.reshape(num_groups, M)
-                _, gt_mode, _ = select_best_mode_group(
+                best_group, gt_mode, best_reward = select_best_mode_group(
                     torch.as_tensor(reward_2d, dtype=torch.float32)
                 )
 
                 executed[agent_id] = executed_traj
-                step_pdms_by_agent[agent_id] = executed_reward
-                step_selected_modes.append(on_training_mode)
-                step_gt_modes.append(int(gt_mode))
-                step_all_rewards.append(rewards.tolist())
+                step_pdms[agent_id] = _extract_pdms_components(reward_debug, on_training_mode)
+                step_selected_modes[agent_id] = on_training_mode
+                step_best_groups[agent_id] = int(best_group)
+                step_best_modes[agent_id] = int(gt_mode)
+                step_best_rewards[agent_id] = float(best_reward)
+                step_valid_masks[agent_id] = masks[idx].astype(bool).tolist()
+                step_all_rewards[agent_id] = reward_2d.astype(float).tolist()
+                step_grpo_pdms_debug[agent_id] = _extract_grpo_pdms_debug(
+                    reward_debug, on_training_mode
+                )
+                pose = poses.get(agent_id)
+                world_trajectory = (
+                    _local_trajectory_to_world(executed_traj, pose)
+                    if pose is not None
+                    else np.zeros((0, 3), dtype=np.float32)
+                )
+                step_world_trajectories[agent_id] = world_trajectory
+                candidate_summaries = []
+                for flat_index, candidate in enumerate(refined_np):
+                    group_index = flat_index // M
+                    mode_index = flat_index % M
+                    candidate_world = (
+                        _local_trajectory_to_world(candidate, pose)
+                        if pose is not None
+                        else np.zeros((0, 3), dtype=np.float32)
+                    )
+                    candidate_summaries.append(
+                        {
+                            "group": group_index,
+                            "mode": mode_index,
+                            "name": (
+                                mode_names[mode_index]
+                                if mode_names and mode_index < len(mode_names)
+                                else None
+                            ),
+                            "valid": bool(masks[idx, mode_index]),
+                            "selected": bool(group_index == 0 and mode_index == on_training_mode),
+                            "reward": float(rewards[flat_index]),
+                            "endpoint_world": (
+                                candidate_world[-1].tolist() if len(candidate_world) > 0 else None
+                            ),
+                        }
+                    )
+                step_candidate_summaries[agent_id] = candidate_summaries
                 frame_data_by_agent[agent_id] = {
                     "refined_np":      refined_np,
                     "on_training_mode": on_training_mode,
@@ -1123,13 +1423,11 @@ def run_test(args):
                     except Exception as _pe:
                         print(f"[test-refine-grpo] traj_plot failed ({agent_id}): {_pe}", flush=True)
 
-            step_pdms_mean = float(np.mean(list(step_pdms_by_agent.values()))) if step_pdms_by_agent else 0.0
-
-            print(
-                f"[test-refine-grpo] episode={episode_idx} step={episode_step} "
-                f"control_backend=unlocked_diffusion step_time={t_end - t_start:.4f}s",
-                flush=True,
-            )
+            step_pdms_values = [
+                float(components.get("reward", 0.0) or 0.0)
+                for components in step_pdms.values()
+            ]
+            step_pdms_mean = float(np.mean(step_pdms_values)) if step_pdms_values else 0.0
 
             # Step 14: Render the combined top-down candidate overlay before
             # execution, while all vehicles are still at the planning-time poses.
@@ -1159,9 +1457,15 @@ def run_test(args):
 
             # Step 15: Execute the selected joint trajectories in the real
             # environment, then derive the generic termination/truncation reason.
+            diffusion_execution_debug: dict = {}
             try:
                 _, env_reward, done, info = _execute_trajectories(
-                    env, planner, agent_ids, executed, env_config
+                    env,
+                    planner,
+                    agent_ids,
+                    executed,
+                    env_config,
+                    execution_debug=diffusion_execution_debug,
                 )
             except AssertionError as e:
                 print(f"[test-refine-grpo] env step error: {e}", flush=True)
@@ -1170,16 +1474,42 @@ def run_test(args):
                 env_reward = 0.0
                 info = {}
 
+            print(
+                f"[test-refine-grpo] episode={episode_idx} step={episode_step} "
+                f"control_backend=unlocked_diffusion "
+                f"step_time={time.time() - step_started_at:.4f}s",
+                flush=True,
+            )
+
             if done and stop_reason == "unknown":
                 if bool((info or {}).get("truncated", False)):
                     stop_reason = "truncated"
                 elif bool((info or {}).get("terminated", False)):
                     stop_reason = "terminated"
 
+            diffusion_planning = {
+                "planning_policy": "diffusion_refine_grpo",
+                "coordinate_frame": "world",
+                "agent_ids": list(agent_ids),
+                "trajectories_by_agent": step_world_trajectories,
+                "candidates_by_agent": step_candidate_summaries,
+                "planner_debug": {"rule_maker": _compact_planner_debug(rule_maker_debug)},
+            }
+            grpo_debug = {
+                "enabled": True,
+                "selected_mode": step_selected_modes,
+                "best_group": step_best_groups,
+                "best_mode": step_best_modes,
+                "best_reward": step_best_rewards,
+                "valid_mask": step_valid_masks,
+                "rewards": step_all_rewards,
+                "pdms_debug": step_grpo_pdms_debug,
+            }
+
             # Accumulate episode rewards and persist this step's records/videos.
+            record_step_idx = episode_step
             episode_env_reward  += float(env_reward)
             episode_pdms_reward += step_pdms_mean
-            episode_step += 1
             vid_2d, vid_3d = _save_step_outputs(
                 env=env,
                 output_dir=output_dir,
@@ -1190,20 +1520,23 @@ def run_test(args):
                 vid_2d=vid_2d,
                 vid_3d=vid_3d,
                 episode_idx=episode_idx,
-                step_idx=episode_step,
+                step_idx=record_step_idx,
                 agent_ids=agent_ids,
                 control_backend="diffusion_planner",
                 formation_locked=False,
                 env_reward=env_reward,
                 pdms_reward=step_pdms_mean,
-                pdms_by_agent=step_pdms_by_agent,
-                selected_modes=step_selected_modes,
-                gt_modes=step_gt_modes,
-                mode_valid_mask=masks,
-                all_rewards=step_all_rewards,
+                info=info,
+                pdms=step_pdms,
+                planning_debug=diffusion_planning,
+                execution_debug=diffusion_execution_debug,
+                grpo_debug=grpo_debug,
+                previous_speed_mps=previous_speed_mps,
+                dt=step_dt,
                 executed_trajs=executed,
                 diffusion_2d_frame=_frame_2d_rgb,
             )
+            episode_step += 1
 
         # Step 16: Finalize video streams and report the episode termination reason.
         if vid_2d is not None:

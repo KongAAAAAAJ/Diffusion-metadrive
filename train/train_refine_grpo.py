@@ -1701,16 +1701,24 @@ def save_ddim_chain_scatter_plot(
     plt.close(fig)
 
 
-def _execute_trajectories(env, planner, agent_ids: list[str], trajectories: dict[str, np.ndarray], config: Mapping[str, Any]):
+def _execute_trajectories(
+    env,
+    planner,
+    agent_ids: list[str],
+    trajectories: dict[str, np.ndarray],
+    config: Mapping[str, Any],
+    execution_debug: dict[str, Any] | None = None,
+):
     lookahead_index = int(config.get("lookahead_index", 2))
     target_speed_km_h = float(config.get("target_speed_km_h", 30.0))
     controller_type = str(config.get("controller_type", "stabilized"))
     low_level_actions = {}
+    controller_debug = {}
     for agent_id in agent_ids:
         trajectory = np.asarray(trajectories[agent_id], dtype=np.float32)
         vehicle = getattr(env.base_env, "agents", {}).get(agent_id)
         current_speed_km_h = float(getattr(vehicle, "speed_km_h", 0.0)) if vehicle is not None else 0.0
-        action_2d, _ = compute_trajectory_control(
+        action_2d, agent_control_debug = compute_trajectory_control(
             trajectory=trajectory,
             lookahead_index=lookahead_index,
             current_speed_km_h=current_speed_km_h,
@@ -1718,6 +1726,17 @@ def _execute_trajectories(env, planner, agent_ids: list[str], trajectories: dict
             controller_type=controller_type,
         )
         low_level_actions[agent_id] = action_2d
+        controller_debug[agent_id] = agent_control_debug
+    if execution_debug is not None:
+        execution_debug.update(
+            {
+                "actions": {
+                    agent_id: np.asarray(action, dtype=np.float32).copy()
+                    for agent_id, action in low_level_actions.items()
+                },
+                "control_debug": controller_debug,
+            }
+        )
     if hasattr(env.base_env, "_pending_step_trajectories"):
         env.base_env._pending_step_trajectories = {
             agent_id: np.asarray(trajectories[agent_id], dtype=np.float32)

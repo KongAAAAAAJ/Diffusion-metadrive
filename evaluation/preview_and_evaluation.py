@@ -145,6 +145,7 @@ def _build_planning_debug(
         candidates_by_agent[agent_id] = candidates
     return {
         "planning_policy": planning_policy,
+        "coordinate_frame": "world",
         "agent_ids": list(agent_ids),
         "trajectories_by_agent": {
             agent_id: np.asarray(trajectory, dtype=np.float32).tolist()

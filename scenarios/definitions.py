@@ -200,7 +200,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "reference_kind": "block_socket_road",
                     "block_id": "g1",
                     "socket_index": 1,
-                    "spawn_longitude": 0.0,
+                    "spawn_longitude": 30.0,
                     "target_speed_kmh": 24.0,
                     "policy": "idm_merge",
                     "merge_front_gap_m": 25.0,

@@ -86,6 +86,7 @@ def _collect_episode_step_record(
     info: dict,
     pdms: dict[str, dict[str, float]],
     planning_debug: dict | None,
+    control_debug: dict | None = None,
     previous_speed_mps: dict[str, np.ndarray],
     dt: float,
 ) -> dict:
@@ -155,14 +156,14 @@ def _collect_episode_step_record(
             }
         )
 
-    planning_debug = planning_debug or {}
-    planning_record = {
-        "planning_policy": planning_debug.get("planning_policy"),
-        "agent_ids": planning_debug.get("agent_ids", list(agent_ids)),
-        "trajectories_by_agent": planning_debug.get("trajectories_by_agent", {}),
-        "candidates_by_agent": planning_debug.get("candidates_by_agent", {}),
-    }
-    control_debug = getattr(env, "_preview_control_debug", None) or {}
+    planning_record = dict(planning_debug or {})
+    planning_record.setdefault("planning_policy", None)
+    planning_record.setdefault("agent_ids", list(agent_ids))
+    planning_record.setdefault("trajectories_by_agent", {})
+    planning_record.setdefault("candidates_by_agent", {})
+    if control_debug is None:
+        control_debug = getattr(env, "_preview_control_debug", None)
+    control_debug = control_debug or {}
     return _json_safe(
         {
             "step_idx": step_idx,
