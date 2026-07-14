@@ -464,6 +464,31 @@ class S8HardcodedBranchFakeRoadNetwork:
         return self.graph[lane_index[0]][lane_index[1]][lane_index[2]]
 
 
+class S7MergeFakeRoadNetwork:
+    def __init__(self):
+        self.graph = {
+            "A": {
+                "B": [
+                    ConnectedFakeLane(0, 10.5, 0.0, "A", "B", length=30.0),
+                    ConnectedFakeLane(1, 7.0, 0.0, "A", "B", length=30.0),
+                    ConnectedFakeLane(2, 3.5, 0.0, "A", "B", length=30.0),
+                    ConnectedFakeLane(3, 0.0, 0.0, "A", "B", length=30.0),
+                ],
+            },
+            "B": {
+                "C": [
+                    ConnectedFakeLane(0, 10.5, 30.0, "B", "C", length=30.0),
+                    ConnectedFakeLane(1, 7.0, 30.0, "B", "C", length=30.0),
+                    ConnectedFakeLane(2, 3.5, 30.0, "B", "C", length=30.0),
+                    ConnectedFakeLane(3, 0.0, 30.0, "B", "C", length=30.0),
+                ],
+            },
+        }
+
+    def get_lane(self, lane_index):
+        return self.graph[lane_index[0]][lane_index[1]][lane_index[2]]
+
+
 def _env_connected(vehicle):
     road_network = ConnectedFakeRoadNetwork()
     vehicle.lane = road_network.graph["A"]["B"][0]
@@ -529,6 +554,21 @@ def _env_s8_hardcoded_branch(vehicle):
     vehicle.navigation = SimpleNamespace(checkpoints=["3C0_1_", "4G0_0_", "4G1_1_"])
     return SimpleNamespace(
         config={"scenario_id": "S8_ego_exit_to_ramp", "local_route": "R6_exit_to_ramp"},
+        agents={"agent0": vehicle},
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=road_network),
+            traffic_manager=SimpleNamespace(_traffic_vehicles=[]),
+        ),
+    )
+
+
+def _env_s7_merge(vehicle, *, lane_id=3, scenario_id="S7_ego_merge_from_ramp", local_route="R7_merge_core"):
+    road_network = S7MergeFakeRoadNetwork()
+    vehicle.lane = road_network.graph["A"]["B"][lane_id]
+    vehicle.position = np.asarray([25.0, vehicle.lane.y], dtype=np.float32)
+    vehicle.navigation = SimpleNamespace(checkpoints=["A", "B", "C"])
+    return SimpleNamespace(
+        config={"scenario_id": scenario_id, "local_route": local_route},
         agents={"agent0": vehicle},
         engine=SimpleNamespace(
             current_map=SimpleNamespace(road_network=road_network),
@@ -929,14 +969,66 @@ def test_debug_compute_records_invalid_manual_action_without_fallback():
     assert debug["invalid_actions"] == {"agent0": 1}
 
 
-def test_s8_candidates_reward_right_lane_change_with_force_lane_score():
+def test_s7_left_lane_change_to_mainline_third_lane_is_marked_forced():
+    vehicle = _vehicle("agent0", 25.0, 0.0, 3, speed_km_h=25.0)
+    env = _env_s7_merge(vehicle)
+    rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
+
+    candidate = rule_maker._build_coarse_trajectory(env, env.agents["agent0"], -1, [])
+
+    assert candidate is not None
+    assert candidate["target_lane_index"] == ("A", "B", 2)
+    assert candidate["forced_lane_change"] is True
+
+
+def test_s7_forced_lane_change_bypasses_joint_score_and_selects_left_action(monkeypatch):
+    vehicle = _vehicle("agent0", 25.0, 0.0, 3, speed_km_h=25.0)
+    env = _env_s7_merge(vehicle)
+    rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
+
+    def fail_if_scored(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("_score_joint_combo should not run for forced lane decisions")
+
+    monkeypatch.setattr(rule_maker, "_score_joint_combo", fail_if_scored)
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == -1
+    assert debug is not None
+    assert debug["forced_lane_decision"] is True
+
+
+def test_s7_left_lane_change_to_other_lane_is_not_marked_forced():
+    vehicle = _vehicle("agent0", 25.0, 0.0, 2, speed_km_h=25.0)
+    env = _env_s7_merge(vehicle, lane_id=2)
+    rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
+
+    candidate = rule_maker._build_coarse_trajectory(env, env.agents["agent0"], -1, [])
+
+    assert candidate is not None
+    assert candidate["target_lane_index"] == ("A", "B", 1)
+    assert "forced_lane_change" not in candidate
+
+
+def test_non_s7_left_lane_change_to_mainline_third_lane_is_not_marked_forced():
+    vehicle = _vehicle("agent0", 25.0, 0.0, 3, speed_km_h=25.0)
+    env = _env_s7_merge(vehicle, scenario_id="S6_background_merge_in", local_route="R6_mainline_merge_approach")
+    rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
+
+    candidate = rule_maker._build_coarse_trajectory(env, env.agents["agent0"], -1, [])
+
+    assert candidate is not None
+    assert candidate["target_lane_index"] == ("A", "B", 2)
+    assert "forced_lane_change" not in candidate
+
+
+def test_s8_candidates_mark_right_lane_change_as_forced():
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s8_exit(vehicle)
     rule_maker = MultiAgentRuleMaker(
         target_speed_km_h=30.0,
         horizon_s=2.0,
         num_waypoints=8,
-        force_lane_change=800.0,
     )
 
     candidates = rule_maker._build_agent_candidates(env, env.agents["agent0"], [])
@@ -944,35 +1036,38 @@ def test_s8_candidates_reward_right_lane_change_with_force_lane_score():
     assert candidates
     for candidate in candidates:
         assert "forced_lane_mean_lateral_distance_m" not in candidate
-        assert "force_lane_score" in candidate
-        expected_score = 800.0 if int(candidate["action"]) == 1 else 0.0
-        assert candidate["force_lane_score"] == pytest.approx(expected_score)
+        assert "force_lane_score" not in candidate
+        assert bool(candidate.get("forced_lane_change", False)) is (int(candidate["action"]) == 1)
 
 
-def test_s8_force_lane_score_prefers_right_lane_change_action():
+def test_s8_forced_lane_change_bypasses_joint_score_and_selects_right_action(monkeypatch):
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s8_exit(vehicle)
     rule_maker = MultiAgentRuleMaker(
         target_speed_km_h=30.0,
         horizon_s=2.0,
         num_waypoints=8,
-        force_lane_change=800.0,
     )
-    candidates = rule_maker._build_agent_candidates(env, env.agents["agent0"], [])
-    scores_by_action = {int(candidate["action"]): float(candidate["force_lane_score"]) for candidate in candidates}
 
-    assert scores_by_action[1] > scores_by_action[0]
-    assert scores_by_action[1] > scores_by_action[-1]
+    def fail_if_scored(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("_score_joint_combo should not run for forced lane decisions")
+
+    monkeypatch.setattr(rule_maker, "_score_joint_combo", fail_if_scored)
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == 1
+    assert debug is not None
+    assert debug["forced_lane_decision"] is True
 
 
-def test_non_s8_candidates_do_not_record_force_lane_score():
+def test_non_s8_candidates_do_not_record_forced_lane_change():
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s8_exit(vehicle, scenario_id="S7_ego_merge_from_ramp", local_route="R7_merge_core")
     rule_maker = MultiAgentRuleMaker(
         target_speed_km_h=30.0,
         horizon_s=2.0,
         num_waypoints=8,
-        force_lane_change=800.0,
     )
 
     candidates = rule_maker._build_agent_candidates(env, env.agents["agent0"], [])
@@ -980,6 +1075,7 @@ def test_non_s8_candidates_do_not_record_force_lane_score():
     assert candidates
     assert all("forced_lane_mean_lateral_distance_m" not in candidate for candidate in candidates)
     assert all("force_lane_score" not in candidate for candidate in candidates)
+    assert all("forced_lane_change" not in candidate for candidate in candidates)
 
 
 def test_rule_maker_joint_agent_safety_score_uses_soft_reward_not_hard_constraint():

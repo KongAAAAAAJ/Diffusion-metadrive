@@ -216,12 +216,14 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         scenario_id="S7_ego_merge_from_ramp",
         allowed_local_routes=("R7_merge_core",),
         trigger_by_local_route={
-            "R7_merge_core": TriggerSpec("h_ramp0", 5.0, 60.0),
+            "R7_merge_core": TriggerSpec("h_ramp0", 5.0, 60.0),  # h_ramp0
         },
         traffic_recipes=build_s7_traffic_recipes(RecipeSpec),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
-        ego_initial_speed_km_h=22.0,
+        ego_spawn_longitude_m=(5.0, 6.0),  # *
+        ego_spawn_reference_block_id="h_ramp0",
+        ego_initial_speed_km_h=(22, 23),
         expert_recipe="汇入博弈",
         description="ego 从匝道汇入主线",
     ),

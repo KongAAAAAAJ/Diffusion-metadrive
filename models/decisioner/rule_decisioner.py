@@ -109,7 +109,6 @@ class MultiAgentRuleMaker(RuleMaker):
         *,
         num_waypoints: int = 8,
         lane_change_preference: float = 0.0,
-        force_lane_change: float = 0.0,
         traffic_safety_distance_m: float = 8.0,  # min gap to traffic vehicles for any candidate to be valid
         agent_safety_distance_m: float = 7.0,  # 
         idm_time_headway_s: float = 1.2,
@@ -143,7 +142,6 @@ class MultiAgentRuleMaker(RuleMaker):
         self.horizon_s = float(horizon_s)
         self.num_waypoints = max(2, int(num_waypoints))
         self.lane_change_preference = float(lane_change_preference)
-        self.force_lane_change = float(force_lane_change)
         self.traffic_safety_distance_m = float(traffic_safety_distance_m)
         self.agent_safety_distance_m = float(agent_safety_distance_m)
         self.idm_time_headway_s = float(idm_time_headway_s)
@@ -237,7 +235,12 @@ class MultiAgentRuleMaker(RuleMaker):
         )
         self._formation_locked = risk_info["next_state"] == "LOCKED"
 
-        if self._formation_locked:
+        forced_combo = self._forced_lane_combo(ordered_agent_ids, candidates_by_agent)
+        forced_lane_decision = forced_combo is not None
+        if forced_lane_decision:
+            best_combo = forced_combo
+            best_score = 0.0
+        elif self._formation_locked:
             best_combo, best_score = self._best_locked_combo(
                 env=env,
                 ordered_agent_ids=ordered_agent_ids,
@@ -310,6 +313,7 @@ class MultiAgentRuleMaker(RuleMaker):
             "formation_locked": bool(self._formation_locked),
             "risk_triggered": bool(risk_info.get("triggered", False)),
             "state_transition": risk_info.get("transition"),
+            "forced_lane_decision": bool(forced_lane_decision),
             "risk_info": risk_info,
             "dynamic_roles": dynamic_roles,
             "candidates_by_agent": {
@@ -393,12 +397,25 @@ class MultiAgentRuleMaker(RuleMaker):
             "source_lane_index": tuple(candidate.get("source_lane_index", ()) or ()),
             "target_lane_index": tuple(candidate.get("target_lane_index", ()) or ()),
             "selected": bool(selected),
-            "force_lane_score": (
-                None
-                if candidate.get("force_lane_score") is None
-                else float(candidate["force_lane_score"])
-            ),
+            "forced_lane_change": bool(candidate.get("forced_lane_change", False)),
         }
+
+    @staticmethod
+    def _forced_lane_combo(
+        ordered_agent_ids: list[str],
+        candidates_by_agent: dict[str, list[dict]],
+    ) -> tuple[dict, ...] | None:
+        combo = []
+        for agent_id in ordered_agent_ids:
+            forced = [
+                candidate
+                for candidate in candidates_by_agent.get(agent_id, [])
+                if bool(candidate.get("forced_lane_change", False))
+            ]
+            if not forced:
+                return None
+            combo.append(forced[0])
+        return tuple(combo)
 
     def _best_locked_combo(
         self,
@@ -595,8 +612,10 @@ class MultiAgentRuleMaker(RuleMaker):
                 "rear_vehicle_post_accel_mps2": None if rear_vehicle_post_accel_mps2 is None else float(rear_vehicle_post_accel_mps2),
                 "mobil_gain": 0.0,
             }
-            if self._is_s8_exit_route(env):
-                candidate["force_lane_score"] = float(self.force_lane_change) if int(action) == 1 else 0.0
+            if self._is_s8_exit_route(env) and int(action) == 1:
+                candidate["forced_lane_change"] = True
+            if self._is_s7_forced_lane_candidate(env, candidate):
+                candidate["forced_lane_change"] = True
             return candidate
         except Exception:
             return None
@@ -710,6 +729,25 @@ class MultiAgentRuleMaker(RuleMaker):
             cls._config_value(config, "scenario_id") == "S8_ego_exit_to_ramp"
             and cls._config_value(config, "local_route") == "R6_exit_to_ramp"
         )
+
+    @classmethod
+    def _is_s7_merge_route(cls, env) -> bool:
+        config = getattr(env, "config", {}) or {}
+        return (
+            cls._config_value(config, "scenario_id") == "S7_ego_merge_from_ramp"
+            and cls._config_value(config, "local_route") == "R7_merge_core"
+        )
+
+    @classmethod
+    def _is_s7_forced_lane_candidate(cls, env, candidate: dict) -> bool:
+        if not cls._is_s7_merge_route(env):
+            return False
+        if int(candidate.get("action", 0)) != -1:
+            return False
+        target_lane_index = tuple(candidate.get("target_lane_index", ()) or ())
+        if len(target_lane_index) < 3:
+            return False
+        return int(target_lane_index[2]) == 2
 
     def _S8_reference_lane_chain(self, env, vehicle, source_lane) -> list | None:
         lane_chain = [source_lane]
@@ -936,9 +974,6 @@ class MultiAgentRuleMaker(RuleMaker):
             progress = float(np.linalg.norm(trajectory[-1] - trajectory[0]))
             # score += self.w_progress * progress
             score += self.w_mobil * float(candidate.get("mobil_gain", 0.0))
-            s8_force_score = candidate.get("force_lane_score")
-            # if self._is_s8_exit_route(env) and s8_force_score is not None:
-            #     score += float(s8_force_score)
             # if action == 0:
             #     score += self.w_keep_bias
             # else:
@@ -1186,7 +1221,6 @@ def make_rule_maker(config: dict) -> RuleMaker:
         rule_maker_horizon_s (float): overrides yaml horizon_s.
         rule_maker_num_waypoints (int): overrides yaml num_waypoints.
         rule_maker_lane_change_preference (float): overrides yaml lane_change_preference.
-        rule_maker_force_lane_change (float): overrides yaml force_lane_change.
         rule_maker_traffic_safety_distance_m (float): overrides yaml traffic_safety_distance_m.
         rule_maker_agent_safety_distance_m (float): overrides yaml agent_safety_distance_m.
         target_speed_km_h (float): overrides yaml target_speed_km_h.
@@ -1203,7 +1237,6 @@ def make_rule_maker(config: dict) -> RuleMaker:
         "horizon_s": config.get("rule_maker_horizon_s"),
         "num_waypoints": config.get("rule_maker_num_waypoints"),
         "lane_change_preference": config.get("rule_maker_lane_change_preference"),
-        "force_lane_change": config.get("rule_maker_force_lane_change", config.get("force_lane_change")),
         "traffic_safety_distance_m": config.get("rule_maker_traffic_safety_distance_m"),
         "agent_safety_distance_m": config.get("rule_maker_agent_safety_distance_m"),
         "locked_on_reset": config.get("rule_maker_locked_on_reset"),
@@ -1222,7 +1255,6 @@ def make_rule_maker(config: dict) -> RuleMaker:
             horizon_s=float(yaml_params.get("horizon_s", 4.0)),
             num_waypoints=int(yaml_params.get("num_waypoints", 8)),
             lane_change_preference=float(yaml_params.get("lane_change_preference", 0.0)),
-            force_lane_change=float(yaml_params.get("force_lane_change", 0.0)),
             traffic_safety_distance_m=float(yaml_params.get("traffic_safety_distance_m", 8.0)),
             agent_safety_distance_m=float(yaml_params.get("agent_safety_distance_m", 7.0)),
             idm_time_headway_s=float(yaml_params.get("idm_time_headway_s", 1.2)),

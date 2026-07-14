@@ -46,7 +46,6 @@ default:
   w_keep_bias: 0.30             # bonus for choosing keep-lane
   lc_cost: 0.75                 # base cost of any lane change
   lane_change_preference: 0.0   # optional positive bias added to every LC score
-  force_lane_change: 0.0        # S8-only route-lane alignment weight
 
   # Background traffic clearance (per background vehicle):
   w_traffic_clearance: 0.03     # coefficient for clearance reward (≥ safety dist)
@@ -158,7 +157,6 @@ scenario_overrides:
   # S8: ego编队从主路分流到匝道 — 主动执行右换道
   S8_ego_exit_to_ramp:
     lane_change_preference: 0.0
-    force_lane_change: 800
     lc_cost: 0.3
     w_mobil: 1.5
     mobil_lane_change_threshold: 0.05
