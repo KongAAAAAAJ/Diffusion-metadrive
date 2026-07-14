@@ -36,7 +36,7 @@ LQR_LAT_Q2 = 1.0
 LQR_LAT_R = 0.1
 
 LQR_DESIRED_GAP_M = 10.0
-LQR_DESIRED_OUTGAP_M = 20.0   # target gap when following a background vehicle
+LQR_DESIRED_OUTGAP_M = 15.0   # target gap when following a background vehicle
 TARGET_SPEED_KMH = 30.0        # free-flow target speed when no front vehicle (km/h)
 LQR_MAX_ACCEL_MPS2 = 1.0
 LQR_MIN_ACCEL_MPS2 = -2.0
