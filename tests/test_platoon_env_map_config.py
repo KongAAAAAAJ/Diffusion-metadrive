@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from envs import platoon_env as platoon_env_module
 from envs.platoon_env import PlatoonEnv, PlatoonEnvConfig
-from envs.diffusion_envs.base_multi_env import DEFAULT_HYBRID_MAP_CONFIG
+from envs.diffusion_envs.base_multi_env import BaseMultiEnv, DEFAULT_HYBRID_MAP_CONFIG
 
 
 def test_platoon_env_uses_base_multi_env_default_hybrid_map_config() -> None:
@@ -22,6 +22,13 @@ def test_platoon_env_default_map_config_is_deep_copied() -> None:
     config.hybrid_map_blocks_config[0]["length"] = -1.0
 
     assert DEFAULT_HYBRID_MAP_CONFIG == original
+
+
+def test_base_multi_env_registers_traffic_spawn_exclusion_keys() -> None:
+    config = BaseMultiEnv.default_config()
+
+    assert config["traffic_spawn_exclusion_ahead_m"] == 0.0
+    assert config["traffic_spawn_exclusion_behind_m"] == 0.0
 
 
 def test_scenario_definition_can_supply_initial_speed_when_not_explicit(monkeypatch) -> None:

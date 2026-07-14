@@ -146,6 +146,8 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 initial_speed_km_h=25.0,
                 traffic_spawn_min_gap_ahead=12.0,
                 traffic_spawn_min_gap_behind=8.0,
+                traffic_spawn_exclusion_ahead_m=0.0,
+                traffic_spawn_exclusion_behind_m=0.0,
                 traffic_spawn_lane_relaxation=True,
                 use_render=True,
                 camera_height=30,  # [m] 观察视角高度
