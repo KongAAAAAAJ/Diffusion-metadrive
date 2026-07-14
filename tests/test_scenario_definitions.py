@@ -9,7 +9,7 @@ def test_s6_declares_ego_spawn_reference_block_and_start_longitude() -> None:
     scenario = SCENARIO_BY_ID["S6_background_merge_in"]
 
     assert scenario.ego_spawn_reference_block_id == "g1"
-    assert scenario.ego_spawn_longitude_m == (25.0, 90.0)
+    assert scenario.ego_spawn_longitude_m == (60.0, 90.0)
     assert scenario.ego_initial_speed_km_h == (20.0, 26.0)
     assert scenario.override_traffic_density == pytest.approx(0.03)
     assert scenario.env_overrides == {
@@ -27,8 +27,8 @@ def test_s6_declares_merge_aware_background_policy() -> None:
     assert recipe.params["merge_front_gap_m"] == pytest.approx(10.0)
     assert recipe.params["merge_rear_gap_m"] == pytest.approx(10.0)
     assert recipe.params["merge_creep_speed_kmh"] == pytest.approx(15.0)
-    assert recipe.params["target_speed_kmh"] == pytest.approx(25.0)
-    assert recipe.params["spawn_longitude"] == (0.0, 20.0)
+    assert recipe.params["target_speed_kmh"] == pytest.approx(24.0)
+    assert recipe.params["spawn_longitude"] == (0.0, 1.0)
 
 
 def test_s6_declares_fixed_same_lane_background_traffic() -> None:
@@ -120,6 +120,29 @@ def test_s5_declares_adjacent_lane_side_vehicle_recipe() -> None:
             "target_speed_range_kmh": (17.0, 21.0),
         },
     )
+
+
+def test_s7_declares_mainline_background_traffic_on_three_lanes() -> None:
+    scenario = SCENARIO_BY_ID["S7_ego_merge_from_ramp"]
+    recipes = [
+        recipe
+        for recipe in scenario.traffic_recipes
+        if recipe.operation == "inject_background_vehicle"
+    ]
+
+    assert len(recipes) == 10
+    assert len({recipe.params["name"] for recipe in recipes}) == 10
+    assert all(recipe.params["reference_kind"] == "block_route_road" for recipe in recipes)
+    assert all(recipe.params["block_id"] == "g1" for recipe in recipes)
+    assert all(recipe.params["trigger_on_start"] is True for recipe in recipes)
+
+    lane_ids = [recipe.params["lane_id"] for recipe in recipes]
+    assert sorted(set(lane_ids)) == [0, 1, 2]
+    assert {lane_id: lane_ids.count(lane_id) for lane_id in sorted(set(lane_ids))} == {
+        0: 3,
+        1: 4,
+        2: 3,
+    }
 
 
 def test_s5_declares_hard_brake_random_ranges() -> None:

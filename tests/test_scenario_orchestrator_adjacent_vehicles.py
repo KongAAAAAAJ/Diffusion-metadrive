@@ -195,6 +195,30 @@ def test_s6_fixed_traffic_skips_missing_adjacent_lane() -> None:
     assert sum(note.startswith("adjacent_lane_missing:right_") for note in orchestrator.summary.notes) == 4
 
 
+def test_s7_mainline_background_spawns_on_three_g1_lanes() -> None:
+    env, _ego, traffic_manager = make_env_and_ego()
+    env.engine.current_map.blocks[0].graph_block_id = "g1"
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S7_ego_merge_from_ramp"],
+        "R7_merge_core",
+    )
+    orchestrator.reset(env, "agent0")
+
+    orchestrator.before_step(env, "agent0", 1)
+
+    calls = traffic_manager.spawn_calls
+    assert len(calls) == 10
+    spawned_lane_ids = [call[1]["spawn_lane_index"][-1] for call in calls]
+    assert {lane_id: spawned_lane_ids.count(lane_id) for lane_id in sorted(set(spawned_lane_ids))} == {
+        0: 3,
+        1: 4,
+        2: 3,
+    }
+    assert [call[1]["spawn_lane_index"][:2] for call in calls] == [("road_a", "road_b")] * 10
+    assert all(call[1]["spawn_velocity_car_frame"] is True for call in calls)
+    assert orchestrator.summary.scenario_realized is True
+
+
 def test_s5_hard_brake_recipe_randomizes_from_traffic_manager_rng(monkeypatch) -> None:
     rng = np.random.RandomState(123)
     env, ego, _traffic_manager = make_env_and_ego(rng=rng)

@@ -7,6 +7,7 @@ from typing import Any, Dict, Tuple
 
 from routes.route_definitions import get_required_preset
 from scenarios.S6_inject_vehicles import build_s6_traffic_recipes
+from scenarios.S7_inject_vehicles import build_s7_traffic_recipes
 
 
 @dataclass(frozen=True)
@@ -217,17 +218,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         trigger_by_local_route={
             "R7_merge_core": TriggerSpec("h_ramp0", 5.0, 60.0),
         },
-        traffic_recipes=(
-            RecipeSpec(
-                "inject_background_vehicle",
-                {
-                    "reference_kind": "block_route_road",
-                    "block_id": "g1",
-                    "spawn_longitude": 18.0,
-                    "target_speed_kmh": 25.0,
-                },
-            ),
-        ),
+        traffic_recipes=build_s7_traffic_recipes(RecipeSpec),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
         ego_initial_speed_km_h=22.0,

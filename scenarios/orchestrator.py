@@ -17,6 +17,12 @@ if TYPE_CHECKING:
     pass
 
 
+@dataclass(frozen=True)
+class _RouteRoadRef:
+    start_node: str
+    end_node: str
+
+
 # ---------------------------------------------------------------------------
 # Trigger evaluator protocol + built-in implementations
 # ---------------------------------------------------------------------------
@@ -233,6 +239,7 @@ class ScenarioOrchestrator:
         params = self._resolve_background_vehicle_params(env, params)
         reference_kind = str(params.get("reference_kind", "ego_lane"))
         policy_class, policy_kwargs, vehicle_config_overrides = self._resolve_injected_background_policy(params)
+        lane_index = params.get("lane_index", params.get("lane_id", 0))
         spawned = self._spawn_on_reference(
             env,
             ego_vehicle,
@@ -240,7 +247,7 @@ class ScenarioOrchestrator:
             block_id=params.get("block_id"),
             socket_index=params.get("socket_index"),
             internal_road_index=params.get("internal_road_index"),
-            lane_index=int(params.get("lane_index", 0)),
+            lane_index=int(lane_index),
             spawn_longitude=float(params.get("spawn_longitude", 15.0)),
             spawn_longitude_offset=float(params.get("spawn_longitude_offset", 0.0)),
             target_speed_kmh=float(params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0))),
@@ -804,6 +811,13 @@ class ScenarioOrchestrator:
 
     @staticmethod
     def _get_first_positive_route_road(block):
+        lane_groups = getattr(getattr(block, "block_network", None), "get_positive_lanes", lambda: [])() or []
+        for lane_group in lane_groups:
+            if not lane_group:
+                continue
+            lane_index = getattr(lane_group[0], "index", None)
+            if lane_index is not None:
+                return _RouteRoadRef(lane_index[0], lane_index[1])
         roads = [
             road for road in getattr(block, "get_respawn_roads", lambda: [])() or []
             if not (hasattr(road, "is_negative_road") and road.is_negative_road())
