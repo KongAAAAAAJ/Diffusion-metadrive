@@ -721,6 +721,18 @@ def _summarize_results(
 # ── Main test loop ─────────────────────────────────────────────────────────────
 
 def run_test(args):
+    """Run closed-loop GRPO-refinement evaluation and save per-step/episode results.
+
+    High-level flow:
+    1. Load configuration and construct the frozen planner(s).
+    2. Build the wrapped platoon environment and optional locked-follow backend.
+    3. For each episode, choose locked-follow or diffusion refinement each step.
+    4. Execute the selected trajectories, save visualizations, and collect rewards.
+    5. Aggregate episode records into the final JSON summary.
+    """
+
+    # Step 1: Load training/test configuration and determine whether the leader
+    # uses a separate frozen pretrained planner.
     config = _load_config(args.refine_train_config_path)
     test_config = _resolve_test_config(config)
 
@@ -735,14 +747,16 @@ def run_test(args):
     planner_device = str(env_config_pre.get("planner_device", "cuda"))
     env_config_pre["planner_device"] = planner_device
 
-    # Build planner (same as training) — used by followers and env mode selection
+    # Step 2: Build and freeze the main refinement planner. It is shared by the
+    # environment's mode selection and by all refined agents during evaluation.
     print("[test-refine-grpo] building planner ...", flush=True)
     planner = build_planner_for_selected_refinement(config, {**env_config_pre, "planner_device": planner_device})
     planner.eval()
     for p in planner.parameters():
         p.requires_grad_(False)
 
-    # When train_followers_only: build a separate frozen pretrained planner for the leader
+    # Step 3: In followers-only mode, keep the leader on the original pretrained
+    # planner so follower refinement can be evaluated against a fixed leader.
     if train_followers_only:
         print("[test-refine-grpo] train_followers_only=True: building frozen pretrain_planner for leader ...", flush=True)
         _pretrain_config = dict(config)
@@ -757,13 +771,15 @@ def run_test(args):
     else:
         pretrain_planner = None
 
-    # Build env (same as training)
+    # Step 4: Build the same mode-selection environment wrapper used by training.
+    # The wrapper exports planner candidates and provides closed-loop execution.
     from envs.wrap_platoon_env import ModeSelectionSB3Env
     env_config = _build_env_config(config, test_config, planner)
     env = ModeSelectionSB3Env(env_config)
     print(f"[test-refine-grpo] env ready: {type(env).__name__}", flush=True)
 
-    # External upper-level decision model (used when target_guidance_type='external_point')
+    # Step 5: Optionally create the rule-based locked-follow backend. When the
+    # formation is locked, this path bypasses diffusion and directly uses LQR follow control.
     _target_guidance_type = str(
         planner._model_config.target_guidance_type
         if hasattr(planner, "_model_config")
@@ -793,7 +809,8 @@ def run_test(args):
         except Exception as exc:
             print(f"[test-refine-grpo] WARNING: locked-follow backend disabled: {exc}", flush=True)
 
-    # Test-time overrides: single group for memory/speed efficiency
+    # Step 6: Resolve deterministic evaluation-time refinement and PDMS parameters.
+    # Evaluation intentionally uses one refinement group to reduce latency/memory.
     config["num_refine_groups"] = 1
 
     # Rollout / DDIM params
@@ -809,7 +826,7 @@ def run_test(args):
     pdms_params = build_pdms_params(config)
     gate_road_half_width_m = pdms_params["gate_road_half_width_m"]
 
-    # DDIM scheduler (same as training)
+    # Step 7: Initialize the DDIM scheduler used to refine every coarse mode.
     refine_scheduler = DDIMSchedulerWithLogProb(
         num_train_timesteps=1000,
         beta_schedule="scaled_linear",
@@ -817,10 +834,10 @@ def run_test(args):
     )
     refine_scheduler.set_timesteps(1000, device=planner._device())
 
-    # Mode names for road-half-width and visualization
+    # Mode names are used for lane-change road-width gates and plot labels.
     mode_names = mode_names_from_planner(planner, None)
 
-    # Output paths
+    # Step 8: Create an isolated run directory and initialize global statistics.
     output_base = pathlib.Path(test_config["output_root"]) / str(test_config["run_tag"])
     output_dir = _create_next_run_dir(output_base)
     records_path = output_dir / "random_action_step_records.jsonl"
@@ -834,6 +851,7 @@ def run_test(args):
     max_steps = int(test_config["max_steps"])
     video_fps = int(test_config["video_fps"])
 
+    # Step 9: Evaluate complete episodes one by one.
     for episode_idx in range(episodes):
         print(f"[test-refine-grpo] episode {episode_idx}/{episodes}", flush=True)
         env.reset()
@@ -851,14 +869,18 @@ def run_test(args):
         info: dict = {}
         stop_reason = "unknown"
 
+        # Step 10: Run one closed-loop planning/control cycle until the environment
+        # terminates, truncates, or a script-level stop condition is reached.
         while not done:
-            if episode_step == 40:
-                debug = 1
+            # if episode_step == 40:
+            #     debug = 1
                 
             if max_steps > 0 and episode_step >= max_steps:
                 stop_reason = "max_steps"
                 break
 
+            # Read the planner inputs and multimodal candidate export prepared by
+            # the environment after reset/the previous step.
             planner_batch = env._last_planner_batch
             export        = env._last_export
             if not planner_batch or export is None:
@@ -872,8 +894,9 @@ def run_test(args):
             masked_logits_np = np.asarray(export["masked_cls_logits"], dtype=np.float32)     # [N, M]
             on_training_modes = np.argmax(masked_logits_np, axis=-1).astype(np.int64)        # [N]
 
-            # Inject external target_point before extract_rl_context so it flows
-            # into model features automatically (external_point guidance mode).
+            # Step 11: Let the rule maker decide whether this step can use the
+            # cheaper locked-follow backend. Its external target point is injected
+            # before context extraction so it reaches the model features.
             rule_maker_debug = None
             locked_follow = {
                 "use_locked_follow": False,
@@ -885,7 +908,8 @@ def run_test(args):
                 locked_follow = _locked_follow_decision(_rule_maker, env, agent_ids, planner_batch)
                 rule_maker_debug = locked_follow.get("rule_maker_debug")
 
-            '如果 LOCKED，直接FOLLOW CONTROL，不通过diffusion planner规划'
+            # Locked formation: directly execute normal-planner + LQR follow
+            # control, bypassing diffusion refinement for this environment step.
             if (
                 bool(locked_follow.get("use_locked_follow", False))
                 and _normal_planner is not None
@@ -950,7 +974,8 @@ def run_test(args):
                 )
                 continue
 
-            # Context extraction (identical to training line 1861)
+            # Step 12: Unlocked formation. Extract neural context and collect each
+            # agent's coarse trajectories as anchors for diffusion refinement.
             with torch.no_grad():
                 contexts, context_agent_ids = planner.extract_rl_context(planner_batch)
 
@@ -963,6 +988,8 @@ def run_test(args):
                         _ct, dtype=torch.float32, device=planner._device()
                     )
 
+            # Capture all current world poses once so inter-vehicle PDMS formation
+            # rewards use a consistent pre-execution state.
             poses = {aid: _get_vehicle_pose(env, aid) for aid in agent_ids}
 
             executed:           dict[str, np.ndarray] = {}
@@ -972,9 +999,13 @@ def run_test(args):
             step_all_rewards:    list[list[float]]    = []
             frame_data_by_agent: dict[str, dict]      = {}  # for combined_traj_frames
 
+            # Step 13: Refine and score every controlled vehicle independently.
+            # Followers additionally compare against the already selected trajectory
+            # of the preceding vehicle to measure longitudinal/lateral formation.
             for idx, agent_id in enumerate(agent_ids):
 
-                # Mode selection (identical to training lines 1888-1891)
+                # Select the planner's highest-logit valid mode; fall back to the
+                # first valid mask entry if the exported selection is invalid.
                 on_training_mode = int(on_training_modes[idx])
                 if on_training_mode < 0 or on_training_mode >= masks.shape[1] or not bool(masks[idx, on_training_mode]):
                     on_training_mode = int(np.argmax(masks[idx]))
@@ -982,7 +1013,8 @@ def run_test(args):
 
                 selected_traj = candidates[idx, on_training_mode]  # [T, 3] coarse
 
-                # Multimodal rollout (identical to training line 1899)
+                # Refine all M modes for each of the G noise groups, producing
+                # G*M candidate trajectories in the agent-local coordinate frame.
                 with torch.no_grad():
                     
                     # train_followers_only: leader uses frozen pretrained planner
@@ -1006,7 +1038,7 @@ def run_test(args):
                 # refined_traj already has heading from reconstruct_heading_from_xy (inside rollout)
                 refined_np = rollout["refined_traj"].detach().cpu().numpy().astype(np.float32)  # [G*M, T, 3]
 
-                # PDMS reward (identical to training lines 1919-1996)
+                # Build the predecessor-dependent formation score used by PDMS.
                 is_ldr = (idx == 0)
                 _prev_traj_arg = None
                 _prev_pose_arg = None
@@ -1027,7 +1059,8 @@ def run_test(args):
                         waypoint_decay_gamma=waypoint_decay_gamma,
                     )
 
-                # Per-mode road half-width and lane-y target
+                # Prepare per-mode road gates and coarse XY anchors. Lane-change
+                # modes receive a wider road envelope than keep-lane modes.
                 _coarse_np = coarse_traj_by_agent.get(agent_id)
                 if _coarse_np is not None and torch.is_tensor(_coarse_np):
                     _coarse_np = _coarse_np.detach().cpu().numpy()
@@ -1054,6 +1087,8 @@ def run_test(args):
                     anchor_trajs=_anchor_trajs_gm,
                 )  # rewards: [G*M]; reward_debug arrays are [G*M]
 
+                # Execute the refined version of the planner-selected mode. The
+                # best PDMS mode is recorded only as an analysis target (gt_mode).
                 executed_traj = refined_np[on_training_mode]           # [T, 3]
                 executed_reward = float(rewards[on_training_mode])
 
@@ -1075,7 +1110,7 @@ def run_test(args):
                     "reward_debug":    reward_debug,
                 }
 
-                # Per-vehicle matplotlib plot (local-frame, no renderer needed)
+                # Optionally save a local-frame trajectory diagnostic per vehicle.
                 if test_config["save_traj_plots"]:
                     plot_path = (output_dir / "traj_plots" / agent_id
                                  / f"episode_{episode_idx:03d}"
@@ -1096,8 +1131,8 @@ def run_test(args):
                 flush=True,
             )
 
-            # Combined traj frame: topdown + overlay
-            # Captured BEFORE execute so agents are still at current positions.
+            # Step 14: Render the combined top-down candidate overlay before
+            # execution, while all vehicles are still at the planning-time poses.
             _frame_2d_rgb: "np.ndarray | None" = None
             if test_config["save_combined_traj_frames"] or test_config["save_2d_video"]:
                 frame_path = (output_dir / "combined_traj_frames"
@@ -1122,7 +1157,8 @@ def run_test(args):
                 except Exception as _fe:
                     print(f"[test-refine-grpo] frame save failed: {_fe}", flush=True)
 
-            # Execute selected trajectories (identical to training line 2298)
+            # Step 15: Execute the selected joint trajectories in the real
+            # environment, then derive the generic termination/truncation reason.
             try:
                 _, env_reward, done, info = _execute_trajectories(
                     env, planner, agent_ids, executed, env_config
@@ -1140,6 +1176,7 @@ def run_test(args):
                 elif bool((info or {}).get("terminated", False)):
                     stop_reason = "terminated"
 
+            # Accumulate episode rewards and persist this step's records/videos.
             episode_env_reward  += float(env_reward)
             episode_pdms_reward += step_pdms_mean
             episode_step += 1
@@ -1168,7 +1205,7 @@ def run_test(args):
                 diffusion_2d_frame=_frame_2d_rgb,
             )
 
-        # Release per-episode video writers
+        # Step 16: Finalize video streams and report the episode termination reason.
         if vid_2d is not None:
             vid_2d.release()
             vid_2d = None
@@ -1186,7 +1223,7 @@ def run_test(args):
             flush=True,
         )
 
-        # Episode-end stats
+        # Update aggregate success/safety counters from the final environment info.
         _info_flat = {k: v for k, v in info.items() if not isinstance(v, dict)}
         if _info_flat.get("arrive_dest"):
             success += 1
@@ -1200,7 +1237,7 @@ def run_test(args):
         print(f"[test-refine-grpo] episode={episode_idx} steps={episode_step} "
               f"pdms/step={ep_pdms_per_step:.4f} env/step={ep_env_per_step:.4f}", flush=True)
 
-    # Write summary
+    # Step 17: Aggregate all episode records, write the summary, and release the env.
     metadata = {
         "checkpoint":            str(config.get("pretrained_ckpt", "") or ""),
         "refine_train_config_path": args.refine_train_config_path,
