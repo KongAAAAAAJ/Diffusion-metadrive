@@ -85,6 +85,7 @@ def _make_policy(road_network: _RoadNetwork, vehicle_lane, objects):
     policy.merge_cruise_speed_kmh = 24.0
     policy.MAX_LONG_DIST = 30.0
     policy.target_speed = 24.0
+    policy.merge_completed = False
     policy.action_info = {}
     return policy
 
@@ -93,7 +94,7 @@ def test_merge_policy_creeps_when_front_or_rear_gap_is_unsafe(monkeypatch) -> No
     road_network = _RoadNetwork()
     target_lane = road_network.mainline[-1]
     front = SimpleNamespace(lane=target_lane, position=np.asarray([20.0, 0.0]))
-    rear = SimpleNamespace(lane=target_lane, position=np.asarray([-10.0, 0.0]))
+    rear = SimpleNamespace(lane=target_lane, position=np.asarray([-4.0, 0.0]))
     policy = _make_policy(road_network, road_network.ramp, [front, rear])
     monkeypatch.setattr(IDMPolicy, "lane_change_policy", lambda self, objects: (None, 30.0, self.control_object.lane))
 
@@ -102,7 +103,7 @@ def test_merge_policy_creeps_when_front_or_rear_gap_is_unsafe(monkeypatch) -> No
     assert policy.target_speed == 5.0
     assert policy.action_info["merge_active"] is True
     assert policy.action_info["merge_front_gap"] == 20.0
-    assert policy.action_info["merge_rear_gap"] == 10.0
+    assert policy.action_info["merge_rear_gap"] == 4.0
     assert policy.action_info["merge_gap_accepted"] is False
     assert policy.action_info["merge_force_active"] is False
 
@@ -132,13 +133,14 @@ def test_merge_policy_restores_cruise_speed_when_gap_is_safe(monkeypatch) -> Non
     assert policy.target_speed == 24.0
     assert policy.action_info["merge_gap_accepted"] is True
     assert policy.action_info["merge_force_active"] is True
+    assert policy.action_info["merge_completed"] is False
     assert result[2] is target_lane
 
 
 def test_merge_policy_holds_connector_lane_when_gap_is_unsafe(monkeypatch) -> None:
     road_network = _RoadNetwork()
     target_lane = road_network.mainline[-1]
-    rear = SimpleNamespace(lane=target_lane, position=np.asarray([-10.0, 0.0]))
+    rear = SimpleNamespace(lane=target_lane, position=np.asarray([-4.0, 0.0]))
     policy = _make_policy(road_network, road_network.connector, [rear])
     sentinel_front = object()
     monkeypatch.setattr(
@@ -155,16 +157,53 @@ def test_merge_policy_holds_connector_lane_when_gap_is_unsafe(monkeypatch) -> No
     assert result == (sentinel_front, 12.0, road_network.connector)
 
 
-def test_merge_policy_delegates_after_entering_mainline(monkeypatch) -> None:
+def test_merge_policy_latches_completed_after_entering_mainline(monkeypatch) -> None:
     road_network = _RoadNetwork()
-    policy = _make_policy(road_network, road_network.after_merge, [])
+    policy = _make_policy(road_network, road_network.mainline[-1], [])
     policy.target_speed = 17.0
-    sentinel = (object(), 12.0, road_network.after_merge)
+    sentinel = (object(), 12.0, road_network.mainline[-1])
     monkeypatch.setattr(IDMPolicy, "lane_change_policy", lambda self, objects: sentinel)
 
     result = policy.lane_change_policy([])
 
     assert result is sentinel
     assert policy.target_speed == 17.0
+    assert policy.merge_completed is True
     assert policy.action_info["merge_active"] is False
     assert policy.action_info["merge_force_active"] is False
+    assert policy.action_info["merge_completed"] is True
+
+
+def test_merge_policy_does_not_reenter_force_after_completed_latch(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    policy = _make_policy(road_network, road_network.mainline[-1], [])
+    first_sentinel = (object(), 12.0, road_network.mainline[-1])
+    monkeypatch.setattr(IDMPolicy, "lane_change_policy", lambda self, objects: first_sentinel)
+
+    first_result = policy.lane_change_policy([])
+
+    assert first_result is first_sentinel
+    assert policy.merge_completed is True
+
+    policy.control_object.lane = road_network.connector
+    second_sentinel = (object(), 8.0, road_network.connector)
+    monkeypatch.setattr(IDMPolicy, "lane_change_policy", lambda self, objects: second_sentinel)
+
+    second_result = policy.lane_change_policy([])
+
+    assert second_result is second_sentinel
+    assert policy.merge_completed is True
+    assert policy.action_info["merge_active"] is False
+    assert policy.action_info["merge_force_active"] is False
+    assert policy.action_info["merge_completed"] is True
+
+
+def test_merge_policy_reset_clears_completed_latch(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    policy = _make_policy(road_network, road_network.mainline[-1], [])
+    policy.merge_completed = True
+    monkeypatch.setattr(IDMPolicy, "reset", lambda self: None)
+
+    policy.reset()
+
+    assert policy.merge_completed is False

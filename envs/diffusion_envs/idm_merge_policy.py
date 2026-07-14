@@ -82,9 +82,9 @@ class IDMMergePolicy(IDMPolicy):
         control_object,
         random_seed,
         *,
-        merge_front_gap_m: float = 25.0,
-        merge_rear_gap_m: float = 15.0,
-        merge_creep_speed_kmh: float = 5.0,
+        merge_front_gap_m: float = 5.0,
+        merge_rear_gap_m: float = 5.0,
+        merge_creep_speed_kmh: float = 20.0,
         merge_cruise_speed_kmh: float = 24.0,
     ):
         super().__init__(control_object, random_seed)
@@ -94,16 +94,29 @@ class IDMMergePolicy(IDMPolicy):
         self.merge_cruise_speed_kmh = float(merge_cruise_speed_kmh)
         self.NORMAL_SPEED = self.merge_cruise_speed_kmh
         self.target_speed = self.merge_cruise_speed_kmh
+        self.merge_completed = False
+
+    def reset(self):
+        super().reset()
+        self.merge_completed = False
 
     def lane_change_policy(self, all_objects):
         parent_result = super().lane_change_policy(all_objects)
-        self._record_merge_state(active=False, force_active=False)
+        self._update_merge_completed()
+        self._record_merge_state(
+            active=False,
+            force_active=False,
+            completed=self.merge_completed,
+        )
+        if self.merge_completed:
+            return parent_result
 
         target_lane = self._find_merge_target_lane()
         if target_lane is None:
             return parent_result
 
-        force_active = self._is_force_merge_road()
+        # force_active = self._is_force_merge_road()
+        force_active = True
 
         search_distance = max(
             float(self.MAX_LONG_DIST),
@@ -118,7 +131,10 @@ class IDMMergePolicy(IDMPolicy):
         )
         front_gap = float(surrounding.front_min_distance()) if surrounding.has_front_object() else inf
         rear_gap = float(surrounding.back_min_distance()) if surrounding.has_back_object() else inf
-        gap_accepted = front_gap >= self.merge_front_gap_m and rear_gap >= self.merge_rear_gap_m
+        gap_accepted = front_gap >= 5 and rear_gap >= 5  # 前后间距 5m 5m
+
+        print(f"Front gap: {front_gap:.2f} m, Rear gap: {rear_gap:.2f} m, Gap accepted: {gap_accepted}, Force active: {force_active}")
+
         self.target_speed = self.merge_cruise_speed_kmh if gap_accepted else self.merge_creep_speed_kmh
         self._record_merge_state(
             active=True,
@@ -126,6 +142,7 @@ class IDMMergePolicy(IDMPolicy):
             front_gap=front_gap,
             rear_gap=rear_gap,
             accepted=gap_accepted,
+            completed=self.merge_completed,
         )
         if force_active and gap_accepted:
             return surrounding.front_object(), surrounding.front_min_distance(), target_lane
@@ -156,6 +173,19 @@ class IDMMergePolicy(IDMPolicy):
             return None
         return getattr(navigation, "merge_target_lane", None)
 
+    def _update_merge_completed(self) -> None:
+        if self.merge_completed:
+            return
+        vehicle = self.control_object
+        navigation = getattr(vehicle, "navigation", None)
+        target_lane = getattr(navigation, "merge_target_lane", None)
+        target_index = getattr(target_lane, "index", None)
+        current_lane = getattr(vehicle, "lane", None)
+        current_index = getattr(current_lane, "index", None)
+        if target_index is None or current_index is None:
+            return
+        self.merge_completed = tuple(current_index[:2]) == tuple(target_index[:2])
+
     def _record_merge_state(
         self,
         *,
@@ -164,9 +194,11 @@ class IDMMergePolicy(IDMPolicy):
         front_gap: float = inf,
         rear_gap: float = inf,
         accepted: bool = False,
+        completed: bool = False,
     ) -> None:
         self.action_info["merge_active"] = bool(active)
         self.action_info["merge_force_active"] = bool(force_active)
         self.action_info["merge_front_gap"] = float(front_gap)
         self.action_info["merge_rear_gap"] = float(rear_gap)
         self.action_info["merge_gap_accepted"] = bool(accepted)
+        self.action_info["merge_completed"] = bool(completed)
