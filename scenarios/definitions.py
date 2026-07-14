@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
 from routes.route_definitions import get_required_preset
+from scenarios.S6_inject_vehicles import build_s6_traffic_recipes
 
 
 @dataclass(frozen=True)
@@ -193,22 +194,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         trigger_by_local_route={
             "R6_mainline_merge_approach": TriggerSpec("g1", 10.0, 95.0),
         },
-        traffic_recipes=(
-            RecipeSpec(
-                "inject_background_vehicle",
-                {
-                    "reference_kind": "block_socket_road",
-                    "block_id": "g1",
-                    "socket_index": 1,
-                    "spawn_longitude": 30.0,
-                    "target_speed_kmh": 24.0,
-                    "policy": "idm_merge",
-                    "merge_front_gap_m": 25.0,
-                    "merge_rear_gap_m": 15.0,
-                    "merge_creep_speed_kmh": 5.0,
-                },
-            ),
-        ),
+        traffic_recipes=build_s6_traffic_recipes(RecipeSpec),
         ego_spawn_lane_preference="rightmost",
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",

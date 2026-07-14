@@ -136,6 +136,49 @@ def test_adjacent_lane_recipe_spawns_left_and_right_once() -> None:
     assert orchestrator.summary.notes.count("adjacent_spawned:right_side") == 1
 
 
+def test_s6_fixed_traffic_spawns_at_head_relative_positions_only_once() -> None:
+    env, ego, traffic_manager = make_env_and_ego()
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S6_background_merge_in"],
+        "R6_mainline_merge_approach",
+    )
+    orchestrator.reset(env, "agent0")
+    orchestrator._road_to_block_id = {("road_a", "road_b"): "g1"}
+
+    orchestrator.before_step(env, "agent0", 1)
+    orchestrator.before_step(env, "agent0", 2)
+
+    ordinary_calls = [call for call in traffic_manager.spawn_calls if call[2] is None]
+    assert len(ordinary_calls) == 16
+    assert [call[1]["spawn_longitude"] for call in ordinary_calls[:8]] == [
+        ego.position[0] + offset
+        for offset in (20.0, 35.0, 50.0, 65.0, -40.0, -55.0, -70.0, -85.0)
+    ]
+    assert [call[1]["spawn_lane_index"][-1] for call in ordinary_calls[8:]] == [
+        0, 0, 0, 0, 2, 2, 2, 2
+    ]
+    assert [call[1]["spawn_longitude"] for call in ordinary_calls[8:12]] == [
+        ego.position[0] + offset for offset in (-30.0, -10.0, 15.0, 35.0)
+    ]
+
+
+def test_s6_fixed_traffic_skips_missing_adjacent_lane() -> None:
+    env, _ego, traffic_manager = make_env_and_ego(lane_count=2, ego_lane_index=1)
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S6_background_merge_in"],
+        "R6_mainline_merge_approach",
+    )
+    orchestrator.reset(env, "agent0")
+    orchestrator._road_to_block_id = {("road_a", "road_b"): "g1"}
+
+    orchestrator.before_step(env, "agent0", 1)
+
+    ordinary_calls = [call for call in traffic_manager.spawn_calls if call[2] is None]
+    assert len(ordinary_calls) == 12
+    assert [call[1]["spawn_lane_index"][-1] for call in ordinary_calls[8:]] == [0, 0, 0, 0]
+    assert sum(note.startswith("adjacent_lane_missing:right_") for note in orchestrator.summary.notes) == 4
+
+
 def test_s5_hard_brake_recipe_randomizes_from_traffic_manager_rng(monkeypatch) -> None:
     rng = np.random.RandomState(123)
     env, ego, _traffic_manager = make_env_and_ego(rng=rng)

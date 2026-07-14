@@ -24,6 +24,67 @@ def test_s6_declares_merge_aware_background_policy() -> None:
     assert recipe.params["target_speed_kmh"] == pytest.approx(24.0)
 
 
+def test_s6_declares_fixed_same_lane_background_traffic() -> None:
+    scenario = SCENARIO_BY_ID["S6_background_merge_in"]
+    recipes = [
+        recipe
+        for recipe in scenario.traffic_recipes
+        if recipe.operation == "inject_background_vehicle"
+        and recipe.params.get("reference_kind") == "ego_lane"
+    ]
+
+    assert len(recipes) == 8
+    assert [recipe.params["name"] for recipe in recipes] == [
+        "ego_lane_front_1",
+        "ego_lane_front_2",
+        "ego_lane_front_3",
+        "ego_lane_front_4",
+        "ego_lane_rear_1",
+        "ego_lane_rear_2",
+        "ego_lane_rear_3",
+        "ego_lane_rear_4",
+    ]
+    assert [recipe.params["spawn_longitude_offset"] for recipe in recipes] == [
+        20.0,
+        35.0,
+        50.0,
+        65.0,
+        -40.0,
+        -55.0,
+        -70.0,
+        -85.0,
+    ]
+    assert all(recipe.params["spawn_longitude"] == 0.0 for recipe in recipes)
+    assert all(recipe.params["trigger_on_start"] is True for recipe in recipes)
+    assert all("policy" not in recipe.params for recipe in recipes)
+
+
+def test_s6_declares_four_background_vehicles_per_adjacent_lane() -> None:
+    scenario = SCENARIO_BY_ID["S6_background_merge_in"]
+    recipes = [
+        recipe
+        for recipe in scenario.traffic_recipes
+        if recipe.operation == "inject_adjacent_lane_vehicles"
+    ]
+
+    assert len(recipes) == 1
+    assert recipes[0].params["trigger_on_start"] is True
+    assert recipes[0].params["clearance_scope"] == "same_lane"
+    vehicles = recipes[0].params["vehicles"]
+    assert len(vehicles) == 8
+    assert len({vehicle["name"] for vehicle in vehicles}) == 8
+    for lane_side in ("left", "right"):
+        lane_vehicles = [vehicle for vehicle in vehicles if vehicle["lane_side"] == lane_side]
+        assert len(lane_vehicles) == 4
+        assert [vehicle["spawn_longitude_offset_m"] for vehicle in lane_vehicles] == [
+            -30.0,
+            -10.0,
+            15.0,
+            35.0,
+        ]
+        assert all(20.0 <= vehicle["target_speed_kmh"] <= 24.0 for vehicle in lane_vehicles)
+
+
 def test_s5_declares_adjacent_lane_side_vehicle_recipe() -> None:
     scenario = SCENARIO_BY_ID["S5_hard_brake_lead"]
 
