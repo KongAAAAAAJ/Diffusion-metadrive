@@ -506,9 +506,15 @@ class ScenarioOrchestrator:
         if traffic_manager is None or not hasattr(traffic_manager, "_spawn_traffic_vehicle_if_safe"):
             return None
         vehicle_type = traffic_manager.random_vehicle_type()
+        spawn_speed_mps = max(float(target_speed_kmh), 0.0) / 3.6
         spawned = traffic_manager._spawn_traffic_vehicle_if_safe(
             vehicle_type,
-            {"spawn_lane_index": lane_tuple, "spawn_longitude": float(spawn_long)},
+            {
+                "spawn_lane_index": lane_tuple,
+                "spawn_longitude": float(spawn_long),
+                "spawn_velocity": (spawn_speed_mps, 0.0),
+                "spawn_velocity_car_frame": True,
+            },
             policy_class=policy_class,
             policy_kwargs=policy_kwargs,
             vehicle_config_overrides=vehicle_config_overrides,

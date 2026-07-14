@@ -127,9 +127,12 @@ def test_adjacent_lane_recipe_spawns_left_and_right_once() -> None:
 
     spawned_lanes = [call[1]["spawn_lane_index"] for call in traffic_manager.spawn_calls]
     spawned_longs = [call[1]["spawn_longitude"] for call in traffic_manager.spawn_calls]
+    spawned_velocities = [call[1]["spawn_velocity"] for call in traffic_manager.spawn_calls]
 
     assert spawned_lanes == [("road_a", "road_b", 0), ("road_a", "road_b", 2)]
     assert spawned_longs == [102.0, 102.0]
+    assert spawned_velocities == [(24.0 / 3.6, 0.0), (24.0 / 3.6, 0.0)]
+    assert all(call[1]["spawn_velocity_car_frame"] is True for call in traffic_manager.spawn_calls)
     assert orchestrator.summary.scenario_triggered is True
     assert orchestrator.summary.scenario_realized is True
     assert orchestrator.summary.notes.count("adjacent_spawned:left_side") == 1
@@ -446,6 +449,45 @@ def test_injected_background_vehicle_gets_topdown_marker() -> None:
     assert spawned.scenario_managed_vehicle is True
     assert spawned.scenario_warning_marker == "!"
     assert spawned.scenario_vehicle_role == "injected_background"
+    assert spawned.spawn_config["spawn_velocity"] == (18.0 / 3.6, 0.0)
+    assert spawned.spawn_config["spawn_velocity_car_frame"] is True
+
+
+def test_hard_brake_spawned_lead_uses_lead_target_speed_as_initial_velocity(monkeypatch) -> None:
+    env, _ego, traffic_manager = make_env_and_ego()
+    definition = ScenarioDefinition(
+        code="T",
+        scenario_id="test_hard_brake_initial_velocity",
+        allowed_local_routes=("R1_entry_straight",),
+        trigger_by_local_route={"R1_entry_straight": TriggerSpec("s0", 80.0, 120.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "hard_brake_lead",
+                {
+                    "lead_distance_m": 10.0,
+                    "lead_target_speed_kmh": 21.0,
+                    "front_distance_min_m": 10.0,
+                    "front_distance_max_m": 15.0,
+                    "brake_target_speed_kmh": 1.0,
+                    "brake_duration_steps": 30,
+                },
+            ),
+        ),
+        ego_spawn_lane_preference=None,
+        ego_spawn_lane_probabilities=None,
+        expert_recipe="test",
+        description="test",
+    )
+    orchestrator = ScenarioOrchestrator(definition, "R1_entry_straight")
+    orchestrator.reset(env, "agent0")
+    monkeypatch.setattr(orchestrator, "_find_front_vehicle_with_distance", lambda vehicle: (None, None))
+
+    orchestrator.before_step(env, "agent0", 1)
+
+    assert len(traffic_manager.spawn_calls) == 1
+    spawn_config = traffic_manager.spawn_calls[0][1]
+    assert spawn_config["spawn_velocity"] == (21.0 / 3.6, 0.0)
+    assert spawn_config["spawn_velocity_car_frame"] is True
 
 
 def test_s6_injected_background_uses_merge_policy_and_start_edge_navigation() -> None:
@@ -490,6 +532,8 @@ def test_s6_injected_background_uses_merge_policy_and_start_edge_navigation() ->
         "merge_cruise_speed_kmh": 24.0,
     }
     assert call[4]["navigation_module"] is StartEdgeNodeNavigation
+    assert call[1]["spawn_velocity"] == (24.0 / 3.6, 0.0)
+    assert call[1]["spawn_velocity_car_frame"] is True
 
 
 def test_unknown_injected_background_policy_is_rejected() -> None:
