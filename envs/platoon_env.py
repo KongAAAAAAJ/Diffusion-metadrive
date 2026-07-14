@@ -298,11 +298,18 @@ class PlatoonEnv(BaseMultiEnv):
             scenario_speed = getattr(scenario, "ego_initial_speed_km_h", None)
             if scenario_speed is not None:
                 updates["initial_speed_km_h"] = float(scenario_speed)
+        if "traffic_density" not in self._explicit_config_keys:
+            traffic_density = getattr(scenario, "override_traffic_density", None)
+            if traffic_density is not None:
+                updates["traffic_density"] = float(traffic_density)
+        updates.update(dict(getattr(scenario, "env_overrides", None) or {}))
 
         self.platoon_config.scenario_id = scenario_id
         self.platoon_config.local_route = local_route
         if "initial_speed_km_h" in updates:
             self.platoon_config.initial_speed_km_h = float(updates["initial_speed_km_h"])
+        if "traffic_density" in updates:
+            self.platoon_config.traffic_density = float(updates["traffic_density"])
         self.config.update(updates)
 
         engine = getattr(self, "engine", None)
@@ -339,6 +346,10 @@ class PlatoonEnv(BaseMultiEnv):
         scenario_initial_speed = getattr(scenario, "ego_initial_speed_km_h", None)
         if scenario_initial_speed is not None and "initial_speed_km_h" not in explicit_config_keys:
             resolved["initial_speed_km_h"] = float(scenario_initial_speed)
+        scenario_traffic_density = getattr(scenario, "override_traffic_density", None)
+        if scenario_traffic_density is not None and "traffic_density" not in explicit_config_keys:
+            resolved["traffic_density"] = float(scenario_traffic_density)
+        resolved.update(dict(getattr(scenario, "env_overrides", None) or {}))
         return resolved
 
     @staticmethod

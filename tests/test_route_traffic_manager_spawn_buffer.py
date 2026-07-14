@@ -90,6 +90,29 @@ def test_route_aware_traffic_spawn_proposals_are_empty_when_lane_too_short_for_b
     assert configs == []
 
 
+def test_road_local_exclusion_rejects_same_road_candidates_near_ego(monkeypatch):
+    lane = _FakeLane(index=("A", "B", 0), length=250.0)
+    manager = _manager_with_engine(monkeypatch, lane)
+    manager._test_engine.spawn_manager = SimpleNamespace(
+        ego_spawn_zones=[
+            {
+                "road": ("A", "B"),
+                "spawn_lane_index": ("A", "B", 1),
+                "spawn_longitude": 100.0,
+            }
+        ]
+    )
+    manager._test_engine.global_config["traffic_spawn_exclusion_ahead_m"] = 100.0
+    manager._test_engine.global_config["traffic_spawn_exclusion_behind_m"] = 100.0
+
+    assert manager._conflicts_with_ego_spawn({"spawn_lane_index": lane.index, "spawn_longitude": 199.0})
+    assert manager._conflicts_with_ego_spawn({"spawn_lane_index": lane.index, "spawn_longitude": 1.0})
+    assert not manager._conflicts_with_ego_spawn({"spawn_lane_index": lane.index, "spawn_longitude": 201.0})
+    assert not manager._conflicts_with_ego_spawn(
+        {"spawn_lane_index": ("C", "D", 0), "spawn_longitude": 100.0}
+    )
+
+
 def test_final_spawn_guard_rejects_candidates_not_found_by_ray_localization(monkeypatch):
     lane = _FakeLane()
     manager = _manager_with_engine(monkeypatch, lane)
@@ -176,7 +199,7 @@ def test_create_basic_vehicles_uses_buffered_spawn_proposals(monkeypatch):
     assert 0.0 not in seen_longitudes
 
 
-def test_after_step_respawn_uses_buffered_spawn_proposals(monkeypatch):
+def test_after_step_does_not_respawn_removed_vehicle_when_removal_is_disabled(monkeypatch):
     lane = _FakeLane()
     manager = _manager_with_engine(monkeypatch, lane)
     removed_vehicle = SimpleNamespace(
@@ -193,6 +216,4 @@ def test_after_step_respawn_uses_buffered_spawn_proposals(monkeypatch):
 
     manager.after_step()
 
-    assert seen_configs
-    assert all(float(config["spawn_longitude"]) >= ROUTE_TRAFFIC_SPAWN_LONGITUDE_BUFFER for config in seen_configs)
-    assert all(float(config["spawn_longitude"]) != 0.0 for config in seen_configs)
+    assert seen_configs == []

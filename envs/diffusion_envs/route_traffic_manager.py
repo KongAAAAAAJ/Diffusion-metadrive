@@ -84,13 +84,19 @@ class RouteAwareTrafficManager(CustomTrafficManager):
             if tuple(zone.get("road", ())) != spawn_road:
                 continue
 
+            ego_spawn_longitude = float(zone["spawn_longitude"])
+            longitudinal_delta = spawn_longitude - ego_spawn_longitude
+            exclusion_ahead = float(self.engine.global_config.get("traffic_spawn_exclusion_ahead_m", 0.0) or 0.0)
+            exclusion_behind = float(self.engine.global_config.get("traffic_spawn_exclusion_behind_m", 0.0) or 0.0)
+            if exclusion_ahead > 0.0 or exclusion_behind > 0.0:
+                if -exclusion_behind <= longitudinal_delta <= exclusion_ahead:
+                    return True
+
             zone_lane = tuple(zone.get("spawn_lane_index", ()))
             same_lane = (zone_lane == spawn_lane) if zone_lane else True
             if (not same_lane) and lane_relaxation:
                 continue
 
-            ego_spawn_longitude = float(zone["spawn_longitude"])
-            longitudinal_delta = spawn_longitude - ego_spawn_longitude
             if longitudinal_delta >= 0.0:
                 longitudinal_conflict = longitudinal_delta < min_gap_ahead
             else:

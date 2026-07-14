@@ -39,6 +39,8 @@ class ScenarioDefinition:
     trim_window_after: int = 60    # frames after lane-index change completes
     # 若设置，覆盖全局采样的 traffic_density（用于换道场景等需要稀疏交通的场合）
     override_traffic_density: float | None = None
+    # Scenario-specific MetaDrive env config overrides.
+    env_overrides: Dict[str, object] | None = None
     # Ego platoon fixed-route spawn controls.
     # ego_spawn_longitude_m is agent0's longitudinal coordinate from the selected road start.
     ego_spawn_reference_block_id: str | None = None
@@ -200,6 +202,11 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_reference_block_id="g1",
         ego_spawn_longitude_m=90,  # 随机范围约 26m ~ 92m
         ego_initial_speed_km_h=22.0,  # 随机范围约 20 ~ 26 km/h
+        override_traffic_density=0.03,
+        env_overrides={
+            "traffic_spawn_exclusion_ahead_m": 100.0,
+            "traffic_spawn_exclusion_behind_m": 100.0,
+        },
         expert_recipe="保守让行",
         description="背景车并入 ego 所在主线",
     ),

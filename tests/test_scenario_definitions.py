@@ -9,7 +9,12 @@ def test_s6_declares_ego_spawn_reference_block_and_start_longitude() -> None:
     scenario = SCENARIO_BY_ID["S6_background_merge_in"]
 
     assert scenario.ego_spawn_reference_block_id == "g1"
-    assert scenario.ego_spawn_longitude_m == pytest.approx(12.0)
+    assert scenario.ego_spawn_longitude_m == pytest.approx(90.0)
+    assert scenario.override_traffic_density == pytest.approx(0.03)
+    assert scenario.env_overrides == {
+        "traffic_spawn_exclusion_ahead_m": 100.0,
+        "traffic_spawn_exclusion_behind_m": 100.0,
+    }
 
 
 def test_s6_declares_merge_aware_background_policy() -> None:
@@ -18,10 +23,10 @@ def test_s6_declares_merge_aware_background_policy() -> None:
 
     assert scenario.trigger_by_local_route["R6_mainline_merge_approach"].block_id == "g1"
     assert recipe.params["policy"] == "idm_merge"
-    assert recipe.params["merge_front_gap_m"] == pytest.approx(25.0)
-    assert recipe.params["merge_rear_gap_m"] == pytest.approx(15.0)
-    assert recipe.params["merge_creep_speed_kmh"] == pytest.approx(5.0)
-    assert recipe.params["target_speed_kmh"] == pytest.approx(24.0)
+    assert recipe.params["merge_front_gap_m"] == pytest.approx(10.0)
+    assert recipe.params["merge_rear_gap_m"] == pytest.approx(10.0)
+    assert recipe.params["merge_creep_speed_kmh"] == pytest.approx(15.0)
+    assert recipe.params["target_speed_kmh"] == pytest.approx(25.0)
 
 
 def test_s6_declares_fixed_same_lane_background_traffic() -> None:
@@ -45,14 +50,14 @@ def test_s6_declares_fixed_same_lane_background_traffic() -> None:
         "ego_lane_rear_4",
     ]
     assert [recipe.params["spawn_longitude_offset"] for recipe in recipes] == [
-        20.0,
-        35.0,
-        50.0,
-        65.0,
-        -40.0,
-        -55.0,
-        -70.0,
-        -85.0,
+        30.0,
+        55.0,
+        80.0,
+        115.0,
+        -20.0,
+        -45.0,
+        -80.0,
+        -115.0,
     ]
     assert all(recipe.params["spawn_longitude"] == 0.0 for recipe in recipes)
     assert all(recipe.params["trigger_on_start"] is True for recipe in recipes)
@@ -77,12 +82,12 @@ def test_s6_declares_four_background_vehicles_per_adjacent_lane() -> None:
         lane_vehicles = [vehicle for vehicle in vehicles if vehicle["lane_side"] == lane_side]
         assert len(lane_vehicles) == 4
         assert [vehicle["spawn_longitude_offset_m"] for vehicle in lane_vehicles] == [
-            -30.0,
+            -40.0,
             -10.0,
             15.0,
             35.0,
         ]
-        assert all(20.0 <= vehicle["target_speed_kmh"] <= 24.0 for vehicle in lane_vehicles)
+        assert all(20.0 <= vehicle["target_speed_kmh"] <= 27.0 for vehicle in lane_vehicles)
 
 
 def test_s5_declares_adjacent_lane_side_vehicle_recipe() -> None:
@@ -123,7 +128,7 @@ def test_s5_declares_hard_brake_random_ranges() -> None:
 
     assert len(recipes) == 1
     params = recipes[0].params
-    assert params["lead_distance_range_m"] == (45.0, 55.0)
+    assert params["lead_distance_range_m"] == (10.0, 15.0)
     assert params["lead_target_speed_range_kmh"] == (19.0, 23.0)
     assert params["brake_target_speed_range_kmh"] == (0.5, 2.0)
     assert params["brake_duration_steps_range"] == (450, 550)
@@ -132,9 +137,9 @@ def test_s5_declares_hard_brake_random_ranges() -> None:
 def test_s9_declares_safe_internal_spawn_road() -> None:
     scenario = SCENARIO_BY_ID["S9_narrow_channel_negotiation"]
 
-    assert scenario.ego_spawn_reference_block_id == "merge0"
+    assert scenario.ego_spawn_reference_block_id == "c3"
     assert scenario.ego_spawn_reference_kind == "block_internal_road"
-    assert scenario.ego_spawn_internal_road_index == 3
+    assert scenario.ego_spawn_internal_road_index == 1
     assert scenario.ego_spawn_longitude_m == pytest.approx(10.0)
 
 
