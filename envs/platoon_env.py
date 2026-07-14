@@ -297,7 +297,7 @@ class PlatoonEnv(BaseMultiEnv):
         if "initial_speed_km_h" not in self._explicit_config_keys:
             scenario_speed = getattr(scenario, "ego_initial_speed_km_h", None)
             if scenario_speed is not None:
-                updates["initial_speed_km_h"] = float(scenario_speed)
+                updates["initial_speed_km_h"] = self._sample_scenario_float(scenario_speed)
         if "traffic_density" not in self._explicit_config_keys:
             traffic_density = getattr(scenario, "override_traffic_density", None)
             if traffic_density is not None:
@@ -345,12 +345,39 @@ class PlatoonEnv(BaseMultiEnv):
             return resolved
         scenario_initial_speed = getattr(scenario, "ego_initial_speed_km_h", None)
         if scenario_initial_speed is not None and "initial_speed_km_h" not in explicit_config_keys:
-            resolved["initial_speed_km_h"] = float(scenario_initial_speed)
+            resolved["initial_speed_km_h"] = PlatoonEnv._float_or_range_midpoint(scenario_initial_speed)
         scenario_traffic_density = getattr(scenario, "override_traffic_density", None)
         if scenario_traffic_density is not None and "traffic_density" not in explicit_config_keys:
             resolved["traffic_density"] = float(scenario_traffic_density)
         resolved.update(dict(getattr(scenario, "env_overrides", None) or {}))
         return resolved
+
+    def _sample_scenario_float(self, value) -> float:
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            low, high = value
+            rng = self._scenario_rng()
+            if rng is not None and hasattr(rng, "uniform"):
+                return float(rng.uniform(float(low), float(high)))
+            return float((float(low) + float(high)) * 0.5)
+        return float(value)
+
+    def _scenario_rng(self):
+        engine = getattr(self, "engine", None)
+        traffic_manager = getattr(engine, "traffic_manager", None)
+        rng = getattr(traffic_manager, "np_random", None)
+        if rng is not None:
+            return rng
+        rng = getattr(self, "np_random", None)
+        if rng is not None:
+            return rng
+        return getattr(engine, "np_random", None)
+
+    @staticmethod
+    def _float_or_range_midpoint(value) -> float:
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            low, high = value
+            return float((float(low) + float(high)) * 0.5)
+        return float(value)
 
     @staticmethod
     def _extract_platoon_config(config: Mapping[str, object]) -> dict[str, object]:

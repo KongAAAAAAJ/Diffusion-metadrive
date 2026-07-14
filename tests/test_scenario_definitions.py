@@ -9,7 +9,8 @@ def test_s6_declares_ego_spawn_reference_block_and_start_longitude() -> None:
     scenario = SCENARIO_BY_ID["S6_background_merge_in"]
 
     assert scenario.ego_spawn_reference_block_id == "g1"
-    assert scenario.ego_spawn_longitude_m == pytest.approx(90.0)
+    assert scenario.ego_spawn_longitude_m == (25.0, 90.0)
+    assert scenario.ego_initial_speed_km_h == (20.0, 26.0)
     assert scenario.override_traffic_density == pytest.approx(0.03)
     assert scenario.env_overrides == {
         "traffic_spawn_exclusion_ahead_m": 100.0,
@@ -27,6 +28,7 @@ def test_s6_declares_merge_aware_background_policy() -> None:
     assert recipe.params["merge_rear_gap_m"] == pytest.approx(10.0)
     assert recipe.params["merge_creep_speed_kmh"] == pytest.approx(15.0)
     assert recipe.params["target_speed_kmh"] == pytest.approx(25.0)
+    assert recipe.params["spawn_longitude"] == (0.0, 20.0)
 
 
 def test_s6_declares_fixed_same_lane_background_traffic() -> None:
@@ -38,9 +40,8 @@ def test_s6_declares_fixed_same_lane_background_traffic() -> None:
         and recipe.params.get("reference_kind") == "ego_lane"
     ]
 
-    assert len(recipes) == 8
+    assert len(recipes) == 7
     assert [recipe.params["name"] for recipe in recipes] == [
-        "ego_lane_front_1",
         "ego_lane_front_2",
         "ego_lane_front_3",
         "ego_lane_front_4",
@@ -50,7 +51,6 @@ def test_s6_declares_fixed_same_lane_background_traffic() -> None:
         "ego_lane_rear_4",
     ]
     assert [recipe.params["spawn_longitude_offset"] for recipe in recipes] == [
-        30.0,
         55.0,
         80.0,
         115.0,

@@ -47,6 +47,14 @@ class _FakeBlock:
         self.block_network = _FakeBlockNetwork(lane_groups)
 
 
+class _FixedUniformRng:
+    def __init__(self, value: float) -> None:
+        self.value = float(value)
+
+    def uniform(self, low, high):
+        return self.value
+
+
 def _manager_with_fixed_spawn(
     monkeypatch,
     *,
@@ -295,6 +303,34 @@ def test_fixed_route_spawn_uses_scenario_longitude_from_road_start(monkeypatch):
     assert configs["agent0"]["spawn_longitude"] == pytest.approx(42.0)
     assert configs["agent1"]["spawn_longitude"] == pytest.approx(32.0)
     assert configs["agent2"]["spawn_longitude"] == pytest.approx(22.0)
+
+
+def test_fixed_route_spawn_samples_scenario_longitude_range(monkeypatch):
+    lanes = [
+        _FakeLane(index=("A", "B", 0), length=200.0),
+        _FakeLane(index=("A", "B", 1), length=200.0),
+    ]
+    scenario = SimpleNamespace(
+        ego_spawn_lane_preference="rightmost",
+        ego_spawn_lane_probabilities=None,
+        ego_spawn_longitude_m=(25.0, 90.0),
+        ego_spawn_distance_to_route_end_m=None,
+        ego_spawn_reference_block_id=None,
+    )
+    manager = _manager_with_fixed_spawn(
+        monkeypatch,
+        lanes=lanes,
+        scenario_id="test_longitude_range",
+        scenario=scenario,
+    )
+    manager.np_random = _FixedUniformRng(72.0)
+
+    assert manager._apply_fixed_route_spawn_configs() is True
+
+    configs = manager.engine.global_config["agent_configs"]
+    assert configs["agent0"]["spawn_longitude"] == pytest.approx(72.0)
+    assert configs["agent1"]["spawn_longitude"] == pytest.approx(62.0)
+    assert configs["agent2"]["spawn_longitude"] == pytest.approx(52.0)
 
 
 def test_fixed_route_spawn_clips_scenario_longitude_to_tail_buffer(monkeypatch):

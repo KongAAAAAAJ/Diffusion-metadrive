@@ -30,7 +30,7 @@ class SimpleRuleRiskDetector(RiskDetector):
     def __init__(
         self,
         *,
-        ttc_trigger_s: float = 3.0,
+        ttc_trigger_s: float = 5.0,
         relock_ttc_threshold_s: float = 5.0,
         ideal_following_distance_m: float = 10.0,
         relock_gap_ratio: float = 1.5,
@@ -63,7 +63,6 @@ class SimpleRuleRiskDetector(RiskDetector):
         transitioned = ttc is not None and ttc < self.ttc_trigger_s
 
         if transitioned:
-            debug = 1
             print(f"ttc = {ttc}s")
             
         return self._result(

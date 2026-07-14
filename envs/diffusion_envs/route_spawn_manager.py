@@ -313,13 +313,33 @@ class RouteAwareSpawnManager(SpawnManager):
         scenario = self._get_spawn_scenario()
         longitude_from_start = getattr(scenario, "ego_spawn_longitude_m", None)
         if longitude_from_start is not None:
-            requested = float(longitude_from_start)
+            requested = self._sample_float_if_range(longitude_from_start)
             return float(np.clip(requested, min_lead, max_lead))
         distance_to_route_end = getattr(scenario, "ego_spawn_distance_to_route_end_m", None)
         if distance_to_route_end is not None:
             requested = float(lane_length) - float(distance_to_route_end)
             return float(np.clip(requested, min_lead, max_lead))
         return float(min(min_lead, max_lead))
+
+    def _sample_float_if_range(self, value) -> float:
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            low, high = value
+            rng = self._spawn_rng()
+            if rng is not None and hasattr(rng, "uniform"):
+                return float(rng.uniform(float(low), float(high)))
+            return float((float(low) + float(high)) * 0.5)
+        return float(value)
+
+    def _spawn_rng(self):
+        engine = getattr(self, "engine", None)
+        traffic_manager = getattr(engine, "traffic_manager", None)
+        rng = getattr(traffic_manager, "np_random", None)
+        if rng is not None:
+            return rng
+        rng = getattr(self, "np_random", None)
+        if rng is not None:
+            return rng
+        return getattr(engine, "np_random", None)
 
     def _select_fixed_route_spawn_road(self, route_roads):
         if not route_roads:

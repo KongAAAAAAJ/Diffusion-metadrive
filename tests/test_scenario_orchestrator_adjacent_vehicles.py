@@ -60,6 +60,14 @@ class FakeTrafficManager:
         return vehicle
 
 
+class _FixedUniformRng:
+    def __init__(self, value: float) -> None:
+        self.value = float(value)
+
+    def uniform(self, low, high):
+        return self.value
+
+
 def make_env_and_ego(lane_count: int = 3, ego_lane_index: int = 1, rng=None):
     lanes = [FakeLane(index) for index in range(lane_count)]
     road_network = FakeRoadNetwork(lanes)
@@ -152,16 +160,21 @@ def test_s6_fixed_traffic_spawns_at_head_relative_positions_only_once() -> None:
     orchestrator.before_step(env, "agent0", 2)
 
     ordinary_calls = [call for call in traffic_manager.spawn_calls if call[2] is None]
-    assert len(ordinary_calls) == 16
-    assert [call[1]["spawn_longitude"] for call in ordinary_calls[:8]] == [
-        ego.position[0] + offset
-        for offset in (20.0, 35.0, 50.0, 65.0, -40.0, -55.0, -70.0, -85.0)
+    assert len(ordinary_calls) == 15
+    assert [call[1]["spawn_longitude"] for call in ordinary_calls[:7]] == [
+        145.0,
+        170.0,
+        198.0,
+        70.0,
+        45.0,
+        10.0,
+        2.0,
     ]
-    assert [call[1]["spawn_lane_index"][-1] for call in ordinary_calls[8:]] == [
+    assert [call[1]["spawn_lane_index"][-1] for call in ordinary_calls[7:]] == [
         0, 0, 0, 0, 2, 2, 2, 2
     ]
-    assert [call[1]["spawn_longitude"] for call in ordinary_calls[8:12]] == [
-        ego.position[0] + offset for offset in (-30.0, -10.0, 15.0, 35.0)
+    assert [call[1]["spawn_longitude"] for call in ordinary_calls[7:11]] == [
+        ego.position[0] + offset for offset in (-40.0, -10.0, 15.0, 35.0)
     ]
 
 
@@ -177,8 +190,8 @@ def test_s6_fixed_traffic_skips_missing_adjacent_lane() -> None:
     orchestrator.before_step(env, "agent0", 1)
 
     ordinary_calls = [call for call in traffic_manager.spawn_calls if call[2] is None]
-    assert len(ordinary_calls) == 12
-    assert [call[1]["spawn_lane_index"][-1] for call in ordinary_calls[8:]] == [0, 0, 0, 0]
+    assert len(ordinary_calls) == 11
+    assert [call[1]["spawn_lane_index"][-1] for call in ordinary_calls[7:]] == [0, 0, 0, 0]
     assert sum(note.startswith("adjacent_lane_missing:right_") for note in orchestrator.summary.notes) == 4
 
 
@@ -199,14 +212,14 @@ def test_s5_hard_brake_recipe_randomizes_from_traffic_manager_rng(monkeypatch) -
 
     monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", fake_spawn)
 
-    orchestrator.before_step(env, "agent0", 1)
+    orchestrator.before_step(env, "agent0", 31)
 
     expected_rng = np.random.RandomState(123)
-    assert captured_params["lead_distance_m"] == float(expected_rng.uniform(45.0, 55.0))
+    assert captured_params["lead_distance_m"] == float(expected_rng.uniform(10.0, 15.0))
     assert captured_params["lead_target_speed_kmh"] == float(expected_rng.uniform(19.0, 23.0))
     assert captured_params["brake_target_speed_kmh"] == float(expected_rng.uniform(0.5, 2.0))
     assert captured_params["brake_duration_steps"] == int(expected_rng.randint(450, 551))
-    assert SCENARIO_BY_ID["S5_hard_brake_lead"].traffic_recipes[0].params["lead_distance_m"] == 50.0
+    assert SCENARIO_BY_ID["S5_hard_brake_lead"].traffic_recipes[0].params["lead_distance_m"] == 10.0
 
 
 def test_s5_adjacent_recipe_randomizes_each_vehicle_from_traffic_manager_rng() -> None:
@@ -451,6 +464,36 @@ def test_injected_background_vehicle_gets_topdown_marker() -> None:
     assert spawned.scenario_vehicle_role == "injected_background"
     assert spawned.spawn_config["spawn_velocity"] == (18.0 / 3.6, 0.0)
     assert spawned.spawn_config["spawn_velocity_car_frame"] is True
+
+
+def test_injected_background_vehicle_samples_spawn_longitude_range() -> None:
+    env, _ego, traffic_manager = make_env_and_ego(rng=_FixedUniformRng(7.5))
+    definition = ScenarioDefinition(
+        code="T",
+        scenario_id="test_injected_background_range",
+        allowed_local_routes=("R1_entry_straight",),
+        trigger_by_local_route={"R1_entry_straight": TriggerSpec("s0", 80.0, 120.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "inject_background_vehicle",
+                {
+                    "reference_kind": "ego_lane",
+                    "spawn_longitude": (0.0, 20.0),
+                    "target_speed_kmh": 18.0,
+                },
+            ),
+        ),
+        ego_spawn_lane_preference=None,
+        ego_spawn_lane_probabilities=None,
+        expert_recipe="test",
+        description="test",
+    )
+    orchestrator = ScenarioOrchestrator(definition, "R1_entry_straight")
+    orchestrator.reset(env, "agent0")
+
+    orchestrator.before_step(env, "agent0", 5)
+
+    assert traffic_manager.spawn_calls[0][1]["spawn_longitude"] == pytest.approx(97.5)
 
 
 def test_hard_brake_spawned_lead_uses_lead_target_speed_as_initial_velocity(monkeypatch) -> None:

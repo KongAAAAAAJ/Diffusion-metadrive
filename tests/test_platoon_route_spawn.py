@@ -22,6 +22,14 @@ class _FakeTrafficVehicle:
         self.position = np.asarray([float(x), float(y)], dtype=np.float32)
 
 
+class _FixedUniformRng:
+    def __init__(self, value: float) -> None:
+        self.value = float(value)
+
+    def uniform(self, low, high):
+        return self.value
+
+
 class _FakeEnv:
     _route_spawn_min_tail_buffer_m = PlatoonEnv._route_spawn_min_tail_buffer_m
     _route_spawn_min_front_buffer_m = PlatoonEnv._route_spawn_min_front_buffer_m
@@ -86,6 +94,7 @@ def _build_runtime_route_env(monkeypatch, *, explicit_initial_speed: bool = Fals
         "initial_speed_km_h": env.platoon_config.initial_speed_km_h,
     }
     engine = SimpleNamespace(
+        traffic_manager=SimpleNamespace(np_random=_FixedUniformRng(24.5)),
         global_config={
             **env.config,
             "agent_configs": {
@@ -109,8 +118,8 @@ def test_runtime_scenario_route_replaces_route_and_invalidates_old_destinations(
     assert env.config["ego_main_route_block_ids"] == ("c2", "g1", "c3")
     assert env.engine.global_config["ego_main_route_block_ids"] == ("c2", "g1", "c3")
     assert env.config["route_preset"] == "mainline"
-    assert env.platoon_config.initial_speed_km_h == pytest.approx(22.0)
-    assert env.engine.global_config["initial_speed_km_h"] == pytest.approx(22.0)
+    assert env.platoon_config.initial_speed_km_h == pytest.approx(24.5)
+    assert env.engine.global_config["initial_speed_km_h"] == pytest.approx(24.5)
     assert env.platoon_config.traffic_density == pytest.approx(0.03)
     assert env.config["traffic_spawn_exclusion_ahead_m"] == pytest.approx(100.0)
     assert env.config["traffic_spawn_exclusion_behind_m"] == pytest.approx(100.0)

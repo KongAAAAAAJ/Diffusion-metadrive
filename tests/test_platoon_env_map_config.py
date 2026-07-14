@@ -46,6 +46,21 @@ def test_scenario_definition_can_supply_initial_speed_when_not_explicit(monkeypa
     assert config["initial_speed_km_h"] == 18.0
 
 
+def test_scenario_definition_initial_speed_range_uses_midpoint_when_not_explicit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        platoon_env_module,
+        "SCENARIO_BY_ID",
+        {"S_speed_range": SimpleNamespace(ego_initial_speed_km_h=(20.0, 26.0))},
+        raising=False,
+    )
+    config = PlatoonEnv._apply_scenario_definition_defaults(
+        {"scenario_id": "S_speed_range", "initial_speed_km_h": 25.0},
+        explicit_config_keys={"scenario_id"},
+    )
+
+    assert config["initial_speed_km_h"] == 23.0
+
+
 def test_explicit_initial_speed_overrides_scenario_definition(monkeypatch) -> None:
     monkeypatch.setattr(
         platoon_env_module,

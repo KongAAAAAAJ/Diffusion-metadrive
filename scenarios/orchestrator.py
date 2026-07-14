@@ -230,6 +230,7 @@ class ScenarioOrchestrator:
         setattr(vehicle, "scenario_role", "hard_brake_lead")
 
     def _handle_inject_background_vehicle(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
+        params = self._resolve_background_vehicle_params(env, params)
         reference_kind = str(params.get("reference_kind", "ego_lane"))
         policy_class, policy_kwargs, vehicle_config_overrides = self._resolve_injected_background_policy(params)
         spawned = self._spawn_on_reference(
@@ -341,6 +342,13 @@ class ScenarioOrchestrator:
             resolved["target_speed_kmh"] = self._sample_float_range(env, params["target_speed_range_kmh"])
         return resolved
 
+    def _resolve_background_vehicle_params(self, env, params: Dict[str, object]) -> Dict[str, object]:
+        resolved = dict(params)
+        spawn_longitude = params.get("spawn_longitude")
+        if self._is_float_range(spawn_longitude):
+            resolved["spawn_longitude"] = self._sample_float_range(env, spawn_longitude)
+        return resolved
+
     @staticmethod
     def _rng_from_env(env):
         traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
@@ -351,6 +359,10 @@ class ScenarioOrchestrator:
         if rng is not None:
             return rng
         return getattr(getattr(env, "engine", None), "np_random", None)
+
+    @staticmethod
+    def _is_float_range(value) -> bool:
+        return isinstance(value, (tuple, list)) and len(value) == 2
 
     def _sample_float_range(self, env, value_range) -> float:
         low, high = value_range

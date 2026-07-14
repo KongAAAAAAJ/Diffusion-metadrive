@@ -46,11 +46,11 @@ class ScenarioDefinition:
     ego_spawn_reference_block_id: str | None = None
     ego_spawn_reference_kind: str | None = None
     ego_spawn_internal_road_index: int | None = None
-    ego_spawn_longitude_m: float | None = None
+    ego_spawn_longitude_m: float | Tuple[float, float] | None = None
     ego_spawn_lane_id: int | None = None
     # Backward-compatible alternative: distance from selected road end.
     ego_spawn_distance_to_route_end_m: float | None = None
-    ego_initial_speed_km_h: float | None = None
+    ego_initial_speed_km_h: float | Tuple[float, float] | None = None
 
     @property
     def allowed_route_presets(self) -> Tuple[str, ...]:
@@ -200,8 +200,8 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_lane_preference="rightmost",
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",
-        ego_spawn_longitude_m=90,  # 随机范围约 26m ~ 92m
-        ego_initial_speed_km_h=22.0,  # 随机范围约 20 ~ 26 km/h
+        ego_spawn_longitude_m=(25.0, 90.0),
+        ego_initial_speed_km_h=(20.0, 26.0),
         override_traffic_density=0.03,
         env_overrides={
             "traffic_spawn_exclusion_ahead_m": 100.0,
