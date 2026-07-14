@@ -135,7 +135,7 @@ class IDMMergePolicy(IDMPolicy):
         front_gap = float(surrounding.front_min_distance()) if surrounding.has_front_object() else inf
         rear_gap = float(surrounding.back_min_distance()) if surrounding.has_back_object() else inf
         rear_ttc = self._rear_ttc_s(surrounding.back_object(), rear_gap)
-        gap_accepted = front_gap >= 10 and rear_gap >= 10 and rear_ttc >= 2.0  # 前后间距 10m 10m, 后车TTC >= 2s
+        gap_accepted = front_gap >= 10 and rear_gap >= 10 and rear_ttc >= 4.0  # *前后间距 10m 10m, 后车TTC >= 2s
 
         print(f"Front gap: {front_gap:.2f} m, Rear gap: {rear_gap:.2f} m, Rear TTC: {rear_ttc:.2f} s, Gap accepted: {gap_accepted}, Force active: {force_active}")
 

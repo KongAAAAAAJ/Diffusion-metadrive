@@ -113,7 +113,7 @@ checkpoint_interval_steps: 2500
 
 env_config:
   num_agents: 3
-  horizon: 70  # max steps per episode
+  horizon: 90  # max steps per episode
   observation_mode: multimodal
   use_render: false
   image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption
