@@ -701,7 +701,8 @@ class TopDownRenderer:
                 continue
             # Pass heading_theta when target_agent_heading_up is enabled to keep text horizontal
             heading_theta = self.current_track_agent.heading_theta if self.target_agent_heading_up else None
-            self._draw_warning_marker(self._screen_canvas, vehicle, screen_position=screen_position, heading_theta=heading_theta)
+            # !删除warning标记
+            # self._draw_warning_marker(self._screen_canvas, vehicle, screen_position=screen_position, heading_theta=heading_theta)
 
     def _world_to_screen_position(self, position, off):
         frame_pos = np.asarray(self._frame_canvas.pos2pix(position[0], position[1]), dtype=np.float32)
