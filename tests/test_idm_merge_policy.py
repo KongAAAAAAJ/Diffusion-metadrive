@@ -166,11 +166,29 @@ def test_merge_policy_latches_completed_after_entering_mainline(monkeypatch) -> 
 
     result = policy.lane_change_policy([])
 
-    assert result is sentinel
+    assert result == sentinel
     assert policy.target_speed == 17.0
     assert policy.merge_completed is True
     assert policy.action_info["merge_active"] is False
     assert policy.action_info["merge_force_active"] is False
+    assert policy.action_info["merge_completed"] is True
+
+
+def test_merge_policy_locks_current_lane_after_completed_latch(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    policy = _make_policy(road_network, road_network.mainline[-1], [])
+    parent_front = object()
+    parent_lane_change_target = road_network.after_merge
+    monkeypatch.setattr(
+        IDMPolicy,
+        "lane_change_policy",
+        lambda self, objects: (parent_front, 12.0, parent_lane_change_target),
+    )
+
+    result = policy.lane_change_policy([])
+
+    assert result == (parent_front, 12.0, road_network.mainline[-1])
+    assert policy.merge_completed is True
     assert policy.action_info["merge_completed"] is True
 
 
@@ -182,16 +200,16 @@ def test_merge_policy_does_not_reenter_force_after_completed_latch(monkeypatch) 
 
     first_result = policy.lane_change_policy([])
 
-    assert first_result is first_sentinel
+    assert first_result == first_sentinel
     assert policy.merge_completed is True
 
     policy.control_object.lane = road_network.connector
-    second_sentinel = (object(), 8.0, road_network.connector)
+    second_sentinel = (object(), 8.0, road_network.after_merge)
     monkeypatch.setattr(IDMPolicy, "lane_change_policy", lambda self, objects: second_sentinel)
 
     second_result = policy.lane_change_policy([])
 
-    assert second_result is second_sentinel
+    assert second_result == (second_sentinel[0], second_sentinel[1], road_network.connector)
     assert policy.merge_completed is True
     assert policy.action_info["merge_active"] is False
     assert policy.action_info["merge_force_active"] is False

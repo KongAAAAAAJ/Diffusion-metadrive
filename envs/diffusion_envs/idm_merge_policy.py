@@ -109,14 +109,13 @@ class IDMMergePolicy(IDMPolicy):
             completed=self.merge_completed,
         )
         if self.merge_completed:
-            return parent_result
+            return parent_result[0], parent_result[1], self.control_object.lane
 
         target_lane = self._find_merge_target_lane()
         if target_lane is None:
             return parent_result
 
-        # force_active = self._is_force_merge_road()
-        force_active = True
+        force_active = self._is_force_merge_road()
 
         search_distance = max(
             float(self.MAX_LONG_DIST),
