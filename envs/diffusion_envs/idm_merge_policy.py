@@ -119,7 +119,7 @@ class IDMMergePolicy(IDMPolicy):
         if target_lane is None:
             return parent_result
 
-        force_active = current_step > 10  # !第几个step开启强制合流
+        force_active = current_step > 2  # !第几个step开启强制合流
 
         search_distance = max(
             float(self.MAX_LONG_DIST),
@@ -135,7 +135,7 @@ class IDMMergePolicy(IDMPolicy):
         front_gap = float(surrounding.front_min_distance()) if surrounding.has_front_object() else inf
         rear_gap = float(surrounding.back_min_distance()) if surrounding.has_back_object() else inf
         rear_ttc = self._rear_ttc_s(surrounding.back_object(), rear_gap)
-        gap_accepted = front_gap >= 10 and rear_gap >= 10 and rear_ttc >= 4.0  # *前后间距 10m 10m, 后车TTC >= 2s
+        gap_accepted = front_gap >= self.merge_front_gap_m and rear_gap >= self.merge_rear_gap_m and rear_ttc >= 4.0  # *前后间距 10m 10m, 后车TTC >= 2s
 
         print(f"Front gap: {front_gap:.2f} m, Rear gap: {rear_gap:.2f} m, Rear TTC: {rear_ttc:.2f} s, Gap accepted: {gap_accepted}, Force active: {force_active}")
 

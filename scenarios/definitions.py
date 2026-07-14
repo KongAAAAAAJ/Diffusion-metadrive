@@ -198,8 +198,8 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_lane_preference="rightmost",
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",
-        ego_spawn_longitude_m=90,  # 范围约26m ~ 92m
-        ego_initial_speed_km_h=22.0,
+        ego_spawn_longitude_m=90,  # 随机范围约 26m ~ 92m
+        ego_initial_speed_km_h=22.0,  # 随机范围约 20 ~ 26 km/h
         expert_recipe="保守让行",
         description="背景车并入 ego 所在主线",
     ),
