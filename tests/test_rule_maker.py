@@ -45,6 +45,12 @@ def test_rule_maker_factory_configures_relock_ttc_threshold():
     assert overridden_rule_maker.relock_ttc_threshold_s == pytest.approx(7.5)
 
 
+def test_rule_maker_factory_configures_forced_lane_unlock_wait_steps():
+    rule_maker = make_rule_maker({"rule_maker_forced_lane_unlock_wait_steps": 3})
+
+    assert rule_maker.forced_lane_unlock_wait_steps == 3
+
+
 class FakeLane:
     def __init__(self, lane_id: int, y: float, length: float = 200.0, width: float = 3.5):
         self.index = ("A", "B", lane_id)
@@ -133,6 +139,46 @@ def test_risk_detector_keeps_locked_at_or_above_ttc_threshold(front_x, front_spe
 
     assert result["triggered"] is False
     assert result["next_state"] == "LOCKED"
+
+
+def test_risk_detector_unlocks_when_partial_forced_lane_wait_reaches_threshold():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=20.0)},
+        traffic=[],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(
+        env,
+        ["agent0"],
+        [],
+        "LOCKED",
+        forced_lane_wait_info={"partial_forced_wait_steps": 10, "threshold_steps": 10},
+    )
+
+    assert result["triggered"] is True
+    assert result["next_state"] == "UNLOCKED"
+    assert result["transition"] == "LOCKED_TO_UNLOCKED"
+    assert result["reason"] == "partial_forced_lane_wait>=10_steps"
+
+
+def test_risk_detector_ignores_forced_lane_wait_while_unlocked():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=20.0)},
+        traffic=[],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=3.0)
+
+    result = detector.detect(
+        env,
+        ["agent0"],
+        [],
+        "UNLOCKED",
+        forced_lane_wait_info={"partial_forced_wait_steps": 10, "threshold_steps": 10},
+    )
+
+    assert result["triggered"] is False
+    assert result["next_state"] == "UNLOCKED"
 
 
 def test_risk_detector_ignores_close_vehicle_in_adjacent_lane_without_intrusion_for_ttc():
@@ -1260,3 +1306,123 @@ def test_rule_maker_relocks_on_next_step_when_follower_gap_is_small():
     assert debug["formation_locked"] is True
     assert debug["risk_triggered"] is True
     assert debug["state_transition"] == "UNLOCKED_TO_LOCKED"
+
+
+def _forced_wait_candidate(action: int, *, forced: bool = False):
+    candidate = {
+        "action": int(action),
+        "valid": True,
+        "score": 0.0,
+        "trajectory_world": np.asarray([[0.0, 0.0], [5.0, 0.0]], dtype=np.float32),
+        "target_point": np.asarray([5.0, 0.0], dtype=np.float32),
+        "source_lane_index": ("A", "B", 1),
+        "target_lane_index": ("A", "B", 1 + int(action)),
+        "mobil_gain": 0.0,
+    }
+    if forced:
+        candidate["forced_lane_change"] = True
+    return candidate
+
+
+def test_rule_maker_unlocks_after_partial_forced_lane_wait_timeout(monkeypatch):
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 10.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 2.0, 0.0, 1),
+        },
+        traffic=[],
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        locked_on_reset=True,
+        forced_lane_unlock_wait_steps=10,
+    )
+
+    def fake_candidates(_env, vehicle, _traffic_vehicles):
+        if vehicle.name == "agent0":
+            return [_forced_wait_candidate(0, forced=False), _forced_wait_candidate(1, forced=True)]
+        return [_forced_wait_candidate(0, forced=False), _forced_wait_candidate(1, forced=False)]
+
+    monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
+    for _ in range(9):
+        rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+        debug = rule_maker.get_last_debug()
+        assert debug["formation_locked"] is True
+        assert debug["forced_lane_wait_info"]["partial_forced_wait_steps"] < 10
+
+    rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert debug["formation_locked"] is False
+    assert debug["state_transition"] == "LOCKED_TO_UNLOCKED"
+    assert debug["risk_info"]["reason"] == "partial_forced_lane_wait>=10_steps"
+    assert debug["forced_lane_wait_info"]["forced_agents"] == ["agent0"]
+    assert debug["forced_lane_wait_info"]["all_forced_ready"] is False
+    assert debug["forced_lane_wait_info"]["partial_forced_wait_steps"] == 10
+
+
+def test_rule_maker_clears_forced_lane_wait_when_signal_disappears(monkeypatch):
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 10.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 2.0, 0.0, 1),
+        },
+        traffic=[],
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        locked_on_reset=True,
+        forced_lane_unlock_wait_steps=10,
+    )
+    forced_enabled = {"value": True}
+
+    def fake_candidates(_env, vehicle, _traffic_vehicles):
+        if vehicle.name == "agent0" and forced_enabled["value"]:
+            return [_forced_wait_candidate(0, forced=False), _forced_wait_candidate(1, forced=True)]
+        return [_forced_wait_candidate(0, forced=False), _forced_wait_candidate(1, forced=False)]
+
+    monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
+    rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    assert rule_maker.get_last_debug()["forced_lane_wait_info"]["partial_forced_wait_steps"] == 1
+
+    forced_enabled["value"] = False
+    rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+    assert debug["forced_lane_wait_info"]["forced_agents"] == []
+    assert debug["forced_lane_wait_info"]["forced_lane_first_step"] == {}
+    assert debug["forced_lane_wait_info"]["partial_forced_wait_steps"] == 0
+
+    forced_enabled["value"] = True
+    rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+    assert debug["forced_lane_wait_info"]["partial_forced_wait_steps"] == 1
+
+
+def test_rule_maker_all_forced_ready_does_not_trigger_wait_unlock(monkeypatch):
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 10.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 2.0, 0.0, 1),
+        },
+        traffic=[],
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        locked_on_reset=True,
+        forced_lane_unlock_wait_steps=1,
+    )
+
+    def fake_candidates(_env, vehicle, _traffic_vehicles):
+        return [_forced_wait_candidate(1, forced=True)]
+
+    monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
+    rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert debug["formation_locked"] is True
+    assert debug["forced_lane_decision"] is True
+    assert debug["forced_lane_wait_info"]["all_forced_ready"] is True
+    assert debug["forced_lane_wait_info"]["partial_forced_wait_steps"] == 0

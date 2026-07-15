@@ -138,6 +138,7 @@ class MultiAgentRuleMaker(RuleMaker):
         relock_ttc_threshold_s: float = 5.0,
         ideal_following_distance_m: float = 10.0,
         relock_gap_ratio: float = 1.5,
+        forced_lane_unlock_wait_steps: int = 10,
     ) -> None:
         self.target_speed_km_h = float(target_speed_km_h)
         self.horizon_s = float(horizon_s)
@@ -171,6 +172,7 @@ class MultiAgentRuleMaker(RuleMaker):
         self.relock_ttc_threshold_s = float(relock_ttc_threshold_s)
         self.ideal_following_distance_m = float(ideal_following_distance_m)
         self.relock_gap_ratio = float(relock_gap_ratio)
+        self.forced_lane_unlock_wait_steps = max(1, int(forced_lane_unlock_wait_steps))
         self._formation_locked = bool(self.locked_on_reset)
         self._risk_detector = SimpleRuleRiskDetector(
             ttc_trigger_s=self.risk_ttc_trigger_s,
@@ -179,6 +181,8 @@ class MultiAgentRuleMaker(RuleMaker):
             relock_gap_ratio=self.relock_gap_ratio,
         )
         self._last_debug: dict | None = None
+        self._decision_step = 0
+        self._forced_lane_first_step_by_agent: dict[str, int] = {}
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
         self._s7_route_lanes_debug_plot_counter = 0
@@ -187,6 +191,8 @@ class MultiAgentRuleMaker(RuleMaker):
     def reset(self, env, agent_ids: list[str]) -> None:  # noqa: ARG002
         self._formation_locked = bool(self.locked_on_reset)
         self._last_debug = None
+        self._decision_step = 0
+        self._forced_lane_first_step_by_agent.clear()
 
     @property
     def is_formation_locked(self) -> bool:
@@ -227,17 +233,25 @@ class MultiAgentRuleMaker(RuleMaker):
         if not candidates_by_agent:
             return {}
 
+        self._decision_step += 1
         ordered_agent_ids = [agent_id for agent_id in agent_ids if agent_id in candidates_by_agent]
         current_state = "LOCKED" if self._formation_locked else "UNLOCKED"
+        forced_combo = self._forced_lane_combo(ordered_agent_ids, candidates_by_agent)
+        forced_lane_wait_info = self._update_forced_lane_wait_info(
+            ordered_agent_ids=ordered_agent_ids,
+            candidates_by_agent=candidates_by_agent,
+            forced_combo=forced_combo,
+            track_wait=current_state == "LOCKED",
+        )
         risk_info = self._risk_detector.detect(
             env,
             ordered_agent_ids,
             traffic_vehicles,
             current_state,
+            forced_lane_wait_info=forced_lane_wait_info,
         )
         self._formation_locked = risk_info["next_state"] == "LOCKED"
 
-        forced_combo = self._forced_lane_combo(ordered_agent_ids, candidates_by_agent)
         forced_lane_decision = forced_combo is not None
         if forced_lane_decision:
             best_combo = forced_combo
@@ -316,6 +330,7 @@ class MultiAgentRuleMaker(RuleMaker):
             "risk_triggered": bool(risk_info.get("triggered", False)),
             "state_transition": risk_info.get("transition"),
             "forced_lane_decision": bool(forced_lane_decision),
+            "forced_lane_wait_info": forced_lane_wait_info,
             "risk_info": risk_info,
             "dynamic_roles": dynamic_roles,
             "candidates_by_agent": {
@@ -418,6 +433,63 @@ class MultiAgentRuleMaker(RuleMaker):
                 return None
             combo.append(forced[0])
         return tuple(combo)
+
+    def _update_forced_lane_wait_info(
+        self,
+        *,
+        ordered_agent_ids: list[str],
+        candidates_by_agent: dict[str, list[dict]],
+        forced_combo: tuple[dict, ...] | None,
+        track_wait: bool = True,
+    ) -> dict:
+        forced_agents = [
+            agent_id
+            for agent_id in ordered_agent_ids
+            if any(bool(candidate.get("forced_lane_change", False)) for candidate in candidates_by_agent.get(agent_id, []))
+        ]
+        all_forced_ready = forced_combo is not None
+        current_forced = set(forced_agents)
+        if not track_wait:
+            self._forced_lane_first_step_by_agent.clear()
+            return {
+                "decision_step": int(self._decision_step),
+                "threshold_steps": int(self.forced_lane_unlock_wait_steps),
+                "forced_agents": list(forced_agents),
+                "all_forced_ready": bool(all_forced_ready),
+                "partial_forced": bool(forced_agents) and not all_forced_ready,
+                "partial_forced_wait_steps": 0,
+                "forced_lane_first_step": {},
+                "forced_lane_wait_steps_by_agent": {},
+            }
+        for agent_id in list(self._forced_lane_first_step_by_agent):
+            if agent_id not in current_forced:
+                self._forced_lane_first_step_by_agent.pop(agent_id, None)
+        for agent_id in forced_agents:
+            self._forced_lane_first_step_by_agent.setdefault(agent_id, int(self._decision_step))
+        if all_forced_ready:
+            self._forced_lane_first_step_by_agent.clear()
+
+        first_steps = {
+            agent_id: int(step)
+            for agent_id, step in self._forced_lane_first_step_by_agent.items()
+            if agent_id in current_forced
+        }
+        partial_forced = bool(forced_agents) and not all_forced_ready
+        wait_steps_by_agent = {
+            agent_id: max(0, int(self._decision_step) - int(first_step) + 1)
+            for agent_id, first_step in first_steps.items()
+        }
+        partial_wait_steps = max(wait_steps_by_agent.values(), default=0) if partial_forced else 0
+        return {
+            "decision_step": int(self._decision_step),
+            "threshold_steps": int(self.forced_lane_unlock_wait_steps),
+            "forced_agents": list(forced_agents),
+            "all_forced_ready": bool(all_forced_ready),
+            "partial_forced": bool(partial_forced),
+            "partial_forced_wait_steps": int(partial_wait_steps),
+            "forced_lane_first_step": first_steps,
+            "forced_lane_wait_steps_by_agent": wait_steps_by_agent,
+        }
 
     def _best_locked_combo(
         self,
@@ -749,7 +821,7 @@ class MultiAgentRuleMaker(RuleMaker):
         target_lane_index = tuple(candidate.get("target_lane_index", ()) or ())
         if len(target_lane_index) < 3:
             return False
-        return int(target_lane_index[2]) == 2
+        return True
 
     def _S8_reference_lane_chain(self, env, vehicle, source_lane) -> list | None:
         lane_chain = [source_lane]
@@ -1145,7 +1217,7 @@ class MultiAgentRuleMaker(RuleMaker):
         return None
 
     def _S7_downstream_target_lane(self, env, vehicle, source_lane):
-        debug = 1
+        debug = 0
         if debug:
             road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
             navigation = getattr(vehicle, "navigation", None)
@@ -1161,11 +1233,11 @@ class MultiAgentRuleMaker(RuleMaker):
                 )
 
         lane_index = tuple(getattr(source_lane, "index", ()) or ())
-        if lane_index == ("A", "B", 3):
+        if lane_index == ('9g0_0_', '9g1_4_', 0):
             road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
             if road_network is not None and hasattr(road_network, "get_lane"):
                 try:
-                    return road_network.get_lane(("A", "B", 2))
+                    return road_network.get_lane(('9g0_0_', '9g0_1_', 2))
                 except Exception:
                     return None
         if len(lane_index) < 3:
@@ -1278,6 +1350,7 @@ def make_rule_maker(config: dict) -> RuleMaker:
         "relock_ttc_threshold_s": config.get("rule_maker_relock_ttc_threshold_s"),
         "ideal_following_distance_m": config.get("rule_maker_ideal_following_distance_m"),
         "relock_gap_ratio": config.get("rule_maker_relock_gap_ratio"),
+        "forced_lane_unlock_wait_steps": config.get("rule_maker_forced_lane_unlock_wait_steps"),
     }
     for k, v in _overrides.items():
         if v is not None:
@@ -1317,6 +1390,7 @@ def make_rule_maker(config: dict) -> RuleMaker:
             relock_ttc_threshold_s=float(yaml_params.get("relock_ttc_threshold_s", 5.0)),
             ideal_following_distance_m=float(yaml_params.get("ideal_following_distance_m", 10.0)),
             relock_gap_ratio=float(yaml_params.get("relock_gap_ratio", 1.5)),
+            forced_lane_unlock_wait_steps=int(yaml_params.get("forced_lane_unlock_wait_steps", 10)),
         )
     raise ValueError(
         f"Unknown rule_maker_type: {rule_maker_type!r}. "

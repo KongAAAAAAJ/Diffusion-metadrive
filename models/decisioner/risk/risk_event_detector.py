@@ -20,6 +20,7 @@ class RiskDetector(ABC):
         agent_ids: list[str],
         traffic_vehicles: list,
         current_state: str,
+        forced_lane_wait_info: dict | None = None,
     ) -> dict:
         """Return the state transition and the metrics used to decide it."""
 
@@ -46,6 +47,7 @@ class SimpleRuleRiskDetector(RiskDetector):
         agent_ids: list[str],
         traffic_vehicles: list,
         current_state: str,
+        forced_lane_wait_info: dict | None = None,
     ) -> dict:
         state = str(current_state).upper()
         if state not in VALID_STATES:
@@ -53,11 +55,33 @@ class SimpleRuleRiskDetector(RiskDetector):
 
         agents = getattr(env, "agents", {}) or {}
         if state == LOCKED:
-            return self._detect_unlock(agents, agent_ids, traffic_vehicles)
+            return self._detect_unlock(agents, agent_ids, traffic_vehicles, forced_lane_wait_info=forced_lane_wait_info)
         return self._detect_relock(agents, agent_ids, traffic_vehicles)
 
-    def _detect_unlock(self, agents: dict, agent_ids: list[str], traffic_vehicles: list) -> dict:
+    def _detect_unlock(
+        self,
+        agents: dict,
+        agent_ids: list[str],
+        traffic_vehicles: list,
+        *,
+        forced_lane_wait_info: dict | None = None,
+    ) -> dict:
         leader_metrics = self._leader_ttc_metrics(agents, agent_ids, traffic_vehicles)
+        forced_lane_wait_info = dict(forced_lane_wait_info or {})
+        forced_wait_steps = int(forced_lane_wait_info.get("partial_forced_wait_steps", 0) or 0)
+        forced_wait_threshold = int(forced_lane_wait_info.get("threshold_steps", 0) or 0)
+        forced_wait_transitioned = forced_wait_threshold > 0 and forced_wait_steps >= forced_wait_threshold
+        if forced_wait_transitioned:
+            return self._result(
+                current_state=LOCKED,
+                next_state=UNLOCKED,
+                transition="LOCKED_TO_UNLOCKED",
+                reason=f"partial_forced_lane_wait>={forced_wait_threshold}_steps",
+                leader=leader_metrics,
+                follower_pairs=[],
+                min_follower_gap_m=None,
+                forced_lane_wait_info=forced_lane_wait_info,
+            )
 
         ttc = leader_metrics["ttc_s"]
         transitioned = ttc is not None and ttc < self.ttc_trigger_s
@@ -73,6 +97,7 @@ class SimpleRuleRiskDetector(RiskDetector):
             leader=leader_metrics,
             follower_pairs=[],
             min_follower_gap_m=None,
+            forced_lane_wait_info=forced_lane_wait_info,
         )
 
     def _detect_relock(self, agents: dict, agent_ids: list[str], traffic_vehicles: list) -> dict:

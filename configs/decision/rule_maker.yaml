@@ -19,6 +19,7 @@ default:
   relock_ttc_threshold_s: 5.0   # UNLOCKED -> LOCKED only when leader TTC is above this
   ideal_following_distance_m: 10.0
   relock_gap_ratio: 1.5         # UNLOCKED -> LOCKED below ratio * ideal distance
+  forced_lane_unlock_wait_steps: 10  # partial forced lane-change wait before unlock
 
   # ── IDM longitudinal model ─────────────────────────────────────────────────
   idm_time_headway_s: 1.2       # desired time gap to front vehicle

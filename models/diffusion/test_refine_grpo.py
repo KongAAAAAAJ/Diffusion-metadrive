@@ -1082,7 +1082,7 @@ def run_test(args):
         # terminates, truncates, or a script-level stop condition is reached.
         while not done:
             step_started_at = time.time()
-            if episode_step == 60:
+            if episode_step == 50:
                 debug = 1
                 
             if max_steps > 0 and episode_step >= max_steps:
