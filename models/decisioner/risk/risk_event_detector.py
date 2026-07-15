@@ -71,7 +71,7 @@ class SimpleRuleRiskDetector(RiskDetector):
         forced_wait_steps = int(forced_lane_wait_info.get("partial_forced_wait_steps", 0) or 0)
         forced_wait_threshold = int(forced_lane_wait_info.get("threshold_steps", 0) or 0)
         forced_wait_transitioned = forced_wait_threshold > 0 and forced_wait_steps >= forced_wait_threshold
-        if forced_wait_transitioned:
+        if forced_wait_transitioned: # *强制换道切换
             return self._result(
                 current_state=LOCKED,
                 next_state=UNLOCKED,
@@ -86,7 +86,7 @@ class SimpleRuleRiskDetector(RiskDetector):
         ttc = leader_metrics["ttc_s"]
         transitioned = ttc is not None and ttc < self.ttc_trigger_s
 
-        if transitioned:
+        if transitioned: # *风险切换
             print(f"ttc = {ttc}s")
             
         return self._result(

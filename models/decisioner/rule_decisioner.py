@@ -819,9 +819,10 @@ class MultiAgentRuleMaker(RuleMaker):
         if int(candidate.get("action", 0)) != -1:
             return False
         target_lane_index = tuple(candidate.get("target_lane_index", ()) or ())
-        if len(target_lane_index) < 3:
-            return False
-        return True
+        source_lane_index = tuple(candidate.get("source_lane_index", ()) or ())
+        if source_lane_index == ('9g0_0_', '9g1_4_', 0) and target_lane_index == ('9g0_0_', '9g0_1_', 2):
+            return True
+        return False
 
     def _S8_reference_lane_chain(self, env, vehicle, source_lane) -> list | None:
         lane_chain = [source_lane]
