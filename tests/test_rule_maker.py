@@ -13,6 +13,7 @@ from models.decisioner.risk import RiskDetector, SimpleRuleRiskDetector
 from models.decisioner.rule_decisioner_helper import (
     save_candidate_debug_plot,
     save_lane_pair_debug_plot,
+    save_s7_route_lanes_debug_plot,
     save_s8_route_lanes_debug_plot,
 )
 from models.decisioner.rule_decisioner import MultiAgentRuleMaker, make_rule_maker
@@ -782,6 +783,38 @@ def test_rule_maker_helper_saves_s8_route_lanes_debug_plot_png(tmp_path, monkeyp
     assert ("C", "D", 0) in seen_lane_indices
 
 
+def test_rule_maker_helper_saves_s7_route_lanes_debug_plot_png(tmp_path, monkeypatch):
+    vehicle = _vehicle("s7_route_plot_agent", 25.0, 0.0, 3)
+    env = _env_s7_merge(vehicle)
+    seen_lane_indices = []
+    original_lane_centerline_points = rule_maker_module.save_s7_route_lanes_debug_plot.__globals__["_lane_centerline_points"]
+
+    def record_lane_centerline_points(lane):
+        seen_lane_indices.append(tuple(getattr(lane, "index", ()) or ()))
+        return original_lane_centerline_points(lane)
+
+    monkeypatch.setitem(
+        rule_maker_module.save_s7_route_lanes_debug_plot.__globals__,
+        "_lane_centerline_points",
+        record_lane_centerline_points,
+    )
+
+    output_path = save_s7_route_lanes_debug_plot(
+        vehicle,
+        env.engine.current_map.road_network,
+        ["A", "B"],
+        vehicle.lane,
+        counter=1,
+        output_dir=tmp_path,
+    )
+
+    assert output_path == tmp_path / "s7_route_lanes_s7_route_plot_agent_000001.png"
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+    assert ("A", "B", 3) in seen_lane_indices
+    assert ("B", "C", 2) in seen_lane_indices
+
+
 def test_rule_maker_idm_profile_slows_terminal_speed_when_slow_front_vehicle_exists():
     env = _env(
         agents={"agent0": _vehicle("agent0", 0.0, 0.0, 1, speed_km_h=28.0)},
@@ -979,6 +1012,36 @@ def test_s7_left_lane_change_to_mainline_third_lane_is_marked_forced():
     assert candidate is not None
     assert candidate["target_lane_index"] == ("A", "B", 2)
     assert candidate["forced_lane_change"] is True
+
+
+def test_s7_target_lane_uses_special_branch_for_left_action(monkeypatch):
+    vehicle = _vehicle("agent0", 25.0, 0.0, 3, speed_km_h=25.0)
+    env = _env_s7_merge(vehicle)
+    rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
+    branch_target = env.engine.current_map.road_network.get_lane(("B", "C", 2))
+    calls = []
+
+    def fake_s7_target(env_arg, vehicle_arg, source_lane_arg):
+        calls.append((env_arg, vehicle_arg, source_lane_arg))
+        return branch_target
+
+    monkeypatch.setattr(rule_maker, "_S7_downstream_target_lane", fake_s7_target)
+
+    target_lane = rule_maker._target_lane(env, env.agents["agent0"], env.agents["agent0"].lane, -1)
+
+    assert target_lane is branch_target
+    assert calls == [(env, env.agents["agent0"], env.agents["agent0"].lane)]
+
+
+def test_s7_downstream_target_lane_uses_placeholder_hardcoded_branch():
+    vehicle = _vehicle("agent0", 25.0, 0.0, 3, speed_km_h=25.0)
+    env = _env_s7_merge(vehicle)
+    rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
+
+    target_lane = rule_maker._S7_downstream_target_lane(env, env.agents["agent0"], env.agents["agent0"].lane)
+
+    assert target_lane is not None
+    assert tuple(target_lane.index) == ("A", "B", 2)
 
 
 def test_s7_forced_lane_change_bypasses_joint_score_and_selects_left_action(monkeypatch):

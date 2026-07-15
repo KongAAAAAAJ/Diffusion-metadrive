@@ -1546,7 +1546,8 @@ class PlatoonEnv(BaseMultiEnv):
         speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
         ego_length = self._vehicle_length_m(ego_id)
         other_length = self._vehicle_length_m(other_id)
-        return 0.5 * (ego_length + other_length) + speed_m_s * self._cfg_float("headway_time_s", 0.5)
+        # return 0.5 * (ego_length + other_length) + speed_m_s * self._cfg_float("headway_time_s", 0.5)
+        return 0.5 * (ego_length + other_length) + 10  # !暂时设置成固定的
 
     def get_formation_relation_state(self, agent_id: str) -> np.ndarray:
         ego_pose = self._agent_pose(agent_id)

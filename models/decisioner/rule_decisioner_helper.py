@@ -104,6 +104,49 @@ def save_s8_route_lanes_debug_plot(
     counter: int,
     output_dir: str | Path = "models/decisioner/outputs",
 ) -> Path:
+    return _save_route_lanes_debug_plot(
+        vehicle=vehicle,
+        road_network=road_network,
+        checkpoints=checkpoints,
+        source_lane=source_lane,
+        counter=counter,
+        output_dir=output_dir,
+        scenario_tag="s8",
+        title_tag="S8",
+    )
+
+
+def save_s7_route_lanes_debug_plot(
+    vehicle,
+    road_network,
+    checkpoints,
+    source_lane,
+    counter: int,
+    output_dir: str | Path = "models/decisioner/outputs",
+) -> Path:
+    return _save_route_lanes_debug_plot(
+        vehicle=vehicle,
+        road_network=road_network,
+        checkpoints=checkpoints,
+        source_lane=source_lane,
+        counter=counter,
+        output_dir=output_dir,
+        scenario_tag="s7",
+        title_tag="S7",
+    )
+
+
+def _save_route_lanes_debug_plot(
+    *,
+    vehicle,
+    road_network,
+    checkpoints,
+    source_lane,
+    counter: int,
+    output_dir: str | Path,
+    scenario_tag: str,
+    title_tag: str,
+) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -113,7 +156,7 @@ def save_s8_route_lanes_debug_plot(
     output_path_dir.mkdir(parents=True, exist_ok=True)
 
     vehicle_name = str(getattr(vehicle, "name", "vehicle"))
-    output_path = output_path_dir / f"s8_route_lanes_{vehicle_name}_{int(counter):06d}.png"
+    output_path = output_path_dir / f"{scenario_tag}_route_lanes_{vehicle_name}_{int(counter):06d}.png"
 
     fig, ax = plt.subplots(figsize=(70, 60))
     ego_pos = np.asarray(getattr(vehicle, "position", [0.0, 0.0])[:2], dtype=np.float32)
@@ -149,7 +192,7 @@ def save_s8_route_lanes_debug_plot(
                     zorder=5,
                 )
 
-    ax.set_title(f"{vehicle_name} S8 map lanes all road graph")
+    ax.set_title(f"{vehicle_name} {title_tag} map lanes all road graph")
     ax.set_xlabel("world x [m]")
     ax.set_ylabel("world y [m]")
     ax.axis("equal")

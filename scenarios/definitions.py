@@ -212,7 +212,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         description="背景车并入 ego 所在主线",
     ),
     ScenarioDefinition(
-        code="S7",  # !!!!初始间距总会先扩大再减小
+        code="S7", 
         scenario_id="S7_ego_merge_from_ramp",
         allowed_local_routes=("R7_merge_core",),
         trigger_by_local_route={

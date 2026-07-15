@@ -14,6 +14,7 @@ from models.decisioner.risk.safety_potential import pairwise_agent_safety_score
 from models.decisioner.rule_decisioner_helper import (
     save_candidate_debug_plot,
     save_lane_pair_debug_plot,
+    save_s7_route_lanes_debug_plot,
     save_s8_route_lanes_debug_plot,
 )
 
@@ -180,6 +181,7 @@ class MultiAgentRuleMaker(RuleMaker):
         self._last_debug: dict | None = None
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
+        self._s7_route_lanes_debug_plot_counter = 0
         self._s8_route_lanes_debug_plot_counter = 0
 
     def reset(self, env, agent_ids: list[str]) -> None:  # noqa: ARG002
@@ -1090,6 +1092,10 @@ class MultiAgentRuleMaker(RuleMaker):
             s8_target = self._S8_downstream_target_lane(env, vehicle, source_lane)
             if s8_target is not None:
                 return s8_target
+        if self._is_s7_merge_route(env) and int(action) == -1:
+            s7_target = self._S7_downstream_target_lane(env, vehicle, source_lane)
+            if s7_target is not None:
+                return s7_target
         lane_index = tuple(getattr(source_lane, "index", ()) or ())
         if len(lane_index) < 3:
             return None
@@ -1136,6 +1142,34 @@ class MultiAgentRuleMaker(RuleMaker):
             candidate_index = tuple(getattr(lane, "index", ()) or ())
             if len(candidate_index) >= 3 and tuple(candidate_index[:2]) != source_road:
                 return lane
+        return None
+
+    def _S7_downstream_target_lane(self, env, vehicle, source_lane):
+        debug = 1
+        if debug:
+            road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
+            navigation = getattr(vehicle, "navigation", None)
+            checkpoints = list(getattr(navigation, "checkpoints", []) or [])
+            if road_network is not None and len(checkpoints) >= 2:
+                self._s7_route_lanes_debug_plot_counter += 1
+                save_s7_route_lanes_debug_plot(
+                    vehicle,
+                    road_network,
+                    checkpoints,
+                    source_lane,
+                    self._s7_route_lanes_debug_plot_counter,
+                )
+
+        lane_index = tuple(getattr(source_lane, "index", ()) or ())
+        if lane_index == ("A", "B", 3):
+            road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
+            if road_network is not None and hasattr(road_network, "get_lane"):
+                try:
+                    return road_network.get_lane(("A", "B", 2))
+                except Exception:
+                    return None
+        if len(lane_index) < 3:
+            return None
         return None
 
     @classmethod
