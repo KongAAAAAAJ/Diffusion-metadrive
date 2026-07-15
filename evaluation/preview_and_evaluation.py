@@ -78,9 +78,9 @@ from tools.topdown_view import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-DEFAULT_SCENARIO_ID = "S6_background_merge_in"
+DEFAULT_SCENARIO_ID = "S7_ego_merge_from_ramp"
 DEFAULT_NUM_AGENTS = 3
-DEFAULT_NUM_EPISODES = 5
+DEFAULT_NUM_EPISODES = 3
 DEFAULT_OUTPUT_ROOT = Path("/media/kong/Elements_SE/Diffusion_Data/outputs/run_results")
 DEFAULT_TRAFFIC_DENSITY = 0
 DEFAULT_START_SEED = 11

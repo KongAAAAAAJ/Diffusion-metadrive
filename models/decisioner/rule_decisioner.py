@@ -290,6 +290,15 @@ class MultiAgentRuleMaker(RuleMaker):
             return result
         best_actions: dict[str, int] = {}
         for agent_id, selected in zip(ordered_agent_ids, best_combo):
+
+            # !!!!![DEBUG]
+            print(
+                f"{agent_id} action={int(selected['action'])} "
+                f"target_lane_index={tuple(selected.get('target_lane_index', ()) or ())} "
+                f"forced={bool(selected.get('forced_lane_change', False))} "
+                f"locked={bool(self._formation_locked)}"
+            )
+
             result[agent_id] = {
                 "action": int(selected["action"]),
                 "target_point": np.asarray(selected["target_point"], dtype=np.float32).reshape(2),
