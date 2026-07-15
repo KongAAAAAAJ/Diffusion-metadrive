@@ -80,7 +80,7 @@ debug_noise_plot_dir: ""
 gate_road_half_width_m: 3.0   # max lateral displacement (m) in ego-local frame; doubled for LC modes
 gate_max_dh_rad: 0.6           # max heading change between adjacent waypoints (rad)
 gate_collision_dist_m: 1.0    # min bumper-to-bumper distance to preceding vehicle (m); unused when env_crashed overrides
-vehicle_length_m: 4.8          # vehicle body length used for bumper distance calculation (m)
+vehicle_length_m: 5.74         # XL vehicle body length used for bumper distance calculation (m)
 lane_change_width_m: 3.5       # lateral lane offset target for LC modes (m)
 
 # Quality weights  (must sum to 1.0 for interpretability, but not enforced)
@@ -113,7 +113,7 @@ checkpoint_interval_steps: 2500
 
 env_config:
   num_agents: 3
-  horizon: 90  # max steps per episode
+  horizon: 100  # max steps per episode
   observation_mode: multimodal
   use_render: false
   image_on_cuda: true   # move camera buffer to GPU to avoid Panda3D RenderState hash map corruption

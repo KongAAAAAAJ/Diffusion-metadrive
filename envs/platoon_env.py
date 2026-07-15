@@ -200,16 +200,26 @@ class PlatoonEnv(BaseMultiEnv):
     def _cfg(self, key: str, default=None):
         config = getattr(self, "config", None)
         if config is not None:
+            has_key = False
             try:
-                return config.get(key, default)
+                has_key = key in config
+            except Exception:
+                has_key = False
+            try:
+                if has_key:
+                    return config.get(key)
             except Exception:
                 pass
             try:
-                return config[key]
+                if has_key:
+                    return config[key]
             except Exception:
                 pass
             if hasattr(config, key):
                 return getattr(config, key)
+        platoon_config = getattr(self, "platoon_config", None)
+        if platoon_config is not None and hasattr(platoon_config, key):
+            return getattr(platoon_config, key)
         return default
 
     def _cfg_float(self, key: str, default: float) -> float:
@@ -461,10 +471,7 @@ class PlatoonEnv(BaseMultiEnv):
 
     def _build_metadrive_config(self) -> dict:
         speed_m_s = self.platoon_config.initial_speed_km_h / 3.6
-        gap_m = (
-            float(self.platoon_config.vehicle_length_m)
-            + speed_m_s * float(self.platoon_config.headway_time_s)
-        )
+        gap_m = self._desired_center_spacing_m()
         lane_index = (FirstPGBlock.NODE_1, FirstPGBlock.NODE_2, 0)
         lead_long = 20.0
         agent_configs = {
@@ -1533,13 +1540,7 @@ class PlatoonEnv(BaseMultiEnv):
         return np.asarray([speed * np.cos(heading), speed * np.sin(heading)], dtype=np.float32)
 
     def _vehicle_length_m(self, agent_id: Optional[str] = None) -> float:
-        default_length = self._cfg_float("vehicle_length_m", 5.74)
-        if agent_id is None:
-            return default_length
-        vehicle = self.agents.get(agent_id)
-        if vehicle is None:
-            return default_length
-        return float(getattr(vehicle, "LENGTH", default_length))
+        return self._cfg_float("vehicle_length_m", 5.74)
 
     def _desired_center_spacing_m(self, ego_id: Optional[str] = None, other_id: Optional[str] = None) -> float:
         speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6

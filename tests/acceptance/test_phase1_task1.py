@@ -108,9 +108,22 @@ def test_initial_spacing_matches_vehicle_length_plus_time_headway():
     env = _build_env()
     try:
         env.reset()
-        vehicle_length = float(env.agents["agent0"].LENGTH)
-        target_gap = vehicle_length + env.platoon_config.headway_time_s * (env.platoon_config.initial_speed_km_h / 3.6)
+        target_gap = env._desired_center_spacing_m("agent0", "agent1")
         actual_gap = float(env.agents["agent0"].position[0] - env.agents["agent1"].position[0])
         assert abs(actual_gap - target_gap) < 1.0
+    finally:
+        env.close()
+
+
+def test_metadrive_config_spawn_gap_matches_desired_center_spacing():
+    env = _build_env()
+    try:
+        config = env._build_metadrive_config()
+        target_gap = env._desired_center_spacing_m()
+        agent_configs = config["agent_configs"]
+
+        assert config["platoon_spawn_gap_m"] == target_gap
+        assert agent_configs["agent0"]["spawn_longitude"] - agent_configs["agent1"]["spawn_longitude"] == target_gap
+        assert agent_configs["agent1"]["spawn_longitude"] - agent_configs["agent2"]["spawn_longitude"] == target_gap
     finally:
         env.close()

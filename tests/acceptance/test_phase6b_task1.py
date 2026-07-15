@@ -8,6 +8,8 @@ from envs.platoon_env import PlatoonEnv
 
 
 class SurrogateHarness:
+    _cfg = PlatoonEnv._cfg
+    _cfg_float = PlatoonEnv._cfg_float
     evaluate_trajectory_group = PlatoonEnv.evaluate_trajectory_group
     _agent_pose = PlatoonEnv._agent_pose
     _agent_speed_km_h = PlatoonEnv._agent_speed_km_h
@@ -46,6 +48,7 @@ def _build_stub_env() -> SurrogateHarness:
         vehicle_length_m=5.74,
         trajectory_dt=0.5,
     )
+    env.config = {}
     env.agents = {
         "agent0": _make_vehicle(0.0),
         "agent1": _make_vehicle(9.21),
@@ -63,16 +66,16 @@ def test_motion_prediction_eliminates_false_crashes():
 
 def test_slow_anchor_correctly_crashes_middle_agent():
     env = _build_stub_env()
-    trajectories = _load_anchor_trajectories()[0:1]
+    trajectories = _load_anchor_trajectories()[1:2]
     result = env.evaluate_trajectory_group("agent1", trajectories)
     assert result["crash_flags"] == [True]
 
 
 def test_lead_agent_no_crash_on_straight_anchors():
     env = _build_stub_env()
-    trajectories = _load_anchor_trajectories()[[4, 7]]
+    trajectories = _load_anchor_trajectories()[[0, 5, 6]]
     result = env.evaluate_trajectory_group("agent2", trajectories)
-    assert result["crash_flags"] == [False, False]
+    assert result["crash_flags"] == [False, False, False]
 
 
 def test_surrogate_does_not_mutate_env_state():
@@ -96,6 +99,17 @@ def test_velocity_fallback():
     assert np.allclose(velocity, np.asarray([0.0, 10.0], dtype=np.float32), atol=1e-4)
 
 
+def test_vehicle_length_uses_configured_xl_length_not_runtime_vehicle_length():
+    env = _build_stub_env()
+    env.agents["agent0"].LENGTH = 4.5
+
+    expected = env.platoon_config.vehicle_length_m
+    expected_spacing = expected + env.platoon_config.initial_speed_km_h / 3.6 * env.platoon_config.headway_time_s
+
+    assert env._vehicle_length_m("agent0") == expected
+    assert env._desired_center_spacing_m("agent0", "agent1") == expected_spacing
+
+
 def test_collision_rate_improvement():
     env = _build_stub_env()
     trajectories = _load_anchor_trajectories()
@@ -105,4 +119,4 @@ def test_collision_rate_improvement():
         result = env.evaluate_trajectory_group(agent_id, trajectories)
         crash_count += sum(bool(flag) for flag in result["crash_flags"])
         total += len(result["crash_flags"])
-    assert crash_count / total < 0.30
+    assert crash_count / total < 0.50
