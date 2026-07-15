@@ -56,7 +56,7 @@ class SimpleRuleRiskDetector(RiskDetector):
         agents = getattr(env, "agents", {}) or {}
         if state == LOCKED:
             return self._detect_unlock(agents, agent_ids, traffic_vehicles, forced_lane_wait_info=forced_lane_wait_info)
-        return self._detect_relock(agents, agent_ids, traffic_vehicles)
+        return self._detect_relock(agents, agent_ids, traffic_vehicles, forced_lane_wait_info=forced_lane_wait_info)
 
     def _detect_unlock(
         self,
@@ -100,7 +100,15 @@ class SimpleRuleRiskDetector(RiskDetector):
             forced_lane_wait_info=forced_lane_wait_info,
         )
 
-    def _detect_relock(self, agents: dict, agent_ids: list[str], traffic_vehicles: list) -> dict:
+    def _detect_relock(
+        self,
+        agents: dict,
+        agent_ids: list[str],
+        traffic_vehicles: list,
+        *,
+        forced_lane_wait_info: dict | None = None,
+    ) -> dict:
+        forced_lane_wait_info = dict(forced_lane_wait_info or {})
         pairs = []
         valid_gaps = []
         for index in range(1, len(agent_ids)):
@@ -125,7 +133,8 @@ class SimpleRuleRiskDetector(RiskDetector):
         leader_metrics = self._leader_ttc_metrics(agents, agent_ids, traffic_vehicles)
         follower_gap_condition_met = min_gap is not None and min_gap < relock_threshold
         leader_ttc_condition_met = leader_metrics["ttc_s"] > self.relock_ttc_threshold_s
-        transitioned = follower_gap_condition_met and leader_ttc_condition_met
+        forced_wait_clear = not bool(forced_lane_wait_info.get("forced_wait_active", False))
+        transitioned = follower_gap_condition_met and leader_ttc_condition_met and forced_wait_clear
         return self._result(
             current_state=UNLOCKED,
             next_state=LOCKED if transitioned else UNLOCKED,
@@ -143,6 +152,8 @@ class SimpleRuleRiskDetector(RiskDetector):
             relock_ttc_threshold_s=self.relock_ttc_threshold_s,
             follower_gap_condition_met=follower_gap_condition_met,
             leader_ttc_condition_met=leader_ttc_condition_met,
+            forced_wait_clear=forced_wait_clear,
+            forced_lane_wait_info=forced_lane_wait_info,
         )
 
     def _leader_ttc_metrics(self, agents: dict, agent_ids: list[str], traffic_vehicles: list) -> dict:

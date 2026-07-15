@@ -183,6 +183,7 @@ class MultiAgentRuleMaker(RuleMaker):
         self._last_debug: dict | None = None
         self._decision_step = 0
         self._forced_lane_first_step_by_agent: dict[str, int] = {}
+        self._forced_lane_frozen_wait_steps_by_agent: dict[str, int] = {}
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
         self._s7_route_lanes_debug_plot_counter = 0
@@ -193,6 +194,7 @@ class MultiAgentRuleMaker(RuleMaker):
         self._last_debug = None
         self._decision_step = 0
         self._forced_lane_first_step_by_agent.clear()
+        self._forced_lane_frozen_wait_steps_by_agent.clear()
 
     @property
     def is_formation_locked(self) -> bool:
@@ -241,7 +243,7 @@ class MultiAgentRuleMaker(RuleMaker):
             ordered_agent_ids=ordered_agent_ids,
             candidates_by_agent=candidates_by_agent,
             forced_combo=forced_combo,
-            track_wait=current_state == "LOCKED",
+            freeze_wait=current_state != "LOCKED",
         )
         risk_info = self._risk_detector.detect(
             env,
@@ -440,7 +442,7 @@ class MultiAgentRuleMaker(RuleMaker):
         ordered_agent_ids: list[str],
         candidates_by_agent: dict[str, list[dict]],
         forced_combo: tuple[dict, ...] | None,
-        track_wait: bool = True,
+        freeze_wait: bool = False,
     ) -> dict:
         forced_agents = [
             agent_id
@@ -449,25 +451,19 @@ class MultiAgentRuleMaker(RuleMaker):
         ]
         all_forced_ready = forced_combo is not None
         current_forced = set(forced_agents)
-        if not track_wait:
+        if not forced_agents:
             self._forced_lane_first_step_by_agent.clear()
-            return {
-                "decision_step": int(self._decision_step),
-                "threshold_steps": int(self.forced_lane_unlock_wait_steps),
-                "forced_agents": list(forced_agents),
-                "all_forced_ready": bool(all_forced_ready),
-                "partial_forced": bool(forced_agents) and not all_forced_ready,
-                "partial_forced_wait_steps": 0,
-                "forced_lane_first_step": {},
-                "forced_lane_wait_steps_by_agent": {},
-            }
-        for agent_id in list(self._forced_lane_first_step_by_agent):
-            if agent_id not in current_forced:
-                self._forced_lane_first_step_by_agent.pop(agent_id, None)
-        for agent_id in forced_agents:
-            self._forced_lane_first_step_by_agent.setdefault(agent_id, int(self._decision_step))
-        if all_forced_ready:
+            self._forced_lane_frozen_wait_steps_by_agent.clear()
+        elif not freeze_wait:
+            for agent_id in list(self._forced_lane_first_step_by_agent):
+                if agent_id not in current_forced:
+                    self._forced_lane_first_step_by_agent.pop(agent_id, None)
+                    self._forced_lane_frozen_wait_steps_by_agent.pop(agent_id, None)
+            for agent_id in forced_agents:
+                self._forced_lane_first_step_by_agent.setdefault(agent_id, int(self._decision_step))
+        if all_forced_ready and not freeze_wait:
             self._forced_lane_first_step_by_agent.clear()
+            self._forced_lane_frozen_wait_steps_by_agent.clear()
 
         first_steps = {
             agent_id: int(step)
@@ -479,6 +475,13 @@ class MultiAgentRuleMaker(RuleMaker):
             agent_id: max(0, int(self._decision_step) - int(first_step) + 1)
             for agent_id, first_step in first_steps.items()
         }
+        if freeze_wait:
+            wait_steps_by_agent = {
+                agent_id: int(self._forced_lane_frozen_wait_steps_by_agent.get(agent_id, 0) or 0)
+                for agent_id in first_steps
+            }
+        else:
+            self._forced_lane_frozen_wait_steps_by_agent = dict(wait_steps_by_agent)
         partial_wait_steps = max(wait_steps_by_agent.values(), default=0) if partial_forced else 0
         return {
             "decision_step": int(self._decision_step),
@@ -487,6 +490,8 @@ class MultiAgentRuleMaker(RuleMaker):
             "all_forced_ready": bool(all_forced_ready),
             "partial_forced": bool(partial_forced),
             "partial_forced_wait_steps": int(partial_wait_steps),
+            "forced_wait_active": bool(self._forced_lane_first_step_by_agent),
+            "forced_wait_frozen": bool(freeze_wait),
             "forced_lane_first_step": first_steps,
             "forced_lane_wait_steps_by_agent": wait_steps_by_agent,
         }
