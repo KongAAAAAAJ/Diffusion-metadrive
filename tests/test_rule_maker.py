@@ -1328,6 +1328,56 @@ def _forced_wait_candidate(action: int, *, forced: bool = False):
     return candidate
 
 
+def _scored_forced_candidate(action: int, *, mobil_gain: float, forced: bool = False):
+    candidate = _forced_wait_candidate(action, forced=forced)
+    candidate["mobil_gain"] = float(mobil_gain)
+    candidate["target_point"] = np.asarray([5.0, float(action)], dtype=np.float32)
+    return candidate
+
+
+def test_unlocked_forced_agent_must_select_forced_candidate(monkeypatch):
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 10.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 2.0, -3.5, 2),
+        },
+        traffic=[],
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        locked_on_reset=False,
+    )
+
+    def fake_candidates(_env, vehicle, _traffic_vehicles):
+        if vehicle.name == "agent0":
+            return [
+                _scored_forced_candidate(0, mobil_gain=10.0, forced=False),
+                _scored_forced_candidate(1, mobil_gain=-10.0, forced=True),
+            ]
+        return [
+            _scored_forced_candidate(0, mobil_gain=-1.0, forced=False),
+            _scored_forced_candidate(1, mobil_gain=2.0, forced=False),
+        ]
+
+    monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
+    decisions = rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == 1
+    assert decisions["agent1"]["action"] == 1
+    assert debug is not None
+    assert debug["formation_locked"] is False
+    assert debug["forced_lane_decision"] is False
+    selected_agent0 = [
+        candidate
+        for candidate in debug["candidates_by_agent"]["agent0"]
+        if candidate["selected"]
+    ]
+    assert len(selected_agent0) == 1
+    assert selected_agent0[0]["forced_lane_change"] is True
+
+
 def test_rule_maker_unlocks_after_partial_forced_lane_wait_timeout_and_blocks_early_relock(monkeypatch):
     env = _env(
         agents={

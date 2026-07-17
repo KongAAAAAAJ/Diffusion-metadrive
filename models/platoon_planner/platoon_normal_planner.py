@@ -182,7 +182,7 @@ class PlatoonNormalPlanner:
         best = resampled_candidates[best_index]
 
         debug = 0
-        if debug:
+        if debug and int(action) == -1:
             # 新建figure，绘制resampled_candidates中的所有轨迹，并将best轨迹高亮
             try:
                 from models.platoon_planner.platoon_planner_helper import save_platoon_candidates_debug_plot

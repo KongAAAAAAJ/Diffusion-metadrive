@@ -268,7 +268,12 @@ class MultiAgentRuleMaker(RuleMaker):
         else:
             best_combo = None
             best_score = -float("inf")
-            for combo in product(*(candidates_by_agent[agent_id] for agent_id in ordered_agent_ids)):
+            candidate_sets = [
+                self._forced_candidates_for_agent(candidates_by_agent.get(agent_id, []))
+                or candidates_by_agent[agent_id]
+                for agent_id in ordered_agent_ids
+            ]
+            for combo in product(*candidate_sets):
                 score = self._score_joint_combo(
                     env=env,
                     ordered_agent_ids=ordered_agent_ids,
@@ -289,15 +294,16 @@ class MultiAgentRuleMaker(RuleMaker):
         if best_combo is None:
             return result
         best_actions: dict[str, int] = {}
+        print(f"step = {self._decision_step}")
         for agent_id, selected in zip(ordered_agent_ids, best_combo):
 
             # !!!!![DEBUG]
-            print(
-                f"{agent_id} action={int(selected['action'])} "
-                f"target_lane_index={tuple(selected.get('target_lane_index', ()) or ())} "
-                f"forced={bool(selected.get('forced_lane_change', False))} "
-                f"locked={bool(self._formation_locked)}"
-            )
+            # print(
+            #     f"{agent_id} action={int(selected['action'])} "
+            #     f"target_lane_index={tuple(selected.get('target_lane_index', ()) or ())} "
+            #     f"forced={bool(selected.get('forced_lane_change', False))} "
+            #     f"locked={bool(self._formation_locked)}"
+            # )
 
             result[agent_id] = {
                 "action": int(selected["action"]),
@@ -444,6 +450,14 @@ class MultiAgentRuleMaker(RuleMaker):
                 return None
             combo.append(forced[0])
         return tuple(combo)
+
+    @staticmethod
+    def _forced_candidates_for_agent(candidates: list[dict]) -> list[dict]:
+        return [
+            candidate
+            for candidate in candidates
+            if bool(candidate.get("forced_lane_change", False))
+        ]
 
     def _update_forced_lane_wait_info(
         self,
