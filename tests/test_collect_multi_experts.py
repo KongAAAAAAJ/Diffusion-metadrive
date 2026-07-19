@@ -13,19 +13,23 @@ def test_multi_defaults_are_three_agents_and_s5_s6_only() -> None:
     assert config.num_agents == 3
     assert config.expert_type == "rule_planner"
     assert config.target_samples == 40000
-    assert config.scenario_weights == multi.DEFAULT_SCENARIOS
+    assert config.scenario_weights == {}
+    assert config.dataset_config_path == Path("configs/dataset/data_collect.yaml")
 
 
-def test_env_config_loads_refine_yaml_and_applies_collection_overrides(tmp_path: Path) -> None:
-    config_path = tmp_path / "refine.yaml"
+def test_env_config_loads_dataset_yaml_and_applies_collection_overrides(tmp_path: Path) -> None:
+    config_path = tmp_path / "data_collect.yaml"
     config_path.write_text(
         "env_config:\n"
         "  horizon: 77\n"
         "  image_on_cuda: true\n"
-        "  num_agents: 9\n",
+        "  num_agents: 9\n"
+        "  scenario_ids:\n"
+        "    - S5_hard_brake_lead\n"
+        "    - S6_background_merge_in\n",
         encoding="utf-8",
     )
-    config = multi.MultiExpertCollectorConfig(train_config_path=config_path)
+    config = multi.MultiExpertCollectorConfig(dataset_config_path=config_path)
 
     env_config = multi.load_collection_env_config(config)
 
@@ -34,6 +38,7 @@ def test_env_config_loads_refine_yaml_and_applies_collection_overrides(tmp_path:
     assert env_config["image_on_cuda"] is False
     assert env_config["use_render"] is False
     assert env_config["scenario_ids"] == list(multi.DEFAULT_SCENARIOS)
+    assert config.scenario_weights == multi.DEFAULT_SCENARIOS
 
 
 def test_info_failure_reason_detects_any_agent_failure() -> None:
@@ -86,4 +91,3 @@ def test_flattened_samples_are_time_major_and_keep_joint_metadata(monkeypatch) -
     ]
     assert order == [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
     assert all(sample["formation_relation_state"].shape == (12,) for sample in samples)
-

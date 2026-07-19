@@ -79,12 +79,12 @@ class MultiExpertCollectorConfig(ExpertCollectorConfig):
     expert_type: str = "rule_planner"
     target_samples: int = 40000
     max_episode_steps: int = 0  # 0 means use env_config.horizon
-    train_config_path: Path = Path("configs/train/refine_grpo.yaml")
+    dataset_config_path: Path = Path("configs/dataset/data_collect.yaml")
     num_agents: int = 3
     decision_policy: str = "rule_maker"
     planning_policy: str = "lattice"
     control_policy: str = "adaptive"
-    scenario_weights: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SCENARIOS))
+    scenario_weights: Dict[str, float] = field(default_factory=dict)
     traffic_density_min: float = 0.0
     traffic_density_max: float = 0.0
     trajectory_correction_enabled: bool = False
@@ -107,8 +107,15 @@ class RawObservationPlatoonEnv(PlatoonEnv):
 
 
 def load_collection_env_config(config: MultiExpertCollectorConfig) -> dict:
-    payload = dict(yaml.safe_load(config.train_config_path.read_text(encoding="utf-8")) or {})
+    payload = dict(yaml.safe_load(config.dataset_config_path.read_text(encoding="utf-8")) or {})
     env_config = dict(payload.get("env_config") or {})
+    if config.scenario_weights:
+        env_config["scenario_ids"] = list(config.scenario_weights)
+    else:
+        scenario_ids = [str(value) for value in (env_config.get("scenario_ids") or [])]
+        if not scenario_ids:
+            raise ValueError("dataset config env_config.scenario_ids must not be empty")
+        config.scenario_weights = {scenario_id: 1.0 for scenario_id in scenario_ids}
     env_config.update(
         {
             "num_agents": int(config.num_agents),
@@ -117,7 +124,6 @@ def load_collection_env_config(config: MultiExpertCollectorConfig) -> dict:
             # DatasetCollectEnv explicitly supports CUDA image collection only
             # for num_agents == 1.  Three-agent raw collection must stay on CPU.
             "image_on_cuda": False,
-            "scenario_ids": list(config.scenario_weights),
         }
     )
     return env_config
@@ -358,7 +364,7 @@ def _multi_manifest(
         "decision_policy": config.decision_policy,
         "planning_policy": config.planning_policy,
         "control_policy": config.control_policy,
-        "environment_config_source": str(config.train_config_path),
+        "environment_config_source": str(config.dataset_config_path),
         "environment_config_overrides": {
             "num_agents": int(config.num_agents),
             "observation_mode": "multimodal",
@@ -388,6 +394,7 @@ def run_collection(config: MultiExpertCollectorConfig) -> None:
         raise ValueError("Multi-agent collection only supports expert_type='rule_planner'.")
     if int(config.num_agents) != 3:
         raise ValueError("This expert demonstration collector currently requires num_agents=3.")
+    effective_env_config = load_collection_env_config(config)
     if set(config.scenario_weights) - set(DEFAULT_SCENARIOS):
         raise ValueError("Only S5_hard_brake_lead and S6_background_merge_in are enabled.")
 
@@ -451,7 +458,6 @@ def run_collection(config: MultiExpertCollectorConfig) -> None:
         "missing_reference_lane_points": 0,
     }
 
-    effective_env_config = load_collection_env_config(config)
     runtime_env_config = {
         key: value
         for key, value in effective_env_config.items()

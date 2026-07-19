@@ -7,7 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 MODEL_CONFIG_PATH="${MODEL_CONFIG_PATH:-${REPO_ROOT}/configs/diffusion/model.yaml}"
-TRAIN_CONFIG_PATH="${TRAIN_CONFIG_PATH:-${REPO_ROOT}/configs/train/refine_grpo.yaml}"
+DATASET_CONFIG_PATH="${DATASET_CONFIG_PATH:-${REPO_ROOT}/configs/dataset/data_collect.yaml}"
 
 STAGE="${STAGE:-all}"  # all | collect | anchors | preprocess
 if [[ -z "${ANCHOR_METHOD:-}" ]]; then
@@ -39,10 +39,6 @@ MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-0}"
 SAMPLES_PER_SHARD="${SAMPLES_PER_SHARD:-2048}"
 RESUME="${RESUME:-1}"
 NUM_AGENTS="${NUM_AGENTS:-3}"
-SCENARIO_WEIGHTS="${SCENARIO_WEIGHTS:-}"
-if [[ -z "${SCENARIO_WEIGHTS}" ]]; then
-    SCENARIO_WEIGHTS='{"S5_hard_brake_lead":1.0,"S6_background_merge_in":1.0}'
-fi
 TRAJECTORY_VISUALIZATION_ENABLED="${TRAJECTORY_VISUALIZATION_ENABLED:-0}"
 SAVE_VIDEOS="${SAVE_VIDEOS:-0}"
 
@@ -57,9 +53,8 @@ OUTPUT_FORMAT="${OUTPUT_FORMAT:-dir}"
 echo "Multi-agent pipeline config:"
 echo "  STAGE=${STAGE} ANCHOR_METHOD=${ANCHOR_METHOD}"
 echo "  agents=${NUM_AGENTS} target_samples=${TARGET_SAMPLES} resume=${RESUME}"
-echo "  scenario_weights=${SCENARIO_WEIGHTS}"
 echo "  model_config=${MODEL_CONFIG_PATH}"
-echo "  train_config=${TRAIN_CONFIG_PATH}"
+echo "  dataset_config=${DATASET_CONFIG_PATH}"
 echo "  collect_output=${COLLECT_OUTPUT}"
 echo "  anchors_output=${ANCHORS_OUTPUT}"
 echo "  preprocess_output=${PREPROCESS_OUTPUT}"
@@ -72,7 +67,7 @@ if [[ "${STAGE}" == "all" || "${STAGE}" == "collect" ]]; then
         --output-root "${OUTPUT_ROOT}" \
         --dataset-name "${DATASET_NAME}" \
         --model-config-path "${MODEL_CONFIG_PATH}" \
-        --train-config-path "${TRAIN_CONFIG_PATH}" \
+        --dataset-config-path "${DATASET_CONFIG_PATH}" \
         --target-samples "${TARGET_SAMPLES}" \
         --start-seed "${START_SEED}" \
         --max-episodes "${MAX_EPISODES}" \
@@ -80,7 +75,6 @@ if [[ "${STAGE}" == "all" || "${STAGE}" == "collect" ]]; then
         --samples-per-shard "${SAMPLES_PER_SHARD}" \
         --resume "${RESUME}" \
         --num-agents "${NUM_AGENTS}" \
-        --scenario-weights "${SCENARIO_WEIGHTS}" \
         --trajectory-visualization-enabled "${TRAJECTORY_VISUALIZATION_ENABLED}" \
         --save-videos "${SAVE_VIDEOS}" \
         2>&1 | tee -a "${OUTPUT_ROOT}/collect_multi_command_${DATASET_NAME}.log"

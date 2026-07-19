@@ -17,7 +17,7 @@ def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
             "OUTPUT_ROOT": "/tmp/multi_pipeline_test",
             "DATASET_NAME": "platoon_smoke",
             "MODEL_CONFIG_PATH": "/tmp/model.yaml",
-            "TRAIN_CONFIG_PATH": "/tmp/refine.yaml",
+            "DATASET_CONFIG_PATH": "/tmp/data_collect.yaml",
             **env,
         }
     )
@@ -38,11 +38,11 @@ def test_collect_invokes_multi_expert_with_platoon_arguments() -> None:
     assert result.returncode == 0, result.stdout
     assert "-m expert_dataset.collect_multi_experts" in result.stdout
     assert "--model-config-path /tmp/model.yaml" in result.stdout
-    assert "--train-config-path /tmp/refine.yaml" in result.stdout
+    assert "--dataset-config-path /tmp/data_collect.yaml" in result.stdout
     assert "--target-samples 40000" in result.stdout
     assert "--resume 1" in result.stdout
     assert "--num-agents 3" in result.stdout
-    assert '--scenario-weights {"S5_hard_brake_lead":1.0,"S6_background_merge_in":1.0}' in result.stdout
+    assert "refine_grpo.yaml" not in result.stdout
     assert "expert_dataset.collect_expert" not in result.stdout
 
 

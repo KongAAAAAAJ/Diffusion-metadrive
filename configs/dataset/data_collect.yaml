@@ -1,0 +1,9 @@
+env_config:
+  num_agents: 3
+  horizon: 200
+  observation_mode: multimodal
+  traffic_density: 0.0
+  target_speed_km_h: 30.0
+  scenario_ids:
+    - S5_hard_brake_lead
+    - S6_background_merge_in
