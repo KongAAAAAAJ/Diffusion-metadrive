@@ -158,7 +158,7 @@ def _build_planning_debug(
     }
 
 
-def _build_pipeline_factory(
+def build_rule_planner_pipeline_factory(
     decision_policy: str = DEFAULT_DECISION_POLICY,
     planning_policy: str = DEFAULT_PLANNING_POLICY,
     control_policy: str = DEFAULT_CONTROL_POLICY,
@@ -225,6 +225,11 @@ def _build_pipeline_factory(
         return action_fn
 
     return factory
+
+
+# Backward-compatible private alias for callers/tests that used the original
+# preview-only helper before it became the shared rule-planner expert API.
+_build_pipeline_factory = build_rule_planner_pipeline_factory
 
 
 # ---------------------------------------------------------------------------

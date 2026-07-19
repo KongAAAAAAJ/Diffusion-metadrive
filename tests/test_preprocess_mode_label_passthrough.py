@@ -20,6 +20,12 @@ def test_preprocess_keeps_recomputed_gt_mode_label_and_preserves_expert_decision
         reference_lane_index=np.asarray([1, 1], dtype=np.int16),
         future_reference_lane_index=np.asarray([[1, 1, 0, 0], [1, 1, 2, 2]], dtype=np.int16),
         scenario_id=np.asarray(["S1", "S1"]),
+        agent_id=np.asarray(["agent0", "agent1"]),
+        agent_index=np.asarray([0, 1], dtype=np.int8),
+        agent_role=np.asarray(["leader", "follower"]),
+        formation_relation_state=np.zeros((2, 12), dtype=np.float32),
+        joint_step_index=np.asarray([5, 5], dtype=np.int32),
+        num_agents=np.asarray([3, 3], dtype=np.int8),
     )
 
     recomputed_labels = [12, 15]
@@ -55,6 +61,12 @@ def test_preprocess_keeps_recomputed_gt_mode_label_and_preserves_expert_decision
     assert payload["reference_lane_index"].tolist() == [1, 1]
     assert payload["future_reference_lane_index"].tolist() == [[1, 1, 0, 0], [1, 1, 2, 2]]
     assert payload["scenario_id"].tolist() == ["S1", "S1"]
+    assert payload["agent_id"].tolist() == ["agent0", "agent1"]
+    assert payload["agent_index"].tolist() == [0, 1]
+    assert payload["agent_role"].tolist() == ["leader", "follower"]
+    assert payload["formation_relation_state"].shape == (2, 12)
+    assert payload["joint_step_index"].tolist() == [5, 5]
+    assert payload["num_agents"].tolist() == [3, 3]
 
 
 def test_sample_to_features_targets_requires_expert_lateral_decision(monkeypatch) -> None:

@@ -52,6 +52,12 @@ OPTIONAL_PASSTHROUGH_FIELDS = (
     "trajectory_mean_abs_lateral_after",
     "trajectory_final_abs_lateral_before",
     "trajectory_final_abs_lateral_after",
+    "agent_id",
+    "agent_index",
+    "agent_role",
+    "formation_relation_state",
+    "joint_step_index",
+    "num_agents",
 )
 
 
