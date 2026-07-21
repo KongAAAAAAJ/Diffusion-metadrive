@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import numpy as np
 
@@ -23,7 +24,7 @@ def test_env_config_loads_dataset_yaml_and_applies_collection_overrides(tmp_path
         "env_config:\n"
         "  horizon: 77\n"
         "  image_on_cuda: true\n"
-        "  num_agents: 9\n"
+        "  num_agents: 3\n"
         "  scenario_ids:\n"
         "    - S5_hard_brake_lead\n"
         "    - S6_background_merge_in\n",
@@ -39,6 +40,41 @@ def test_env_config_loads_dataset_yaml_and_applies_collection_overrides(tmp_path
     assert env_config["use_render"] is False
     assert env_config["scenario_ids"] == list(multi.DEFAULT_SCENARIOS)
     assert config.scenario_weights == multi.DEFAULT_SCENARIOS
+
+
+def test_parse_args_uses_collection_yaml_as_defaults_and_allows_cli_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "data_collect.yaml"
+    config_path.write_text(
+        "env_config:\n"
+        "  num_agents: 3\n"
+        "  scenario_ids: [S5_hard_brake_lead, S6_background_merge_in]\n"
+        "collection:\n"
+        "  target_samples: 1234\n"
+        "  start_seed: 21\n"
+        "  resume: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "collect_multi_experts.py",
+            "--dataset-config-path",
+            str(config_path),
+            "--target-samples",
+            "99",
+        ],
+    )
+
+    config = multi.parse_args()
+
+    assert config.dataset_config_path == config_path
+    assert config.target_samples == 99
+    assert config.start_seed == 21
+    assert config.resume is True
 
 
 def test_info_failure_reason_detects_any_agent_failure() -> None:

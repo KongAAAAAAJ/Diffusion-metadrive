@@ -294,7 +294,7 @@ class MultiAgentRuleMaker(RuleMaker):
         if best_combo is None:
             return result
         best_actions: dict[str, int] = {}
-        print(f"step = {self._decision_step}")
+        # print(f"step = {self._decision_step}")
         for agent_id, selected in zip(ordered_agent_ids, best_combo):
 
             # !!!!![DEBUG]

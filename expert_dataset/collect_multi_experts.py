@@ -106,9 +106,14 @@ class RawObservationPlatoonEnv(PlatoonEnv):
         return {str(agent_id): dict(agent_obs) for agent_id, agent_obs in obs.items()}
 
 
+def load_dataset_config(path: Path) -> dict:
+    return dict(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+
+
 def load_collection_env_config(config: MultiExpertCollectorConfig) -> dict:
-    payload = dict(yaml.safe_load(config.dataset_config_path.read_text(encoding="utf-8")) or {})
+    payload = load_dataset_config(config.dataset_config_path)
     env_config = dict(payload.get("env_config") or {})
+    config.num_agents = int(env_config.get("num_agents", config.num_agents))
     if config.scenario_weights:
         env_config["scenario_ids"] = list(config.scenario_weights)
     else:
@@ -578,7 +583,25 @@ def run_collection(config: MultiExpertCollectorConfig) -> None:
 
 
 def parse_args() -> MultiExpertCollectorConfig:
-    config = MultiExpertCollectorConfig()
+    config_path_parser = argparse.ArgumentParser(add_help=False)
+    config_path_parser.add_argument(
+        "--dataset-config-path",
+        type=Path,
+        default=MultiExpertCollectorConfig().dataset_config_path,
+    )
+    config_path_args, _ = config_path_parser.parse_known_args()
+
+    config = MultiExpertCollectorConfig(dataset_config_path=config_path_args.dataset_config_path)
+    collection_config = dict(
+        load_dataset_config(config.dataset_config_path).get("collection") or {}
+    )
+    valid_fields = {item.name for item in fields(MultiExpertCollectorConfig)}
+    unknown_fields = sorted(set(collection_config) - valid_fields)
+    if unknown_fields:
+        raise ValueError(f"Unknown collection config fields: {unknown_fields}")
+    for name, value in collection_config.items():
+        setattr(config, name, value)
+
     parser = argparse.ArgumentParser(description=__doc__)
     for item in fields(MultiExpertCollectorConfig):
         default = getattr(config, item.name)

@@ -1,3 +1,10 @@
+pipeline:
+  model_config_path: configs/diffusion/model.yaml
+
+dataset:
+  name: platoon_rule_expert
+  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets
+
 env_config:
   num_agents: 3
   horizon: 200
@@ -7,3 +14,27 @@ env_config:
   scenario_ids:
     - S5_hard_brake_lead
     - S6_background_merge_in
+
+collection:
+  target_samples: 40000
+  start_seed: 10
+  max_episodes: 0
+  samples_per_shard: 2048
+  resume: true
+  trajectory_visualization_enabled: false
+  save_videos: false
+
+anchors:
+  method: dynamic
+  output_path: expert_dataset/platoon_anchors.npy
+  figure_path: expert_dataset/platoon_anchors.png
+  trajectory_key: trajectory
+  num_anchors: 20
+  seed: 0
+  split: all
+  max_trajectories: 100000
+
+preprocess:
+  output_suffix: _pp
+  output_format: dir
+  skip_existing: true

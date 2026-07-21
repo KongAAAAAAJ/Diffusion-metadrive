@@ -86,8 +86,8 @@ class SimpleRuleRiskDetector(RiskDetector):
         ttc = leader_metrics["ttc_s"]
         transitioned = ttc is not None and ttc < self.ttc_trigger_s
 
-        if transitioned: # *风险切换
-            print(f"ttc = {ttc}s")
+        # if transitioned: # *风险切换
+        #     print(f"ttc = {ttc}s")
             
         return self._result(
             current_state=LOCKED,
