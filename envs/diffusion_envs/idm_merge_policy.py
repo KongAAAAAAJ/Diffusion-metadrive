@@ -8,6 +8,8 @@ from metadrive.component.navigation_module.node_network_navigation import NodeNe
 from metadrive.component.road_network import Road
 from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
 
+from envs.diffusion_envs.ground_truth_idm_policy import GroundTruthIDMMixin
+
 
 class StartEdgeNodeNavigation(NodeNetworkNavigation):
     """Keep the physical spawn edge when it is not on the shortest node path."""
@@ -74,7 +76,7 @@ class StartEdgeNodeNavigation(NodeNetworkNavigation):
                 self.merge_target_lane = mainline_lanes[-1]
 
 
-class IDMMergePolicy(IDMPolicy):
+class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
     """IDM variant that waits for a safe mainline gap on a natural merge."""
 
     def __init__(

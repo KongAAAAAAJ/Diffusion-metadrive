@@ -141,6 +141,16 @@ class ExpertJointStep:
     controls: Mapping[str, np.ndarray]
 
 
+@dataclass(frozen=True)
+class JointEpisodeRollout:
+    samples: tuple[JointBEVSample, ...]
+    simulator_steps: int
+    rejected_joint_steps: int
+    failure_reason: str | None
+    terminated: bool
+    truncated: bool
+
+
 class SensorlessJointBEVPlatoonEnv(PlatoonEnv):
     """PlatoonEnv configured without visual/range observations or rendering."""
 
@@ -154,7 +164,13 @@ class SensorlessJointBEVPlatoonEnv(PlatoonEnv):
         config = PlatoonEnv.default_config()
         # It must remain Config: MetaDrive expects ``Config.update`` to return
         # the mapping, whereas built-in ``dict.update`` returns None.
-        config.update({"sensors": Config({})}, stop_recursive_update=["sensors"])
+        config.update(
+            {
+                "sensors": Config({}),
+                "ground_truth_traffic_policy": True,
+            },
+            stop_recursive_update=["sensors"],
+        )
         return config
 
     def __init__(self, config: Mapping[str, object] | None = None):
@@ -173,6 +189,7 @@ class SensorlessJointBEVPlatoonEnv(PlatoonEnv):
                 "agent_observation": DummyObservation,
                 "sensors": {},
                 "interface_panel": [],
+                "ground_truth_traffic_policy": True,
             }
         )
         super().__init__(payload)
@@ -465,7 +482,7 @@ def collect_joint_episode(
     *,
     max_steps: int,
     builder: JointBEVSampleBuilder | None = None,
-) -> list[JointBEVSample]:
+) -> JointEpisodeRollout:
     """Collect one episode in memory; persistence is deliberately out of scope."""
 
     if max_steps <= 0:
@@ -477,6 +494,11 @@ def collect_joint_episode(
     sample_builder.reset()
     dt_s = simulator_decision_dt_s(env)
     samples: list[JointBEVSample] = []
+    rejected_joint_steps = 0
+    simulator_steps = 0
+    failure_reason = None
+    episode_terminated = False
+    episode_truncated = False
 
     for joint_step in range(int(max_steps)):
         sample_builder.capture_state(env, timestamp_s=joint_step * dt_s)
@@ -487,11 +509,43 @@ def collect_joint_episode(
             except JointStepRejected:
                 # The expert controls remain valid, but a joint label/mask
                 # conflict makes all three aligned training rows unusable.
-                pass
-        _, _, terminated, truncated, _ = env.low_level_step(dict(expert_step.controls))
-        if bool(terminated.get("__all__", False)) or bool(truncated.get("__all__", False)):
+                rejected_joint_steps += 1
+        _, _, terminated, truncated, info = env.low_level_step(dict(expert_step.controls))
+        simulator_steps += 1
+        for agent_id in agent_ids:
+            agent_info = info.get(agent_id, {}) if isinstance(info, Mapping) else {}
+            if not isinstance(agent_info, Mapping):
+                continue
+            if any(
+                bool(agent_info.get(key, False))
+                for key in (
+                    "crash",
+                    "crash_vehicle",
+                    "crash_object",
+                    "crash_building",
+                    "crash_human",
+                )
+            ):
+                failure_reason = f"crash:{agent_id}"
+                break
+            if any(
+                bool(agent_info.get(key, False))
+                for key in ("out_of_road", "out_of_route")
+            ):
+                failure_reason = f"out_of_road:{agent_id}"
+                break
+        episode_terminated = bool(terminated.get("__all__", False))
+        episode_truncated = bool(truncated.get("__all__", False))
+        if failure_reason is not None or episode_terminated or episode_truncated:
             break
-    return samples
+    return JointEpisodeRollout(
+        samples=tuple(samples),
+        simulator_steps=simulator_steps,
+        rejected_joint_steps=rejected_joint_steps,
+        failure_reason=failure_reason,
+        terminated=episode_terminated,
+        truncated=episode_truncated,
+    )
 
 
 __all__ = [
@@ -501,6 +555,7 @@ __all__ = [
     "JointBEVSample",
     "JointBEVSampleBuilder",
     "JointCollectionError",
+    "JointEpisodeRollout",
     "JointStepRejected",
     "JOINT_SAMPLE_DTYPES",
     "JOINT_SAMPLE_SHAPES",

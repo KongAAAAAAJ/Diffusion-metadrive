@@ -262,6 +262,7 @@ def test_sensorless_environment_forces_no_rendering_observation_stack(monkeypatc
     assert captured["image_on_cuda"] is False
     assert captured["sensors"] == {}
     assert captured["interface_panel"] == []
+    assert captured["ground_truth_traffic_policy"] is True
     assert captured["agent_observation"].__name__ == "DummyObservation"
 
 

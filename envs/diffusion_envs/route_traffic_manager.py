@@ -227,8 +227,20 @@ class RouteAwareTrafficManager(CustomTrafficManager):
             # Skip this vehicle silently rather than crashing the subprocess.
             return None
         if policy_class is None:
-            from metadrive.policy.idm_policy import IDMPolicy
-            policy_class = IDMPolicy
+            if bool(
+                self.engine.global_config.get(
+                    "ground_truth_traffic_policy", False
+                )
+            ):
+                from envs.diffusion_envs.ground_truth_idm_policy import (
+                    GroundTruthIDMPolicy,
+                )
+
+                policy_class = GroundTruthIDMPolicy
+            else:
+                from metadrive.policy.idm_policy import IDMPolicy
+
+                policy_class = IDMPolicy
         self.add_policy(
             random_v.id,
             policy_class,
@@ -277,7 +289,6 @@ class RouteAwareTrafficManager(CustomTrafficManager):
             self.np_random.shuffle(potential_vehicle_configs)
             selected = potential_vehicle_configs[:min(total_vehicles, len(potential_vehicle_configs))]
 
-            from metadrive.policy.idm_policy import IDMPolicy
             for v_config in selected:
                 vehicle_type = self.random_vehicle_type()
                 random_v = self._spawn_traffic_vehicle_if_safe(
