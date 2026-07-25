@@ -17,8 +17,15 @@ from expert_dataset.joint_bev_storage import (
     EpisodeSplitConfig,
     JointBEVDatasetStore,
     JointStorageError,
+    PACKED_BEV_FIELD,
     SPLIT_NAMES,
+    STORAGE_SCHEMA_VERSION,
     fingerprint_payload,
+)
+from expert_dataset.semantic_bev_codec import (
+    BEV_COMPRESSION_RATIO,
+    PACKED_BEV_SHAPE,
+    unpack_semantic_bev,
 )
 from models.bev_planner.mode_contract import ModeIndex
 
@@ -28,7 +35,10 @@ def _sample(marker: int = 0) -> JointBEVSample:
         name: np.zeros(shape, dtype=JOINT_SAMPLE_DTYPES[name])
         for name, shape in JOINT_SAMPLE_SHAPES.items()
     }
-    values["bev"][:, 0, 0, 0] = np.uint8(marker)
+    values["bev"][:, 0, 0, 0] = np.uint8(255 if marker % 2 else 0)
+    values["bev"][:, 3, 0, 1] = np.asarray(
+        (0, 85, 170, 255), dtype=np.uint8
+    )[marker % 4]
     values["agent_role"] = np.asarray(list(AgentRole), dtype=np.int64)
     values["mode_valid_mask"][:, ModeIndex.STOP] = True
     values["gt_mode"][:] = int(ModeIndex.STOP)
@@ -94,10 +104,27 @@ def test_independent_split_writers_store_mmap_joint_first_episodes(tmp_path: Pat
         for entry in manifest["episodes"]:
             episode_path = root / split / "episodes" / entry["directory"]
             all_episode_paths.append(episode_path)
-            bev = np.load(episode_path / "bev.npy", mmap_mode="r", allow_pickle=False)
-            assert isinstance(bev, np.memmap)
-            assert bev.shape == (2, *JOINT_SAMPLE_SHAPES["bev"])
-            assert bev.dtype == np.uint8
+            packed = np.load(
+                episode_path / f"{PACKED_BEV_FIELD}.npy",
+                mmap_mode="r",
+                allow_pickle=False,
+            )
+            assert isinstance(packed, np.memmap)
+            assert packed.shape == (2, 3, *PACKED_BEV_SHAPE)
+            assert packed.dtype == np.uint8
+            assert not (episode_path / "bev.npy").exists()
+            assert (
+                np.prod(JOINT_SAMPLE_SHAPES["bev"])
+                / np.prod(packed.shape[1:])
+                == BEV_COMPRESSION_RATIO
+            )
+            expected = np.stack(
+                [
+                    _sample(entry["episode_index"]).bev,
+                    _sample(entry["episode_index"] + 1).bev,
+                ]
+            )
+            np.testing.assert_array_equal(unpack_semantic_bev(packed), expected)
     assert len(all_episode_paths) == len({path.name for path in all_episode_paths})
     assert all(path.parent.parent.name in SPLIT_NAMES for path in all_episode_paths)
 
@@ -136,6 +163,28 @@ def test_resume_continues_without_overwriting_and_reconciles_stale_state(
         assert final.summary()["rejected_episodes"] == 1
 
 
+def test_expert_labels_do_not_change_packed_bev_input(tmp_path: Path) -> None:
+    root = tmp_path / "dataset"
+    base = _sample(1)
+    changed_values = {
+        name: np.array(value, copy=True) for name, value in base.as_dict().items()
+    }
+    changed_values["expert_trajectory"][:] = np.float32(12.5)
+    changed = JointBEVSample(**changed_values)
+    with _open(root, resume=False) as store:
+        episode = store.commit_episode(0, [base, changed], {"scenario_id": "S5"})
+    packed = np.load(
+        root
+        / episode.split
+        / "episodes"
+        / episode.directory
+        / f"{PACKED_BEV_FIELD}.npy",
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    np.testing.assert_array_equal(packed[0], packed[1])
+
+
 def test_resume_rejects_changed_contract(tmp_path: Path) -> None:
     root = tmp_path / "dataset"
     with _open(root, resume=False):
@@ -149,12 +198,25 @@ def test_resume_rejects_changed_contract(tmp_path: Path) -> None:
     with pytest.raises(JointStorageError, match="contract mismatch"):
         _open(root, resume=True, fingerprint=_fingerprint("different"))
 
+    contract_path = root / "dataset_contract.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["schema_version"] = STORAGE_SCHEMA_VERSION - 1
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    with pytest.raises(JointStorageError, match="contract mismatch"):
+        _open(root, resume=True)
+
 
 def test_resume_rejects_corrupt_committed_array(tmp_path: Path) -> None:
     root = tmp_path / "dataset"
     with _open(root, resume=False) as store:
         episode = store.commit_episode(0, [_sample()], {})
-        array_path = root / episode.split / "episodes" / episode.directory / "bev.npy"
+        array_path = (
+            root
+            / episode.split
+            / "episodes"
+            / episode.directory
+            / f"{PACKED_BEV_FIELD}.npy"
+        )
     with array_path.open("r+b") as stream:
         stream.truncate(64)
     with pytest.raises(JointStorageError, match="unable to mmap episode array"):

@@ -1,8 +1,9 @@
 """Atomic episode storage for the joint-first BEV dataset.
 
 Each completed episode is committed to exactly one split as a directory of
-uncompressed ``.npy`` arrays.  The format keeps BEV tensors memory-mappable and
-uses the episode-directory rename as the durable commit marker.
+``.npy`` arrays.  Semantic BEV tensors use the frozen lossless bit-packed
+representation while all logical tensors remain memory-mappable.  The
+episode-directory rename is the durable commit marker.
 """
 
 from __future__ import annotations
@@ -25,12 +26,35 @@ from expert_dataset.collect_joint_bev import (
     JOINT_SAMPLE_SHAPES,
     JointBEVSample,
 )
+from expert_dataset.semantic_bev_codec import (
+    PACKED_BEV_SHAPE,
+    SemanticBEVCodecError,
+    pack_semantic_bev,
+    packed_bev_contract,
+)
 
 
-STORAGE_SCHEMA_VERSION = 1
-STORAGE_FORMAT = "joint-first-npy-episodes"
+STORAGE_SCHEMA_VERSION = 2
+STORAGE_FORMAT = "joint-first-packed-semantic-bev-npy-episodes"
 SPLIT_NAMES = ("train", "val", "test")
 EPISODE_PATTERN = re.compile(r"^episode_(\d{8})$")
+PACKED_BEV_FIELD = "bev_packed"
+STORED_FIELD_SHAPES = {
+    PACKED_BEV_FIELD: (JOINT_SAMPLE_SHAPES["bev"][0], *PACKED_BEV_SHAPE),
+    **{
+        name: shape
+        for name, shape in JOINT_SAMPLE_SHAPES.items()
+        if name != "bev"
+    },
+}
+STORED_FIELD_DTYPES = {
+    PACKED_BEV_FIELD: np.dtype(np.uint8),
+    **{
+        name: dtype
+        for name, dtype in JOINT_SAMPLE_DTYPES.items()
+        if name != "bev"
+    },
+}
 
 
 class JointStorageError(RuntimeError):
@@ -175,6 +199,16 @@ def _sample_contract() -> dict[str, dict[str, object]]:
     }
 
 
+def _physical_storage_contract() -> dict[str, dict[str, object]]:
+    return {
+        name: {
+            "shape": list(STORED_FIELD_SHAPES[name]),
+            "dtype": str(STORED_FIELD_DTYPES[name]),
+        }
+        for name in STORED_FIELD_SHAPES
+    }
+
+
 @dataclass(frozen=True)
 class StoredEpisode:
     episode_index: int
@@ -223,6 +257,8 @@ class JointEpisodeWriter:
             raise JointStorageError(f"committed episode is not marked complete: {path}")
         if int(metadata.get("schema_version", -1)) != STORAGE_SCHEMA_VERSION:
             raise JointStorageError(f"episode schema version mismatch: {path}")
+        if metadata.get("format") != STORAGE_FORMAT:
+            raise JointStorageError(f"episode storage format mismatch: {path}")
         if int(metadata.get("episode_index", -1)) != episode_index:
             raise JointStorageError(f"episode directory/index mismatch: {path}")
         if metadata.get("split") != self.split:
@@ -235,7 +271,7 @@ class JointEpisodeWriter:
             raise JointStorageError(f"episode attributes must be an object: {path}")
 
         expected_names = {"episode.json"} | {
-            f"{field_name}.npy" for field_name in JOINT_SAMPLE_SHAPES
+            f"{field_name}.npy" for field_name in STORED_FIELD_SHAPES
         }
         actual_names = {item.name for item in path.iterdir()}
         if actual_names != expected_names:
@@ -245,7 +281,7 @@ class JointEpisodeWriter:
                 f"unexpected={sorted(actual_names - expected_names)}"
             )
 
-        for field_name, sample_shape in JOINT_SAMPLE_SHAPES.items():
+        for field_name, sample_shape in STORED_FIELD_SHAPES.items():
             array_path = path / f"{field_name}.npy"
             try:
                 array = np.load(array_path, mmap_mode="r", allow_pickle=False)
@@ -257,10 +293,10 @@ class JointEpisodeWriter:
                     f"stored {field_name} shape mismatch at {path}: "
                     f"expected {expected_shape}, got {array.shape}"
                 )
-            if array.dtype != JOINT_SAMPLE_DTYPES[field_name]:
+            if array.dtype != STORED_FIELD_DTYPES[field_name]:
                 raise JointStorageError(
                     f"stored {field_name} dtype mismatch at {path}: "
-                    f"expected {JOINT_SAMPLE_DTYPES[field_name]}, got {array.dtype}"
+                    f"expected {STORED_FIELD_DTYPES[field_name]}, got {array.dtype}"
                 )
 
         return StoredEpisode(
@@ -340,8 +376,22 @@ class JointEpisodeWriter:
         )
         temporary.mkdir()
 
-        stacked: dict[str, np.ndarray] = {}
+        packed_bev = np.empty(
+            (len(samples), *STORED_FIELD_SHAPES[PACKED_BEV_FIELD]),
+            dtype=np.uint8,
+        )
+        try:
+            for sample_index, sample in enumerate(samples):
+                packed_bev[sample_index] = pack_semantic_bev(sample.bev)
+        except SemanticBEVCodecError as exc:
+            raise JointStorageError(
+                "episode BEV violates the packed semantic storage contract"
+            ) from exc
+
+        stacked: dict[str, np.ndarray] = {PACKED_BEV_FIELD: packed_bev}
         for field_name in JOINT_SAMPLE_SHAPES:
+            if field_name == "bev":
+                continue
             values = [sample.as_dict()[field_name] for sample in samples]
             array = np.ascontiguousarray(np.stack(values, axis=0))
             expected_shape = (len(samples), *JOINT_SAMPLE_SHAPES[field_name])
@@ -453,6 +503,8 @@ class JointBEVDatasetStore:
             "format": STORAGE_FORMAT,
             "joint_first": True,
             "sample_contract": _sample_contract(),
+            "physical_storage_contract": _physical_storage_contract(),
+            "packed_semantic_bev": packed_bev_contract(),
             "split_assignment": self.split_config.as_dict(),
             "dataset_fingerprint": self.dataset_fingerprint,
         }
@@ -628,9 +680,12 @@ __all__ = [
     "JointBEVDatasetStore",
     "JointEpisodeWriter",
     "JointStorageError",
+    "PACKED_BEV_FIELD",
     "SPLIT_NAMES",
     "STORAGE_FORMAT",
     "STORAGE_SCHEMA_VERSION",
+    "STORED_FIELD_DTYPES",
+    "STORED_FIELD_SHAPES",
     "StoredEpisode",
     "fingerprint_payload",
 ]

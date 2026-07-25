@@ -13,6 +13,8 @@ from expert_dataset.collect_joint_bev import (
     JointEpisodeRollout,
 )
 from expert_dataset import run_joint_bev_collection as runner
+from expert_dataset.joint_bev_storage import PACKED_BEV_FIELD
+from expert_dataset.semantic_bev_codec import PACKED_BEV_SHAPE, unpack_semantic_bev
 from models.bev_planner.mode_contract import ModeIndex
 
 
@@ -202,6 +204,12 @@ def test_run_collection_commits_joint_episode_with_real_store(
         name for name, values in summary["splits"].items() if values["episodes"] == 1
     )
     episode_dir = next((config.dataset_root / split / "episodes").iterdir())
-    bev = np.load(episode_dir / "bev.npy", mmap_mode="r", allow_pickle=False)
-    assert isinstance(bev, np.memmap)
-    assert bev.shape == (1, *JOINT_SAMPLE_SHAPES["bev"])
+    packed = np.load(
+        episode_dir / f"{PACKED_BEV_FIELD}.npy",
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    assert isinstance(packed, np.memmap)
+    assert packed.shape == (1, 3, *PACKED_BEV_SHAPE)
+    np.testing.assert_array_equal(unpack_semantic_bev(packed[0]), _sample().bev)
+    assert not (episode_dir / "bev.npy").exists()
