@@ -9,9 +9,11 @@ def test_s6_declares_ego_spawn_reference_block_and_start_longitude() -> None:
     scenario = SCENARIO_BY_ID["S6_background_merge_in"]
 
     assert scenario.ego_spawn_reference_block_id == "g1"
-    assert scenario.ego_spawn_longitude_m == (60.0, 90.0)
-    assert scenario.ego_initial_speed_km_h == (20.0, 26.0)
-    assert scenario.override_traffic_density == pytest.approx(0.03)
+    assert scenario.ego_spawn_reference_kind == "block_internal_road"
+    assert scenario.ego_spawn_internal_road_index == 1
+    assert scenario.ego_spawn_longitude_m == (72.0, 78.0)
+    assert scenario.ego_initial_speed_km_h == (23.0, 25.0)
+    assert scenario.override_traffic_density == pytest.approx(0.0)
     assert scenario.env_overrides == {
         "traffic_spawn_exclusion_ahead_m": 100.0,
         "traffic_spawn_exclusion_behind_m": 100.0,
@@ -26,68 +28,19 @@ def test_s6_declares_merge_aware_background_policy() -> None:
     assert recipe.params["policy"] == "idm_merge"
     assert recipe.params["merge_front_gap_m"] == pytest.approx(10.0)
     assert recipe.params["merge_rear_gap_m"] == pytest.approx(10.0)
-    assert recipe.params["merge_creep_speed_kmh"] == pytest.approx(15.0)
+    assert recipe.params["merge_creep_speed_kmh"] == pytest.approx(20.0)
     assert recipe.params["target_speed_kmh"] == pytest.approx(24.0)
-    assert recipe.params["spawn_longitude"] == (0.0, 1.0)
+    assert recipe.params["merge_arrival_offset_s"] == pytest.approx(1.2)
+    assert "spawn_longitude" not in recipe.params
 
 
-def test_s6_declares_fixed_same_lane_background_traffic() -> None:
+def test_s6_declares_only_one_controlled_merge_vehicle() -> None:
     scenario = SCENARIO_BY_ID["S6_background_merge_in"]
-    recipes = [
-        recipe
-        for recipe in scenario.traffic_recipes
-        if recipe.operation == "inject_background_vehicle"
-        and recipe.params.get("reference_kind") == "ego_lane"
-    ]
-
-    assert len(recipes) == 7
-    assert [recipe.params["name"] for recipe in recipes] == [
-        "ego_lane_front_2",
-        "ego_lane_front_3",
-        "ego_lane_front_4",
-        "ego_lane_rear_1",
-        "ego_lane_rear_2",
-        "ego_lane_rear_3",
-        "ego_lane_rear_4",
-    ]
-    assert [recipe.params["spawn_longitude_offset"] for recipe in recipes] == [
-        55.0,
-        80.0,
-        115.0,
-        -20.0,
-        -45.0,
-        -80.0,
-        -115.0,
-    ]
-    assert all(recipe.params["spawn_longitude"] == 0.0 for recipe in recipes)
-    assert all(recipe.params["trigger_on_start"] is True for recipe in recipes)
-    assert all("policy" not in recipe.params for recipe in recipes)
-
-
-def test_s6_declares_four_background_vehicles_per_adjacent_lane() -> None:
-    scenario = SCENARIO_BY_ID["S6_background_merge_in"]
-    recipes = [
-        recipe
-        for recipe in scenario.traffic_recipes
-        if recipe.operation == "inject_adjacent_lane_vehicles"
-    ]
-
-    assert len(recipes) == 1
-    assert recipes[0].params["trigger_on_start"] is True
-    assert recipes[0].params["clearance_scope"] == "same_lane"
-    vehicles = recipes[0].params["vehicles"]
-    assert len(vehicles) == 8
-    assert len({vehicle["name"] for vehicle in vehicles}) == 8
-    for lane_side in ("left", "right"):
-        lane_vehicles = [vehicle for vehicle in vehicles if vehicle["lane_side"] == lane_side]
-        assert len(lane_vehicles) == 4
-        assert [vehicle["spawn_longitude_offset_m"] for vehicle in lane_vehicles] == [
-            -40.0,
-            -10.0,
-            15.0,
-            35.0,
-        ]
-        assert all(20.0 <= vehicle["target_speed_kmh"] <= 27.0 for vehicle in lane_vehicles)
+    assert len(scenario.traffic_recipes) == 1
+    recipe = scenario.traffic_recipes[0]
+    assert recipe.operation == "inject_background_vehicle"
+    assert recipe.params["reference_kind"] == "block_socket_road"
+    assert recipe.params["trigger_on_start"] is True
 
 
 def test_s5_declares_adjacent_lane_side_vehicle_recipe() -> None:
@@ -106,20 +59,19 @@ def test_s5_declares_adjacent_lane_side_vehicle_recipe() -> None:
         {
             "name": "left_side",
             "lane_side": "left",
-            "spawn_longitude_offset_m": -8.0,
-            "spawn_longitude_offset_range_m": (-10.0, -6.0),
-            "target_speed_kmh": 18.0,
-            "target_speed_range_kmh": (16.0, 20.0),
+            "spawn_longitude_offset_range_m": (-15.0, -13.0),
+            "target_speed_kmh": 24.0,
         },
         {
             "name": "right_side",
             "lane_side": "right",
-            "spawn_longitude_offset_m": 6.0,
-            "spawn_longitude_offset_range_m": (4.0, 8.0),
-            "target_speed_kmh": 19.0,
-            "target_speed_range_kmh": (17.0, 21.0),
+            "spawn_longitude_offset_range_m": (13.0, 15.0),
+            "target_speed_kmh": 24.0,
         },
     )
+    assert scenario.allowed_local_routes == ("R1_entry_straight",)
+    assert tuple(scenario.trigger_by_local_route) == ("R1_entry_straight",)
+    assert scenario.override_traffic_density == 0.0
 
 
 def test_s7_declares_mainline_background_traffic_on_three_lanes() -> None:
@@ -151,10 +103,11 @@ def test_s5_declares_hard_brake_random_ranges() -> None:
 
     assert len(recipes) == 1
     params = recipes[0].params
-    assert params["lead_distance_range_m"] == (10.0, 15.0)
-    assert params["lead_target_speed_range_kmh"] == (19.0, 23.0)
+    assert params["trigger_after_s"] == 3.0
+    assert params["lead_bumper_gap_range_m"] == (9.0, 13.0)
+    assert params["lead_target_speed_range_kmh"] == (22.0, 26.0)
     assert params["brake_target_speed_range_kmh"] == (0.5, 2.0)
-    assert params["brake_duration_steps_range"] == (450, 550)
+    assert params["brake_deceleration_range_mps2"] == (5.0, 7.0)
 
 
 def test_s9_declares_safe_internal_spawn_road() -> None:

@@ -59,7 +59,7 @@ class PlatoonNormalPlanner:
         num_output_points: int = 8,
         lane_change_target_margin_m: float = 0.15,
         keep_lateral_margin_m: float = 0.25,
-        background_safe_gap_m: float = 8.0,
+        background_safe_gap_m: float = 5.0,
         platoon_safe_gap_m: float = 7.0,
         safety_distance_m: float = 6.0,
         safety_weight: float = 8.0,

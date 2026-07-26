@@ -102,6 +102,13 @@ def _env_s8_hardcoded_target():
     )
 
 
+def test_default_hard_safety_gaps_match_collection_contract():
+    planner = PlatoonNormalPlanner()
+
+    assert planner.background_safe_gap_m == 5.0
+    assert planner.platoon_safe_gap_m == 7.0
+
+
 def test_keep_returns_8x3_forward_trajectory():
     env = _env(agent_lane_id=1)
     planner = PlatoonNormalPlanner()

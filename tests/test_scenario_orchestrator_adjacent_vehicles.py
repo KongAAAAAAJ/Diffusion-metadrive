@@ -21,6 +21,9 @@ class FakeLane:
     def position(self, longitudinal: float, lateral: float):
         return (float(longitudinal), float(self.index[2]) * 4.0 + float(lateral))
 
+    def heading_theta_at(self, longitudinal: float):
+        return 0.0
+
 
 class FakeRoadNetwork:
     def __init__(self, lanes) -> None:
@@ -51,7 +54,28 @@ class FakeTrafficManager:
         vehicle_config_overrides=None,
     ):
         name = f"traffic_{len(self._traffic_vehicles)}"
-        vehicle = SimpleNamespace(name=name, spawn_config=config)
+        vehicle = SimpleNamespace(
+            name=name,
+            spawn_config=config,
+            position=(
+                float(config["spawn_longitude"]),
+                float(config["spawn_lane_index"][-1]) * 4.0,
+            ),
+            speed_km_h=float(config["spawn_velocity"][0]) * 3.6,
+            LENGTH=5.74,
+        )
+        vehicle.set_position = lambda position: setattr(
+            vehicle, "position", tuple(position)
+        )
+        vehicle.set_heading_theta = lambda heading: setattr(
+            vehicle, "heading_theta", float(heading)
+        )
+        vehicle.set_velocity = lambda velocity, in_local_frame=True: setattr(
+            vehicle, "speed_km_h", float(velocity[0]) * 3.6
+        )
+        vehicle.set_throttle_brake = lambda value: setattr(
+            vehicle, "throttle_brake", float(value)
+        )
         self._traffic_vehicles.append(vehicle)
         self.spawn_calls.append(
             (vehicle_type, config, policy_class, policy_kwargs or {}, vehicle_config_overrides or {})
@@ -98,6 +122,75 @@ def make_env_and_ego(lane_count: int = 3, ego_lane_index: int = 1, rng=None):
         config={"scenario_spawn_min_agent_clearance_m": 0.0},
     )
     return env, ego, traffic_manager
+
+
+class _S6Lane:
+    def __init__(self, start, end, lane_id, length, lateral=0.0):
+        self.index = (start, end, lane_id)
+        self.length = float(length)
+        self.lateral = float(lateral)
+
+    def local_coordinates(self, position):
+        return float(position[0]), float(position[1]) - self.lateral
+
+    def position(self, longitudinal, lateral):
+        return float(longitudinal), self.lateral + float(lateral)
+
+    def heading_theta_at(self, longitudinal):
+        return 0.0
+
+
+def make_s6_alignment_env():
+    main_lanes = [_S6Lane("A", "C", index, 180.0) for index in range(3)]
+    branch_lane = _S6Lane("A", "B", 0, 100.0, lateral=8.0)
+    connector_lane = _S6Lane("B", "C", 0, 80.0, lateral=4.0)
+    lanes = [*main_lanes, branch_lane, connector_lane]
+    road_network = SimpleNamespace(
+        graph={
+            "A": {"B": [branch_lane], "C": main_lanes},
+            "B": {"C": [connector_lane]},
+        },
+        get_lane=lambda index: {
+            lane.index: lane for lane in lanes
+        }[tuple(index)],
+    )
+    socket = SimpleNamespace(
+        positive_road=SimpleNamespace(start_node="A", end_node="B")
+    )
+    block = SimpleNamespace(
+        graph_block_id="g1",
+        get_socket=lambda index: socket if index == 1 else None,
+        block_network=SimpleNamespace(get_positive_lanes=lambda: [main_lanes]),
+        get_socket_list=lambda: [],
+        get_respawn_roads=lambda: [],
+    )
+    traffic_manager = FakeTrafficManager()
+    engine = SimpleNamespace(
+        current_map=SimpleNamespace(
+            road_network=road_network,
+            blocks=[block],
+        ),
+        traffic_manager=traffic_manager,
+        get_policy=lambda name: traffic_manager.policies.get(name),
+    )
+    agent_positions = (75.0, 59.26, 43.52)
+    agents = {}
+    for index, longitudinal in enumerate(agent_positions):
+        lane = main_lanes[2]
+        agents[f"agent{index}"] = SimpleNamespace(
+            name=f"agent{index}",
+            lane=lane,
+            lane_index=lane.index,
+            position=lane.position(longitudinal, 0.0),
+            speed_km_h=24.0,
+            LENGTH=5.74,
+        )
+    env = SimpleNamespace(
+        agents=agents,
+        engine=engine,
+        config={"scenario_spawn_min_agent_clearance_m": 0.0},
+    )
+    return env, traffic_manager
 
 
 def make_adjacent_definition(recipe_params: dict | None = None) -> ScenarioDefinition:
@@ -147,52 +240,57 @@ def test_adjacent_lane_recipe_spawns_left_and_right_once() -> None:
     assert orchestrator.summary.notes.count("adjacent_spawned:right_side") == 1
 
 
-def test_s6_fixed_traffic_spawns_at_head_relative_positions_only_once() -> None:
-    env, ego, traffic_manager = make_env_and_ego()
+def test_s6_spawns_one_arrival_aligned_merge_vehicle_only_once() -> None:
+    env, traffic_manager = make_s6_alignment_env()
     orchestrator = ScenarioOrchestrator(
         SCENARIO_BY_ID["S6_background_merge_in"],
         "R6_mainline_merge_approach",
     )
     orchestrator.reset(env, "agent0")
-    orchestrator._road_to_block_id = {("road_a", "road_b"): "g1"}
+    orchestrator._road_to_block_id = {("A", "C"): "g1"}
 
     orchestrator.before_step(env, "agent0", 1)
     orchestrator.before_step(env, "agent0", 2)
 
-    ordinary_calls = [call for call in traffic_manager.spawn_calls if call[2] is None]
-    assert len(ordinary_calls) == 15
-    assert [call[1]["spawn_longitude"] for call in ordinary_calls[:7]] == [
-        145.0,
-        170.0,
-        198.0,
-        70.0,
-        45.0,
-        10.0,
-        2.0,
-    ]
-    assert [call[1]["spawn_lane_index"][-1] for call in ordinary_calls[7:]] == [
-        0, 0, 0, 0, 2, 2, 2, 2
-    ]
-    assert [call[1]["spawn_longitude"] for call in ordinary_calls[7:11]] == [
-        ego.position[0] + offset for offset in (-40.0, -10.0, 15.0, 35.0)
-    ]
-
-
-def test_s6_fixed_traffic_skips_missing_adjacent_lane() -> None:
-    env, _ego, traffic_manager = make_env_and_ego(lane_count=2, ego_lane_index=1)
-    orchestrator = ScenarioOrchestrator(
-        SCENARIO_BY_ID["S6_background_merge_in"],
-        "R6_mainline_merge_approach",
+    assert len(traffic_manager.spawn_calls) == 1
+    call = traffic_manager.spawn_calls[0]
+    assert call[1]["spawn_lane_index"] == ("A", "B", 0)
+    assert call[1]["spawn_longitude"] == pytest.approx(67.0, abs=0.05)
+    assert call[1]["spawn_velocity"] == pytest.approx((24.0 / 3.6, 0.0))
+    assert call[3] == {
+        "merge_front_gap_m": 10.0,
+        "merge_rear_gap_m": 10.0,
+        "merge_creep_speed_kmh": 20.0,
+        "merge_cruise_speed_kmh": 24.0,
+    }
+    vehicle = traffic_manager._traffic_vehicles[0]
+    assert vehicle.scenario_vehicle_role == "s6_merge_vehicle"
+    assert vehicle.scenario_merge_arrival_offset_s == pytest.approx(1.2)
+    assert (
+        vehicle.scenario_leader_ttc_s
+        < vehicle.scenario_merge_ttc_s
+        < vehicle.scenario_middle_ttc_s
     )
-    orchestrator.reset(env, "agent0")
-    orchestrator._road_to_block_id = {("road_a", "road_b"): "g1"}
-
-    orchestrator.before_step(env, "agent0", 1)
-
-    ordinary_calls = [call for call in traffic_manager.spawn_calls if call[2] is None]
-    assert len(ordinary_calls) == 11
-    assert [call[1]["spawn_lane_index"][-1] for call in ordinary_calls[7:]] == [0, 0, 0, 0]
-    assert sum(note.startswith("adjacent_lane_missing:right_") for note in orchestrator.summary.notes) == 4
+    assert (
+        vehicle.scenario_merge_ttc_s - vehicle.scenario_leader_ttc_s
+        == pytest.approx(1.2)
+    )
+    branch_lane = env.engine.current_map.road_network.get_lane(
+        call[1]["spawn_lane_index"]
+    )
+    spawn_position = branch_lane.position(call[1]["spawn_longitude"], 0.0)
+    spawn_heading = branch_lane.heading_theta_at(call[1]["spawn_longitude"])
+    assert all(
+        not orchestrator._oriented_boxes_overlap(
+            spawn_position,
+            spawn_heading,
+            (5.74, 2.3),
+            agent.position,
+            0.0,
+            (5.74, 2.3),
+        )
+        for agent in env.agents.values()
+    )
 
 
 def test_s7_mainline_background_spawns_on_three_g1_lanes() -> None:
@@ -221,46 +319,64 @@ def test_s7_mainline_background_spawns_on_three_g1_lanes() -> None:
 
 def test_s5_hard_brake_recipe_randomizes_from_traffic_manager_rng(monkeypatch) -> None:
     rng = np.random.RandomState(123)
-    env, ego, _traffic_manager = make_env_and_ego(rng=rng)
+    env, ego, traffic_manager = make_env_and_ego(rng=rng)
     ego.speed_km_h = 30.0
-    orchestrator = ScenarioOrchestrator(SCENARIO_BY_ID["S5_hard_brake_lead"], "R3_mainline_straight")
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"],
+        "R1_entry_straight",
+    )
     orchestrator.reset(env, "agent0")
-    orchestrator._road_to_block_id = {("road_a", "road_b"): "s_main0"}
+    orchestrator._road_to_block_id = {("road_a", "road_b"): "s0"}
     monkeypatch.setattr(orchestrator, "_find_front_vehicle_with_distance", lambda vehicle: (None, None))
 
     captured_params = {}
 
     def fake_spawn(env_arg, ego_arg, params):
         captured_params.update(params)
-        return SimpleNamespace(name="spawned_lead")
+        spawned = SimpleNamespace(
+            name="spawned_lead",
+            speed_km_h=float(params["lead_target_speed_kmh"]),
+            LENGTH=5.74,
+        )
+        traffic_manager._traffic_vehicles.append(spawned)
+        return spawned
 
     monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", fake_spawn)
 
     orchestrator.before_step(env, "agent0", 31)
 
     expected_rng = np.random.RandomState(123)
-    assert captured_params["lead_distance_m"] == float(expected_rng.uniform(10.0, 15.0))
-    assert captured_params["lead_target_speed_kmh"] == float(expected_rng.uniform(19.0, 23.0))
+    assert captured_params["lead_bumper_gap_m"] == float(
+        expected_rng.uniform(9.0, 13.0)
+    )
+    assert captured_params["lead_target_speed_kmh"] == float(
+        expected_rng.uniform(22.0, 26.0)
+    )
     assert captured_params["brake_target_speed_kmh"] == float(expected_rng.uniform(0.5, 2.0))
-    assert captured_params["brake_duration_steps"] == int(expected_rng.randint(450, 551))
-    assert SCENARIO_BY_ID["S5_hard_brake_lead"].traffic_recipes[0].params["lead_distance_m"] == 10.0
+    assert captured_params["brake_deceleration_mps2"] == float(
+        expected_rng.uniform(5.0, 7.0)
+    )
+    assert orchestrator._speed_profiles["spawned_lead"]["remaining_steps"] == float(
+        "inf"
+    )
 
 
 def test_s5_adjacent_recipe_randomizes_each_vehicle_from_traffic_manager_rng() -> None:
     rng = np.random.RandomState(321)
     env, ego, traffic_manager = make_env_and_ego(rng=rng)
     ego.position = (20.0, ego.position[1])
-    orchestrator = ScenarioOrchestrator(SCENARIO_BY_ID["S5_hard_brake_lead"], "R3_mainline_straight")
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"],
+        "R1_entry_straight",
+    )
     orchestrator.reset(env, "agent0")
-    orchestrator._road_to_block_id = {("road_a", "road_b"): "s_main0"}
+    orchestrator._road_to_block_id = {("road_a", "road_b"): "s0"}
 
     orchestrator.before_step(env, "agent0", 1)
 
     expected_rng = np.random.RandomState(321)
-    left_offset = float(expected_rng.uniform(-10.0, -6.0))
-    left_speed = float(expected_rng.uniform(16.0, 20.0))
-    right_offset = float(expected_rng.uniform(4.0, 8.0))
-    right_speed = float(expected_rng.uniform(17.0, 21.0))
+    left_offset = float(expected_rng.uniform(-15.0, -13.0))
+    right_offset = float(expected_rng.uniform(13.0, 15.0))
 
     assert [call[1]["spawn_lane_index"] for call in traffic_manager.spawn_calls] == [
         ("road_a", "road_b", 0),
@@ -271,12 +387,12 @@ def test_s5_adjacent_recipe_randomizes_each_vehicle_from_traffic_manager_rng() -
         20.0 + right_offset,
     ]
     assert [traffic_manager.policies[vehicle.name].target_speed for vehicle in traffic_manager._traffic_vehicles] == [
-        left_speed,
-        right_speed,
+        24.0,
+        24.0,
     ]
 
 
-def test_hard_brake_recipe_without_ranges_keeps_static_params(monkeypatch) -> None:
+def test_hard_brake_recipe_rejects_legacy_static_contract(monkeypatch) -> None:
     rng = np.random.RandomState(123)
     env, _ego, _traffic_manager = make_env_and_ego(rng=rng)
     definition = ScenarioDefinition(
@@ -306,20 +422,11 @@ def test_hard_brake_recipe_without_ranges_keeps_static_params(monkeypatch) -> No
     orchestrator.reset(env, "agent0")
     monkeypatch.setattr(orchestrator, "_find_front_vehicle_with_distance", lambda vehicle: (None, None))
 
-    captured_params = {}
-
-    def fake_spawn(env_arg, ego_arg, params):
-        captured_params.update(params)
-        return SimpleNamespace(name="spawned_lead")
-
-    monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", fake_spawn)
-
-    orchestrator.before_step(env, "agent0", 1)
-
-    assert captured_params["lead_distance_m"] == 10.0
-    assert captured_params["lead_target_speed_kmh"] == 21.0
-    assert captured_params["brake_target_speed_kmh"] == 1.0
-    assert captured_params["brake_duration_steps"] == 200
+    with pytest.raises(
+        ValueError,
+        match="lead_bumper_gap_range_m",
+    ):
+        orchestrator.before_step(env, "agent0", 1)
 
 
 def test_adjacent_lane_recipe_skips_missing_side_lane() -> None:
@@ -531,12 +638,10 @@ def test_hard_brake_spawned_lead_uses_lead_target_speed_as_initial_velocity(monk
             RecipeSpec(
                 "hard_brake_lead",
                 {
-                    "lead_distance_m": 10.0,
+                    "lead_bumper_gap_range_m": (9.0, 13.0),
                     "lead_target_speed_kmh": 21.0,
-                    "front_distance_min_m": 10.0,
-                    "front_distance_max_m": 15.0,
                     "brake_target_speed_kmh": 1.0,
-                    "brake_duration_steps": 30,
+                    "brake_deceleration_range_mps2": (5.0, 7.0),
                 },
             ),
         ),
@@ -555,6 +660,33 @@ def test_hard_brake_spawned_lead_uses_lead_target_speed_as_initial_velocity(monk
     spawn_config = traffic_manager.spawn_calls[0][1]
     assert spawn_config["spawn_velocity"] == (21.0 / 3.6, 0.0)
     assert spawn_config["spawn_velocity_car_frame"] is True
+
+
+def test_bounded_hard_brake_is_continuous_and_respects_deceleration():
+    vehicle = SimpleNamespace(speed_km_h=24.0)
+    vehicle.set_throttle_brake = lambda value: setattr(
+        vehicle, "throttle_brake", float(value)
+    )
+    vehicle.set_velocity = lambda velocity, in_local_frame=True: setattr(
+        vehicle, "speed_km_h", float(velocity[0]) * 3.6
+    )
+
+    speeds = [vehicle.speed_km_h]
+    for _ in range(20):
+        speeds.append(
+            ScenarioOrchestrator._bounded_brake_speed_kmh(
+                vehicle,
+                target_speed_kmh=1.0,
+                max_deceleration_mps2=6.0,
+                dt_s=0.1,
+            )
+        )
+
+    speeds = np.asarray(speeds)
+    observed_deceleration = -(np.diff(speeds) / 3.6) / 0.1
+    assert np.all(np.diff(speeds) <= 1e-9)
+    assert np.all(observed_deceleration <= 6.0 + 1e-9)
+    assert speeds[-1] == pytest.approx(1.0)
 
 
 def test_s6_injected_background_uses_merge_policy_and_start_edge_navigation() -> None:

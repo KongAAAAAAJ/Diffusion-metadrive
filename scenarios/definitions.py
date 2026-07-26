@@ -133,33 +133,24 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
     ScenarioDefinition(
         code="S5",
         scenario_id="S5_hard_brake_lead",
-        allowed_local_routes=("R1_entry_straight", "R3_mainline_straight", "R3_post_transition_straight"),
-        # S5 no longer uses this window for hard-brake timing.
-        # Kept only for local_route validation / legacy orchestrator compatibility.
+        allowed_local_routes=("R1_entry_straight",),
         trigger_by_local_route={
-            "R1_entry_straight": TriggerSpec("s0", 50.0, 220.0),  # 80-220m 之间触发，确保有足够距离完成急刹
-            "R3_mainline_straight": TriggerSpec("s_main0", 60.0, 160.0),
-            "R3_post_transition_straight": TriggerSpec("s_main1", 60.0, 115.0),
+            "R1_entry_straight": TriggerSpec("s0", 50.0, 220.0),
         },
         traffic_recipes=(
             RecipeSpec(
-                "hard_brake_lead",  # 急刹车
+                "hard_brake_lead",
                 {
                     "trigger_after_s": 3.0,
-                    "lead_distance_m": 10.0, 
-                    "lead_distance_range_m": (10.0, 15.0),  # 控制新生成急刹车相对 leader 的位置
-                    "lead_target_speed_kmh": 21.0,
-                    "lead_target_speed_range_kmh": (19.0, 23.0),
-                    "front_distance_min_m": 10.0,  # 急刹触发距离最小范围
-                    "front_distance_max_m": 15.0,
+                    "lead_bumper_gap_range_m": (9.0, 13.0),
+                    "lead_target_speed_range_kmh": (22.0, 26.0),
                     "brake_target_speed_kmh": 1.0,
                     "brake_target_speed_range_kmh": (0.5, 2.0),
-                    "brake_duration_steps": 500,
-                    "brake_duration_steps_range": (450, 550),
+                    "brake_deceleration_range_mps2": (5.0, 7.0),
                 },
             ),
             RecipeSpec(
-                "inject_adjacent_lane_vehicles",  # 相邻车道车
+                "inject_adjacent_lane_vehicles",
                 {
                     "trigger_on_start": True,
                     "clearance_scope": "same_lane",
@@ -167,18 +158,14 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                         {
                             "name": "left_side",
                             "lane_side": "left",
-                            "spawn_longitude_offset_m": -8.0,  # 相对于编队头车的位置
-                            "spawn_longitude_offset_range_m": (-10.0, -6.0),
-                            "target_speed_kmh": 18.0,
-                            "target_speed_range_kmh": (16.0, 20.0),
+                            "spawn_longitude_offset_range_m": (-15.0, -13.0),
+                            "target_speed_kmh": 24.0,
                         },
                         {
                             "name": "right_side",
                             "lane_side": "right",
-                            "spawn_longitude_offset_m": 6.0,
-                            "spawn_longitude_offset_range_m": (4.0, 8.0),
-                            "target_speed_kmh": 19.0,
-                            "target_speed_range_kmh": (17.0, 21.0),
+                            "spawn_longitude_offset_range_m": (13.0, 15.0),
+                            "target_speed_kmh": 24.0,
                         },
                     ),
                 },
@@ -187,6 +174,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_lane_preference="middle",
         ego_spawn_lane_probabilities=None,
         ego_initial_speed_km_h=24.0,
+        override_traffic_density=0.0,
         expert_recipe="提高安全时距",
         description="前车急减速",
     ),
@@ -201,9 +189,11 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_lane_preference="rightmost",
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",
-        ego_spawn_longitude_m=(60.0, 90.0), # *
-        ego_initial_speed_km_h=(20.0, 26.0), # *
-        override_traffic_density=0.03,
+        ego_spawn_reference_kind="block_internal_road",
+        ego_spawn_internal_road_index=1,
+        ego_spawn_longitude_m=(72.0, 78.0),
+        ego_initial_speed_km_h=(23.0, 25.0),
+        override_traffic_density=0.0,
         env_overrides={
             "traffic_spawn_exclusion_ahead_m": 100.0,
             "traffic_spawn_exclusion_behind_m": 100.0,

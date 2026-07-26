@@ -576,6 +576,15 @@ def collect_joint_episode(
         episode_truncated = bool(truncated.get("__all__", False))
         if failure_reason is not None or episode_terminated or episode_truncated:
             break
+    scenario_orchestrator = getattr(env, "_scenario_orchestrator", None)
+    if (
+        failure_reason is None
+        and scenario_orchestrator is not None
+        and hasattr(scenario_orchestrator, "get_episode_summary")
+    ):
+        scenario_summary = scenario_orchestrator.get_episode_summary()
+        if not bool(scenario_summary.get("scenario_realized", False)):
+            failure_reason = "scenario_not_realized"
     return JointEpisodeRollout(
         samples=tuple(samples),
         simulator_steps=simulator_steps,
