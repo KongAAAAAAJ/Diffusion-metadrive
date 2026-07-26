@@ -323,7 +323,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         env, max_steps=config.max_episode_steps
                     )
                 except JointCollectionError as exc:
-                    reason = f"collection_contract:{type(exc).__name__}"
+                    reason = getattr(exc, "reason_code", "collection_contract")
                     store.record_rejected_episode(episode_index, reason)
                     print(
                         f"[WARNING] episode={episode_index} split="
@@ -365,6 +365,9 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         "initial_speed_km_h": spec.initial_speed_km_h,
                         "simulator_steps": rollout.simulator_steps,
                         "rejected_joint_steps": rollout.rejected_joint_steps,
+                        "joint_step_rejection_counts": dict(
+                            rollout.joint_step_rejection_counts
+                        ),
                         "terminated": rollout.terminated,
                         "truncated": rollout.truncated,
                     },

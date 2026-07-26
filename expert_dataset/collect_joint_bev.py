@@ -7,7 +7,8 @@ episode splitting, shard writers, and resume semantics belong to round four.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from collections import Counter
+from dataclasses import dataclass, field, fields
 from enum import IntEnum
 from typing import Mapping, Sequence
 
@@ -43,6 +44,10 @@ NUM_RELATION_NEIGHBORS = 2
 
 class JointCollectionError(RuntimeError):
     """The synchronized joint state is unsuitable for the frozen dataset."""
+
+    def __init__(self, message: str, *, reason_code: str = "collection_contract") -> None:
+        super().__init__(message)
+        self.reason_code = str(reason_code)
 
 
 class JointStepRejected(JointCollectionError):
@@ -149,6 +154,7 @@ class JointEpisodeRollout:
     failure_reason: str | None
     terminated: bool
     truncated: bool
+    joint_step_rejection_counts: Mapping[str, int] = field(default_factory=dict)
 
 
 class SensorlessJointBEVPlatoonEnv(PlatoonEnv):
@@ -233,7 +239,10 @@ class RulePlannerExpert:
         actions: dict[str, int] = {}
         for agent_id in self.agent_ids:
             if agent_id not in raw:
-                raise JointCollectionError(f"RuleMaker omitted {agent_id}")
+                raise JointCollectionError(
+                    f"RuleMaker omitted {agent_id}",
+                    reason_code="rule_maker_no_action",
+                )
             action, target = self._normalize_decision(raw[agent_id])
             actions[agent_id] = action
             decisions[agent_id] = {"action": action, "target_point": target}
@@ -245,14 +254,40 @@ class RulePlannerExpert:
 
         trajectories = self.planner.plan(env, decisions)
         planner_debug = self.planner.get_last_debug() or {}
+        joint_debug = planner_debug.get("_joint", {})
+        if isinstance(joint_debug, Mapping) and bool(
+            joint_debug.get("fallback_used", False)
+        ):
+            fallback_reason = str(joint_debug.get("fallback_reason", "unknown"))
+            if fallback_reason == "single_agent_no_safe_candidate":
+                missing = ",".join(
+                    str(value) for value in joint_debug.get("missing_agents", ())
+                )
+                raise JointCollectionError(
+                    f"normal planner has no safe local candidate for {missing}",
+                    reason_code="normal_planner_single_agent_no_safe_candidate",
+                )
+            if fallback_reason == "no_safe_joint_combination":
+                raise JointCollectionError(
+                    "normal planner has no safe three-vehicle joint combination",
+                    reason_code="normal_planner_no_safe_joint_combination",
+                )
+            raise JointCollectionError(
+                f"normal planner fallback: {fallback_reason}",
+                reason_code="normal_planner_fallback",
+            )
         for agent_id in self.agent_ids:
             trajectory = np.asarray(trajectories.get(agent_id), dtype=np.float32)
             if trajectory.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM) or not np.isfinite(trajectory).all():
-                raise JointCollectionError(f"normal planner returned an invalid trajectory for {agent_id}")
+                raise JointCollectionError(
+                    f"normal planner returned an invalid trajectory for {agent_id}",
+                    reason_code="normal_planner_invalid_trajectory",
+                )
             agent_debug = planner_debug.get(agent_id)
             if not isinstance(agent_debug, Mapping) or bool(agent_debug.get("fallback_used", True)):
                 raise JointCollectionError(
-                    f"normal planner did not produce a native expert trajectory for {agent_id}"
+                    f"normal planner did not produce a native expert trajectory for {agent_id}",
+                    reason_code="normal_planner_fallback",
                 )
 
         controller = select_controller_by_formation(
@@ -450,7 +485,8 @@ class JointBEVSampleBuilder:
                 expert_values.append(expert_local)
         except ModeContractError as exc:
             raise JointStepRejected(
-                "one agent violated the mode/label contract; discard the entire joint step"
+                "one agent violated the mode/label contract; discard the entire joint step",
+                reason_code="gt_mode_mask_conflict",
             ) from exc
 
         return JointBEVSample(
@@ -495,6 +531,7 @@ def collect_joint_episode(
     dt_s = simulator_decision_dt_s(env)
     samples: list[JointBEVSample] = []
     rejected_joint_steps = 0
+    joint_step_rejection_counts: Counter[str] = Counter()
     simulator_steps = 0
     failure_reason = None
     episode_terminated = False
@@ -506,10 +543,11 @@ def collect_joint_episode(
         if sample_builder.history_ready():
             try:
                 samples.append(sample_builder.build_sample(env, expert_step))
-            except JointStepRejected:
+            except JointStepRejected as exc:
                 # The expert controls remain valid, but a joint label/mask
                 # conflict makes all three aligned training rows unusable.
                 rejected_joint_steps += 1
+                joint_step_rejection_counts[exc.reason_code] += 1
         _, _, terminated, truncated, info = env.low_level_step(dict(expert_step.controls))
         simulator_steps += 1
         for agent_id in agent_ids:
@@ -545,6 +583,7 @@ def collect_joint_episode(
         failure_reason=failure_reason,
         terminated=episode_terminated,
         truncated=episode_truncated,
+        joint_step_rejection_counts=dict(joint_step_rejection_counts),
     )
 
 

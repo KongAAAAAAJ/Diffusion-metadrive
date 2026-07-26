@@ -15,6 +15,7 @@ from expert_dataset.collect_joint_bev import (
     JointBEVSample,
     JointBEVSampleBuilder,
     JointCollectionError,
+    RulePlannerExpert,
     SensorlessJointBEVPlatoonEnv,
 )
 from models.bev_planner.dynamic_anchors import SimulatorDynamicAnchorGenerator
@@ -237,6 +238,46 @@ def test_joint_sample_rejects_partial_or_misaligned_data() -> None:
     values["bev"] = np.zeros((8, 256, 256), dtype=np.uint8)
     with pytest.raises(JointCollectionError, match="bev must have shape"):
         JointBEVSample(**values)
+
+
+def test_rule_planner_expert_reports_joint_planner_failure_category() -> None:
+    expert = RulePlannerExpert.__new__(RulePlannerExpert)
+    expert.agent_ids = ("agent0", "agent1", "agent2")
+    decision = {
+        agent_id: {
+            "action": 0,
+            "target_point": np.asarray([20.0, 0.0], dtype=np.float32),
+        }
+        for agent_id in expert.agent_ids
+    }
+    expert.rule_maker = SimpleNamespace(
+        compute=lambda *args, **kwargs: decision,
+        get_last_debug=lambda: {},
+    )
+    expert.planner = SimpleNamespace(
+        plan=lambda *args, **kwargs: {
+            agent_id: np.zeros((8, 3), dtype=np.float32)
+            for agent_id in expert.agent_ids
+        },
+        get_last_debug=lambda: {
+            "_joint": {
+                "fallback_used": True,
+                "fallback_reason": "no_safe_joint_combination",
+            }
+        },
+    )
+    env = SimpleNamespace(
+        agents={agent_id: object() for agent_id in expert.agent_ids},
+        _last_planner_batch={},
+    )
+
+    with pytest.raises(JointCollectionError) as error:
+        expert.plan(env)
+
+    assert (
+        error.value.reason_code
+        == "normal_planner_no_safe_joint_combination"
+    )
 
 
 def test_sensorless_environment_forces_no_rendering_observation_stack(monkeypatch) -> None:

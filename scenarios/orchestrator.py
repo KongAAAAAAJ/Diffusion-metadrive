@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Tuple
 
 from scenarios.definitions import ScenarioDefinition, TriggerSpec
-from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
+from metadrive.policy.idm_policy import IDMPolicy
 
 if TYPE_CHECKING:
     pass
@@ -418,30 +418,39 @@ class ScenarioOrchestrator:
 
     def _find_front_vehicle_with_distance(self, ego_vehicle):
         ref_lane = _select_reference_lane(ego_vehicle)
-        if ref_lane is None or not hasattr(ego_vehicle, "lidar"):
-            return None, None
-        current_ref_lanes = getattr(getattr(ego_vehicle, "navigation", None), "current_ref_lanes", None)
-        all_objects = ego_vehicle.lidar.get_surrounding_objects(ego_vehicle)
-        surrounding_objects = FrontBackObjects.get_find_front_back_objs(
-            all_objects,
-            ref_lane,
-            ego_vehicle.position,
-            max_distance=IDMPolicy.MAX_LONG_DIST,
-            ref_lanes=current_ref_lanes if current_ref_lanes and ref_lane in current_ref_lanes else None,
-        )
-        front_vehicle = surrounding_objects.front_object()
-        if front_vehicle is None:
+        if ref_lane is None:
             return None, None
         try:
-            ego_long = ref_lane.local_coordinates(ego_vehicle.position)[0]
-            front_long = ref_lane.local_coordinates(front_vehicle.position)[0]
-            return front_vehicle, max(float(front_long - ego_long), 0.0)
+            ego_long, _ = ref_lane.local_coordinates(ego_vehicle.position)
         except Exception:
+            return None, None
+
+        engine = getattr(ego_vehicle, "engine", None)
+        traffic_manager = getattr(engine, "traffic_manager", None)
+        raw_vehicles = getattr(traffic_manager, "_traffic_vehicles", ()) or ()
+        vehicles = raw_vehicles.values() if isinstance(raw_vehicles, dict) else raw_vehicles
+        lane_half_width = 0.5 * float(getattr(ref_lane, "width", 3.5) or 3.5)
+        best_vehicle = None
+        best_distance = float("inf")
+        for other in vehicles:
+            if other is ego_vehicle:
+                continue
             try:
-                delta = front_vehicle.position - ego_vehicle.position
-                return front_vehicle, float((delta[0] ** 2 + delta[1] ** 2) ** 0.5)
+                other_long, other_lateral = ref_lane.local_coordinates(other.position)
             except Exception:
-                return front_vehicle, None
+                continue
+            other_width = float(
+                getattr(other, "WIDTH", getattr(other, "width", 2.0)) or 2.0
+            )
+            if abs(float(other_lateral)) > lane_half_width + 0.5 * other_width:
+                continue
+            distance = float(other_long) - float(ego_long)
+            if 0.0 < distance <= IDMPolicy.MAX_LONG_DIST and distance < best_distance:
+                best_vehicle = other
+                best_distance = distance
+        if best_vehicle is None:
+            return None, None
+        return best_vehicle, best_distance
 
     def _spawn_on_reference(
         self,

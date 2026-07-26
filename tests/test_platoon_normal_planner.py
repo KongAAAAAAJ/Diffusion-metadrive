@@ -3,8 +3,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
+from models.platoon_planner.platoon_normal_planner import (
+    PlatoonNormalPlanner,
+    _Neighbor,
+    _TrafficEnvelope,
+    _TrajectoryCandidate,
+)
+from scenarios.orchestrator import ScenarioOrchestrator
 
 
 class FakeLane:
@@ -179,12 +186,16 @@ def test_target_point_changes_terminal_progress():
 
 def test_candidate_failure_falls_back_to_keep_lane_trajectory():
     env = _env(agent_lane_id=1)
+    lane = env.agents["agent0"].lane
+    blocker = _vehicle("blocker", 30.0, 0.0, lane, speed_km_h=0.0)
+    blocker.LENGTH = 200.0
+    blocker.WIDTH = 20.0
+    env.engine.traffic_manager = SimpleNamespace(_traffic_vehicles=[blocker])
     planner = PlatoonNormalPlanner()
-    planner._candidate_durations = lambda: ()  # type: ignore[method-assign]
 
     result = planner.plan(
         env,
-        {"agent0": {"action": 1, "target_point": np.asarray([20.0, 0.0], dtype=np.float32)}},
+        {"agent0": {"action": 0, "target_point": np.asarray([20.0, 0.0], dtype=np.float32)}},
     )
     debug = planner.get_last_debug()
 
@@ -303,11 +314,18 @@ def test_score_candidate_adds_ttc_penalty_for_slow_lead_vehicle():
     assert slow_score > fast_score + 3.0
 
 
-def test_candidate_collision_detects_static_vehicle_aabb_overlap():
+def test_candidate_collision_detects_static_vehicle_obb_overlap():
     env = _env(agent_lane_id=1)
     ego = env.agents["agent0"]
     lane = ego.lane
-    env.agents["stopped"] = _vehicle("stopped", 18.0, 0.0, lane, velocity=(0.0, 0.0))
+    env.agents["stopped"] = _vehicle(
+        "stopped",
+        18.0,
+        0.0,
+        lane,
+        speed_km_h=0.0,
+        velocity=(0.0, 0.0),
+    )
     planner = PlatoonNormalPlanner(collision_margin_m=0.0)
     candidate = np.asarray(
         [
@@ -334,6 +352,8 @@ def test_candidate_collision_uses_velocity_without_heading_fallback():
         velocity=(0.0, 4.0),
         heading_theta=np.pi,
     )
+    env.agents["crossing"].lane = None
+    env.agents["crossing"].lane_index = None
     planner = PlatoonNormalPlanner(collision_margin_m=0.0)
     candidate = np.asarray(
         [
@@ -371,7 +391,14 @@ def test_candidate_collision_checks_traffic_manager_vehicles():
     env = _env(agent_lane_id=1)
     ego = env.agents["agent0"]
     lane = ego.lane
-    traffic_vehicle = _vehicle("traffic", 18.0, 0.0, lane, velocity=(0.0, 0.0))
+    traffic_vehicle = _vehicle(
+        "traffic",
+        18.0,
+        0.0,
+        lane,
+        speed_km_h=0.0,
+        velocity=(0.0, 0.0),
+    )
     env.engine.traffic_manager = SimpleNamespace(_traffic_vehicles=[traffic_vehicle])
     planner = PlatoonNormalPlanner(collision_margin_m=0.0)
     candidate = np.asarray(
@@ -391,10 +418,17 @@ def test_plan_filters_colliding_candidates_before_scoring_and_falls_back():
     env = _env(agent_lane_id=1)
     ego = env.agents["agent0"]
     lane = ego.lane
-    blocker = _vehicle("blocker", 30.0, 0.0, lane, velocity=(0.0, 0.0))
+    blocker = _vehicle(
+        "blocker",
+        30.0,
+        0.0,
+        lane,
+        speed_km_h=0.0,
+        velocity=(0.0, 0.0),
+    )
     blocker.LENGTH = 200.0
     blocker.WIDTH = 20.0
-    env.agents["blocker"] = blocker
+    env.engine.traffic_manager = SimpleNamespace(_traffic_vehicles=[blocker])
     planner = PlatoonNormalPlanner(collision_margin_m=0.0)
 
     result = planner.plan(
@@ -406,4 +440,244 @@ def test_plan_filters_colliding_candidates_before_scoring_and_falls_back():
     assert result["agent0"].shape == (8, 3)
     assert debug is not None
     assert debug["agent0"]["fallback_used"] is True
-    assert debug["agent0"]["fallback_reason"] == "no_valid_candidates"
+    assert debug["agent0"]["fallback_reason"] == "no_safe_candidate"
+
+
+def test_output_indices_are_exact_half_second_future_timestamps():
+    planner = PlatoonNormalPlanner()
+
+    sampled_times = planner._dense_times[planner._output_indices]
+
+    np.testing.assert_allclose(sampled_times, np.arange(1, 9) * 0.5)
+
+
+def test_emergency_braking_stops_without_reversing():
+    planner = PlatoonNormalPlanner()
+
+    progress = planner._longitudinal_progress(
+        8.0,
+        -8.0,
+        planner._dense_times,
+    )
+
+    assert np.all(np.diff(progress) >= -1e-9)
+    np.testing.assert_allclose(progress[planner._dense_times >= 1.0], 4.0)
+
+
+def test_front_vehicle_shrinks_terminal_progress_corridor():
+    planner = PlatoonNormalPlanner()
+    env = _env()
+    ego = env.agents["agent0"]
+    lane = ego.lane
+    near = _vehicle("near", 22.0, lane.y, lane, speed_km_h=0.0)
+    far = _vehicle("far", 42.0, lane.y, lane, speed_km_h=0.0)
+
+    near_upper = planner._safe_terminal_corridor(
+        _TrafficEnvelope(
+            front=_Neighbor("near", near, False, 12.0, 6.26, 0.0, 1.0),
+            rear=None,
+        ),
+        ego,
+        4.0,
+    )[1]
+    far_upper = planner._safe_terminal_corridor(
+        _TrafficEnvelope(
+            front=_Neighbor("far", far, False, 32.0, 26.26, 0.0, 1.0),
+            rear=None,
+        ),
+        ego,
+        4.0,
+    )[1]
+
+    assert near_upper < far_upper
+
+
+def test_fast_rear_vehicle_excludes_unsafe_terminal_braking_progress():
+    planner = PlatoonNormalPlanner()
+    env = _env()
+    ego = env.agents["agent0"]
+    lane = ego.lane
+    rear = _vehicle("rear", 0.0, lane.y, lane, speed_km_h=54.0)
+    lower, _ = planner._safe_terminal_corridor(
+        _TrafficEnvelope(
+            front=None,
+            rear=_Neighbor("rear", rear, False, -10.0, 4.26, 15.0, 0.5),
+        ),
+        ego,
+        4.0,
+    )
+    emergency_progress = planner._longitudinal_progress(
+        5.0,
+        -8.0,
+        np.asarray([4.0]),
+    )[0]
+
+    assert emergency_progress < lower
+
+
+def test_search_corridor_allows_yielding_behind_a_closing_rear_vehicle():
+    planner = PlatoonNormalPlanner()
+    env = _env()
+    ego = env.agents["agent0"]
+    lane = ego.lane
+    rear = _vehicle("rear", 0.0, lane.y, lane, speed_km_h=54.0)
+    envelope = _TrafficEnvelope(
+        front=None,
+        rear=_Neighbor("rear", rear, False, -10.0, 4.26, 15.0, 0.5),
+    )
+
+    hard_lower, _ = planner._safe_terminal_corridor(envelope, ego, 4.0)
+    search_lower, _ = planner._terminal_search_corridor(envelope, ego, 4.0)
+
+    assert np.isfinite(hard_lower)
+    assert search_lower == -float("inf")
+
+
+def test_profile_selection_preserves_brake_wait_recover_shape():
+    planner = PlatoonNormalPlanner()
+    profiles = []
+    for acceleration, duration, recovery in (
+        (0.0, 4.0, 0.0),
+        (-2.0, 4.0, 0.0),
+        (-4.0, 1.0, 0.0),
+        (-6.0, 1.0, 1.5),
+        (-8.0, 2.0, 3.0),
+        (-8.0, 4.0, 0.0),
+        (2.0, 4.0, 0.0),
+    ):
+        progress = planner._longitudinal_progress(
+            5.0,
+            acceleration,
+            planner._dense_times,
+            acceleration_duration_s=duration,
+            recovery_acceleration_mps2=recovery,
+        )
+        profiles.append((abs(acceleration), acceleration, duration, recovery, progress))
+    profiles.sort(key=lambda value: value[0])
+
+    selected = planner._select_longitudinal_profiles(profiles, maximum=6)
+
+    assert any(
+        acceleration == -8.0 and duration == 2.0 and recovery == 3.0
+        for _, acceleration, duration, recovery, _ in selected
+    )
+    assert any(
+        acceleration == -8.0 and duration == 4.0 and recovery == 0.0
+        for _, acceleration, duration, recovery, _ in selected
+    )
+
+
+def test_tight_target_lane_gap_delays_lane_change_start():
+    planner = PlatoonNormalPlanner()
+    env = _env()
+    lane = env.agents["agent0"].lane
+    front = _vehicle("front", 18.0, lane.y, lane)
+    tight = _TrafficEnvelope(
+        front=_Neighbor("front", front, False, 8.0, 2.26, 5.0, 2.0),
+        rear=None,
+    )
+
+    assert planner._lane_change_start_delays(1, 4.0, tight) == (
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+        3.5,
+    )
+    assert planner._lane_change_start_delays(
+        1,
+        4.0,
+        _TrafficEnvelope(front=None, rear=None),
+    )[0] == 0.0
+
+
+def test_rotated_obb_avoids_axis_aligned_false_positive():
+    angle = np.pi / 4.0
+    first = np.asarray([[0.0, 0.0, angle]])
+    lateral = np.asarray([-np.sin(angle), np.cos(angle)])
+    second = np.asarray(
+        [[*(lateral * 2.6), angle]],
+        dtype=np.float64,
+    )
+
+    assert not PlatoonNormalPlanner._obb_overlap_series(
+        first,
+        (5.74, 2.3),
+        second,
+        (5.74, 2.3),
+        0.0,
+    )
+
+
+def _candidate(x_values, score):
+    dense = np.column_stack(
+        [
+            np.asarray(x_values, dtype=np.float64),
+            np.zeros(len(x_values)),
+            np.zeros(len(x_values)),
+        ]
+    )
+    return _TrajectoryCandidate(
+        dense=dense,
+        output=dense[1:].astype(np.float32),
+        score=float(score),
+        acceleration_mps2=0.0,
+        acceleration_duration_s=4.0,
+        recovery_acceleration_mps2=0.0,
+        lane_change_duration_s=4.0,
+        lane_change_start_delay_s=0.0,
+        stop_time_s=None,
+        terminal_progress_m=float(x_values[-1] - x_values[0]),
+    )
+
+
+def test_joint_selection_replaces_conflicting_local_optimum():
+    planner = PlatoonNormalPlanner(collision_margin_m=0.0)
+    env = _env()
+    lane = env.agents["agent0"].lane
+    env.agents = {
+        "agent0": _vehicle("agent0", 12.0, 0.0, lane),
+        "agent1": _vehicle("agent1", 0.0, 0.0, lane),
+    }
+    front_fast = _candidate(np.linspace(12.0, 28.0, 9), 0.0)
+    front_slow = _candidate(np.linspace(12.0, 20.0, 9), 1.0)
+    rear_fast = _candidate(np.linspace(0.0, 24.0, 9), 0.0)
+    rear_slow = _candidate(np.linspace(0.0, 8.0, 9), 1.0)
+
+    selection, debug = planner._select_joint_candidates(
+        env,
+        ["agent0", "agent1"],
+        env.agents,
+        {
+            "agent0": [front_fast, front_slow],
+            "agent1": [rear_fast, rear_slow],
+        },
+    )
+
+    assert selection is not None
+    assert selection != (0, 0)
+    assert debug["pairwise_conflict_count"] > 0
+
+
+def test_scenario_front_lookup_uses_simulator_state_without_lidar():
+    road_network = FakeRoadNetwork()
+    lane = road_network.get_lane(("A", "B", 1))
+    ego = _vehicle("ego", 10.0, lane.y, lane)
+    front = _vehicle("front", 30.0, lane.y, lane)
+    adjacent = _vehicle("adjacent", 15.0, lane.y + 4.0, lane)
+    engine = SimpleNamespace(
+        traffic_manager=SimpleNamespace(
+            _traffic_vehicles=[front, adjacent],
+        )
+    )
+    ego.engine = engine
+
+    found, distance = ScenarioOrchestrator._find_front_vehicle_with_distance(
+        object(),
+        ego,
+    )
+
+    assert found is front
+    assert distance == pytest.approx(20.0)

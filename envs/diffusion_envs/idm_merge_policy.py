@@ -139,7 +139,13 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         rear_ttc = self._rear_ttc_s(surrounding.back_object(), rear_gap)
         gap_accepted = front_gap >= self.merge_front_gap_m and rear_gap >= self.merge_rear_gap_m and rear_ttc >= 4.0  # *前后间距 10m 10m, 后车TTC >= 2s
 
-        print(f"Front gap: {front_gap:.2f} m, Rear gap: {rear_gap:.2f} m, Rear TTC: {rear_ttc:.2f} s, Gap accepted: {gap_accepted}, Force active: {force_active}")
+        global_config = getattr(getattr(self.control_object, "engine", None), "global_config", {})
+        if bool(global_config.get("merge_policy_debug", False)):
+            print(
+                f"Front gap: {front_gap:.2f} m, Rear gap: {rear_gap:.2f} m, "
+                f"Rear TTC: {rear_ttc:.2f} s, Gap accepted: {gap_accepted}, "
+                f"Force active: {force_active}"
+            )
 
         if gap_accepted:
             rear_speed_kmh = self._vehicle_speed_mps(surrounding.back_object()) * 3.6
