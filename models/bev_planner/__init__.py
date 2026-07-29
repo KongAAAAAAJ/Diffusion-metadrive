@@ -36,6 +36,15 @@ from .mode_contract import (
     build_hard_mode_valid_mask,
     label_gt_mode,
 )
+from .stage1_joint_loss import (
+    JointStage1Loss,
+    Stage1LossConfig,
+    Stage1LossError,
+    Stage1LossResult,
+    local_trajectory_to_world_xy,
+    trajectory_speed_acceleration,
+    wrapped_heading_error,
+)
 
 __all__ = [
     "BEVBackboneError",
@@ -55,6 +64,7 @@ __all__ = [
     "TRAJECTORY_SHAPE",
     "HardModeMaskConfig",
     "HardModeMaskResult",
+    "JointStage1Loss",
     "ModeContractError",
     "ModeIndex",
     "ModeTopology",
@@ -63,7 +73,13 @@ __all__ = [
     "RuleAction",
     "RESNET18_A1_SHA256",
     "SimulatorDynamicAnchorGenerator",
+    "Stage1LossConfig",
+    "Stage1LossError",
+    "Stage1LossResult",
     "build_hard_mode_valid_mask",
     "label_gt_mode",
+    "local_trajectory_to_world_xy",
     "sha256_file",
+    "trajectory_speed_acceleration",
+    "wrapped_heading_error",
 ]
