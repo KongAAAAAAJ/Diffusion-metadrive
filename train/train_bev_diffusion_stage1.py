@@ -1,8 +1,9 @@
-"""Stage 1 A training for the joint-first BEV-only diffusion planner."""
+"""Unified Stage 1 A/B training for the joint-first BEV-only diffusion planner."""
 
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import dataclasses
 import json
@@ -13,7 +14,7 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -33,6 +34,7 @@ from expert_dataset.joint_bev_dataset import (
 )
 from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
+    BEVOnlyDiffusionPlannerConfig,
     JointStage1Loss,
     Stage1LossConfig,
     Stage1LossResult,
@@ -43,13 +45,20 @@ DEFAULT_CONFIG_PATH = Path("configs/train/bev_diffusion_stage1.yaml")
 DEFAULT_OUTPUT_ROOT = Path(
     "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1"
 )
-CHECKPOINT_SCHEMA_VERSION = 1
-CHECKPOINT_FORMAT = "bev_stage1_joint_mean"
+CHECKPOINT_SCHEMA_VERSION = 2
+CHECKPOINT_FORMAT = "bev_stage1_joint_mean_v2"
 RUN_PATTERN = re.compile(r"^run_(\d+)$")
+Stage1Variant = Literal["A", "B"]
+Stage1RunMode = Literal["formal", "smoke", "overfit_64"]
+VARIANT_CONDITIONS: dict[str, str] = {
+    "A": "none",
+    "B": "predicted_detached",
+}
+RUN_MODES = ("formal", "smoke", "overfit_64")
 
 
 class Stage1TrainingError(RuntimeError):
-    """Raised when the fixed Stage 1 A training contract is violated."""
+    """Raised when the strict Stage 1 A/B training contract is violated."""
 
 
 def load_stage1_config(path: Path | str) -> dict[str, Any]:
@@ -100,12 +109,17 @@ def validate_stage1_config(config: Mapping[str, Any]) -> None:
     training = _mapping(config, "training")
     loss = _mapping(config, "loss")
     overfit = _mapping(config, "overfit")
-    if experiment.get("variant") != "A":
-        raise Stage1TrainingError("Stage 1 variant must be A")
+    variant = experiment.get("variant")
+    if variant not in VARIANT_CONDITIONS:
+        raise Stage1TrainingError("Stage 1 variant must be A or B")
     if experiment.get("joint_update") != "joint_mean":
         raise Stage1TrainingError("Stage 1 joint_update must be joint_mean")
-    if experiment.get("predecessor_condition") != "none":
-        raise Stage1TrainingError("Stage 1 predecessor_condition must be none")
+    expected_condition = VARIANT_CONDITIONS[str(variant)]
+    if experiment.get("predecessor_condition") != expected_condition:
+        raise Stage1TrainingError(
+            f"Stage 1 variant {variant} requires predecessor_condition="
+            f"{expected_condition}"
+        )
     dataset_root = dataset.get("root")
     if not isinstance(dataset_root, str) or not dataset_root:
         raise Stage1TrainingError("dataset.root must be a non-empty path string")
@@ -159,6 +173,60 @@ def validate_stage1_config(config: Mapping[str, Any]) -> None:
         overfit.get("evaluation_interval_steps"),
         name="overfit.evaluation_interval_steps",
     )
+
+
+def configure_stage1_variant(
+    config: Mapping[str, Any], variant: Stage1Variant
+) -> dict[str, Any]:
+    """Return a copied config with the exact A/B condition pairing."""
+
+    if variant not in VARIANT_CONDITIONS:
+        raise Stage1TrainingError("Stage 1 variant must be A or B")
+    configured = copy.deepcopy(dict(config))
+    experiment = configured.get("experiment")
+    if not isinstance(experiment, dict):
+        raise Stage1TrainingError("config.experiment must be a mapping")
+    experiment["variant"] = variant
+    experiment["predecessor_condition"] = VARIANT_CONDITIONS[variant]
+    validate_stage1_config(configured)
+    return configured
+
+
+def validate_stage1_run_mode(
+    run_mode: str, max_optimizer_steps: int | None
+) -> Stage1RunMode:
+    if run_mode not in RUN_MODES:
+        raise Stage1TrainingError(
+            "run_mode must be formal, smoke, or overfit_64"
+        )
+    if max_optimizer_steps is not None:
+        _positive_int(max_optimizer_steps, name="max_optimizer_steps")
+    if run_mode == "formal" and max_optimizer_steps is not None:
+        raise Stage1TrainingError(
+            "formal Stage 1 training cannot be truncated by optimizer steps"
+        )
+    if run_mode == "smoke" and max_optimizer_steps is None:
+        raise Stage1TrainingError(
+            "smoke Stage 1 training requires max_optimizer_steps"
+        )
+    if run_mode == "overfit_64" and max_optimizer_steps is not None:
+        raise Stage1TrainingError(
+            "overfit_64 uses overfit.max_optimizer_steps from the frozen config"
+        )
+    return run_mode  # type: ignore[return-value]
+
+
+def _experiment_contract(config: Mapping[str, Any]) -> tuple[str, str]:
+    experiment = _mapping(config, "experiment")
+    return str(experiment["variant"]), str(experiment["predecessor_condition"])
+
+
+def _run_mode_flags(run_mode: Stage1RunMode) -> dict[str, bool]:
+    return {
+        "diagnostic_only": run_mode != "formal",
+        "cross_split_overfit": run_mode == "overfit_64",
+        "eligible_for_formal_training": run_mode == "formal",
+    }
 
 
 def seed_everything(seed: int) -> None:
@@ -327,7 +395,7 @@ def _module_gradient_norm(module: nn.Module) -> float:
 
 
 def module_gradient_norms(planner: BEVOnlyDiffusionPlanner) -> dict[str, float]:
-    return {
+    metrics = {
         "gradient/backbone": _module_gradient_norm(planner.backbone),
         "gradient/bev_fusion": _module_gradient_norm(planner.bev_fusion),
         "gradient/context_encoder": _module_gradient_norm(planner.context_encoder),
@@ -337,6 +405,23 @@ def module_gradient_norms(planner: BEVOnlyDiffusionPlanner) -> dict[str, float]:
         ),
         "gradient/mode_head": _module_gradient_norm(planner.mode_head),
     }
+    action_encoder = planner.diffusion_decoder.predecessor_action_encoder
+    residual_gate = planner.diffusion_decoder.predecessor_residual_gate
+    if action_encoder is not None:
+        metrics["gradient/predecessor_action_encoder"] = _module_gradient_norm(
+            action_encoder
+        )
+    if residual_gate is not None:
+        gradient = residual_gate.grad
+        if gradient is None:
+            gate_norm = 0.0
+        else:
+            finite_gradient = gradient.detach().float()
+            if not bool(torch.isfinite(finite_gradient).all()):
+                raise Stage1TrainingError("non-finite gradient detected")
+            gate_norm = float(torch.linalg.vector_norm(finite_gradient).cpu())
+        metrics["gradient/predecessor_residual_gate"] = gate_norm
+    return metrics
 
 
 def move_joint_batch(
@@ -628,17 +713,24 @@ def checkpoint_payload(
     epoch: int,
     optimizer_step: int,
     metrics: Mapping[str, float],
-    diagnostic_only: bool,
+    run_mode: Stage1RunMode,
 ) -> dict[str, Any]:
+    validate_stage1_config(config)
+    validate_stage1_run_mode(run_mode, None if run_mode != "smoke" else 1)
+    variant, predecessor_condition = _experiment_contract(config)
+    if planner.config.predecessor_condition != predecessor_condition:
+        raise Stage1TrainingError(
+            "planner predecessor condition does not match Stage 1 config"
+        )
+    flags = _run_mode_flags(run_mode)
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "format": CHECKPOINT_FORMAT,
-        "variant": "A",
+        "variant": variant,
         "joint_update": "joint_mean",
-        "predecessor_condition": "none",
-        "diagnostic_only": bool(diagnostic_only),
-        "cross_split_overfit": bool(diagnostic_only),
-        "eligible_for_formal_training": not bool(diagnostic_only),
+        "predecessor_condition": predecessor_condition,
+        "run_mode": run_mode,
+        **flags,
         "dataset_fingerprint": str(dataset_fingerprint),
         "epoch": int(epoch),
         "optimizer_step": int(optimizer_step),
@@ -675,12 +767,25 @@ def load_stage1_checkpoint(
         ) from exc
     if not isinstance(payload, dict):
         raise Stage1TrainingError("Stage 1 checkpoint must be a mapping")
+    predecessor_condition = planner.config.predecessor_condition
+    expected_variant = next(
+        (
+            variant
+            for variant, condition in VARIANT_CONDITIONS.items()
+            if condition == predecessor_condition
+        ),
+        None,
+    )
+    if expected_variant is None:
+        raise Stage1TrainingError(
+            "planner has an unsupported predecessor condition"
+        )
     expected = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "format": CHECKPOINT_FORMAT,
-        "variant": "A",
+        "variant": expected_variant,
         "joint_update": "joint_mean",
-        "predecessor_condition": "none",
+        "predecessor_condition": predecessor_condition,
     }
     for name, value in expected.items():
         if payload.get(name) != value:
@@ -703,12 +808,35 @@ def load_stage1_checkpoint(
     ):
         if not isinstance(payload.get(name), bool):
             raise Stage1TrainingError(f"Stage 1 checkpoint {name} is invalid")
-    diagnostic_only = payload["diagnostic_only"]
-    if (
-        payload["cross_split_overfit"] is not diagnostic_only
-        or payload["eligible_for_formal_training"] is diagnostic_only
-    ):
+    run_mode = payload.get("run_mode")
+    if run_mode not in RUN_MODES:
+        raise Stage1TrainingError("Stage 1 checkpoint run_mode is invalid")
+    expected_flags = _run_mode_flags(run_mode)
+    if any(payload[name] is not value for name, value in expected_flags.items()):
         raise Stage1TrainingError("Stage 1 checkpoint diagnostic flags conflict")
+    planner_config = payload.get("planner_config")
+    if (
+        not isinstance(planner_config, Mapping)
+        or planner_config.get("predecessor_condition") != predecessor_condition
+    ):
+        raise Stage1TrainingError(
+            "Stage 1 checkpoint planner_config does not match the BEV planner"
+        )
+    training_config = payload.get("training_config")
+    try:
+        validate_stage1_config(training_config)  # type: ignore[arg-type]
+    except (Stage1TrainingError, TypeError) as exc:
+        raise Stage1TrainingError(
+            "Stage 1 checkpoint training_config is invalid"
+        ) from exc
+    checkpoint_variant, checkpoint_condition = _experiment_contract(training_config)
+    if (
+        checkpoint_variant != expected_variant
+        or checkpoint_condition != predecessor_condition
+    ):
+        raise Stage1TrainingError(
+            "Stage 1 checkpoint training_config does not match the BEV planner"
+        )
     fingerprint = payload.get("dataset_fingerprint")
     if not isinstance(fingerprint, str) or len(fingerprint) != 64:
         raise Stage1TrainingError("Stage 1 checkpoint dataset fingerprint is invalid")
@@ -761,7 +889,8 @@ def build_overfit_loader(
     combined = ConcatDataset(datasets)
     if len(combined) != 64:
         raise Stage1TrainingError(
-            f"--overfit-64 requires exactly 64 joint samples, found {len(combined)}"
+            f"run_mode=overfit_64 requires exactly 64 joint samples, "
+            f"found {len(combined)}"
         )
     return DataLoader(
         combined,
@@ -798,13 +927,16 @@ def run_stage1_training(
     config: Mapping[str, Any],
     *,
     output_root: Path | str,
-    overfit_64: bool,
+    run_mode: Stage1RunMode,
     max_optimizer_steps: int | None = None,
 ) -> Path:
     validate_stage1_config(config)
+    run_mode = validate_stage1_run_mode(run_mode, max_optimizer_steps)
     training = _mapping(config, "training")
     dataset_config = _mapping(config, "dataset")
     overfit_config = _mapping(config, "overfit")
+    variant, predecessor_condition = _experiment_contract(config)
+    overfit_64 = run_mode == "overfit_64"
     seed = int(training["seed"])
     seed_everything(seed)
     device = resolve_device(str(training["device"]))
@@ -820,19 +952,22 @@ def run_stage1_training(
         encoding="utf-8",
     )
     metadata = {
-        "variant": "A",
+        "variant": variant,
         "joint_update": "joint_mean",
-        "predecessor_condition": "none",
-        "diagnostic_only": bool(overfit_64),
-        "cross_split_overfit": bool(overfit_64),
-        "eligible_for_formal_training": not bool(overfit_64),
+        "predecessor_condition": predecessor_condition,
+        "run_mode": run_mode,
+        **_run_mode_flags(run_mode),
         "dataset_fingerprint": dataset_fingerprint,
     }
     (run_dir / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    planner = BEVOnlyDiffusionPlanner().to(device)
+    planner = BEVOnlyDiffusionPlanner(
+        BEVOnlyDiffusionPlannerConfig(
+            predecessor_condition=predecessor_condition,
+        )
+    ).to(device)
     loss_module = JointStage1Loss(_loss_config(config)).to(device)
     optimizer = build_stage1_optimizer(
         planner,
@@ -853,8 +988,6 @@ def run_stage1_training(
         )
         val_loader = None
         hard_max_steps = int(overfit_config["max_optimizer_steps"])
-        if max_optimizer_steps is not None:
-            hard_max_steps = min(hard_max_steps, int(max_optimizer_steps))
     else:
         train_loader = build_joint_bev_dataloader(
             dataset_root,
@@ -1013,7 +1146,7 @@ def run_stage1_training(
                         epoch=epoch,
                         optimizer_step=optimizer_step,
                         metrics=val_metrics,
-                        diagnostic_only=False,
+                        run_mode=run_mode,
                     )
                     save_stage1_checkpoint(
                         run_dir / "checkpoints" / "best.pt", best_payload
@@ -1028,17 +1161,24 @@ def run_stage1_training(
                 epoch=epoch,
                 optimizer_step=optimizer_step,
                 metrics=final_metrics,
-                diagnostic_only=overfit_64,
+                run_mode=run_mode,
             )
             checkpoint_name = "diagnostic.pt" if overfit_64 else "last.pt"
             save_stage1_checkpoint(
                 run_dir / "checkpoints" / checkpoint_name, checkpoint
             )
+            mode_accuracy = final_metrics.get(
+                "metric/mode_accuracy", train_metrics["metric/mode_accuracy"]
+            )
+            gt_mode_ade = final_metrics.get(
+                "metric/gt_mode_ade", train_metrics["metric/gt_mode_ade"]
+            )
             print(
-                f"[stage1-A] epoch={epoch} step={optimizer_step} "
+                f"[stage1-{variant}] mode={run_mode} epoch={epoch} "
+                f"step={optimizer_step} "
                 f"loss={train_metrics['loss/total']:.6f} "
-                f"mode_acc={final_metrics.get('metric/mode_accuracy', train_metrics['metric/mode_accuracy']):.4f} "
-                f"gt_ade={final_metrics.get('metric/gt_mode_ade', train_metrics['metric/gt_mode_ade']):.4f}",
+                f"mode_acc={mode_accuracy:.4f} "
+                f"gt_ade={gt_mode_ade:.4f}",
                 flush=True,
             )
             if passed:
@@ -1070,20 +1210,27 @@ def run_stage1_training(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train Stage 1 A joint-mean BEV diffusion planner."
+        description="Train the Stage 1 A/B joint-mean BEV diffusion planner."
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--dataset-root", type=Path, default=None)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--variant", choices=("A", "B"), default=None)
+    parser.add_argument(
+        "--run-mode",
+        choices=RUN_MODES,
+        default="formal",
+    )
     parser.add_argument("--device", choices=("cuda", "cpu"), default=None)
     parser.add_argument("--max-optimizer-steps", type=int, default=None)
-    parser.add_argument("--overfit-64", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config = load_stage1_config(args.config)
+    if args.variant is not None:
+        config = configure_stage1_variant(config, args.variant)
     if args.dataset_root is not None:
         config["dataset"]["root"] = str(args.dataset_root.expanduser().resolve())
     if args.device is not None:
@@ -1094,10 +1241,11 @@ def main() -> None:
     run_dir = run_stage1_training(
         config,
         output_root=args.output_root,
-        overfit_64=bool(args.overfit_64),
+        run_mode=args.run_mode,
         max_optimizer_steps=args.max_optimizer_steps,
     )
-    print(f"[stage1-A] outputs={run_dir}", flush=True)
+    variant, _ = _experiment_contract(config)
+    print(f"[stage1-{variant}] outputs={run_dir}", flush=True)
 
 
 if __name__ == "__main__":
@@ -1111,6 +1259,7 @@ __all__ = [
     "build_overfit_loader",
     "build_stage1_optimizer",
     "checkpoint_payload",
+    "configure_stage1_variant",
     "create_numbered_run_dir",
     "deterministic_overfit_noise",
     "evaluate_overfit_fixed",
@@ -1125,4 +1274,5 @@ __all__ = [
     "save_stage1_checkpoint",
     "train_one_epoch",
     "validate_stage1_config",
+    "validate_stage1_run_mode",
 ]

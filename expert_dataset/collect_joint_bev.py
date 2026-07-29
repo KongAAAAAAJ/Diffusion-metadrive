@@ -22,6 +22,7 @@ from models.bev_planner.mode_contract import (
     TRAJECTORY_DIM,
     TRAJECTORY_STEPS,
     ModeContractError,
+    ModeIndex,
     build_hard_mode_valid_mask,
     label_gt_mode,
 )
@@ -40,6 +41,15 @@ NUM_PLATOON_AGENTS = 3
 EGO_STATE_DIM = 8
 FORMATION_RELATION_DIM = 12
 NUM_RELATION_NEIGHBORS = 2
+MODEL_INPUT_FIELDS = (
+    "bev",
+    "ego_state",
+    "formation_relation_state",
+    "relation_valid_mask",
+    "agent_role",
+    "coarse_trajectories",
+    "mode_valid_mask",
+)
 
 
 class JointCollectionError(RuntimeError):
@@ -137,6 +147,50 @@ class JointBEVSample:
         """Return the exact round-three tensor schema without metadata fields."""
 
         return {item.name: getattr(self, item.name) for item in fields(self)}
+
+
+@dataclass(frozen=True)
+class JointBEVModelInputs:
+    """The label-free joint-first inputs consumed by the online planner."""
+
+    bev: np.ndarray
+    ego_state: np.ndarray
+    formation_relation_state: np.ndarray
+    relation_valid_mask: np.ndarray
+    agent_role: np.ndarray
+    coarse_trajectories: np.ndarray
+    mode_valid_mask: np.ndarray
+
+    def __post_init__(self) -> None:
+        for item in fields(self):
+            name = item.name
+            array = np.asarray(getattr(self, name))
+            expected_shape = JOINT_SAMPLE_SHAPES[name]
+            expected_dtype = JOINT_SAMPLE_DTYPES[name]
+            if array.shape != expected_shape:
+                raise JointCollectionError(
+                    f"{name} must have shape {expected_shape}, got {array.shape}"
+                )
+            if array.dtype != expected_dtype:
+                raise JointCollectionError(
+                    f"{name} must have dtype {expected_dtype}, got {array.dtype}"
+                )
+            if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
+                raise JointCollectionError(f"{name} contains non-finite values")
+            owned = np.ascontiguousarray(array).copy()
+            owned.setflags(write=False)
+            object.__setattr__(self, name, owned)
+
+        expected_roles = np.asarray(list(AgentRole), dtype=np.int64)
+        if not np.array_equal(self.agent_role, expected_roles):
+            raise JointCollectionError(
+                "agent_role must be [LEADER, MIDDLE, REAR] in joint-first order"
+            )
+        if not bool(self.mode_valid_mask[:, int(ModeIndex.STOP)].all()):
+            raise JointCollectionError("STOP must be valid for every online role")
+
+    def as_dict(self) -> dict[str, np.ndarray]:
+        return {name: getattr(self, name) for name in MODEL_INPUT_FIELDS}
 
 
 @dataclass(frozen=True)
@@ -431,56 +485,93 @@ class JointBEVSampleBuilder:
         values = [other_id in active for other_id in self.agent_ids if other_id != ego_id]
         return np.asarray(values, dtype=np.bool_)
 
-    def build_sample(self, env: PlatoonEnv, expert_step: ExpertJointStep) -> JointBEVSample:
+    def _build_model_inputs(self, env: PlatoonEnv) -> JointBEVModelInputs:
         if not self.history_ready():
             raise JointCollectionError("t/t-0.5/t-1.0 simulator history is not ready")
-        missing = [agent_id for agent_id in self.agent_ids if agent_id not in getattr(env, "agents", {})]
+        active_agents = getattr(env, "agents", {})
+        missing = [
+            agent_id for agent_id in self.agent_ids if agent_id not in active_agents
+        ]
         if missing:
             raise JointCollectionError(f"joint sample is missing active agents: {missing}")
 
         bev_values = []
         ego_states = []
-        poses = []
         relations = []
         relation_masks = []
         coarse_values = []
         mode_masks = []
-        gt_modes = []
-        expert_values = []
+
+        for agent_id in self.agent_ids:
+            vehicle = env.agents[agent_id]
+            bev = self.scene_adapter.rasterize(env, agent_id, self.snapshots)
+            anchors = self.anchor_generator.generate(env, agent_id)
+            speed_mps = float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6
+            mask_result = build_hard_mode_valid_mask(
+                bev,
+                anchors.coarse_trajectories,
+                speed_mps,
+                anchors.topology,
+            )
+            bev_values.append(bev)
+            ego_states.append(self._ego_state(env, agent_id))
+            relations.append(
+                np.asarray(
+                    env.get_formation_relation_state(agent_id), dtype=np.float32
+                )
+            )
+            relation_masks.append(self._relation_valid_mask(env, agent_id))
+            coarse_values.append(anchors.coarse_trajectories)
+            mode_masks.append(mask_result.valid_mask)
+
+        return JointBEVModelInputs(
+            bev=np.stack(bev_values).astype(np.uint8, copy=False),
+            ego_state=np.stack(ego_states).astype(np.float32, copy=False),
+            formation_relation_state=np.stack(relations).astype(np.float32, copy=False),
+            relation_valid_mask=np.stack(relation_masks).astype(np.bool_, copy=False),
+            agent_role=np.asarray(list(AgentRole), dtype=np.int64),
+            coarse_trajectories=np.stack(coarse_values).astype(np.float32, copy=False),
+            mode_valid_mask=np.stack(mode_masks).astype(np.bool_, copy=False),
+        )
+
+    def build_model_inputs(self, env: PlatoonEnv) -> JointBEVModelInputs:
+        """Build online planner inputs without consulting expert decisions or labels."""
 
         try:
-            for agent_id in self.agent_ids:
-                if agent_id not in expert_step.rule_actions or agent_id not in expert_step.trajectories_world:
+            return self._build_model_inputs(env)
+        except ModeContractError as exc:
+            raise JointCollectionError(
+                "online state violated the hard mode contract",
+                reason_code="mode_contract",
+            ) from exc
+
+    def build_sample(self, env: PlatoonEnv, expert_step: ExpertJointStep) -> JointBEVSample:
+        try:
+            model_inputs = self._build_model_inputs(env)
+            poses = []
+            gt_modes = []
+            expert_values = []
+            for role_index, agent_id in enumerate(self.agent_ids):
+                if (
+                    agent_id not in expert_step.rule_actions
+                    or agent_id not in expert_step.trajectories_world
+                ):
                     raise JointCollectionError(f"expert step omitted {agent_id}")
                 vehicle = env.agents[agent_id]
-                bev = self.scene_adapter.rasterize(env, agent_id, self.snapshots)
-                anchors = self.anchor_generator.generate(env, agent_id)
-                speed_mps = float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6
-                mask_result = build_hard_mode_valid_mask(
-                    bev,
-                    anchors.coarse_trajectories,
-                    speed_mps,
-                    anchors.topology,
-                )
                 expert_local = _world_trajectory_to_ego_local(
                     vehicle, expert_step.trajectories_world[agent_id]
                 )
                 if expert_local.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM):
-                    raise JointCollectionError(f"expert trajectory for {agent_id} is not [8,3]")
+                    raise JointCollectionError(
+                        f"expert trajectory for {agent_id} is not [8,3]"
+                    )
                 gt_mode = label_gt_mode(
                     expert_step.rule_actions[agent_id],
                     expert_local,
-                    anchors.coarse_trajectories,
-                    mask_result.valid_mask,
+                    model_inputs.coarse_trajectories[role_index],
+                    model_inputs.mode_valid_mask[role_index],
                 )
-
-                bev_values.append(bev)
-                ego_states.append(self._ego_state(env, agent_id))
                 poses.append(self._global_pose(vehicle))
-                relations.append(np.asarray(env.get_formation_relation_state(agent_id), dtype=np.float32))
-                relation_masks.append(self._relation_valid_mask(env, agent_id))
-                coarse_values.append(anchors.coarse_trajectories)
-                mode_masks.append(mask_result.valid_mask)
                 gt_modes.append(gt_mode)
                 expert_values.append(expert_local)
         except ModeContractError as exc:
@@ -490,14 +581,14 @@ class JointBEVSampleBuilder:
             ) from exc
 
         return JointBEVSample(
-            bev=np.stack(bev_values).astype(np.uint8, copy=False),
-            ego_state=np.stack(ego_states).astype(np.float32, copy=False),
+            bev=model_inputs.bev,
+            ego_state=model_inputs.ego_state,
             ego_pose_global=np.stack(poses).astype(np.float32, copy=False),
-            formation_relation_state=np.stack(relations).astype(np.float32, copy=False),
-            relation_valid_mask=np.stack(relation_masks).astype(np.bool_, copy=False),
-            agent_role=np.asarray(list(AgentRole), dtype=np.int64),
-            coarse_trajectories=np.stack(coarse_values).astype(np.float32, copy=False),
-            mode_valid_mask=np.stack(mode_masks).astype(np.bool_, copy=False),
+            formation_relation_state=model_inputs.formation_relation_state,
+            relation_valid_mask=model_inputs.relation_valid_mask,
+            agent_role=model_inputs.agent_role,
+            coarse_trajectories=model_inputs.coarse_trajectories,
+            mode_valid_mask=model_inputs.mode_valid_mask,
             gt_mode=np.asarray(gt_modes, dtype=np.int64),
             expert_trajectory=np.stack(expert_values).astype(np.float32, copy=False),
         )
@@ -602,12 +693,14 @@ __all__ = [
     "ExpertJointStep",
     "JointBEVSample",
     "JointBEVSampleBuilder",
+    "JointBEVModelInputs",
     "JointCollectionError",
     "JointEpisodeRollout",
     "JointStepRejected",
     "JOINT_SAMPLE_DTYPES",
     "JOINT_SAMPLE_SHAPES",
     "NUM_PLATOON_AGENTS",
+    "MODEL_INPUT_FIELDS",
     "RulePlannerExpert",
     "SensorlessJointBEVPlatoonEnv",
     "collect_joint_episode",

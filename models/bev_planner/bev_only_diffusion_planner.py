@@ -417,9 +417,13 @@ class CrossBEVDiffusionDecoder(nn.Module):
         nn.init.zeros_(self.trajectory_head[-1].weight)
         nn.init.zeros_(self.trajectory_head[-1].bias)
         if config.predecessor_condition == "predicted_detached":
-            self.predecessor_action_encoder: PredecessorActionEncoder | None = (
-                PredecessorActionEncoder(config.d_model)
-            )
+            # Variant B owns extra randomly initialized parameters.  Preserve the
+            # caller RNG state so constructing B with the same seed does not
+            # perturb any later shared parameters (notably ``mode_head``).
+            with torch.random.fork_rng(devices=[]):
+                self.predecessor_action_encoder: PredecessorActionEncoder | None = (
+                    PredecessorActionEncoder(config.d_model)
+                )
             self.predecessor_residual_gate = nn.Parameter(torch.zeros(()))
         else:
             self.predecessor_action_encoder = None

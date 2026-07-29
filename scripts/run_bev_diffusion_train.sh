@@ -9,8 +9,12 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_d
 ARGS=(
   --config "${CONFIG}"
   --output-root "${OUTPUT_ROOT}"
+  --run-mode "${RUN_MODE:-formal}"
 )
 
+if [[ -n "${VARIANT:-}" ]]; then
+  ARGS+=(--variant "${VARIANT}")
+fi
 if [[ -n "${DATASET_ROOT:-}" ]]; then
   ARGS+=(--dataset-root "${DATASET_ROOT}")
 fi
@@ -20,10 +24,6 @@ fi
 if [[ -n "${MAX_OPTIMIZER_STEPS:-}" ]]; then
   ARGS+=(--max-optimizer-steps "${MAX_OPTIMIZER_STEPS}")
 fi
-if [[ "${OVERFIT_64:-0}" == "1" ]]; then
-  ARGS+=(--overfit-64)
-fi
-
 cd "${PROJECT_ROOT}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 exec "${PYTHON_BIN}" -m train.train_bev_diffusion_stage1 "${ARGS[@]}"

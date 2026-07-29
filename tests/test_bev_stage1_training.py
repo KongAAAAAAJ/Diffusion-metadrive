@@ -30,6 +30,7 @@ from train.train_bev_diffusion_stage1 import (
     Stage1TrainingError,
     build_stage1_optimizer,
     checkpoint_payload,
+    configure_stage1_variant,
     deterministic_overfit_noise,
     evaluate_overfit_fixed,
     load_stage1_checkpoint,
@@ -40,6 +41,7 @@ from train.train_bev_diffusion_stage1 import (
     save_stage1_checkpoint,
     train_one_epoch,
     validate_stage1_config,
+    validate_stage1_run_mode,
 )
 
 
@@ -148,9 +150,20 @@ def planner() -> BEVOnlyDiffusionPlanner:
     )
 
 
-def test_config_rejects_non_a_and_non_fixed_overfit_timestep() -> None:
+def test_config_accepts_exact_a_b_pairs_and_rejects_other_contracts() -> None:
     config = _config()
     validate_stage1_config(config)
+    variant_b = configure_stage1_variant(config, "B")
+    assert variant_b["experiment"] == {
+        "variant": "B",
+        "joint_update": "joint_mean",
+        "predecessor_condition": "predicted_detached",
+    }
+    validate_stage1_config(variant_b)
+    changed = copy.deepcopy(variant_b)
+    changed["experiment"]["predecessor_condition"] = "none"
+    with pytest.raises(Stage1TrainingError, match="requires"):
+        validate_stage1_config(changed)
     changed = copy.deepcopy(config)
     changed["experiment"]["joint_update"] = "sequential_role"
     with pytest.raises(Stage1TrainingError, match="joint_mean"):
@@ -159,6 +172,18 @@ def test_config_rejects_non_a_and_non_fixed_overfit_timestep() -> None:
     changed["overfit"]["timestep"] = 7
     with pytest.raises(Stage1TrainingError, match="fixed at 8"):
         validate_stage1_config(changed)
+
+
+def test_run_modes_prevent_truncated_formal_checkpoints() -> None:
+    assert validate_stage1_run_mode("formal", None) == "formal"
+    assert validate_stage1_run_mode("smoke", 4) == "smoke"
+    assert validate_stage1_run_mode("overfit_64", None) == "overfit_64"
+    with pytest.raises(Stage1TrainingError, match="cannot be truncated"):
+        validate_stage1_run_mode("formal", 4)
+    with pytest.raises(Stage1TrainingError, match="requires"):
+        validate_stage1_run_mode("smoke", None)
+    with pytest.raises(Stage1TrainingError, match="frozen config"):
+        validate_stage1_run_mode("overfit_64", 4)
 
 
 def test_optimizer_groups_are_disjoint_exhaustive_and_use_fixed_lrs(
@@ -307,7 +332,7 @@ def test_checkpoint_round_trip_is_strict_and_marks_diagnostic(
         epoch=3,
         optimizer_step=11,
         metrics={"loss/total": 1.0},
-        diagnostic_only=True,
+        run_mode="overfit_64",
     )
     path = save_stage1_checkpoint(tmp_path / "diagnostic.pt", payload)
     expected = planner.mode_head.weight.detach().clone()
@@ -318,6 +343,7 @@ def test_checkpoint_round_trip_is_strict_and_marks_diagnostic(
     assert loaded["diagnostic_only"] is True
     assert loaded["cross_split_overfit"] is True
     assert loaded["eligible_for_formal_training"] is False
+    assert loaded["run_mode"] == "overfit_64"
     loaded["format"] = "legacy"
     torch.save(loaded, tmp_path / "legacy.pt")
     with pytest.raises(Stage1TrainingError, match="format mismatch"):

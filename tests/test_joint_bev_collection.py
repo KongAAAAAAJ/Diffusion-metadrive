@@ -12,6 +12,8 @@ from expert_dataset.collect_joint_bev import (
     ExpertJointStep,
     JOINT_SAMPLE_DTYPES,
     JOINT_SAMPLE_SHAPES,
+    MODEL_INPUT_FIELDS,
+    JointBEVModelInputs,
     JointBEVSample,
     JointBEVSampleBuilder,
     JointCollectionError,
@@ -189,6 +191,9 @@ def test_rule_action_changes_only_label_not_bev_input() -> None:
     generator = SimulatorDynamicAnchorGenerator()
     builder = JointBEVSampleBuilder(anchor_generator=generator)
     _prime_builder(builder, env)
+    online = builder.build_model_inputs(env)
+    assert isinstance(online, JointBEVModelInputs)
+    assert tuple(online.as_dict()) == MODEL_INPUT_FIELDS
     keep = builder.build_sample(
         env,
         _expert_step(env, generator, {"agent0": 0, "agent1": 0, "agent2": 0}),
@@ -198,6 +203,9 @@ def test_rule_action_changes_only_label_not_bev_input() -> None:
         _expert_step(env, generator, {"agent0": -1, "agent1": 0, "agent2": 0}),
     )
     np.testing.assert_array_equal(keep.bev, left.bev)
+    for name, value in online.as_dict().items():
+        np.testing.assert_array_equal(value, getattr(keep, name))
+        assert not value.flags.writeable
     assert keep.gt_mode[0] != left.gt_mode[0]
     assert int(left.gt_mode[0]) in LEFT_MODES
     # Navigation is simulator route geometry, not the selected local manoeuvre.
