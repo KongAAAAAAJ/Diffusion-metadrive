@@ -1,0 +1,14 @@
+online:
+  device: cuda
+  seed: 17
+  total_optimizer_steps: 5000
+  calibration_report: null
+  resume_checkpoint: null
+  environment_steps_per_episode: 100
+  validation_interval_steps: 100
+  scenario_seeds: [17, 23]
+  scenarios:
+    - {scenario: S1_free_cruise_straight, route: R3_mainline_straight}
+    - {scenario: S2_free_cruise_curve, route: R2_entry_curve}
+    - {scenario: S3_straight_following, route: R3_mainline_straight}
+    - {scenario: S4_curve_following, route: R2_entry_curve}

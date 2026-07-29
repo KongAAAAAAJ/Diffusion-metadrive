@@ -61,6 +61,15 @@ from .joint_grpo import (
     StandardGaussianDDIM,
     normalize_signed_advantages,
 )
+from .joint_reward import (
+    JointRewardConfig,
+    JointRewardError,
+    JointRewardResult,
+    JointTrajectoryProxyReward,
+    RewardCalibrationResult,
+    calibrate_joint_rewards,
+    compose_joint_reward,
+)
 
 __all__ = [
     "BEVBackboneError",
@@ -89,6 +98,11 @@ __all__ = [
     "JointGRPOTrainerA",
     "JointGRPOTrainerB",
     "JointGRPOUpdateResult",
+    "JointRewardConfig",
+    "JointRewardError",
+    "JointRewardResult",
+    "JointTrajectoryProxyReward",
+    "RewardCalibrationResult",
     "FrozenGRPOReference",
     "FrozenVariantAReference",
     "GaussianDDIMStep",
@@ -112,4 +126,6 @@ __all__ = [
     "trajectory_speed_acceleration",
     "wrapped_heading_error",
     "normalize_signed_advantages",
+    "calibrate_joint_rewards",
+    "compose_joint_reward",
 ]

@@ -1633,10 +1633,42 @@ class PlatoonEnv(BaseMultiEnv):
         k = np.linalg.inv(r + b.T @ p @ b) @ (b.T @ p @ a)
         return np.asarray(k, dtype=np.float32)
 
-    def _longitudinal_lqr(self, agent_id: str) -> float:
+    @staticmethod
+    def _trajectory_target_speed_mps(trajectory: np.ndarray) -> float:
+        trajectory = np.asarray(trajectory)
+        if trajectory.shape != (8, 3):
+            raise ValueError(
+                f"Expected trajectory shape (8, 3), got {trajectory.shape}"
+            )
+        if not np.issubdtype(trajectory.dtype, np.floating) or not np.isfinite(
+            trajectory
+        ).all():
+            raise ValueError("Trajectory must contain finite floating-point values")
+        first_second = np.concatenate(
+            (
+                np.zeros((1, 2), dtype=np.float64),
+                trajectory[:2, :2].astype(np.float64, copy=False),
+            ),
+            axis=0,
+        )
+        # The first two waypoints represent t=0.5 s and t=1.0 s.  Their
+        # accumulated arc length therefore gives the trajectory-implied speed
+        # over the next second, including lateral motion during a lane change.
+        target_speed = float(
+            np.linalg.norm(np.diff(first_second, axis=0), axis=1).sum()
+        )
+        return float(np.clip(target_speed, 0.0, 100.0 / 3.6))
+
+    def _longitudinal_lqr(
+        self, agent_id: str, trajectory_target_speed_mps: float
+    ) -> float:
         ego_idx = self._agent_ids.index(agent_id)
         current_speed = self._agent_speed_km_h(agent_id) / 3.6
-        target_speed = self._cfg_float("target_speed_km_h", 25.0) / 3.6
+        target_speed = float(trajectory_target_speed_mps)
+        if not np.isfinite(target_speed) or target_speed < 0.0:
+            raise ValueError(
+                "trajectory_target_speed_mps must be finite and non-negative"
+            )
 
         def _speed_tracking_accel() -> float:
             speed_error = current_speed - target_speed
@@ -1663,10 +1695,10 @@ class PlatoonEnv(BaseMultiEnv):
         return float(np.clip(accel, -1.0, 1.0))
 
     def trajectory_to_control(self, agent_id: str, trajectory: np.ndarray) -> np.ndarray:
-        if trajectory.shape != (8, 3):
-            raise ValueError(f"Expected trajectory shape (8, 3), got {trajectory.shape}")
+        trajectory = np.asarray(trajectory)
+        target_speed = self._trajectory_target_speed_mps(trajectory)
         steering = self._lateral_pd(trajectory)
-        throttle = self._longitudinal_lqr(agent_id)
+        throttle = self._longitudinal_lqr(agent_id, target_speed)
         return np.asarray([steering, throttle], dtype=np.float32)
 
     def get_platoon_metrics(self) -> dict:

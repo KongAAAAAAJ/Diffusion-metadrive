@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+
+from train.train_bev_joint_grpo_online import (
+    DIAGNOSTIC_SCENARIOS,
+    JointGRPOOnlineConfig,
+    OnlineGRPOError,
+    constant_velocity_actions,
+    episode_has_ended,
+    joint_trajectory_action,
+    run_joint_grpo_training,
+)
+from scenarios.definitions import SCENARIO_BY_ID
+
+
+def _calibration(path: Path, *, variant: str = "A", passed: bool = False) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "format": "bev_joint_reward_calibration_v1",
+                "variant": variant,
+                "passed": passed,
+                "reward_config": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
+    with pytest.raises(OnlineGRPOError):
+        JointGRPOOnlineConfig(device="auto")
+    with pytest.raises(OnlineGRPOError):
+        JointGRPOOnlineConfig(total_optimizer_steps=0)
+
+    report = _calibration(tmp_path / "failed.json")
+    config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
+    with pytest.raises(OnlineGRPOError, match="calibration failed"):
+        run_joint_grpo_training(
+            config,
+            variant="A",
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "does-not-exist.pt",
+            output_root=tmp_path / "output",
+            max_optimizer_steps=20,
+        )
+    with pytest.raises(OnlineGRPOError, match="positive"):
+        run_joint_grpo_training(
+            config,
+            variant="A",
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "does-not-exist.pt",
+            output_root=tmp_path / "output",
+            max_optimizer_steps=0,
+        )
+    with pytest.raises(OnlineGRPOError, match="forbids"):
+        run_joint_grpo_training(
+            config,
+            variant="A",
+            run_mode="formal",
+            source_checkpoint=tmp_path / "does-not-exist.pt",
+            output_root=tmp_path / "output",
+            max_optimizer_steps=20,
+        )
+
+
+def test_calibration_scenario_routes_match_runtime_contract() -> None:
+    for scenario_id, route in DIAGNOSTIC_SCENARIOS:
+        assert route in SCENARIO_BY_ID[scenario_id].allowed_local_routes
+        assert route in SCENARIO_BY_ID[scenario_id].trigger_by_local_route
+
+
+def test_calibration_variant_is_checked_before_source_load(tmp_path: Path) -> None:
+    report = _calibration(tmp_path / "wrong.json", variant="B", passed=True)
+    config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
+    with pytest.raises(OnlineGRPOError, match="variant mismatch"):
+        run_joint_grpo_training(
+            config,
+            variant="A",
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "does-not-exist.pt",
+            output_root=tmp_path / "output",
+            max_optimizer_steps=1,
+        )
+
+
+def test_online_action_helpers_are_label_free_and_strict() -> None:
+    env = SimpleNamespace(
+        agents={
+            f"agent{role}": SimpleNamespace(speed_km_h=18.0)
+            for role in range(3)
+        }
+    )
+    actions = constant_velocity_actions(env)
+    assert set(actions) == {"agent0", "agent1", "agent2"}
+    assert actions["agent0"].shape == (8, 3)
+    assert actions["agent0"][1, 0] == pytest.approx(5.0)
+
+    trajectories = np.zeros((3, 8, 3), dtype=np.float32)
+    converted = joint_trajectory_action(trajectories)
+    trajectories[0, 0, 0] = 99.0
+    assert converted["agent0"][0, 0] == 0.0
+    with pytest.raises(OnlineGRPOError):
+        joint_trajectory_action(np.zeros((3, 7, 3), dtype=np.float32))
+
+    flags = {"__all__": False}
+    assert not episode_has_ended(flags, flags, {})
+    assert episode_has_ended(
+        flags,
+        flags,
+        {"agent1": {"out_of_road": True}},
+    )
