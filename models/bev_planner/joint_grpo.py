@@ -238,6 +238,11 @@ class JointGRPORollout:
 
 
 @dataclass(frozen=True)
+class JointGRPORolloutB(JointGRPORollout):
+    predecessor_action_history_normalized: Tensor
+
+
+@dataclass(frozen=True)
 class JointGRPOLossResult:
     total: Tensor
     mode_pg: Tensor
@@ -275,7 +280,7 @@ class JointGRPOUpdateResult:
     optimizer_step: int
 
 
-class FrozenVariantAReference(nn.Module):
+class FrozenGRPOReference(nn.Module):
     """Frozen decoder and mode head copied from the initial Stage 1 policy."""
 
     def __init__(self, planner: BEVOnlyDiffusionPlanner) -> None:
@@ -303,6 +308,10 @@ class FrozenVariantAReference(nn.Module):
             context,
         )
         return candidates, self.mode_head(features).squeeze(-1)
+
+
+# Preserve the Round-11 public name while using a variant-neutral implementation.
+FrozenVariantAReference = FrozenGRPOReference
 
 
 def normalize_signed_advantages(
@@ -411,8 +420,11 @@ def _trajectory_bc(current: Tensor, reference: Tensor, config: JointGRPOConfig) 
     return xy + float(config.heading_bc_weight) * heading
 
 
-class JointGRPOTrainerA:
-    """One-update-per-rollout joint GRPO trainer for variant A."""
+class _JointGRPOTrainerBase:
+    """Variant-neutral one-update-per-rollout joint GRPO implementation."""
+
+    variant = ""
+    predecessor_condition = ""
 
     required_model_inputs = (
         "bev",
@@ -429,8 +441,11 @@ class JointGRPOTrainerA:
         planner: BEVOnlyDiffusionPlanner,
         config: JointGRPOConfig | None = None,
     ) -> None:
-        if planner.config.predecessor_condition != "none":
-            raise JointGRPOError("JointGRPOTrainerA requires variant A / none")
+        if planner.config.predecessor_condition != self.predecessor_condition:
+            raise JointGRPOError(
+                f"JointGRPOTrainer{self.variant} requires variant "
+                f"{self.variant} / {self.predecessor_condition}"
+            )
         self.planner = planner
         self.config = config or JointGRPOConfig()
         self.transition = StandardGaussianDDIM(planner.config.num_train_timesteps)
@@ -440,7 +455,7 @@ class JointGRPOTrainerA:
             parameter.requires_grad_(True)
         for parameter in planner.mode_head.parameters():
             parameter.requires_grad_(True)
-        self.reference = FrozenVariantAReference(planner).to(
+        self.reference = FrozenGRPOReference(planner).to(
             next(planner.parameters()).device
         )
         self.planner.eval()
@@ -467,6 +482,52 @@ class JointGRPOTrainerA:
                 model_inputs["relation_valid_mask"],
                 model_inputs["agent_role"],
             )
+
+    def _rollout_prediction(
+        self,
+        sample: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
+        candidates, logits = self.planner.predict_denoised_candidates(
+            sample,
+            timesteps,
+            context,
+            coarse,
+            valid_mask,
+        )
+        return candidates, logits, None
+
+    def _make_rollout(
+        self,
+        *,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+        chains: Tensor,
+        modes: Tensor,
+        selected: Tensor,
+        mode_log_prob: Tensor,
+        trajectory_log_prob: Tensor,
+        step_histories: list[Tensor],
+    ) -> JointGRPORollout:
+        if step_histories:
+            raise JointGRPOError("variant A rollout must not contain action history")
+        return JointGRPORollout(
+            context=BEVPlannerContext(
+                bev_feature=context.bev_feature.detach(),
+                role_tokens=context.role_tokens.detach(),
+            ),
+            coarse_trajectories=coarse.detach(),
+            mode_valid_mask=valid_mask.detach(),
+            chains_normalized=chains.detach(),
+            sampled_modes=modes.detach(),
+            selected_trajectories=selected.detach(),
+            old_mode_log_prob=mode_log_prob.detach(),
+            old_trajectory_log_prob=trajectory_log_prob.detach(),
+        )
 
     @torch.no_grad()
     def sample_groups(
@@ -516,6 +577,7 @@ class JointGRPOTrainerA:
         ).reshape_as(anchor).clamp(-1.0, 1.0)
         chains = [sample]
         stochastic_log_probs = []
+        step_histories: list[Tensor] = []
         final_candidates = final_logits = None
         destinations = (*self.config.roll_timesteps[1:], -1)
         for timestep, previous_timestep in zip(
@@ -527,13 +589,15 @@ class JointGRPOTrainerA:
                 device=anchor.device,
                 dtype=torch.int64,
             )
-            candidates, logits = self.planner.predict_denoised_candidates(
+            candidates, logits, step_history = self._rollout_prediction(
                 sample,
                 batch_timestep,
                 repeated_context,
                 repeated_coarse,
                 repeated_mask,
             )
+            if step_history is not None:
+                step_histories.append(step_history)
             model_output = self.planner._normalize_xy(candidates[..., :2]).float()
             transition = self.transition.step(
                 model_output=model_output,
@@ -575,26 +639,70 @@ class JointGRPOTrainerA:
             TRAJECTORY_STEPS,
             2,
         )
-        return JointGRPORollout(
-            context=BEVPlannerContext(
-                bev_feature=context.bev_feature.detach(),
-                role_tokens=context.role_tokens.detach(),
-            ),
-            coarse_trajectories=coarse.detach(),
-            mode_valid_mask=valid_mask.detach(),
-            chains_normalized=chain_tensor.detach(),
-            sampled_modes=modes.reshape(batch_size, groups, NUM_PLATOON_ROLES).detach(),
-            selected_trajectories=selected.reshape(
+        return self._make_rollout(
+            context=context,
+            coarse=coarse,
+            valid_mask=valid_mask,
+            chains=chain_tensor,
+            modes=modes.reshape(batch_size, groups, NUM_PLATOON_ROLES),
+            selected=selected.reshape(
                 batch_size,
                 groups,
                 NUM_PLATOON_ROLES,
                 TRAJECTORY_STEPS,
                 TRAJECTORY_DIM,
-            ).detach(),
-            old_mode_log_prob=mode_log_prob.reshape(batch_size, groups).detach(),
-            old_trajectory_log_prob=trajectory_log_prob.reshape(
+            ),
+            mode_log_prob=mode_log_prob.reshape(batch_size, groups),
+            trajectory_log_prob=trajectory_log_prob.reshape(
                 batch_size, groups, len(self.config.stochastic_timesteps)
-            ).detach(),
+            ),
+            step_histories=step_histories,
+        )
+
+    def _replay_history(
+        self,
+        rollout: JointGRPORollout,
+        *,
+        step_index: int,
+        flat_count: int,
+    ) -> Tensor | None:
+        del rollout, step_index, flat_count
+        return None
+
+    def _replay_predictions(
+        self,
+        *,
+        sample: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+        predecessor_history: Tensor | None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        if predecessor_history is not None:
+            raise JointGRPOError("variant A replay must not receive action history")
+        current_candidates, current_logits = (
+            self.planner.predict_denoised_candidates(
+                sample,
+                timesteps,
+                context,
+                coarse,
+                valid_mask,
+            )
+        )
+        with torch.no_grad():
+            reference_candidates, reference_logits = self.reference.predict(
+                self.planner,
+                sample,
+                timesteps,
+                context,
+                coarse,
+            )
+        return (
+            current_candidates,
+            current_logits,
+            reference_candidates,
+            reference_logits,
         )
 
     def compute_loss(
@@ -642,23 +750,24 @@ class JointGRPOTrainerA:
                 device=sample.device,
                 dtype=torch.int64,
             )
-            current_candidates, current_logits = (
-                self.planner.predict_denoised_candidates(
-                    sample,
-                    batch_timestep,
-                    context,
-                    coarse,
-                    valid_mask,
-                )
+            predecessor_history = self._replay_history(
+                rollout,
+                step_index=step_index,
+                flat_count=flat_count,
             )
-            with torch.no_grad():
-                reference_candidates, reference_logits = self.reference.predict(
-                    self.planner,
-                    sample,
-                    batch_timestep,
-                    context,
-                    coarse,
-                )
+            (
+                current_candidates,
+                current_logits,
+                reference_candidates,
+                reference_logits,
+            ) = self._replay_predictions(
+                sample=sample,
+                timesteps=batch_timestep,
+                context=context,
+                coarse=coarse,
+                valid_mask=valid_mask,
+                predecessor_history=predecessor_history,
+            )
             current_output = self.planner._normalize_xy(
                 current_candidates[..., :2]
             ).float()
@@ -797,6 +906,18 @@ class JointGRPOTrainerA:
             return 0.0
         return float(torch.stack(values).sum().sqrt().cpu())
 
+    @staticmethod
+    def _parameter_gradient_norm(parameter: Tensor) -> float:
+        if parameter.grad is None:
+            return 0.0
+        gradient = parameter.grad.detach().float()
+        if not bool(torch.isfinite(gradient).all()):
+            raise JointGRPOError("joint GRPO gradient is non-finite")
+        return float(torch.linalg.vector_norm(gradient).cpu())
+
+    def _extra_gradient_norms(self) -> dict[str, float]:
+        return {}
+
     def update(
         self, rollout: JointGRPORollout, rewards: Tensor
     ) -> JointGRPOUpdateResult:
@@ -812,7 +933,13 @@ class JointGRPOTrainerA:
             ),
             "mode_head": self._module_gradient_norm(self.planner.mode_head),
         }
-        if any(value <= 0.0 or not math.isfinite(value) for value in gradient_norms.values()):
+        gradient_norms.update(self._extra_gradient_norms())
+        if any(not math.isfinite(value) for value in gradient_norms.values()):
+            raise JointGRPOError("joint GRPO gradients must be finite")
+        if any(
+            gradient_norms[name] <= 0.0
+            for name in ("diffusion_decoder", "mode_head")
+        ):
             raise JointGRPOError(
                 "mode head and diffusion decoder require finite non-zero gradients"
             )
@@ -836,14 +963,251 @@ class JointGRPOTrainerA:
         )
 
 
+class JointGRPOTrainerA(_JointGRPOTrainerBase):
+    """Variant-A joint GRPO with vectorized independent role decoding."""
+
+    variant = "A"
+    predecessor_condition = "none"
+
+
+class JointGRPOTrainerB(_JointGRPOTrainerBase):
+    """Variant-B joint GRPO with fixed predicted-detached action history."""
+
+    variant = "B"
+    predecessor_condition = "predicted_detached"
+
+    def _decode_roles(
+        self,
+        *,
+        decoder: nn.Module,
+        mode_head: nn.Module,
+        sample: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+        fixed_history: Tensor | None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        batch_size = context.batch_size
+        if fixed_history is not None:
+            expected = (
+                batch_size,
+                NUM_PLATOON_ROLES - 1,
+                TRAJECTORY_STEPS,
+                TRAJECTORY_DIM,
+            )
+            if (
+                fixed_history.dtype != torch.float32
+                or tuple(fixed_history.shape) != expected
+                or fixed_history.device != context.role_tokens.device
+                or not bool(torch.isfinite(fixed_history).all())
+                or fixed_history.requires_grad
+            ):
+                raise JointGRPOError(
+                    "fixed predecessor history must be detached float32 "
+                    "with shape [N,2,8,3]"
+                )
+        noisy_metric = self.planner._denormalize_xy(
+            sample.clamp(-1.0, 1.0)
+        )
+        role_candidates = []
+        role_logits = []
+        generated_history = []
+        predecessor_action: Tensor | None = None
+        for role_index in range(NUM_PLATOON_ROLES):
+            if role_index > 0 and fixed_history is not None:
+                predecessor_action = fixed_history[:, role_index - 1]
+            candidates, mode_features = decoder.forward_role(
+                noisy_metric,
+                coarse,
+                timesteps,
+                context,
+                role_index=role_index,
+                predecessor_action=predecessor_action,
+            )
+            logits = mode_head(mode_features).squeeze(-1)
+            role_candidates.append(candidates)
+            role_logits.append(logits)
+            if role_index + 1 < NUM_PLATOON_ROLES and fixed_history is None:
+                selected = self.planner._select_predecessor_trajectory(
+                    candidates,
+                    logits,
+                    valid_mask[:, role_index],
+                )
+                predecessor_action = (
+                    self.planner._normalize_predecessor_action(selected)
+                ).float()
+                generated_history.append(predecessor_action)
+        history = (
+            fixed_history
+            if fixed_history is not None
+            else torch.stack(generated_history, dim=1).detach()
+        )
+        return (
+            torch.stack(role_candidates, dim=1),
+            torch.stack(role_logits, dim=1),
+            history,
+        )
+
+    def _rollout_prediction(
+        self,
+        sample: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        return self._decode_roles(
+            decoder=self.planner.diffusion_decoder,
+            mode_head=self.planner.mode_head,
+            sample=sample,
+            timesteps=timesteps,
+            context=context,
+            coarse=coarse,
+            valid_mask=valid_mask,
+            fixed_history=None,
+        )
+
+    def _make_rollout(
+        self,
+        *,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+        chains: Tensor,
+        modes: Tensor,
+        selected: Tensor,
+        mode_log_prob: Tensor,
+        trajectory_log_prob: Tensor,
+        step_histories: list[Tensor],
+    ) -> JointGRPORolloutB:
+        if len(step_histories) != len(self.config.roll_timesteps):
+            raise JointGRPOError("variant B rollout action history count mismatch")
+        batch_size, groups = modes.shape[:2]
+        history = torch.stack(step_histories, dim=1).reshape(
+            batch_size,
+            groups,
+            len(self.config.roll_timesteps),
+            NUM_PLATOON_ROLES - 1,
+            TRAJECTORY_STEPS,
+            TRAJECTORY_DIM,
+        )
+        if history.dtype != torch.float32 or not bool(
+            torch.isfinite(history).all()
+        ):
+            raise JointGRPOError(
+                "variant B rollout action history must be finite float32"
+            )
+        return JointGRPORolloutB(
+            context=BEVPlannerContext(
+                bev_feature=context.bev_feature.detach(),
+                role_tokens=context.role_tokens.detach(),
+            ),
+            coarse_trajectories=coarse.detach(),
+            mode_valid_mask=valid_mask.detach(),
+            chains_normalized=chains.detach(),
+            sampled_modes=modes.detach(),
+            selected_trajectories=selected.detach(),
+            old_mode_log_prob=mode_log_prob.detach(),
+            old_trajectory_log_prob=trajectory_log_prob.detach(),
+            predecessor_action_history_normalized=history.detach(),
+        )
+
+    def _replay_history(
+        self,
+        rollout: JointGRPORollout,
+        *,
+        step_index: int,
+        flat_count: int,
+    ) -> Tensor:
+        if not isinstance(rollout, JointGRPORolloutB):
+            raise JointGRPOError("variant B requires JointGRPORolloutB")
+        expected = (
+            rollout.batch_size,
+            rollout.group_size,
+            len(self.config.roll_timesteps),
+            NUM_PLATOON_ROLES - 1,
+            TRAJECTORY_STEPS,
+            TRAJECTORY_DIM,
+        )
+        history = rollout.predecessor_action_history_normalized
+        if (
+            history.dtype != torch.float32
+            or tuple(history.shape) != expected
+            or not bool(torch.isfinite(history).all())
+            or history.requires_grad
+        ):
+            raise JointGRPOError("variant B rollout action history is invalid")
+        return history.reshape(
+            flat_count,
+            len(self.config.roll_timesteps),
+            NUM_PLATOON_ROLES - 1,
+            TRAJECTORY_STEPS,
+            TRAJECTORY_DIM,
+        )[:, step_index]
+
+    def _replay_predictions(
+        self,
+        *,
+        sample: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+        predecessor_history: Tensor | None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        if predecessor_history is None:
+            raise JointGRPOError("variant B replay requires action history")
+        current_candidates, current_logits, _ = self._decode_roles(
+            decoder=self.planner.diffusion_decoder,
+            mode_head=self.planner.mode_head,
+            sample=sample,
+            timesteps=timesteps,
+            context=context,
+            coarse=coarse,
+            valid_mask=valid_mask,
+            fixed_history=predecessor_history,
+        )
+        with torch.no_grad():
+            reference_candidates, reference_logits, _ = self._decode_roles(
+                decoder=self.reference.diffusion_decoder,
+                mode_head=self.reference.mode_head,
+                sample=sample,
+                timesteps=timesteps,
+                context=context,
+                coarse=coarse,
+                valid_mask=valid_mask,
+                fixed_history=predecessor_history,
+            )
+        return (
+            current_candidates,
+            current_logits,
+            reference_candidates,
+            reference_logits,
+        )
+
+    def _extra_gradient_norms(self) -> dict[str, float]:
+        encoder = self.planner.diffusion_decoder.predecessor_action_encoder
+        gate = self.planner.diffusion_decoder.predecessor_residual_gate
+        if encoder is None or gate is None:
+            raise JointGRPOError("variant B condition modules are missing")
+        return {
+            "predecessor_action_encoder": self._module_gradient_norm(encoder),
+            "predecessor_residual_gate": self._parameter_gradient_norm(gate),
+        }
+
+
 __all__ = [
+    "FrozenGRPOReference",
     "FrozenVariantAReference",
     "GaussianDDIMStep",
     "JointGRPOConfig",
     "JointGRPOError",
     "JointGRPOLossResult",
     "JointGRPORollout",
+    "JointGRPORolloutB",
     "JointGRPOTrainerA",
+    "JointGRPOTrainerB",
     "JointGRPOUpdateResult",
     "StandardGaussianDDIM",
     "normalize_signed_advantages",

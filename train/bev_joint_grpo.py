@@ -1,4 +1,4 @@
-"""Checkpoint and Stage 1 loading helpers for Variant-A joint GRPO."""
+"""Checkpoint and Stage 1 loading helpers for Variant-A/B joint GRPO."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from models.bev_planner import (
     JointGRPOConfig,
     JointGRPOError,
     JointGRPOTrainerA,
+    JointGRPOTrainerB,
 )
 from train.train_bev_diffusion_stage1 import (
     CHECKPOINT_FORMAT as STAGE1_CHECKPOINT_FORMAT,
@@ -28,22 +29,31 @@ from train.train_bev_diffusion_stage1 import (
 
 GRPO_CHECKPOINT_SCHEMA_VERSION = 1
 GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v1"
+GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v1"
 
 
-def validate_stage1_a_source_metadata(
+def _variant_contract(variant: str) -> tuple[str, str]:
+    if variant == "A":
+        return "none", GRPO_CHECKPOINT_FORMAT
+    if variant == "B":
+        return "predicted_detached", GRPO_B_CHECKPOINT_FORMAT
+    raise JointGRPOError("GRPO variant must be A or B")
+
+
+def _validate_stage1_source_metadata(
     payload: Mapping[str, Any],
     *,
+    variant: str,
     allow_diagnostic_source: bool,
 ) -> None:
-    """Validate the immutable Stage 1 source boundary before GRPO starts."""
-
+    condition, _ = _variant_contract(variant)
     if not isinstance(payload, Mapping):
         raise JointGRPOError("Stage 1 source metadata must be a mapping")
     expected = {
         "schema_version": STAGE1_CHECKPOINT_SCHEMA_VERSION,
         "format": STAGE1_CHECKPOINT_FORMAT,
-        "variant": "A",
-        "predecessor_condition": "none",
+        "variant": variant,
+        "predecessor_condition": condition,
     }
     for name, value in expected.items():
         if payload.get(name) != value:
@@ -74,6 +84,34 @@ def validate_stage1_a_source_metadata(
         ) from exc
 
 
+def validate_stage1_a_source_metadata(
+    payload: Mapping[str, Any],
+    *,
+    allow_diagnostic_source: bool,
+) -> None:
+    """Validate the immutable Stage 1 source boundary before GRPO starts."""
+
+    _validate_stage1_source_metadata(
+        payload,
+        variant="A",
+        allow_diagnostic_source=allow_diagnostic_source,
+    )
+
+
+def validate_stage1_b_source_metadata(
+    payload: Mapping[str, Any],
+    *,
+    allow_diagnostic_source: bool,
+) -> None:
+    """Validate the immutable Stage 1 B source boundary."""
+
+    _validate_stage1_source_metadata(
+        payload,
+        variant="B",
+        allow_diagnostic_source=allow_diagnostic_source,
+    )
+
+
 def sha256_checkpoint(path: Path | str) -> str:
     checkpoint = Path(path)
     digest = hashlib.sha256()
@@ -86,6 +124,39 @@ def sha256_checkpoint(path: Path | str) -> str:
     return digest.hexdigest()
 
 
+def _load_stage1_for_grpo(
+    path: Path | str,
+    *,
+    variant: str,
+    device: torch.device,
+    config: JointGRPOConfig | None = None,
+    allow_diagnostic_source: bool = False,
+) -> tuple[JointGRPOTrainerA | JointGRPOTrainerB, dict[str, Any], str]:
+    condition, _ = _variant_contract(variant)
+    checkpoint_path = Path(path)
+    planner = BEVOnlyDiffusionPlanner(
+        BEVOnlyDiffusionPlannerConfig(predecessor_condition=condition)
+    )
+    try:
+        payload = load_stage1_checkpoint(checkpoint_path, planner)
+    except Stage1TrainingError as exc:
+        raise JointGRPOError(
+            f"unable to load the Stage 1 {variant} source checkpoint"
+        ) from exc
+    _validate_stage1_source_metadata(
+        payload,
+        variant=variant,
+        allow_diagnostic_source=allow_diagnostic_source,
+    )
+    planner.to(device)
+    trainer = (
+        JointGRPOTrainerA(planner, config)
+        if variant == "A"
+        else JointGRPOTrainerB(planner, config)
+    )
+    return trainer, payload, sha256_checkpoint(checkpoint_path)
+
+
 def load_stage1_a_for_grpo(
     path: Path | str,
     *,
@@ -93,32 +164,51 @@ def load_stage1_a_for_grpo(
     config: JointGRPOConfig | None = None,
     allow_diagnostic_source: bool = False,
 ) -> tuple[JointGRPOTrainerA, dict[str, Any], str]:
-    checkpoint_path = Path(path)
-    planner = BEVOnlyDiffusionPlanner(
-        BEVOnlyDiffusionPlannerConfig(predecessor_condition="none")
-    )
-    try:
-        payload = load_stage1_checkpoint(checkpoint_path, planner)
-    except Stage1TrainingError as exc:
-        raise JointGRPOError("unable to load the Stage 1 A source checkpoint") from exc
-    validate_stage1_a_source_metadata(
-        payload,
+    trainer, payload, digest = _load_stage1_for_grpo(
+        path,
+        variant="A",
+        device=device,
+        config=config,
         allow_diagnostic_source=allow_diagnostic_source,
     )
-    planner.to(device)
-    trainer = JointGRPOTrainerA(planner, config)
-    return trainer, payload, sha256_checkpoint(checkpoint_path)
+    if not isinstance(trainer, JointGRPOTrainerA):
+        raise JointGRPOError("Stage 1 A loader constructed the wrong trainer")
+    return trainer, payload, digest
 
 
-def grpo_checkpoint_payload(
+def load_stage1_b_for_grpo(
+    path: Path | str,
     *,
-    trainer: JointGRPOTrainerA,
+    device: torch.device,
+    config: JointGRPOConfig | None = None,
+    allow_diagnostic_source: bool = False,
+) -> tuple[JointGRPOTrainerB, dict[str, Any], str]:
+    trainer, payload, digest = _load_stage1_for_grpo(
+        path,
+        variant="B",
+        device=device,
+        config=config,
+        allow_diagnostic_source=allow_diagnostic_source,
+    )
+    if not isinstance(trainer, JointGRPOTrainerB):
+        raise JointGRPOError("Stage 1 B loader constructed the wrong trainer")
+    return trainer, payload, digest
+
+
+def _grpo_checkpoint_payload(
+    *,
+    trainer: JointGRPOTrainerA | JointGRPOTrainerB,
+    variant: str,
     source_stage1_sha256: str,
     source_stage1_payload: Mapping[str, Any],
     metrics: Mapping[str, float],
     diagnostic_only: bool,
     scaler_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    condition, checkpoint_format = _variant_contract(variant)
+    expected_type = JointGRPOTrainerA if variant == "A" else JointGRPOTrainerB
+    if not isinstance(trainer, expected_type):
+        raise JointGRPOError("GRPO checkpoint trainer variant mismatch")
     if not isinstance(diagnostic_only, bool):
         raise JointGRPOError("diagnostic_only must be boolean")
     if scaler_state is not None and not isinstance(scaler_state, Mapping):
@@ -135,8 +225,9 @@ def grpo_checkpoint_payload(
         raise JointGRPOError(
             "source_stage1_sha256 must be a SHA256 hex digest"
         ) from exc
-    validate_stage1_a_source_metadata(
+    _validate_stage1_source_metadata(
         source_stage1_payload,
+        variant=variant,
         allow_diagnostic_source=True,
     )
     if (
@@ -159,9 +250,9 @@ def grpo_checkpoint_payload(
         checked_metrics[name] = float(value)
     return {
         "schema_version": GRPO_CHECKPOINT_SCHEMA_VERSION,
-        "format": GRPO_CHECKPOINT_FORMAT,
-        "variant": "A",
-        "predecessor_condition": "none",
+        "format": checkpoint_format,
+        "variant": variant,
+        "predecessor_condition": condition,
         "reward_source": "external",
         "source_stage1_sha256": source_stage1_sha256,
         "source_dataset_fingerprint": fingerprint,
@@ -183,6 +274,46 @@ def grpo_checkpoint_payload(
     }
 
 
+def grpo_checkpoint_payload(
+    *,
+    trainer: JointGRPOTrainerA,
+    source_stage1_sha256: str,
+    source_stage1_payload: Mapping[str, Any],
+    metrics: Mapping[str, float],
+    diagnostic_only: bool,
+    scaler_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _grpo_checkpoint_payload(
+        trainer=trainer,
+        variant="A",
+        source_stage1_sha256=source_stage1_sha256,
+        source_stage1_payload=source_stage1_payload,
+        metrics=metrics,
+        diagnostic_only=diagnostic_only,
+        scaler_state=scaler_state,
+    )
+
+
+def grpo_b_checkpoint_payload(
+    *,
+    trainer: JointGRPOTrainerB,
+    source_stage1_sha256: str,
+    source_stage1_payload: Mapping[str, Any],
+    metrics: Mapping[str, float],
+    diagnostic_only: bool,
+    scaler_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _grpo_checkpoint_payload(
+        trainer=trainer,
+        variant="B",
+        source_stage1_sha256=source_stage1_sha256,
+        source_stage1_payload=source_stage1_payload,
+        metrics=metrics,
+        diagnostic_only=diagnostic_only,
+        scaler_state=scaler_state,
+    )
+
+
 def save_grpo_checkpoint(
     path: Path | str, payload: Mapping[str, Any]
 ) -> Path:
@@ -194,12 +325,17 @@ def save_grpo_checkpoint(
     return checkpoint_path
 
 
-def load_grpo_checkpoint(
+def _load_grpo_checkpoint(
     path: Path | str,
-    trainer: JointGRPOTrainerA,
+    trainer: JointGRPOTrainerA | JointGRPOTrainerB,
     *,
+    variant: str,
     expected_source_stage1_sha256: str,
 ) -> dict[str, Any]:
+    condition, checkpoint_format = _variant_contract(variant)
+    expected_type = JointGRPOTrainerA if variant == "A" else JointGRPOTrainerB
+    if not isinstance(trainer, expected_type):
+        raise JointGRPOError("GRPO checkpoint trainer variant mismatch")
     if (
         not isinstance(expected_source_stage1_sha256, str)
         or len(expected_source_stage1_sha256) != 64
@@ -224,9 +360,9 @@ def load_grpo_checkpoint(
         raise JointGRPOError("GRPO checkpoint must be a mapping")
     expected = {
         "schema_version": GRPO_CHECKPOINT_SCHEMA_VERSION,
-        "format": GRPO_CHECKPOINT_FORMAT,
-        "variant": "A",
-        "predecessor_condition": "none",
+        "format": checkpoint_format,
+        "variant": variant,
+        "predecessor_condition": condition,
         "reward_source": "external",
         "source_stage1_sha256": expected_source_stage1_sha256,
     }
@@ -293,13 +429,46 @@ def load_grpo_checkpoint(
     return payload
 
 
+def load_grpo_checkpoint(
+    path: Path | str,
+    trainer: JointGRPOTrainerA,
+    *,
+    expected_source_stage1_sha256: str,
+) -> dict[str, Any]:
+    return _load_grpo_checkpoint(
+        path,
+        trainer,
+        variant="A",
+        expected_source_stage1_sha256=expected_source_stage1_sha256,
+    )
+
+
+def load_grpo_b_checkpoint(
+    path: Path | str,
+    trainer: JointGRPOTrainerB,
+    *,
+    expected_source_stage1_sha256: str,
+) -> dict[str, Any]:
+    return _load_grpo_checkpoint(
+        path,
+        trainer,
+        variant="B",
+        expected_source_stage1_sha256=expected_source_stage1_sha256,
+    )
+
+
 __all__ = [
+    "GRPO_B_CHECKPOINT_FORMAT",
     "GRPO_CHECKPOINT_FORMAT",
     "GRPO_CHECKPOINT_SCHEMA_VERSION",
+    "grpo_b_checkpoint_payload",
     "grpo_checkpoint_payload",
+    "load_grpo_b_checkpoint",
     "load_grpo_checkpoint",
     "load_stage1_a_for_grpo",
+    "load_stage1_b_for_grpo",
     "save_grpo_checkpoint",
     "sha256_checkpoint",
     "validate_stage1_a_source_metadata",
+    "validate_stage1_b_source_metadata",
 ]
