@@ -160,6 +160,7 @@ def test_context_shapes_and_dynamic_anchor_dependency(
             timesteps,
             context,
             batch["coarse_trajectories"],
+            batch["mode_valid_mask"],
         )
         changed_anchors = batch["coarse_trajectories"].clone()
         changed_anchors[..., 2] = 0.4
@@ -170,6 +171,7 @@ def test_context_shapes_and_dynamic_anchor_dependency(
             timesteps,
             context,
             changed_anchors,
+            batch["mode_valid_mask"],
         )
 
     assert context.bev_feature.shape == (1, 3, 128, 64, 64)

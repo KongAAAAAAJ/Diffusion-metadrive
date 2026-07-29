@@ -16,6 +16,7 @@ from .bev_only_diffusion_planner import (
     CrossBEVDiffusionDecoder,
     LightweightBEVFusion,
     MetricTrajectoryBEVSampler,
+    PredecessorActionEncoder,
 )
 from .dynamic_anchors import (
     DynamicAnchorConfig,
@@ -70,6 +71,7 @@ __all__ = [
     "ModeTopology",
     "LightweightBEVFusion",
     "MetricTrajectoryBEVSampler",
+    "PredecessorActionEncoder",
     "RuleAction",
     "RESNET18_A1_SHA256",
     "SimulatorDynamicAnchorGenerator",

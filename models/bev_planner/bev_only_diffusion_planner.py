@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Literal
 
 import torch
 import torch.nn.functional as F
@@ -53,6 +53,7 @@ class BEVOnlyDiffusionPlannerConfig:
     inference_denoise_steps: int = 2
     inference_seed: int = 0
     max_xy_residual_m: float = 12.0
+    predecessor_condition: Literal["none", "predicted_detached"] = "none"
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -81,11 +82,12 @@ class BEVOnlyDiffusionPlannerConfig:
             )
         if not math.isfinite(self.dropout) or not 0.0 <= self.dropout < 1.0:
             raise BEVPlannerError("dropout must be finite and in [0,1)")
-        if (
-            not math.isfinite(self.max_xy_residual_m)
-            or self.max_xy_residual_m <= 0.0
-        ):
+        if not math.isfinite(self.max_xy_residual_m) or self.max_xy_residual_m <= 0.0:
             raise BEVPlannerError("max_xy_residual_m must be positive and finite")
+        if self.predecessor_condition not in ("none", "predicted_detached"):
+            raise BEVPlannerError(
+                "predecessor_condition must be none or predicted_detached"
+            )
 
 
 @dataclass(frozen=True)
@@ -142,8 +144,7 @@ class LightweightBEVFusion(nn.Module):
     ) -> None:
         super().__init__()
         self.lateral = nn.ModuleList(
-            nn.Conv2d(channels, d_model, kernel_size=1)
-            for channels in input_channels
+            nn.Conv2d(channels, d_model, kernel_size=1) for channels in input_channels
         )
         self.output = nn.Sequential(
             nn.Conv2d(d_model, d_model, kernel_size=3, padding=1, bias=False),
@@ -170,7 +171,9 @@ class LightweightBEVFusion(nn.Module):
 class JointStateRelationEncoder(nn.Module):
     """Encode ego state, masked neighbor relations, role, and BEV context."""
 
-    def __init__(self, d_model: int, num_heads: int, ffn_dim: int, dropout: float) -> None:
+    def __init__(
+        self, d_model: int, num_heads: int, ffn_dim: int, dropout: float
+    ) -> None:
         super().__init__()
         self.register_buffer(
             "ego_scale",
@@ -249,9 +252,7 @@ class JointStateRelationEncoder(nn.Module):
             dtype=relation_state.dtype
         )
         relation_normalized = (
-            relation_masked.reshape(
-                batch_size, NUM_PLATOON_ROLES, RELATION_STATE_DIM
-            )
+            relation_masked.reshape(batch_size, NUM_PLATOON_ROLES, RELATION_STATE_DIM)
             / self.relation_scale
         ).clamp(-5.0, 5.0)
         bev_global = F.adaptive_avg_pool2d(
@@ -290,12 +291,8 @@ class MetricTrajectoryBEVSampler(nn.Module):
         x = trajectory_xy[..., 0]
         y = trajectory_xy[..., 1]
         # Semantic BEV image coordinates: forward points up and left points left.
-        grid_x = 1.0 - 2.0 * (y - self.y_min_m) / (
-            self.y_max_m - self.y_min_m
-        )
-        grid_y = 1.0 - 2.0 * (x - self.x_min_m) / (
-            self.x_max_m - self.x_min_m
-        )
+        grid_x = 1.0 - 2.0 * (y - self.y_min_m) / (self.y_max_m - self.y_min_m)
+        grid_y = 1.0 - 2.0 * (x - self.x_min_m) / (self.x_max_m - self.x_min_m)
         return torch.stack((grid_x, grid_y), dim=-1)
 
     def forward(self, bev_feature: Tensor, trajectory_xy: Tensor) -> Tensor:
@@ -320,7 +317,9 @@ class MetricTrajectoryBEVSampler(nn.Module):
 class CrossBEVDecoderBlock(nn.Module):
     """One cross-BEV and cross-role decoder block."""
 
-    def __init__(self, d_model: int, num_heads: int, ffn_dim: int, dropout: float) -> None:
+    def __init__(
+        self, d_model: int, num_heads: int, ffn_dim: int, dropout: float
+    ) -> None:
         super().__init__()
         self.bev_attention = nn.MultiheadAttention(
             d_model, num_heads, dropout=dropout, batch_first=True
@@ -354,6 +353,32 @@ class CrossBEVDecoderBlock(nn.Module):
         )[0]
         query = self.norm2(query + self.dropout(role_update))
         return self.norm3(query + self.dropout(self.ffn(query)))
+
+
+class PredecessorActionEncoder(nn.Module):
+    """Encode one normalized predecessor trajectory into a shared action token."""
+
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(TRAJECTORY_STEPS * TRAJECTORY_DIM, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+
+    def forward(self, normalized_trajectory: Tensor) -> Tensor:
+        if normalized_trajectory.ndim != 3 or tuple(
+            normalized_trajectory.shape[1:]
+        ) != (TRAJECTORY_STEPS, TRAJECTORY_DIM):
+            raise BEVPlannerError("predecessor trajectory must have shape [B,8,3]")
+        if not normalized_trajectory.is_floating_point() or not bool(
+            torch.isfinite(normalized_trajectory).all()
+        ):
+            raise BEVPlannerError(
+                "predecessor trajectory must contain finite floating-point values"
+            )
+        return self.network(normalized_trajectory.flatten(1))
 
 
 class CrossBEVDiffusionDecoder(nn.Module):
@@ -391,28 +416,27 @@ class CrossBEVDiffusionDecoder(nn.Module):
         )
         nn.init.zeros_(self.trajectory_head[-1].weight)
         nn.init.zeros_(self.trajectory_head[-1].bias)
+        if config.predecessor_condition == "predicted_detached":
+            self.predecessor_action_encoder: PredecessorActionEncoder | None = (
+                PredecessorActionEncoder(config.d_model)
+            )
+            self.predecessor_residual_gate = nn.Parameter(torch.zeros(()))
+        else:
+            self.predecessor_action_encoder = None
+            self.register_parameter("predecessor_residual_gate", None)
 
-    def forward(
+    def _decode_flat(
         self,
-        noisy_xy_metric: Tensor,
-        coarse_trajectories: Tensor,
-        timesteps: Tensor,
-        context: BEVPlannerContext,
+        noisy_flat: Tensor,
+        coarse_flat: Tensor,
+        bev_flat: Tensor,
+        role_token_flat: Tensor,
+        joint_tokens: Tensor,
+        timesteps_flat: Tensor,
+        *,
+        predecessor_action: Tensor | None,
     ) -> tuple[Tensor, Tensor]:
-        batch_size = context.batch_size
-        flat_count = batch_size * NUM_PLATOON_ROLES
-        noisy_flat = noisy_xy_metric.reshape(
-            flat_count, NUM_MODES, TRAJECTORY_STEPS, 2
-        )
-        coarse_flat = coarse_trajectories.reshape(
-            flat_count, NUM_MODES, TRAJECTORY_STEPS, TRAJECTORY_DIM
-        )
-        bev_flat = context.bev_feature.reshape(
-            flat_count,
-            context.bev_feature.shape[-3],
-            context.bev_feature.shape[-2],
-            context.bev_feature.shape[-1],
-        )
+        flat_count = int(noisy_flat.shape[0])
         sampled = self.sampler(bev_flat, noisy_flat)
         sampled = sampled.reshape(
             flat_count * NUM_MODES,
@@ -427,42 +451,149 @@ class CrossBEVDiffusionDecoder(nn.Module):
             NUM_MODES, device=query.device, dtype=torch.long
         ).unsqueeze(0)
         query = query + self.mode_embedding(mode_ids)
-        role_token_flat = context.role_tokens.reshape(flat_count, -1)
         query = query + role_token_flat.unsqueeze(1)
-        time_embedding = self.timestep_embedding(timesteps.reshape(flat_count))
+        time_embedding = self.timestep_embedding(timesteps_flat)
         query = query + time_embedding.unsqueeze(1)
+        if predecessor_action is not None:
+            if (
+                self.predecessor_action_encoder is None
+                or self.predecessor_residual_gate is None
+            ):
+                raise BEVPlannerError(
+                    "predecessor action requires predicted_detached configuration"
+                )
+            action_token = self.predecessor_action_encoder(predecessor_action)
+            query = query + torch.tanh(self.predecessor_residual_gate) * (
+                action_token.unsqueeze(1)
+            )
         query = self.input_norm(query).reshape(
             flat_count * NUM_MODES, 1, self.config.d_model
         )
 
+        joint_tokens = joint_tokens.repeat_interleave(NUM_MODES, dim=0)
+        for block in self.blocks:
+            query = block(query, sampled, joint_tokens)
+        mode_features = query.squeeze(1).reshape(
+            flat_count, NUM_MODES, self.config.d_model
+        )
+
+        residual = self.trajectory_head(mode_features).reshape(
+            flat_count,
+            NUM_MODES,
+            TRAJECTORY_STEPS,
+            TRAJECTORY_DIM,
+        )
+        xy = noisy_flat + torch.tanh(residual[..., :2]) * float(
+            self.config.max_xy_residual_m
+        )
+        heading = coarse_flat[..., 2] + math.pi * torch.tanh(residual[..., 2])
+        heading = torch.atan2(torch.sin(heading), torch.cos(heading))
+        candidates = torch.cat((xy, heading.unsqueeze(-1)), dim=-1)
+        return candidates, mode_features
+
+    def forward(
+        self,
+        noisy_xy_metric: Tensor,
+        coarse_trajectories: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+    ) -> tuple[Tensor, Tensor]:
+        """Vectorized three-role decoder used by variant A."""
+
+        batch_size = context.batch_size
+        flat_count = batch_size * NUM_PLATOON_ROLES
+        noisy_flat = noisy_xy_metric.reshape(flat_count, NUM_MODES, TRAJECTORY_STEPS, 2)
+        coarse_flat = coarse_trajectories.reshape(
+            flat_count, NUM_MODES, TRAJECTORY_STEPS, TRAJECTORY_DIM
+        )
+        bev_flat = context.bev_feature.reshape(
+            flat_count,
+            context.bev_feature.shape[-3],
+            context.bev_feature.shape[-2],
+            context.bev_feature.shape[-1],
+        )
+        role_token_flat = context.role_tokens.reshape(flat_count, -1)
         joint_tokens = (
             context.role_tokens.unsqueeze(1)
             .expand(-1, NUM_PLATOON_ROLES, -1, -1)
             .reshape(flat_count, NUM_PLATOON_ROLES, self.config.d_model)
         )
-        joint_tokens = joint_tokens.repeat_interleave(NUM_MODES, dim=0)
-        for block in self.blocks:
-            query = block(query, sampled, joint_tokens)
-        mode_features = query.squeeze(1).reshape(
-            batch_size, NUM_PLATOON_ROLES, NUM_MODES, self.config.d_model
+        candidates, mode_features = self._decode_flat(
+            noisy_flat,
+            coarse_flat,
+            bev_flat,
+            role_token_flat,
+            joint_tokens,
+            timesteps.reshape(flat_count),
+            predecessor_action=None,
+        )
+        return (
+            candidates.reshape(
+                batch_size,
+                NUM_PLATOON_ROLES,
+                NUM_MODES,
+                TRAJECTORY_STEPS,
+                TRAJECTORY_DIM,
+            ),
+            mode_features.reshape(
+                batch_size,
+                NUM_PLATOON_ROLES,
+                NUM_MODES,
+                self.config.d_model,
+            ),
         )
 
-        residual = self.trajectory_head(mode_features).reshape(
-            batch_size,
-            NUM_PLATOON_ROLES,
-            NUM_MODES,
-            TRAJECTORY_STEPS,
-            TRAJECTORY_DIM,
+    def forward_role(
+        self,
+        noisy_xy_metric: Tensor,
+        coarse_trajectories: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        *,
+        role_index: int,
+        predecessor_action: Tensor | None,
+    ) -> tuple[Tensor, Tensor]:
+        """Decode one role for the ordered predicted-detached path."""
+
+        if self.config.predecessor_condition != "predicted_detached":
+            raise BEVPlannerError(
+                "forward_role requires predicted_detached configuration"
+            )
+        if (
+            isinstance(role_index, bool)
+            or not isinstance(role_index, int)
+            or role_index < 0
+            or role_index >= NUM_PLATOON_ROLES
+        ):
+            raise BEVPlannerError("role_index must be 0, 1, or 2")
+        if role_index == 0 and predecessor_action is not None:
+            raise BEVPlannerError("leader must not receive predecessor action")
+        if role_index > 0 and predecessor_action is None:
+            raise BEVPlannerError("middle and rear require a predecessor action")
+        batch_size = context.batch_size
+        if predecessor_action is not None:
+            if (
+                predecessor_action.ndim != 3
+                or tuple(predecessor_action.shape[1:])
+                != (TRAJECTORY_STEPS, TRAJECTORY_DIM)
+                or int(predecessor_action.shape[0]) != batch_size
+            ):
+                raise BEVPlannerError(
+                    "predecessor trajectory must have shape [B,8,3]"
+                )
+            if predecessor_action.device != context.role_tokens.device:
+                raise BEVPlannerError(
+                    "predecessor trajectory must be on the context device"
+                )
+        return self._decode_flat(
+            noisy_xy_metric[:, role_index],
+            coarse_trajectories[:, role_index],
+            context.bev_feature[:, role_index],
+            context.role_tokens[:, role_index],
+            context.role_tokens,
+            timesteps[:, role_index],
+            predecessor_action=predecessor_action,
         )
-        xy = noisy_xy_metric + torch.tanh(residual[..., :2]) * float(
-            self.config.max_xy_residual_m
-        )
-        heading = coarse_trajectories[..., 2] + math.pi * torch.tanh(
-            residual[..., 2]
-        )
-        heading = torch.atan2(torch.sin(heading), torch.cos(heading))
-        candidates = torch.cat((xy, heading.unsqueeze(-1)), dim=-1)
-        return candidates, mode_features
 
 
 class BEVOnlyDiffusionPlanner(nn.Module):
@@ -496,16 +627,12 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         bev_config = SemanticBEVConfig()
         self.register_buffer(
             "trajectory_xy_min",
-            torch.tensor(
-                [bev_config.x_min_m, bev_config.y_min_m], dtype=torch.float32
-            ),
+            torch.tensor([bev_config.x_min_m, bev_config.y_min_m], dtype=torch.float32),
             persistent=True,
         )
         self.register_buffer(
             "trajectory_xy_max",
-            torch.tensor(
-                [bev_config.x_max_m, bev_config.y_max_m], dtype=torch.float32
-            ),
+            torch.tensor([bev_config.x_max_m, bev_config.y_max_m], dtype=torch.float32),
             persistent=True,
         )
 
@@ -517,8 +644,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             raise BEVPlannerError("denoise_steps must be a positive integer")
         step_ratio = 20.0 / float(denoise_steps)
         return tuple(
-            int(round(index * step_ratio))
-            for index in reversed(range(denoise_steps))
+            int(round(index * step_ratio)) for index in reversed(range(denoise_steps))
         )
 
     @staticmethod
@@ -660,12 +786,9 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         )
 
     def _denormalize_xy(self, trajectory_xy: Tensor) -> Tensor:
-        return (
-            (trajectory_xy + 1.0)
-            * 0.5
-            * (self.trajectory_xy_max - self.trajectory_xy_min)
-            + self.trajectory_xy_min
-        )
+        return (trajectory_xy + 1.0) * 0.5 * (
+            self.trajectory_xy_max - self.trajectory_xy_min
+        ) + self.trajectory_xy_min
 
     def encode_context(
         self,
@@ -758,6 +881,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         diffusion_timesteps: Tensor,
         context: BEVPlannerContext,
         coarse_trajectories: Tensor,
+        mode_valid_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """Run one differentiable denoising prediction.
 
@@ -796,6 +920,15 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             batch_size=batch_size,
             finite=True,
         )
+        self._require_tensor(
+            mode_valid_mask,
+            name="mode_valid_mask",
+            dtype=torch.bool,
+            shape_tail=(NUM_PLATOON_ROLES, NUM_MODES),
+            batch_size=batch_size,
+        )
+        if not bool(mode_valid_mask[..., STOP_MODE_INDEX].all()):
+            raise BEVPlannerError("STOP must be valid for every role")
         self._validate_timesteps(
             diffusion_timesteps,
             batch_size=batch_size,
@@ -827,6 +960,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         if (
             noisy_xy_normalized.device != device
             or coarse_trajectories.device != device
+            or mode_valid_mask.device != device
             or context.bev_feature.device != device
         ):
             raise BEVPlannerError(
@@ -837,6 +971,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             diffusion_timesteps,
             context,
             coarse_trajectories,
+            mode_valid_mask,
         )
 
     def _predict_denoised_candidates_impl(
@@ -845,20 +980,81 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         diffusion_timesteps: Tensor,
         context: BEVPlannerContext,
         coarse_trajectories: Tensor,
+        mode_valid_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """Denoise inputs already validated by a public entry point."""
 
-        noisy_xy_metric = self._denormalize_xy(
-            noisy_xy_normalized.clamp(-1.0, 1.0)
-        )
-        candidates, mode_features = self.diffusion_decoder(
+        noisy_xy_metric = self._denormalize_xy(noisy_xy_normalized.clamp(-1.0, 1.0))
+        if self.config.predecessor_condition == "none":
+            candidates, mode_features = self.diffusion_decoder(
+                noisy_xy_metric,
+                coarse_trajectories,
+                diffusion_timesteps,
+                context,
+            )
+            raw_logits = self.mode_head(mode_features).squeeze(-1)
+            return candidates, raw_logits
+        return self._predict_detached_candidates(
             noisy_xy_metric,
-            coarse_trajectories,
             diffusion_timesteps,
             context,
+            coarse_trajectories,
+            mode_valid_mask,
         )
-        raw_logits = self.mode_head(mode_features).squeeze(-1)
-        return candidates, raw_logits
+
+    def _normalize_predecessor_action(self, trajectory: Tensor) -> Tensor:
+        normalized_xy = self._normalize_xy(trajectory[..., :2]).clamp(-1.0, 1.0)
+        wrapped_heading = torch.atan2(
+            torch.sin(trajectory[..., 2]),
+            torch.cos(trajectory[..., 2]),
+        )
+        normalized_heading = (wrapped_heading / math.pi).unsqueeze(-1)
+        return torch.cat((normalized_xy, normalized_heading), dim=-1).detach()
+
+    @staticmethod
+    def _select_predecessor_trajectory(
+        candidates: Tensor,
+        raw_logits: Tensor,
+        mode_valid_mask: Tensor,
+    ) -> Tensor:
+        masked_logits = raw_logits.masked_fill(~mode_valid_mask, float("-inf"))
+        selected_mode = masked_logits.argmax(dim=-1)
+        gather_index = selected_mode[:, None, None, None].expand(
+            -1, 1, TRAJECTORY_STEPS, TRAJECTORY_DIM
+        )
+        return candidates.gather(1, gather_index).squeeze(1)
+
+    def _predict_detached_candidates(
+        self,
+        noisy_xy_metric: Tensor,
+        diffusion_timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse_trajectories: Tensor,
+        mode_valid_mask: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        role_candidates = []
+        role_logits = []
+        predecessor_action: Tensor | None = None
+        for role_index in range(NUM_PLATOON_ROLES):
+            candidates, mode_features = self.diffusion_decoder.forward_role(
+                noisy_xy_metric,
+                coarse_trajectories,
+                diffusion_timesteps,
+                context,
+                role_index=role_index,
+                predecessor_action=predecessor_action,
+            )
+            raw_logits = self.mode_head(mode_features).squeeze(-1)
+            role_candidates.append(candidates)
+            role_logits.append(raw_logits)
+            if role_index + 1 < NUM_PLATOON_ROLES:
+                selected = self._select_predecessor_trajectory(
+                    candidates,
+                    raw_logits,
+                    mode_valid_mask[:, role_index],
+                )
+                predecessor_action = self._normalize_predecessor_action(selected)
+        return torch.stack(role_candidates, dim=1), torch.stack(role_logits, dim=1)
 
     def _training_forward(
         self,
@@ -867,6 +1063,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         *,
         diffusion_noise: Tensor | None,
         diffusion_timesteps: Tensor | None,
+        mode_valid_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
         batch_size = context.batch_size
         device = coarse_trajectories.device
@@ -880,13 +1077,9 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             )
         else:
             timesteps = diffusion_timesteps
-            self._validate_timesteps(
-                timesteps, batch_size=batch_size, device=device
-            )
+            self._validate_timesteps(timesteps, batch_size=batch_size, device=device)
             if bool((timesteps >= self.config.train_timestep_upper).any()):
-                raise BEVPlannerError(
-                    "training diffusion_timesteps must be in [0,50)"
-                )
+                raise BEVPlannerError("training diffusion_timesteps must be in [0,50)")
         anchor_normalized = self._normalize_xy(coarse_trajectories[..., :2])
         noise = (
             torch.randn_like(anchor_normalized)
@@ -909,6 +1102,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             timesteps,
             context,
             coarse_trajectories,
+            mode_valid_mask,
         )
 
     def _inference_noise(
@@ -932,6 +1126,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         coarse_trajectories: Tensor,
         *,
         diffusion_noise: Tensor | None,
+        mode_valid_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
         batch_size = context.batch_size
         device = coarse_trajectories.device
@@ -978,6 +1173,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
                 batch_timesteps,
                 context,
                 coarse_trajectories,
+                mode_valid_mask,
             )
             predicted_normalized = self._normalize_xy(candidates[..., :2])
             sample = self.diffusion_scheduler.step(
@@ -1046,6 +1242,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
                 coarse_trajectories,
                 diffusion_noise=noise,
                 diffusion_timesteps=diffusion_timesteps,
+                mode_valid_mask=mode_valid_mask,
             )
         else:
             if diffusion_timesteps is not None:
@@ -1056,6 +1253,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
                 context,
                 coarse_trajectories,
                 diffusion_noise=noise,
+                mode_valid_mask=mode_valid_mask,
             )
         return self._select(candidates, raw_logits, mode_valid_mask)
 
@@ -1068,4 +1266,5 @@ __all__ = [
     "CrossBEVDiffusionDecoder",
     "LightweightBEVFusion",
     "MetricTrajectoryBEVSampler",
+    "PredecessorActionEncoder",
 ]
