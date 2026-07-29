@@ -8,7 +8,8 @@ online:
   validation_interval_steps: 100
   scenario_seeds: [17, 23]
   scenarios:
-    - {scenario: S1_free_cruise_straight, route: R3_mainline_straight}
-    - {scenario: S2_free_cruise_curve, route: R2_entry_curve}
-    - {scenario: S3_straight_following, route: R3_mainline_straight}
-    - {scenario: S4_curve_following, route: R2_entry_curve}
+    - {scenario: S5_hard_brake_lead, route: R1_entry_straight}
+    - {scenario: S6_background_merge_in, route: R6_mainline_merge_approach}
+    - {scenario: S7_ego_merge_from_ramp, route: R7_merge_core}
+    - {scenario: S8_ego_exit_to_ramp, route: R6_exit_to_ramp}
+    - {scenario: S9_narrow_channel_negotiation, route: R8_narrow_channel}

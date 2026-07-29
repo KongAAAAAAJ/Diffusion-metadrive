@@ -167,3 +167,30 @@ def test_reward_config_is_strict() -> None:
         JointRewardConfig(local_mix=0.8, team_mix=0.8)
     with pytest.raises(JointRewardError):
         JointRewardConfig(unsafe_base_reward=-4.0)
+    with pytest.raises(JointRewardError):
+        JointRewardConfig(tracking_lateral_margin_m=1.01)
+
+
+def test_tracking_envelope_makes_proxy_footprint_more_conservative() -> None:
+    inputs = _model_inputs()
+    # A narrow drivable stripe that admits the nominal center footprint but
+    # not the measured-error-expanded footprint.
+    inputs.bev[:, 0] = 0
+    inputs.bev[:, 0, 188:228, 120:136] = 255
+    stationary = np.stack([_trajectory(0.0)] * 3)[None]
+    nominal = JointTrajectoryProxyReward(
+        JointRewardConfig()
+    )
+    expanded = JointTrajectoryProxyReward(
+        JointRewardConfig(
+            tracking_longitudinal_margin_m=1.0,
+            tracking_lateral_margin_m=0.8,
+            tracking_heading_margin_rad=0.1,
+        )
+    )
+    nominal._prediction_planner._predicted_obstacles = lambda *args, **kwargs: []
+    expanded._prediction_planner._predicted_obstacles = lambda *args, **kwargs: []
+    nominal_result = nominal.score(_env(), inputs, stationary)
+    expanded_result = expanded.score(_env(), inputs, stationary)
+    assert not nominal_result.out_of_drivable[0]
+    assert expanded_result.out_of_drivable[0]

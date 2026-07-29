@@ -34,6 +34,9 @@ class JointRewardConfig:
     vehicle_width_m: float = 2.3
     platoon_safe_gap_m: float = 7.0
     background_safe_gap_m: float = 5.0
+    tracking_longitudinal_margin_m: float = 0.0
+    tracking_lateral_margin_m: float = 0.0
+    tracking_heading_margin_rad: float = 0.0
     progress_norm_m: float = 30.0
     formation_norm_m: float = 10.0
     local_progress_weight: float = 0.8
@@ -62,6 +65,17 @@ class JointRewardConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise JointRewardError(f"{name} must be positive and finite")
+        margin_limits = {
+            "tracking_longitudinal_margin_m": 1.5,
+            "tracking_lateral_margin_m": 1.0,
+            "tracking_heading_margin_rad": 0.15,
+        }
+        for name, maximum in margin_limits.items():
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0.0 or value > maximum:
+                raise JointRewardError(
+                    f"{name} must be finite and within [0,{maximum}]"
+                )
         if self.interpolation_dt_s > self.trajectory_dt_s:
             raise JointRewardError(
                 "interpolation_dt_s cannot exceed trajectory_dt_s"
@@ -215,8 +229,7 @@ def _local_to_world(local: np.ndarray, pose: np.ndarray) -> np.ndarray:
 
 
 def _footprint_points(local: np.ndarray, config: JointRewardConfig) -> np.ndarray:
-    half_length = 0.5 * config.vehicle_length_m
-    half_width = 0.5 * config.vehicle_width_m
+    half_length, half_width = _tracking_aware_half_extents(config)
     offsets = np.asarray(
         [
             [0.0, 0.0],
@@ -239,6 +252,24 @@ def _footprint_points(local: np.ndarray, config: JointRewardConfig) -> np.ndarra
             local[:, 1] + sin_h * longitudinal + cos_h * lateral
         )
     return points
+
+
+def _tracking_aware_half_extents(
+    config: JointRewardConfig,
+) -> tuple[float, float]:
+    """Conservative vehicle extents under measured closed-loop tracking error."""
+    heading = config.tracking_heading_margin_rad
+    half_length = (
+        0.5 * config.vehicle_length_m
+        + config.tracking_longitudinal_margin_m
+        + 0.5 * config.vehicle_width_m * math.sin(heading)
+    )
+    half_width = (
+        0.5 * config.vehicle_width_m
+        + config.tracking_lateral_margin_m
+        + 0.5 * config.vehicle_length_m * math.sin(heading)
+    )
+    return half_length, half_width
 
 
 def _footprint_outside_drivable(
@@ -483,7 +514,8 @@ class JointTrajectoryProxyReward:
             times,
             include_platoon=False,
         )
-        dimensions = (self.config.vehicle_length_m, self.config.vehicle_width_m)
+        half_length, half_width = _tracking_aware_half_extents(self.config)
+        dimensions = (2.0 * half_length, 2.0 * half_width)
 
         for group in range(group_size):
             role_progress = []
@@ -577,7 +609,7 @@ class JointTrajectoryProxyReward:
                 center_distance = np.linalg.norm(
                     first[:, :2] - second[:, :2], axis=1
                 )
-                bumper = center_distance - self.config.vehicle_length_m
+                bumper = center_distance - dimensions[0]
                 if follower == leader + 1:
                     deficit = np.maximum(
                         self.config.platoon_safe_gap_m - bumper, 0.0

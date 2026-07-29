@@ -38,16 +38,25 @@ class _ControlHarness:
                 position=np.asarray([0.0, 0.0], dtype=np.float32),
                 heading_theta=0.0,
                 speed_km_h=float(speed_kmh),
+                FRONT_WHEELBASE=1.4,
+                REAR_WHEELBASE=1.4,
+                max_steering=60.0,
             ),
             "agent1": SimpleNamespace(
                 position=np.asarray([follower_x, 0.0], dtype=np.float32),
                 heading_theta=0.0,
                 speed_km_h=float(speed_kmh),
+                FRONT_WHEELBASE=1.4,
+                REAR_WHEELBASE=1.4,
+                max_steering=60.0,
             ),
             "agent2": SimpleNamespace(
                 position=np.asarray([2.0 * follower_x, 0.0], dtype=np.float32),
                 heading_theta=0.0,
                 speed_km_h=float(speed_kmh),
+                FRONT_WHEELBASE=1.4,
+                REAR_WHEELBASE=1.4,
+                max_steering=60.0,
             ),
         }
 
@@ -96,6 +105,44 @@ def test_follower_combines_gap_and_trajectory_speed() -> None:
     close_reference = close.trajectory_to_control("agent1", _trajectory(8.0))
     assert slow_reference[1] < fast_reference[1]
     assert close_reference[1] < fast_reference[1]
+
+
+def test_pure_pursuit_turn_sign_and_straight_zero() -> None:
+    env = _ControlHarness(speed_kmh=18.0)
+    straight = _trajectory(6.0)
+    left = straight.copy()
+    left[:, 1] = np.linspace(0.2, 4.0, 8, dtype=np.float32)
+    left[:, 2] = np.linspace(0.02, 0.35, 8, dtype=np.float32)
+    right = left.copy()
+    right[:, 1:] *= -1.0
+    assert env._lateral_pd("agent0", straight) == pytest.approx(0.0)
+    assert env._lateral_pd("agent0", left) > 0.0
+    assert env._lateral_pd("agent0", right) < 0.0
+
+
+def test_curve_preview_caps_speed_by_lateral_acceleration() -> None:
+    straight = _trajectory(20.0)
+    curve = straight.copy()
+    curve[:, 2] = np.linspace(0.15, 1.2, 8, dtype=np.float32)
+    straight_speed = PlatoonEnv._trajectory_target_speed_mps(straight)
+    curve_speed = PlatoonEnv._trajectory_target_speed_mps(curve)
+    assert curve_speed < straight_speed
+    distance = np.linalg.norm(
+        np.diff(
+            np.concatenate(
+                (np.zeros((1, 2), dtype=np.float32), curve[:, :2]), axis=0
+            ),
+            axis=0,
+        ),
+        axis=1,
+    )
+    curvature = np.abs(
+        np.arctan2(
+            np.sin(np.diff(np.concatenate(([0.0], curve[:, 2])))),
+            np.cos(np.diff(np.concatenate(([0.0], curve[:, 2])))),
+        )
+    ) / np.maximum(distance, 1.0e-3)
+    assert curve_speed**2 * curvature.max() <= 6.0 + 1.0e-5
 
 
 @pytest.mark.parametrize(

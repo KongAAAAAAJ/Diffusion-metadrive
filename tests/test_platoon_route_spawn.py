@@ -120,10 +120,10 @@ def test_runtime_scenario_route_replaces_route_and_invalidates_old_destinations(
     assert env.config["route_preset"] == "mainline"
     assert env.platoon_config.initial_speed_km_h == pytest.approx(24.5)
     assert env.engine.global_config["initial_speed_km_h"] == pytest.approx(24.5)
-    assert env.platoon_config.traffic_density == pytest.approx(0.03)
+    assert env.platoon_config.traffic_density == pytest.approx(0.0)
     assert env.config["traffic_spawn_exclusion_ahead_m"] == pytest.approx(100.0)
     assert env.config["traffic_spawn_exclusion_behind_m"] == pytest.approx(100.0)
-    assert env.engine.global_config["traffic_density"] == pytest.approx(0.03)
+    assert env.engine.global_config["traffic_density"] == pytest.approx(0.0)
     assert env.engine.global_config["traffic_spawn_exclusion_ahead_m"] == pytest.approx(100.0)
     assert env.engine.global_config["traffic_spawn_exclusion_behind_m"] == pytest.approx(100.0)
     assert all(

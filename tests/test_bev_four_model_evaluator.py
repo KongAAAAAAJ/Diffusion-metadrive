@@ -6,11 +6,13 @@ from pathlib import Path
 import pytest
 
 from evaluation.bev_four_model_evaluator import (
+    DIAGNOSTIC_EVAL_SCENARIOS,
     FourModelEvaluationConfig,
     FourModelEvaluationError,
     _load_manifest,
     _summarize,
 )
+from scenarios.bev_round13_contract import HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS
 
 
 def test_evaluation_config_and_manifest_are_strict(tmp_path: Path) -> None:
@@ -18,6 +20,15 @@ def test_evaluation_config_and_manifest_are_strict(tmp_path: Path) -> None:
         FourModelEvaluationConfig(device="auto")
     with pytest.raises(FourModelEvaluationError):
         FourModelEvaluationConfig(max_steps=0)
+    config = FourModelEvaluationConfig(device="cpu")
+    assert config.scenarios == PRIMARY_S5_S9_SCENARIOS
+    assert config.seeds == HOLDOUT_SEEDS
+    assert DIAGNOSTIC_EVAL_SCENARIOS == PRIMARY_S5_S9_SCENARIOS
+    with pytest.raises(FourModelEvaluationError):
+        FourModelEvaluationConfig(
+            device="cpu",
+            scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),),
+        )
 
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"format": "bev_four_model_manifest_v1", "models": {}}))

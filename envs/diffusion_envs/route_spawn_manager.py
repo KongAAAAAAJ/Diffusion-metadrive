@@ -331,6 +331,9 @@ class RouteAwareSpawnManager(SpawnManager):
         return float(value)
 
     def _spawn_rng(self):
+        fixed_rng = getattr(self, "_fixed_route_rng", None)
+        if fixed_rng is not None:
+            return fixed_rng
         engine = getattr(self, "engine", None)
         traffic_manager = getattr(engine, "traffic_manager", None)
         rng = getattr(traffic_manager, "np_random", None)
@@ -431,10 +434,19 @@ class RouteAwareSpawnManager(SpawnManager):
 
     def reset(self):
         self._refresh_main_route_spawn_roads()
-        super().reset()
-        self._apply_spawn_lane_preference()
-        self._apply_fixed_route_spawn_configs()
-        self._cache_ego_spawn_zones()
+        episode_seed = getattr(self, "_episode_spawn_seed", None)
+        self._fixed_route_rng = (
+            np.random.RandomState(int(episode_seed))
+            if episode_seed is not None
+            else self.np_random
+        )
+        try:
+            super().reset()
+            self._apply_spawn_lane_preference()
+            self._apply_fixed_route_spawn_configs()
+            self._cache_ego_spawn_zones()
+        finally:
+            self._fixed_route_rng = None
 
     def _get_spawn_lane_preference(self) -> str | None:
         scenario = self._get_spawn_scenario()
@@ -495,7 +507,9 @@ class RouteAwareSpawnManager(SpawnManager):
                 if lane_labels:
                     probs = np.asarray(weights, dtype=np.float64)
                     probs = probs / np.sum(probs)
-                    sampled_label = str(self.np_random.choice(lane_labels, p=probs))
+                    sampled_label = str(
+                        self._spawn_rng().choice(lane_labels, p=probs)
+                    )
                     preferred_lane_idx = self._resolve_named_lane_index(len(lanes), sampled_label)
                     config["spawn_lane_index"] = (lane_index[0], lane_index[1], preferred_lane_idx)
                     continue

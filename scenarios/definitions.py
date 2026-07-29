@@ -261,7 +261,10 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         scenario_id="S9_narrow_channel_negotiation",
         allowed_local_routes=("R8_narrow_channel",),
         trigger_by_local_route={
-            "R8_narrow_channel": TriggerSpec("merge0", 10.0, 110.0),
+            # The three-vehicle fixed spawn is constrained to s≈37.5 m on c3.
+            # Trigger on that deterministic approach so the merge/split actors
+            # exist inside the 100-step online training/evaluation horizon.
+            "R8_narrow_channel": TriggerSpec("c3", 35.0, 90.0),
         },
         traffic_recipes=(
             RecipeSpec(

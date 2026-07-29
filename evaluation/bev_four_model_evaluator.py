@@ -33,21 +33,18 @@ from train.train_bev_joint_grpo_online import (
     joint_trajectory_action,
     model_inputs_to_batch,
 )
+from scenarios.bev_round13_contract import (
+    BEVScenarioContractError,
+    HOLDOUT_SEEDS,
+    PRIMARY_S5_S9_SCENARIOS,
+    primary_scenario_contract,
+    deterministic_initial_speed_km_h,
+)
 
 
 MODEL_NAMES = ("A", "B", "A_GRPO", "B_GRPO")
-DIAGNOSTIC_EVAL_SCENARIOS = (
-    ("S1_free_cruise_straight", "R3_mainline_straight"),
-    ("S3_straight_following", "R3_mainline_straight"),
-    ("S4_curve_following", "R2_entry_curve"),
-)
-FORMAL_EVAL_SCENARIOS = (
-    ("S5_hard_brake_lead", "R1_entry_straight"),
-    ("S6_background_merge_in", "R6_mainline_merge_approach"),
-    ("S7_ego_merge_from_ramp", "R7_merge_core"),
-    ("S8_ego_exit_to_ramp", "R6_exit_to_ramp"),
-    ("S9_narrow_channel_negotiation", "R8_narrow_channel"),
-)
+DIAGNOSTIC_EVAL_SCENARIOS = PRIMARY_S5_S9_SCENARIOS
+FORMAL_EVAL_SCENARIOS = PRIMARY_S5_S9_SCENARIOS
 FORMAL_EVAL_SEEDS = (17, 23, 31, 47, 59)
 
 
@@ -59,7 +56,7 @@ class FourModelEvaluationError(RuntimeError):
 class FourModelEvaluationConfig:
     run_mode: Literal["diagnostic", "formal"] = "diagnostic"
     device: str = "cuda"
-    seeds: tuple[int, ...] = (17, 23)
+    seeds: tuple[int, ...] = HOLDOUT_SEEDS
     scenarios: tuple[tuple[str, str], ...] = DIAGNOSTIC_EVAL_SCENARIOS
     max_steps: int = 100
     inference_p95_limit_ms: float = 100.0
@@ -78,6 +75,10 @@ class FourModelEvaluationConfig:
             raise FourModelEvaluationError("evaluation seeds must be integers")
         if not self.scenarios:
             raise FourModelEvaluationError("evaluation scenarios cannot be empty")
+        try:
+            primary_scenario_contract(self.scenarios)
+        except BEVScenarioContractError as exc:
+            raise FourModelEvaluationError(str(exc)) from exc
         if isinstance(self.max_steps, bool) or self.max_steps <= 0:
             raise FourModelEvaluationError("max_steps must be positive")
         if (
@@ -156,6 +157,7 @@ def _load_policy(
             "calibration_report_sha256",
             "scenario_seeds",
             "environment_steps",
+            "scenario_contract_sha256",
         ):
             if field not in grpo_payload:
                 raise FourModelEvaluationError(
@@ -164,6 +166,14 @@ def _load_policy(
         if formal and grpo_payload.get("eligible_for_formal_training") is not True:
             raise FourModelEvaluationError(
                 f"{name} checkpoint is diagnostic-only"
+            )
+        expected_contract = primary_scenario_contract()
+        if (
+            grpo_payload.get("scenario_contract_sha256")
+            != expected_contract["sha256"]
+        ):
+            raise FourModelEvaluationError(
+                f"{name} scenario contract no longer matches frozen S5--S9"
             )
     trainer.planner.eval()
     return trainer.planner
@@ -306,12 +316,23 @@ def evaluate_four_models(
                     {
                         "num_agents": 3,
                         "traffic_density": 0.0,
+                        "initial_speed_km_h": deterministic_initial_speed_km_h(
+                            scenario[0], int(seed)
+                        ),
                         "start_seed": int(seed),
                         "num_scenarios": 1,
                     }
                 )
                 env.set_runtime_scenario_route(*scenario)
-                env.reset()
+                spawn_manager = getattr(
+                    getattr(env, "engine", None), "spawn_manager", None
+                )
+                set_spawn_seed = getattr(
+                    spawn_manager, "set_episode_spawn_seed", None
+                )
+                if callable(set_spawn_seed):
+                    set_spawn_seed(int(seed))
+                env.reset(seed=int(seed))
                 builder = JointBEVSampleBuilder(AGENT_IDS)
                 builder.reset()
                 dt_s = simulator_decision_dt_s(env)
@@ -522,6 +543,7 @@ def evaluate_four_models(
         "common_scenarios": [list(value) for value in cfg.scenarios],
         "common_seeds": list(cfg.seeds),
         "common_noise_seed_by_episode": True,
+        "scenario_contract": primary_scenario_contract(cfg.scenarios),
         "models": model_reports,
     }
     output_path = Path(output_path)
@@ -549,7 +571,7 @@ def main() -> int:
             seeds=(
                 FORMAL_EVAL_SEEDS
                 if arguments.run_mode == "formal"
-                else (17, 23)
+                else HOLDOUT_SEEDS
             ),
             scenarios=(
                 FORMAL_EVAL_SCENARIOS

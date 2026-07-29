@@ -20,6 +20,7 @@ from models.bev_planner.joint_reward import (
     compose_joint_reward,
 )
 from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
+from scenarios.bev_round13_contract import deterministic_initial_speed_km_h
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,12 @@ class SimulatorBranchResult:
     minimum_platoon_gap_m: np.ndarray
     minimum_background_gap_m: np.ndarray
     failure_reasons: tuple[tuple[str, ...], ...]
+    tracking_longitudinal_error_m: np.ndarray
+    tracking_lateral_error_m: np.ndarray
+    tracking_heading_error_rad: np.ndarray
+    reference_curvature_max_per_m: np.ndarray
+    minimum_road_clearance_m: np.ndarray
+    tracking_traces: tuple[tuple[Mapping[str, object], ...], ...]
 
     def __post_init__(self) -> None:
         group_size = self.reward.rewards.shape[0]
@@ -73,6 +80,16 @@ class SimulatorBranchResult:
             value = np.asarray(getattr(self, name))
             if value.shape != (group_size,) or not np.isfinite(value).all():
                 raise JointRewardError(f"{name} must be finite [G]")
+        for name in (
+            "tracking_longitudinal_error_m",
+            "tracking_lateral_error_m",
+            "tracking_heading_error_rad",
+            "reference_curvature_max_per_m",
+            "minimum_road_clearance_m",
+        ):
+            value = np.asarray(getattr(self, name))
+            if value.shape != (group_size, 3) or not np.isfinite(value).all():
+                raise JointRewardError(f"{name} must be finite [G,3]")
         steps = np.asarray(self.executed_steps)
         if (
             steps.shape != (group_size,)
@@ -90,6 +107,19 @@ class SimulatorBranchResult:
             )
         ):
             raise JointRewardError("failure_reasons must contain one tuple per group")
+        if (
+            not isinstance(self.tracking_traces, tuple)
+            or len(self.tracking_traces) != group_size
+            or any(
+                not isinstance(group, tuple)
+                or len(group) != 3
+                or any(not isinstance(role, Mapping) for role in group)
+                for group in self.tracking_traces
+            )
+        ):
+            raise JointRewardError(
+                "tracking_traces must contain three role mappings per group"
+            )
 
 
 def capture_joint_pose_global(env: object) -> np.ndarray:
@@ -168,6 +198,72 @@ def _world_reference_to_current_local(
     return local
 
 
+def _world_reference_pose_at(
+    world_reference: np.ndarray, elapsed_s: float
+) -> np.ndarray:
+    source_times = np.arange(9, dtype=np.float64) * 0.5
+    query = float(np.clip(elapsed_s, 0.0, 4.0))
+    return np.asarray(
+        [
+            np.interp(query, source_times, world_reference[:, 0]),
+            np.interp(query, source_times, world_reference[:, 1]),
+            _wrap(
+                np.interp(
+                    query,
+                    source_times,
+                    np.unwrap(world_reference[:, 2]),
+                )
+            ).item(),
+        ],
+        dtype=np.float64,
+    )
+
+
+def _maximum_reference_curvature(world_reference: np.ndarray) -> float:
+    distances = np.linalg.norm(np.diff(world_reference[:, :2], axis=0), axis=1)
+    headings = np.unwrap(world_reference[:, 2])
+    curvature = np.abs(np.diff(headings)) / np.maximum(distances, 1.0e-3)
+    return float(curvature.max(initial=0.0))
+
+
+def _tracking_error(
+    actual_pose: np.ndarray, reference_pose: np.ndarray
+) -> tuple[float, float, float]:
+    delta = np.asarray(actual_pose[:2] - reference_pose[:2], dtype=np.float64)
+    cos_h = math.cos(float(reference_pose[2]))
+    sin_h = math.sin(float(reference_pose[2]))
+    longitudinal = cos_h * delta[0] + sin_h * delta[1]
+    lateral = -sin_h * delta[0] + cos_h * delta[1]
+    heading = float(_wrap(actual_pose[2] - reference_pose[2]))
+    return float(longitudinal), float(lateral), heading
+
+
+def _road_clearance_m(vehicle: object) -> float:
+    lane = getattr(vehicle, "lane", None)
+    if lane is None or not hasattr(lane, "local_coordinates"):
+        return 1.0e6
+    try:
+        longitudinal, lateral = lane.local_coordinates(vehicle.position)
+        width_at = getattr(lane, "width_at", None)
+        width = (
+            float(width_at(longitudinal))
+            if callable(width_at)
+            else float(getattr(lane, "width", 1.0e6))
+        )
+        vehicle_width = float(getattr(vehicle, "WIDTH", 2.3))
+        value = 0.5 * width - abs(float(lateral)) - 0.5 * vehicle_width
+    except (AttributeError, TypeError, ValueError):
+        return 1.0e6
+    return value if math.isfinite(value) else 1.0e6
+
+
+def _trajectory_target_speed_mps(trajectory: np.ndarray) -> float:
+    points = np.concatenate(
+        (np.zeros((1, 2), dtype=np.float64), trajectory[:2, :2]), axis=0
+    )
+    return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+
+
 def _has_failure(info: Mapping[str, object]) -> tuple[bool, bool]:
     collision = False
     out = False
@@ -238,6 +334,9 @@ class JointSimulatorBranchEvaluator:
         config = {
             "num_agents": 3,
             "traffic_density": 0.0,
+            "initial_speed_km_h": deterministic_initial_speed_km_h(
+                spec.scenario_id, spec.seed
+            ),
             "start_seed": spec.seed,
             "num_scenarios": 1,
             **dict(spec.env_config),
@@ -247,7 +346,17 @@ class JointSimulatorBranchEvaluator:
         if not callable(setter):
             raise JointRewardError("branch environment has no route setter")
         setter(spec.scenario_id, spec.local_route)
-        env.reset()
+        spawn_manager = getattr(
+            getattr(env, "engine", None), "spawn_manager", None
+        )
+        set_spawn_seed = getattr(spawn_manager, "set_episode_spawn_seed", None)
+        if callable(set_spawn_seed):
+            set_spawn_seed(spec.seed)
+        try:
+            env.reset(seed=spec.seed)
+        except TypeError:
+            # Test-only minimal env factories may expose the pre-Gym reset API.
+            env.reset()
         return env
 
     def _instant_gaps(self, env: object) -> tuple[float, float]:
@@ -323,6 +432,29 @@ class JointSimulatorBranchEvaluator:
         minimum_platoon = np.full(group_size, np.inf, dtype=np.float64)
         minimum_background = np.full(group_size, np.inf, dtype=np.float64)
         failure_reasons: list[set[str]] = [set() for _ in range(group_size)]
+        tracking_longitudinal = np.zeros((group_size, 3), dtype=np.float64)
+        tracking_lateral = np.zeros((group_size, 3), dtype=np.float64)
+        tracking_heading = np.zeros((group_size, 3), dtype=np.float64)
+        reference_curvature = np.zeros((group_size, 3), dtype=np.float64)
+        road_clearance = np.full((group_size, 3), np.inf, dtype=np.float64)
+        tracking_traces: list[list[dict[str, object]]] = [
+            [
+                {
+                    "reference_world": [],
+                    "actual_world": [],
+                    "longitudinal_errors_m": [],
+                    "lateral_errors_m": [],
+                    "heading_errors_rad": [],
+                    "road_clearance_m": [],
+                    "steering": [],
+                    "throttle": [],
+                    "target_speed_mps": [],
+                    "actual_speed_mps": [],
+                }
+                for _ in range(3)
+            ]
+            for _ in range(group_size)
+        ]
 
         for group in range(group_size):
             env = self._make_env(episode_spec)
@@ -354,6 +486,10 @@ class JointSimulatorBranchEvaluator:
                     _local_reference_to_world(candidates[group, role], initial[role])
                     for role in range(3)
                 ]
+                for role in range(3):
+                    reference_curvature[group, role] = (
+                        _maximum_reference_curvature(references[role])
+                    )
                 dt_s = simulator_decision_dt_s(env)
                 maximum_steps = max(1, int(math.ceil(4.0 / dt_s)))
                 positions = [[initial[role, :2].copy()] for role in range(3)]
@@ -373,6 +509,23 @@ class JointSimulatorBranchEvaluator:
                         )
                         for role, agent_id in enumerate(AGENT_IDS)
                     }
+                    controls: dict[str, np.ndarray] = {}
+                    for role, agent_id in enumerate(AGENT_IDS):
+                        control_fn = getattr(env, "trajectory_to_control", None)
+                        if callable(control_fn):
+                            control = np.asarray(
+                                control_fn(agent_id, action[agent_id]),
+                                dtype=np.float64,
+                            )
+                            if control.shape != (2,) or not np.isfinite(
+                                control
+                            ).all():
+                                raise JointRewardError(
+                                    "branch trajectory controller returned invalid control"
+                                )
+                        else:
+                            control = np.asarray([0.0, 0.0], dtype=np.float64)
+                        controls[agent_id] = control
                     _, _, terminated, truncated, info = env.step(action)
                     executed[group] += 1
                     crashed, left_road = _has_failure(info)
@@ -404,7 +557,6 @@ class JointSimulatorBranchEvaluator:
                         for agent_id in AGENT_IDS
                     ):
                         if not (crashed or left_road):
-                            out[group] = True
                             failure_reasons[group].add(
                                 "simulator:agent_removed_without_failure_flag"
                             )
@@ -420,6 +572,45 @@ class JointSimulatorBranchEvaluator:
                                 )
                             )
                             / 3.6
+                        )
+                        reference_pose = _world_reference_pose_at(
+                            references[role], (step_index + 1) * dt_s
+                        )
+                        longitudinal, lateral, heading_error = _tracking_error(
+                            current[role], reference_pose
+                        )
+                        trace = tracking_traces[group][role]
+                        trace["reference_world"].append(reference_pose.tolist())
+                        trace["actual_world"].append(current[role].tolist())
+                        trace["longitudinal_errors_m"].append(longitudinal)
+                        trace["lateral_errors_m"].append(lateral)
+                        trace["heading_errors_rad"].append(heading_error)
+                        clearance_value = _road_clearance_m(
+                            env.agents[agent_id]
+                        )
+                        trace["road_clearance_m"].append(clearance_value)
+                        trace["steering"].append(
+                            float(controls[agent_id][0])
+                        )
+                        trace["throttle"].append(
+                            float(controls[agent_id][1])
+                        )
+                        trace["target_speed_mps"].append(
+                            _trajectory_target_speed_mps(action[agent_id])
+                        )
+                        trace["actual_speed_mps"].append(speeds[role][-1])
+                        tracking_longitudinal[group, role] = max(
+                            tracking_longitudinal[group, role],
+                            abs(longitudinal),
+                        )
+                        tracking_lateral[group, role] = max(
+                            tracking_lateral[group, role], abs(lateral)
+                        )
+                        tracking_heading[group, role] = max(
+                            tracking_heading[group, role], abs(heading_error)
+                        )
+                        road_clearance[group, role] = min(
+                            road_clearance[group, role], clearance_value
                         )
                     pair_error = []
                     for leader, follower in ((0, 1), (1, 2)):
@@ -528,6 +719,7 @@ class JointSimulatorBranchEvaluator:
         # the report, never as an NaN/inf sentinel.
         minimum_background[~np.isfinite(minimum_background)] = 1.0e6
         minimum_platoon[~np.isfinite(minimum_platoon)] = 1.0e6
+        road_clearance[~np.isfinite(road_clearance)] = 1.0e6
         reward = compose_joint_reward(
             progress=progress,
             formation=formation,
@@ -546,6 +738,19 @@ class JointSimulatorBranchEvaluator:
             minimum_background_gap_m=minimum_background.astype(np.float32),
             failure_reasons=tuple(
                 tuple(sorted(values)) for values in failure_reasons
+            ),
+            tracking_longitudinal_error_m=tracking_longitudinal.astype(
+                np.float32
+            ),
+            tracking_lateral_error_m=tracking_lateral.astype(np.float32),
+            tracking_heading_error_rad=tracking_heading.astype(np.float32),
+            reference_curvature_max_per_m=reference_curvature.astype(
+                np.float32
+            ),
+            minimum_road_clearance_m=road_clearance.astype(np.float32),
+            tracking_traces=tuple(
+                tuple(dict(role) for role in group)
+                for group in tracking_traces
             ),
         )
 

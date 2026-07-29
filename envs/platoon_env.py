@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Mapping, Optional
 import copy
+import math
 
 import numpy as np
 import torch
@@ -1610,15 +1611,48 @@ class PlatoonEnv(BaseMultiEnv):
                 min_gap = min(min_gap, gap)
         return 0.0 if not np.isfinite(min_gap) else min_gap
 
-    def _lateral_pd(self, trajectory: np.ndarray) -> float:
-        lookahead_idx = min(2, len(trajectory) - 1)
-        waypoint = trajectory[lookahead_idx]
-        x = max(float(waypoint[0]), 1e-3)
-        y = float(waypoint[1])
-        heading = float(waypoint[2]) if trajectory.shape[1] > 2 else 0.0
-        steering_angle = float(np.arctan2(y, x))
-        steering = 0.85 * steering_angle + 0.35 * _wrap_to_pi(heading)
-        return float(np.clip(steering, -1.0, 1.0))
+    def _lateral_pd(self, agent_id: str, trajectory: np.ndarray) -> float:
+        """Speed-adaptive pure pursuit over the ego-local trajectory."""
+        vehicle = (getattr(self, "agents", {}) or {}).get(agent_id)
+        if vehicle is None:
+            raise ValueError(f"Unknown or inactive agent: {agent_id}")
+        speed_mps = max(0.0, self._agent_speed_km_h(agent_id) / 3.6)
+        lookahead_m = float(np.clip(0.6 * speed_mps, 3.0, 8.0))
+        path_xy = np.concatenate(
+            (
+                np.zeros((1, 2), dtype=np.float64),
+                trajectory[:, :2].astype(np.float64, copy=False),
+            ),
+            axis=0,
+        )
+        segment = np.linalg.norm(np.diff(path_xy, axis=0), axis=1)
+        arc = np.concatenate(([0.0], np.cumsum(segment)))
+        query = min(lookahead_m, float(arc[-1]))
+        if query <= 1.0e-6:
+            return 0.0
+        x = float(np.interp(query, arc, path_xy[:, 0]))
+        y = float(np.interp(query, arc, path_xy[:, 1]))
+        headings = np.concatenate(
+            ([0.0], np.unwrap(trajectory[:, 2].astype(np.float64)))
+        )
+        heading = float(np.interp(query, arc, headings))
+        curvature = 2.0 * y / max(query * query, 1.0e-6)
+        wheelbase = float(
+            getattr(vehicle, "FRONT_WHEELBASE", 1.4)
+            + getattr(vehicle, "REAR_WHEELBASE", 1.4)
+        )
+        max_steering_rad = math.radians(
+            float(getattr(vehicle, "max_steering", 60.0))
+        )
+        if (
+            not np.isfinite([x, y, heading, wheelbase, max_steering_rad]).all()
+            or wheelbase <= 0.0
+            or max_steering_rad <= 0.0
+        ):
+            raise ValueError("Vehicle steering geometry is invalid")
+        steering_angle = math.atan(wheelbase * curvature)
+        steering_angle += 0.25 * _wrap_to_pi(heading)
+        return float(np.clip(steering_angle / max_steering_rad, -1.0, 1.0))
 
     def _solve_lqr_gain(self, dt: float = 0.1) -> np.ndarray:
         a = np.asarray([[1.0, dt], [0.0, 1.0]], dtype=np.float32)
@@ -1657,7 +1691,30 @@ class PlatoonEnv(BaseMultiEnv):
         target_speed = float(
             np.linalg.norm(np.diff(first_second, axis=0), axis=1).sum()
         )
-        return float(np.clip(target_speed, 0.0, 100.0 / 3.6))
+        path = np.concatenate(
+            (
+                np.zeros((1, 3), dtype=np.float64),
+                trajectory.astype(np.float64, copy=False),
+            ),
+            axis=0,
+        )
+        distance = np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1)
+        heading_delta = np.abs(
+            np.arctan2(
+                np.sin(np.diff(path[:, 2])),
+                np.cos(np.diff(path[:, 2])),
+            )
+        )
+        curvature = heading_delta / np.maximum(distance, 1.0e-3)
+        maximum_curvature = float(curvature.max(initial=0.0))
+        curve_speed_limit = (
+            math.sqrt(6.0 / maximum_curvature)
+            if maximum_curvature > 1.0e-6
+            else float("inf")
+        )
+        return float(
+            np.clip(min(target_speed, curve_speed_limit), 0.0, 100.0 / 3.6)
+        )
 
     def _longitudinal_lqr(
         self, agent_id: str, trajectory_target_speed_mps: float
@@ -1697,7 +1754,7 @@ class PlatoonEnv(BaseMultiEnv):
     def trajectory_to_control(self, agent_id: str, trajectory: np.ndarray) -> np.ndarray:
         trajectory = np.asarray(trajectory)
         target_speed = self._trajectory_target_speed_mps(trajectory)
-        steering = self._lateral_pd(trajectory)
+        steering = self._lateral_pd(agent_id, trajectory)
         throttle = self._longitudinal_lqr(agent_id, target_speed)
         return np.asarray([steering, throttle], dtype=np.float32)
 

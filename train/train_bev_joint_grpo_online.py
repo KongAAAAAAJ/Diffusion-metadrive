@@ -21,6 +21,10 @@ from evaluation.joint_simulator_branch import (
     JointSimulatorBranchEvaluator,
     capture_joint_pose_global,
 )
+from evaluation.tracking_diagnostics import (
+    aggregate_tracking_rows,
+    classify_false_safe,
+)
 from expert_dataset.collect_joint_bev import (
     JointBEVSampleBuilder,
     SensorlessJointBEVPlatoonEnv,
@@ -31,6 +35,7 @@ from models.bev_planner import (
     JointTrajectoryProxyReward,
     calibrate_joint_rewards,
 )
+from models.bev_planner.mode_contract import ModeIndex
 from train.bev_joint_grpo import (
     grpo_b_checkpoint_payload,
     grpo_checkpoint_payload,
@@ -41,16 +46,19 @@ from train.bev_joint_grpo import (
     save_grpo_checkpoint,
 )
 from train.train_bev_diffusion_stage1 import planner_forward_from_batch
+from scenarios.bev_round13_contract import (
+    DEVELOPMENT_SEEDS,
+    HOLDOUT_SEEDS,
+    INTERFACE_SMOKE_SCENARIOS,
+    PRIMARY_S5_S9_SCENARIOS,
+    BEVScenarioContractError,
+    deterministic_initial_speed_km_h,
+    primary_scenario_contract,
+    validate_primary_scenario_contract,
+)
 
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
-DIAGNOSTIC_SCENARIOS = (
-    ("S1_free_cruise_straight", "R3_mainline_straight"),
-    ("S2_free_cruise_curve", "R2_entry_curve"),
-    ("S3_straight_following", "R3_mainline_straight"),
-    ("S4_curve_following", "R2_entry_curve"),
-)
-DIAGNOSTIC_SEEDS = (17, 23)
 
 
 class OnlineGRPOError(RuntimeError):
@@ -64,8 +72,8 @@ class JointGRPOOnlineConfig:
     total_optimizer_steps: int = 5000
     calibration_report: Path | None = None
     resume_checkpoint: Path | None = None
-    scenarios: tuple[tuple[str, str], ...] = DIAGNOSTIC_SCENARIOS
-    scenario_seeds: tuple[int, ...] = DIAGNOSTIC_SEEDS
+    scenarios: tuple[tuple[str, str], ...] = PRIMARY_S5_S9_SCENARIOS
+    scenario_seeds: tuple[int, ...] = DEVELOPMENT_SEEDS
     environment_steps_per_episode: int = 100
     validation_interval_steps: int = 100
 
@@ -87,6 +95,10 @@ class JointGRPOOnlineConfig:
             for value in self.scenarios
         ):
             raise OnlineGRPOError("at least one scenario/route pair is required")
+        try:
+            primary_scenario_contract(self.scenarios)
+        except BEVScenarioContractError as exc:
+            raise OnlineGRPOError(str(exc)) from exc
         if not self.scenario_seeds or any(
             isinstance(value, bool) or not isinstance(value, int)
             for value in self.scenario_seeds
@@ -130,6 +142,34 @@ def constant_velocity_actions(env: object) -> dict[str, np.ndarray]:
         trajectory = np.zeros((8, 3), dtype=np.float32)
         trajectory[:, 0] = speed * np.arange(1, 9, dtype=np.float32) * 0.5
         actions[agent_id] = trajectory
+    return actions
+
+
+def route_following_warmup_actions(
+    env: object, builder: JointBEVSampleBuilder
+) -> dict[str, np.ndarray]:
+    """Label-free route-following warm-up for curved S5--S9 approaches."""
+    if not builder.history_ready():
+        return constant_velocity_actions(env)
+    values = builder.build_model_inputs(env)
+    actions = {}
+    for role, agent_id in enumerate(AGENT_IDS):
+        valid = np.asarray(values.mode_valid_mask[role], dtype=np.bool_)
+        preferred = [
+            int(ModeIndex.KEEP_HIGH),
+            int(ModeIndex.KEEP_MEDIUM),
+            int(ModeIndex.KEEP_LOW),
+        ]
+        mode = next((index for index in preferred if valid[index]), None)
+        if mode is None:
+            raise OnlineGRPOError(
+                f"{agent_id} has no valid KEEP anchor during route warm-up"
+            )
+        actions[agent_id] = np.array(
+            values.coarse_trajectories[role, mode],
+            dtype=np.float32,
+            copy=True,
+        )
     return actions
 
 
@@ -177,12 +217,19 @@ def _new_env(scenario: tuple[str, str], seed: int) -> object:
         {
             "num_agents": 3,
             "traffic_density": 0.0,
+            "initial_speed_km_h": deterministic_initial_speed_km_h(
+                scenario[0], seed
+            ),
             "start_seed": int(seed),
             "num_scenarios": 1,
         }
     )
     env.set_runtime_scenario_route(*scenario)
-    env.reset()
+    spawn_manager = getattr(getattr(env, "engine", None), "spawn_manager", None)
+    set_spawn_seed = getattr(spawn_manager, "set_episode_spawn_seed", None)
+    if callable(set_spawn_seed):
+        set_spawn_seed(int(seed))
+    env.reset(seed=int(seed))
     return env
 
 
@@ -214,6 +261,179 @@ def _json_sha256(path: Path) -> tuple[dict[str, object], str]:
     return payload, hashlib.sha256(raw).hexdigest()
 
 
+def _scenario_summary(env: object) -> dict[str, object]:
+    orchestrator = getattr(env, "_scenario_orchestrator", None)
+    getter = getattr(orchestrator, "get_episode_summary", None)
+    if not callable(getter):
+        raise OnlineGRPOError("environment has no scenario realization summary")
+    value = getter()
+    if not isinstance(value, Mapping):
+        raise OnlineGRPOError("scenario realization summary is invalid")
+    return dict(value)
+
+
+def _scenario_ready_for_primary_sampling(env: object) -> bool:
+    summary = _scenario_summary(env)
+    return bool(summary.get("scenario_realized", False))
+
+
+def _replay_pose_error(
+    scenario: tuple[str, str],
+    seed: int,
+    prefix: Sequence[Mapping[str, np.ndarray]],
+    reference_pose: np.ndarray,
+) -> tuple[float, float]:
+    replay = _new_env(scenario, seed)
+    try:
+        for action in prefix:
+            replay.step(action)
+        pose = capture_joint_pose_global(replay)
+    finally:
+        replay.close()
+    position = float(
+        np.linalg.norm(pose[:, :2] - reference_pose[:, :2], axis=1).max()
+    )
+    heading = float(
+        np.abs(
+            np.arctan2(
+                np.sin(pose[:, 2] - reference_pose[:, 2]),
+                np.cos(pose[:, 2] - reference_pose[:, 2]),
+            )
+        ).max()
+    )
+    return position, heading
+
+
+def run_s5_s9_preflight(
+    output_path: Path,
+    *,
+    seeds: Sequence[int] = DEVELOPMENT_SEEDS,
+    states_per_episode: int = 3,
+    maximum_steps: int = 200,
+) -> dict[str, object]:
+    if tuple(int(value) for value in seeds) != DEVELOPMENT_SEEDS:
+        raise OnlineGRPOError("preflight requires development seeds [17,23]")
+    if states_per_episode != 3 or maximum_steps < 40:
+        raise OnlineGRPOError(
+            "preflight requires three states and at least 40 environment steps"
+        )
+    contract = primary_scenario_contract()
+    episodes = []
+    passed = True
+    for scenario in PRIMARY_S5_S9_SCENARIOS:
+        for seed in seeds:
+            env = _new_env(scenario, int(seed))
+            builder = JointBEVSampleBuilder(AGENT_IDS)
+            builder.reset()
+            prefix: list[dict[str, np.ndarray]] = []
+            dt_s = simulator_decision_dt_s(env)
+            collected = 0
+            max_position_error = 0.0
+            max_heading_error = 0.0
+            failure = None
+            last_summary: dict[str, object] = {}
+            try:
+                for step_index in range(maximum_steps):
+                    builder.capture_state(env, step_index * dt_s)
+                    last_summary = _scenario_summary(env)
+                    if (
+                        builder.history_ready()
+                        and bool(last_summary.get("scenario_realized", False))
+                    ):
+                        values = builder.build_model_inputs(env)
+                        fields = values.as_dict()
+                        if set(fields) != {
+                            "bev",
+                            "ego_state",
+                            "formation_relation_state",
+                            "relation_valid_mask",
+                            "agent_role",
+                            "coarse_trajectories",
+                            "mode_valid_mask",
+                        }:
+                            raise OnlineGRPOError(
+                                "preflight online model-input schema mismatch"
+                            )
+                        pose = capture_joint_pose_global(env)
+                        env.close()
+                        env = None
+                        position_error, heading_error = _replay_pose_error(
+                            scenario, int(seed), prefix, pose
+                        )
+                        max_position_error = max(
+                            max_position_error, position_error
+                        )
+                        max_heading_error = max(
+                            max_heading_error, heading_error
+                        )
+                        if position_error > 0.01 or heading_error > 0.01:
+                            raise OnlineGRPOError(
+                                "preflight prefix replay exceeded 0.01m/0.01rad"
+                            )
+                        collected += 1
+                        env = _new_env(scenario, int(seed))
+                        builder = JointBEVSampleBuilder(AGENT_IDS)
+                        builder.reset()
+                        for replay_index, replay_action in enumerate(prefix):
+                            builder.capture_state(env, replay_index * dt_s)
+                            env.step(replay_action)
+                        if collected >= states_per_episode:
+                            break
+                    action = route_following_warmup_actions(env, builder)
+                    prefix.append(
+                        {
+                            name: np.array(value, copy=True)
+                            for name, value in action.items()
+                        }
+                    )
+                    _, _, terminated, truncated, info = env.step(action)
+                    if episode_has_ended(terminated, truncated, info):
+                        failure = "episode_ended_before_three_realized_states"
+                        break
+                if collected != states_per_episode:
+                    passed = False
+                    failure = failure or "insufficient_realized_states"
+            except Exception as exc:
+                passed = False
+                failure = f"{type(exc).__name__}:{exc}"
+            finally:
+                if env is not None:
+                    env.close()
+            episodes.append(
+                {
+                    "scenario": scenario[0],
+                    "route": scenario[1],
+                    "seed": int(seed),
+                    "states": collected,
+                    "scenario_triggered": bool(
+                        last_summary.get("scenario_triggered", False)
+                    ),
+                    "scenario_realized": bool(
+                        last_summary.get("scenario_realized", False)
+                    ),
+                    "maximum_replay_position_error_m": max_position_error,
+                    "maximum_replay_heading_error_rad": max_heading_error,
+                    "failure": failure,
+                    "passed": failure is None and collected == states_per_episode,
+                }
+            )
+    report = {
+        "format": "bev_s5_s9_preflight_v1",
+        "diagnostic_only": True,
+        "scenario_contract": contract,
+        "seeds": [int(value) for value in seeds],
+        "states_per_episode": states_per_episode,
+        "passed": passed,
+        "episodes": episodes,
+    }
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return report
+
+
 def run_joint_reward_calibration(
     *,
     variant: Literal["A", "B"],
@@ -221,14 +441,35 @@ def run_joint_reward_calibration(
     output_path: Path,
     device: str = "cuda",
     reward_config: JointRewardConfig | None = None,
-    scenarios: Sequence[tuple[str, str]] = DIAGNOSTIC_SCENARIOS,
-    seeds: Sequence[int] = DIAGNOSTIC_SEEDS,
+    scenarios: Sequence[tuple[str, str]] = PRIMARY_S5_S9_SCENARIOS,
+    seeds: Sequence[int] = HOLDOUT_SEEDS,
     states_per_episode: int = 3,
+    calibration_phase: Literal["development", "holdout"] = "holdout",
 ) -> dict[str, object]:
     if variant not in ("A", "B"):
         raise OnlineGRPOError("calibration variant must be A or B")
     if states_per_episode <= 0:
         raise OnlineGRPOError("states_per_episode must be positive")
+    if tuple((str(a), str(b)) for a, b in scenarios) != PRIMARY_S5_S9_SCENARIOS:
+        raise OnlineGRPOError(
+            "primary calibration requires the complete ordered S5--S9 set"
+        )
+    expected_seeds = (
+        DEVELOPMENT_SEEDS
+        if calibration_phase == "development"
+        else HOLDOUT_SEEDS
+        if calibration_phase == "holdout"
+        else None
+    )
+    if expected_seeds is None:
+        raise OnlineGRPOError(
+            "calibration_phase must be development or holdout"
+        )
+    if tuple(int(value) for value in seeds) != expected_seeds:
+        raise OnlineGRPOError(
+            f"{calibration_phase} calibration requires seeds {list(expected_seeds)}"
+        )
+    contract = primary_scenario_contract(scenarios)
     torch_device = _device(device)
     trainer, source_payload, source_sha = _load_trainer(
         variant,
@@ -246,6 +487,8 @@ def run_joint_reward_calibration(
     proxy_bad_rows = []
     simulator_bad_rows = []
     details = []
+    tracking_rows = []
+    false_safe_causes: dict[str, int] = {}
 
     for scenario in scenarios:
         for seed in seeds:
@@ -259,8 +502,11 @@ def run_joint_reward_calibration(
             try:
                 while collected < states_per_episode:
                     builder.capture_state(env, step_index * dt_s)
-                    if not builder.history_ready():
-                        action = constant_velocity_actions(env)
+                    if not (
+                        builder.history_ready()
+                        and _scenario_ready_for_primary_sampling(env)
+                    ):
+                        action = route_following_warmup_actions(env, builder)
                     else:
                         values = builder.build_model_inputs(env)
                         batch = model_inputs_to_batch(values, torch_device)
@@ -295,6 +541,74 @@ def run_joint_reward_calibration(
                         simulator_rows.append(simulator.reward.rewards.copy())
                         proxy_bad_rows.append(proxy.unsafe.copy())
                         simulator_bad_rows.append(simulator.reward.unsafe.copy())
+                        sampled_modes = (
+                            rollout.sampled_modes[0]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.int64, copy=False)
+                        )
+                        for group in range(candidates.shape[0]):
+                            for role in range(3):
+                                trace = simulator.tracking_traces[group][role]
+                                if not trace["longitudinal_errors_m"]:
+                                    continue
+                                tracking_rows.append(
+                                    {
+                                        "scenario": scenario[0],
+                                        "route": scenario[1],
+                                        "seed": int(seed),
+                                        "state_index": collected,
+                                        "group": group,
+                                        "role": role,
+                                        "mode": int(sampled_modes[group, role]),
+                                        "longitudinal_errors_m": trace[
+                                            "longitudinal_errors_m"
+                                        ],
+                                        "lateral_errors_m": trace[
+                                            "lateral_errors_m"
+                                        ],
+                                        "heading_errors_rad": trace[
+                                            "heading_errors_rad"
+                                        ],
+                                    }
+                                )
+                        false_safe_indices = np.flatnonzero(
+                            simulator.reward.unsafe & ~proxy.unsafe
+                        )
+                        false_safe_attribution = {}
+                        for group in false_safe_indices:
+                            cause = classify_false_safe(
+                                simulator_collision=bool(
+                                    simulator.reward.collision[group]
+                                ),
+                                simulator_out_of_drivable=bool(
+                                    simulator.reward.out_of_drivable[group]
+                                ),
+                                failure_reasons=simulator.failure_reasons[group],
+                                replay_position_error_m=float(
+                                    simulator.replay_position_error_m[group]
+                                ),
+                                replay_heading_error_rad=float(
+                                    simulator.replay_heading_error_rad[group]
+                                ),
+                                maximum_lateral_error_m=float(
+                                    simulator.tracking_lateral_error_m[group].max()
+                                ),
+                                maximum_heading_error_rad=float(
+                                    simulator.tracking_heading_error_rad[group].max()
+                                ),
+                                minimum_platoon_gap_m=float(
+                                    simulator.minimum_platoon_gap_m[group]
+                                ),
+                                minimum_background_gap_m=float(
+                                    simulator.minimum_background_gap_m[group]
+                                ),
+                            )
+                            false_safe_attribution[str(int(group))] = cause
+                            false_safe_causes[cause] = (
+                                false_safe_causes.get(cause, 0) + 1
+                            )
                         details.append(
                             {
                                 "scenario": scenario[0],
@@ -307,9 +621,8 @@ def run_joint_reward_calibration(
                                 "simulator_unsafe": simulator.reward.unsafe.tolist(),
                                 "simulator_collision": simulator.reward.collision.tolist(),
                                 "simulator_out_of_drivable": simulator.reward.out_of_drivable.tolist(),
-                                "false_safe_indices": np.flatnonzero(
-                                    simulator.reward.unsafe & ~proxy.unsafe
-                                ).tolist(),
+                                "false_safe_indices": false_safe_indices.tolist(),
+                                "false_safe_attribution": false_safe_attribution,
                                 "false_safe_trajectories": candidates[
                                     simulator.reward.unsafe & ~proxy.unsafe
                                 ].tolist(),
@@ -329,6 +642,15 @@ def run_joint_reward_calibration(
                                 },
                                 "replay_position_error_m": simulator.replay_position_error_m.tolist(),
                                 "replay_heading_error_rad": simulator.replay_heading_error_rad.tolist(),
+                                "tracking_longitudinal_max_m": simulator.tracking_longitudinal_error_m.tolist(),
+                                "tracking_lateral_max_m": simulator.tracking_lateral_error_m.tolist(),
+                                "tracking_heading_max_rad": simulator.tracking_heading_error_rad.tolist(),
+                                "reference_curvature_max_per_m": simulator.reference_curvature_max_per_m.tolist(),
+                                "minimum_road_clearance_m": simulator.minimum_road_clearance_m.tolist(),
+                                "tracking_traces": [
+                                    [dict(role) for role in group]
+                                    for group in simulator.tracking_traces
+                                ],
                             }
                         )
                         action = joint_trajectory_action(
@@ -397,17 +719,31 @@ def run_joint_reward_calibration(
     proxy_bad = np.asarray(proxy_bad_rows, dtype=np.bool_)
     simulator_bad = np.asarray(simulator_bad_rows, dtype=np.bool_)
     result = calibrate_joint_rewards(
-        proxy_array, simulator_array, proxy_bad, simulator_bad
+        proxy_array,
+        simulator_array,
+        proxy_bad,
+        simulator_bad,
+        min_informative_groups=15,
+    )
+    tracking = aggregate_tracking_rows(tracking_rows)
+    lateral_p95 = float(tracking["overall"]["lateral_m"]["p95"])
+    heading_p95 = float(tracking["overall"]["heading_rad"]["p95"])
+    tracking_passed = lateral_p95 <= 0.5 and heading_p95 <= 0.1
+    passed = bool(
+        calibration_phase == "holdout" and result.passed and tracking_passed
     )
     report: dict[str, object] = {
-        "format": "bev_joint_reward_calibration_v1",
+        "format": "bev_joint_reward_calibration_v2",
         "variant": variant,
+        "calibration_phase": calibration_phase,
         "diagnostic_only": True,
         "eligible_for_formal_training": False,
         "source_stage1_checkpoint": str(Path(source_checkpoint).resolve()),
         "source_stage1_sha256": source_sha,
         "source_dataset_fingerprint": source_payload["dataset_fingerprint"],
         "reward_config": dataclasses.asdict(reward_cfg),
+        "scenario_contract": contract,
+        "scenario_contract_sha256": contract["sha256"],
         "scenarios": [list(value) for value in scenarios],
         "seeds": [int(value) for value in seeds],
         "states_per_episode": int(states_per_episode),
@@ -417,7 +753,14 @@ def run_joint_reward_calibration(
         "informative_groups": result.informative_groups,
         "pairwise_comparisons": result.pairwise_comparisons,
         "false_safe_count": result.false_safe_count,
-        "passed": result.passed,
+        "tracking": tracking,
+        "tracking_gate": {
+            "lateral_p95_m": lateral_p95,
+            "heading_p95_rad": heading_p95,
+            "passed": tracking_passed,
+        },
+        "false_safe_causes": dict(sorted(false_safe_causes.items())),
+        "passed": passed,
         "details": details,
     }
     output_path = Path(output_path)
@@ -454,6 +797,7 @@ def _checkpoint_payload(
     run_mode: str,
     reward_config: JointRewardConfig,
     calibration_sha: str,
+    scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
     environment_steps: int,
 ) -> dict[str, object]:
@@ -472,6 +816,7 @@ def _checkpoint_payload(
             "run_mode": run_mode,
             "reward_config": dataclasses.asdict(reward_config),
             "calibration_report_sha256": calibration_sha,
+            "scenario_contract_sha256": scenario_contract_sha,
             "scenario_seeds": [int(value) for value in scenario_seeds],
             "environment_steps": int(environment_steps),
         }
@@ -485,12 +830,14 @@ def _validate_online_checkpoint_metadata(
     run_mode: str,
     reward_config: JointRewardConfig,
     calibration_sha: str,
+    scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
 ) -> None:
     expected = {
         "run_mode": run_mode,
         "reward_config": dataclasses.asdict(reward_config),
         "calibration_report_sha256": calibration_sha,
+        "scenario_contract_sha256": scenario_contract_sha,
         "scenario_seeds": [int(value) for value in scenario_seeds],
     }
     for name, value in expected.items():
@@ -529,11 +876,14 @@ def _fixed_simulator_validation(
             prefix: list[dict[str, np.ndarray]] = []
             dt_s = simulator_decision_dt_s(env)
             try:
-                for step_index in range(30):
+                for step_index in range(100):
                     builder.capture_state(env, step_index * dt_s)
-                    if builder.history_ready():
+                    if (
+                        builder.history_ready()
+                        and _scenario_ready_for_primary_sampling(env)
+                    ):
                         break
-                    action = constant_velocity_actions(env)
+                    action = route_following_warmup_actions(env, builder)
                     prefix.append(
                         {
                             name: np.array(value, copy=True)
@@ -547,7 +897,7 @@ def _fixed_simulator_validation(
                         )
                 else:
                     raise OnlineGRPOError(
-                        "fixed validation history was never ready"
+                        "fixed validation never reached a realized S5--S9 state"
                     )
                 values = builder.build_model_inputs(env)
                 batch = model_inputs_to_batch(values, device)
@@ -619,7 +969,7 @@ def run_joint_grpo_training(
     if config.calibration_report is None:
         raise OnlineGRPOError("online GRPO requires a calibration report")
     calibration, calibration_sha = _json_sha256(config.calibration_report)
-    if calibration.get("format") != "bev_joint_reward_calibration_v1":
+    if calibration.get("format") != "bev_joint_reward_calibration_v2":
         raise OnlineGRPOError("calibration report format mismatch")
     if calibration.get("variant") != variant:
         raise OnlineGRPOError("calibration report variant mismatch")
@@ -627,6 +977,22 @@ def run_joint_grpo_training(
         raise OnlineGRPOError(
             "proxy calibration failed; online GRPO is intentionally blocked"
         )
+    if calibration.get("calibration_phase") != "holdout":
+        raise OnlineGRPOError("online GRPO requires an independent holdout calibration")
+    try:
+        scenario_contract_sha = validate_primary_scenario_contract(
+            calibration.get("scenario_contract")
+        )
+    except BEVScenarioContractError as exc:
+        raise OnlineGRPOError(str(exc)) from exc
+    if calibration.get("scenario_contract_sha256") != scenario_contract_sha:
+        raise OnlineGRPOError("calibration scenario contract hash mismatch")
+    if tuple(tuple(value) for value in calibration.get("scenarios", ())) != (
+        PRIMARY_S5_S9_SCENARIOS
+    ):
+        raise OnlineGRPOError("calibration does not cover the complete S5--S9 set")
+    if tuple(calibration.get("seeds", ())) != HOLDOUT_SEEDS:
+        raise OnlineGRPOError("calibration does not use holdout seeds [31,47]")
     reward_config = JointRewardConfig(**dict(calibration["reward_config"]))
     torch_device = _device(config.device)
     trainer, source_payload, source_sha = _load_trainer(
@@ -658,6 +1024,7 @@ def run_joint_grpo_training(
             run_mode=run_mode,
             reward_config=reward_config,
             calibration_sha=calibration_sha,
+            scenario_contract_sha=scenario_contract_sha,
             scenario_seeds=config.scenario_seeds,
         )
         environment_steps = int(resume_payload["environment_steps"])
@@ -688,6 +1055,8 @@ def run_joint_grpo_training(
         },
         "reward_config": dataclasses.asdict(reward_config),
         "calibration_report_sha256": calibration_sha,
+        "scenario_contract": primary_scenario_contract(config.scenarios),
+        "scenario_contract_sha256": scenario_contract_sha,
     }
     (run_dir / "config.json").write_text(
         json.dumps(frozen, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -721,8 +1090,11 @@ def run_joint_grpo_training(
                     and episode_step < config.environment_steps_per_episode
                 ):
                     builder.capture_state(env, episode_step * dt_s)
-                    if not builder.history_ready():
-                        action = constant_velocity_actions(env)
+                    if not (
+                        builder.history_ready()
+                        and _scenario_ready_for_primary_sampling(env)
+                    ):
+                        action = route_following_warmup_actions(env, builder)
                     else:
                         values = builder.build_model_inputs(env)
                         batch = model_inputs_to_batch(values, torch_device)
@@ -793,7 +1165,7 @@ def run_joint_grpo_training(
                     device=torch_device,
                     reward_config=reward_config,
                     scenarios=config.scenarios,
-                    seeds=config.scenario_seeds,
+                    seeds=HOLDOUT_SEEDS,
                 )
                 last_metrics.update(validation)
                 for metric_name, metric_value in validation.items():
@@ -814,6 +1186,7 @@ def run_joint_grpo_training(
                     run_mode=run_mode,
                     reward_config=reward_config,
                     calibration_sha=calibration_sha,
+                    scenario_contract_sha=scenario_contract_sha,
                     scenario_seeds=config.scenario_seeds,
                     environment_steps=environment_steps,
                 )
@@ -837,6 +1210,7 @@ def run_joint_grpo_training(
         run_mode=run_mode,
         reward_config=reward_config,
         calibration_sha=calibration_sha,
+        scenario_contract_sha=scenario_contract_sha,
         scenario_seeds=config.scenario_seeds,
         environment_steps=environment_steps,
     )
@@ -858,6 +1232,7 @@ def run_joint_grpo_training(
         run_mode=run_mode,
         reward_config=reward_config,
         calibration_sha=calibration_sha,
+        scenario_contract_sha=scenario_contract_sha,
         scenario_seeds=config.scenario_seeds,
     )
 
@@ -870,6 +1245,10 @@ def run_joint_grpo_training(
         "optimizer_steps": trainer.optimizer_step,
         "environment_steps": environment_steps,
         "calibration_report_sha256": calibration_sha,
+        "scenario_contract_sha256": scenario_contract_sha,
+        "training_scenarios": [list(value) for value in config.scenarios],
+        "training_seeds": [int(value) for value in config.scenario_seeds],
+        "validation_seeds": list(HOLDOUT_SEEDS),
         "last_checkpoint": str(last_path.resolve()),
         "best_checkpoint": str(best_path.resolve()),
         "metrics": last_metrics,
@@ -910,9 +1289,9 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
             if online.get("resume_checkpoint")
             else None
         ),
-        scenarios=scenarios or DIAGNOSTIC_SCENARIOS,
+        scenarios=scenarios or PRIMARY_S5_S9_SCENARIOS,
         scenario_seeds=tuple(
-            int(value) for value in online.get("scenario_seeds", DIAGNOSTIC_SEEDS)
+            int(value) for value in online.get("scenario_seeds", DEVELOPMENT_SEEDS)
         ),
         environment_steps_per_episode=int(
             online.get("environment_steps_per_episode", 100)
@@ -951,8 +1330,10 @@ def main() -> int:
 
 
 __all__ = [
-    "DIAGNOSTIC_SCENARIOS",
-    "DIAGNOSTIC_SEEDS",
+    "DEVELOPMENT_SEEDS",
+    "HOLDOUT_SEEDS",
+    "INTERFACE_SMOKE_SCENARIOS",
+    "PRIMARY_S5_S9_SCENARIOS",
     "JointGRPOOnlineConfig",
     "OnlineGRPOError",
     "constant_velocity_actions",
@@ -961,6 +1342,7 @@ __all__ = [
     "model_inputs_to_batch",
     "run_joint_grpo_training",
     "run_joint_reward_calibration",
+    "run_s5_s9_preflight",
 ]
 
 

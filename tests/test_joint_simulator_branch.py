@@ -79,7 +79,12 @@ def _spec(reference=None) -> JointEpisodeSpec:
             [[0.0, 0.0, 0.0], [-15.74, 0.0, 0.0], [-31.48, 0.0, 0.0]],
             dtype=np.float64,
         )
-    return JointEpisodeSpec("S1", "R3", 17, reference)
+    return JointEpisodeSpec(
+        "S1_free_cruise_straight",
+        "R3_mainline_straight",
+        17,
+        reference,
+    )
 
 
 def _evaluator() -> JointSimulatorBranchEvaluator:
@@ -102,6 +107,15 @@ def test_branch_recreates_each_group_and_tracks_for_four_seconds() -> None:
     assert not result.reward.unsafe.any()
     assert result.reward.rewards[1] > result.reward.rewards[0]
     assert result.minimum_platoon_gap_m == pytest.approx([10.0, 10.0])
+    assert result.tracking_longitudinal_error_m.shape == (2, 3)
+    assert result.tracking_lateral_error_m.shape == (2, 3)
+    assert result.tracking_heading_error_rad.shape == (2, 3)
+    np.testing.assert_allclose(result.tracking_longitudinal_error_m, 0.0)
+    np.testing.assert_allclose(result.tracking_lateral_error_m, 0.0)
+    np.testing.assert_allclose(result.tracking_heading_error_rad, 0.0)
+    assert len(result.tracking_traces) == 2
+    assert len(result.tracking_traces[0]) == 3
+    assert len(result.tracking_traces[0][0]["actual_world"]) == 8
 
 
 def test_branch_is_deterministic_and_does_not_mutate_inputs() -> None:

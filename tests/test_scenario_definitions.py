@@ -117,6 +117,9 @@ def test_s9_declares_safe_internal_spawn_road() -> None:
     assert scenario.ego_spawn_reference_kind == "block_internal_road"
     assert scenario.ego_spawn_internal_road_index == 1
     assert scenario.ego_spawn_longitude_m == pytest.approx(10.0)
+    trigger = scenario.trigger_by_local_route["R8_narrow_channel"]
+    assert trigger.block_id == "c3"
+    assert trigger.longitudinal_min == pytest.approx(35.0)
 
 
 def test_s8_declares_explicit_ego_spawn_controls() -> None:

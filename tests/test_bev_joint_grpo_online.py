@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from train.train_bev_joint_grpo_online import (
-    DIAGNOSTIC_SCENARIOS,
+    PRIMARY_S5_S9_SCENARIOS,
     JointGRPOOnlineConfig,
     OnlineGRPOError,
     constant_velocity_actions,
@@ -18,16 +18,22 @@ from train.train_bev_joint_grpo_online import (
     run_joint_grpo_training,
 )
 from scenarios.definitions import SCENARIO_BY_ID
+from scenarios.bev_round13_contract import HOLDOUT_SEEDS, primary_scenario_contract
 
 
 def _calibration(path: Path, *, variant: str = "A", passed: bool = False) -> Path:
     path.write_text(
         json.dumps(
             {
-                "format": "bev_joint_reward_calibration_v1",
+                "format": "bev_joint_reward_calibration_v2",
+                "calibration_phase": "holdout",
                 "variant": variant,
                 "passed": passed,
                 "reward_config": {},
+                "scenario_contract": primary_scenario_contract(),
+                "scenario_contract_sha256": primary_scenario_contract()["sha256"],
+                "scenarios": [list(value) for value in PRIMARY_S5_S9_SCENARIOS],
+                "seeds": list(HOLDOUT_SEEDS),
             }
         ),
         encoding="utf-8",
@@ -40,6 +46,10 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
         JointGRPOOnlineConfig(device="auto")
     with pytest.raises(OnlineGRPOError):
         JointGRPOOnlineConfig(total_optimizer_steps=0)
+    with pytest.raises(OnlineGRPOError, match="complete ordered S5--S9"):
+        JointGRPOOnlineConfig(
+            scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),)
+        )
 
     report = _calibration(tmp_path / "failed.json")
     config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
@@ -73,9 +83,10 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
 
 
 def test_calibration_scenario_routes_match_runtime_contract() -> None:
-    for scenario_id, route in DIAGNOSTIC_SCENARIOS:
+    for scenario_id, route in PRIMARY_S5_S9_SCENARIOS:
         assert route in SCENARIO_BY_ID[scenario_id].allowed_local_routes
         assert route in SCENARIO_BY_ID[scenario_id].trigger_by_local_route
+    assert JointGRPOOnlineConfig(device="cpu").scenarios == PRIMARY_S5_S9_SCENARIOS
 
 
 def test_calibration_variant_is_checked_before_source_load(tmp_path: Path) -> None:
