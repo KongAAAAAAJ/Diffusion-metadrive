@@ -1,0 +1,850 @@
+"""Variant-A joint GRPO core for the BEV-only diffusion planner."""
+
+from __future__ import annotations
+
+import copy
+import math
+from dataclasses import dataclass
+from typing import Mapping
+
+import torch
+import torch.nn.functional as F
+from diffusers.schedulers import DDIMScheduler
+from torch import Tensor, nn
+from torch.optim import AdamW
+
+from models.bev_planner.bev_only_diffusion_planner import (
+    BEVOnlyDiffusionPlanner,
+    BEVPlannerContext,
+    NUM_PLATOON_ROLES,
+    TRAJECTORY_DIM,
+)
+from models.bev_planner.mode_contract import NUM_MODES, TRAJECTORY_STEPS
+
+
+class JointGRPOError(RuntimeError):
+    """Raised when the strict joint GRPO contract is violated."""
+
+
+@dataclass(frozen=True)
+class JointGRPOConfig:
+    group_size: int = 4
+    initial_noise_timestep: int = 8
+    denoise_steps: int = 4
+    eta: float = 1.0
+    mode_pg_weight: float = 1.0
+    trajectory_pg_weight: float = 1.0
+    bc_weight: float = 0.1
+    reference_kl_weight: float = 0.02
+    learning_rate: float = 1e-5
+    weight_decay: float = 1e-4
+    max_grad_norm: float = 1.0
+    advantage_eps: float = 1e-6
+    xy_beta_m: float = 1.0
+    heading_beta_rad: float = 0.1
+    heading_bc_weight: float = 0.2
+
+    def __post_init__(self) -> None:
+        if self.group_size != 4:
+            raise JointGRPOError("group_size is frozen to 4")
+        if self.initial_noise_timestep != 8:
+            raise JointGRPOError("initial_noise_timestep is frozen to 8")
+        if self.denoise_steps != 4:
+            raise JointGRPOError("denoise_steps is frozen to 4")
+        if not math.isclose(float(self.eta), 1.0):
+            raise JointGRPOError("eta is frozen to 1.0")
+        positive = (
+            "learning_rate",
+            "max_grad_norm",
+            "advantage_eps",
+            "xy_beta_m",
+            "heading_beta_rad",
+        )
+        non_negative = (
+            "mode_pg_weight",
+            "trajectory_pg_weight",
+            "bc_weight",
+            "reference_kl_weight",
+            "weight_decay",
+            "heading_bc_weight",
+        )
+        for name in positive:
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise JointGRPOError(f"{name} must be positive and finite")
+        for name in non_negative:
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise JointGRPOError(f"{name} must be non-negative and finite")
+
+    @property
+    def roll_timesteps(self) -> tuple[int, ...]:
+        return BEVOnlyDiffusionPlanner.inference_roll_timesteps(self.denoise_steps)
+
+    @property
+    def stochastic_timesteps(self) -> tuple[int, ...]:
+        return tuple(value for value in self.roll_timesteps if value > 0)
+
+
+@dataclass(frozen=True)
+class GaussianDDIMStep:
+    prev_sample: Tensor
+    mean: Tensor
+    std: Tensor
+    log_prob: Tensor | None
+
+
+class StandardGaussianDDIM:
+    """DDIM transition with additive Gaussian noise and exact log-probability."""
+
+    def __init__(self, num_train_timesteps: int = 1000) -> None:
+        self.scheduler = DDIMScheduler(
+            num_train_timesteps=num_train_timesteps,
+            beta_schedule="scaled_linear",
+            prediction_type="sample",
+        )
+        self.scheduler.set_timesteps(num_train_timesteps)
+
+    def add_noise(
+        self, original: Tensor, noise: Tensor, timesteps: Tensor
+    ) -> Tensor:
+        return self.scheduler.add_noise(original, noise, timesteps)
+
+    def step(
+        self,
+        *,
+        model_output: Tensor,
+        timestep: int,
+        previous_timestep: int,
+        sample: Tensor,
+        eta: float,
+        generator: torch.Generator | None = None,
+        prev_sample: Tensor | None = None,
+    ) -> GaussianDDIMStep:
+        if isinstance(timestep, bool) or not isinstance(timestep, int):
+            raise JointGRPOError("DDIM timestep must be an integer")
+        if timestep < 0 or timestep >= self.scheduler.config.num_train_timesteps:
+            raise JointGRPOError("DDIM timestep is outside the scheduler")
+        if (
+            isinstance(previous_timestep, bool)
+            or not isinstance(previous_timestep, int)
+            or previous_timestep < -1
+            or previous_timestep >= timestep
+        ):
+            raise JointGRPOError(
+                "DDIM previous_timestep must be an integer in [-1,timestep)"
+            )
+        if timestep == 0 and previous_timestep != -1:
+            raise JointGRPOError("the deterministic t=0 step must terminate at -1")
+        if timestep > 0 and previous_timestep < 0:
+            raise JointGRPOError("only t=0 may transition to -1")
+        if sample.shape != model_output.shape:
+            raise JointGRPOError("DDIM sample and model_output shapes must match")
+        if sample.dtype != torch.float32 or model_output.dtype != torch.float32:
+            raise JointGRPOError("DDIM probability tensors must use float32")
+        if sample.device != model_output.device:
+            raise JointGRPOError("DDIM sample and model_output devices must match")
+        if not bool(torch.isfinite(sample).all()) or not bool(
+            torch.isfinite(model_output).all()
+        ):
+            raise JointGRPOError("DDIM inputs must be finite")
+        if not math.isfinite(float(eta)) or float(eta) < 0.0:
+            raise JointGRPOError("DDIM eta must be non-negative and finite")
+
+        device = sample.device
+        dtype = sample.dtype
+        alpha_t = self.scheduler.alphas_cumprod[timestep].to(device, dtype)
+        alpha_previous = (
+            self.scheduler.alphas_cumprod[previous_timestep].to(device, dtype)
+            if previous_timestep >= 0
+            else self.scheduler.final_alpha_cumprod.to(device, dtype)
+        )
+        beta_t = 1.0 - alpha_t
+        prediction = model_output.clamp(
+            -float(self.scheduler.config.clip_sample_range),
+            float(self.scheduler.config.clip_sample_range),
+        )
+        epsilon = (sample - alpha_t.sqrt() * prediction) / beta_t.sqrt().clamp_min(
+            torch.finfo(dtype).eps
+        )
+        variance = (
+            (1.0 - alpha_previous)
+            / (1.0 - alpha_t).clamp_min(torch.finfo(dtype).eps)
+            * (1.0 - alpha_t / alpha_previous)
+        ).clamp_min(0.0)
+        std = float(eta) * variance.sqrt()
+        direction_scale = (1.0 - alpha_previous - std.square()).clamp_min(0.0)
+        mean = alpha_previous.sqrt() * prediction + direction_scale.sqrt() * epsilon
+
+        stochastic = bool(float(std.detach().cpu()) > 0.0)
+        if prev_sample is None:
+            if stochastic:
+                noise = torch.randn(
+                    sample.shape,
+                    dtype=dtype,
+                    device=device,
+                    generator=generator,
+                )
+                sampled = mean + std * noise
+            else:
+                sampled = mean
+        else:
+            if prev_sample.shape != sample.shape or prev_sample.dtype != dtype:
+                raise JointGRPOError(
+                    "replayed DDIM prev_sample must match sample shape and dtype"
+                )
+            if prev_sample.device != device or not bool(
+                torch.isfinite(prev_sample).all()
+            ):
+                raise JointGRPOError(
+                    "replayed DDIM prev_sample must be finite and colocated"
+                )
+            sampled = prev_sample
+
+        log_prob = None
+        if stochastic:
+            elementwise = (
+                -0.5 * ((sampled.detach() - mean) / std).square()
+                - torch.log(std)
+                - 0.5 * math.log(2.0 * math.pi)
+            )
+            log_prob = elementwise.sum(dim=(-2, -1))
+        return GaussianDDIMStep(
+            prev_sample=sampled,
+            mean=mean,
+            std=std,
+            log_prob=log_prob,
+        )
+
+
+@dataclass(frozen=True)
+class JointGRPORollout:
+    context: BEVPlannerContext
+    coarse_trajectories: Tensor
+    mode_valid_mask: Tensor
+    chains_normalized: Tensor
+    sampled_modes: Tensor
+    selected_trajectories: Tensor
+    old_mode_log_prob: Tensor
+    old_trajectory_log_prob: Tensor
+
+    @property
+    def batch_size(self) -> int:
+        return int(self.sampled_modes.shape[0])
+
+    @property
+    def group_size(self) -> int:
+        return int(self.sampled_modes.shape[1])
+
+
+@dataclass(frozen=True)
+class JointGRPOLossResult:
+    total: Tensor
+    mode_pg: Tensor
+    trajectory_pg: Tensor
+    behavior_cloning: Tensor
+    mode_reference_kl: Tensor
+    trajectory_reference_kl: Tensor
+    reference_kl: Tensor
+    advantages: Tensor
+    new_mode_log_prob: Tensor
+    new_trajectory_log_prob: Tensor
+
+    def scalar_metrics(self) -> dict[str, float]:
+        values = {
+            "loss/total": self.total,
+            "loss/mode_pg": self.mode_pg,
+            "loss/trajectory_pg": self.trajectory_pg,
+            "loss/behavior_cloning": self.behavior_cloning,
+            "loss/mode_reference_kl": self.mode_reference_kl,
+            "loss/trajectory_reference_kl": self.trajectory_reference_kl,
+            "loss/reference_kl": self.reference_kl,
+            "advantage/mean": self.advantages.mean(),
+            "advantage/std": self.advantages.std(unbiased=False),
+            "advantage/min": self.advantages.min(),
+            "advantage/max": self.advantages.max(),
+        }
+        return {name: float(value.detach().cpu()) for name, value in values.items()}
+
+
+@dataclass(frozen=True)
+class JointGRPOUpdateResult:
+    loss: JointGRPOLossResult
+    gradient_norms: Mapping[str, float]
+    total_gradient_norm: float
+    optimizer_step: int
+
+
+class FrozenVariantAReference(nn.Module):
+    """Frozen decoder and mode head copied from the initial Stage 1 policy."""
+
+    def __init__(self, planner: BEVOnlyDiffusionPlanner) -> None:
+        super().__init__()
+        self.diffusion_decoder = copy.deepcopy(planner.diffusion_decoder)
+        self.mode_head = copy.deepcopy(planner.mode_head)
+        self.requires_grad_(False)
+        self.eval()
+
+    def predict(
+        self,
+        planner: BEVOnlyDiffusionPlanner,
+        noisy_xy_normalized: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse_trajectories: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        noisy_metric = planner._denormalize_xy(
+            noisy_xy_normalized.clamp(-1.0, 1.0)
+        )
+        candidates, features = self.diffusion_decoder(
+            noisy_metric,
+            coarse_trajectories,
+            timesteps,
+            context,
+        )
+        return candidates, self.mode_head(features).squeeze(-1)
+
+
+def normalize_signed_advantages(
+    rewards: Tensor, *, group_size: int = 4, eps: float = 1e-6
+) -> Tensor:
+    if not isinstance(rewards, Tensor):
+        raise JointGRPOError("rewards must be a torch.Tensor")
+    if rewards.dtype != torch.float32:
+        raise JointGRPOError("rewards must use dtype torch.float32")
+    if rewards.ndim != 2 or int(rewards.shape[1]) != int(group_size):
+        raise JointGRPOError(f"rewards must have shape [B,{group_size}]")
+    if int(rewards.shape[0]) <= 0 or not bool(torch.isfinite(rewards).all()):
+        raise JointGRPOError("rewards must contain a non-empty finite batch")
+    centered = rewards - rewards.mean(dim=1, keepdim=True)
+    scale = rewards.std(dim=1, unbiased=False, keepdim=True)
+    return centered / (scale + float(eps))
+
+
+def _repeat_context(context: BEVPlannerContext, groups: int) -> BEVPlannerContext:
+    batch_size = context.batch_size
+    bev = (
+        context.bev_feature.unsqueeze(1)
+        .expand(-1, groups, -1, -1, -1, -1)
+        .reshape(batch_size * groups, *context.bev_feature.shape[1:])
+    )
+    roles = (
+        context.role_tokens.unsqueeze(1)
+        .expand(-1, groups, -1, -1)
+        .reshape(batch_size * groups, *context.role_tokens.shape[1:])
+    )
+    return BEVPlannerContext(bev_feature=bev, role_tokens=roles)
+
+
+def _repeat_groups(value: Tensor, groups: int) -> Tensor:
+    return (
+        value.unsqueeze(1)
+        .expand(-1, groups, *([-1] * (value.ndim - 1)))
+        .reshape(value.shape[0] * groups, *value.shape[1:])
+    )
+
+
+def _gather_modes(value: Tensor, modes: Tensor) -> Tensor:
+    """Gather the mode axis from [N,3,K,...] with modes [N,3]."""
+
+    tail = value.shape[3:]
+    index = modes[..., None]
+    for _ in tail:
+        index = index.unsqueeze(-1)
+    index = index.expand(-1, -1, 1, *tail)
+    return value.gather(2, index).squeeze(2)
+
+
+def _sample_masked_modes(
+    logits: Tensor,
+    valid_mask: Tensor,
+    *,
+    generator: torch.Generator,
+) -> tuple[Tensor, Tensor]:
+    masked = logits.float().masked_fill(~valid_mask, float("-inf"))
+    probabilities = torch.softmax(masked, dim=-1)
+    flat = probabilities.reshape(-1, NUM_MODES)
+    modes = torch.multinomial(flat, 1, replacement=True, generator=generator).reshape(
+        logits.shape[0], NUM_PLATOON_ROLES
+    )
+    role_log_prob = torch.log_softmax(masked, dim=-1).gather(
+        -1, modes.unsqueeze(-1)
+    ).squeeze(-1)
+    return modes, role_log_prob.sum(dim=-1)
+
+
+def _masked_categorical_kl(
+    current_logits: Tensor, reference_logits: Tensor, valid_mask: Tensor
+) -> Tensor:
+    current = current_logits.float().masked_fill(~valid_mask, float("-inf"))
+    reference = reference_logits.float().masked_fill(~valid_mask, float("-inf"))
+    current_log = torch.log_softmax(current, dim=-1)
+    reference_log = torch.log_softmax(reference, dim=-1)
+    probability = torch.softmax(current, dim=-1)
+    # Avoid creating ``-inf - -inf`` on invalid modes.  Masking the final
+    # expression with torch.where is insufficient because autograd can still
+    # encounter the NaN intermediate during backward.
+    current_log = current_log.masked_fill(~valid_mask, 0.0)
+    reference_log = reference_log.masked_fill(~valid_mask, 0.0)
+    probability = probability.masked_fill(~valid_mask, 0.0)
+    terms = probability * (current_log - reference_log)
+    # Analytic KL is non-negative.  Float32 reduction can produce a tiny
+    # negative value (around 1e-8) for identical GPU policies.
+    return terms.sum(dim=-1).mean().clamp_min(0.0)
+
+
+def _trajectory_bc(current: Tensor, reference: Tensor, config: JointGRPOConfig) -> Tensor:
+    xy = F.smooth_l1_loss(
+        current[..., :2],
+        reference[..., :2],
+        beta=float(config.xy_beta_m),
+    )
+    heading_error = torch.atan2(
+        torch.sin(current[..., 2] - reference[..., 2]),
+        torch.cos(current[..., 2] - reference[..., 2]),
+    )
+    heading = F.smooth_l1_loss(
+        heading_error,
+        torch.zeros_like(heading_error),
+        beta=float(config.heading_beta_rad),
+    )
+    return xy + float(config.heading_bc_weight) * heading
+
+
+class JointGRPOTrainerA:
+    """One-update-per-rollout joint GRPO trainer for variant A."""
+
+    required_model_inputs = (
+        "bev",
+        "ego_state",
+        "formation_relation_state",
+        "relation_valid_mask",
+        "agent_role",
+        "coarse_trajectories",
+        "mode_valid_mask",
+    )
+
+    def __init__(
+        self,
+        planner: BEVOnlyDiffusionPlanner,
+        config: JointGRPOConfig | None = None,
+    ) -> None:
+        if planner.config.predecessor_condition != "none":
+            raise JointGRPOError("JointGRPOTrainerA requires variant A / none")
+        self.planner = planner
+        self.config = config or JointGRPOConfig()
+        self.transition = StandardGaussianDDIM(planner.config.num_train_timesteps)
+        for parameter in planner.parameters():
+            parameter.requires_grad_(False)
+        for parameter in planner.diffusion_decoder.parameters():
+            parameter.requires_grad_(True)
+        for parameter in planner.mode_head.parameters():
+            parameter.requires_grad_(True)
+        self.reference = FrozenVariantAReference(planner).to(
+            next(planner.parameters()).device
+        )
+        self.planner.eval()
+        self.optimizer = AdamW(
+            [
+                *self.planner.diffusion_decoder.parameters(),
+                *self.planner.mode_head.parameters(),
+            ],
+            lr=float(self.config.learning_rate),
+            weight_decay=float(self.config.weight_decay),
+        )
+        self.optimizer_step = 0
+        self._consumed_rollouts: set[int] = set()
+
+    def _context_from_inputs(self, model_inputs: Mapping[str, Tensor]) -> BEVPlannerContext:
+        missing = [name for name in self.required_model_inputs if name not in model_inputs]
+        if missing:
+            raise JointGRPOError(f"model_inputs are missing fields: {missing}")
+        with torch.no_grad():
+            return self.planner.encode_context(
+                model_inputs["bev"],
+                model_inputs["ego_state"],
+                model_inputs["formation_relation_state"],
+                model_inputs["relation_valid_mask"],
+                model_inputs["agent_role"],
+            )
+
+    @torch.no_grad()
+    def sample_groups(
+        self,
+        model_inputs: Mapping[str, Tensor],
+        *,
+        generator: torch.Generator,
+    ) -> JointGRPORollout:
+        if not isinstance(generator, torch.Generator):
+            raise JointGRPOError("sample_groups requires an explicit torch.Generator")
+        context = self._context_from_inputs(model_inputs)
+        coarse = model_inputs["coarse_trajectories"]
+        valid_mask = model_inputs["mode_valid_mask"]
+        self.planner._validate_trajectory_inputs(
+            coarse,
+            valid_mask,
+            batch_size=context.batch_size,
+            device=context.role_tokens.device,
+        )
+        groups = self.config.group_size
+        repeated_context = _repeat_context(context, groups)
+        repeated_coarse = _repeat_groups(coarse, groups)
+        repeated_mask = _repeat_groups(valid_mask, groups)
+        anchor = self.planner._normalize_xy(repeated_coarse[..., :2])
+        noise = torch.randn(
+            anchor.shape,
+            device=anchor.device,
+            dtype=torch.float32,
+            generator=generator,
+        )
+        noise_timestep = torch.full(
+            (anchor.shape[0] * NUM_PLATOON_ROLES,),
+            self.config.initial_noise_timestep,
+            device=anchor.device,
+            dtype=torch.int64,
+        )
+        flat_shape = (
+            anchor.shape[0] * NUM_PLATOON_ROLES,
+            NUM_MODES,
+            TRAJECTORY_STEPS,
+            2,
+        )
+        sample = self.transition.add_noise(
+            anchor.reshape(flat_shape),
+            noise.reshape(flat_shape),
+            noise_timestep,
+        ).reshape_as(anchor).clamp(-1.0, 1.0)
+        chains = [sample]
+        stochastic_log_probs = []
+        final_candidates = final_logits = None
+        destinations = (*self.config.roll_timesteps[1:], -1)
+        for timestep, previous_timestep in zip(
+            self.config.roll_timesteps, destinations
+        ):
+            batch_timestep = torch.full(
+                (anchor.shape[0], NUM_PLATOON_ROLES),
+                timestep,
+                device=anchor.device,
+                dtype=torch.int64,
+            )
+            candidates, logits = self.planner.predict_denoised_candidates(
+                sample,
+                batch_timestep,
+                repeated_context,
+                repeated_coarse,
+                repeated_mask,
+            )
+            model_output = self.planner._normalize_xy(candidates[..., :2]).float()
+            transition = self.transition.step(
+                model_output=model_output,
+                timestep=timestep,
+                previous_timestep=previous_timestep,
+                sample=sample.float(),
+                eta=self.config.eta,
+                generator=generator,
+            )
+            if transition.log_prob is not None:
+                stochastic_log_probs.append(transition.log_prob)
+            sample = transition.prev_sample.detach()
+            chains.append(sample)
+            final_candidates, final_logits = candidates, logits
+        if final_candidates is None or final_logits is None:
+            raise JointGRPOError("joint rollout produced no decoder output")
+        if len(stochastic_log_probs) != len(self.config.stochastic_timesteps):
+            raise JointGRPOError("joint rollout stochastic transition count mismatch")
+        modes, mode_log_prob = _sample_masked_modes(
+            final_logits,
+            repeated_mask,
+            generator=generator,
+        )
+        trajectory_log_prob = torch.stack(
+            [
+                _gather_modes(value.unsqueeze(-1), modes).squeeze(-1).sum(dim=-1)
+                for value in stochastic_log_probs
+            ],
+            dim=-1,
+        )
+        selected = _gather_modes(final_candidates, modes)
+        batch_size = context.batch_size
+        chain_tensor = torch.stack(chains, dim=1).reshape(
+            batch_size,
+            groups,
+            len(chains),
+            NUM_PLATOON_ROLES,
+            NUM_MODES,
+            TRAJECTORY_STEPS,
+            2,
+        )
+        return JointGRPORollout(
+            context=BEVPlannerContext(
+                bev_feature=context.bev_feature.detach(),
+                role_tokens=context.role_tokens.detach(),
+            ),
+            coarse_trajectories=coarse.detach(),
+            mode_valid_mask=valid_mask.detach(),
+            chains_normalized=chain_tensor.detach(),
+            sampled_modes=modes.reshape(batch_size, groups, NUM_PLATOON_ROLES).detach(),
+            selected_trajectories=selected.reshape(
+                batch_size,
+                groups,
+                NUM_PLATOON_ROLES,
+                TRAJECTORY_STEPS,
+                TRAJECTORY_DIM,
+            ).detach(),
+            old_mode_log_prob=mode_log_prob.reshape(batch_size, groups).detach(),
+            old_trajectory_log_prob=trajectory_log_prob.reshape(
+                batch_size, groups, len(self.config.stochastic_timesteps)
+            ).detach(),
+        )
+
+    def compute_loss(
+        self, rollout: JointGRPORollout, rewards: Tensor
+    ) -> JointGRPOLossResult:
+        advantages = normalize_signed_advantages(
+            rewards,
+            group_size=self.config.group_size,
+            eps=self.config.advantage_eps,
+        ).to(device=rollout.old_mode_log_prob.device)
+        if tuple(advantages.shape) != (
+            rollout.batch_size,
+            rollout.group_size,
+        ):
+            raise JointGRPOError("reward batch does not match rollout")
+        batch_size = rollout.batch_size
+        groups = rollout.group_size
+        flat_count = batch_size * groups
+        context = _repeat_context(rollout.context, groups)
+        coarse = _repeat_groups(rollout.coarse_trajectories, groups)
+        valid_mask = _repeat_groups(rollout.mode_valid_mask, groups)
+        modes = rollout.sampled_modes.reshape(flat_count, NUM_PLATOON_ROLES)
+        chains = rollout.chains_normalized.reshape(
+            flat_count,
+            len(self.config.roll_timesteps) + 1,
+            NUM_PLATOON_ROLES,
+            NUM_MODES,
+            TRAJECTORY_STEPS,
+            2,
+        )
+
+        current_log_probs = []
+        trajectory_kls = []
+        final_current_candidates = final_reference_candidates = None
+        final_current_logits = final_reference_logits = None
+        destinations = (*self.config.roll_timesteps[1:], -1)
+        for step_index, (timestep, previous_timestep) in enumerate(
+            zip(self.config.roll_timesteps, destinations)
+        ):
+            sample = chains[:, step_index]
+            next_sample = chains[:, step_index + 1]
+            batch_timestep = torch.full(
+                (flat_count, NUM_PLATOON_ROLES),
+                timestep,
+                device=sample.device,
+                dtype=torch.int64,
+            )
+            current_candidates, current_logits = (
+                self.planner.predict_denoised_candidates(
+                    sample,
+                    batch_timestep,
+                    context,
+                    coarse,
+                    valid_mask,
+                )
+            )
+            with torch.no_grad():
+                reference_candidates, reference_logits = self.reference.predict(
+                    self.planner,
+                    sample,
+                    batch_timestep,
+                    context,
+                    coarse,
+                )
+            current_output = self.planner._normalize_xy(
+                current_candidates[..., :2]
+            ).float()
+            reference_output = self.planner._normalize_xy(
+                reference_candidates[..., :2]
+            ).float()
+            current_transition = self.transition.step(
+                model_output=current_output,
+                timestep=timestep,
+                previous_timestep=previous_timestep,
+                sample=sample.float(),
+                eta=self.config.eta,
+                prev_sample=next_sample.float(),
+            )
+            with torch.no_grad():
+                reference_transition = self.transition.step(
+                    model_output=reference_output,
+                    timestep=timestep,
+                    previous_timestep=previous_timestep,
+                    sample=sample.float(),
+                    eta=self.config.eta,
+                    prev_sample=next_sample.float(),
+                )
+            if current_transition.log_prob is not None:
+                selected_log_prob = _gather_modes(
+                    current_transition.log_prob.unsqueeze(-1), modes
+                ).squeeze(-1)
+                current_log_probs.append(selected_log_prob.sum(dim=-1))
+                selected_current_mean = _gather_modes(
+                    current_transition.mean, modes
+                )
+                selected_reference_mean = _gather_modes(
+                    reference_transition.mean, modes
+                )
+                sigma_squared = current_transition.std.square()
+                trajectory_kls.append(
+                    (
+                        (selected_current_mean - selected_reference_mean).square()
+                        / (2.0 * sigma_squared)
+                    ).mean()
+                )
+            final_current_candidates = current_candidates
+            final_reference_candidates = reference_candidates
+            final_current_logits = current_logits
+            final_reference_logits = reference_logits
+
+        if (
+            final_current_candidates is None
+            or final_reference_candidates is None
+            or final_current_logits is None
+            or final_reference_logits is None
+        ):
+            raise JointGRPOError("joint replay produced no decoder output")
+        new_trajectory_log_prob = torch.stack(current_log_probs, dim=-1).reshape(
+            batch_size, groups, -1
+        )
+        masked_current = final_current_logits.float().masked_fill(
+            ~valid_mask, float("-inf")
+        )
+        role_mode_log_prob = torch.log_softmax(masked_current, dim=-1).gather(
+            -1, modes.unsqueeze(-1)
+        ).squeeze(-1)
+        new_mode_log_prob = role_mode_log_prob.sum(dim=-1).reshape(
+            batch_size, groups
+        )
+        mode_ratio = torch.exp(new_mode_log_prob - rollout.old_mode_log_prob)
+        trajectory_ratio = torch.exp(
+            new_trajectory_log_prob - rollout.old_trajectory_log_prob
+        )
+        mode_pg = -(advantages * mode_ratio).mean()
+        trajectory_pg = -(
+            advantages.unsqueeze(-1) * trajectory_ratio
+        ).mean()
+
+        current_selected = _gather_modes(final_current_candidates, modes)
+        reference_selected = _gather_modes(final_reference_candidates, modes)
+        behavior_cloning = _trajectory_bc(
+            current_selected,
+            reference_selected,
+            self.config,
+        )
+        mode_reference_kl = _masked_categorical_kl(
+            final_current_logits,
+            final_reference_logits,
+            valid_mask,
+        )
+        trajectory_reference_kl = torch.stack(trajectory_kls).mean()
+        reference_kl = mode_reference_kl + trajectory_reference_kl
+        total = (
+            float(self.config.mode_pg_weight) * mode_pg
+            + float(self.config.trajectory_pg_weight) * trajectory_pg
+            + float(self.config.bc_weight) * behavior_cloning
+            + float(self.config.reference_kl_weight) * reference_kl
+        )
+        tensors = (
+            total,
+            mode_pg,
+            trajectory_pg,
+            behavior_cloning,
+            mode_reference_kl,
+            trajectory_reference_kl,
+            reference_kl,
+            new_mode_log_prob,
+            new_trajectory_log_prob,
+        )
+        if not all(bool(torch.isfinite(value).all()) for value in tensors):
+            raise JointGRPOError("joint GRPO loss contains non-finite values")
+        if bool((mode_reference_kl < -1e-7).item()) or bool(
+            (trajectory_reference_kl < -1e-7).item()
+        ):
+            raise JointGRPOError("reference KL must be non-negative")
+        return JointGRPOLossResult(
+            total=total,
+            mode_pg=mode_pg,
+            trajectory_pg=trajectory_pg,
+            behavior_cloning=behavior_cloning,
+            mode_reference_kl=mode_reference_kl,
+            trajectory_reference_kl=trajectory_reference_kl,
+            reference_kl=reference_kl,
+            advantages=advantages,
+            new_mode_log_prob=new_mode_log_prob,
+            new_trajectory_log_prob=new_trajectory_log_prob,
+        )
+
+    @staticmethod
+    def _module_gradient_norm(module: nn.Module) -> float:
+        values = []
+        for parameter in module.parameters():
+            if parameter.grad is None:
+                continue
+            gradient = parameter.grad.detach().float()
+            if not bool(torch.isfinite(gradient).all()):
+                raise JointGRPOError("joint GRPO gradient is non-finite")
+            values.append(gradient.square().sum())
+        if not values:
+            return 0.0
+        return float(torch.stack(values).sum().sqrt().cpu())
+
+    def update(
+        self, rollout: JointGRPORollout, rewards: Tensor
+    ) -> JointGRPOUpdateResult:
+        rollout_id = id(rollout)
+        if rollout_id in self._consumed_rollouts:
+            raise JointGRPOError("each joint rollout may be updated exactly once")
+        self.optimizer.zero_grad(set_to_none=True)
+        loss = self.compute_loss(rollout, rewards)
+        loss.total.backward()
+        gradient_norms = {
+            "diffusion_decoder": self._module_gradient_norm(
+                self.planner.diffusion_decoder
+            ),
+            "mode_head": self._module_gradient_norm(self.planner.mode_head),
+        }
+        if any(value <= 0.0 or not math.isfinite(value) for value in gradient_norms.values()):
+            raise JointGRPOError(
+                "mode head and diffusion decoder require finite non-zero gradients"
+            )
+        trainable = [
+            *self.planner.diffusion_decoder.parameters(),
+            *self.planner.mode_head.parameters(),
+        ]
+        total_norm = torch.nn.utils.clip_grad_norm_(
+            trainable, float(self.config.max_grad_norm)
+        )
+        if not bool(torch.isfinite(total_norm)):
+            raise JointGRPOError("joint GRPO total gradient norm is non-finite")
+        self.optimizer.step()
+        self.optimizer_step += 1
+        self._consumed_rollouts.add(rollout_id)
+        return JointGRPOUpdateResult(
+            loss=loss,
+            gradient_norms=gradient_norms,
+            total_gradient_norm=float(total_norm.detach().cpu()),
+            optimizer_step=self.optimizer_step,
+        )
+
+
+__all__ = [
+    "FrozenVariantAReference",
+    "GaussianDDIMStep",
+    "JointGRPOConfig",
+    "JointGRPOError",
+    "JointGRPOLossResult",
+    "JointGRPORollout",
+    "JointGRPOTrainerA",
+    "JointGRPOUpdateResult",
+    "StandardGaussianDDIM",
+    "normalize_signed_advantages",
+]

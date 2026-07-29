@@ -46,6 +46,18 @@ from .stage1_joint_loss import (
     trajectory_speed_acceleration,
     wrapped_heading_error,
 )
+from .joint_grpo import (
+    FrozenVariantAReference,
+    GaussianDDIMStep,
+    JointGRPOConfig,
+    JointGRPOError,
+    JointGRPOLossResult,
+    JointGRPORollout,
+    JointGRPOTrainerA,
+    JointGRPOUpdateResult,
+    StandardGaussianDDIM,
+    normalize_signed_advantages,
+)
 
 __all__ = [
     "BEVBackboneError",
@@ -66,6 +78,15 @@ __all__ = [
     "HardModeMaskConfig",
     "HardModeMaskResult",
     "JointStage1Loss",
+    "JointGRPOConfig",
+    "JointGRPOError",
+    "JointGRPOLossResult",
+    "JointGRPORollout",
+    "JointGRPOTrainerA",
+    "JointGRPOUpdateResult",
+    "FrozenVariantAReference",
+    "GaussianDDIMStep",
+    "StandardGaussianDDIM",
     "ModeContractError",
     "ModeIndex",
     "ModeTopology",
@@ -84,4 +105,5 @@ __all__ = [
     "sha256_file",
     "trajectory_speed_acceleration",
     "wrapped_heading_error",
+    "normalize_signed_advantages",
 ]
