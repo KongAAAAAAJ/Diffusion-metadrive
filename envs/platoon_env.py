@@ -115,6 +115,14 @@ class PlatoonEnvConfig:
         lqr_lat_q1: float = 1.0,
         lqr_lat_q2: float = 1.0,
         lqr_lat_r: float = 0.1,
+        preview_pid_kp: float = 1.6,
+        preview_pid_ki: float = 0.05,
+        preview_pid_kd: float = 0.12,
+        preview_pid_integral_limit: float = 1.0,
+        preview_lookahead_time_s: float = 0.6,
+        preview_lookahead_min_m: float = 3.0,
+        preview_lookahead_max_m: float = 8.0,
+        preview_heading_weight: float = 0.5,
     ) -> None:
         self.num_agents = int(num_agents)
         self.use_render = bool(use_render)
@@ -152,6 +160,14 @@ class PlatoonEnvConfig:
         self.lqr_lat_q1 = float(lqr_lat_q1)
         self.lqr_lat_q2 = float(lqr_lat_q2)
         self.lqr_lat_r = float(lqr_lat_r)
+        self.preview_pid_kp = float(preview_pid_kp)
+        self.preview_pid_ki = float(preview_pid_ki)
+        self.preview_pid_kd = float(preview_pid_kd)
+        self.preview_pid_integral_limit = float(preview_pid_integral_limit)
+        self.preview_lookahead_time_s = float(preview_lookahead_time_s)
+        self.preview_lookahead_min_m = float(preview_lookahead_min_m)
+        self.preview_lookahead_max_m = float(preview_lookahead_max_m)
+        self.preview_heading_weight = float(preview_heading_weight)
 
 
 class PlatoonEnv(BaseMultiEnv):
@@ -195,6 +211,7 @@ class PlatoonEnv(BaseMultiEnv):
         self._pending_step_all_candidates: dict[str, np.ndarray] = {}  # (num_modes,8,3) local ego frame
         self._pending_step_mode_valid_masks: dict[str, np.ndarray] = {}   # (num_modes,) bool
         self._trajectory_reward_cache: Optional[dict[str, object]] = None
+        self._lateral_preview_pid_state: dict[str, tuple[float, float, bool]] = {}
         super().__init__(config=self._build_metadrive_config())
         self._install_platoon_runtime_config()
 
@@ -277,6 +294,14 @@ class PlatoonEnv(BaseMultiEnv):
             "lqr_lat_q1": self.platoon_config.lqr_lat_q1,
             "lqr_lat_q2": self.platoon_config.lqr_lat_q2,
             "lqr_lat_r": self.platoon_config.lqr_lat_r,
+            "preview_pid_kp": self.platoon_config.preview_pid_kp,
+            "preview_pid_ki": self.platoon_config.preview_pid_ki,
+            "preview_pid_kd": self.platoon_config.preview_pid_kd,
+            "preview_pid_integral_limit": self.platoon_config.preview_pid_integral_limit,
+            "preview_lookahead_time_s": self.platoon_config.preview_lookahead_time_s,
+            "preview_lookahead_min_m": self.platoon_config.preview_lookahead_min_m,
+            "preview_lookahead_max_m": self.platoon_config.preview_lookahead_max_m,
+            "preview_heading_weight": self.platoon_config.preview_heading_weight,
         }
 
     def _install_platoon_runtime_config(self) -> None:
@@ -424,6 +449,14 @@ class PlatoonEnv(BaseMultiEnv):
             "lqr_lat_q1",
             "lqr_lat_q2",
             "lqr_lat_r",
+            "preview_pid_kp",
+            "preview_pid_ki",
+            "preview_pid_kd",
+            "preview_pid_integral_limit",
+            "preview_lookahead_time_s",
+            "preview_lookahead_min_m",
+            "preview_lookahead_max_m",
+            "preview_heading_weight",
         }
         return {key: config[key] for key in keys if key in config}
 
@@ -459,6 +492,14 @@ class PlatoonEnv(BaseMultiEnv):
             "lqr_lat_q1",
             "lqr_lat_q2",
             "lqr_lat_r",
+            "preview_pid_kp",
+            "preview_pid_ki",
+            "preview_pid_kd",
+            "preview_pid_integral_limit",
+            "preview_lookahead_time_s",
+            "preview_lookahead_min_m",
+            "preview_lookahead_max_m",
+            "preview_heading_weight",
             # scenario_id / local_route are intentionally excluded here so they pass
             # through to the MetaDrive config via _build_metadrive_config explicitly.
         }
@@ -741,6 +782,7 @@ class PlatoonEnv(BaseMultiEnv):
         self._pending_step_mode_groups = {}
         self._pending_step_all_candidates = {}
         self._pending_step_mode_valid_masks = {}
+        self._lateral_preview_pid_state = {}
 
         return self._augment_observations(obs)
 
@@ -1611,13 +1653,23 @@ class PlatoonEnv(BaseMultiEnv):
                 min_gap = min(min_gap, gap)
         return 0.0 if not np.isfinite(min_gap) else min_gap
 
-    def _lateral_pd(self, agent_id: str, trajectory: np.ndarray) -> float:
-        """Speed-adaptive pure pursuit over the ego-local trajectory."""
+    def _lateral_preview_pid(self, agent_id: str, trajectory: np.ndarray) -> float:
+        """Track an ego-local preview point with one bounded PID controller."""
         vehicle = (getattr(self, "agents", {}) or {}).get(agent_id)
         if vehicle is None:
             raise ValueError(f"Unknown or inactive agent: {agent_id}")
         speed_mps = max(0.0, self._agent_speed_km_h(agent_id) / 3.6)
-        lookahead_m = float(np.clip(0.6 * speed_mps, 3.0, 8.0))
+        lookahead_min = self._cfg_float("preview_lookahead_min_m", 3.0)
+        lookahead_max = self._cfg_float("preview_lookahead_max_m", 8.0)
+        if lookahead_min <= 0.0 or lookahead_max < lookahead_min:
+            raise ValueError("preview lookahead bounds are invalid")
+        lookahead_m = float(
+            np.clip(
+                self._cfg_float("preview_lookahead_time_s", 0.6) * speed_mps,
+                lookahead_min,
+                lookahead_max,
+            )
+        )
         path_xy = np.concatenate(
             (
                 np.zeros((1, 2), dtype=np.float64),
@@ -1636,23 +1688,48 @@ class PlatoonEnv(BaseMultiEnv):
             ([0.0], np.unwrap(trajectory[:, 2].astype(np.float64)))
         )
         heading = float(np.interp(query, arc, headings))
-        curvature = 2.0 * y / max(query * query, 1.0e-6)
-        wheelbase = float(
-            getattr(vehicle, "FRONT_WHEELBASE", 1.4)
-            + getattr(vehicle, "REAR_WHEELBASE", 1.4)
+        if not np.isfinite([x, y, heading]).all():
+            raise ValueError("Preview point is not finite")
+
+        bearing_error = math.atan2(y, max(x, 1.0e-3))
+        heading_error = _wrap_to_pi(heading)
+        error = _wrap_to_pi(
+            bearing_error
+            + self._cfg_float("preview_heading_weight", 0.5) * heading_error
         )
-        max_steering_rad = math.radians(
-            float(getattr(vehicle, "max_steering", 60.0))
+        dt_s = self._cfg_float("physics_world_step_size", 0.02) * self._cfg_int(
+            "decision_repeat", 5
         )
+        if dt_s <= 0.0:
+            raise ValueError("controller decision timestep must be positive")
+        kp = self._cfg_float("preview_pid_kp", 1.6)
+        ki = self._cfg_float("preview_pid_ki", 0.05)
+        kd = self._cfg_float("preview_pid_kd", 0.12)
+        integral_limit = self._cfg_float("preview_pid_integral_limit", 1.0)
         if (
-            not np.isfinite([x, y, heading, wheelbase, max_steering_rad]).all()
-            or wheelbase <= 0.0
-            or max_steering_rad <= 0.0
+            not np.isfinite([kp, ki, kd, integral_limit]).all()
+            or min(kp, ki, kd) < 0.0
+            or integral_limit <= 0.0
         ):
-            raise ValueError("Vehicle steering geometry is invalid")
-        steering_angle = math.atan(wheelbase * curvature)
-        steering_angle += 0.25 * _wrap_to_pi(heading)
-        return float(np.clip(steering_angle / max_steering_rad, -1.0, 1.0))
+            raise ValueError("preview PID gains are invalid")
+
+        integral, previous_error, initialized = self._lateral_preview_pid_state.get(
+            agent_id, (0.0, 0.0, False)
+        )
+        candidate_integral = float(
+            np.clip(integral + error * dt_s, -integral_limit, integral_limit)
+        )
+        derivative = (error - previous_error) / dt_s if initialized else 0.0
+        raw = kp * error + ki * candidate_integral + kd * derivative
+        if abs(raw) > 1.0 and np.sign(raw) == np.sign(error):
+            candidate_integral = integral
+            raw = kp * error + ki * candidate_integral + kd * derivative
+        self._lateral_preview_pid_state[agent_id] = (
+            candidate_integral,
+            error,
+            True,
+        )
+        return float(np.clip(raw, -1.0, 1.0))
 
     def _solve_lqr_gain(self, dt: float = 0.1) -> np.ndarray:
         a = np.asarray([[1.0, dt], [0.0, 1.0]], dtype=np.float32)
@@ -1754,7 +1831,7 @@ class PlatoonEnv(BaseMultiEnv):
     def trajectory_to_control(self, agent_id: str, trajectory: np.ndarray) -> np.ndarray:
         trajectory = np.asarray(trajectory)
         target_speed = self._trajectory_target_speed_mps(trajectory)
-        steering = self._lateral_pd(agent_id, trajectory)
+        steering = self._lateral_preview_pid(agent_id, trajectory)
         throttle = self._longitudinal_lqr(agent_id, target_speed)
         return np.asarray([steering, throttle], dtype=np.float32)
 

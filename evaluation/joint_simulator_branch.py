@@ -226,16 +226,63 @@ def _maximum_reference_curvature(world_reference: np.ndarray) -> float:
     return float(curvature.max(initial=0.0))
 
 
-def _tracking_error(
-    actual_pose: np.ndarray, reference_pose: np.ndarray
-) -> tuple[float, float, float]:
-    delta = np.asarray(actual_pose[:2] - reference_pose[:2], dtype=np.float64)
-    cos_h = math.cos(float(reference_pose[2]))
-    sin_h = math.sin(float(reference_pose[2]))
-    longitudinal = cos_h * delta[0] + sin_h * delta[1]
+def _tracking_error_against_reference(
+    actual_pose: np.ndarray,
+    world_reference: np.ndarray,
+    elapsed_s: float,
+) -> tuple[float, float, float, np.ndarray]:
+    """Separate path-tracking error from longitudinal timing lag."""
+    points = np.asarray(world_reference[:, :2], dtype=np.float64)
+    segments = np.diff(points, axis=0)
+    lengths = np.linalg.norm(segments, axis=1)
+    cumulative = np.concatenate(([0.0], np.cumsum(lengths)))
+    best_distance = float("inf")
+    best_index = 0
+    best_fraction = 0.0
+    best_point = points[0]
+    for index, (start, segment, length) in enumerate(
+        zip(points[:-1], segments, lengths)
+    ):
+        if length <= 1.0e-9:
+            fraction = 0.0
+        else:
+            fraction = float(
+                np.clip(
+                    np.dot(actual_pose[:2] - start, segment) / (length * length),
+                    0.0,
+                    1.0,
+                )
+            )
+        projection = start + fraction * segment
+        distance = float(np.linalg.norm(actual_pose[:2] - projection))
+        if distance < best_distance:
+            best_distance = distance
+            best_index = index
+            best_fraction = fraction
+            best_point = projection
+
+    headings = np.unwrap(np.asarray(world_reference[:, 2], dtype=np.float64))
+    nearest_heading = float(
+        headings[best_index]
+        + best_fraction * (headings[best_index + 1] - headings[best_index])
+    )
+    nearest_arc = (
+        cumulative[best_index] + best_fraction * lengths[best_index]
+    )
+    source_times = np.arange(9, dtype=np.float64) * 0.5
+    expected_arc = float(
+        np.interp(np.clip(elapsed_s, 0.0, 4.0), source_times, cumulative)
+    )
+    delta = np.asarray(actual_pose[:2] - best_point, dtype=np.float64)
+    cos_h = math.cos(nearest_heading)
+    sin_h = math.sin(nearest_heading)
     lateral = -sin_h * delta[0] + cos_h * delta[1]
-    heading = float(_wrap(actual_pose[2] - reference_pose[2]))
-    return float(longitudinal), float(lateral), heading
+    heading = float(_wrap(actual_pose[2] - nearest_heading))
+    nearest_pose = np.asarray(
+        [best_point[0], best_point[1], _wrap(nearest_heading).item()],
+        dtype=np.float64,
+    )
+    return float(nearest_arc - expected_arc), float(lateral), heading, nearest_pose
 
 
 def _road_clearance_m(vehicle: object) -> float:
@@ -441,6 +488,7 @@ class JointSimulatorBranchEvaluator:
             [
                 {
                     "reference_world": [],
+                    "nearest_reference_world": [],
                     "actual_world": [],
                     "longitudinal_errors_m": [],
                     "lateral_errors_m": [],
@@ -509,24 +557,23 @@ class JointSimulatorBranchEvaluator:
                         )
                         for role, agent_id in enumerate(AGENT_IDS)
                     }
-                    controls: dict[str, np.ndarray] = {}
-                    for role, agent_id in enumerate(AGENT_IDS):
-                        control_fn = getattr(env, "trajectory_to_control", None)
-                        if callable(control_fn):
-                            control = np.asarray(
-                                control_fn(agent_id, action[agent_id]),
-                                dtype=np.float64,
-                            )
-                            if control.shape != (2,) or not np.isfinite(
-                                control
-                            ).all():
-                                raise JointRewardError(
-                                    "branch trajectory controller returned invalid control"
-                                )
-                        else:
-                            control = np.asarray([0.0, 0.0], dtype=np.float64)
-                        controls[agent_id] = control
                     _, _, terminated, truncated, info = env.step(action)
+                    executed_controls = (
+                        getattr(env, "_pending_low_level_actions", {}) or {}
+                    )
+                    controls: dict[str, np.ndarray] = {}
+                    for agent_id in AGENT_IDS:
+                        control = np.asarray(
+                            executed_controls.get(
+                                agent_id, np.asarray([0.0, 0.0])
+                            ),
+                            dtype=np.float64,
+                        )
+                        if control.shape != (2,) or not np.isfinite(control).all():
+                            raise JointRewardError(
+                                "branch environment recorded invalid executed control"
+                            )
+                        controls[agent_id] = control
                     executed[group] += 1
                     crashed, left_road = _has_failure(info)
                     collision[group] |= crashed
@@ -576,11 +623,21 @@ class JointSimulatorBranchEvaluator:
                         reference_pose = _world_reference_pose_at(
                             references[role], (step_index + 1) * dt_s
                         )
-                        longitudinal, lateral, heading_error = _tracking_error(
-                            current[role], reference_pose
+                        (
+                            longitudinal,
+                            lateral,
+                            heading_error,
+                            nearest_reference_pose,
+                        ) = _tracking_error_against_reference(
+                            current[role],
+                            references[role],
+                            (step_index + 1) * dt_s,
                         )
                         trace = tracking_traces[group][role]
                         trace["reference_world"].append(reference_pose.tolist())
+                        trace["nearest_reference_world"].append(
+                            nearest_reference_pose.tolist()
+                        )
                         trace["actual_world"].append(current[role].tolist())
                         trace["longitudinal_errors_m"].append(longitudinal)
                         trace["lateral_errors_m"].append(lateral)

@@ -8,6 +8,7 @@ import pytest
 from evaluation.joint_simulator_branch import (
     JointEpisodeSpec,
     JointSimulatorBranchEvaluator,
+    _tracking_error_against_reference,
 )
 from models.bev_planner import JointRewardError
 
@@ -49,7 +50,16 @@ class _BranchEnv:
     def _desired_center_spacing_m(self, *_args) -> float:
         return 15.74
 
+    def trajectory_to_control(self, *_args):
+        raise AssertionError(
+            "branch diagnostics must not invoke the stateful controller outside step()"
+        )
+
     def step(self, actions):
+        self._pending_low_level_actions = {
+            agent_id: np.asarray([0.1, 0.2], dtype=np.float32)
+            for agent_id in actions
+        }
         for agent_id, trajectory in actions.items():
             vehicle = self.agents[agent_id]
             point = np.asarray(trajectory, dtype=np.float64)[0]
@@ -116,6 +126,23 @@ def test_branch_recreates_each_group_and_tracks_for_four_seconds() -> None:
     assert len(result.tracking_traces) == 2
     assert len(result.tracking_traces[0]) == 3
     assert len(result.tracking_traces[0][0]["actual_world"]) == 8
+    assert result.tracking_traces[0][0]["steering"] == pytest.approx([0.1] * 8)
+    assert result.tracking_traces[0][0]["throttle"] == pytest.approx([0.2] * 8)
+
+
+def test_tracking_metric_does_not_turn_curve_timing_lag_into_lateral_error() -> None:
+    reference = np.zeros((9, 3), dtype=np.float64)
+    reference[:, 0] = np.arange(9, dtype=np.float64)
+    reference[:, 1] = 0.1 * reference[:, 0] ** 2
+    reference[:, 2] = np.arctan(0.2 * reference[:, 0])
+    actual = reference[3].copy()
+    longitudinal, lateral, heading, nearest = (
+        _tracking_error_against_reference(actual, reference, elapsed_s=2.5)
+    )
+    assert longitudinal < 0.0
+    assert lateral == pytest.approx(0.0, abs=1.0e-8)
+    assert heading == pytest.approx(0.0, abs=1.0e-8)
+    np.testing.assert_allclose(nearest, actual)
 
 
 def test_branch_is_deterministic_and_does_not_mutate_inputs() -> None:

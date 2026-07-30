@@ -13,7 +13,7 @@ class _ControlHarness:
         PlatoonEnv._trajectory_target_speed_mps
     )
     _longitudinal_lqr = PlatoonEnv._longitudinal_lqr
-    _lateral_pd = PlatoonEnv._lateral_pd
+    _lateral_preview_pid = PlatoonEnv._lateral_preview_pid
     _solve_lqr_gain = PlatoonEnv._solve_lqr_gain
     trajectory_to_control = PlatoonEnv.trajectory_to_control
     _agent_speed_km_h = PlatoonEnv._agent_speed_km_h
@@ -22,12 +22,15 @@ class _ControlHarness:
     _vehicle_length_m = PlatoonEnv._vehicle_length_m
     _cfg = PlatoonEnv._cfg
     _cfg_float = PlatoonEnv._cfg_float
+    _cfg_int = PlatoonEnv._cfg_int
 
     def __init__(self, *, speed_kmh: float = 18.0, follower_x: float = -15.74):
         self._agent_ids = ["agent0", "agent1", "agent2"]
         self.config = {
             "vehicle_length_m": 5.74,
             "initial_speed_km_h": 25.0,
+            "physics_world_step_size": 0.02,
+            "decision_repeat": 5,
         }
         self.platoon_config = SimpleNamespace(
             vehicle_length_m=5.74,
@@ -59,6 +62,7 @@ class _ControlHarness:
                 max_steering=60.0,
             ),
         }
+        self._lateral_preview_pid_state = {}
 
 
 def _trajectory(speed_mps: float) -> np.ndarray:
@@ -107,17 +111,47 @@ def test_follower_combines_gap_and_trajectory_speed() -> None:
     assert close_reference[1] < fast_reference[1]
 
 
-def test_pure_pursuit_turn_sign_and_straight_zero() -> None:
-    env = _ControlHarness(speed_kmh=18.0)
+def test_preview_pid_turn_sign_and_straight_zero() -> None:
     straight = _trajectory(6.0)
     left = straight.copy()
     left[:, 1] = np.linspace(0.2, 4.0, 8, dtype=np.float32)
     left[:, 2] = np.linspace(0.02, 0.35, 8, dtype=np.float32)
     right = left.copy()
     right[:, 1:] *= -1.0
-    assert env._lateral_pd("agent0", straight) == pytest.approx(0.0)
-    assert env._lateral_pd("agent0", left) > 0.0
-    assert env._lateral_pd("agent0", right) < 0.0
+    assert _ControlHarness()._lateral_preview_pid(
+        "agent0", straight
+    ) == pytest.approx(0.0)
+    assert _ControlHarness()._lateral_preview_pid("agent0", left) > 0.0
+    assert _ControlHarness()._lateral_preview_pid("agent0", right) < 0.0
+
+
+def test_preview_pid_uses_future_curvature() -> None:
+    near_straight = _trajectory(8.0)
+    future_curve = near_straight.copy()
+    future_curve[1:, 1] = np.linspace(0.8, 5.0, 7, dtype=np.float32)
+    future_curve[1:, 2] = np.linspace(0.08, 0.5, 7, dtype=np.float32)
+    straight_command = _ControlHarness(
+        speed_kmh=36.0
+    )._lateral_preview_pid("agent0", near_straight)
+    curve_command = _ControlHarness(
+        speed_kmh=36.0
+    )._lateral_preview_pid("agent0", future_curve)
+    assert curve_command > straight_command
+
+
+def test_preview_pid_integral_is_bounded_and_resettable() -> None:
+    env = _ControlHarness()
+    left = _trajectory(6.0)
+    left[:, 1] = 3.0
+    left[:, 2] = 0.3
+    for _ in range(100):
+        command = env._lateral_preview_pid("agent0", left)
+        assert -1.0 <= command <= 1.0
+    integral, _, initialized = env._lateral_preview_pid_state["agent0"]
+    assert initialized
+    assert abs(integral) <= 1.0
+    env._lateral_preview_pid_state = {}
+    assert env._lateral_preview_pid_state == {}
 
 
 def test_curve_preview_caps_speed_by_lateral_acceleration() -> None:
