@@ -28,6 +28,11 @@ def main() -> int:
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--states-per-episode", type=int, default=3)
     parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="write the complete JSON report without echoing it to stdout",
+    )
+    parser.add_argument(
         "--phase", choices=("development", "holdout"), required=True
     )
     parser.add_argument("--tracking-envelope-report", type=Path)
@@ -73,7 +78,8 @@ def main() -> int:
         states_per_episode=arguments.states_per_episode,
         calibration_phase=arguments.phase,
     )
-    print(json.dumps(report, indent=2, sort_keys=True))
+    if not arguments.quiet:
+        print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
 

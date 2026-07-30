@@ -56,6 +56,7 @@ class JointEpisodeSpec:
 @dataclass(frozen=True)
 class SimulatorBranchResult:
     reward: JointRewardResult
+    initial_speed_mps: np.ndarray
     replay_position_error_m: np.ndarray
     replay_heading_error_rad: np.ndarray
     executed_steps: np.ndarray
@@ -86,6 +87,7 @@ class SimulatorBranchResult:
             "tracking_heading_error_rad",
             "reference_curvature_max_per_m",
             "minimum_road_clearance_m",
+            "initial_speed_mps",
         ):
             value = np.asarray(getattr(self, name))
             if value.shape != (group_size, 3) or not np.isfinite(value).all():
@@ -224,6 +226,40 @@ def _maximum_reference_curvature(world_reference: np.ndarray) -> float:
     headings = np.unwrap(world_reference[:, 2])
     curvature = np.abs(np.diff(headings)) / np.maximum(distances, 1.0e-3)
     return float(curvature.max(initial=0.0))
+
+
+def _reference_arc_kinematics(
+    world_reference: np.ndarray, elapsed_s: float
+) -> tuple[float, float, float]:
+    points = np.asarray(world_reference[:, :2], dtype=np.float64)
+    cumulative = np.concatenate(
+        ([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+    )
+    source_times = np.arange(9, dtype=np.float64) * 0.5
+    query = float(np.clip(elapsed_s, 0.0, 4.0))
+    arc_position = float(np.interp(query, source_times, cumulative))
+    segment_speed = np.diff(cumulative) / 0.5
+    segment_centers = source_times[:-1] + 0.25
+    speed = float(
+        np.interp(
+            query,
+            segment_centers,
+            segment_speed,
+            left=segment_speed[0],
+            right=segment_speed[-1],
+        )
+    )
+    acceleration_values = np.gradient(segment_speed, 0.5)
+    acceleration = float(
+        np.interp(
+            query,
+            segment_centers,
+            acceleration_values,
+            left=acceleration_values[0],
+            right=acceleration_values[-1],
+        )
+    )
+    return arc_position, speed, acceleration
 
 
 def _tracking_error_against_reference(
@@ -475,6 +511,7 @@ class JointSimulatorBranchEvaluator:
         out = np.zeros(group_size, dtype=np.bool_)
         replay_position = np.zeros(group_size, dtype=np.float64)
         replay_heading = np.zeros(group_size, dtype=np.float64)
+        initial_speed = np.zeros((group_size, 3), dtype=np.float64)
         executed = np.zeros(group_size, dtype=np.int64)
         minimum_platoon = np.full(group_size, np.inf, dtype=np.float64)
         minimum_background = np.full(group_size, np.inf, dtype=np.float64)
@@ -497,7 +534,18 @@ class JointSimulatorBranchEvaluator:
                     "steering": [],
                     "throttle": [],
                     "target_speed_mps": [],
+                    "reference_arc_position_m": [],
+                    "actual_projected_arc_position_m": [],
+                    "reference_feedforward_speed_mps": [],
+                    "reference_feedforward_acceleration_mps2": [],
+                    "position_error_speed_increment_mps": [],
+                    "formation_gap_error_m": [],
+                    "formation_control_increment": [],
                     "actual_speed_mps": [],
+                    "actual_acceleration_mps2": [],
+                    "control_saturated": [],
+                    "lateral_heading_contaminated": [],
+                    "maximum_continuous_saturation_s": 0.0,
                 }
                 for _ in range(3)
             ]
@@ -530,6 +578,10 @@ class JointSimulatorBranchEvaluator:
                     )
 
                 initial = replay_pose.copy()
+                for role, agent_id in enumerate(AGENT_IDS):
+                    initial_speed[group, role] = float(
+                        getattr(env.agents[agent_id], "speed_km_h", 0.0)
+                    ) / 3.6
                 references = [
                     _local_reference_to_world(candidates[group, role], initial[role])
                     for role in range(3)
@@ -557,6 +609,64 @@ class JointSimulatorBranchEvaluator:
                         )
                         for role, agent_id in enumerate(AGENT_IDS)
                     }
+                    controller_diagnostics = []
+                    for role, agent_id in enumerate(AGENT_IDS):
+                        _, feedforward_speed, feedforward_acceleration = (
+                            _reference_arc_kinematics(
+                                references[role], elapsed
+                            )
+                        )
+                        target_speed_getter = getattr(
+                            env, "_trajectory_target_speed_mps", None
+                        )
+                        target_speed = (
+                            float(target_speed_getter(action[agent_id]))
+                            if callable(target_speed_getter)
+                            else _trajectory_target_speed_mps(
+                                action[agent_id]
+                            )
+                        )
+                        current_speed = float(
+                            getattr(
+                                env.agents[agent_id], "speed_km_h", 0.0
+                            )
+                        ) / 3.6
+                        speed_only_control = float(
+                            np.clip(
+                                -0.35 * (current_speed - target_speed),
+                                -1.0,
+                                1.0,
+                            )
+                        )
+                        if role == 0:
+                            formation_gap_error = 0.0
+                        else:
+                            follower_heading = float(current[role, 2])
+                            relative = (
+                                current[role - 1, :2] - current[role, :2]
+                            )
+                            actual_gap = float(
+                                math.cos(follower_heading) * relative[0]
+                                + math.sin(follower_heading) * relative[1]
+                            )
+                            desired_gap = float(
+                                getattr(env, "_desired_center_spacing_m")(
+                                    agent_id, AGENT_IDS[role - 1]
+                                )
+                            )
+                            formation_gap_error = desired_gap - actual_gap
+                        controller_diagnostics.append(
+                            {
+                                "feedforward_speed": feedforward_speed,
+                                "feedforward_acceleration": (
+                                    feedforward_acceleration
+                                ),
+                                "target_speed": target_speed,
+                                "current_speed": current_speed,
+                                "speed_only_control": speed_only_control,
+                                "formation_gap_error": formation_gap_error,
+                            }
+                        )
                     _, _, terminated, truncated, info = env.step(action)
                     executed_controls = (
                         getattr(env, "_pending_low_level_actions", {}) or {}
@@ -634,6 +744,10 @@ class JointSimulatorBranchEvaluator:
                             (step_index + 1) * dt_s,
                         )
                         trace = tracking_traces[group][role]
+                        reference_arc, _, _ = _reference_arc_kinematics(
+                            references[role], (step_index + 1) * dt_s
+                        )
+                        diagnostic = controller_diagnostics[role]
                         trace["reference_world"].append(reference_pose.tolist())
                         trace["nearest_reference_world"].append(
                             nearest_reference_pose.tolist()
@@ -653,9 +767,46 @@ class JointSimulatorBranchEvaluator:
                             float(controls[agent_id][1])
                         )
                         trace["target_speed_mps"].append(
-                            _trajectory_target_speed_mps(action[agent_id])
+                            diagnostic["target_speed"]
+                        )
+                        trace["reference_arc_position_m"].append(reference_arc)
+                        trace["actual_projected_arc_position_m"].append(
+                            reference_arc + longitudinal
+                        )
+                        trace["reference_feedforward_speed_mps"].append(
+                            diagnostic["feedforward_speed"]
+                        )
+                        trace[
+                            "reference_feedforward_acceleration_mps2"
+                        ].append(diagnostic["feedforward_acceleration"])
+                        trace[
+                            "position_error_speed_increment_mps"
+                        ].append(
+                            diagnostic["target_speed"]
+                            - diagnostic["feedforward_speed"]
+                        )
+                        trace["formation_gap_error_m"].append(
+                            diagnostic["formation_gap_error"]
+                        )
+                        trace["formation_control_increment"].append(
+                            float(controls[agent_id][1])
+                            - diagnostic["speed_only_control"]
                         )
                         trace["actual_speed_mps"].append(speeds[role][-1])
+                        trace["actual_acceleration_mps2"].append(
+                            (
+                                speeds[role][-1]
+                                - diagnostic["current_speed"]
+                            )
+                            / dt_s
+                        )
+                        trace["control_saturated"].append(
+                            abs(float(controls[agent_id][1])) >= 0.999
+                        )
+                        trace["lateral_heading_contaminated"].append(
+                            abs(lateral) > 0.5
+                            or abs(heading_error) > 0.1
+                        )
                         tracking_longitudinal[group, role] = max(
                             tracking_longitudinal[group, role],
                             abs(longitudinal),
@@ -769,6 +920,18 @@ class JointSimulatorBranchEvaluator:
                     1.0,
                 )
                 comfort[group] = float(np.mean(role_comfort))
+                for role in range(3):
+                    saturated = tracking_traces[group][role][
+                        "control_saturated"
+                    ]
+                    longest = 0
+                    current_run = 0
+                    for value in saturated:
+                        current_run = current_run + 1 if value else 0
+                        longest = max(longest, current_run)
+                    tracking_traces[group][role][
+                        "maximum_continuous_saturation_s"
+                    ] = longest * dt_s
             finally:
                 env.close()
 
@@ -788,6 +951,7 @@ class JointSimulatorBranchEvaluator:
         )
         return SimulatorBranchResult(
             reward=reward,
+            initial_speed_mps=initial_speed.astype(np.float32),
             replay_position_error_m=replay_position.astype(np.float32),
             replay_heading_error_rad=replay_heading.astype(np.float32),
             executed_steps=executed,

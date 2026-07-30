@@ -21,6 +21,12 @@ from evaluation.joint_simulator_branch import (
     JointSimulatorBranchEvaluator,
     capture_joint_pose_global,
 )
+from evaluation.longitudinal_tracking_diagnostics import (
+    audit_longitudinal_trajectory,
+    build_longitudinal_tracking_report,
+    summarize_longitudinal_control,
+    summarize_trajectory_audits,
+)
 from evaluation.tracking_diagnostics import (
     aggregate_tracking_rows,
     classify_false_safe,
@@ -488,6 +494,21 @@ def run_joint_reward_calibration(
     simulator_bad_rows = []
     details = []
     tracking_rows = []
+    longitudinal_audit_rows = []
+    longitudinal_state_reports = []
+    longitudinal_clean_errors = []
+    longitudinal_target_speed_delta = []
+    longitudinal_control_by_role = [
+        {
+            "target_delta": [],
+            "actual_acceleration": [],
+            "formation_increment": [],
+            "saturation": [],
+            "clean_longitudinal_error": [],
+            "contamination": [],
+        }
+        for _ in range(3)
+    ]
     false_safe_causes: dict[str, int] = {}
 
     for scenario in scenarios:
@@ -548,6 +569,64 @@ def run_joint_reward_calibration(
                             .numpy()
                             .astype(np.int64, copy=False)
                         )
+                        dynamic_anchor_violations = []
+                        for role in range(3):
+                            valid_modes = np.flatnonzero(
+                                values.mode_valid_mask[role]
+                            )
+                            for mode in valid_modes:
+                                anchor_audit = audit_longitudinal_trajectory(
+                                    values.coarse_trajectories[role, mode],
+                                    float(values.ego_state[role, 0]),
+                                )
+                                longitudinal_audit_rows.append(
+                                    {
+                                        "source": "dynamic_anchor",
+                                        "scenario": scenario[0],
+                                        "role": role,
+                                        "mode": int(mode),
+                                        "audit": anchor_audit,
+                                    }
+                                )
+                                if not anchor_audit.valid:
+                                    dynamic_anchor_violations.append(
+                                        {
+                                            "role": role,
+                                            "mode": int(mode),
+                                            "violations": list(
+                                                anchor_audit.violations
+                                            ),
+                                        }
+                                    )
+                        state_longitudinal_audits = []
+                        for group in range(candidates.shape[0]):
+                            group_audits = []
+                            for role in range(3):
+                                audit = audit_longitudinal_trajectory(
+                                    candidates[group, role],
+                                    float(values.ego_state[role, 0]),
+                                )
+                                longitudinal_audit_rows.append(
+                                    {
+                                        "source": f"diffusion_{variant}",
+                                        "scenario": scenario[0],
+                                        "role": role,
+                                        "mode": int(
+                                            sampled_modes[group, role]
+                                        ),
+                                        "audit": audit,
+                                    }
+                                )
+                                group_audits.append(audit.as_dict())
+                            state_longitudinal_audits.append(group_audits)
+                        state_longitudinal_report = (
+                            build_longitudinal_tracking_report(
+                                simulator, candidates
+                            )
+                        )
+                        longitudinal_state_reports.append(
+                            state_longitudinal_report
+                        )
                         for group in range(candidates.shape[0]):
                             for role in range(3):
                                 trace = simulator.tracking_traces[group][role]
@@ -572,6 +651,72 @@ def run_joint_reward_calibration(
                                             "heading_errors_rad"
                                         ],
                                     }
+                                )
+                                longitudinal = np.abs(
+                                    np.asarray(
+                                        trace["longitudinal_errors_m"],
+                                        dtype=np.float64,
+                                    )
+                                )
+                                uncontaminated = ~np.asarray(
+                                    trace[
+                                        "lateral_heading_contaminated"
+                                    ],
+                                    dtype=bool,
+                                )
+                                longitudinal_clean_errors.extend(
+                                    longitudinal[uncontaminated].tolist()
+                                )
+                                longitudinal_target_speed_delta.extend(
+                                    np.asarray(
+                                        trace[
+                                            "position_error_speed_increment_mps"
+                                        ],
+                                        dtype=np.float64,
+                                    ).tolist()
+                                )
+                                role_control = (
+                                    longitudinal_control_by_role[role]
+                                )
+                                role_control["target_delta"].extend(
+                                    np.asarray(
+                                        trace[
+                                            "position_error_speed_increment_mps"
+                                        ],
+                                        dtype=np.float64,
+                                    ).tolist()
+                                )
+                                role_control["actual_acceleration"].extend(
+                                    np.asarray(
+                                        trace[
+                                            "actual_acceleration_mps2"
+                                        ],
+                                        dtype=np.float64,
+                                    ).tolist()
+                                )
+                                role_control["formation_increment"].extend(
+                                    np.asarray(
+                                        trace[
+                                            "formation_control_increment"
+                                        ],
+                                        dtype=np.float64,
+                                    ).tolist()
+                                )
+                                role_control["saturation"].extend(
+                                    np.asarray(
+                                        trace["control_saturated"],
+                                        dtype=np.bool_,
+                                    ).tolist()
+                                )
+                                role_control[
+                                    "clean_longitudinal_error"
+                                ].extend(
+                                    longitudinal[
+                                        uncontaminated
+                                    ].tolist()
+                                )
+                                role_control["contamination"].extend(
+                                    (~uncontaminated).tolist()
                                 )
                         false_safe_indices = np.flatnonzero(
                             simulator.reward.unsafe & ~proxy.unsafe
@@ -651,6 +796,15 @@ def run_joint_reward_calibration(
                                     [dict(role) for role in group]
                                     for group in simulator.tracking_traces
                                 ],
+                                "longitudinal_trajectory_audits": (
+                                    state_longitudinal_audits
+                                ),
+                                "dynamic_anchor_violations": (
+                                    dynamic_anchor_violations
+                                ),
+                                "longitudinal_tracking_report": (
+                                    state_longitudinal_report.as_dict()
+                                ),
                             }
                         )
                         action = joint_trajectory_action(
@@ -726,9 +880,36 @@ def run_joint_reward_calibration(
         min_informative_groups=15,
     )
     tracking = aggregate_tracking_rows(tracking_rows)
+    longitudinal_audit = summarize_trajectory_audits(
+        longitudinal_audit_rows
+    )
+    longitudinal_blockers = sorted(
+        {
+            blocker
+            for state_report in longitudinal_state_reports
+            for blocker in state_report.blockers
+        }
+    )
+    longitudinal_clean_samples = sum(
+        report.clean_sample_count for report in longitudinal_state_reports
+    )
+    longitudinal_contaminated_samples = sum(
+        report.contaminated_sample_count
+        for report in longitudinal_state_reports
+    )
+    clean_longitudinal_array = np.asarray(
+        longitudinal_clean_errors, dtype=np.float64
+    )
+    target_speed_delta_array = np.asarray(
+        longitudinal_target_speed_delta, dtype=np.float64
+    )
     lateral_p95 = float(tracking["overall"]["lateral_m"]["p95"])
     heading_p95 = float(tracking["overall"]["heading_rad"]["p95"])
     tracking_passed = lateral_p95 <= 0.5 and heading_p95 <= 0.1
+
+    longitudinal_control_decomposition = summarize_longitudinal_control(
+        longitudinal_control_by_role
+    )
     passed = bool(
         calibration_phase == "holdout" and result.passed and tracking_passed
     )
@@ -758,6 +939,57 @@ def run_joint_reward_calibration(
             "lateral_p95_m": lateral_p95,
             "heading_p95_rad": heading_p95,
             "passed": tracking_passed,
+        },
+        "longitudinal_diagnostics": {
+            "trajectory_audit": longitudinal_audit,
+            "clean_sample_count": longitudinal_clean_samples,
+            "contaminated_sample_count": (
+                longitudinal_contaminated_samples
+            ),
+            "maximum_state_longitudinal_p95_m": max(
+                report.longitudinal_error_p95_m
+                for report in longitudinal_state_reports
+            ),
+            "overall_longitudinal_p95_m": (
+                float(np.percentile(clean_longitudinal_array, 95))
+                if clean_longitudinal_array.size
+                else float("inf")
+            ),
+            "overall_longitudinal_p99_m": (
+                float(np.percentile(clean_longitudinal_array, 99))
+                if clean_longitudinal_array.size
+                else float("inf")
+            ),
+            "overall_target_reference_speed_delta_p95_mps": (
+                float(
+                    np.percentile(
+                        np.abs(target_speed_delta_array), 95
+                    )
+                )
+                if target_speed_delta_array.size
+                else float("inf")
+            ),
+            "control_decomposition": (
+                longitudinal_control_decomposition
+            ),
+            "maximum_state_longitudinal_p99_m": max(
+                report.longitudinal_error_p99_m
+                for report in longitudinal_state_reports
+            ),
+            "maximum_target_reference_speed_delta_p95_mps": max(
+                report.target_reference_speed_delta_p95_mps
+                for report in longitudinal_state_reports
+            ),
+            "maximum_continuous_saturation_s": max(
+                report.maximum_continuous_saturation_s
+                for report in longitudinal_state_reports
+            ),
+            "maximum_stop_terminal_speed_mps": max(
+                report.maximum_stop_terminal_speed_mps
+                for report in longitudinal_state_reports
+            ),
+            "blockers": longitudinal_blockers,
+            "passed": not longitudinal_blockers,
         },
         "false_safe_causes": dict(sorted(false_safe_causes.items())),
         "passed": passed,

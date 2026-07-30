@@ -8,7 +8,11 @@ import pytest
 from evaluation.joint_simulator_branch import (
     JointEpisodeSpec,
     JointSimulatorBranchEvaluator,
+    _local_reference_to_world,
+    _reference_arc_kinematics,
     _tracking_error_against_reference,
+    _trajectory_target_speed_mps,
+    _world_reference_to_current_local,
 )
 from models.bev_planner import JointRewardError
 
@@ -112,6 +116,7 @@ def test_branch_recreates_each_group_and_tracks_for_four_seconds() -> None:
         np.stack((slow, fast)),
     )
     assert result.executed_steps.tolist() == [8, 8]
+    np.testing.assert_allclose(result.initial_speed_mps, 0.0)
     assert result.replay_position_error_m.tolist() == [0.0, 0.0]
     assert result.replay_heading_error_rad.tolist() == [0.0, 0.0]
     assert not result.reward.unsafe.any()
@@ -128,6 +133,17 @@ def test_branch_recreates_each_group_and_tracks_for_four_seconds() -> None:
     assert len(result.tracking_traces[0][0]["actual_world"]) == 8
     assert result.tracking_traces[0][0]["steering"] == pytest.approx([0.1] * 8)
     assert result.tracking_traces[0][0]["throttle"] == pytest.approx([0.2] * 8)
+    trace = result.tracking_traces[0][0]
+    assert len(trace["reference_arc_position_m"]) == 8
+    assert len(trace["actual_projected_arc_position_m"]) == 8
+    assert len(trace["reference_feedforward_speed_mps"]) == 8
+    assert len(trace["reference_feedforward_acceleration_mps2"]) == 8
+    assert len(trace["position_error_speed_increment_mps"]) == 8
+    assert len(trace["formation_gap_error_m"]) == 8
+    assert len(trace["formation_control_increment"]) == 8
+    assert len(trace["actual_acceleration_mps2"]) == 8
+    assert len(trace["lateral_heading_contaminated"]) == 8
+    assert trace["maximum_continuous_saturation_s"] == pytest.approx(0.0)
 
 
 def test_tracking_metric_does_not_turn_curve_timing_lag_into_lateral_error() -> None:
@@ -143,6 +159,26 @@ def test_tracking_metric_does_not_turn_curve_timing_lag_into_lateral_error() -> 
     assert lateral == pytest.approx(0.0, abs=1.0e-8)
     assert heading == pytest.approx(0.0, abs=1.0e-8)
     np.testing.assert_allclose(nearest, actual)
+
+
+def test_current_target_speed_mixes_position_lag_into_speed_command() -> None:
+    world = _local_reference_to_world(
+        _trajectory(4.0), np.asarray([0.0, 0.0, 0.0], dtype=np.float64)
+    )
+    # At t=1 s the reference is x=4 m, while the vehicle is deliberately 2 m
+    # behind.  The current target-speed extraction measures from the actual
+    # vehicle to the next two fixed-time points and therefore adds that 2 m
+    # position lag to the one-second speed command.
+    local = _world_reference_to_current_local(
+        world,
+        np.asarray([2.0, 0.0, 0.0], dtype=np.float64),
+        elapsed_s=1.0,
+    )
+    _, reference_speed, _ = _reference_arc_kinematics(world, elapsed_s=1.0)
+    current_target = _trajectory_target_speed_mps(local)
+    assert reference_speed == pytest.approx(4.0)
+    assert current_target == pytest.approx(6.0)
+    assert current_target - reference_speed == pytest.approx(2.0)
 
 
 def test_branch_is_deterministic_and_does_not_mutate_inputs() -> None:
