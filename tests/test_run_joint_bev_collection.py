@@ -113,6 +113,55 @@ def test_episode_sampling_is_deterministic_by_global_episode_index(
     assert all(0.0 <= spec.traffic_density <= 0.03 for spec in first)
 
 
+def test_diagnostic64_config_and_event_sampling_are_strict() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_diagnostic64.yaml")
+    )
+    assert sum(config.diagnostic_scenario_quotas.values()) == 64
+    assert tuple(config.diagnostic_scenario_quotas.values()) == (
+        13,
+        13,
+        13,
+        13,
+        12,
+    )
+    samples = tuple(_sample() for _ in range(4))
+    rollout = JointEpisodeRollout(
+        samples=samples,
+        simulator_steps=50,
+        rejected_joint_steps=0,
+        failure_reason=None,
+        terminated=False,
+        truncated=True,
+        sample_step_indices=(10, 20, 30, 40),
+        scenario_summary={
+            "scenario_triggered": True,
+            "scenario_trigger_step": 20,
+            "scenario_realized": True,
+            "scenario_realized_step": 20,
+        },
+    )
+    selected, steps, trigger = runner._select_diagnostic_samples(
+        rollout,
+        decision_dt_s=0.1,
+        offsets_s=(0.0, 1.0),
+        remaining=2,
+    )
+    assert len(selected) == 2
+    assert steps == (20, 30)
+    assert trigger == 20
+    with pytest.raises(runner.JointCollectionError, match="never triggered"):
+        runner._select_diagnostic_samples(
+            runner.replace(
+                rollout,
+                scenario_summary={"scenario_triggered": False},
+            ),
+            decision_dt_s=0.1,
+            offsets_s=(0.0, 1.0),
+            remaining=2,
+        )
+
+
 def test_cli_overrides_only_operational_collection_limits(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     config = runner.parse_args(

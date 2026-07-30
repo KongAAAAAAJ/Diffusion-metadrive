@@ -18,6 +18,7 @@ from models.bev_planner.mode_contract import (
     HardModeMaskConfig,
     TRAJECTORY_DIM,
     TRAJECTORY_STEPS,
+    validate_trajectory_kinematics,
 )
 
 
@@ -29,10 +30,6 @@ def _readonly(array: np.ndarray, *, dtype: np.dtype) -> np.ndarray:
     value = np.ascontiguousarray(array, dtype=dtype)
     value.setflags(write=False)
     return value
-
-
-def _wrap(angle: np.ndarray) -> np.ndarray:
-    return np.arctan2(np.sin(angle), np.cos(angle))
 
 
 @dataclass(frozen=True)
@@ -160,28 +157,6 @@ class LongitudinalTrajectoryAudit:
         }
 
 
-def _reachable_distance(
-    current_speed_mps: float,
-    acceleration_mps2: float,
-    config: LongitudinalAuditConfig,
-) -> np.ndarray:
-    speed = float(current_speed_mps)
-    distance = 0.0
-    values = []
-    for _ in range(TRAJECTORY_STEPS):
-        next_speed = float(
-            np.clip(
-                speed + acceleration_mps2 * config.dt_s,
-                0.0,
-                config.max_speed_mps,
-            )
-        )
-        distance += 0.5 * (speed + next_speed) * config.dt_s
-        values.append(distance)
-        speed = next_speed
-    return np.asarray(values, dtype=np.float64)
-
-
 def audit_longitudinal_trajectory(
     trajectory: np.ndarray,
     current_speed_mps: float,
@@ -208,109 +183,38 @@ def audit_longitudinal_trajectory(
             "current_speed_mps must be finite and non-negative"
         )
     cfg = config or LongitudinalAuditConfig()
-    poses = np.concatenate(
-        (
-            np.zeros((1, TRAJECTORY_DIM), dtype=np.float64),
-            values.astype(np.float64, copy=False),
-        ),
-        axis=0,
+    hard_config = HardModeMaskConfig(
+        dt_s=cfg.dt_s,
+        max_speed_mps=cfg.max_speed_mps,
+        min_accel_mps2=cfg.min_accel_mps2,
+        max_accel_mps2=cfg.max_accel_mps2,
+        max_yaw_rate_rad_s=cfg.max_yaw_rate_rad_s,
+        max_curvature_per_m=cfg.max_curvature_per_m,
+        max_lateral_accel_mps2=cfg.max_lateral_accel_mps2,
+        max_heading_alignment_error_rad=cfg.max_heading_alignment_error_rad,
+        min_forward_step_m=cfg.min_forward_step_m,
+        movement_epsilon_m=cfg.movement_epsilon_m,
     )
-    displacement = np.diff(poses[:, :2], axis=0)
-    distance = np.linalg.norm(displacement, axis=1)
-    previous_heading = poses[:-1, 2]
-    heading_delta = _wrap(np.diff(poses[:, 2]))
-    forward = (
-        displacement[:, 0] * np.cos(previous_heading)
-        + displacement[:, 1] * np.sin(previous_heading)
+    result = validate_trajectory_kinematics(
+        values,
+        float(current_speed_mps),
+        np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
+        hard_config,
     )
-    speed = distance / cfg.dt_s
-    acceleration = np.diff(
-        np.concatenate(([float(current_speed_mps)], speed))
-    ) / cfg.dt_s
-    yaw_rate = np.abs(heading_delta) / cfg.dt_s
-    curvature = np.abs(heading_delta) / np.maximum(
-        distance, cfg.movement_epsilon_m
-    )
-    lateral_acceleration = speed * yaw_rate
-    segment_heading = np.arctan2(displacement[:, 1], displacement[:, 0])
-    middle_heading = previous_heading + 0.5 * heading_delta
-    alignment = np.abs(_wrap(segment_heading - middle_heading))
-    alignment[distance <= cfg.movement_epsilon_m] = 0.0
-    cumulative = np.cumsum(distance)
-    reachable_min = _reachable_distance(
-        float(current_speed_mps), cfg.min_accel_mps2, cfg
-    )
-    reachable_max = _reachable_distance(
-        float(current_speed_mps), cfg.max_accel_mps2, cfg
-    )
-
-    violations = []
-    checks = (
-        (
-            "first_waypoint_at_time_zero",
-            (
-                float(current_speed_mps) > 0.5
-                and distance[0] <= cfg.movement_epsilon_m
-                and reachable_min[0] > cfg.movement_epsilon_m
-            ),
-        ),
-        ("non_forward_motion", np.any(forward < cfg.min_forward_step_m)),
-        ("speed_limit", np.any(speed > cfg.max_speed_mps + 1.0e-6)),
-        (
-            "acceleration_below_min",
-            np.any(acceleration < cfg.min_accel_mps2 - 1.0e-6),
-        ),
-        (
-            "acceleration_above_max",
-            np.any(acceleration > cfg.max_accel_mps2 + 1.0e-6),
-        ),
-        (
-            "yaw_rate_limit",
-            np.any(yaw_rate > cfg.max_yaw_rate_rad_s + 1.0e-6),
-        ),
-        (
-            "curvature_limit",
-            np.any(curvature > cfg.max_curvature_per_m + 1.0e-6),
-        ),
-        (
-            "lateral_acceleration_limit",
-            np.any(
-                lateral_acceleration
-                > cfg.max_lateral_accel_mps2 + 1.0e-6
-            ),
-        ),
-        (
-            "heading_alignment",
-            np.any(
-                alignment
-                > cfg.max_heading_alignment_error_rad + 1.0e-6
-            ),
-        ),
-        (
-            "outside_reachable_distance",
-            np.any(
-                (cumulative < reachable_min - 1.0e-6)
-                | (cumulative > reachable_max + 1.0e-6)
-            ),
-        ),
-    )
-    violations.extend(name for name, failed in checks if bool(failed))
     return LongitudinalTrajectoryAudit(
-        sample_times_s=(
-            np.arange(1, TRAJECTORY_STEPS + 1, dtype=np.float64) * cfg.dt_s
-        ),
-        segment_distance_m=distance,
-        forward_step_m=forward,
-        speed_mps=speed,
-        acceleration_mps2=acceleration,
-        yaw_rate_rad_s=yaw_rate,
-        curvature_per_m=curvature,
-        lateral_acceleration_mps2=lateral_acceleration,
-        heading_alignment_error_rad=alignment,
-        cumulative_distance_m=cumulative,
-        reachable_min_distance_m=reachable_min,
-        reachable_max_distance_m=reachable_max,
-        violations=tuple(violations),
+        sample_times_s=result.sample_times_s,
+        segment_distance_m=result.segment_distance_m,
+        forward_step_m=result.forward_step_m,
+        speed_mps=result.speed_mps,
+        acceleration_mps2=result.acceleration_mps2,
+        yaw_rate_rad_s=result.yaw_rate_rad_s,
+        curvature_per_m=result.curvature_per_m,
+        lateral_acceleration_mps2=result.lateral_acceleration_mps2,
+        heading_alignment_error_rad=result.heading_alignment_error_rad,
+        cumulative_distance_m=result.cumulative_distance_m,
+        reachable_min_distance_m=result.reachable_min_distance_m,
+        reachable_max_distance_m=result.reachable_max_distance_m,
+        violations=result.violations,
     )
 
 

@@ -10,6 +10,16 @@ from typing import Mapping
 
 import numpy as np
 
+from models.bev_planner.mode_contract import (
+    HardModeMaskConfig,
+    ModeContractError,
+    validate_trajectory_kinematics,
+)
+
+
+class NormalPlannerKinematicError(RuntimeError):
+    """Raised when a selected native trajectory violates the fixed-time contract."""
+
 
 @dataclass(frozen=True)
 class _Neighbor:
@@ -182,6 +192,14 @@ class PlatoonNormalPlanner:
         results = {}
         for agent_id, selected_index in zip(ordered_ids, selection):
             candidate = pools[agent_id][selected_index]
+            final_audit = self._candidate_kinematics_audit(
+                candidate.output, agents[agent_id]
+            )
+            if not final_audit.valid:
+                raise NormalPlannerKinematicError(
+                    f"{agent_id} selected trajectory is dynamically invalid: "
+                    + ",".join(final_audit.violations)
+                )
             results[agent_id] = candidate.output.astype(np.float32, copy=False)
             debug[agent_id].update(
                 fallback_used=False,
@@ -228,6 +246,7 @@ class PlatoonNormalPlanner:
             "background_collision_rejection_count": 0,
         }
         collision_hits: Counter[str] = Counter()
+        kinematic_hits: Counter[str] = Counter()
         source_lane = getattr(vehicle, "lane", None)
         if source_lane is None:
             return [], self._empty_debug("missing_source_lane", stats, collision_hits)
@@ -412,8 +431,15 @@ class PlatoonNormalPlanner:
                         if candidate_dense is None:
                             stats["road_rejection_count"] += 1
                             continue
-                        if not self._candidate_kinematics_valid(candidate_dense):
+                        output = candidate_dense[self._output_indices].astype(
+                            np.float32, copy=False
+                        )
+                        kinematic_audit = self._candidate_kinematics_audit(
+                            output, vehicle
+                        )
+                        if not kinematic_audit.valid:
                             stats["kinematic_rejection_count"] += 1
+                            kinematic_hits.update(kinematic_audit.violations)
                             continue
                         hits = self._collision_names_against_predictions(
                             candidate_dense,
@@ -424,9 +450,6 @@ class PlatoonNormalPlanner:
                             stats["background_collision_rejection_count"] += 1
                             collision_hits.update(hits)
                             continue
-                        output = candidate_dense[self._output_indices].astype(
-                            np.float32, copy=False
-                        )
                         score = self._score_candidate(
                             output,
                             target_world=target_world,
@@ -498,6 +521,9 @@ class PlatoonNormalPlanner:
             "generated_valid_candidate_count": len(candidates),
             **stats,
             "collision_rejections_by_object": dict(sorted(collision_hits.items())),
+            "kinematic_rejections_by_reason": dict(
+                sorted(kinematic_hits.items())
+            ),
             "source_envelope": self._serialize_envelope(source_envelope),
             "target_envelope": self._serialize_envelope(target_envelope),
             "reachable_progress_m": [float(reachable[0]), float(reachable[1])],
@@ -1114,17 +1140,31 @@ class PlatoonNormalPlanner:
             dtype=np.float64,
         )
 
-    def _candidate_kinematics_valid(self, trajectory: np.ndarray) -> bool:
-        if trajectory.shape != (len(self._dense_times), 3):
-            return False
-        if not np.isfinite(trajectory).all():
-            return False
-        sampled = trajectory[self._output_indices]
-        displacement = np.linalg.norm(np.diff(sampled[:, :2], axis=0), axis=1)
-        if np.any(displacement > self.MAX_SPEED_MPS * self.OUTPUT_DT_S + 0.5):
-            return False
-        heading_delta = np.abs(self._wrap_angle(np.diff(sampled[:, 2])))
-        return not np.any(heading_delta > 1.0 * self.OUTPUT_DT_S + 0.05)
+    @staticmethod
+    def _candidate_kinematics_audit(trajectory: np.ndarray, vehicle):
+        origin = np.asarray(
+            [
+                float(vehicle.position[0]),
+                float(vehicle.position[1]),
+                float(getattr(vehicle, "heading_theta", 0.0)),
+            ],
+            dtype=np.float64,
+        )
+        speed = max(
+            float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
+            0.0,
+        )
+        try:
+            return validate_trajectory_kinematics(
+                trajectory,
+                speed,
+                origin,
+                HardModeMaskConfig(),
+            )
+        except ModeContractError as exc:
+            raise NormalPlannerKinematicError(
+                f"invalid Normal planner trajectory tensor: {exc}"
+            ) from exc
 
     def _traffic_envelope(self, env, vehicle, lane) -> _TrafficEnvelope:
         try:

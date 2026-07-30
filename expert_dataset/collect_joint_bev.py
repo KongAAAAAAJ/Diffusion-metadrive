@@ -16,7 +16,10 @@ import numpy as np
 
 from envs.observations.semantic_bev import MetaDriveSceneAdapter, SemanticBEVConfig, SimulatorSnapshot
 from envs.platoon_env import PlatoonEnv
-from models.bev_planner.dynamic_anchors import SimulatorDynamicAnchorGenerator
+from models.bev_planner.dynamic_anchors import (
+    DynamicAnchorError,
+    SimulatorDynamicAnchorGenerator,
+)
 from models.bev_planner.mode_contract import (
     NUM_MODES,
     TRAJECTORY_DIM,
@@ -25,11 +28,15 @@ from models.bev_planner.mode_contract import (
     ModeIndex,
     build_hard_mode_valid_mask,
     label_gt_mode,
+    validate_trajectory_kinematics,
 )
 from models.controller.LQRFollowerController import LQRFollowerController
 from models.controller.PIDController import PIDTrajectoryController, _world_trajectory_to_ego_local
 from models.decisioner.rule_decisioner import make_rule_maker, select_controller_by_formation
-from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
+from models.platoon_planner.platoon_normal_planner import (
+    NormalPlannerKinematicError,
+    PlatoonNormalPlanner,
+)
 
 try:
     from metadrive.obs.observation_base import DummyObservation
@@ -209,6 +216,8 @@ class JointEpisodeRollout:
     terminated: bool
     truncated: bool
     joint_step_rejection_counts: Mapping[str, int] = field(default_factory=dict)
+    sample_step_indices: tuple[int, ...] = ()
+    scenario_summary: Mapping[str, object] = field(default_factory=dict)
 
 
 class SensorlessJointBEVPlatoonEnv(PlatoonEnv):
@@ -306,7 +315,13 @@ class RulePlannerExpert:
         if dynamic_roles:
             env.apply_dynamic_roles(dynamic_roles)
 
-        trajectories = self.planner.plan(env, decisions)
+        try:
+            trajectories = self.planner.plan(env, decisions)
+        except NormalPlannerKinematicError as exc:
+            raise JointCollectionError(
+                "Normal planner selected a dynamically invalid native trajectory",
+                reason_code="normal_planner_final_kinematic_invalid",
+            ) from exc
         planner_debug = self.planner.get_last_debug() or {}
         joint_debug = planner_debug.get("_joint", {})
         if isinstance(joint_debug, Mapping) and bool(
@@ -513,6 +528,17 @@ class JointBEVSampleBuilder:
                 speed_mps,
                 anchors.topology,
             )
+            for mode_index in np.flatnonzero(mask_result.valid_mask):
+                audit = validate_trajectory_kinematics(
+                    anchors.coarse_trajectories[int(mode_index)],
+                    speed_mps,
+                    np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
+                )
+                if not audit.valid:
+                    raise ModeContractError(
+                        f"{agent_id} hard-valid anchor {int(mode_index)} is "
+                        f"dynamically invalid: {','.join(audit.violations)}"
+                    )
             bev_values.append(bev)
             ego_states.append(self._ego_state(env, agent_id))
             relations.append(
@@ -539,7 +565,7 @@ class JointBEVSampleBuilder:
 
         try:
             return self._build_model_inputs(env)
-        except ModeContractError as exc:
+        except (ModeContractError, DynamicAnchorError) as exc:
             raise JointCollectionError(
                 "online state violated the hard mode contract",
                 reason_code="mode_contract",
@@ -565,6 +591,17 @@ class JointBEVSampleBuilder:
                     raise JointCollectionError(
                         f"expert trajectory for {agent_id} is not [8,3]"
                     )
+                expert_audit = validate_trajectory_kinematics(
+                    expert_local,
+                    float(model_inputs.ego_state[role_index, 0]),
+                    np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
+                )
+                if not expert_audit.valid:
+                    raise JointStepRejected(
+                        f"expert trajectory for {agent_id} is dynamically "
+                        f"invalid: {','.join(expert_audit.violations)}",
+                        reason_code="normal_planner_final_kinematic_invalid",
+                    )
                 gt_mode = label_gt_mode(
                     expert_step.rule_actions[agent_id],
                     expert_local,
@@ -574,7 +611,7 @@ class JointBEVSampleBuilder:
                 poses.append(self._global_pose(vehicle))
                 gt_modes.append(gt_mode)
                 expert_values.append(expert_local)
-        except ModeContractError as exc:
+        except (ModeContractError, DynamicAnchorError) as exc:
             raise JointStepRejected(
                 "one agent violated the mode/label contract; discard the entire joint step",
                 reason_code="gt_mode_mask_conflict",
@@ -621,6 +658,7 @@ def collect_joint_episode(
     sample_builder.reset()
     dt_s = simulator_decision_dt_s(env)
     samples: list[JointBEVSample] = []
+    sample_step_indices: list[int] = []
     rejected_joint_steps = 0
     joint_step_rejection_counts: Counter[str] = Counter()
     simulator_steps = 0
@@ -634,6 +672,7 @@ def collect_joint_episode(
         if sample_builder.history_ready():
             try:
                 samples.append(sample_builder.build_sample(env, expert_step))
+                sample_step_indices.append(int(joint_step))
             except JointStepRejected as exc:
                 # The expert controls remain valid, but a joint label/mask
                 # conflict makes all three aligned training rows unusable.
@@ -667,6 +706,7 @@ def collect_joint_episode(
         episode_truncated = bool(truncated.get("__all__", False))
         if failure_reason is not None or episode_terminated or episode_truncated:
             break
+    scenario_summary: Mapping[str, object] = {}
     scenario_orchestrator = getattr(env, "_scenario_orchestrator", None)
     if (
         failure_reason is None
@@ -676,6 +716,12 @@ def collect_joint_episode(
         scenario_summary = scenario_orchestrator.get_episode_summary()
         if not bool(scenario_summary.get("scenario_realized", False)):
             failure_reason = "scenario_not_realized"
+    if failure_reason is None and rejected_joint_steps:
+        primary_reason = sorted(
+            joint_step_rejection_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[0][0]
+        failure_reason = f"joint_step_rejected:{primary_reason}"
     return JointEpisodeRollout(
         samples=tuple(samples),
         simulator_steps=simulator_steps,
@@ -684,6 +730,8 @@ def collect_joint_episode(
         terminated=episode_terminated,
         truncated=episode_truncated,
         joint_step_rejection_counts=dict(joint_step_rejection_counts),
+        sample_step_indices=tuple(sample_step_indices),
+        scenario_summary=dict(scenario_summary),
     )
 
 

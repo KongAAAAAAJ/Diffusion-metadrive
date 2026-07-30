@@ -160,6 +160,64 @@ class HardModeMaskResult:
             object.__setattr__(self, name, _frozen_bool_mask(getattr(self, name), name=name))
 
 
+@dataclass(frozen=True)
+class TrajectoryKinematicResult:
+    """Immutable fixed-time trajectory feasibility result.
+
+    The vectors contain one value for each future sample at
+    ``0.5, 1.0, ..., 4.0`` seconds.  Shape/type failures are contract errors;
+    physical failures are reported through ``violations``.
+    """
+
+    sample_times_s: np.ndarray
+    segment_distance_m: np.ndarray
+    forward_step_m: np.ndarray
+    speed_mps: np.ndarray
+    acceleration_mps2: np.ndarray
+    yaw_rate_rad_s: np.ndarray
+    curvature_per_m: np.ndarray
+    lateral_acceleration_mps2: np.ndarray
+    heading_alignment_error_rad: np.ndarray
+    cumulative_distance_m: np.ndarray
+    reachable_min_distance_m: np.ndarray
+    reachable_max_distance_m: np.ndarray
+    violations: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name in (
+            "sample_times_s",
+            "segment_distance_m",
+            "forward_step_m",
+            "speed_mps",
+            "acceleration_mps2",
+            "yaw_rate_rad_s",
+            "curvature_per_m",
+            "lateral_acceleration_mps2",
+            "heading_alignment_error_rad",
+            "cumulative_distance_m",
+            "reachable_min_distance_m",
+            "reachable_max_distance_m",
+        ):
+            value = np.asarray(getattr(self, name), dtype=np.float64)
+            if value.shape != (TRAJECTORY_STEPS,) or not np.isfinite(value).all():
+                raise ModeContractError(
+                    f"{name} must be finite [{TRAJECTORY_STEPS}]"
+                )
+            frozen = np.ascontiguousarray(value)
+            frozen.setflags(write=False)
+            object.__setattr__(self, name, frozen)
+        if (
+            not isinstance(self.violations, tuple)
+            or len(set(self.violations)) != len(self.violations)
+            or any(not isinstance(value, str) for value in self.violations)
+        ):
+            raise ModeContractError("violations must be a unique tuple of strings")
+
+    @property
+    def valid(self) -> bool:
+        return not self.violations
+
+
 def _validate_bev(bev: np.ndarray) -> np.ndarray:
     array = np.asarray(bev)
     expected = SemanticBEVConfig().shape
@@ -295,48 +353,165 @@ def _road_mask(bev: np.ndarray, trajectories: np.ndarray, config: HardModeMaskCo
     )
 
 
-def _trajectory_is_kinematic(
-    trajectory: np.ndarray,
-    ego_speed_mps: float,
+def _reachable_distance(
+    current_speed_mps: float,
+    acceleration_mps2: float,
     config: HardModeMaskConfig,
-) -> bool:
+) -> np.ndarray:
+    speed = float(current_speed_mps)
+    distance = 0.0
+    values = []
+    for _ in range(TRAJECTORY_STEPS):
+        next_speed = float(
+            np.clip(
+                speed + acceleration_mps2 * config.dt_s,
+                0.0,
+                config.max_speed_mps,
+            )
+        )
+        distance += 0.5 * (speed + next_speed) * config.dt_s
+        values.append(distance)
+        speed = next_speed
+    return np.asarray(values, dtype=np.float64)
+
+
+def validate_trajectory_kinematics(
+    trajectory: np.ndarray,
+    current_speed_mps: float,
+    origin_pose: np.ndarray,
+    config: HardModeMaskConfig | None = None,
+) -> TrajectoryKinematicResult:
+    """Validate one fixed-time local or world-frame trajectory.
+
+    ``origin_pose`` must use the same coordinate frame as ``trajectory``.
+    This makes the calculation usable both for ego-local dataset tensors and
+    world-frame Normal-planner candidates without changing the physics.
+    """
+
+    try:
+        values = np.asarray(trajectory, dtype=np.float64)
+        origin = np.asarray(origin_pose, dtype=np.float64)
+        speed0 = float(current_speed_mps)
+    except (TypeError, ValueError) as exc:
+        raise ModeContractError("trajectory kinematic inputs must be numeric") from exc
+    if values.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM):
+        raise ModeContractError(
+            f"trajectory must have shape [{TRAJECTORY_STEPS},{TRAJECTORY_DIM}]"
+        )
+    if origin.shape != (TRAJECTORY_DIM,):
+        raise ModeContractError("origin_pose must have shape [3]")
+    if (
+        not np.isfinite(values).all()
+        or not np.isfinite(origin).all()
+        or not np.isfinite(speed0)
+        or speed0 < 0.0
+    ):
+        raise ModeContractError(
+            "trajectory, origin_pose and current_speed_mps must be finite; "
+            "speed must be non-negative"
+        )
+    cfg = config or HardModeMaskConfig()
+    if not isinstance(cfg, HardModeMaskConfig):
+        raise ModeContractError("config must be a HardModeMaskConfig instance")
+
     poses = np.concatenate(
-        [np.zeros((1, TRAJECTORY_DIM), dtype=np.float64), trajectory], axis=0
+        [origin[None], values], axis=0
     )
     segments = np.diff(poses[:, :2], axis=0)
     distances = np.linalg.norm(segments, axis=1)
     heading_delta = _wrap_to_pi(np.diff(poses[:, 2]))
     previous_heading = poses[:-1, 2]
-    forward = segments[:, 0] * np.cos(previous_heading) + segments[:, 1] * np.sin(previous_heading)
-    if np.any(forward < config.min_forward_step_m):
-        return False
-
-    speeds = distances / config.dt_s
-    if np.any(speeds > config.max_speed_mps + 1e-6):
-        return False
-    accelerations = np.diff(np.concatenate([[ego_speed_mps], speeds])) / config.dt_s
-    if np.any(accelerations < config.min_accel_mps2 - 1e-6):
-        return False
-    if np.any(accelerations > config.max_accel_mps2 + 1e-6):
-        return False
-
-    yaw_rate = np.abs(heading_delta) / config.dt_s
-    if np.any(yaw_rate > config.max_yaw_rate_rad_s + 1e-6):
-        return False
+    forward = (
+        segments[:, 0] * np.cos(previous_heading)
+        + segments[:, 1] * np.sin(previous_heading)
+    )
+    speeds = distances / cfg.dt_s
+    accelerations = (
+        np.diff(np.concatenate([[speed0], speeds])) / cfg.dt_s
+    )
+    yaw_rate = np.abs(heading_delta) / cfg.dt_s
     lateral_acceleration = speeds * yaw_rate
-    if np.any(lateral_acceleration > config.max_lateral_accel_mps2 + 1e-6):
-        return False
-
-    moving = distances > config.movement_epsilon_m
-    if np.any(np.abs(heading_delta[moving]) / distances[moving] > config.max_curvature_per_m + 1e-6):
-        return False
+    curvature = np.zeros_like(distances)
+    moving = distances > cfg.movement_epsilon_m
+    curvature[moving] = np.abs(heading_delta[moving]) / distances[moving]
+    alignment_error = np.zeros_like(distances)
     if np.any(moving):
         segment_heading = np.arctan2(segments[moving, 1], segments[moving, 0])
         middle_heading = previous_heading[moving] + 0.5 * heading_delta[moving]
-        alignment_error = np.abs(_wrap_to_pi(segment_heading - middle_heading))
-        if np.any(alignment_error > config.max_heading_alignment_error_rad + 1e-6):
-            return False
-    return True
+        alignment_error[moving] = np.abs(
+            _wrap_to_pi(segment_heading - middle_heading)
+        )
+    cumulative = np.cumsum(distances)
+    reachable_min = _reachable_distance(speed0, cfg.min_accel_mps2, cfg)
+    reachable_max = _reachable_distance(speed0, cfg.max_accel_mps2, cfg)
+    epsilon = 1.0e-6
+    violations = []
+    checks = (
+        (
+            "first_waypoint_at_time_zero",
+            (
+                speed0 > 0.5
+                and distances[0] <= cfg.movement_epsilon_m
+                and reachable_min[0] > cfg.movement_epsilon_m
+            ),
+        ),
+        ("non_forward_motion", np.any(forward < cfg.min_forward_step_m)),
+        ("speed_limit", np.any(speeds > cfg.max_speed_mps + epsilon)),
+        (
+            "acceleration_below_min",
+            np.any(accelerations < cfg.min_accel_mps2 - epsilon),
+        ),
+        (
+            "acceleration_above_max",
+            np.any(accelerations > cfg.max_accel_mps2 + epsilon),
+        ),
+        (
+            "yaw_rate_limit",
+            np.any(yaw_rate > cfg.max_yaw_rate_rad_s + epsilon),
+        ),
+        (
+            "curvature_limit",
+            np.any(curvature > cfg.max_curvature_per_m + epsilon),
+        ),
+        (
+            "lateral_acceleration_limit",
+            np.any(
+                lateral_acceleration
+                > cfg.max_lateral_accel_mps2 + epsilon
+            ),
+        ),
+        (
+            "heading_alignment",
+            np.any(
+                alignment_error
+                > cfg.max_heading_alignment_error_rad + epsilon
+            ),
+        ),
+        (
+            "outside_reachable_distance",
+            np.any(cumulative < reachable_min - 1.0e-3)
+            or np.any(cumulative > reachable_max + 1.0e-3),
+        ),
+    )
+    for name, failed in checks:
+        if bool(failed):
+            violations.append(name)
+    return TrajectoryKinematicResult(
+        sample_times_s=np.arange(1, TRAJECTORY_STEPS + 1, dtype=np.float64)
+        * cfg.dt_s,
+        segment_distance_m=distances,
+        forward_step_m=forward,
+        speed_mps=speeds,
+        acceleration_mps2=accelerations,
+        yaw_rate_rad_s=yaw_rate,
+        curvature_per_m=curvature,
+        lateral_acceleration_mps2=lateral_acceleration,
+        heading_alignment_error_rad=alignment_error,
+        cumulative_distance_m=cumulative,
+        reachable_min_distance_m=reachable_min,
+        reachable_max_distance_m=reachable_max,
+        violations=tuple(violations),
+    )
 
 
 def _kinematic_mask(
@@ -346,7 +521,12 @@ def _kinematic_mask(
 ) -> np.ndarray:
     return np.asarray(
         [
-            _trajectory_is_kinematic(trajectory, ego_speed_mps, config)
+            validate_trajectory_kinematics(
+                trajectory,
+                ego_speed_mps,
+                np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
+                config,
+            ).valid
             for trajectory in trajectories
         ],
         dtype=bool,

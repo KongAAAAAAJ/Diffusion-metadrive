@@ -17,6 +17,7 @@ from expert_dataset.collect_joint_bev import (
     JointCollectionError,
     SensorlessJointBEVPlatoonEnv,
     collect_joint_episode,
+    simulator_decision_dt_s,
 )
 from expert_dataset.joint_bev_storage import (
     EpisodeSplitConfig,
@@ -24,10 +25,20 @@ from expert_dataset.joint_bev_storage import (
     fingerprint_payload,
 )
 from scenarios.definitions import SCENARIO_BY_ID, get_scenario_definition
+from scenarios.bev_round13_contract import (
+    PRIMARY_S5_S9_SCENARIOS,
+    primary_scenario_contract,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TOP_LEVEL_KEYS = {"dataset", "split", "collection", "env_config"}
+TOP_LEVEL_KEYS = {
+    "dataset",
+    "split",
+    "collection",
+    "env_config",
+    "diagnostic_64",
+}
 SECTION_KEYS = {
     "dataset": {"name", "output_root"},
     "split": {"train_ratio", "val_ratio", "test_ratio", "seed"},
@@ -40,6 +51,12 @@ SECTION_KEYS = {
         "scenario_weights",
         "traffic_density_min",
         "traffic_density_max",
+    },
+    "diagnostic_64": {
+        "enabled",
+        "scenario_quotas",
+        "sample_offsets_after_trigger_s",
+        "max_attempts_per_scenario",
     },
 }
 
@@ -58,6 +75,9 @@ class JointCollectionRunConfig:
     traffic_density_min: float
     traffic_density_max: float
     env_config: Mapping[str, object]
+    diagnostic_scenario_quotas: Mapping[str, int] | None = None
+    diagnostic_sample_offsets_s: tuple[float, ...] = ()
+    diagnostic_max_attempts_per_scenario: int = 0
 
     def __post_init__(self) -> None:
         if self.target_joint_steps <= 0:
@@ -113,6 +133,48 @@ class JointCollectionRunConfig:
             }
         )
         object.__setattr__(self, "env_config", env_config)
+        quotas = self.diagnostic_scenario_quotas
+        if quotas is not None:
+            expected = tuple(value[0] for value in PRIMARY_S5_S9_SCENARIOS)
+            if tuple(quotas) != expected:
+                raise ValueError(
+                    "diagnostic_64 scenario_quotas must use ordered S5--S9"
+                )
+            normalized_quotas = {}
+            for scenario_id, value in quotas.items():
+                if isinstance(value, bool) or int(value) <= 0:
+                    raise ValueError(
+                        "diagnostic_64 scenario quotas must be positive integers"
+                    )
+                normalized_quotas[str(scenario_id)] = int(value)
+            if sum(normalized_quotas.values()) != self.target_joint_steps:
+                raise ValueError(
+                    "diagnostic_64 quotas must sum to target_joint_steps"
+                )
+            offsets = tuple(float(value) for value in self.diagnostic_sample_offsets_s)
+            if (
+                not offsets
+                or any(not np.isfinite(value) or value < 0.0 for value in offsets)
+                or tuple(sorted(set(offsets))) != offsets
+            ):
+                raise ValueError(
+                    "diagnostic_64 sample offsets must be unique, ordered and non-negative"
+                )
+            if int(self.diagnostic_max_attempts_per_scenario) <= 0:
+                raise ValueError(
+                    "diagnostic_64 max_attempts_per_scenario must be positive"
+                )
+            if self.resume:
+                raise ValueError("diagnostic_64 collection does not support resume")
+            object.__setattr__(
+                self, "diagnostic_scenario_quotas", normalized_quotas
+            )
+            object.__setattr__(self, "diagnostic_sample_offsets_s", offsets)
+            object.__setattr__(
+                self,
+                "diagnostic_max_attempts_per_scenario",
+                int(self.diagnostic_max_attempts_per_scenario),
+            )
 
     def immutable_fingerprint(self) -> str:
         return fingerprint_payload(
@@ -124,6 +186,22 @@ class JointCollectionRunConfig:
                 "traffic_density_min": self.traffic_density_min,
                 "traffic_density_max": self.traffic_density_max,
                 "env_config": dict(self.env_config),
+                "diagnostic_64": (
+                    None
+                    if self.diagnostic_scenario_quotas is None
+                    else {
+                        "scenario_quotas": dict(
+                            self.diagnostic_scenario_quotas
+                        ),
+                        "sample_offsets_after_trigger_s": list(
+                            self.diagnostic_sample_offsets_s
+                        ),
+                        "max_attempts_per_scenario": (
+                            self.diagnostic_max_attempts_per_scenario
+                        ),
+                        "scenario_contract": primary_scenario_contract(),
+                    }
+                ),
             }
         )
 
@@ -181,6 +259,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
     split = _strict_section(payload, "split")
     collection = _strict_section(payload, "collection")
     env_config = _strict_section(payload, "env_config", required=False)
+    diagnostic = _strict_section(
+        payload, "diagnostic_64", required=False
+    )
 
     dataset_name = str(_required(dataset, "dataset", "name")).strip()
     if not dataset_name or Path(dataset_name).name != dataset_name:
@@ -196,6 +277,39 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
     resume = _required(collection, "collection", "resume")
     if not isinstance(resume, bool):
         raise ValueError("collection.resume must be a boolean")
+
+    diagnostic_enabled = diagnostic.get("enabled", False)
+    if not isinstance(diagnostic_enabled, bool):
+        raise ValueError("diagnostic_64.enabled must be bool")
+    diagnostic_quotas = None
+    diagnostic_offsets: tuple[float, ...] = ()
+    diagnostic_max_attempts = 0
+    if diagnostic_enabled:
+        raw_quotas = _required(
+            diagnostic, "diagnostic_64", "scenario_quotas"
+        )
+        raw_offsets = _required(
+            diagnostic,
+            "diagnostic_64",
+            "sample_offsets_after_trigger_s",
+        )
+        if not isinstance(raw_quotas, Mapping):
+            raise ValueError("diagnostic_64.scenario_quotas must be a mapping")
+        if not isinstance(raw_offsets, (list, tuple)):
+            raise ValueError(
+                "diagnostic_64.sample_offsets_after_trigger_s must be a list"
+            )
+        diagnostic_quotas = {
+            str(name): int(value) for name, value in raw_quotas.items()
+        }
+        diagnostic_offsets = tuple(float(value) for value in raw_offsets)
+        diagnostic_max_attempts = int(
+            _required(
+                diagnostic,
+                "diagnostic_64",
+                "max_attempts_per_scenario",
+            )
+        )
 
     return JointCollectionRunConfig(
         config_path=config_path,
@@ -225,6 +339,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
             _required(collection, "collection", "traffic_density_max")
         ),
         env_config=env_config,
+        diagnostic_scenario_quotas=diagnostic_quotas,
+        diagnostic_sample_offsets_s=diagnostic_offsets,
+        diagnostic_max_attempts_per_scenario=diagnostic_max_attempts,
     )
 
 
@@ -271,6 +388,105 @@ def sample_episode_spec(
     )
 
 
+def sample_episode_spec_for_scenario(
+    config: JointCollectionRunConfig,
+    episode_index: int,
+    scenario_id: str,
+) -> JointEpisodeSpec:
+    """Sample episode nuisance variables while freezing the diagnostic scenario."""
+
+    if scenario_id not in config.scenario_weights:
+        raise ValueError(f"scenario is not enabled by collection config: {scenario_id}")
+    rng = _episode_rng(config.start_seed, episode_index)
+    scenario = get_scenario_definition(scenario_id)
+    route_by_scenario = dict(PRIMARY_S5_S9_SCENARIOS)
+    if scenario_id not in route_by_scenario:
+        raise ValueError(f"diagnostic scenario is outside S5--S9: {scenario_id}")
+    local_route = route_by_scenario[scenario_id]
+    density = float(
+        rng.uniform(config.traffic_density_min, config.traffic_density_max)
+    )
+    if scenario.override_traffic_density is not None:
+        density = min(density, float(scenario.override_traffic_density))
+    initial_speed = scenario.ego_initial_speed_km_h
+    if isinstance(initial_speed, (tuple, list)) and len(initial_speed) == 2:
+        initial_speed_km_h = float(
+            rng.uniform(float(initial_speed[0]), float(initial_speed[1]))
+        )
+    elif initial_speed is None:
+        initial_speed_km_h = float(
+            config.env_config.get("initial_speed_km_h", 25.0)
+        )
+    else:
+        initial_speed_km_h = float(initial_speed)
+    return JointEpisodeSpec(
+        scenario_id=scenario_id,
+        local_route=local_route,
+        spawn_seed=int(rng.randint(0, 2**31 - 1)),
+        traffic_density=density,
+        initial_speed_km_h=initial_speed_km_h,
+    )
+
+
+def _select_diagnostic_samples(
+    rollout,
+    *,
+    decision_dt_s: float,
+    offsets_s: tuple[float, ...],
+    remaining: int,
+) -> tuple[tuple[object, ...], tuple[int, ...], int]:
+    summary = dict(rollout.scenario_summary)
+    if not bool(summary.get("scenario_triggered", False)):
+        raise JointCollectionError(
+            "diagnostic episode never triggered its dangerous event",
+            reason_code="diagnostic_event_not_triggered",
+        )
+    trigger_step = summary.get("scenario_trigger_step")
+    if (
+        isinstance(trigger_step, bool)
+        or not isinstance(trigger_step, (int, np.integer))
+        or int(trigger_step) < 0
+    ):
+        raise JointCollectionError(
+            "diagnostic episode has no valid trigger step",
+            reason_code="diagnostic_event_not_triggered",
+        )
+    if len(rollout.samples) != len(rollout.sample_step_indices):
+        raise JointCollectionError(
+            "sample/step metadata are misaligned",
+            reason_code="diagnostic_sample_alignment",
+        )
+    selected_indices: list[int] = []
+    selected_steps: list[int] = []
+    for offset_s in offsets_s[:remaining]:
+        target_step = int(trigger_step) + int(round(offset_s / decision_dt_s))
+        eligible = [
+            (index, int(step))
+            for index, step in enumerate(rollout.sample_step_indices)
+            if int(step) >= target_step and index not in selected_indices
+        ]
+        if not eligible:
+            raise JointCollectionError(
+                f"no history-ready sample exists after trigger+{offset_s:.1f}s",
+                reason_code="diagnostic_event_sample_missing",
+            )
+        index, actual_step = min(
+            eligible, key=lambda value: (value[1] - target_step, value[1])
+        )
+        selected_indices.append(index)
+        selected_steps.append(actual_step)
+    if not selected_indices:
+        raise JointCollectionError(
+            "diagnostic episode selected no samples",
+            reason_code="diagnostic_event_sample_missing",
+        )
+    return (
+        tuple(rollout.samples[index] for index in selected_indices),
+        tuple(selected_steps),
+        int(trigger_step),
+    )
+
+
 def _configure_episode(
     env: SensorlessJointBEVPlatoonEnv,
     spec: JointEpisodeSpec,
@@ -311,12 +527,58 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
             return summary
 
         env = SensorlessJointBEVPlatoonEnv(dict(config.env_config))
+        diagnostic_quotas = (
+            None
+            if config.diagnostic_scenario_quotas is None
+            else dict(config.diagnostic_scenario_quotas)
+        )
+        diagnostic_counts = (
+            None
+            if diagnostic_quotas is None
+            else {name: 0 for name in diagnostic_quotas}
+        )
+        diagnostic_attempts = (
+            None
+            if diagnostic_quotas is None
+            else {name: 0 for name in diagnostic_quotas}
+        )
+        diagnostic_order = (
+            ()
+            if diagnostic_quotas is None
+            else tuple(diagnostic_quotas)
+        )
         try:
             while store.total_joint_samples < config.target_joint_steps:
                 episode_index = store.next_episode_index
                 if config.max_episodes > 0 and episode_index >= config.max_episodes:
                     break
-                spec = sample_episode_spec(config, episode_index)
+                if diagnostic_quotas is None:
+                    spec = sample_episode_spec(config, episode_index)
+                else:
+                    incomplete = [
+                        scenario_id
+                        for scenario_id in diagnostic_order
+                        if diagnostic_counts[scenario_id]
+                        < diagnostic_quotas[scenario_id]
+                    ]
+                    if not incomplete:
+                        break
+                    scenario_id = incomplete[
+                        episode_index % len(incomplete)
+                    ]
+                    if (
+                        diagnostic_attempts[scenario_id]
+                        >= config.diagnostic_max_attempts_per_scenario
+                    ):
+                        raise JointCollectionError(
+                            f"diagnostic quota for {scenario_id} was not met "
+                            f"within {config.diagnostic_max_attempts_per_scenario} attempts",
+                            reason_code="diagnostic_attempt_limit",
+                        )
+                    diagnostic_attempts[scenario_id] += 1
+                    spec = sample_episode_spec_for_scenario(
+                        config, episode_index, scenario_id
+                    )
                 _configure_episode(env, spec)
                 try:
                     rollout = collect_joint_episode(
@@ -354,9 +616,43 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     )
                     continue
 
+                samples_to_store = rollout.samples
+                selected_steps: tuple[int, ...] = tuple(
+                    int(value) for value in rollout.sample_step_indices
+                )
+                trigger_step = rollout.scenario_summary.get(
+                    "scenario_trigger_step"
+                )
+                if diagnostic_quotas is not None:
+                    remaining = (
+                        diagnostic_quotas[spec.scenario_id]
+                        - diagnostic_counts[spec.scenario_id]
+                    )
+                    try:
+                        (
+                            samples_to_store,
+                            selected_steps,
+                            trigger_step,
+                        ) = _select_diagnostic_samples(
+                            rollout,
+                            decision_dt_s=simulator_decision_dt_s(env),
+                            offsets_s=config.diagnostic_sample_offsets_s,
+                            remaining=remaining,
+                        )
+                    except JointCollectionError as exc:
+                        store.record_rejected_episode(
+                            episode_index, exc.reason_code
+                        )
+                        print(
+                            f"[WARNING] episode={episode_index} "
+                            f"scenario={spec.scenario_id} "
+                            f"rejected={exc.reason_code}: {exc}",
+                            flush=True,
+                        )
+                        continue
                 stored = store.commit_episode(
                     episode_index,
-                    rollout.samples,
+                    samples_to_store,
                     {
                         "scenario_id": spec.scenario_id,
                         "local_route": spec.local_route,
@@ -370,8 +666,25 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         ),
                         "terminated": rollout.terminated,
                         "truncated": rollout.truncated,
+                        "scenario_trigger_step": trigger_step,
+                        "scenario_realized_step": (
+                            rollout.scenario_summary.get(
+                                "scenario_realized_step"
+                            )
+                        ),
+                        "selected_sample_steps": list(selected_steps),
+                        "diagnostic_subsampled": (
+                            diagnostic_quotas is not None
+                        ),
+                        "scenario_contract_sha256": (
+                            primary_scenario_contract()["sha256"]
+                            if diagnostic_quotas is not None
+                            else None
+                        ),
                     },
                 )
+                if diagnostic_counts is not None:
+                    diagnostic_counts[spec.scenario_id] += stored.joint_samples
                 elapsed = max(time.perf_counter() - wall_start, 1e-6)
                 rate = (
                     store.total_joint_samples - starting_joint_samples
@@ -387,6 +700,20 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
         finally:
             env.close()
         summary = store.summary()
+        if diagnostic_quotas is not None:
+            summary["diagnostic_64"] = {
+                "scenario_quotas": diagnostic_quotas,
+                "scenario_counts": diagnostic_counts,
+                "attempts": diagnostic_attempts,
+                "scenario_contract_sha256": primary_scenario_contract()[
+                    "sha256"
+                ],
+            }
+            if diagnostic_counts != diagnostic_quotas:
+                raise JointCollectionError(
+                    "diagnostic collection ended before all quotas were met",
+                    reason_code="diagnostic_quota_incomplete",
+                )
 
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     return summary

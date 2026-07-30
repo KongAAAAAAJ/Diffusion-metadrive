@@ -34,7 +34,26 @@ from expert_dataset.semantic_bev_codec import (
     pack_semantic_bev,
     unpack_semantic_bev,
 )
-from models.bev_planner.mode_contract import MODE_NAMES, NUM_MODES, ModeIndex
+from models.bev_planner.mode_contract import (
+    MODE_NAMES,
+    NUM_MODES,
+    ModeContractError,
+    ModeIndex,
+    validate_trajectory_kinematics,
+)
+from scenarios.bev_round13_contract import (
+    PRIMARY_S5_S9_SCENARIOS,
+    primary_scenario_contract,
+)
+
+
+DIAGNOSTIC_64_SCENARIO_COUNTS = {
+    "S5_hard_brake_lead": 13,
+    "S6_background_merge_in": 13,
+    "S7_ego_merge_from_ramp": 13,
+    "S8_ego_exit_to_ramp": 13,
+    "S9_narrow_channel_negotiation": 12,
+}
 
 
 class JointBEVVerificationError(RuntimeError):
@@ -97,7 +116,7 @@ def _validate_chunk(
     *,
     split: str,
     episode_index: int,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float, dict[str, int]]:
     context = f"split={split} episode={episode_index} samples=[{start}:{stop}]"
     packed = np.asarray(arrays[PACKED_BEV_FIELD][start:stop])
     decode_start = time.perf_counter()
@@ -149,7 +168,61 @@ def _validate_chunk(
         raise JointBEVVerificationError(
             f"mode_valid_mask[gt_mode] is false at {context}"
         )
-    return bev, decode_seconds
+    ego_state = np.asarray(arrays["ego_state"][start:stop])
+    coarse = np.asarray(arrays["coarse_trajectories"][start:stop])
+    expert = np.asarray(arrays["expert_trajectory"][start:stop])
+    kinematic_counts = {
+        "expert_total": 0,
+        "expert_valid": 0,
+        "hard_valid_anchor_total": 0,
+        "hard_valid_anchor_valid": 0,
+        "stop_total": 0,
+        "stop_valid": 0,
+    }
+    for sample_index in range(stop - start):
+        for role_index in range(3):
+            speed = float(ego_state[sample_index, role_index, 0])
+            try:
+                expert_audit = validate_trajectory_kinematics(
+                    expert[sample_index, role_index],
+                    speed,
+                    np.zeros((3,), dtype=np.float64),
+                )
+            except ModeContractError as exc:
+                raise JointBEVVerificationError(
+                    f"expert trajectory contract error at {context}, "
+                    f"sample={sample_index}, role={role_index}: {exc}"
+                ) from exc
+            kinematic_counts["expert_total"] += 1
+            if not expert_audit.valid:
+                raise JointBEVVerificationError(
+                    f"expert trajectory is dynamically invalid at {context}, "
+                    f"sample={sample_index}, role={role_index}: "
+                    f"{','.join(expert_audit.violations)}"
+                )
+            kinematic_counts["expert_valid"] += 1
+            for mode_index in np.flatnonzero(
+                mode_mask[sample_index, role_index]
+            ):
+                anchor_audit = validate_trajectory_kinematics(
+                    coarse[sample_index, role_index, int(mode_index)],
+                    speed,
+                    np.zeros((3,), dtype=np.float64),
+                )
+                kinematic_counts["hard_valid_anchor_total"] += 1
+                if int(mode_index) == int(ModeIndex.STOP):
+                    kinematic_counts["stop_total"] += 1
+                if not anchor_audit.valid:
+                    raise JointBEVVerificationError(
+                        f"hard-valid anchor is dynamically invalid at {context}, "
+                        f"sample={sample_index}, role={role_index}, "
+                        f"mode={int(mode_index)}: "
+                        f"{','.join(anchor_audit.violations)}"
+                    )
+                kinematic_counts["hard_valid_anchor_valid"] += 1
+                if int(mode_index) == int(ModeIndex.STOP):
+                    kinematic_counts["stop_valid"] += 1
+    return bev, decode_seconds, kinematic_counts
 
 
 def verify_joint_bev_dataset(
@@ -159,6 +232,7 @@ def verify_joint_bev_dataset(
     max_samples_per_split: int | None = None,
     chunk_size: int = 16,
     min_decode_samples_per_s: float = 0.0,
+    diagnostic_64: bool = False,
 ) -> dict[str, object]:
     """Run strict verification and return a JSON-serializable report."""
 
@@ -225,6 +299,7 @@ def verify_joint_bev_dataset(
         total_joint_samples = 0
         total_packed_bytes = 0
         total_raw_bytes = 0
+        total_kinematic_counts: Counter[str] = Counter()
         for split, dataset in datasets.items():
             scenario_counts: Counter[str] = Counter()
             gt_counts = np.zeros(NUM_MODES, dtype=np.int64)
@@ -242,6 +317,45 @@ def verify_joint_bev_dataset(
                     raise JointBEVVerificationError(
                         f"episode {record.episode_index} lacks scenario/route attributes"
                     )
+                if diagnostic_64:
+                    expected_routes = dict(PRIMARY_S5_S9_SCENARIOS)
+                    if expected_routes.get(scenario_id) != local_route:
+                        raise JointBEVVerificationError(
+                            f"diagnostic episode {record.episode_index} "
+                            "violates the S5--S9 route contract"
+                        )
+                    if record.attributes.get("diagnostic_subsampled") is not True:
+                        raise JointBEVVerificationError(
+                            "diagnostic episode is not marked as event-subsampled"
+                        )
+                    if (
+                        record.attributes.get("scenario_contract_sha256")
+                        != primary_scenario_contract()["sha256"]
+                    ):
+                        raise JointBEVVerificationError(
+                            "diagnostic scenario contract hash mismatch"
+                        )
+                    selected_steps = record.attributes.get(
+                        "selected_sample_steps"
+                    )
+                    trigger_step = record.attributes.get(
+                        "scenario_trigger_step"
+                    )
+                    if (
+                        not isinstance(selected_steps, list)
+                        or len(selected_steps) != record.joint_samples
+                        or isinstance(trigger_step, bool)
+                        or not isinstance(trigger_step, int)
+                        or any(
+                            isinstance(value, bool)
+                            or not isinstance(value, int)
+                            or value < trigger_step
+                            for value in selected_steps
+                        )
+                    ):
+                        raise JointBEVVerificationError(
+                            "diagnostic event sample metadata are invalid"
+                        )
                 episode_root = (
                     dataset.split_root / "episodes" / record.directory
                 )
@@ -262,7 +376,7 @@ def verify_joint_bev_dataset(
                 scenario_counts[scenario_id] += available
                 for start in range(0, available, chunk_size):
                     stop = min(start + chunk_size, available)
-                    bev, elapsed = _validate_chunk(
+                    bev, elapsed, kinematic_counts = _validate_chunk(
                         arrays,
                         start,
                         stop,
@@ -272,6 +386,7 @@ def verify_joint_bev_dataset(
                     count = stop - start
                     scanned += count
                     decode_seconds += elapsed
+                    total_kinematic_counts.update(kinematic_counts)
                     occupancy += np.count_nonzero(
                         bev, axis=(0, 1, 3, 4)
                     ).astype(np.int64)
@@ -390,6 +505,40 @@ def verify_joint_bev_dataset(
                 f"decode throughput {total_rate:.2f} joint samples/s is below "
                 f"required {min_decode_samples_per_s:.2f}"
             )
+        global_scenario_counts: Counter[str] = Counter()
+        for value in report_splits.values():
+            global_scenario_counts.update(value["scenario_joint_samples"])
+        if (
+            total_kinematic_counts["expert_valid"]
+            != total_kinematic_counts["expert_total"]
+            or total_kinematic_counts["hard_valid_anchor_valid"]
+            != total_kinematic_counts["hard_valid_anchor_total"]
+            or total_kinematic_counts["stop_valid"]
+            != total_kinematic_counts["stop_total"]
+        ):
+            raise JointBEVVerificationError(
+                "trajectory kinematic validation counts are inconsistent"
+            )
+        if diagnostic_64:
+            if total_joint_samples != 64 or total_scanned != 64:
+                raise JointBEVVerificationError(
+                    "diagnostic_64 requires a complete scan of exactly 64 samples"
+                )
+            if dict(global_scenario_counts) != DIAGNOSTIC_64_SCENARIO_COUNTS:
+                raise JointBEVVerificationError(
+                    "diagnostic_64 scenario sample quotas do not match"
+                )
+            if any(len(dataset) == 0 for dataset in datasets.values()):
+                raise JointBEVVerificationError(
+                    "diagnostic_64 requires non-empty train/val/test splits"
+                )
+            if (
+                total_kinematic_counts["expert_total"] != 192
+                or total_kinematic_counts["stop_total"] != 192
+            ):
+                raise JointBEVVerificationError(
+                    "diagnostic_64 role-level kinematic counts must equal 192"
+                )
         return {
             "schema_version": STORAGE_SCHEMA_VERSION,
             "dataset_root": str(root.resolve()),
@@ -410,6 +559,13 @@ def verify_joint_bev_dataset(
             ),
             "decode_seconds": total_decode_seconds,
             "decode_joint_samples_per_s": total_rate,
+            "kinematic_validation": dict(
+                sorted(total_kinematic_counts.items())
+            ),
+            "scenario_joint_samples": dict(
+                sorted(global_scenario_counts.items())
+            ),
+            "diagnostic_64": bool(diagnostic_64),
             "splits": report_splits,
         }
     finally:
@@ -429,6 +585,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-samples-per-split", type=int, default=0)
     parser.add_argument("--chunk-size", type=int, default=16)
     parser.add_argument("--min-decode-samples-per-s", type=float, default=0.0)
+    parser.add_argument("--diagnostic-64", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -442,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         chunk_size=args.chunk_size,
         min_decode_samples_per_s=args.min_decode_samples_per_s,
+        diagnostic_64=args.diagnostic_64,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True))
     return 0

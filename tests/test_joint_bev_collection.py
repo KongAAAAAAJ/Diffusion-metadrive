@@ -21,7 +21,11 @@ from expert_dataset.collect_joint_bev import (
     SensorlessJointBEVPlatoonEnv,
 )
 from models.bev_planner.dynamic_anchors import SimulatorDynamicAnchorGenerator
-from models.bev_planner.mode_contract import LEFT_MODES, ModeIndex
+from models.bev_planner.mode_contract import (
+    LEFT_MODES,
+    ModeIndex,
+    validate_trajectory_kinematics,
+)
 
 
 def _rectangle(x0: float, x1: float, y0: float, y1: float) -> np.ndarray:
@@ -163,6 +167,20 @@ def test_dynamic_anchors_have_fixed_modes_and_simulator_topology() -> None:
     ]
     assert output.coarse_trajectories[ModeIndex.LEFT_MEDIUM, -1, 1] > 2.5
     assert output.coarse_trajectories[ModeIndex.RIGHT_MEDIUM, -1, 1] < -2.5
+    stop = output.coarse_trajectories[ModeIndex.STOP]
+    speed = env.agents["agent0"].speed_km_h / 3.6
+    assert validate_trajectory_kinematics(
+        stop, speed, np.zeros(3)
+    ).valid
+    increments = np.linalg.norm(
+        np.diff(np.vstack([np.zeros((1, 2)), stop[:, :2]]), axis=0),
+        axis=1,
+    )
+    stationary = np.flatnonzero(increments <= 1.0e-3)
+    assert stationary.size
+    first = int(stationary[0])
+    assert np.all(stop[first:, :2] == stop[first, :2])
+    assert np.all(stop[first:, 2] == stop[first, 2])
 
 
 def test_joint_sample_contract_is_exact_and_joint_first() -> None:

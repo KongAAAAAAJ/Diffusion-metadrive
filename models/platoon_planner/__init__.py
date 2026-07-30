@@ -1,4 +1,4 @@
-from .platoon_normal_planner import PlatoonNormalPlanner
+from .platoon_normal_planner import NormalPlannerKinematicError, PlatoonNormalPlanner
 
 try:
     from ._relation_encoder import RelationEncoder
@@ -9,4 +9,10 @@ except ModuleNotFoundError:
     PlatoonDiffusionPlanner = None
     migrate_single_to_platoon = None
 
-__all__ = ["RelationEncoder", "PlatoonDiffusionPlanner", "PlatoonNormalPlanner", "migrate_single_to_platoon"]
+__all__ = [
+    "NormalPlannerKinematicError",
+    "RelationEncoder",
+    "PlatoonDiffusionPlanner",
+    "PlatoonNormalPlanner",
+    "migrate_single_to_platoon",
+]

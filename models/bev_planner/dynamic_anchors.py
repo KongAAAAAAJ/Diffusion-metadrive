@@ -19,6 +19,8 @@ from models.bev_planner.mode_contract import (
     TRAJECTORY_DIM,
     TRAJECTORY_SHAPE,
     TRAJECTORY_STEPS,
+    HardModeMaskConfig,
+    validate_trajectory_kinematics,
 )
 
 
@@ -315,6 +317,23 @@ class SimulatorDynamicAnchorGenerator:
         return np.asarray(values, dtype=np.float64)
 
     @staticmethod
+    def _freeze_stationary_tail(
+        distances: np.ndarray,
+        *,
+        movement_epsilon_m: float,
+    ) -> np.ndarray:
+        """Make a stopped anchor exactly stationary after its last moving step."""
+
+        values = np.asarray(distances, dtype=np.float64).copy()
+        increments = np.diff(np.concatenate(([0.0], values)))
+        stationary = np.flatnonzero(increments <= float(movement_epsilon_m))
+        if stationary.size:
+            first = int(stationary[0])
+            frozen_distance = 0.0 if first == 0 else float(values[first - 1])
+            values[first:] = frozen_distance
+        return values
+
+    @staticmethod
     def _headings_from_xy(xy: np.ndarray) -> np.ndarray:
         points = np.concatenate([np.zeros((1, 2), dtype=np.float64), xy], axis=0)
         delta = np.diff(points, axis=0)
@@ -325,6 +344,25 @@ class SimulatorDynamicAnchorGenerator:
                 previous = float(np.arctan2(segment[1], segment[0]))
             headings[index] = previous
         return _wrap_to_pi(headings)
+
+    @staticmethod
+    def _rate_limit_headings(
+        headings: np.ndarray,
+        *,
+        max_delta_rad: float,
+    ) -> np.ndarray:
+        limited = np.asarray(headings, dtype=np.float64).copy()
+        previous = 0.0
+        for index in range(len(limited)):
+            delta = float(_wrap_to_pi(limited[index] - previous))
+            previous = float(
+                _wrap_to_pi(
+                    previous
+                    + np.clip(delta, -max_delta_rad, max_delta_rad)
+                )
+            )
+            limited[index] = previous
+        return limited
 
     def _trajectory(
         self,
@@ -350,6 +388,66 @@ class SimulatorDynamicAnchorGenerator:
             xy = source_local * (1.0 - blend[:, None]) + target_local * blend[:, None]
         heading = self._headings_from_xy(xy)
         return np.column_stack([xy, heading]).astype(np.float32)
+
+    def _stop_trajectory(
+        self,
+        road_network: object,
+        source_lane: object,
+        source_s: float,
+        ego_pose: np.ndarray,
+        speed_mps: float,
+    ) -> np.ndarray:
+        if speed_mps <= 1.0e-9:
+            return np.zeros(
+                (TRAJECTORY_STEPS, TRAJECTORY_DIM), dtype=np.float32
+            )
+        contract = HardModeMaskConfig(dt_s=self.config.dt_s)
+        distances = self._freeze_stationary_tail(
+            self._travel_distances(
+                speed_mps, self.config.stop_accel_mps2
+            ),
+            movement_epsilon_m=contract.movement_epsilon_m,
+        )
+        world = self._sample_lane_path(
+            road_network, source_lane, source_s, distances
+        )
+        xy = self._world_to_ego(world, ego_pose)
+        increments = np.diff(np.concatenate(([0.0], distances)))
+        stationary = np.flatnonzero(
+            increments <= contract.movement_epsilon_m
+        )
+        if stationary.size:
+            first = int(stationary[0])
+            frozen_xy = (
+                np.zeros((2,), dtype=np.float64)
+                if first == 0
+                else xy[first - 1].copy()
+            )
+            xy[first:] = frozen_xy
+        heading = self._headings_from_xy(xy)
+        heading = self._rate_limit_headings(
+            heading,
+            max_delta_rad=(
+                contract.max_yaw_rate_rad_s * contract.dt_s
+            ),
+        )
+        if stationary.size:
+            first = int(stationary[0])
+            frozen_heading = 0.0 if first == 0 else float(heading[first - 1])
+            heading[first:] = frozen_heading
+        result = np.column_stack([xy, heading]).astype(np.float32)
+        audit = validate_trajectory_kinematics(
+            result,
+            speed_mps,
+            np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
+            contract,
+        )
+        if not audit.valid:
+            raise DynamicAnchorError(
+                "STOP anchor violates fixed-time kinematics: "
+                + ",".join(audit.violations)
+            )
+        return result
 
     def generate(self, env: object, ego_id: str) -> DynamicAnchorOutput:
         agents = getattr(env, "agents", None)
@@ -401,15 +499,12 @@ class SimulatorDynamicAnchorGenerator:
                 trajectories[slot] = self._trajectory(
                     road_network, source_lane, right_lane, source_s, right_s, ego_pose, speed_mps, accel
                 )
-        trajectories[ModeIndex.STOP] = self._trajectory(
+        trajectories[ModeIndex.STOP] = self._stop_trajectory(
             road_network,
             source_lane,
-            None,
             source_s,
-            0.0,
             ego_pose,
             speed_mps,
-            self.config.stop_accel_mps2,
         )
         return DynamicAnchorOutput(
             coarse_trajectories=np.ascontiguousarray(trajectories),

@@ -40,6 +40,7 @@ def _sample(marker: int) -> JointBEVSample:
         (0, 85, 170, 255), dtype=np.uint8
     )[marker % 4]
     values["ego_state"][:] = np.float32(marker)
+    values["ego_state"][:, 0] = 0.0
     values["relation_valid_mask"][:] = True
     values["agent_role"] = np.asarray(list(AgentRole), dtype=np.int64)
     values["mode_valid_mask"][:, ModeIndex.STOP] = True

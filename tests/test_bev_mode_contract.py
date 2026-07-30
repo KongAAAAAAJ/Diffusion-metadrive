@@ -51,11 +51,11 @@ def _stop() -> np.ndarray:
 
 def _coarse() -> np.ndarray:
     trajectories = np.zeros(TRAJECTORY_SHAPE, dtype=np.float32)
-    for index, speed in zip((0, 1, 2), (10.0, 8.0, 6.0)):
+    for index, speed in zip((0, 1, 2), (9.0, 8.0, 6.0)):
         trajectories[index] = _straight(speed)
-    for index, speed in zip((3, 4, 5), (10.0, 8.0, 6.0)):
+    for index, speed in zip((3, 4, 5), (9.0, 8.0, 6.0)):
         trajectories[index] = _lane_change(speed, 1.0)
-    for index, speed in zip((6, 7, 8), (10.0, 8.0, 6.0)):
+    for index, speed in zip((6, 7, 8), (9.0, 8.0, 6.0)):
         trajectories[index] = _lane_change(speed, -1.0)
     trajectories[ModeIndex.STOP] = _stop()
     return trajectories
