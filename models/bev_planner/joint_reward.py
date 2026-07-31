@@ -14,9 +14,6 @@ from typing import Mapping
 import numpy as np
 
 from envs.observations.semantic_bev import BEVChannel, SemanticBEVConfig
-from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
-
-
 AGENT_IDS = ("agent0", "agent1", "agent2")
 NUM_ROLES = 3
 TRAJECTORY_SHAPE = (8, 3)
@@ -466,6 +463,12 @@ class JointTrajectoryProxyReward:
     """Score synchronized three-role trajectories from simulator GT."""
 
     def __init__(self, config: JointRewardConfig | None = None) -> None:
+        # Imported lazily because the normal planner consumes the BEV mode
+        # contract while this reward is re-exported by models.bev_planner.
+        from models.platoon_planner.platoon_normal_planner import (
+            PlatoonNormalPlanner,
+        )
+
         self.config = config or JointRewardConfig()
         self._prediction_planner = PlatoonNormalPlanner(
             background_safe_gap_m=self.config.background_safe_gap_m,

@@ -109,6 +109,62 @@ def test_default_hard_safety_gaps_match_collection_contract():
     assert planner.platoon_safe_gap_m == 7.0
 
 
+def test_keep_lateral_search_includes_current_and_desired_offsets():
+    planner = PlatoonNormalPlanner()
+    lane = FakeLane(1, 0.0)
+
+    targets = planner._candidate_lateral_targets(
+        0,
+        -0.9,
+        0.4,
+        lane,
+        lane,
+    )
+
+    assert targets == (-0.9, 0.4, 0.15, 0.65)
+
+
+def test_lane_end_restriction_adds_urgent_zero_delay_durations():
+    planner = PlatoonNormalPlanner()
+
+    assert planner._lane_end_restricted(
+        action=-1,
+        ego_speed_mps=8.0,
+        usable_source_progress_m=5.0,
+    )
+    assert planner._lane_change_durations(
+        action=-1,
+        lane_end_restricted=True,
+    ) == (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
+    assert planner._lane_change_durations(
+        action=-1,
+        lane_end_restricted=False,
+    ) == planner.LANE_CHANGE_DURATIONS_S
+    assert not planner._lane_end_restricted(
+        action=0,
+        ego_speed_mps=8.0,
+        usable_source_progress_m=1.0,
+    )
+
+
+def test_lane_change_completion_progress_uses_candidate_progress():
+    planner = PlatoonNormalPlanner()
+    progress = planner._longitudinal_progress(
+        1.0,
+        -8.0,
+        planner._dense_times,
+    )
+
+    completion = planner._lane_change_completion_progress(
+        progress,
+        duration_s=1.0,
+        start_delay_s=0.0,
+    )
+
+    expected = float(np.interp(1.0, planner._dense_times, progress))
+    assert completion == pytest.approx(expected)
+
+
 def test_keep_returns_8x3_forward_trajectory():
     env = _env(agent_lane_id=1)
     planner = PlatoonNormalPlanner()

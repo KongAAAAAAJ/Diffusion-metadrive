@@ -20,7 +20,10 @@ from expert_dataset.collect_joint_bev import (
     RulePlannerExpert,
     SensorlessJointBEVPlatoonEnv,
 )
-from models.bev_planner.dynamic_anchors import SimulatorDynamicAnchorGenerator
+from models.bev_planner.dynamic_anchors import (
+    DynamicAnchorError,
+    SimulatorDynamicAnchorGenerator,
+)
 from models.bev_planner.mode_contract import (
     LEFT_MODES,
     ModeIndex,
@@ -183,6 +186,63 @@ def test_dynamic_anchors_have_fixed_modes_and_simulator_topology() -> None:
     assert np.all(stop[first:, 2] == stop[first, 2])
 
 
+def test_stop_anchor_preserves_current_lane_offset_without_recentering() -> None:
+    env = _Env()
+    vehicle = env.agents["agent0"]
+    vehicle.position[1] = vehicle.lane.y + 0.6
+
+    output = SimulatorDynamicAnchorGenerator().generate(env, "agent0")
+    stop = output.coarse_trajectories[ModeIndex.STOP]
+
+    assert np.max(np.abs(stop[:, 1])) < 1.0e-5
+    assert validate_trajectory_kinematics(
+        stop,
+        vehicle.speed_km_h / 3.6,
+        np.zeros(3),
+    ).valid
+
+
+def test_low_speed_stop_limits_heading_change_to_kinematic_contract() -> None:
+    env = _Env()
+    vehicle = env.agents["agent0"]
+    vehicle.position[1] = vehicle.lane.y - 0.4
+    vehicle.heading_theta = -0.103
+    vehicle.speed_km_h = 5.18
+
+    output = SimulatorDynamicAnchorGenerator().generate(env, "agent0")
+    stop = output.coarse_trajectories[ModeIndex.STOP]
+    audit = validate_trajectory_kinematics(
+        stop,
+        vehicle.speed_km_h / 3.6,
+        np.zeros(3),
+    )
+
+    assert audit.valid
+    assert np.max(audit.curvature_per_m) <= 0.25 + 1.0e-6
+
+
+def test_moving_anchors_start_from_current_lane_offset() -> None:
+    env = _Env()
+    vehicle = env.agents["agent0"]
+    vehicle.position[1] = vehicle.lane.y + 0.6
+    vehicle.heading_theta = -0.2
+
+    output = SimulatorDynamicAnchorGenerator().generate(env, "agent0")
+
+    for mode in (
+        ModeIndex.KEEP_HIGH,
+        ModeIndex.KEEP_MEDIUM,
+        ModeIndex.KEEP_LOW,
+    ):
+        trajectory = output.coarse_trajectories[mode]
+        assert abs(float(trajectory[0, 1])) < 0.6
+        assert validate_trajectory_kinematics(
+            trajectory,
+            vehicle.speed_km_h / 3.6,
+            np.zeros(3),
+        ).valid
+
+
 def test_joint_sample_contract_is_exact_and_joint_first() -> None:
     env = _Env()
     generator = SimulatorDynamicAnchorGenerator()
@@ -248,8 +308,29 @@ def test_one_agent_contract_failure_discards_whole_joint_step() -> None:
         trajectories_world=expert.trajectories_world,
         controls=expert.controls,
     )
-    with pytest.raises(JointCollectionError, match="discard the entire joint step"):
+    with pytest.raises(JointCollectionError) as exc_info:
         builder.build_sample(env, expert)
+    assert exc_info.value.reason_code == "gt_action_group_has_no_valid_mode"
+
+
+def test_dynamic_anchor_failure_has_distinct_reason_code() -> None:
+    class _BrokenAnchorGenerator:
+        def generate(self, env, agent_id):  # noqa: ARG002
+            raise DynamicAnchorError("synthetic STOP failure")
+
+    env = _Env()
+    builder = JointBEVSampleBuilder(
+        anchor_generator=_BrokenAnchorGenerator()
+    )
+    _prime_builder(builder, env)
+
+    with pytest.raises(JointCollectionError) as exc_info:
+        builder.build_model_inputs(env)
+
+    assert (
+        exc_info.value.reason_code
+        == "dynamic_anchor_kinematic_invalid"
+    )
 
 
 def test_joint_sample_rejects_partial_or_misaligned_data() -> None:

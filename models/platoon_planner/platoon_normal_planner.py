@@ -62,6 +62,8 @@ class PlatoonNormalPlanner:
     MIN_ACCEL_MPS2 = -8.0
     MAX_ACCEL_MPS2 = 5.0
     LANE_CHANGE_DURATIONS_S = (2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
+    URGENT_LANE_CHANGE_DURATIONS_S = (1.0, 1.5, 2.0)
+    LANE_END_CLEARANCE_M = 0.5
 
     def __init__(
         self,
@@ -244,6 +246,7 @@ class PlatoonNormalPlanner:
             "corridor_rejection_count": 0,
             "road_rejection_count": 0,
             "background_collision_rejection_count": 0,
+            "lane_end_rejection_count": 0,
         }
         collision_hits: Counter[str] = Counter()
         kinematic_hits: Counter[str] = Counter()
@@ -301,9 +304,29 @@ class PlatoonNormalPlanner:
         target_envelope = self._traffic_envelope(env, vehicle, target_lane)
         ego_speed = max(float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6, 0.0)
         reachable = self._reachable_progress_range(ego_speed, self.HORIZON_S)
-        durations = (self.HORIZON_S,) if int(action) == 0 else self.LANE_CHANGE_DURATIONS_S
+        ego_length, _ = self._vehicle_dimensions(vehicle)
+        usable_source_progress = max(
+            source_length
+            - start_s
+            - 0.5 * ego_length
+            - self.LANE_END_CLEARANCE_M,
+            0.0,
+        )
+        lane_end_restricted = self._lane_end_restricted(
+            action=int(action),
+            ego_speed_mps=ego_speed,
+            usable_source_progress_m=usable_source_progress,
+        )
+        durations = self._lane_change_durations(
+            action=int(action),
+            lane_end_restricted=lane_end_restricted,
+        )
         lateral_targets = self._candidate_lateral_targets(
-            int(action), desired_end_d, source_lane, target_lane
+            int(action),
+            start_d,
+            desired_end_d,
+            source_lane,
+            target_lane,
         )
         background_predictions = self._predicted_obstacles(
             env,
@@ -353,6 +376,8 @@ class PlatoonNormalPlanner:
                 float(duration),
                 target_envelope,
             )
+            if lane_end_restricted and int(action) != 0:
+                start_delays = (0.0,)
             profile_options = []
             for acceleration in accelerations:
                 for acceleration_duration in self._acceleration_durations(float(acceleration)):
@@ -412,6 +437,17 @@ class PlatoonNormalPlanner:
                 maximum=12 if int(action) == 0 else 6,
             ):
                 for start_delay in start_delays:
+                    if lane_end_restricted and int(action) != 0:
+                        completion_progress = self._lane_change_completion_progress(
+                            progress,
+                            duration_s=float(duration),
+                            start_delay_s=float(start_delay),
+                        )
+                        if completion_progress > usable_source_progress + 1e-6:
+                            stats["lane_end_rejection_count"] += len(
+                                lateral_targets
+                            )
+                            continue
                     for end_d in lateral_targets:
                         stats["raw_candidate_count"] += 1
                         candidate_dense = self._build_dense_candidate(
@@ -479,6 +515,12 @@ class PlatoonNormalPlanner:
                         score += 0.02 * abs(float(recovery_acceleration))
                         score += 0.05 * abs(float(duration) - self.HORIZON_S)
                         score += 0.02 * float(start_delay)
+                        if lane_end_restricted and int(action) != 0:
+                            deadline_margin = max(
+                                usable_source_progress - completion_progress,
+                                0.0,
+                            )
+                            score += 0.1 / max(deadline_margin + 0.25, 0.25)
                         if not np.isfinite(score):
                             stats["kinematic_rejection_count"] += 1
                             continue
@@ -527,6 +569,15 @@ class PlatoonNormalPlanner:
             "source_envelope": self._serialize_envelope(source_envelope),
             "target_envelope": self._serialize_envelope(target_envelope),
             "reachable_progress_m": [float(reachable[0]), float(reachable[1])],
+            "lateral_targets_m": [float(value) for value in lateral_targets],
+            "source_lane_remaining_m": float(
+                max(source_length - start_s, 0.0)
+            ),
+            "source_lane_usable_progress_m": float(usable_source_progress),
+            "lane_end_restricted": bool(lane_end_restricted),
+            "lane_change_durations_s": [
+                float(value) for value in durations
+            ],
             "safe_corridor_by_duration_m": corridor_debug,
             "candidates": [self._candidate_debug(value) for value in pool],
         }
@@ -1345,6 +1396,7 @@ class PlatoonNormalPlanner:
     def _candidate_lateral_targets(
         self,
         action: int,
+        start_d: float,
         desired_end_d: float,
         source_lane,
         target_lane,
@@ -1353,8 +1405,9 @@ class PlatoonNormalPlanner:
             margin = self.keep_lateral_margin_m
             lane_half_width = 0.5 * float(getattr(source_lane, "width", 3.5) or 3.5)
             values = [
-                np.clip(desired_end_d - margin, -lane_half_width, lane_half_width),
+                np.clip(start_d, -lane_half_width, lane_half_width),
                 np.clip(desired_end_d, -lane_half_width, lane_half_width),
+                np.clip(desired_end_d - margin, -lane_half_width, lane_half_width),
                 np.clip(desired_end_d + margin, -lane_half_width, lane_half_width),
             ]
         else:
@@ -1364,6 +1417,78 @@ class PlatoonNormalPlanner:
             )
             values = [desired_end_d - margin, desired_end_d, desired_end_d + margin]
         return tuple(dict.fromkeys(round(float(value), 4) for value in values))
+
+    def _lane_change_durations(
+        self,
+        *,
+        action: int,
+        lane_end_restricted: bool,
+    ) -> tuple[float, ...]:
+        if int(action) == 0:
+            return (self.HORIZON_S,)
+        if not lane_end_restricted:
+            return self.LANE_CHANGE_DURATIONS_S
+        return tuple(
+            dict.fromkeys(
+                self.URGENT_LANE_CHANGE_DURATIONS_S
+                + self.LANE_CHANGE_DURATIONS_S
+            )
+        )
+
+    def _lane_end_restricted(
+        self,
+        *,
+        action: int,
+        ego_speed_mps: float,
+        usable_source_progress_m: float,
+    ) -> bool:
+        if int(action) == 0:
+            return False
+        earliest_standard_s = min(self.LANE_CHANGE_DURATIONS_S)
+        fastest_standard_progress = self._longitudinal_progress(
+            ego_speed_mps,
+            self.MAX_ACCEL_MPS2,
+            np.asarray([earliest_standard_s], dtype=np.float64),
+        )[0]
+        return bool(
+            usable_source_progress_m
+            <= max(float(fastest_standard_progress), 8.0) + 1e-6
+        )
+
+    def _lane_change_completion_progress(
+        self,
+        progress: np.ndarray,
+        *,
+        duration_s: float,
+        start_delay_s: float,
+    ) -> float:
+        completion = float(
+            np.interp(
+                min(float(duration_s), self.HORIZON_S),
+                self._dense_times,
+                progress,
+            )
+        )
+        start = float(
+            np.interp(
+                float(start_delay_s),
+                self._dense_times,
+                progress,
+            )
+        )
+        if float(duration_s) > self.HORIZON_S:
+            observed_duration = max(
+                self.HORIZON_S - float(start_delay_s),
+                self.DENSE_DT_S,
+            )
+            full_duration = max(
+                float(duration_s) - float(start_delay_s),
+                observed_duration,
+            )
+            completion = start + (completion - start) * (
+                full_duration / observed_duration
+            )
+        return float(completion)
 
     def _candidate_collision_names(
         self,

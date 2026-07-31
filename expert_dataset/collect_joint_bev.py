@@ -520,25 +520,37 @@ class JointBEVSampleBuilder:
         for agent_id in self.agent_ids:
             vehicle = env.agents[agent_id]
             bev = self.scene_adapter.rasterize(env, agent_id, self.snapshots)
-            anchors = self.anchor_generator.generate(env, agent_id)
+            try:
+                anchors = self.anchor_generator.generate(env, agent_id)
+            except DynamicAnchorError as exc:
+                raise JointCollectionError(
+                    f"{agent_id} dynamic anchor is invalid: {exc}",
+                    reason_code="dynamic_anchor_kinematic_invalid",
+                ) from exc
             speed_mps = float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6
-            mask_result = build_hard_mode_valid_mask(
-                bev,
-                anchors.coarse_trajectories,
-                speed_mps,
-                anchors.topology,
-            )
-            for mode_index in np.flatnonzero(mask_result.valid_mask):
-                audit = validate_trajectory_kinematics(
-                    anchors.coarse_trajectories[int(mode_index)],
+            try:
+                mask_result = build_hard_mode_valid_mask(
+                    bev,
+                    anchors.coarse_trajectories,
                     speed_mps,
-                    np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
+                    anchors.topology,
                 )
-                if not audit.valid:
-                    raise ModeContractError(
-                        f"{agent_id} hard-valid anchor {int(mode_index)} is "
-                        f"dynamically invalid: {','.join(audit.violations)}"
+                for mode_index in np.flatnonzero(mask_result.valid_mask):
+                    audit = validate_trajectory_kinematics(
+                        anchors.coarse_trajectories[int(mode_index)],
+                        speed_mps,
+                        np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
                     )
+                    if not audit.valid:
+                        raise ModeContractError(
+                            f"{agent_id} hard-valid anchor {int(mode_index)} is "
+                            f"dynamically invalid: {','.join(audit.violations)}"
+                        )
+            except ModeContractError as exc:
+                raise JointCollectionError(
+                    f"{agent_id} hard mode contract is invalid: {exc}",
+                    reason_code="hard_mode_contract_invalid",
+                ) from exc
             bev_values.append(bev)
             ego_states.append(self._ego_state(env, agent_id))
             relations.append(
@@ -563,59 +575,71 @@ class JointBEVSampleBuilder:
     def build_model_inputs(self, env: PlatoonEnv) -> JointBEVModelInputs:
         """Build online planner inputs without consulting expert decisions or labels."""
 
-        try:
-            return self._build_model_inputs(env)
-        except (ModeContractError, DynamicAnchorError) as exc:
-            raise JointCollectionError(
-                "online state violated the hard mode contract",
-                reason_code="mode_contract",
-            ) from exc
+        return self._build_model_inputs(env)
 
     def build_sample(self, env: PlatoonEnv, expert_step: ExpertJointStep) -> JointBEVSample:
         try:
             model_inputs = self._build_model_inputs(env)
-            poses = []
-            gt_modes = []
-            expert_values = []
-            for role_index, agent_id in enumerate(self.agent_ids):
-                if (
-                    agent_id not in expert_step.rule_actions
-                    or agent_id not in expert_step.trajectories_world
-                ):
-                    raise JointCollectionError(f"expert step omitted {agent_id}")
-                vehicle = env.agents[agent_id]
-                expert_local = _world_trajectory_to_ego_local(
-                    vehicle, expert_step.trajectories_world[agent_id]
+        except JointCollectionError as exc:
+            if exc.reason_code not in {
+                "dynamic_anchor_kinematic_invalid",
+                "hard_mode_contract_invalid",
+            }:
+                raise
+            raise JointStepRejected(
+                str(exc),
+                reason_code=exc.reason_code,
+            ) from exc
+
+        poses = []
+        gt_modes = []
+        expert_values = []
+        for role_index, agent_id in enumerate(self.agent_ids):
+            if (
+                agent_id not in expert_step.rule_actions
+                or agent_id not in expert_step.trajectories_world
+            ):
+                raise JointCollectionError(f"expert step omitted {agent_id}")
+            vehicle = env.agents[agent_id]
+            expert_local = _world_trajectory_to_ego_local(
+                vehicle, expert_step.trajectories_world[agent_id]
+            )
+            if expert_local.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM):
+                raise JointCollectionError(
+                    f"expert trajectory for {agent_id} is not [8,3]"
                 )
-                if expert_local.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM):
-                    raise JointCollectionError(
-                        f"expert trajectory for {agent_id} is not [8,3]"
-                    )
+            try:
                 expert_audit = validate_trajectory_kinematics(
                     expert_local,
                     float(model_inputs.ego_state[role_index, 0]),
                     np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
                 )
-                if not expert_audit.valid:
-                    raise JointStepRejected(
-                        f"expert trajectory for {agent_id} is dynamically "
-                        f"invalid: {','.join(expert_audit.violations)}",
-                        reason_code="normal_planner_final_kinematic_invalid",
-                    )
+            except ModeContractError as exc:
+                raise JointStepRejected(
+                    f"expert trajectory contract for {agent_id} is invalid: {exc}",
+                    reason_code="normal_planner_final_kinematic_invalid",
+                ) from exc
+            if not expert_audit.valid:
+                raise JointStepRejected(
+                    f"expert trajectory for {agent_id} is dynamically "
+                    f"invalid: {','.join(expert_audit.violations)}",
+                    reason_code="normal_planner_final_kinematic_invalid",
+                )
+            try:
                 gt_mode = label_gt_mode(
                     expert_step.rule_actions[agent_id],
                     expert_local,
                     model_inputs.coarse_trajectories[role_index],
                     model_inputs.mode_valid_mask[role_index],
                 )
-                poses.append(self._global_pose(vehicle))
-                gt_modes.append(gt_mode)
-                expert_values.append(expert_local)
-        except (ModeContractError, DynamicAnchorError) as exc:
-            raise JointStepRejected(
-                "one agent violated the mode/label contract; discard the entire joint step",
-                reason_code="gt_mode_mask_conflict",
-            ) from exc
+            except ModeContractError as exc:
+                raise JointStepRejected(
+                    f"{agent_id} RuleMaker action has no valid GT mode: {exc}",
+                    reason_code="gt_action_group_has_no_valid_mode",
+                ) from exc
+            poses.append(self._global_pose(vehicle))
+            gt_modes.append(gt_mode)
+            expert_values.append(expert_local)
 
         return JointBEVSample(
             bev=model_inputs.bev,
@@ -684,17 +708,22 @@ def collect_joint_episode(
             agent_info = info.get(agent_id, {}) if isinstance(info, Mapping) else {}
             if not isinstance(agent_info, Mapping):
                 continue
+            if bool(agent_info.get("crash_vehicle", False)):
+                failure_reason = f"crash_vehicle:{agent_id}"
+                break
+            if bool(agent_info.get("crash_sidewalk", False)):
+                failure_reason = f"crash_sidewalk:{agent_id}"
+                break
             if any(
                 bool(agent_info.get(key, False))
                 for key in (
                     "crash",
-                    "crash_vehicle",
                     "crash_object",
                     "crash_building",
                     "crash_human",
                 )
             ):
-                failure_reason = f"crash:{agent_id}"
+                failure_reason = f"crash_object:{agent_id}"
                 break
             if any(
                 bool(agent_info.get(key, False))

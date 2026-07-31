@@ -305,6 +305,101 @@ class SimulatorDynamicAnchorGenerator:
             result.append(point)
         return np.asarray(result, dtype=np.float64)
 
+    def _sample_lane_pose_path(
+        self,
+        road_network: object,
+        lane: object,
+        start_s: float,
+        lateral_offset: float,
+        distances: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample lane positions and tangents without snapping to lane centre."""
+
+        chain = [lane]
+        starts = [
+            float(
+                np.clip(
+                    start_s,
+                    0.0,
+                    max(float(getattr(lane, "length", 0.0) or 0.0), 0.0),
+                )
+            )
+        ]
+        covered = max(
+            float(getattr(lane, "length", 0.0) or 0.0) - starts[0],
+            0.0,
+        )
+        while covered < float(np.max(distances)) and len(chain) < 6:
+            successors = self._successors(road_network, chain[-1])
+            if not successors or successors[0] in chain:
+                break
+            chain.append(successors[0])
+            starts.append(0.0)
+            covered += max(
+                float(getattr(chain[-1], "length", 0.0) or 0.0),
+                0.0,
+            )
+
+        points: list[np.ndarray] = []
+        headings: list[float] = []
+        for distance in np.asarray(distances, dtype=np.float64):
+            remaining = max(float(distance), 0.0)
+            point = None
+            heading = None
+            for current_lane, lane_start in zip(chain, starts):
+                length = max(
+                    float(getattr(current_lane, "length", 0.0) or 0.0),
+                    0.0,
+                )
+                available = max(length - lane_start, 0.0)
+                if remaining <= available + 1e-6:
+                    longitudinal = min(lane_start + remaining, length)
+                    try:
+                        point = np.asarray(
+                            current_lane.position(
+                                float(longitudinal),
+                                float(lateral_offset),
+                            ),
+                            dtype=np.float64,
+                        ).reshape(-1)[:2]
+                    except (AttributeError, TypeError, ValueError) as exc:
+                        raise DynamicAnchorError(
+                            "lane does not provide finite offset position(s, d)"
+                        ) from exc
+                    heading = self._lane_heading(current_lane, longitudinal)
+                    break
+                remaining -= available
+            if point is None or heading is None:
+                last = chain[-1]
+                length = max(
+                    float(getattr(last, "length", 0.0) or 0.0),
+                    0.0,
+                )
+                try:
+                    end = np.asarray(
+                        last.position(length, float(lateral_offset)),
+                        dtype=np.float64,
+                    ).reshape(-1)[:2]
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise DynamicAnchorError(
+                        "lane does not provide finite offset endpoint"
+                    ) from exc
+                heading = self._lane_heading(last, length)
+                point = end + remaining * np.asarray(
+                    [np.cos(heading), np.sin(heading)],
+                    dtype=np.float64,
+                )
+            if not np.isfinite(point).all() or not np.isfinite(heading):
+                raise DynamicAnchorError(
+                    "lane offset pose sampling returned non-finite values"
+                )
+            points.append(point)
+            headings.append(float(heading))
+        return (
+            np.asarray(points, dtype=np.float64),
+            np.asarray(headings, dtype=np.float64),
+        )
+
     def _travel_distances(self, speed_mps: float, accel_mps2: float) -> np.ndarray:
         speed = max(float(speed_mps), 0.0)
         distance = 0.0
@@ -346,19 +441,39 @@ class SimulatorDynamicAnchorGenerator:
         return _wrap_to_pi(headings)
 
     @staticmethod
-    def _rate_limit_headings(
-        headings: np.ndarray,
-        *,
-        max_delta_rad: float,
+    def _contract_limited_headings(
+        desired_headings: np.ndarray,
+        xy: np.ndarray,
+        contract: HardModeMaskConfig,
     ) -> np.ndarray:
-        limited = np.asarray(headings, dtype=np.float64).copy()
+        """Approach lane tangents without exceeding the hard dynamics limits."""
+
+        desired = np.asarray(desired_headings, dtype=np.float64)
+        points = np.concatenate(
+            [np.zeros((1, 2), dtype=np.float64), np.asarray(xy, dtype=np.float64)],
+            axis=0,
+        )
+        distances = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        limited = np.empty_like(desired)
         previous = 0.0
-        for index in range(len(limited)):
-            delta = float(_wrap_to_pi(limited[index] - previous))
+        for index, (target, distance) in enumerate(
+            zip(desired, distances)
+        ):
+            speed = float(distance) / contract.dt_s
+            max_delta = min(
+                contract.max_yaw_rate_rad_s * contract.dt_s,
+                contract.max_curvature_per_m * float(distance),
+                (
+                    contract.max_lateral_accel_mps2
+                    * contract.dt_s
+                    / max(speed, 1.0e-9)
+                ),
+            )
+            delta = float(_wrap_to_pi(float(target) - previous))
             previous = float(
                 _wrap_to_pi(
                     previous
-                    + np.clip(delta, -max_delta_rad, max_delta_rad)
+                    + np.clip(delta, -max_delta, max_delta)
                 )
             )
             limited[index] = previous
@@ -370,13 +485,20 @@ class SimulatorDynamicAnchorGenerator:
         source_lane: object,
         target_lane: object | None,
         source_s: float,
+        source_d: float,
         target_s: float,
         ego_pose: np.ndarray,
         speed_mps: float,
         accel_mps2: float,
     ) -> np.ndarray:
         distances = self._travel_distances(speed_mps, accel_mps2)
-        source_world = self._sample_lane_path(road_network, source_lane, source_s, distances)
+        source_world, _ = self._sample_lane_pose_path(
+            road_network,
+            source_lane,
+            source_s,
+            source_d,
+            distances,
+        )
         source_local = self._world_to_ego(source_world, ego_pose)
         if target_lane is None or target_lane is source_lane:
             xy = source_local
@@ -394,6 +516,7 @@ class SimulatorDynamicAnchorGenerator:
         road_network: object,
         source_lane: object,
         source_s: float,
+        source_d: float,
         ego_pose: np.ndarray,
         speed_mps: float,
     ) -> np.ndarray:
@@ -408,8 +531,12 @@ class SimulatorDynamicAnchorGenerator:
             ),
             movement_epsilon_m=contract.movement_epsilon_m,
         )
-        world = self._sample_lane_path(
-            road_network, source_lane, source_s, distances
+        world, world_heading = self._sample_lane_pose_path(
+            road_network,
+            source_lane,
+            source_s,
+            source_d,
+            distances,
         )
         xy = self._world_to_ego(world, ego_pose)
         increments = np.diff(np.concatenate(([0.0], distances)))
@@ -424,12 +551,10 @@ class SimulatorDynamicAnchorGenerator:
                 else xy[first - 1].copy()
             )
             xy[first:] = frozen_xy
-        heading = self._headings_from_xy(xy)
-        heading = self._rate_limit_headings(
-            heading,
-            max_delta_rad=(
-                contract.max_yaw_rate_rad_s * contract.dt_s
-            ),
+        heading = self._contract_limited_headings(
+            _wrap_to_pi(world_heading - ego_pose[2]),
+            xy,
+            contract,
         )
         if stationary.size:
             first = int(stationary[0])
@@ -467,7 +592,7 @@ class SimulatorDynamicAnchorGenerator:
             raise DynamicAnchorError(f"agent {ego_id!r} has invalid kinematics")
 
         road_network = self._road_network(env)
-        source_s, _ = self._project(source_lane, position[:2])
+        source_s, source_d = self._project(source_lane, position[:2])
         left_lane = self._lateral_lane(road_network, source_lane, ego_pose, direction=1)
         right_lane = self._lateral_lane(road_network, source_lane, ego_pose, direction=-1)
         left_s = self._project(left_lane, position[:2])[0] if left_lane is not None else 0.0
@@ -483,26 +608,51 @@ class SimulatorDynamicAnchorGenerator:
             (ModeIndex.KEEP_HIGH, ModeIndex.KEEP_MEDIUM, ModeIndex.KEEP_LOW), accelerations
         ):
             trajectories[slot] = self._trajectory(
-                road_network, source_lane, None, source_s, 0.0, ego_pose, speed_mps, accel
+                road_network,
+                source_lane,
+                None,
+                source_s,
+                source_d,
+                0.0,
+                ego_pose,
+                speed_mps,
+                accel,
             )
         if left_lane is not None:
             for slot, accel in zip(
                 (ModeIndex.LEFT_HIGH, ModeIndex.LEFT_MEDIUM, ModeIndex.LEFT_LOW), accelerations
             ):
                 trajectories[slot] = self._trajectory(
-                    road_network, source_lane, left_lane, source_s, left_s, ego_pose, speed_mps, accel
+                    road_network,
+                    source_lane,
+                    left_lane,
+                    source_s,
+                    source_d,
+                    left_s,
+                    ego_pose,
+                    speed_mps,
+                    accel,
                 )
         if right_lane is not None:
             for slot, accel in zip(
                 (ModeIndex.RIGHT_HIGH, ModeIndex.RIGHT_MEDIUM, ModeIndex.RIGHT_LOW), accelerations
             ):
                 trajectories[slot] = self._trajectory(
-                    road_network, source_lane, right_lane, source_s, right_s, ego_pose, speed_mps, accel
+                    road_network,
+                    source_lane,
+                    right_lane,
+                    source_s,
+                    source_d,
+                    right_s,
+                    ego_pose,
+                    speed_mps,
+                    accel,
                 )
         trajectories[ModeIndex.STOP] = self._stop_trajectory(
             road_network,
             source_lane,
             source_s,
+            source_d,
             ego_pose,
             speed_mps,
         )
