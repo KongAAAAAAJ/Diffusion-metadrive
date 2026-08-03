@@ -223,6 +223,12 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
     selected_proposal_rank = np.full((count,), -1, dtype=np.int16)
     proposal_attempt_count = np.zeros((count,), dtype=np.int16)
     pool_cache_hit_count = np.zeros((count,), dtype=np.int16)
+    trajectory_source = np.full((count,), "new_native_plan", dtype="<U32")
+    execution_id = np.full((count,), -1, dtype=np.int32)
+    execution_elapsed_s = np.full((count,), np.nan, dtype=np.float32)
+    rolling_hard_audit = np.full((count,), "not_applicable", dtype="<U32")
+    minimum_platoon_gap_m = np.full((count,), np.nan, dtype=np.float32)
+    tracking_error = np.full((count, 3, 3), np.nan, dtype=np.float32)
     gt_mode = np.full((count, 3), -1, dtype=np.int64)
     mode_valid_mask = np.zeros((count, 3, 10), dtype=np.bool_)
     collection_ready = np.zeros((count,), dtype=np.bool_)
@@ -251,6 +257,22 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
         pool_cache_hit_count[row] = int(
             record.get("pool_cache_hit_count", 0)
         )
+        trajectory_source[row] = str(
+            record.get("trajectory_source", "new_native_plan")
+        )
+        execution_id[row] = int(record.get("execution_id", -1))
+        execution_elapsed_s[row] = float(
+            record.get("execution_elapsed_s", np.nan)
+        )
+        rolling_hard_audit[row] = str(
+            record.get("rolling_hard_audit", "not_applicable")
+        )
+        minimum_platoon_gap_m[row] = float(
+            record.get("minimum_platoon_gap_m", np.nan)
+        )
+        tracking = record.get("tracking_error")
+        if tracking is not None:
+            tracking_error[row] = np.asarray(tracking, dtype=np.float32)
         collection_ready[row] = bool(record.get("collection_ready", False))
         if record.get("gt_mode") is not None:
             gt_mode[row] = np.asarray(record["gt_mode"], dtype=np.int64)
@@ -271,6 +293,12 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
         selected_proposal_rank=selected_proposal_rank,
         proposal_attempt_count=proposal_attempt_count,
         pool_cache_hit_count=pool_cache_hit_count,
+        trajectory_source=trajectory_source,
+        execution_id=execution_id,
+        execution_elapsed_s=execution_elapsed_s,
+        rolling_hard_audit=rolling_hard_audit,
+        minimum_platoon_gap_m=minimum_platoon_gap_m,
+        tracking_error=tracking_error,
         collection_ready=collection_ready,
         gt_mode=gt_mode,
         mode_valid_mask=mode_valid_mask,
@@ -469,6 +497,11 @@ def _expert_debug_snapshot(
         },
         "planner_ranked": (
             dict(planner_debug.get("_ranked", {}) or {})
+            if isinstance(planner_debug, Mapping)
+            else {}
+        ),
+        "planner_execution": (
+            dict(planner_debug.get("_execution", {}) or {})
             if isinstance(planner_debug, Mapping)
             else {}
         ),
@@ -836,6 +869,8 @@ def _run_single_episode(
     dt_s = simulator_decision_dt_s(env)
     rollout_started = time.perf_counter()
     planning_times_s: list[float] = []
+    native_plan_times_s: list[float] = []
+    committed_roll_times_s: list[float] = []
     planning_attempt_steps = 0
     native_joint_success_steps = 0
     collection_ready_attempt_steps = 0
@@ -875,7 +910,15 @@ def _run_single_episode(
         try:
             actions = action_fn(env)
         except JointCollectionError as exc:
-            planning_times_s.append(time.perf_counter() - planning_started)
+            elapsed_planning_s = time.perf_counter() - planning_started
+            planning_times_s.append(elapsed_planning_s)
+            failure_planning = getattr(env, "_preview_planning_debug", None) or {}
+            failure_native = failure_planning.get("planner_debug", {}) if isinstance(failure_planning, Mapping) else {}
+            failure_execution = failure_native.get("_execution", {}) if isinstance(failure_native, Mapping) else {}
+            if failure_execution.get("trajectory_source") == "committed_roll":
+                committed_roll_times_s.append(elapsed_planning_s)
+            else:
+                native_plan_times_s.append(elapsed_planning_s)
             failure_reason = exc.reason_code
             rejection_counts[exc.reason_code] += 1
             rejection_details[str(exc)] += 1
@@ -894,7 +937,15 @@ def _run_single_episode(
             if semantic_bev_frames is not None:
                 semantic_bev_frames.append(_semantic_bev_mosaic(None))
             break
-        planning_times_s.append(time.perf_counter() - planning_started)
+        elapsed_planning_s = time.perf_counter() - planning_started
+        planning_times_s.append(elapsed_planning_s)
+        successful_planning = getattr(env, "_preview_planning_debug", None) or {}
+        successful_native = successful_planning.get("planner_debug", {}) if isinstance(successful_planning, Mapping) else {}
+        successful_execution = successful_native.get("_execution", {}) if isinstance(successful_native, Mapping) else {}
+        if successful_execution.get("trajectory_source") == "committed_roll":
+            committed_roll_times_s.append(elapsed_planning_s)
+        else:
+            native_plan_times_s.append(elapsed_planning_s)
         if not actions:
             failure_reason = "rule_maker_no_action"
             break
@@ -962,6 +1013,14 @@ def _run_single_episode(
                 if isinstance(native_planner_debug, Mapping)
                 else {}
             )
+            execution_snapshot = (
+                native_planner_debug.get("_execution", {})
+                if isinstance(native_planner_debug, Mapping)
+                else {}
+            )
+            execution_agents = dict(
+                execution_snapshot.get("agents", {}) or {}
+            )
             trajectory_records.append(
                 {
                     "step": int(_step),
@@ -1019,6 +1078,46 @@ def _run_single_episode(
                     ),
                     "pool_cache_hit_count": int(
                         ranked_snapshot.get("pool_cache_hit_count", 0)
+                    ),
+                    "trajectory_source": str(
+                        execution_snapshot.get(
+                            "trajectory_source", "new_native_plan"
+                        )
+                    ),
+                    "execution_id": int(
+                        execution_snapshot.get("execution_id", -1)
+                    ),
+                    "execution_elapsed_s": float(
+                        execution_snapshot.get("elapsed_s", 0.0)
+                    ),
+                    "rolling_hard_audit": str(
+                        execution_snapshot.get(
+                            "rolling_hard_audit", "not_applicable"
+                        )
+                    ),
+                    "minimum_platoon_gap_m": float(
+                        execution_snapshot.get(
+                            "minimum_platoon_gap_m", np.nan
+                        )
+                    ),
+                    "tracking_error": np.asarray(
+                        [
+                            [
+                                float(
+                                    (
+                                        execution_agents.get(agent_id, {})
+                                        .get("tracking_error", {})
+                                    ).get(name, np.nan)
+                                )
+                                for name in (
+                                    "longitudinal_m",
+                                    "lateral_m",
+                                    "heading_rad",
+                                )
+                            ]
+                            for agent_id in agent_ids
+                        ],
+                        dtype=np.float32,
                     ),
                     "collection_ready": sample is not None,
                     "gt_mode": None if sample is None else sample.gt_mode,
@@ -1144,6 +1243,14 @@ def _run_single_episode(
                     ),
                     "p50": 1000.0 * _percentile(planning_times_s, 50),
                     "p95": 1000.0 * _percentile(planning_times_s, 95),
+                },
+                "native_plan_time_ms": {
+                    "p50": 1000.0 * _percentile(native_plan_times_s, 50),
+                    "p95": 1000.0 * _percentile(native_plan_times_s, 95),
+                },
+                "committed_roll_time_ms": {
+                    "p50": 1000.0 * _percentile(committed_roll_times_s, 50),
+                    "p95": 1000.0 * _percentile(committed_roll_times_s, 95),
                 },
                 "collision": bool(collision_agents),
                 "collision_agents": collision_agents,

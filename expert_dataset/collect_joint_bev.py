@@ -38,6 +38,8 @@ from models.decisioner.rule_decisioner import (
     select_controller_by_formation,
 )
 from models.platoon_planner.platoon_normal_planner import (
+    CommittedTrajectoryError,
+    JointTrajectoryExecutor,
     NormalPlannerKinematicError,
     NormalPlannerNoFeasiblePlan,
     PlatoonNormalPlanner,
@@ -282,6 +284,7 @@ class RulePlannerExpert:
         self.rule_maker = make_rule_maker(config)
         self.rule_maker.reset(env, list(self.agent_ids))
         self.planner = PlatoonNormalPlanner()
+        self.trajectory_executor = JointTrajectoryExecutor(self.planner)
         self.pid_controller = PIDTrajectoryController(config)
         self.pid_controller.reset()
         self.lqr_controller = LQRFollowerController(config)
@@ -315,6 +318,42 @@ class RulePlannerExpert:
         active = [agent_id for agent_id in self.agent_ids if agent_id in getattr(env, "agents", {})]
         if tuple(active) != self.agent_ids:
             raise JointCollectionError("all three ordered platoon agents must be active")
+        if self.trajectory_executor.active:
+            execution_plan = self.trajectory_executor.plan
+            assert execution_plan is not None
+            try:
+                self.rule_maker.advance_committed_execution(
+                    env, active, execution_plan.execution_id
+                )
+            except LaneChangeCommitmentError as exc:
+                raise JointCollectionError(
+                    str(exc), reason_code="lane_change_commitment_invalid"
+                ) from exc
+            if not self.rule_maker.has_active_lane_change_commitments:
+                self.trajectory_executor.reset()
+            else:
+                try:
+                    rolled = self.trajectory_executor.roll(env)
+                except CommittedTrajectoryError as exc:
+                    self.planner._last_debug = {
+                        "_joint": {
+                            "fallback_used": False,
+                            "fallback_reason": exc.reason_code,
+                            "trajectory_source": "committed_roll",
+                        },
+                        "_execution": dict(exc.debug),
+                    }
+                    raise JointCollectionError(
+                        str(exc), reason_code=exc.reason_code
+                    ) from exc
+                return self._build_expert_step(
+                    env,
+                    actions=dict(rolled.rule_actions),
+                    trajectories=rolled.trajectories_world,
+                    trajectories_local=rolled.trajectories_local,
+                    trajectory_source="committed_roll",
+                    execution_debug=dict(rolled.debug),
+                )
         try:
             proposal_batch = self.rule_maker.propose_joint_actions(
                 env,
@@ -340,14 +379,23 @@ class RulePlannerExpert:
             ) from exc
         except NormalPlannerKinematicError as exc:
             raise JointCollectionError(
-                "Normal planner selected a dynamically invalid native trajectory",
+                "Normal planner selected a dynamically invalid native trajectory: "
+                f"{exc}",
                 reason_code="normal_planner_final_kinematic_invalid",
             ) from exc
+        if plan_result.execution_plan is not None:
+            try:
+                self.trajectory_executor.start(env, plan_result.execution_plan)
+            except CommittedTrajectoryError as exc:
+                raise JointCollectionError(
+                    str(exc), reason_code=exc.reason_code
+                ) from exc
         try:
             self.rule_maker.accept_joint_action(
                 proposal_batch.batch_id, plan_result.proposal_id
             )
         except LaneChangeCommitmentError as exc:
+            self.trajectory_executor.reset()
             raise JointCollectionError(
                 str(exc), reason_code="lane_change_commitment_invalid"
             ) from exc
@@ -369,17 +417,61 @@ class RulePlannerExpert:
         if len(formation_flags) != 1:
             raise JointCollectionError("RuleMaker returned mixed coordination modes")
 
+        trajectories = plan_result.trajectories_world
+        trajectories_local = plan_result.trajectories_local
+        return self._build_expert_step(
+            env,
+            actions=actions,
+            trajectories=trajectories,
+            trajectories_local=trajectories_local,
+            trajectory_source="new_native_plan",
+            execution_debug=self.trajectory_executor.get_last_debug(),
+        )
+
+    def _build_expert_step(
+        self,
+        env: PlatoonEnv,
+        *,
+        actions: Mapping[str, int],
+        trajectories: Mapping[str, np.ndarray],
+        trajectories_local: Mapping[str, np.ndarray],
+        trajectory_source: str,
+        execution_debug: Mapping[str, object] | None,
+    ) -> ExpertJointStep:
         rule_debug = getattr(self.rule_maker, "get_last_debug", lambda: None)() or {}
         dynamic_roles = rule_debug.get("dynamic_roles", {}) if isinstance(rule_debug, Mapping) else {}
         if dynamic_roles:
             env.apply_dynamic_roles(dynamic_roles)
-
-        trajectories = plan_result.trajectories_world
-        trajectories_local = plan_result.trajectories_local
         planner_debug = self.planner.get_last_debug() or {}
+        if trajectory_source == "new_native_plan" and execution_debug:
+            planner_debug["_execution"] = dict(execution_debug)
+            self.planner._last_debug = planner_debug
+        if trajectory_source == "committed_roll":
+            planner_debug = {
+                agent_id: {
+                    "fallback_used": False,
+                    "fallback_reason": None,
+                    "trajectory_source": trajectory_source,
+                }
+                for agent_id in self.agent_ids
+            }
+            planner_debug["_joint"] = {
+                "fallback_used": False,
+                "fallback_reason": None,
+                "trajectory_source": trajectory_source,
+                "planning_time_ms": 0.0,
+            }
+            planner_debug["_execution"] = dict(execution_debug or {})
+            self.planner._last_debug = planner_debug
         for agent_id in self.agent_ids:
             trajectory = np.asarray(trajectories.get(agent_id), dtype=np.float32)
-            if trajectory.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM) or not np.isfinite(trajectory).all():
+            local = np.asarray(trajectories_local.get(agent_id), dtype=np.float32)
+            if (
+                trajectory.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM)
+                or local.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM)
+                or not np.isfinite(trajectory).all()
+                or not np.isfinite(local).all()
+            ):
                 raise JointCollectionError(
                     f"normal planner returned an invalid trajectory for {agent_id}",
                     reason_code="normal_planner_invalid_trajectory",
@@ -390,7 +482,6 @@ class RulePlannerExpert:
                     f"normal planner did not produce a native expert trajectory for {agent_id}",
                     reason_code="normal_planner_fallback",
                 )
-
         controller = select_controller_by_formation(
             self.rule_maker, self.pid_controller, self.lqr_controller
         )
@@ -398,13 +489,13 @@ class RulePlannerExpert:
         if self._last_formation_locked is None or formation_locked != self._last_formation_locked:
             controller.reset()
         self._last_formation_locked = formation_locked
-        controls = controller.compute_actions(env, trajectories)
+        controls = controller.compute_actions(env, dict(trajectories))
         for agent_id in self.agent_ids:
             control = np.asarray(controls.get(agent_id), dtype=np.float32)
             if control.shape != (2,) or not np.isfinite(control).all():
                 raise JointCollectionError(f"controller returned an invalid action for {agent_id}")
         return ExpertJointStep(
-            rule_actions=actions,
+            rule_actions={key: int(value) for key, value in actions.items()},
             trajectories_world={
                 key: np.ascontiguousarray(np.asarray(value, dtype=np.float32))
                 for key, value in trajectories.items()

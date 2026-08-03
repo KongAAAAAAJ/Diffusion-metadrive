@@ -34,6 +34,7 @@ from models.decisioner.rule_decisioner import (
     RuleMakerProposalBatch,
 )
 from models.platoon_planner.platoon_normal_planner import (
+    JointTrajectoryExecutor,
     NormalPlannerNoFeasiblePlan,
     RankedJointPlan,
 )
@@ -410,6 +411,7 @@ def test_rule_planner_expert_reports_joint_planner_failure_category() -> None:
         ),
         get_last_debug=lambda: {},
     )
+    expert.trajectory_executor = JointTrajectoryExecutor(expert.planner)
     env = SimpleNamespace(
         agents={agent_id: object() for agent_id in expert.agent_ids},
         _last_planner_batch={},
@@ -470,6 +472,7 @@ def test_rule_planner_expert_uses_independent_pid_when_formation_is_unlocked() -
             },
         },
     )
+    expert.trajectory_executor = JointTrajectoryExecutor(expert.planner)
 
     class _Controller:
         def __init__(self):

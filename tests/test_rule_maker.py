@@ -175,6 +175,43 @@ def test_lane_change_commitment_is_transactional_until_plan_acceptance():
     )
 
 
+def test_committed_execution_advances_state_without_generating_proposals():
+    vehicle = _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=20.0)
+    env = _env(agents={"agent0": vehicle}, traffic=[])
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=False,
+        lane_change_preference=20.0,
+        lc_cost=0.0,
+        w_mobil=0.0,
+        w_keep_bias=0.0,
+    )
+    batch = rule_maker.propose_joint_actions(env, ["agent0"], {})
+    proposal = next(
+        value
+        for value in batch.proposals
+        if int(value.decisions["agent0"]["action"]) != 0
+    )
+    action = int(proposal.decisions["agent0"]["action"])
+    rule_maker.accept_joint_action(batch.batch_id, proposal.proposal_id)
+
+    debug = rule_maker.advance_committed_execution(env, ["agent0"], 11)
+
+    assert debug["proposal_count"] == 0
+    assert debug["action_search"]["proposal_generation_skipped"] is True
+    assert debug["active_execution_id"] == 11
+    assert debug["lane_change_commitments"]["active"]["agent0"]["action"] == action
+
+    target_lane_id = 1 + action
+    target_y = {0: 3.5, 2: -3.5}[target_lane_id]
+    env.agents["agent0"] = _vehicle(
+        "agent0", 24.0, target_y, target_lane_id, speed_km_h=20.0
+    )
+    completed = rule_maker.advance_committed_execution(env, ["agent0"], 11)
+
+    assert completed["lane_change_commitments"]["active"] == {}
+    assert rule_maker.has_active_lane_change_commitments is False
+
+
 def test_risk_detector_unlocks_when_leader_ttc_is_below_threshold():
     env = _env(
         agents={

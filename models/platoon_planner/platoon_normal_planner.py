@@ -33,6 +33,80 @@ class NormalPlannerNoFeasiblePlan(RuntimeError):
         self.debug = copy.deepcopy(debug)
 
 
+class CommittedTrajectoryError(RuntimeError):
+    """Raised when an accepted joint trajectory can no longer be executed safely."""
+
+    def __init__(self, message: str, *, reason_code: str, debug: dict) -> None:
+        super().__init__(message)
+        self.reason_code = str(reason_code)
+        self.debug = copy.deepcopy(debug)
+
+
+@dataclass(frozen=True)
+class TrajectoryExecutionSpec:
+    """Immutable parameterization of one selected native trajectory."""
+
+    agent_id: str
+    source_lane_index: tuple
+    continuation_lane_index: tuple
+    target_lane_index: tuple
+    start_s: float
+    start_d: float
+    end_d: float
+    initial_speed_mps: float
+    acceleration_mps2: float
+    acceleration_duration_s: float
+    recovery_acceleration_mps2: float
+    lane_change_duration_s: float
+    lane_change_start_delay_s: float
+    default_heading: float
+    selected_candidate_index: int
+    rule_target_point: tuple[float, float]
+    sample_times_s: np.ndarray
+    trajectory_world: np.ndarray
+
+    def __post_init__(self) -> None:
+        times = np.ascontiguousarray(self.sample_times_s, dtype=np.float64)
+        trajectory = np.ascontiguousarray(self.trajectory_world, dtype=np.float64)
+        if times.ndim != 1 or trajectory.shape != (times.size, 3):
+            raise ValueError("execution trajectory/time shape mismatch")
+        if times.size < 2 or abs(float(times[0])) > 1e-9:
+            raise ValueError("execution trajectory must start at t=0")
+        if not np.isfinite(times).all() or not np.isfinite(trajectory).all():
+            raise ValueError("execution trajectory must be finite")
+        if np.any(np.diff(times) <= 0.0):
+            raise ValueError("execution trajectory times must increase")
+        times.setflags(write=False)
+        trajectory.setflags(write=False)
+        object.__setattr__(self, "sample_times_s", times)
+        object.__setattr__(self, "trajectory_world", trajectory)
+
+
+@dataclass(frozen=True)
+class JointTrajectoryExecutionPlan:
+    """Atomic three-agent trajectory retained for a lane-change commitment."""
+
+    execution_id: int
+    proposal_id: int
+    proposal_rank: int
+    start_step: int
+    start_time_s: float
+    rule_actions: Mapping[str, int]
+    agent_specs: Mapping[str, TrajectoryExecutionSpec]
+    committed_agents: tuple[str, ...]
+    completion_deadline_s: float
+
+
+@dataclass(frozen=True)
+class RolledJointTrajectory:
+    execution_id: int
+    elapsed_s: float
+    trajectories_world: Mapping[str, np.ndarray]
+    trajectories_local: Mapping[str, np.ndarray]
+    rule_actions: Mapping[str, int]
+    debug: Mapping[str, object]
+
+
 @dataclass(frozen=True)
 class RankedJointPlan:
     proposal_id: int
@@ -42,6 +116,7 @@ class RankedJointPlan:
     trajectories_world: Mapping[str, np.ndarray]
     trajectories_local: Mapping[str, np.ndarray]
     selected_candidate_indices: Mapping[str, int]
+    execution_plan: JointTrajectoryExecutionPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +148,8 @@ class _TrajectoryCandidate:
     lane_change_start_delay_s: float
     stop_time_s: float | None
     terminal_progress_m: float
+    execution_spec: TrajectoryExecutionSpec | None = None
+    execution_parameters: Mapping[str, object] | None = None
 
 
 class PlatoonNormalPlanner:
@@ -133,6 +210,8 @@ class PlatoonNormalPlanner:
             dtype=np.int64,
         )
         self._last_debug: dict | None = None
+        self._execution_counter = 0
+        self._last_selected_candidates: dict[str, _TrajectoryCandidate] = {}
 
     def plan(
         self,
@@ -142,6 +221,7 @@ class PlatoonNormalPlanner:
         _pool_cache: dict | None = None,
     ) -> dict[str, np.ndarray]:
         planning_started_at = time.perf_counter()
+        self._last_selected_candidates = {}
         agents = getattr(env, "agents", {}) or {}
         ordered_ids = [
             str(agent_id)
@@ -272,6 +352,7 @@ class PlatoonNormalPlanner:
                     + ",".join(final_audit.violations)
                 )
             results[agent_id] = candidate.output.astype(np.float32, copy=False)
+            self._last_selected_candidates[agent_id] = candidate
             debug[agent_id].update(
                 fallback_used=False,
                 fallback_reason=None,
@@ -381,6 +462,48 @@ class PlatoonNormalPlanner:
                 "pool_cache_hit_count": int(pool_cache_hit_count),
             }
             self._last_debug = attempt_debug
+            committed_agents = tuple(
+                agent_id
+                for agent_id, decision in proposal.decisions.items()
+                if int(decision.get("action", 0)) != 0
+            )
+            execution_plan = None
+            if committed_agents:
+                self._execution_counter += 1
+                config = getattr(env, "config", {}) or {}
+                decision_dt_s = float(
+                    config.get("physics_world_step_size", 0.02)
+                ) * float(config.get("decision_repeat", 5))
+                deadline = max(
+                    float(self._last_selected_candidates[agent_id].lane_change_start_delay_s)
+                    + float(self._last_selected_candidates[agent_id].lane_change_duration_s)
+                    for agent_id in committed_agents
+                )
+                specs = {
+                    agent_id: self._build_execution_spec(
+                        env,
+                        agent_id,
+                        self._last_selected_candidates[agent_id],
+                        selected_candidate_index=indices[agent_id],
+                        maximum_time_s=deadline + self.HORIZON_S + decision_dt_s,
+                    )
+                    for agent_id in trajectories
+                }
+                start_step = int(getattr(env, "_scenario_step_count", 0) or 0)
+                execution_plan = JointTrajectoryExecutionPlan(
+                    execution_id=int(self._execution_counter),
+                    proposal_id=int(proposal.proposal_id),
+                    proposal_rank=int(proposal.rank),
+                    start_step=start_step,
+                    start_time_s=float(start_step * decision_dt_s),
+                    rule_actions={
+                        agent_id: int(decision.get("action", 0))
+                        for agent_id, decision in proposal.decisions.items()
+                    },
+                    agent_specs=specs,
+                    committed_agents=committed_agents,
+                    completion_deadline_s=float(deadline),
+                )
             return RankedJointPlan(
                 proposal_id=int(proposal.proposal_id),
                 proposal_rank=int(proposal.rank),
@@ -392,6 +515,7 @@ class PlatoonNormalPlanner:
                 },
                 trajectories_local=local,
                 selected_candidate_indices=indices,
+                execution_plan=execution_plan,
             )
 
         committed = any(
@@ -418,6 +542,119 @@ class PlatoonNormalPlanner:
             "no ranked RuleMaker proposal has a native joint trajectory",
             reason_code=reason_code,
             debug=debug,
+        )
+
+    def _build_execution_spec(
+        self,
+        env,
+        agent_id: str,
+        candidate: _TrajectoryCandidate,
+        *,
+        selected_candidate_index: int,
+        maximum_time_s: float,
+    ) -> TrajectoryExecutionSpec:
+        params = dict(candidate.execution_parameters or {})
+        required = {
+            "source_lane_index",
+            "target_lane_index",
+            "start_s",
+            "start_d",
+            "end_d",
+            "initial_speed_mps",
+            "default_heading",
+            "rule_target_point",
+        }
+        if not required.issubset(params):
+            raise NormalPlannerKinematicError(
+                f"{agent_id} selected candidate lacks execution parameters"
+            )
+        source_lane = self._lane_from_index(env, tuple(params["source_lane_index"]))
+        continuation_index = tuple(params.get("continuation_lane_index", ()) or ())
+        continuation_lane = (
+            self._lane_from_index(env, continuation_index)
+            if continuation_index
+            else None
+        )
+        if source_lane is None:
+            raise NormalPlannerKinematicError(
+                f"{agent_id} execution source lane is unavailable"
+            )
+        continuation = self._continuation_context(source_lane, continuation_lane)
+        sample_times = np.arange(
+            0.0,
+            float(maximum_time_s) + 0.5 * self.DENSE_DT_S,
+            self.DENSE_DT_S,
+            dtype=np.float64,
+        )
+        progress = self._longitudinal_progress(
+            float(params["initial_speed_mps"]),
+            float(candidate.acceleration_mps2),
+            sample_times,
+            acceleration_duration_s=float(candidate.acceleration_duration_s),
+            recovery_acceleration_mps2=float(
+                candidate.recovery_acceleration_mps2
+            ),
+        )
+        trajectory = self._build_dense_candidate(
+            source_lane=source_lane,
+            continuation_lane=continuation_lane,
+            continuation=continuation,
+            start_s=float(params["start_s"]),
+            start_d=float(params["start_d"]),
+            progress=progress,
+            end_d=float(params["end_d"]),
+            lane_change_duration_s=float(candidate.lane_change_duration_s),
+            lane_change_start_delay_s=float(
+                candidate.lane_change_start_delay_s
+            ),
+            default_heading=float(params["default_heading"]),
+            times=sample_times,
+        )
+        if trajectory is None:
+            raise NormalPlannerKinematicError(
+                f"{agent_id} selected trajectory cannot be parameterized"
+            )
+        initial_count = min(candidate.dense.shape[0], trajectory.shape[0])
+        xy_matches = np.allclose(
+            trajectory[:initial_count, :2],
+            candidate.dense[:initial_count, :2],
+            rtol=1e-5,
+            atol=2e-4,
+        )
+        heading_count = max(initial_count - 1, 0)
+        heading_matches = np.allclose(
+            trajectory[:heading_count, 2],
+            candidate.dense[:heading_count, 2],
+            rtol=1e-5,
+            atol=2e-4,
+        )
+        if not xy_matches or not heading_matches:
+            raise NormalPlannerKinematicError(
+                f"{agent_id} execution parameterization does not reproduce selected path"
+            )
+        return TrajectoryExecutionSpec(
+            agent_id=str(agent_id),
+            source_lane_index=tuple(params["source_lane_index"]),
+            continuation_lane_index=continuation_index,
+            target_lane_index=tuple(params["target_lane_index"]),
+            start_s=float(params["start_s"]),
+            start_d=float(params["start_d"]),
+            end_d=float(params["end_d"]),
+            initial_speed_mps=float(params["initial_speed_mps"]),
+            acceleration_mps2=float(candidate.acceleration_mps2),
+            acceleration_duration_s=float(candidate.acceleration_duration_s),
+            recovery_acceleration_mps2=float(
+                candidate.recovery_acceleration_mps2
+            ),
+            lane_change_duration_s=float(candidate.lane_change_duration_s),
+            lane_change_start_delay_s=float(
+                candidate.lane_change_start_delay_s
+            ),
+            default_heading=float(params["default_heading"]),
+            selected_candidate_index=int(selected_candidate_index),
+            rule_target_point=tuple(params["rule_target_point"]),
+            sample_times_s=sample_times,
+            trajectory_world=trajectory,
         )
 
     def get_last_debug(self) -> dict | None:
@@ -787,6 +1024,27 @@ class PlatoonNormalPlanner:
                                 lane_change_start_delay_s=float(start_delay),
                                 stop_time_s=stop_time,
                                 terminal_progress_m=float(progress[-1]),
+                                execution_parameters={
+                                    "source_lane_index": tuple(
+                                        getattr(source_lane, "index", ()) or ()
+                                    ),
+                                    "continuation_lane_index": tuple(
+                                        getattr(continuation_lane, "index", ()) or ()
+                                    ),
+                                    "target_lane_index": tuple(
+                                        getattr(target_lane, "index", ()) or ()
+                                    ),
+                                    "start_s": float(start_s),
+                                    "start_d": float(start_d),
+                                    "end_d": float(end_d),
+                                    "initial_speed_mps": float(ego_speed),
+                                    "default_heading": float(
+                                        getattr(vehicle, "heading_theta", 0.0)
+                                    ),
+                                    "rule_target_point": tuple(
+                                        float(value) for value in target_point
+                                    ),
+                                },
                             )
                         )
 
@@ -1328,21 +1586,30 @@ class PlatoonNormalPlanner:
         lane_change_duration_s: float,
         lane_change_start_delay_s: float,
         default_heading: float,
+        times: np.ndarray | None = None,
     ) -> np.ndarray | None:
+        evaluation_times = (
+            self._dense_times
+            if times is None
+            else np.asarray(times, dtype=np.float64)
+        )
+        progress = np.asarray(progress, dtype=np.float64)
+        if progress.shape != evaluation_times.shape:
+            return None
         source_length = float(getattr(source_lane, "length", 0.0) or 0.0)
         total_length = source_length + float(continuation["remaining_length"])
         s_values = np.clip(float(start_s) + np.asarray(progress), 0.0, total_length)
         completion_progress = float(
             np.interp(
                 min(float(lane_change_duration_s), self.HORIZON_S),
-                self._dense_times,
+                evaluation_times,
                 progress,
             )
         )
         start_progress = float(
             np.interp(
                 float(lane_change_start_delay_s),
-                self._dense_times,
+                evaluation_times,
                 progress,
             )
         )
@@ -1397,7 +1664,7 @@ class PlatoonNormalPlanner:
                 ),
                 lateral_values[~source_mask] + float(continuation["d_offset"]),
             )
-        if points_xy.shape != (len(self._dense_times), 2) or not np.isfinite(points_xy).all():
+        if points_xy.shape != (len(evaluation_times), 2) or not np.isfinite(points_xy).all():
             return None
         return self._append_heading(points_xy, default_heading=default_heading)
 
@@ -2461,3 +2728,418 @@ class PlatoonNormalPlanner:
             return np.concatenate(
                 [xy, np.full((8, 1), heading, dtype=np.float64)], axis=1
             ).astype(np.float32)
+
+
+class JointTrajectoryExecutor:
+    """Roll an accepted three-agent native plan without restarting its maneuver."""
+
+    TRACKING_LONGITUDINAL_LIMIT_M = 1.0
+    TRACKING_LATERAL_LIMIT_M = 0.5
+    TRACKING_HEADING_LIMIT_RAD = 0.1
+
+    def __init__(self, planner: PlatoonNormalPlanner) -> None:
+        self.planner = planner
+        self._plan: JointTrajectoryExecutionPlan | None = None
+        self._last_debug: dict | None = None
+
+    @property
+    def active(self) -> bool:
+        return self._plan is not None
+
+    @property
+    def plan(self) -> JointTrajectoryExecutionPlan | None:
+        return self._plan
+
+    def reset(self) -> None:
+        self._plan = None
+        self._last_debug = None
+
+    def start(self, env, plan: JointTrajectoryExecutionPlan) -> None:
+        if self._plan is not None:
+            raise CommittedTrajectoryError(
+                "a committed joint trajectory is already active",
+                reason_code="committed_trajectory_tracking_deviation",
+                debug={"active_execution_id": self._plan.execution_id},
+            )
+        expected = tuple(str(value) for value in plan.agent_specs)
+        active = tuple(
+            value for value in expected if value in (getattr(env, "agents", {}) or {})
+        )
+        if active != expected or not plan.committed_agents:
+            raise CommittedTrajectoryError(
+                "execution plan does not contain three active agents and a commitment",
+                reason_code="committed_trajectory_lane_chain_invalid",
+                debug={"expected_agents": expected, "active_agents": active},
+            )
+        self._plan = plan
+        self._last_debug = {
+            "trajectory_source": "new_native_plan",
+            "execution_id": int(plan.execution_id),
+            "source_proposal_id": int(plan.proposal_id),
+            "source_proposal_rank": int(plan.proposal_rank),
+            "execution_start_step": int(plan.start_step),
+            "committed_agents": list(plan.committed_agents),
+            "completion_deadline_s": float(plan.completion_deadline_s),
+        }
+
+    def get_last_debug(self) -> dict | None:
+        return copy.deepcopy(self._last_debug)
+
+    def roll(self, env) -> RolledJointTrajectory:
+        plan = self._plan
+        if plan is None:
+            raise RuntimeError("no committed joint trajectory is active")
+        config = getattr(env, "config", {}) or {}
+        decision_dt_s = float(config.get("physics_world_step_size", 0.02)) * float(
+            config.get("decision_repeat", 5)
+        )
+        current_step = int(getattr(env, "_scenario_step_count", 0) or 0)
+        elapsed_s = max(0.0, float(current_step - plan.start_step) * decision_dt_s)
+        if elapsed_s > float(plan.completion_deadline_s) + decision_dt_s + 1e-6:
+            debug = self._base_debug(plan, elapsed_s)
+            debug["completion_reason"] = "deadline_missed"
+            self._last_debug = debug
+            raise CommittedTrajectoryError(
+                "committed lane change did not enter its target lane before deadline",
+                reason_code="committed_trajectory_deadline_missed",
+                debug=debug,
+            )
+
+        dense_offsets = np.arange(0, 41, dtype=np.float64) * self.planner.DENSE_DT_S
+        sparse_offsets = np.arange(1, 9, dtype=np.float64) * self.planner.OUTPUT_DT_S
+        agents = getattr(env, "agents", {}) or {}
+        dense_by_agent: dict[str, np.ndarray] = {}
+        world: dict[str, np.ndarray] = {}
+        local: dict[str, np.ndarray] = {}
+        per_agent: dict[str, dict] = {}
+
+        for agent_id, spec in plan.agent_specs.items():
+            vehicle = agents.get(agent_id)
+            if vehicle is None:
+                self._raise(
+                    plan,
+                    elapsed_s,
+                    "committed trajectory agent is no longer active",
+                    "committed_trajectory_tracking_deviation",
+                    {"agent_id": agent_id},
+                )
+            for lane_index in (
+                spec.source_lane_index,
+                spec.target_lane_index,
+                spec.continuation_lane_index,
+            ):
+                if lane_index and self.planner._lane_from_index(env, lane_index) is None:
+                    self._raise(
+                        plan,
+                        elapsed_s,
+                        "committed trajectory lane chain is unavailable",
+                        "committed_trajectory_lane_chain_invalid",
+                        {"agent_id": agent_id, "lane_index": lane_index},
+                    )
+            planned_now = self._sample_spec(spec, np.asarray([elapsed_s]))[0]
+            tracking = self._tracking_error(vehicle, planned_now)
+            if (
+                abs(tracking["longitudinal_m"])
+                > self.TRACKING_LONGITUDINAL_LIMIT_M
+                or abs(tracking["lateral_m"]) > self.TRACKING_LATERAL_LIMIT_M
+                or abs(tracking["heading_rad"]) > self.TRACKING_HEADING_LIMIT_RAD
+            ):
+                self._raise(
+                    plan,
+                    elapsed_s,
+                    "vehicle tracking error left the committed trajectory envelope",
+                    "committed_trajectory_tracking_deviation",
+                    {"agent_id": agent_id, "tracking_error": tracking},
+                )
+            dense_future = self._sample_spec(spec, elapsed_s + dense_offsets[1:])
+            current_pose = np.asarray(
+                [
+                    float(vehicle.position[0]),
+                    float(vehicle.position[1]),
+                    float(getattr(vehicle, "heading_theta", 0.0)),
+                ],
+                dtype=np.float64,
+            )
+            dense = np.concatenate((current_pose[None, :], dense_future), axis=0)
+            output = self._sample_spec(spec, elapsed_s + sparse_offsets).astype(
+                np.float32
+            )
+            local_output = world_trajectory_to_ego_local(output, current_pose)
+            speed = max(float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6, 0.0)
+            world_audit = validate_trajectory_kinematics(
+                output, speed, current_pose, HardModeMaskConfig()
+            )
+            local_audit = validate_trajectory_kinematics(
+                local_output,
+                speed,
+                np.zeros((3,), dtype=np.float64),
+                HardModeMaskConfig(),
+            )
+            if not world_audit.valid or not local_audit.valid:
+                self._raise(
+                    plan,
+                    elapsed_s,
+                    "rolled trajectory failed the unified kinematic contract",
+                    "committed_trajectory_kinematic_infeasible",
+                    {
+                        "agent_id": agent_id,
+                        "world_violations": list(world_audit.violations),
+                        "local_violations": list(local_audit.violations),
+                        "tracking_error": tracking,
+                    },
+                )
+            if not self._footprint_on_road(env, vehicle, dense, spec):
+                self._raise(
+                    plan,
+                    elapsed_s,
+                    "rolled trajectory footprint leaves the road",
+                    "committed_trajectory_out_of_road",
+                    {"agent_id": agent_id},
+                )
+            background = self.planner._predicted_obstacles(
+                env,
+                vehicle,
+                self.planner._dense_times,
+                include_platoon=False,
+            )
+            collision_names = self.planner._collision_names_against_predictions(
+                dense,
+                self.planner._vehicle_dimensions(vehicle),
+                background,
+            )
+            minimum_background_gap = self._minimum_gap(
+                dense,
+                self.planner._vehicle_dimensions(vehicle),
+                background,
+            )
+            if collision_names or minimum_background_gap < self.planner.background_safe_gap_m - 1e-6:
+                self._raise(
+                    plan,
+                    elapsed_s,
+                    "rolled trajectory violates background safety",
+                    "committed_trajectory_background_unsafe",
+                    {
+                        "agent_id": agent_id,
+                        "collision_objects": collision_names,
+                        "minimum_background_gap_m": minimum_background_gap,
+                    },
+                )
+            dense_by_agent[agent_id] = dense
+            world[agent_id] = np.ascontiguousarray(output)
+            local[agent_id] = np.ascontiguousarray(local_output)
+            per_agent[agent_id] = {
+                "tracking_error": tracking,
+                "minimum_background_gap_m": minimum_background_gap,
+                "selected_lane_change_duration_s": float(
+                    spec.lane_change_duration_s
+                ),
+                "reference_cursor_s": float(elapsed_s),
+            }
+
+        minimum_platoon_gap = float("inf")
+        ordered_ids = tuple(plan.agent_specs)
+        for first_index in range(len(ordered_ids)):
+            for second_index in range(first_index + 1, len(ordered_ids)):
+                first_id = ordered_ids[first_index]
+                second_id = ordered_ids[second_index]
+                first_dense = dense_by_agent[first_id]
+                second_dense = dense_by_agent[second_id]
+                if self.planner._trajectory_pair_collides(
+                    first_dense,
+                    agents[first_id],
+                    second_dense,
+                    agents[second_id],
+                ):
+                    self._raise(
+                        plan,
+                        elapsed_s,
+                        "rolled joint trajectory has a pairwise OBB conflict",
+                        "committed_trajectory_pairwise_unsafe",
+                        {"pair": [first_id, second_id], "obb_collision": True},
+                    )
+                pair_gap = self._minimum_pair_gap(
+                    first_dense,
+                    self.planner._vehicle_dimensions(agents[first_id]),
+                    second_dense,
+                    self.planner._vehicle_dimensions(agents[second_id]),
+                )
+                minimum_platoon_gap = min(minimum_platoon_gap, pair_gap)
+                if pair_gap < self.planner.platoon_safe_gap_m - 1e-6:
+                    self._raise(
+                        plan,
+                        elapsed_s,
+                        "rolled joint trajectory violates platoon safety gap",
+                        "committed_trajectory_pairwise_unsafe",
+                        {"pair": [first_id, second_id], "minimum_gap_m": pair_gap},
+                    )
+
+        debug = self._base_debug(plan, elapsed_s)
+        debug.update(
+            rolling_hard_audit="passed",
+            minimum_platoon_gap_m=minimum_platoon_gap,
+            agents=per_agent,
+        )
+        self._last_debug = debug
+        return RolledJointTrajectory(
+            execution_id=int(plan.execution_id),
+            elapsed_s=float(elapsed_s),
+            trajectories_world=world,
+            trajectories_local=local,
+            rule_actions=dict(plan.rule_actions),
+            debug=debug,
+        )
+
+    def _raise(
+        self,
+        plan: JointTrajectoryExecutionPlan,
+        elapsed_s: float,
+        message: str,
+        reason_code: str,
+        detail: Mapping[str, object],
+    ) -> None:
+        debug = self._base_debug(plan, elapsed_s)
+        debug.update(rolling_hard_audit="failed", failure_detail=dict(detail))
+        self._last_debug = debug
+        raise CommittedTrajectoryError(
+            message, reason_code=reason_code, debug=debug
+        )
+
+    @staticmethod
+    def _base_debug(plan: JointTrajectoryExecutionPlan, elapsed_s: float) -> dict:
+        return {
+            "trajectory_source": "committed_roll",
+            "execution_id": int(plan.execution_id),
+            "source_proposal_id": int(plan.proposal_id),
+            "source_proposal_rank": int(plan.proposal_rank),
+            "execution_start_step": int(plan.start_step),
+            "elapsed_s": float(elapsed_s),
+            "remaining_s": max(float(plan.completion_deadline_s) - elapsed_s, 0.0),
+            "committed_agents": list(plan.committed_agents),
+            "completion_deadline_s": float(plan.completion_deadline_s),
+        }
+
+    @staticmethod
+    def _sample_spec(spec: TrajectoryExecutionSpec, query_times: np.ndarray) -> np.ndarray:
+        query = np.asarray(query_times, dtype=np.float64)
+        if query.size and (
+            float(np.min(query)) < -1e-9
+            or float(np.max(query)) > float(spec.sample_times_s[-1]) + 1e-9
+        ):
+            raise CommittedTrajectoryError(
+                "committed trajectory buffer is exhausted",
+                reason_code="committed_trajectory_deadline_missed",
+                debug={"maximum_time_s": float(spec.sample_times_s[-1])},
+            )
+        x = np.interp(query, spec.sample_times_s, spec.trajectory_world[:, 0])
+        y = np.interp(query, spec.sample_times_s, spec.trajectory_world[:, 1])
+        headings = np.unwrap(spec.trajectory_world[:, 2])
+        heading = np.interp(query, spec.sample_times_s, headings)
+        heading = np.arctan2(np.sin(heading), np.cos(heading))
+        return np.column_stack((x, y, heading))
+
+    @staticmethod
+    def _tracking_error(vehicle, planned_pose: np.ndarray) -> dict[str, float]:
+        heading = float(planned_pose[2])
+        delta = np.asarray(vehicle.position[:2], dtype=np.float64) - planned_pose[:2]
+        longitudinal = float(delta[0] * math.cos(heading) + delta[1] * math.sin(heading))
+        lateral = float(-delta[0] * math.sin(heading) + delta[1] * math.cos(heading))
+        heading_error = float(
+            math.atan2(
+                math.sin(float(getattr(vehicle, "heading_theta", 0.0)) - heading),
+                math.cos(float(getattr(vehicle, "heading_theta", 0.0)) - heading),
+            )
+        )
+        return {
+            "longitudinal_m": longitudinal,
+            "lateral_m": lateral,
+            "heading_rad": heading_error,
+        }
+
+    def _footprint_on_road(self, env, vehicle, trajectory: np.ndarray, spec: TrajectoryExecutionSpec) -> bool:
+        lanes = [
+            self.planner._lane_from_index(env, lane_index)
+            for lane_index in (
+                spec.source_lane_index,
+                spec.target_lane_index,
+                spec.continuation_lane_index,
+            )
+            if lane_index
+        ]
+        lanes = [lane for lane in lanes if lane is not None]
+        if not lanes:
+            return False
+        length, width = self.planner._vehicle_dimensions(vehicle)
+        offsets = np.asarray(
+            [
+                [0.5 * length, 0.5 * width],
+                [0.5 * length, -0.5 * width],
+                [-0.5 * length, 0.5 * width],
+                [-0.5 * length, -0.5 * width],
+                [0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        for pose in np.asarray(trajectory, dtype=np.float64):
+            c, s = math.cos(float(pose[2])), math.sin(float(pose[2]))
+            rotation = np.asarray([[c, -s], [s, c]], dtype=np.float64)
+            points = pose[:2][None, :] + offsets @ rotation.T
+            for point in points:
+                inside = False
+                for lane in lanes:
+                    try:
+                        longitudinal, lateral = lane.local_coordinates(point)
+                        lane_length = float(getattr(lane, "length", 0.0) or 0.0)
+                        lane_width = float(getattr(lane, "width", 3.5) or 3.5)
+                    except Exception:
+                        continue
+                    if (
+                        -1e-3 <= float(longitudinal) <= lane_length + 1e-3
+                        and abs(float(lateral)) <= 0.5 * lane_width + 1e-3
+                    ):
+                        inside = True
+                        break
+                if not inside:
+                    return False
+        return True
+
+    @classmethod
+    def _minimum_gap(
+        cls,
+        trajectory: np.ndarray,
+        dimensions: tuple[float, float],
+        predictions: list[tuple[str, np.ndarray, tuple[float, float]]],
+    ) -> float:
+        value = float("inf")
+        for _, predicted, other_dimensions in predictions:
+            value = min(
+                value,
+                cls._minimum_pair_gap(
+                    trajectory, dimensions, predicted, other_dimensions
+                ),
+            )
+        return value
+
+    @staticmethod
+    def _minimum_pair_gap(
+        first: np.ndarray,
+        first_dimensions: tuple[float, float],
+        second: np.ndarray,
+        second_dimensions: tuple[float, float],
+    ) -> float:
+        first = np.asarray(first, dtype=np.float64)
+        second = np.asarray(second, dtype=np.float64)
+        if first.shape != second.shape:
+            return -float("inf")
+        forward = np.column_stack((np.cos(first[:, 2]), np.sin(first[:, 2])))
+        lateral_axis = np.column_stack((-forward[:, 1], forward[:, 0]))
+        delta = second[:, :2] - first[:, :2]
+        longitudinal = np.abs(np.einsum("ij,ij->i", delta, forward))
+        lateral = np.abs(np.einsum("ij,ij->i", delta, lateral_axis))
+        lateral_limit = 0.5 * (float(first_dimensions[1]) + float(second_dimensions[1]))
+        same_corridor = lateral <= lateral_limit + 1e-6
+        if not np.any(same_corridor):
+            return float("inf")
+        bumper = longitudinal - 0.5 * (
+            float(first_dimensions[0]) + float(second_dimensions[0])
+        )
+        return float(np.min(bumper[same_corridor]))

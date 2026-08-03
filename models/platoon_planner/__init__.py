@@ -1,4 +1,12 @@
-from .platoon_normal_planner import NormalPlannerKinematicError, PlatoonNormalPlanner
+from .platoon_normal_planner import (
+    CommittedTrajectoryError,
+    JointTrajectoryExecutor,
+    JointTrajectoryExecutionPlan,
+    NormalPlannerKinematicError,
+    PlatoonNormalPlanner,
+    RolledJointTrajectory,
+    TrajectoryExecutionSpec,
+)
 
 try:
     from ._relation_encoder import RelationEncoder
@@ -11,8 +19,13 @@ except ModuleNotFoundError:
 
 __all__ = [
     "NormalPlannerKinematicError",
+    "CommittedTrajectoryError",
+    "JointTrajectoryExecutor",
+    "JointTrajectoryExecutionPlan",
     "RelationEncoder",
     "PlatoonDiffusionPlanner",
     "PlatoonNormalPlanner",
+    "RolledJointTrajectory",
+    "TrajectoryExecutionSpec",
     "migrate_single_to_platoon",
 ]

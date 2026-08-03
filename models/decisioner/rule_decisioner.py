@@ -227,6 +227,7 @@ class MultiAgentRuleMaker(RuleMaker):
         self._outstanding_proposal_batch: RuleMakerProposalBatch | None = None
         self._outstanding_proposal_candidates: dict[int, tuple[dict, ...]] = {}
         self._last_ranked_combos: list[tuple[tuple[dict, ...], float]] = []
+        self._active_execution_id: int | None = None
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
         self._s7_route_lanes_debug_plot_counter = 0
@@ -245,6 +246,7 @@ class MultiAgentRuleMaker(RuleMaker):
         self._outstanding_proposal_batch = None
         self._outstanding_proposal_candidates.clear()
         self._last_ranked_combos.clear()
+        self._active_execution_id = None
         reset_detector = getattr(self._risk_detector, "reset", None)
         if callable(reset_detector):
             reset_detector()
@@ -363,6 +365,84 @@ class MultiAgentRuleMaker(RuleMaker):
             )
         self._outstanding_proposal_batch = None
         self._outstanding_proposal_candidates.clear()
+
+    @property
+    def has_active_lane_change_commitments(self) -> bool:
+        return bool(
+            self._lane_change_commitments
+            or self._pending_lane_change_commitments
+        )
+
+    def advance_committed_execution(
+        self,
+        env,
+        agent_ids: list[str],
+        execution_id: int,
+    ) -> dict:
+        """Advance risk/commitment state without generating a new proposal."""
+
+        if self._active_execution_id is None:
+            self._active_execution_id = int(execution_id)
+        elif int(self._active_execution_id) != int(execution_id):
+            raise LaneChangeCommitmentError(
+                "lane_change_commitment_invalid: execution id mismatch"
+            )
+        if not self.has_active_lane_change_commitments:
+            raise LaneChangeCommitmentError(
+                "lane_change_commitment_invalid: no committed maneuver to advance"
+            )
+        self._last_ranked_combos = []
+        self._promote_pending_lane_change_commitments()
+        self._refresh_lane_change_commitments(env, agent_ids)
+        self._decision_step += 1
+        traffic_vehicles = self._traffic_vehicles(env)
+        current_state = "LOCKED" if self._formation_locked else "UNLOCKED"
+        previous_debug = self._last_debug or {}
+        forced_lane_wait_info = copy.deepcopy(
+            previous_debug.get("forced_lane_wait_info", {})
+        )
+        risk_info = self._risk_detector.detect(
+            env,
+            list(agent_ids),
+            traffic_vehicles,
+            current_state,
+            forced_lane_wait_info=forced_lane_wait_info,
+            active_lane_change_commitments=bool(self._lane_change_commitments),
+        )
+        self._formation_locked = risk_info["next_state"] == "LOCKED"
+        dynamic_roles = (
+            self._locked_roles(list(agent_ids))
+            if self._formation_locked
+            else {agent_id: "leader" for agent_id in agent_ids}
+        )
+        debug = {
+            "agent_ids": list(agent_ids),
+            "best_actions": copy.deepcopy(previous_debug.get("best_actions", {})),
+            "best_score": previous_debug.get("best_score"),
+            "formation_locked": bool(self._formation_locked),
+            "formation_constraint_enabled": bool(self._formation_locked),
+            "coordination_mode": (
+                "LOCKED" if self._formation_locked else "EMERGENCY_INDEPENDENT"
+            ),
+            "risk_triggered": bool(risk_info.get("triggered", False)),
+            "state_transition": risk_info.get("transition"),
+            "forced_lane_decision": False,
+            "forced_lane_wait_info": forced_lane_wait_info,
+            "risk_info": risk_info,
+            "dynamic_roles": dynamic_roles,
+            "action_search": {
+                "strategy": "committed_joint_trajectory_roll",
+                "proposal_generation_skipped": True,
+            },
+            "lane_change_commitments": self._lane_change_commitment_debug(),
+            "active_execution_id": int(execution_id),
+            "proposal_count": 0,
+            "trajectory_source": "committed_roll",
+        }
+        self._last_debug = debug
+        if not self._lane_change_commitments:
+            self._active_execution_id = None
+        return copy.deepcopy(debug)
 
     @staticmethod
     def _decision_from_candidate(

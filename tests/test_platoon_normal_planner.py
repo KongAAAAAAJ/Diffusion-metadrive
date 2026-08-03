@@ -6,8 +6,12 @@ import numpy as np
 import pytest
 
 from models.platoon_planner.platoon_normal_planner import (
+    CommittedTrajectoryError,
+    JointTrajectoryExecutor,
+    JointTrajectoryExecutionPlan,
     NormalPlannerNoFeasiblePlan,
     PlatoonNormalPlanner,
+    TrajectoryExecutionSpec,
     _Neighbor,
     _TrafficEnvelope,
     _TrajectoryCandidate,
@@ -102,6 +106,110 @@ def _env_s8_hardcoded_target():
     return SimpleNamespace(
         engine=SimpleNamespace(current_map=SimpleNamespace(road_network=road_network)),
     )
+
+
+def _execution_fixture():
+    env = _env(agent_lane_id=1)
+    lane = env.agents["agent0"].lane
+    env.agents = {
+        "agent0": _vehicle("agent0", 50.5, lane.y, lane, speed_km_h=18.0),
+        "agent1": _vehicle("agent1", 30.5, lane.y, lane, speed_km_h=18.0),
+        "agent2": _vehicle("agent2", 10.5, lane.y, lane, speed_km_h=18.0),
+    }
+    env.config = {"physics_world_step_size": 0.02, "decision_repeat": 5}
+    env._scenario_step_count = 1
+    times = np.arange(0.0, 8.2, 0.1, dtype=np.float64)
+    specs = {}
+    for agent_id, start_x in zip(env.agents, (50.0, 30.0, 10.0)):
+        trajectory = np.column_stack(
+            (
+                start_x + 5.0 * times,
+                np.zeros_like(times),
+                np.zeros_like(times),
+            )
+        )
+        specs[agent_id] = TrajectoryExecutionSpec(
+            agent_id=agent_id,
+            source_lane_index=lane.index,
+            continuation_lane_index=(),
+            target_lane_index=lane.index,
+            start_s=start_x,
+            start_d=0.0,
+            end_d=0.0,
+            initial_speed_mps=5.0,
+            acceleration_mps2=0.0,
+            acceleration_duration_s=4.0,
+            recovery_acceleration_mps2=0.0,
+            lane_change_duration_s=4.0,
+            lane_change_start_delay_s=0.0,
+            default_heading=0.0,
+            selected_candidate_index=0,
+            rule_target_point=(20.0, 0.0),
+            sample_times_s=times,
+            trajectory_world=trajectory,
+        )
+    plan = JointTrajectoryExecutionPlan(
+        execution_id=7,
+        proposal_id=2,
+        proposal_rank=1,
+        start_step=0,
+        start_time_s=0.0,
+        rule_actions={"agent0": -1, "agent1": 0, "agent2": 0},
+        agent_specs=specs,
+        committed_agents=("agent0",),
+        completion_deadline_s=4.0,
+    )
+    return env, plan
+
+
+def test_joint_trajectory_executor_rolls_absolute_time_without_restart():
+    env, plan = _execution_fixture()
+    executor = JointTrajectoryExecutor(PlatoonNormalPlanner())
+    executor.start(env, plan)
+
+    result = executor.roll(env)
+
+    assert result.execution_id == 7
+    assert result.elapsed_s == pytest.approx(0.1)
+    assert result.trajectories_world["agent0"][0, 0] == pytest.approx(53.0)
+    assert result.trajectories_world["agent0"][-1, 0] == pytest.approx(70.5)
+    assert result.debug["trajectory_source"] == "committed_roll"
+    assert result.debug["rolling_hard_audit"] == "passed"
+
+
+def test_execution_spec_sampling_uses_original_absolute_lateral_curve():
+    env, plan = _execution_fixture()
+    del env
+    spec = plan.agent_specs["agent0"]
+    curved = TrajectoryExecutionSpec(
+        **{
+            **spec.__dict__,
+            "trajectory_world": np.column_stack(
+                (
+                    spec.trajectory_world[:, 0],
+                    spec.sample_times_s**2,
+                    np.zeros_like(spec.sample_times_s),
+                )
+            ),
+        }
+    )
+
+    shifted = JointTrajectoryExecutor._sample_spec(curved, np.asarray([0.6, 4.1]))
+
+    assert shifted[:, 1] == pytest.approx([0.36, 16.81])
+    assert shifted[0, 1] != pytest.approx(0.25)
+
+
+def test_joint_trajectory_executor_rejects_tracking_deviation():
+    env, plan = _execution_fixture()
+    env.agents["agent2"].position[0] += 2.0
+    executor = JointTrajectoryExecutor(PlatoonNormalPlanner())
+    executor.start(env, plan)
+
+    with pytest.raises(CommittedTrajectoryError) as error:
+        executor.roll(env)
+
+    assert error.value.reason_code == "committed_trajectory_tracking_deviation"
 
 
 def test_default_hard_safety_gaps_match_collection_contract():
