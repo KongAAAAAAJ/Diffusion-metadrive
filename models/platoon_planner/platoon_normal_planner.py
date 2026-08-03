@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import itertools
 import math
 import time
 from collections import Counter
@@ -15,6 +14,7 @@ from models.bev_planner.mode_contract import (
     ModeContractError,
     validate_trajectory_kinematics,
 )
+from models.platoon_planner.collision_geometry import obb_overlap_series
 
 
 class NormalPlannerKinematicError(RuntimeError):
@@ -121,6 +121,15 @@ class PlatoonNormalPlanner:
         ]
         pools: dict[str, list[_TrajectoryCandidate]] = {}
         debug: dict[str, dict] = {}
+        formation_flags = {
+            bool((decision or {}).get("formation_constraint_enabled", True))
+            for decision in (agent_decisions or {}).values()
+        }
+        if len(formation_flags) != 1:
+            raise ValueError(
+                "all joint decisions must agree on formation_constraint_enabled"
+            )
+        formation_constraint_enabled = formation_flags.pop()
 
         for agent_id in ordered_ids:
             decision = (agent_decisions or {})[agent_id] or {}
@@ -162,6 +171,9 @@ class PlatoonNormalPlanner:
                 "combination_count": 0,
                 "pairwise_conflict_count": 0,
                 "pairwise_conflict_pair_count": 0,
+                "formation_constraint_enabled": formation_constraint_enabled,
+                "formation_penalty_applied": False,
+                "prefix_counts": [],
                 "planning_time_ms": (
                     time.perf_counter() - planning_started_at
                 ) * 1000.0,
@@ -174,6 +186,7 @@ class PlatoonNormalPlanner:
             ordered_ids,
             agents,
             pools,
+            formation_constraint_enabled=formation_constraint_enabled,
         )
         debug["_joint"] = joint_debug
         if selection is None:
@@ -752,6 +765,8 @@ class PlatoonNormalPlanner:
         ordered_ids: list[str],
         agents: Mapping[str, object],
         pools: Mapping[str, list[_TrajectoryCandidate]],
+        *,
+        formation_constraint_enabled: bool = True,
     ) -> tuple[tuple[int, ...] | None, dict]:
         combination_count = 0
         pairwise_conflict_count = 0
@@ -781,35 +796,45 @@ class PlatoonNormalPlanner:
                     f"{ordered_ids[first]}:{ordered_ids[second]}"
                 ] = int(np.count_nonzero(table))
                 conflict_tables[(first, second)] = table
+        prefixes: list[tuple[int, ...]] = [tuple()]
+        prefix_counts: list[int] = []
+        for role_index, agent_id in enumerate(ordered_ids):
+            next_prefixes: list[tuple[int, ...]] = []
+            for prefix in prefixes:
+                for candidate_index in range(len(pools[agent_id])):
+                    conflict = False
+                    for previous_index, previous_candidate_index in enumerate(prefix):
+                        if conflict_tables[(previous_index, role_index)][
+                            previous_candidate_index, candidate_index
+                        ]:
+                            pairwise_conflict_count += 1
+                            conflict = True
+                            break
+                    if not conflict:
+                        next_prefixes.append(prefix + (candidate_index,))
+            prefixes = next_prefixes
+            prefix_counts.append(len(prefixes))
+            if not prefixes:
+                break
+
         best_selection: tuple[int, ...] | None = None
         best_score = float("inf")
-        ranges = [range(len(pools[agent_id])) for agent_id in ordered_ids]
-        for selection in itertools.product(*ranges):
+        for selection in prefixes:
+            if len(selection) != len(ordered_ids):
+                continue
             combination_count += 1
             chosen = [
                 pools[agent_id][candidate_index]
                 for agent_id, candidate_index in zip(ordered_ids, selection)
             ]
-            has_conflict = False
-            for first in range(len(chosen)):
-                for second in range(first + 1, len(chosen)):
-                    if conflict_tables[(first, second)][
-                        selection[first], selection[second]
-                    ]:
-                        pairwise_conflict_count += 1
-                        has_conflict = True
-                        break
-                if has_conflict:
-                    break
-            if has_conflict:
-                continue
             score = sum(value.score for value in chosen)
-            score += self._joint_formation_penalty(
-                env,
-                ordered_ids,
-                agents,
-                chosen,
-            )
+            if formation_constraint_enabled:
+                score += self._joint_formation_penalty(
+                    env,
+                    ordered_ids,
+                    agents,
+                    chosen,
+                )
             if score < best_score:
                 best_score = float(score)
                 best_selection = tuple(int(value) for value in selection)
@@ -822,6 +847,13 @@ class PlatoonNormalPlanner:
             "pairwise_conflict_count": int(pairwise_conflict_count),
             "pairwise_conflict_pair_count": int(conflict_pair_count),
             "pairwise_conflict_counts_by_pair": conflict_counts_by_pair,
+            "prefix_counts": prefix_counts,
+            "formation_constraint_enabled": bool(
+                formation_constraint_enabled
+            ),
+            "formation_penalty_applied": bool(
+                formation_constraint_enabled and self.joint_pair_weight > 0.0
+            ),
             "selected_indices": (
                 None if best_selection is None else list(best_selection)
             ),
@@ -1748,53 +1780,13 @@ class PlatoonNormalPlanner:
         second_dimensions: tuple[float, float],
         margin_m,
     ) -> bool:
-        first = np.asarray(first, dtype=np.float64)
-        second = np.asarray(second, dtype=np.float64)
-        if first.shape != second.shape or first.ndim != 2 or first.shape[1] != 3:
-            raise ValueError("OBB trajectories must have matching [N,3] shapes")
-        margins = np.asarray(margin_m, dtype=np.float64)
-        if margins.ndim == 0:
-            margins = np.full((len(first), 2), float(margins), dtype=np.float64)
-        elif margins.shape == (len(first),):
-            margins = np.repeat(margins[:, None], 2, axis=1)
-        if margins.shape != (len(first), 2) or np.any(margins < 0.0):
-            raise ValueError("OBB margin must be non-negative scalar, [N], or [N,2]")
-        first_half = (
-            np.asarray(first_dimensions, dtype=np.float64)[None, :] * 0.5
-            + margins
+        return obb_overlap_series(
+            first,
+            first_dimensions,
+            second,
+            second_dimensions,
+            margin_m,
         )
-        second_half = (
-            np.asarray(second_dimensions, dtype=np.float64)[None, :] * 0.5
-            + margins
-        )
-        first_long = np.column_stack(
-            [np.cos(first[:, 2]), np.sin(first[:, 2])]
-        )
-        first_lat = np.column_stack([-first_long[:, 1], first_long[:, 0]])
-        second_long = np.column_stack(
-            [np.cos(second[:, 2]), np.sin(second[:, 2])]
-        )
-        second_lat = np.column_stack([-second_long[:, 1], second_long[:, 0]])
-        delta = second[:, :2] - first[:, :2]
-        separated = np.zeros(len(first), dtype=np.bool_)
-        for axis in (first_long, first_lat, second_long, second_lat):
-            first_radius = (
-                first_half[:, 0]
-                * np.abs(np.einsum("ij,ij->i", first_long, axis))
-                + first_half[:, 1]
-                * np.abs(np.einsum("ij,ij->i", first_lat, axis))
-            )
-            second_radius = (
-                second_half[:, 0]
-                * np.abs(np.einsum("ij,ij->i", second_long, axis))
-                + second_half[:, 1]
-                * np.abs(np.einsum("ij,ij->i", second_lat, axis))
-            )
-            separated |= (
-                np.abs(np.einsum("ij,ij->i", delta, axis))
-                > first_radius + second_radius
-            )
-        return bool(np.any(~separated))
 
     def _score_candidate(
         self,

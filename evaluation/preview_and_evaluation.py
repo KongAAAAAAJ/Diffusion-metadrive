@@ -216,6 +216,10 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
     actions = np.full((count, 3), -9, dtype=np.int8)
     trajectories = np.full((count, 3, 8, 3), np.nan, dtype=np.float32)
     controls = np.full((count, 3, 2), np.nan, dtype=np.float32)
+    formation_constraint_enabled = np.ones((count,), dtype=np.bool_)
+    coordination_mode = np.full((count,), "LOCKED", dtype="<U32")
+    controller_backend = np.full((count,), "LQRFollowerController", dtype="<U32")
+    committed_actions = np.zeros((count, 3), dtype=np.int8)
     gt_mode = np.full((count, 3), -1, dtype=np.int64)
     mode_valid_mask = np.zeros((count, 3, 10), dtype=np.bool_)
     collection_ready = np.zeros((count,), dtype=np.bool_)
@@ -225,6 +229,16 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
             record["trajectories_world"], dtype=np.float32
         )
         controls[row] = np.asarray(record["controls"], dtype=np.float32)
+        formation_constraint_enabled[row] = bool(
+            record.get("formation_constraint_enabled", True)
+        )
+        coordination_mode[row] = str(record.get("coordination_mode", "LOCKED"))
+        controller_backend[row] = str(
+            record.get("controller_backend", "LQRFollowerController")
+        )
+        committed_actions[row] = np.asarray(
+            record.get("committed_actions", (0, 0, 0)), dtype=np.int8
+        )
         collection_ready[row] = bool(record.get("collection_ready", False))
         if record.get("gt_mode") is not None:
             gt_mode[row] = np.asarray(record["gt_mode"], dtype=np.int64)
@@ -238,6 +252,10 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
         rule_actions=actions,
         trajectories_world=trajectories,
         controls=controls,
+        formation_constraint_enabled=formation_constraint_enabled,
+        coordination_mode=coordination_mode,
+        controller_backend=controller_backend,
+        committed_actions=committed_actions,
         collection_ready=collection_ready,
         gt_mode=gt_mode,
         mode_valid_mask=mode_valid_mask,
@@ -353,6 +371,8 @@ def _expert_debug_snapshot(
     planner_debug = planning.get("planner_debug", {}) if isinstance(planning, Mapping) else {}
     rule_fields = (
         "formation_locked",
+        "formation_constraint_enabled",
+        "coordination_mode",
         "risk_triggered",
         "best_actions",
         "best_score",
@@ -360,6 +380,8 @@ def _expert_debug_snapshot(
         "forced_lane_decision",
         "forced_lane_wait_info",
         "risk_info",
+        "action_search",
+        "lane_change_commitments",
     )
     joint_fields = (
         "fallback_used",
@@ -372,6 +394,9 @@ def _expert_debug_snapshot(
         "selected_indices",
         "selected_score",
         "planning_time_ms",
+        "prefix_counts",
+        "formation_constraint_enabled",
+        "formation_penalty_applied",
     )
     agent_fields = (
         "action",
@@ -882,6 +907,20 @@ def _run_single_episode(
         else:
             ordered_rule_actions = []
         if trajectory_records is not None and expert_step is not None:
+            rule_snapshot = (
+                getattr(env, "_preview_rule_maker_debug", None) or {}
+            )
+            commitment_snapshot = (
+                rule_snapshot.get("lane_change_commitments", {})
+                if isinstance(rule_snapshot, Mapping)
+                else {}
+            )
+            active_commitments = dict(
+                commitment_snapshot.get("active", {}) or {}
+            )
+            pending_commitments = dict(
+                commitment_snapshot.get("pending", {}) or {}
+            )
             trajectory_records.append(
                 {
                     "step": int(_step),
@@ -904,6 +943,32 @@ def _run_single_episode(
                             )
                             for agent_id in agent_ids
                         ]
+                    ),
+                    "formation_constraint_enabled": bool(
+                        rule_snapshot.get(
+                            "formation_constraint_enabled", True
+                        )
+                    ),
+                    "coordination_mode": str(
+                        rule_snapshot.get("coordination_mode", "LOCKED")
+                    ),
+                    "controller_backend": (
+                        "LQRFollowerController"
+                        if bool(rule_snapshot.get("formation_locked", True))
+                        else "PIDTrajectoryController"
+                    ),
+                    "committed_actions": np.asarray(
+                        [
+                            int(
+                                (
+                                    active_commitments.get(agent_id)
+                                    or pending_commitments.get(agent_id)
+                                    or {}
+                                ).get("action", 0)
+                            )
+                            for agent_id in agent_ids
+                        ],
+                        dtype=np.int8,
                     ),
                     "collection_ready": sample is not None,
                     "gt_mode": None if sample is None else sample.gt_mode,

@@ -722,6 +722,38 @@ def test_joint_selection_replaces_conflicting_local_optimum():
     assert selection is not None
     assert selection != (0, 0)
     assert debug["pairwise_conflict_count"] > 0
+    assert debug["prefix_counts"] == [2, 2]
+
+
+def test_independent_joint_selection_skips_formation_penalty(monkeypatch):
+    planner = PlatoonNormalPlanner(collision_margin_m=0.0)
+    env = _env()
+    lane = env.agents["agent0"].lane
+    env.agents = {
+        "agent0": _vehicle("agent0", 20.0, 0.0, lane),
+        "agent1": _vehicle("agent1", 8.0, 0.0, lane),
+    }
+    candidates = {
+        "agent0": [_candidate(np.linspace(20.0, 28.0, 9), 0.0)],
+        "agent1": [_candidate(np.linspace(8.0, 16.0, 9), 0.0)],
+    }
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("formation penalty must be disabled")
+
+    monkeypatch.setattr(planner, "_joint_formation_penalty", forbidden)
+    selection, debug = planner._select_joint_candidates(
+        env,
+        ["agent0", "agent1"],
+        env.agents,
+        candidates,
+        formation_constraint_enabled=False,
+    )
+
+    assert selection == (0, 0)
+    assert debug["formation_constraint_enabled"] is False
+    assert debug["formation_penalty_applied"] is False
+    assert debug["prefix_counts"] == [1, 1]
 
 
 def test_scenario_front_lookup_uses_simulator_state_without_lidar():

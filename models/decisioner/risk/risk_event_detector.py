@@ -35,11 +35,23 @@ class SimpleRuleRiskDetector(RiskDetector):
         relock_ttc_threshold_s: float = 5.0,
         ideal_following_distance_m: float = 10.0,
         relock_gap_ratio: float = 1.5,
+        relock_stable_steps: int = 20,
+        platoon_safe_gap_m: float = 7.0,
     ) -> None:
         self.ttc_trigger_s = float(ttc_trigger_s)
         self.relock_ttc_threshold_s = float(relock_ttc_threshold_s)
         self.ideal_following_distance_m = float(ideal_following_distance_m)
         self.relock_gap_ratio = float(relock_gap_ratio)
+        self.relock_stable_steps = max(1, int(relock_stable_steps))
+        self.platoon_safe_gap_m = float(platoon_safe_gap_m)
+        self._relock_stable_count = 0
+        self._seen_hard_brake_tokens: set[tuple[object, int]] = set()
+
+    def reset(self) -> None:
+        """Clear episode-local emergency and relock state."""
+
+        self._relock_stable_count = 0
+        self._seen_hard_brake_tokens.clear()
 
     def detect(
         self,
@@ -48,6 +60,7 @@ class SimpleRuleRiskDetector(RiskDetector):
         traffic_vehicles: list,
         current_state: str,
         forced_lane_wait_info: dict | None = None,
+        active_lane_change_commitments: bool = False,
     ) -> dict:
         state = str(current_state).upper()
         if state not in VALID_STATES:
@@ -55,11 +68,24 @@ class SimpleRuleRiskDetector(RiskDetector):
 
         agents = getattr(env, "agents", {}) or {}
         if state == LOCKED:
-            return self._detect_unlock(agents, agent_ids, traffic_vehicles, forced_lane_wait_info=forced_lane_wait_info)
-        return self._detect_relock(agents, agent_ids, traffic_vehicles, forced_lane_wait_info=forced_lane_wait_info)
+            return self._detect_unlock(
+                env,
+                agents,
+                agent_ids,
+                traffic_vehicles,
+                forced_lane_wait_info=forced_lane_wait_info,
+            )
+        return self._detect_relock(
+            agents,
+            agent_ids,
+            traffic_vehicles,
+            forced_lane_wait_info=forced_lane_wait_info,
+            active_lane_change_commitments=active_lane_change_commitments,
+        )
 
     def _detect_unlock(
         self,
+        env,
         agents: dict,
         agent_ids: list[str],
         traffic_vehicles: list,
@@ -67,6 +93,20 @@ class SimpleRuleRiskDetector(RiskDetector):
         forced_lane_wait_info: dict | None = None,
     ) -> dict:
         leader_metrics = self._leader_ttc_metrics(agents, agent_ids, traffic_vehicles)
+        hard_brake_event = self._new_hard_brake_event(traffic_vehicles)
+        if hard_brake_event is not None:
+            self._relock_stable_count = 0
+            return self._result(
+                current_state=LOCKED,
+                next_state=UNLOCKED,
+                transition="LOCKED_TO_UNLOCKED",
+                reason="hard_brake_lead_triggered",
+                leader=leader_metrics,
+                follower_pairs=[],
+                min_follower_gap_m=None,
+                emergency_event=hard_brake_event,
+                forced_lane_wait_info=dict(forced_lane_wait_info or {}),
+            )
         forced_lane_wait_info = dict(forced_lane_wait_info or {})
         forced_wait_steps = int(forced_lane_wait_info.get("partial_forced_wait_steps", 0) or 0)
         forced_wait_threshold = int(forced_lane_wait_info.get("threshold_steps", 0) or 0)
@@ -84,7 +124,18 @@ class SimpleRuleRiskDetector(RiskDetector):
             )
 
         ttc = leader_metrics["ttc_s"]
-        transitioned = ttc is not None and ttc < self.ttc_trigger_s
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        s5_waiting_for_brake = (
+            scenario_id == "S5_hard_brake_lead"
+            and not self._seen_hard_brake_tokens
+        )
+        transitioned = (
+            not s5_waiting_for_brake
+            and ttc is not None
+            and ttc < self.ttc_trigger_s
+        )
+        if transitioned:
+            self._relock_stable_count = 0
 
         # if transitioned: # *风险切换
         #     print(f"ttc = {ttc}s")
@@ -98,6 +149,7 @@ class SimpleRuleRiskDetector(RiskDetector):
             follower_pairs=[],
             min_follower_gap_m=None,
             forced_lane_wait_info=forced_lane_wait_info,
+            waiting_for_s5_hard_brake=bool(s5_waiting_for_brake),
         )
 
     def _detect_relock(
@@ -107,6 +159,7 @@ class SimpleRuleRiskDetector(RiskDetector):
         traffic_vehicles: list,
         *,
         forced_lane_wait_info: dict | None = None,
+        active_lane_change_commitments: bool = False,
     ) -> dict:
         forced_lane_wait_info = dict(forced_lane_wait_info or {})
         pairs = []
@@ -131,10 +184,22 @@ class SimpleRuleRiskDetector(RiskDetector):
         min_gap = min(valid_gaps) if valid_gaps else None
         relock_threshold = self.relock_gap_ratio * self.ideal_following_distance_m
         leader_metrics = self._leader_ttc_metrics(agents, agent_ids, traffic_vehicles)
-        follower_gap_condition_met = min_gap is not None and min_gap < relock_threshold
+        follower_gap_condition_met = (
+            min_gap is not None
+            and self.platoon_safe_gap_m <= min_gap < relock_threshold
+        )
         leader_ttc_condition_met = leader_metrics["ttc_s"] > self.relock_ttc_threshold_s
         forced_wait_clear = not bool(forced_lane_wait_info.get("forced_wait_active", False))
-        transitioned = follower_gap_condition_met and leader_ttc_condition_met and forced_wait_clear
+        agents_safe = self._agents_are_safe(agents, agent_ids)
+        stable_now = (
+            follower_gap_condition_met
+            and leader_ttc_condition_met
+            and forced_wait_clear
+            and not bool(active_lane_change_commitments)
+            and agents_safe
+        )
+        self._relock_stable_count = self._relock_stable_count + 1 if stable_now else 0
+        transitioned = self._relock_stable_count >= self.relock_stable_steps
         return self._result(
             current_state=UNLOCKED,
             next_state=LOCKED if transitioned else UNLOCKED,
@@ -153,8 +218,59 @@ class SimpleRuleRiskDetector(RiskDetector):
             follower_gap_condition_met=follower_gap_condition_met,
             leader_ttc_condition_met=leader_ttc_condition_met,
             forced_wait_clear=forced_wait_clear,
+            agents_safe=agents_safe,
+            active_lane_change_commitments=bool(active_lane_change_commitments),
+            relock_stable_count=int(self._relock_stable_count),
+            relock_stable_steps=int(self.relock_stable_steps),
             forced_lane_wait_info=forced_lane_wait_info,
         )
+
+    def _new_hard_brake_event(self, traffic_vehicles: list) -> dict | None:
+        """Return a newly observed simulator hard-brake event exactly once."""
+
+        for vehicle in traffic_vehicles:
+            if str(getattr(vehicle, "scenario_role", "")) != "hard_brake_lead":
+                continue
+            trigger_step = getattr(vehicle, "scenario_brake_trigger_step", None)
+            if trigger_step is None:
+                continue
+            token = (self._vehicle_id(vehicle), int(trigger_step))
+            if token in self._seen_hard_brake_tokens:
+                continue
+            self._seen_hard_brake_tokens.add(token)
+            return {
+                "vehicle_id": token[0],
+                "trigger_step": token[1],
+                "target_speed_kmh": getattr(
+                    vehicle, "scenario_brake_target_speed_kmh", None
+                ),
+                "deceleration_mps2": getattr(
+                    vehicle, "scenario_brake_deceleration_mps2", None
+                ),
+            }
+        return None
+
+    @staticmethod
+    def _agents_are_safe(agents: dict, agent_ids: list[str]) -> bool:
+        for agent_id in agent_ids:
+            vehicle = agents.get(agent_id)
+            if vehicle is None:
+                return False
+            if any(
+                bool(getattr(vehicle, name, False))
+                for name in (
+                    "crash_vehicle",
+                    "crash_object",
+                    "crash_building",
+                    "crash_human",
+                    "crash_sidewalk",
+                )
+            ):
+                return False
+            on_lane = getattr(vehicle, "on_lane", True)
+            if on_lane is False:
+                return False
+        return True
 
     def _leader_ttc_metrics(self, agents: dict, agent_ids: list[str], traffic_vehicles: list) -> dict:
         leader = agents.get(agent_ids[0]) if agent_ids else None

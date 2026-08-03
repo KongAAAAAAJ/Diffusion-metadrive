@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import copy
-from itertools import product
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -11,6 +11,7 @@ import numpy as np
 
 from models.decisioner.risk import SimpleRuleRiskDetector
 from models.decisioner.risk.safety_potential import pairwise_agent_safety_score
+from models.platoon_planner.collision_geometry import obb_overlap_series
 from models.decisioner.rule_decisioner_helper import (
     save_candidate_debug_plot,
     save_lane_pair_debug_plot,
@@ -22,6 +23,19 @@ if TYPE_CHECKING:
     pass
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "decision" / "rule_maker.yaml"
+
+
+class LaneChangeCommitmentError(RuntimeError):
+    """Raised when an active lane-change commitment can no longer be represented."""
+
+
+@dataclass(frozen=True)
+class _LaneChangeCommitment:
+    action: int
+    source_lane_index: tuple
+    target_lane_index: tuple
+    target_lane_chain: tuple[tuple, ...]
+    commit_step: int
 
 
 def load_rule_maker_config(
@@ -139,6 +153,7 @@ class MultiAgentRuleMaker(RuleMaker):
         ideal_following_distance_m: float = 10.0,
         relock_gap_ratio: float = 1.5,
         forced_lane_unlock_wait_steps: int = 10,
+        relock_stable_steps: int = 20,
     ) -> None:
         self.target_speed_km_h = float(target_speed_km_h)
         self.horizon_s = float(horizon_s)
@@ -173,17 +188,23 @@ class MultiAgentRuleMaker(RuleMaker):
         self.ideal_following_distance_m = float(ideal_following_distance_m)
         self.relock_gap_ratio = float(relock_gap_ratio)
         self.forced_lane_unlock_wait_steps = max(1, int(forced_lane_unlock_wait_steps))
+        self.relock_stable_steps = max(1, int(relock_stable_steps))
         self._formation_locked = bool(self.locked_on_reset)
         self._risk_detector = SimpleRuleRiskDetector(
             ttc_trigger_s=self.risk_ttc_trigger_s,
             relock_ttc_threshold_s=self.relock_ttc_threshold_s,
             ideal_following_distance_m=self.ideal_following_distance_m,
             relock_gap_ratio=self.relock_gap_ratio,
+            relock_stable_steps=self.relock_stable_steps,
+            platoon_safe_gap_m=self.agent_safety_distance_m,
         )
         self._last_debug: dict | None = None
         self._decision_step = 0
         self._forced_lane_first_step_by_agent: dict[str, int] = {}
         self._forced_lane_frozen_wait_steps_by_agent: dict[str, int] = {}
+        self._lane_change_commitments: dict[str, _LaneChangeCommitment] = {}
+        self._pending_lane_change_commitments: dict[str, _LaneChangeCommitment] = {}
+        self._completed_lane_change_commitments: dict[str, dict] = {}
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
         self._s7_route_lanes_debug_plot_counter = 0
@@ -195,6 +216,12 @@ class MultiAgentRuleMaker(RuleMaker):
         self._decision_step = 0
         self._forced_lane_first_step_by_agent.clear()
         self._forced_lane_frozen_wait_steps_by_agent.clear()
+        self._lane_change_commitments.clear()
+        self._pending_lane_change_commitments.clear()
+        self._completed_lane_change_commitments.clear()
+        reset_detector = getattr(self._risk_detector, "reset", None)
+        if callable(reset_detector):
+            reset_detector()
 
     @property
     def is_formation_locked(self) -> bool:
@@ -212,11 +239,23 @@ class MultiAgentRuleMaker(RuleMaker):
         planner_batch: dict[str, dict],
     ) -> dict[str, np.ndarray]:
         agents = getattr(env, "agents", {})
+        self._promote_pending_lane_change_commitments()
+        self._refresh_lane_change_commitments(env, agent_ids)
         traffic_vehicles = self._traffic_vehicles(env)
         candidates_by_agent: dict[str, list[dict]] = {}
         for agent_id in agent_ids:
             vehicle = agents.get(agent_id)
-            candidates = self._build_agent_candidates(env, vehicle, traffic_vehicles)
+            commitment = self._lane_change_commitments.get(agent_id)
+            candidates = (
+                self._build_agent_candidates(env, vehicle, traffic_vehicles)
+                if commitment is None
+                else self._build_agent_candidates(
+                    env,
+                    vehicle,
+                    traffic_vehicles,
+                    commitment=commitment,
+                )
+            )
             if not candidates:
                 pp = self._from_coarse_fallback(planner_batch, agent_id)
                 if pp is None:
@@ -251,38 +290,77 @@ class MultiAgentRuleMaker(RuleMaker):
             traffic_vehicles,
             current_state,
             forced_lane_wait_info=forced_lane_wait_info,
+            active_lane_change_commitments=bool(self._lane_change_commitments),
         )
         self._formation_locked = risk_info["next_state"] == "LOCKED"
+        formation_constraint_enabled = bool(self._formation_locked)
 
         forced_lane_decision = forced_combo is not None
         if forced_lane_decision:
-            best_combo = forced_combo
-            best_score = 0.0
+            forced_conflicts: dict[str, int] = {}
+            best_combo = (
+                None
+                if self._combo_has_hard_conflict(
+                    env,
+                    ordered_agent_ids,
+                    forced_combo,
+                    forced_conflicts,
+                )
+                else forced_combo
+            )
+            best_score = 0.0 if best_combo is not None else -float("inf")
+            action_search_debug = {
+                "strategy": "forced_combo",
+                "prefix_counts": [1 if best_combo is not None else 0],
+                "pairwise_conflict_counts": forced_conflicts,
+            }
+        elif self._formation_locked and bool(
+            risk_info.get("waiting_for_s5_hard_brake", False)
+        ):
+            keep_combo = tuple(
+                self._candidate_for_action(
+                    candidates_by_agent.get(agent_id, []), 0
+                )
+                for agent_id in ordered_agent_ids
+            )
+            pre_brake_conflicts: dict[str, int] = {}
+            if any(candidate is None for candidate in keep_combo):
+                best_combo = None
+            elif self._combo_has_hard_conflict(
+                env,
+                ordered_agent_ids,
+                keep_combo,
+                pre_brake_conflicts,
+            ):
+                best_combo = None
+            else:
+                best_combo = keep_combo
+            best_score = 0.0 if best_combo is not None else -float("inf")
+            action_search_debug = {
+                "strategy": "s5_pre_brake_keep",
+                "prefix_counts": [1 if best_combo is not None else 0],
+                "pairwise_conflict_counts": pre_brake_conflicts,
+            }
         elif self._formation_locked:
-            best_combo, best_score = self._best_locked_combo(
+            best_combo, best_score, action_search_debug = self._best_locked_combo(
                 env=env,
                 ordered_agent_ids=ordered_agent_ids,
                 candidates_by_agent=candidates_by_agent,
                 traffic_vehicles=traffic_vehicles,
             )
         else:
-            best_combo = None
-            best_score = -float("inf")
             candidate_sets = [
                 self._forced_candidates_for_agent(candidates_by_agent.get(agent_id, []))
                 or candidates_by_agent[agent_id]
                 for agent_id in ordered_agent_ids
             ]
-            for combo in product(*candidate_sets):
-                score = self._score_joint_combo(
-                    env=env,
-                    ordered_agent_ids=ordered_agent_ids,
-                    combo=combo,
-                    traffic_vehicles=traffic_vehicles,
-                )
-                if score > best_score:
-                    best_score = score
-                    best_combo = combo
+            best_combo, best_score, action_search_debug = self._best_conditional_combo(
+                env=env,
+                ordered_agent_ids=ordered_agent_ids,
+                candidate_sets=candidate_sets,
+                traffic_vehicles=traffic_vehicles,
+                formation_constraint_enabled=False,
+            )
 
         result: dict[str, dict] = {}
 
@@ -292,6 +370,34 @@ class MultiAgentRuleMaker(RuleMaker):
 
 
         if best_combo is None:
+            self._last_debug = {
+                "agent_ids": list(ordered_agent_ids),
+                "best_actions": {},
+                "best_score": None,
+                "formation_locked": bool(self._formation_locked),
+                "formation_constraint_enabled": formation_constraint_enabled,
+                "coordination_mode": (
+                    "LOCKED"
+                    if formation_constraint_enabled
+                    else "EMERGENCY_INDEPENDENT"
+                ),
+                "risk_triggered": bool(risk_info.get("triggered", False)),
+                "state_transition": risk_info.get("transition"),
+                "forced_lane_decision": bool(forced_lane_decision),
+                "forced_lane_wait_info": forced_lane_wait_info,
+                "risk_info": risk_info,
+                "dynamic_roles": {},
+                "action_search": action_search_debug,
+                "lane_change_commitments": self._lane_change_commitment_debug(),
+                "failure_reason": "no_safe_joint_action_combination",
+                "candidates_by_agent": {
+                    agent_id: [
+                        self._debug_candidate(candidate, selected=False)
+                        for candidate in candidates_by_agent.get(agent_id, [])
+                    ]
+                    for agent_id in ordered_agent_ids
+                },
+            }
             return result
         best_actions: dict[str, int] = {}
         # print(f"step = {self._decision_step}")
@@ -308,6 +414,10 @@ class MultiAgentRuleMaker(RuleMaker):
             result[agent_id] = {
                 "action": int(selected["action"]),
                 "target_point": np.asarray(selected["target_point"], dtype=np.float32).reshape(2),
+                "formation_constraint_enabled": formation_constraint_enabled,
+                "coordination_mode": (
+                    "LOCKED" if formation_constraint_enabled else "EMERGENCY_INDEPENDENT"
+                ),
             }
             best_actions[agent_id] = int(selected["action"])
 
@@ -330,26 +440,29 @@ class MultiAgentRuleMaker(RuleMaker):
 
 
 
+        self._schedule_lane_change_commitments(ordered_agent_ids, best_combo)
+
         if self._formation_locked:
             dynamic_roles = self._locked_roles(ordered_agent_ids)
         else:
-            dynamic_roles = self._resolve_dynamic_roles(
-                env,
-                ordered_agent_ids,
-                best_actions,
-                traffic_vehicles,
-            )
+            dynamic_roles = {agent_id: "leader" for agent_id in ordered_agent_ids}
         self._last_debug = {
             "agent_ids": list(ordered_agent_ids),
             "best_actions": best_actions,
             "best_score": float(best_score),
             "formation_locked": bool(self._formation_locked),
+            "formation_constraint_enabled": formation_constraint_enabled,
+            "coordination_mode": (
+                "LOCKED" if formation_constraint_enabled else "EMERGENCY_INDEPENDENT"
+            ),
             "risk_triggered": bool(risk_info.get("triggered", False)),
             "state_transition": risk_info.get("transition"),
             "forced_lane_decision": bool(forced_lane_decision),
             "forced_lane_wait_info": forced_lane_wait_info,
             "risk_info": risk_info,
             "dynamic_roles": dynamic_roles,
+            "action_search": action_search_debug,
+            "lane_change_commitments": self._lane_change_commitment_debug(),
             "candidates_by_agent": {
                 agent_id: [
                     self._debug_candidate(candidate, selected=bool(int(candidate["action"]) == best_actions[agent_id]))
@@ -432,6 +545,99 @@ class MultiAgentRuleMaker(RuleMaker):
             "target_lane_index": tuple(candidate.get("target_lane_index", ()) or ()),
             "selected": bool(selected),
             "forced_lane_change": bool(candidate.get("forced_lane_change", False)),
+            "maneuver_committed": bool(candidate.get("maneuver_committed", False)),
+        }
+
+    def _promote_pending_lane_change_commitments(self) -> None:
+        if not self._pending_lane_change_commitments:
+            return
+        for agent_id, commitment in self._pending_lane_change_commitments.items():
+            self._lane_change_commitments.setdefault(agent_id, commitment)
+        self._pending_lane_change_commitments.clear()
+
+    def _refresh_lane_change_commitments(self, env, agent_ids: list[str]) -> None:
+        agents = getattr(env, "agents", {}) or {}
+        self._completed_lane_change_commitments = {}
+        for agent_id in list(self._lane_change_commitments):
+            if agent_id not in agent_ids:
+                self._lane_change_commitments.pop(agent_id, None)
+                continue
+            commitment = self._lane_change_commitments[agent_id]
+            vehicle = agents.get(agent_id)
+            current_index = tuple(
+                getattr(getattr(vehicle, "lane", None), "index", ()) or ()
+            )
+            if current_index not in set(commitment.target_lane_chain):
+                continue
+            self._completed_lane_change_commitments[agent_id] = {
+                "action": int(commitment.action),
+                "source_lane_index": commitment.source_lane_index,
+                "target_lane_index": commitment.target_lane_index,
+                "commit_step": int(commitment.commit_step),
+                "completion_step": int(self._decision_step + 1),
+                "completion_reason": "entered_target_lane_family",
+            }
+            self._lane_change_commitments.pop(agent_id, None)
+
+    def _schedule_lane_change_commitments(
+        self,
+        ordered_agent_ids: list[str],
+        selected_combo,
+    ) -> None:
+        for agent_id, candidate in zip(ordered_agent_ids, selected_combo):
+            if agent_id in self._lane_change_commitments:
+                continue
+            action = int(candidate.get("action", 0))
+            if action == 0:
+                continue
+            target_chain = tuple(
+                tuple(value)
+                for value in candidate.get("target_lane_chain_indices", ())
+                if value
+            )
+            target_index = tuple(candidate.get("target_lane_index", ()) or ())
+            if not target_chain:
+                target_chain = (target_index,)
+            self._pending_lane_change_commitments[agent_id] = _LaneChangeCommitment(
+                action=action,
+                source_lane_index=tuple(
+                    candidate.get("source_lane_index", ()) or ()
+                ),
+                target_lane_index=target_index,
+                target_lane_chain=target_chain,
+                commit_step=int(self._decision_step),
+            )
+
+    def _lane_change_commitment_debug(self) -> dict:
+        active = {
+            agent_id: {
+                "status": "committed",
+                "action": int(value.action),
+                "source_lane_index": value.source_lane_index,
+                "target_lane_index": value.target_lane_index,
+                "target_lane_chain": value.target_lane_chain,
+                "commit_step": int(value.commit_step),
+                "duration_steps": max(
+                    0, int(self._decision_step) - int(value.commit_step)
+                ),
+            }
+            for agent_id, value in self._lane_change_commitments.items()
+        }
+        pending = {
+            agent_id: {
+                "status": "pending",
+                "action": int(value.action),
+                "source_lane_index": value.source_lane_index,
+                "target_lane_index": value.target_lane_index,
+                "target_lane_chain": value.target_lane_chain,
+                "commit_step": int(value.commit_step),
+            }
+            for agent_id, value in self._pending_lane_change_commitments.items()
+        }
+        return {
+            "active": active,
+            "pending": pending,
+            "completed": copy.deepcopy(self._completed_lane_change_commitments),
         }
 
     @staticmethod
@@ -527,8 +733,7 @@ class MultiAgentRuleMaker(RuleMaker):
         candidates_by_agent: dict[str, list[dict]],
         traffic_vehicles: list,
     ):
-        best_combo = None
-        best_score = -float("inf")
+        candidate_sets = []
         for action in self.ACTIONS:
             combo = []
             valid = True
@@ -540,17 +745,172 @@ class MultiAgentRuleMaker(RuleMaker):
                 combo.append(candidate)
             if not valid:
                 continue
-            combo_tuple = tuple(combo)
+            candidate_sets.append(tuple(combo))
+        best_combo = None
+        best_score = -float("inf")
+        conflict_counts: dict[str, int] = {}
+        for combo_tuple in candidate_sets:
+            if self._combo_has_hard_conflict(
+                env, ordered_agent_ids, combo_tuple, conflict_counts
+            ):
+                continue
             score = self._score_joint_combo(
                 env=env,
                 ordered_agent_ids=ordered_agent_ids,
                 combo=combo_tuple,
                 traffic_vehicles=traffic_vehicles,
+                formation_constraint_enabled=True,
             )
             if score > best_score:
                 best_score = score
                 best_combo = combo_tuple
-        return best_combo, best_score
+        return best_combo, best_score, {
+            "strategy": "locked_shared_action",
+            "prefix_counts": [len(candidate_sets)],
+            "pairwise_conflict_counts": conflict_counts,
+        }
+
+    def _best_conditional_combo(
+        self,
+        *,
+        env,
+        ordered_agent_ids: list[str],
+        candidate_sets: list[list[dict]],
+        traffic_vehicles: list,
+        formation_constraint_enabled: bool,
+    ):
+        """Complete leader-to-rear prefix search with immediate collision pruning."""
+
+        agents = getattr(env, "agents", {}) or {}
+        prefixes: list[tuple[dict, ...]] = [tuple()]
+        prefix_counts: list[int] = []
+        conflict_counts: dict[str, int] = {}
+        for role_index, candidates in enumerate(candidate_sets):
+            next_prefixes: list[tuple[dict, ...]] = []
+            agent_id = ordered_agent_ids[role_index]
+            for prefix in prefixes:
+                for candidate in candidates:
+                    conflict = False
+                    for previous_index, previous in enumerate(prefix):
+                        previous_id = ordered_agent_ids[previous_index]
+                        if self._coarse_pair_collides(
+                            previous,
+                            agents.get(previous_id),
+                            candidate,
+                            agents.get(agent_id),
+                        ):
+                            key = f"{previous_id}:{agent_id}"
+                            conflict_counts[key] = conflict_counts.get(key, 0) + 1
+                            conflict = True
+                            break
+                    if not conflict:
+                        next_prefixes.append(prefix + (candidate,))
+            prefixes = next_prefixes
+            prefix_counts.append(len(prefixes))
+            if not prefixes:
+                break
+
+        best_combo = None
+        best_score = -float("inf")
+        for combo in prefixes:
+            if len(combo) != len(ordered_agent_ids):
+                continue
+            score = self._score_joint_combo(
+                env=env,
+                ordered_agent_ids=ordered_agent_ids,
+                combo=combo,
+                traffic_vehicles=traffic_vehicles,
+                formation_constraint_enabled=formation_constraint_enabled,
+            )
+            if score > best_score:
+                best_score = score
+                best_combo = combo
+        return best_combo, best_score, {
+            "strategy": "leader_to_rear_complete_prefix",
+            "prefix_counts": prefix_counts,
+            "pairwise_conflict_counts": conflict_counts,
+            "complete_combo_count": sum(
+                1 for value in prefixes if len(value) == len(ordered_agent_ids)
+            ),
+        }
+
+    def _combo_has_hard_conflict(
+        self,
+        env,
+        ordered_agent_ids: list[str],
+        combo,
+        conflict_counts: dict[str, int],
+    ) -> bool:
+        agents = getattr(env, "agents", {}) or {}
+        for first in range(len(combo)):
+            for second in range(first + 1, len(combo)):
+                if self._coarse_pair_collides(
+                    combo[first],
+                    agents.get(ordered_agent_ids[first]),
+                    combo[second],
+                    agents.get(ordered_agent_ids[second]),
+                ):
+                    key = f"{ordered_agent_ids[first]}:{ordered_agent_ids[second]}"
+                    conflict_counts[key] = conflict_counts.get(key, 0) + 1
+                    return True
+        return False
+
+    def _coarse_pair_collides(
+        self,
+        first: dict,
+        first_vehicle,
+        second: dict,
+        second_vehicle,
+    ) -> bool:
+        first_pose = self._dense_coarse_pose(
+            first.get("trajectory_world"), first_vehicle
+        )
+        second_pose = self._dense_coarse_pose(
+            second.get("trajectory_world"), second_vehicle
+        )
+        if first_pose is None or second_pose is None:
+            return True
+        first_dimensions = self._vehicle_dimensions(first_vehicle)
+        second_dimensions = self._vehicle_dimensions(second_vehicle)
+        margins = np.full((len(first_pose), 2), 0.2, dtype=np.float64)
+        grace = min(5, max(len(first_pose) - 1, 0))
+        if grace > 0:
+            margins[: grace + 1] *= np.linspace(0.0, 1.0, grace + 1)[:, None]
+        return obb_overlap_series(
+            first_pose,
+            first_dimensions,
+            second_pose,
+            second_dimensions,
+            margins,
+        )
+
+    def _dense_coarse_pose(self, trajectory, vehicle) -> np.ndarray | None:
+        xy = np.asarray(trajectory, dtype=np.float64).copy()
+        if xy.ndim != 2 or xy.shape[0] < 2 or xy.shape[1] < 2:
+            return None
+        current_position = np.asarray(
+            getattr(vehicle, "position", ()), dtype=np.float64
+        ).reshape(-1)
+        if current_position.size < 2 or not np.isfinite(current_position[:2]).all():
+            return None
+        xy[0, :2] = current_position[:2]
+        source_times = np.linspace(0.0, self.horizon_s, len(xy))
+        dense_times = np.arange(0.0, self.horizon_s + 0.05, 0.1)
+        dense_xy = np.column_stack(
+            [np.interp(dense_times, source_times, xy[:, axis]) for axis in (0, 1)]
+        )
+        delta = np.diff(dense_xy, axis=0, append=dense_xy[-1:])
+        if len(delta) > 1 and np.linalg.norm(delta[-1]) <= 1.0e-6:
+            delta[-1] = delta[-2]
+        heading = np.unwrap(np.arctan2(delta[:, 1], delta[:, 0]))
+        return np.column_stack([dense_xy, heading])
+
+    @staticmethod
+    def _vehicle_dimensions(vehicle) -> tuple[float, float]:
+        return (
+            float(getattr(vehicle, "LENGTH", 5.74) or 5.74),
+            float(getattr(vehicle, "WIDTH", 2.3) or 2.3),
+        )
 
     @staticmethod
     def _candidate_for_action(candidates: list[dict], action: int) -> dict | None:
@@ -594,14 +954,40 @@ class MultiAgentRuleMaker(RuleMaker):
                 roles[agent_id] = "follower"
         return roles
 
-    def _build_agent_candidates(self, env, vehicle, traffic_vehicles: list) -> list[dict]:
+    def _build_agent_candidates(
+        self,
+        env,
+        vehicle,
+        traffic_vehicles: list,
+        *,
+        commitment: _LaneChangeCommitment | None = None,
+    ) -> list[dict]:
         if vehicle is None:
             return []
         other_vehicles = self._candidate_obstacle_vehicles(env, vehicle, traffic_vehicles)
         candidates = []
-        for action in self.ACTIONS:
-            candidate = self._build_coarse_trajectory(env, vehicle, int(action), other_vehicles)
+        actions = self.ACTIONS if commitment is None else (int(commitment.action),)
+        for action in actions:
+            target_lane_override = None
+            if commitment is not None:
+                target_lane_override = self._lane_from_index(
+                    env, commitment.target_lane_index
+                )
+                if target_lane_override is None:
+                    raise LaneChangeCommitmentError(
+                        "lane_change_commitment_invalid: target lane "
+                        f"{commitment.target_lane_index!r} is unavailable"
+                    )
+            candidate = self._build_coarse_trajectory(
+                env,
+                vehicle,
+                int(action),
+                other_vehicles,
+                target_lane_override=target_lane_override,
+            )
             if candidate is not None:
+                if commitment is not None:
+                    candidate["maneuver_committed"] = True
                 candidates.append(candidate)
 
         debug = 0
@@ -621,10 +1007,22 @@ class MultiAgentRuleMaker(RuleMaker):
                 candidate["mobil_gain"] = float(accel - keep_accel - self.mobil_lane_change_threshold - rear_penalty)
         return candidates
 
-    def _build_coarse_trajectory(self, env, vehicle, action: int, other_vehicles: list) -> dict | None:
+    def _build_coarse_trajectory(
+        self,
+        env,
+        vehicle,
+        action: int,
+        other_vehicles: list,
+        *,
+        target_lane_override=None,
+    ) -> dict | None:
         # Step 1: 计算当前车辆所在lane和目标lane
         source_lane = getattr(vehicle, "lane", None)
-        target_lane = self._target_lane(env, vehicle, source_lane, action)
+        target_lane = (
+            target_lane_override
+            if target_lane_override is not None
+            else self._target_lane(env, vehicle, source_lane, action)
+        )
 
         debug = 0
         if debug == 1 and action == 1:
@@ -703,6 +1101,10 @@ class MultiAgentRuleMaker(RuleMaker):
                 "target_point": target_point,
                 "source_lane_index": tuple(getattr(source_lane, "index", ()) or ()),
                 "target_lane_index": tuple(getattr(target_lane, "index", ()) or ()),
+                "target_lane_chain_indices": tuple(
+                    tuple(getattr(lane, "index", ()) or ())
+                    for lane in target_lane_chain
+                ),
                 "start_s": float(start_s),
                 "end_s": float(end_s),
                 "front_vehicle_speed_km_h": float(getattr(front_vehicle, "speed_km_h", 0.0) or 0.0) if front_vehicle is not None else None,
@@ -719,6 +1121,20 @@ class MultiAgentRuleMaker(RuleMaker):
             if self._is_s7_forced_lane_candidate(env, candidate):
                 candidate["forced_lane_change"] = True
             return candidate
+        except Exception:
+            return None
+
+    @staticmethod
+    def _lane_from_index(env, lane_index: tuple):
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        if road_network is None or not hasattr(road_network, "get_lane"):
+            return None
+        try:
+            return road_network.get_lane(tuple(lane_index))
         except Exception:
             return None
 
@@ -1064,6 +1480,7 @@ class MultiAgentRuleMaker(RuleMaker):
         ordered_agent_ids: list[str],
         combo,
         traffic_vehicles: list,
+        formation_constraint_enabled: bool = True,
     ) -> float:
         score = 0.0
         agents = getattr(env, "agents", {}) or {}
@@ -1108,6 +1525,9 @@ class MultiAgentRuleMaker(RuleMaker):
                     )
 
         score += self._joint_agent_safety_score(combo)
+
+        if not formation_constraint_enabled:
+            return float(score)
 
         for idx in range(1, len(ordered_agent_ids)):
             prev_agent_id = ordered_agent_ids[idx - 1]
@@ -1466,6 +1886,7 @@ def make_rule_maker(config: dict) -> RuleMaker:
         "ideal_following_distance_m": config.get("rule_maker_ideal_following_distance_m"),
         "relock_gap_ratio": config.get("rule_maker_relock_gap_ratio"),
         "forced_lane_unlock_wait_steps": config.get("rule_maker_forced_lane_unlock_wait_steps"),
+        "relock_stable_steps": config.get("rule_maker_relock_stable_steps"),
     }
     for k, v in _overrides.items():
         if v is not None:
@@ -1506,6 +1927,7 @@ def make_rule_maker(config: dict) -> RuleMaker:
             ideal_following_distance_m=float(yaml_params.get("ideal_following_distance_m", 10.0)),
             relock_gap_ratio=float(yaml_params.get("relock_gap_ratio", 1.5)),
             forced_lane_unlock_wait_steps=int(yaml_params.get("forced_lane_unlock_wait_steps", 10)),
+            relock_stable_steps=int(yaml_params.get("relock_stable_steps", 20)),
         )
     raise ValueError(
         f"Unknown rule_maker_type: {rule_maker_type!r}. "

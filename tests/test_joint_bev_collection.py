@@ -415,6 +415,75 @@ def test_rule_planner_expert_reports_joint_planner_failure_category() -> None:
     )
 
 
+def test_rule_planner_expert_uses_independent_pid_when_formation_is_unlocked() -> None:
+    agent_ids = ("agent0", "agent1", "agent2")
+    expert = RulePlannerExpert.__new__(RulePlannerExpert)
+    expert.agent_ids = agent_ids
+    expert._last_formation_locked = True
+    decision = {
+        agent_id: {
+            "action": 0,
+            "target_point": np.asarray([20.0, 0.0], dtype=np.float32),
+            "formation_constraint_enabled": False,
+            "coordination_mode": "EMERGENCY_INDEPENDENT",
+        }
+        for agent_id in agent_ids
+    }
+    expert.rule_maker = SimpleNamespace(
+        compute=lambda *args, **kwargs: decision,
+        get_last_debug=lambda: {
+            "dynamic_roles": {agent_id: "leader" for agent_id in agent_ids}
+        },
+        is_formation_locked=False,
+    )
+    trajectories = {
+        agent_id: np.zeros((8, 3), dtype=np.float32)
+        for agent_id in agent_ids
+    }
+    expert.planner = SimpleNamespace(
+        plan=lambda *args, **kwargs: trajectories,
+        get_last_debug=lambda: {
+            "_joint": {"fallback_used": False},
+            **{
+                agent_id: {"fallback_used": False}
+                for agent_id in agent_ids
+            },
+        },
+    )
+
+    class _Controller:
+        def __init__(self):
+            self.reset_calls = 0
+            self.compute_calls = 0
+
+        def reset(self):
+            self.reset_calls += 1
+
+        def compute_actions(self, env, trajectories_world):  # noqa: ARG002
+            self.compute_calls += 1
+            return {
+                agent_id: np.asarray([0.0, -0.2], dtype=np.float32)
+                for agent_id in trajectories_world
+            }
+
+    expert.pid_controller = _Controller()
+    expert.lqr_controller = _Controller()
+    applied_roles = {}
+    env = SimpleNamespace(
+        agents={agent_id: object() for agent_id in agent_ids},
+        _last_planner_batch={},
+        apply_dynamic_roles=lambda roles: applied_roles.update(roles),
+    )
+
+    result = expert.plan(env)
+
+    assert set(result.controls) == set(agent_ids)
+    assert expert.pid_controller.compute_calls == 1
+    assert expert.pid_controller.reset_calls == 1
+    assert expert.lqr_controller.compute_calls == 0
+    assert applied_roles == {agent_id: "leader" for agent_id in agent_ids}
+
+
 def test_sensorless_environment_forces_no_rendering_observation_stack(monkeypatch) -> None:
     assert dict(SensorlessJointBEVPlatoonEnv.default_config()["sensors"]) == {}
     captured = {}

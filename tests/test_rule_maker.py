@@ -51,6 +51,12 @@ def test_rule_maker_factory_configures_forced_lane_unlock_wait_steps():
     assert rule_maker.forced_lane_unlock_wait_steps == 3
 
 
+def test_rule_maker_factory_configures_relock_stable_steps():
+    rule_maker = make_rule_maker({"rule_maker_relock_stable_steps": 7})
+
+    assert rule_maker.relock_stable_steps == 7
+
+
 class FakeLane:
     def __init__(self, lane_id: int, y: float, length: float = 200.0, width: float = 3.5):
         self.index = ("A", "B", lane_id)
@@ -144,6 +150,67 @@ def test_risk_detector_unlocks_when_leader_ttc_is_below_threshold():
     assert result["leader"]["front_net_gap_m"] == pytest.approx(13.5)
     assert result["leader"]["closing_speed_mps"] == pytest.approx(5.0)
     assert result["leader"]["ttc_s"] == pytest.approx(2.7)
+
+
+def test_risk_detector_unlocks_immediately_for_new_s5_hard_brake_marker():
+    lead = _vehicle("hard_brake", 80.0, 0.0, 1, speed_km_h=24.0)
+    lead.scenario_role = "hard_brake_lead"
+    lead.scenario_brake_trigger_step = 30
+    lead.scenario_brake_target_speed_kmh = 1.0
+    lead.scenario_brake_deceleration_mps2 = 6.0
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 20.0, 0.0, 1)},
+        traffic=[lead],
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=0.1)
+
+    first = detector.detect(env, ["agent0"], [lead], "LOCKED")
+    second = detector.detect(env, ["agent0"], [lead], "LOCKED")
+
+    assert first["transition"] == "LOCKED_TO_UNLOCKED"
+    assert first["reason"] == "hard_brake_lead_triggered"
+    assert first["emergency_event"]["trigger_step"] == 30
+    assert second["triggered"] is False
+
+
+def test_rule_maker_applies_emergency_independent_mode_before_action_selection():
+    lead = _vehicle("hard_brake", 100.0, 0.0, 1, speed_km_h=24.0)
+    lead.scenario_role = "hard_brake_lead"
+    lead.scenario_brake_trigger_step = 30
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 20.0, 0.0, 1)},
+        traffic=[lead],
+    )
+    rule_maker = MultiAgentRuleMaker(locked_on_reset=True, risk_ttc_trigger_s=0.1)
+
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["formation_constraint_enabled"] is False
+    assert decisions["agent0"]["coordination_mode"] == "EMERGENCY_INDEPENDENT"
+    assert debug["state_transition"] == "LOCKED_TO_UNLOCKED"
+    assert debug["dynamic_roles"] == {"agent0": "leader"}
+
+
+def test_s5_stays_locked_and_keeps_lane_before_hard_brake_marker():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=30.0)},
+        traffic=[_vehicle("near_front", 28.0, 0.0, 1, speed_km_h=0.0)],
+    )
+    env.config = {"scenario_id": "S5_hard_brake_lead"}
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=True,
+        lane_change_preference=100.0,
+        lc_cost=0.0,
+    )
+
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == 0
+    assert debug["formation_locked"] is True
+    assert debug["action_search"]["strategy"] == "s5_pre_brake_keep"
+    assert debug["risk_info"]["waiting_for_s5_hard_brake"] is True
 
 
 @pytest.mark.parametrize(
@@ -291,7 +358,11 @@ def test_risk_detector_relocks_when_follower_gap_is_below_threshold():
         },
         traffic=[],
     )
-    detector = SimpleRuleRiskDetector(ideal_following_distance_m=10.0, relock_gap_ratio=1.5)
+    detector = SimpleRuleRiskDetector(
+        ideal_following_distance_m=10.0,
+        relock_gap_ratio=1.5,
+        relock_stable_steps=1,
+    )
 
     result = detector.detect(env, ["agent0", "agent1", "agent2"], [], "UNLOCKED")
 
@@ -323,7 +394,9 @@ def test_risk_detector_keeps_unlocked_when_leader_ttc_is_not_above_relock_thresh
         },
         traffic=[_vehicle("front", front_x, 0.0, 1, speed_km_h=18.0)],
     )
-    detector = SimpleRuleRiskDetector(relock_ttc_threshold_s=5.0)
+    detector = SimpleRuleRiskDetector(
+        relock_ttc_threshold_s=5.0, relock_stable_steps=1
+    )
 
     result = detector.detect(
         env,
@@ -347,7 +420,9 @@ def test_risk_detector_relocks_when_follower_gap_and_leader_ttc_are_safe():
         },
         traffic=[_vehicle("front", 60.0, 0.0, 1, speed_km_h=18.0)],
     )
-    detector = SimpleRuleRiskDetector(relock_ttc_threshold_s=5.0)
+    detector = SimpleRuleRiskDetector(
+        relock_ttc_threshold_s=5.0, relock_stable_steps=1
+    )
 
     result = detector.detect(
         env,
@@ -369,7 +444,9 @@ def test_risk_detector_treats_non_closing_front_vehicle_as_safe_for_relock():
         },
         traffic=[_vehicle("front", 40.0, 0.0, 1, speed_km_h=36.0)],
     )
-    detector = SimpleRuleRiskDetector(relock_ttc_threshold_s=5.0)
+    detector = SimpleRuleRiskDetector(
+        relock_ttc_threshold_s=5.0, relock_stable_steps=1
+    )
 
     result = detector.detect(
         env,
@@ -705,8 +782,8 @@ def _env_s7_real_lane_contract(vehicle):
 def test_rule_maker_returns_target_points_for_all_agents():
     env = _env(
         agents={
-            "agent0": _vehicle("agent0", 0.0, 0.0, 1),
-            "agent1": _vehicle("agent1", -10.0, 0.0, 1),
+            "agent0": _vehicle("agent0", 20.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 10.0, 0.0, 1),
         },
         traffic=[],
     )
@@ -1354,7 +1431,7 @@ def test_rule_maker_unlocks_after_risk_trigger_and_recovers_dynamic_roles():
     assert debug["dynamic_roles"]["agent1"] == "leader"
 
 
-def test_rule_maker_relocks_on_next_step_when_follower_gap_is_small():
+def test_rule_maker_relocks_only_after_twenty_stable_steps():
     env = _env(
         agents={
             "agent0": _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=36.0),
@@ -1369,14 +1446,22 @@ def test_rule_maker_relocks_on_next_step_when_follower_gap_is_small():
         risk_ttc_trigger_s=3.0,
         ideal_following_distance_m=10.0,
         relock_gap_ratio=1.5,
+        relock_stable_steps=20,
     )
     rule_maker.reset(env, ["agent0", "agent1"])
 
     rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
     assert rule_maker.is_formation_locked is False
+    rule_maker._lane_change_commitments.clear()
+    rule_maker._pending_lane_change_commitments.clear()
 
-    env.agents["agent1"] = _vehicle("agent1", 0.0, 0.0, 1, speed_km_h=36.0)
+    env.agents["agent1"] = _vehicle("agent1", -2.0, 0.0, 1, speed_km_h=36.0)
     env.engine.traffic_manager._traffic_vehicles = []
+    for _ in range(19):
+        rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+        debug = rule_maker.get_last_debug()
+        assert debug is not None
+        assert debug["formation_locked"] is False
     rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
     debug = rule_maker.get_last_debug()
 
@@ -1386,12 +1471,24 @@ def test_rule_maker_relocks_on_next_step_when_follower_gap_is_small():
     assert debug["state_transition"] == "UNLOCKED_TO_LOCKED"
 
 
-def _forced_wait_candidate(action: int, *, forced: bool = False):
+def _forced_wait_candidate(
+    action: int,
+    *,
+    forced: bool = False,
+    origin_x: float = 0.0,
+    origin_y: float = 0.0,
+):
     candidate = {
         "action": int(action),
         "valid": True,
         "score": 0.0,
-        "trajectory_world": np.asarray([[0.0, 0.0], [5.0, 0.0]], dtype=np.float32),
+        "trajectory_world": np.asarray(
+            [
+                [origin_x, origin_y],
+                [origin_x + 5.0, origin_y - 3.5 * float(action)],
+            ],
+            dtype=np.float32,
+        ),
         "target_point": np.asarray([5.0, 0.0], dtype=np.float32),
         "source_lane_index": ("A", "B", 1),
         "target_lane_index": ("A", "B", 1 + int(action)),
@@ -1402,11 +1499,61 @@ def _forced_wait_candidate(action: int, *, forced: bool = False):
     return candidate
 
 
-def _scored_forced_candidate(action: int, *, mobil_gain: float, forced: bool = False):
-    candidate = _forced_wait_candidate(action, forced=forced)
+def _scored_forced_candidate(
+    action: int,
+    *,
+    mobil_gain: float,
+    forced: bool = False,
+    origin_x: float = 0.0,
+    origin_y: float = 0.0,
+):
+    candidate = _forced_wait_candidate(
+        action,
+        forced=forced,
+        origin_x=origin_x,
+        origin_y=origin_y,
+    )
     candidate["mobil_gain"] = float(mobil_gain)
     candidate["target_point"] = np.asarray([5.0, float(action)], dtype=np.float32)
     return candidate
+
+
+def test_independent_joint_score_omits_formation_consistency_terms():
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 20.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 8.0, 0.0, 1),
+        },
+        traffic=[],
+    )
+    rule_maker = MultiAgentRuleMaker(
+        w_formation_consistent=100.0,
+        w_formation_inconsistent_cost=100.0,
+        w_close_keep=100.0,
+        w_close_lc_same_cost=100.0,
+        w_close_lc_diff_cost=100.0,
+    )
+    combo = (
+        _forced_wait_candidate(0, origin_x=20.0),
+        _forced_wait_candidate(1, origin_x=8.0),
+    )
+
+    locked = rule_maker._score_joint_combo(
+        env,
+        ["agent0", "agent1"],
+        combo,
+        [],
+        formation_constraint_enabled=True,
+    )
+    independent = rule_maker._score_joint_combo(
+        env,
+        ["agent0", "agent1"],
+        combo,
+        [],
+        formation_constraint_enabled=False,
+    )
+
+    assert independent > locked
 
 
 def test_unlocked_forced_agent_must_select_forced_candidate(monkeypatch):
@@ -1423,15 +1570,19 @@ def test_unlocked_forced_agent_must_select_forced_candidate(monkeypatch):
         locked_on_reset=False,
     )
 
-    def fake_candidates(_env, vehicle, _traffic_vehicles):
+    def fake_candidates(_env, vehicle, _traffic_vehicles, **_kwargs):
+        origin = {
+            "origin_x": float(vehicle.position[0]),
+            "origin_y": float(vehicle.position[1]),
+        }
         if vehicle.name == "agent0":
             return [
-                _scored_forced_candidate(0, mobil_gain=10.0, forced=False),
-                _scored_forced_candidate(1, mobil_gain=-10.0, forced=True),
+                _scored_forced_candidate(0, mobil_gain=10.0, forced=False, **origin),
+                _scored_forced_candidate(1, mobil_gain=-10.0, forced=True, **origin),
             ]
         return [
-            _scored_forced_candidate(0, mobil_gain=-1.0, forced=False),
-            _scored_forced_candidate(1, mobil_gain=2.0, forced=False),
+            _scored_forced_candidate(0, mobil_gain=-1.0, forced=False, **origin),
+            _scored_forced_candidate(1, mobil_gain=2.0, forced=False, **origin),
         ]
 
     monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
@@ -1465,14 +1616,19 @@ def test_rule_maker_unlocks_after_partial_forced_lane_wait_timeout_and_blocks_ea
         horizon_s=2.0,
         locked_on_reset=True,
         forced_lane_unlock_wait_steps=10,
+        relock_stable_steps=1,
     )
 
     forced_enabled = {"value": True}
 
-    def fake_candidates(_env, vehicle, _traffic_vehicles):
+    def fake_candidates(_env, vehicle, _traffic_vehicles, **_kwargs):
+        origin = {
+            "origin_x": float(vehicle.position[0]),
+            "origin_y": float(vehicle.position[1]),
+        }
         if vehicle.name == "agent0" and forced_enabled["value"]:
-            return [_forced_wait_candidate(0, forced=False), _forced_wait_candidate(1, forced=True)]
-        return [_forced_wait_candidate(0, forced=False), _forced_wait_candidate(1, forced=False)]
+            return [_forced_wait_candidate(0, forced=False, **origin), _forced_wait_candidate(1, forced=True, **origin)]
+        return [_forced_wait_candidate(0, forced=False, **origin), _forced_wait_candidate(1, forced=False, **origin)]
 
     monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
     for _ in range(9):
@@ -1504,6 +1660,13 @@ def test_rule_maker_unlocks_after_partial_forced_lane_wait_timeout_and_blocks_ea
     forced_enabled["value"] = False
     rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
     debug = rule_maker.get_last_debug()
+    assert debug["formation_locked"] is False
+    assert debug["risk_info"]["active_lane_change_commitments"] is True
+
+    env.agents["agent0"] = _vehicle("agent0", 10.0, -3.5, 2)
+    env.agents["agent1"] = _vehicle("agent1", -2.0, -3.5, 2)
+    rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
+    debug = rule_maker.get_last_debug()
     assert debug["formation_locked"] is True
     assert debug["state_transition"] == "UNLOCKED_TO_LOCKED"
     assert debug["risk_info"]["forced_wait_clear"] is True
@@ -1523,13 +1686,18 @@ def test_rule_maker_clears_forced_lane_wait_when_signal_disappears(monkeypatch):
         horizon_s=2.0,
         locked_on_reset=True,
         forced_lane_unlock_wait_steps=10,
+        relock_stable_steps=1,
     )
     forced_enabled = {"value": True}
 
-    def fake_candidates(_env, vehicle, _traffic_vehicles):
+    def fake_candidates(_env, vehicle, _traffic_vehicles, **_kwargs):
+        origin = {
+            "origin_x": float(vehicle.position[0]),
+            "origin_y": float(vehicle.position[1]),
+        }
         if vehicle.name == "agent0" and forced_enabled["value"]:
-            return [_forced_wait_candidate(0, forced=False), _forced_wait_candidate(1, forced=True)]
-        return [_forced_wait_candidate(0, forced=False), _forced_wait_candidate(1, forced=False)]
+            return [_forced_wait_candidate(0, forced=False, **origin), _forced_wait_candidate(1, forced=True, **origin)]
+        return [_forced_wait_candidate(0, forced=False, **origin), _forced_wait_candidate(1, forced=False, **origin)]
 
     monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
     rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
@@ -1563,8 +1731,15 @@ def test_rule_maker_all_forced_ready_does_not_trigger_wait_unlock(monkeypatch):
         forced_lane_unlock_wait_steps=1,
     )
 
-    def fake_candidates(_env, vehicle, _traffic_vehicles):
-        return [_forced_wait_candidate(1, forced=True)]
+    def fake_candidates(_env, vehicle, _traffic_vehicles, **_kwargs):
+        return [
+            _forced_wait_candidate(
+                1,
+                forced=True,
+                origin_x=float(vehicle.position[0]),
+                origin_y=float(vehicle.position[1]),
+            )
+        ]
 
     monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
     rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
@@ -1574,3 +1749,60 @@ def test_rule_maker_all_forced_ready_does_not_trigger_wait_unlock(monkeypatch):
     assert debug["forced_lane_decision"] is True
     assert debug["forced_lane_wait_info"]["all_forced_ready"] is True
     assert debug["forced_lane_wait_info"]["partial_forced_wait_steps"] == 0
+
+
+def test_lane_change_commitment_blocks_reversal_until_target_lane_entry():
+    vehicle = _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=20.0)
+    env = _env(agents={"agent0": vehicle}, traffic=[])
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        locked_on_reset=False,
+        lane_change_preference=20.0,
+        lc_cost=0.0,
+        w_mobil=0.0,
+        w_keep_bias=0.0,
+    )
+
+    first = rule_maker.compute(env, ["agent0"], planner_batch={})
+    committed_action = int(first["agent0"]["action"])
+    assert committed_action in (-1, 1)
+    assert rule_maker.get_last_debug()["lane_change_commitments"]["pending"]
+
+    rule_maker.lane_change_preference = -100.0
+    second = rule_maker.compute(env, ["agent0"], planner_batch={})
+    assert int(second["agent0"]["action"]) == committed_action
+    active = rule_maker.get_last_debug()["lane_change_commitments"]["active"]
+    assert active["agent0"]["action"] == committed_action
+
+    target_lane_id = 1 + committed_action
+    target_y = {0: 3.5, 2: -3.5}[target_lane_id]
+    env.agents["agent0"] = _vehicle(
+        "agent0", 24.0, target_y, target_lane_id, speed_km_h=20.0
+    )
+    third = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert debug["lane_change_commitments"]["active"] == {}
+    assert debug["lane_change_commitments"]["completed"]["agent0"][
+        "completion_reason"
+    ] == "entered_target_lane_family"
+    assert int(third["agent0"]["action"]) != committed_action
+
+
+def test_reset_clears_lane_change_commitment_state():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 20.0, 0.0, 1)}, traffic=[]
+    )
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=False,
+        lane_change_preference=20.0,
+        lc_cost=0.0,
+    )
+    rule_maker.compute(env, ["agent0"], planner_batch={})
+    assert rule_maker._pending_lane_change_commitments
+
+    rule_maker.reset(env, ["agent0"])
+
+    assert rule_maker._lane_change_commitments == {}
+    assert rule_maker._pending_lane_change_commitments == {}

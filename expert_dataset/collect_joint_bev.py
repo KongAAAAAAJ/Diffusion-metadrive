@@ -32,7 +32,11 @@ from models.bev_planner.mode_contract import (
 )
 from models.controller.LQRFollowerController import LQRFollowerController
 from models.controller.PIDController import PIDTrajectoryController, _world_trajectory_to_ego_local
-from models.decisioner.rule_decisioner import make_rule_maker, select_controller_by_formation
+from models.decisioner.rule_decisioner import (
+    LaneChangeCommitmentError,
+    make_rule_maker,
+    select_controller_by_formation,
+)
 from models.platoon_planner.platoon_normal_planner import (
     NormalPlannerKinematicError,
     PlatoonNormalPlanner,
@@ -279,9 +283,10 @@ class RulePlannerExpert:
         self.pid_controller.reset()
         self.lqr_controller = LQRFollowerController(config)
         self.lqr_controller.reset()
+        self._last_formation_locked: bool | None = None
 
     @staticmethod
-    def _normalize_decision(value: object) -> tuple[int, np.ndarray]:
+    def _normalize_decision(value: object) -> tuple[int, np.ndarray, bool, str]:
         if not isinstance(value, Mapping):
             raise JointCollectionError("RuleMaker decision must contain action and target_point")
         try:
@@ -291,24 +296,54 @@ class RulePlannerExpert:
             raise JointCollectionError("invalid RuleMaker decision") from exc
         if action not in (-1, 0, 1) or not np.isfinite(target).all():
             raise JointCollectionError("RuleMaker decision is outside the frozen label contract")
-        return action, target
+        formation_enabled = bool(value.get("formation_constraint_enabled", True))
+        coordination_mode = str(
+            value.get(
+                "coordination_mode",
+                "LOCKED" if formation_enabled else "EMERGENCY_INDEPENDENT",
+            )
+        )
+        expected_mode = "LOCKED" if formation_enabled else "EMERGENCY_INDEPENDENT"
+        if coordination_mode != expected_mode:
+            raise JointCollectionError("RuleMaker coordination metadata is inconsistent")
+        return action, target, formation_enabled, coordination_mode
 
     def plan(self, env: PlatoonEnv) -> ExpertJointStep:
         active = [agent_id for agent_id in self.agent_ids if agent_id in getattr(env, "agents", {})]
         if tuple(active) != self.agent_ids:
             raise JointCollectionError("all three ordered platoon agents must be active")
-        raw = self.rule_maker.compute(env, active, getattr(env, "_last_planner_batch", None) or {})
+        try:
+            raw = self.rule_maker.compute(
+                env,
+                active,
+                getattr(env, "_last_planner_batch", None) or {},
+            )
+        except LaneChangeCommitmentError as exc:
+            raise JointCollectionError(
+                str(exc), reason_code="lane_change_commitment_invalid"
+            ) from exc
         decisions: dict[str, dict[str, object]] = {}
         actions: dict[str, int] = {}
+        formation_flags: set[bool] = set()
         for agent_id in self.agent_ids:
             if agent_id not in raw:
                 raise JointCollectionError(
                     f"RuleMaker omitted {agent_id}",
                     reason_code="rule_maker_no_action",
                 )
-            action, target = self._normalize_decision(raw[agent_id])
+            action, target, formation_enabled, coordination_mode = self._normalize_decision(
+                raw[agent_id]
+            )
             actions[agent_id] = action
-            decisions[agent_id] = {"action": action, "target_point": target}
+            formation_flags.add(formation_enabled)
+            decisions[agent_id] = {
+                "action": action,
+                "target_point": target,
+                "formation_constraint_enabled": formation_enabled,
+                "coordination_mode": coordination_mode,
+            }
+        if len(formation_flags) != 1:
+            raise JointCollectionError("RuleMaker returned mixed coordination modes")
 
         rule_debug = getattr(self.rule_maker, "get_last_debug", lambda: None)() or {}
         dynamic_roles = rule_debug.get("dynamic_roles", {}) if isinstance(rule_debug, Mapping) else {}
@@ -362,6 +397,10 @@ class RulePlannerExpert:
         controller = select_controller_by_formation(
             self.rule_maker, self.pid_controller, self.lqr_controller
         )
+        formation_locked = bool(self.rule_maker.is_formation_locked)
+        if self._last_formation_locked is None or formation_locked != self._last_formation_locked:
+            controller.reset()
+        self._last_formation_locked = formation_locked
         controls = controller.compute_actions(env, trajectories)
         for agent_id in self.agent_ids:
             control = np.asarray(controls.get(agent_id), dtype=np.float32)
