@@ -93,7 +93,7 @@ class SimpleRuleRiskDetector(RiskDetector):
         forced_lane_wait_info: dict | None = None,
     ) -> dict:
         leader_metrics = self._leader_ttc_metrics(agents, agent_ids, traffic_vehicles)
-        hard_brake_event = self._new_hard_brake_event(traffic_vehicles)
+        hard_brake_event = self._new_hard_brake_event(env, traffic_vehicles)
         if hard_brake_event is not None:
             self._relock_stable_count = 0
             return self._result(
@@ -124,10 +124,10 @@ class SimpleRuleRiskDetector(RiskDetector):
             )
 
         ttc = leader_metrics["ttc_s"]
-        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        scenario_id, scenario_triggered, _ = self._scenario_event_state(env)
         s5_waiting_for_brake = (
             scenario_id == "S5_hard_brake_lead"
-            and not self._seen_hard_brake_tokens
+            and not scenario_triggered
         )
         transitioned = (
             not s5_waiting_for_brake
@@ -225,14 +225,30 @@ class SimpleRuleRiskDetector(RiskDetector):
             forced_lane_wait_info=forced_lane_wait_info,
         )
 
-    def _new_hard_brake_event(self, traffic_vehicles: list) -> dict | None:
+    def _new_hard_brake_event(self, env, traffic_vehicles: list) -> dict | None:
         """Return a newly observed simulator hard-brake event exactly once."""
+
+        scenario_id, scenario_triggered, episode_trigger_step = (
+            self._scenario_event_state(env)
+        )
+        if scenario_id == "S5_hard_brake_lead" and not scenario_triggered:
+            return None
 
         for vehicle in traffic_vehicles:
             if str(getattr(vehicle, "scenario_role", "")) != "hard_brake_lead":
                 continue
+            if scenario_id == "S5_hard_brake_lead" and str(
+                getattr(vehicle, "scenario_id", "")
+            ) != scenario_id:
+                continue
             trigger_step = getattr(vehicle, "scenario_brake_trigger_step", None)
             if trigger_step is None:
+                continue
+            if (
+                scenario_id == "S5_hard_brake_lead"
+                and episode_trigger_step is not None
+                and int(trigger_step) != int(episode_trigger_step)
+            ):
                 continue
             token = (self._vehicle_id(vehicle), int(trigger_step))
             if token in self._seen_hard_brake_tokens:
@@ -249,6 +265,25 @@ class SimpleRuleRiskDetector(RiskDetector):
                 ),
             }
         return None
+
+    @staticmethod
+    def _scenario_event_state(env) -> tuple[str, bool, int | None]:
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        if orchestrator is not None and hasattr(
+            orchestrator, "get_episode_summary"
+        ):
+            summary = dict(orchestrator.get_episode_summary() or {})
+            scenario_id = str(summary.get("scenario_id", ""))
+            trigger_step = summary.get("scenario_trigger_step")
+            return (
+                scenario_id,
+                bool(summary.get("scenario_triggered", False)),
+                None if trigger_step is None else int(trigger_step),
+            )
+        scenario_id = str(
+            (getattr(env, "config", {}) or {}).get("scenario_id", "")
+        )
+        return scenario_id, bool(False), None
 
     @staticmethod
     def _agents_are_safe(agents: dict, agent_ids: list[str]) -> bool:

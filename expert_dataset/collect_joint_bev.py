@@ -31,7 +31,7 @@ from models.bev_planner.mode_contract import (
     validate_trajectory_kinematics,
 )
 from models.controller.LQRFollowerController import LQRFollowerController
-from models.controller.PIDController import PIDTrajectoryController, _world_trajectory_to_ego_local
+from models.controller.PIDController import PIDTrajectoryController
 from models.decisioner.rule_decisioner import (
     LaneChangeCommitmentError,
     make_rule_maker,
@@ -39,8 +39,10 @@ from models.decisioner.rule_decisioner import (
 )
 from models.platoon_planner.platoon_normal_planner import (
     NormalPlannerKinematicError,
+    NormalPlannerNoFeasiblePlan,
     PlatoonNormalPlanner,
 )
+from models.platoon_planner.collision_geometry import world_trajectory_to_ego_local
 
 try:
     from metadrive.obs.observation_base import DummyObservation
@@ -209,6 +211,7 @@ class ExpertJointStep:
     rule_actions: Mapping[str, int]
     trajectories_world: Mapping[str, np.ndarray]
     controls: Mapping[str, np.ndarray]
+    trajectories_local: Mapping[str, np.ndarray] | None = None
 
 
 @dataclass(frozen=True)
@@ -313,7 +316,7 @@ class RulePlannerExpert:
         if tuple(active) != self.agent_ids:
             raise JointCollectionError("all three ordered platoon agents must be active")
         try:
-            raw = self.rule_maker.compute(
+            proposal_batch = self.rule_maker.propose_joint_actions(
                 env,
                 active,
                 getattr(env, "_last_planner_batch", None) or {},
@@ -322,26 +325,47 @@ class RulePlannerExpert:
             raise JointCollectionError(
                 str(exc), reason_code="lane_change_commitment_invalid"
             ) from exc
-        decisions: dict[str, dict[str, object]] = {}
+        if not proposal_batch.proposals:
+            raise JointCollectionError(
+                "RuleMaker produced no joint action proposal",
+                reason_code="rule_maker_no_action",
+            )
+        try:
+            plan_result = self.planner.plan_ranked(
+                env, proposal_batch.proposals
+            )
+        except NormalPlannerNoFeasiblePlan as exc:
+            raise JointCollectionError(
+                str(exc), reason_code=exc.reason_code
+            ) from exc
+        except NormalPlannerKinematicError as exc:
+            raise JointCollectionError(
+                "Normal planner selected a dynamically invalid native trajectory",
+                reason_code="normal_planner_final_kinematic_invalid",
+            ) from exc
+        try:
+            self.rule_maker.accept_joint_action(
+                proposal_batch.batch_id, plan_result.proposal_id
+            )
+        except LaneChangeCommitmentError as exc:
+            raise JointCollectionError(
+                str(exc), reason_code="lane_change_commitment_invalid"
+            ) from exc
+
+        decisions = plan_result.decisions
         actions: dict[str, int] = {}
         formation_flags: set[bool] = set()
         for agent_id in self.agent_ids:
-            if agent_id not in raw:
+            if agent_id not in decisions:
                 raise JointCollectionError(
                     f"RuleMaker omitted {agent_id}",
                     reason_code="rule_maker_no_action",
                 )
             action, target, formation_enabled, coordination_mode = self._normalize_decision(
-                raw[agent_id]
+                decisions[agent_id]
             )
             actions[agent_id] = action
             formation_flags.add(formation_enabled)
-            decisions[agent_id] = {
-                "action": action,
-                "target_point": target,
-                "formation_constraint_enabled": formation_enabled,
-                "coordination_mode": coordination_mode,
-            }
         if len(formation_flags) != 1:
             raise JointCollectionError("RuleMaker returned mixed coordination modes")
 
@@ -350,36 +374,9 @@ class RulePlannerExpert:
         if dynamic_roles:
             env.apply_dynamic_roles(dynamic_roles)
 
-        try:
-            trajectories = self.planner.plan(env, decisions)
-        except NormalPlannerKinematicError as exc:
-            raise JointCollectionError(
-                "Normal planner selected a dynamically invalid native trajectory",
-                reason_code="normal_planner_final_kinematic_invalid",
-            ) from exc
+        trajectories = plan_result.trajectories_world
+        trajectories_local = plan_result.trajectories_local
         planner_debug = self.planner.get_last_debug() or {}
-        joint_debug = planner_debug.get("_joint", {})
-        if isinstance(joint_debug, Mapping) and bool(
-            joint_debug.get("fallback_used", False)
-        ):
-            fallback_reason = str(joint_debug.get("fallback_reason", "unknown"))
-            if fallback_reason == "single_agent_no_safe_candidate":
-                missing = ",".join(
-                    str(value) for value in joint_debug.get("missing_agents", ())
-                )
-                raise JointCollectionError(
-                    f"normal planner has no safe local candidate for {missing}",
-                    reason_code="normal_planner_single_agent_no_safe_candidate",
-                )
-            if fallback_reason == "no_safe_joint_combination":
-                raise JointCollectionError(
-                    "normal planner has no safe three-vehicle joint combination",
-                    reason_code="normal_planner_no_safe_joint_combination",
-                )
-            raise JointCollectionError(
-                f"normal planner fallback: {fallback_reason}",
-                reason_code="normal_planner_fallback",
-            )
         for agent_id in self.agent_ids:
             trajectory = np.asarray(trajectories.get(agent_id), dtype=np.float32)
             if trajectory.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM) or not np.isfinite(trajectory).all():
@@ -415,6 +412,10 @@ class RulePlannerExpert:
             controls={
                 key: np.ascontiguousarray(np.asarray(value, dtype=np.float32))
                 for key, value in controls.items()
+            },
+            trajectories_local={
+                key: np.ascontiguousarray(np.asarray(value, dtype=np.float32))
+                for key, value in trajectories_local.items()
             },
         )
 
@@ -640,9 +641,30 @@ class JointBEVSampleBuilder:
             ):
                 raise JointCollectionError(f"expert step omitted {agent_id}")
             vehicle = env.agents[agent_id]
-            expert_local = _world_trajectory_to_ego_local(
-                vehicle, expert_step.trajectories_world[agent_id]
+            origin_pose = np.asarray(
+                [
+                    float(vehicle.position[0]),
+                    float(vehicle.position[1]),
+                    float(getattr(vehicle, "heading_theta", 0.0)),
+                ],
+                dtype=np.float64,
             )
+            recomputed_local = world_trajectory_to_ego_local(
+                expert_step.trajectories_world[agent_id], origin_pose
+            )
+            if expert_step.trajectories_local is None:
+                expert_local = recomputed_local
+            else:
+                expert_local = np.asarray(
+                    expert_step.trajectories_local[agent_id], dtype=np.float32
+                )
+                if not np.allclose(
+                    expert_local, recomputed_local, rtol=0.0, atol=2.0e-5
+                ):
+                    raise JointCollectionError(
+                        f"expert trajectory origin changed for {agent_id}",
+                        reason_code="normal_planner_final_kinematic_invalid",
+                    )
             if expert_local.shape != (TRAJECTORY_STEPS, TRAJECTORY_DIM):
                 raise JointCollectionError(
                     f"expert trajectory for {agent_id} is not [8,3]"

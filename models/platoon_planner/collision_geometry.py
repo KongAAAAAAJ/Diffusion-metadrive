@@ -50,4 +50,34 @@ def obb_overlap_series(
     return bool(np.any(~separated))
 
 
-__all__ = ["obb_overlap_series"]
+def world_trajectory_to_ego_local(
+    trajectory_world: np.ndarray,
+    origin_pose: np.ndarray,
+) -> np.ndarray:
+    """Convert world ``[N,3]`` poses to the exact float32 label frame."""
+
+    trajectory = np.asarray(trajectory_world, dtype=np.float64)
+    origin = np.asarray(origin_pose, dtype=np.float64).reshape(-1)
+    if trajectory.ndim != 2 or trajectory.shape[1] != 3:
+        raise ValueError("trajectory_world must have shape [N,3]")
+    if origin.shape != (3,) or not np.isfinite(origin).all():
+        raise ValueError("origin_pose must be finite [3]")
+    if not np.isfinite(trajectory).all():
+        raise ValueError("trajectory_world must be finite")
+    delta = trajectory[:, :2] - origin[None, :2]
+    cos_h = float(np.cos(origin[2]))
+    sin_h = float(np.sin(origin[2]))
+    local_heading = (
+        trajectory[:, 2] - origin[2] + np.pi
+    ) % (2.0 * np.pi) - np.pi
+    local = np.column_stack(
+        [
+            cos_h * delta[:, 0] + sin_h * delta[:, 1],
+            -sin_h * delta[:, 0] + cos_h * delta[:, 1],
+            local_heading,
+        ]
+    )
+    return np.ascontiguousarray(local.astype(np.float32))
+
+
+__all__ = ["obb_overlap_series", "world_trajectory_to_ego_local"]

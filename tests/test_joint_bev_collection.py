@@ -29,6 +29,14 @@ from models.bev_planner.mode_contract import (
     ModeIndex,
     validate_trajectory_kinematics,
 )
+from models.decisioner.rule_decisioner import (
+    JointActionProposal,
+    RuleMakerProposalBatch,
+)
+from models.platoon_planner.platoon_normal_planner import (
+    NormalPlannerNoFeasiblePlan,
+    RankedJointPlan,
+)
 
 
 def _rectangle(x0: float, x1: float, y0: float, y1: float) -> np.ndarray:
@@ -385,21 +393,22 @@ def test_rule_planner_expert_reports_joint_planner_failure_category() -> None:
         }
         for agent_id in expert.agent_ids
     }
+    proposal = JointActionProposal(0, 0, 0.0, decision)
+    batch = RuleMakerProposalBatch(1, (proposal,))
     expert.rule_maker = SimpleNamespace(
-        compute=lambda *args, **kwargs: decision,
+        propose_joint_actions=lambda *args, **kwargs: batch,
+        accept_joint_action=lambda *args, **kwargs: None,
         get_last_debug=lambda: {},
     )
     expert.planner = SimpleNamespace(
-        plan=lambda *args, **kwargs: {
-            agent_id: np.zeros((8, 3), dtype=np.float32)
-            for agent_id in expert.agent_ids
-        },
-        get_last_debug=lambda: {
-            "_joint": {
-                "fallback_used": True,
-                "fallback_reason": "no_safe_joint_combination",
-            }
-        },
+        plan_ranked=lambda *args, **kwargs: (_ for _ in ()).throw(
+            NormalPlannerNoFeasiblePlan(
+                "no ranked proposal",
+                reason_code="all_rule_proposals_infeasible",
+                debug={},
+            )
+        ),
+        get_last_debug=lambda: {},
     )
     env = SimpleNamespace(
         agents={agent_id: object() for agent_id in expert.agent_ids},
@@ -411,7 +420,7 @@ def test_rule_planner_expert_reports_joint_planner_failure_category() -> None:
 
     assert (
         error.value.reason_code
-        == "normal_planner_no_safe_joint_combination"
+        == "all_rule_proposals_infeasible"
     )
 
 
@@ -429,8 +438,11 @@ def test_rule_planner_expert_uses_independent_pid_when_formation_is_unlocked() -
         }
         for agent_id in agent_ids
     }
+    proposal = JointActionProposal(0, 0, 0.0, decision)
+    batch = RuleMakerProposalBatch(1, (proposal,))
     expert.rule_maker = SimpleNamespace(
-        compute=lambda *args, **kwargs: decision,
+        propose_joint_actions=lambda *args, **kwargs: batch,
+        accept_joint_action=lambda *args, **kwargs: None,
         get_last_debug=lambda: {
             "dynamic_roles": {agent_id: "leader" for agent_id in agent_ids}
         },
@@ -441,7 +453,15 @@ def test_rule_planner_expert_uses_independent_pid_when_formation_is_unlocked() -
         for agent_id in agent_ids
     }
     expert.planner = SimpleNamespace(
-        plan=lambda *args, **kwargs: trajectories,
+        plan_ranked=lambda *args, **kwargs: RankedJointPlan(
+            proposal_id=0,
+            proposal_rank=0,
+            rule_score=0.0,
+            decisions=decision,
+            trajectories_world=trajectories,
+            trajectories_local=trajectories,
+            selected_candidate_indices={agent_id: 0 for agent_id in agent_ids},
+        ),
         get_last_debug=lambda: {
             "_joint": {"fallback_used": False},
             **{

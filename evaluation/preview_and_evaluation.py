@@ -220,6 +220,9 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
     coordination_mode = np.full((count,), "LOCKED", dtype="<U32")
     controller_backend = np.full((count,), "LQRFollowerController", dtype="<U32")
     committed_actions = np.zeros((count, 3), dtype=np.int8)
+    selected_proposal_rank = np.full((count,), -1, dtype=np.int16)
+    proposal_attempt_count = np.zeros((count,), dtype=np.int16)
+    pool_cache_hit_count = np.zeros((count,), dtype=np.int16)
     gt_mode = np.full((count, 3), -1, dtype=np.int64)
     mode_valid_mask = np.zeros((count, 3, 10), dtype=np.bool_)
     collection_ready = np.zeros((count,), dtype=np.bool_)
@@ -239,6 +242,15 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
         committed_actions[row] = np.asarray(
             record.get("committed_actions", (0, 0, 0)), dtype=np.int8
         )
+        selected_proposal_rank[row] = int(
+            record.get("selected_proposal_rank", -1)
+        )
+        proposal_attempt_count[row] = int(
+            record.get("proposal_attempt_count", 0)
+        )
+        pool_cache_hit_count[row] = int(
+            record.get("pool_cache_hit_count", 0)
+        )
         collection_ready[row] = bool(record.get("collection_ready", False))
         if record.get("gt_mode") is not None:
             gt_mode[row] = np.asarray(record["gt_mode"], dtype=np.int64)
@@ -256,6 +268,9 @@ def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -
         coordination_mode=coordination_mode,
         controller_backend=controller_backend,
         committed_actions=committed_actions,
+        selected_proposal_rank=selected_proposal_rank,
+        proposal_attempt_count=proposal_attempt_count,
+        pool_cache_hit_count=pool_cache_hit_count,
         collection_ready=collection_ready,
         gt_mode=gt_mode,
         mode_valid_mask=mode_valid_mask,
@@ -382,6 +397,11 @@ def _expert_debug_snapshot(
         "risk_info",
         "action_search",
         "lane_change_commitments",
+        "proposal_batch_id",
+        "proposal_count",
+        "proposal_ranking",
+        "accepted_proposal_id",
+        "accepted_proposal_rank",
     )
     joint_fields = (
         "fallback_used",
@@ -404,6 +424,7 @@ def _expert_debug_snapshot(
         "generated_valid_candidate_count",
         "raw_candidate_count",
         "kinematic_rejection_count",
+        "local_kinematic_rejection_count",
         "corridor_rejection_count",
         "road_rejection_count",
         "background_collision_rejection_count",
@@ -411,6 +432,8 @@ def _expert_debug_snapshot(
         "collision_rejections_by_object",
         "kinematic_rejections_by_reason",
         "lane_end_restricted",
+        "commitment_elapsed_s",
+        "commitment_deadline_remaining_s",
         "source_lane_remaining_m",
         "lane_end_deadline_s",
         "safe_corridor_by_duration_m",
@@ -444,6 +467,11 @@ def _expert_debug_snapshot(
             if isinstance(planner_debug, Mapping)
             and key in (planner_debug.get("_joint", {}) or {})
         },
+        "planner_ranked": (
+            dict(planner_debug.get("_ranked", {}) or {})
+            if isinstance(planner_debug, Mapping)
+            else {}
+        ),
         "planner_agents": {
             agent_id: {
                 key: (planner_debug.get(agent_id, {}) or {}).get(key)
@@ -921,6 +949,19 @@ def _run_single_episode(
             pending_commitments = dict(
                 commitment_snapshot.get("pending", {}) or {}
             )
+            planner_snapshot = (
+                getattr(env, "_preview_planning_debug", None) or {}
+            )
+            native_planner_debug = (
+                planner_snapshot.get("planner_debug", {})
+                if isinstance(planner_snapshot, Mapping)
+                else {}
+            )
+            ranked_snapshot = (
+                native_planner_debug.get("_ranked", {})
+                if isinstance(native_planner_debug, Mapping)
+                else {}
+            )
             trajectory_records.append(
                 {
                     "step": int(_step),
@@ -969,6 +1010,15 @@ def _run_single_episode(
                             for agent_id in agent_ids
                         ],
                         dtype=np.int8,
+                    ),
+                    "selected_proposal_rank": int(
+                        ranked_snapshot.get("selected_proposal_rank", -1)
+                    ),
+                    "proposal_attempt_count": len(
+                        ranked_snapshot.get("proposal_attempts", ()) or ()
+                    ),
+                    "pool_cache_hit_count": int(
+                        ranked_snapshot.get("pool_cache_hit_count", 0)
                     ),
                     "collection_ready": sample is not None,
                     "gt_mode": None if sample is None else sample.gt_mode,

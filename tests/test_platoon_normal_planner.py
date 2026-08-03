@@ -6,11 +6,13 @@ import numpy as np
 import pytest
 
 from models.platoon_planner.platoon_normal_planner import (
+    NormalPlannerNoFeasiblePlan,
     PlatoonNormalPlanner,
     _Neighbor,
     _TrafficEnvelope,
     _TrajectoryCandidate,
 )
+from models.decisioner.rule_decisioner import JointActionProposal
 from scenarios.orchestrator import ScenarioOrchestrator
 
 
@@ -109,6 +111,102 @@ def test_default_hard_safety_gaps_match_collection_contract():
     assert planner.platoon_safe_gap_m == 7.0
 
 
+def test_ranked_planner_uses_first_rule_rank_with_native_trajectory(monkeypatch):
+    env = _env(agent_lane_id=1)
+    planner = PlatoonNormalPlanner()
+    generated_actions = []
+    output = np.column_stack(
+        [
+            np.arange(1, 9, dtype=np.float32) * 2.5 + 10.0,
+            np.zeros(8, dtype=np.float32),
+            np.zeros(8, dtype=np.float32),
+        ]
+    )
+    dense = np.column_stack(
+        [
+            np.linspace(10.0, 30.0, 41),
+            np.zeros(41),
+            np.zeros(41),
+        ]
+    )
+    candidate = _TrajectoryCandidate(
+        dense=dense,
+        output=output,
+        score=0.0,
+        acceleration_mps2=0.0,
+        acceleration_duration_s=4.0,
+        recovery_acceleration_mps2=0.0,
+        lane_change_duration_s=4.0,
+        lane_change_start_delay_s=0.0,
+        stop_time_s=None,
+        terminal_progress_m=20.0,
+    )
+
+    def fake_pool(_env, _vehicle, action, _target, **_kwargs):
+        generated_actions.append(int(action))
+        if int(action) == -1:
+            return [], {"fallback_used": True, "fallback_reason": "no_safe_candidate"}
+        return [candidate], {
+            "fallback_used": False,
+            "fallback_reason": None,
+            "candidate_count": 1,
+            "candidates": [{"selected": False}],
+        }
+
+    monkeypatch.setattr(planner, "_generate_candidate_pool", fake_pool)
+    common = {
+        "target_point": np.asarray([20.0, 0.0], dtype=np.float32),
+        "source_lane_index": ("A", "B", 1),
+        "target_lane_index": ("A", "B", 1),
+        "formation_constraint_enabled": False,
+        "coordination_mode": "EMERGENCY_INDEPENDENT",
+    }
+    proposals = (
+        JointActionProposal(0, 0, 10.0, {"agent0": {**common, "action": -1}}),
+        JointActionProposal(1, 1, 5.0, {"agent0": {**common, "action": 0}}),
+    )
+
+    result = planner.plan_ranked(env, proposals)
+
+    assert result.proposal_id == 1
+    assert result.proposal_rank == 1
+    assert generated_actions == [-1, 0]
+    assert planner.get_last_debug()["_ranked"]["proposal_attempts"][0][
+        "native_feasible"
+    ] is False
+
+
+def test_ranked_planner_caches_repeated_infeasible_action_pool(monkeypatch):
+    env = _env(agent_lane_id=1)
+    planner = PlatoonNormalPlanner()
+    calls = []
+
+    def no_pool(_env, _vehicle, action, _target, **_kwargs):
+        calls.append(int(action))
+        return [], {"fallback_used": True, "fallback_reason": "no_safe_candidate"}
+
+    monkeypatch.setattr(planner, "_generate_candidate_pool", no_pool)
+    decision = {
+        "agent0": {
+            "action": -1,
+            "target_point": np.asarray([20.0, 3.5], dtype=np.float32),
+            "target_lane_index": ("A", "B", 0),
+            "formation_constraint_enabled": False,
+        }
+    }
+    proposals = (
+        JointActionProposal(0, 0, 2.0, decision),
+        JointActionProposal(1, 1, 1.0, decision),
+    )
+
+    with pytest.raises(NormalPlannerNoFeasiblePlan) as error:
+        planner.plan_ranked(env, proposals)
+
+    assert error.value.reason_code == "all_rule_proposals_infeasible"
+    assert calls == [-1]
+    assert error.value.debug["pool_cache_hit_count"] == 1
+
+
 def test_keep_lateral_search_includes_current_and_desired_offsets():
     planner = PlatoonNormalPlanner()
     lane = FakeLane(1, 0.0)
@@ -136,6 +234,22 @@ def test_lane_end_restriction_adds_urgent_zero_delay_durations():
         action=-1,
         lane_end_restricted=True,
     ) == (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
+
+
+def test_committed_lane_change_uses_absolute_remaining_deadline():
+    planner = PlatoonNormalPlanner()
+
+    first, first_remaining = planner._committed_lane_change_durations(
+        planner.LANE_CHANGE_DURATIONS_S, 0.1
+    )
+    later, later_remaining = planner._committed_lane_change_durations(
+        planner.LANE_CHANGE_DURATIONS_S, 3.5
+    )
+
+    assert first_remaining == pytest.approx(4.9)
+    assert max(first) == pytest.approx(4.9)
+    assert later_remaining == pytest.approx(1.5)
+    assert later == (1.5,)
     assert planner._lane_change_durations(
         action=-1,
         lane_end_restricted=False,

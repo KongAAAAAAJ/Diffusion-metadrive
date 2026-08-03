@@ -1,0 +1,43 @@
+{
+  "episode_count": 10,
+  "collision_rate": 0.0,
+  "out_of_road_rate": 0.0,
+  "persistable_episode_rate": 0.0,
+  "native_joint_planning_success_rate": 0.9801980198019802,
+  "collection_ready_step_success_rate": 1.0,
+  "planning_attempt_steps": 505,
+  "native_joint_success_steps": 495,
+  "collection_ready_attempt_steps": 395,
+  "collection_ready_success_steps": 395,
+  "rollout_wall_time_s": {
+    "mean": 17.935885155433787,
+    "p50": 19.968075725599192,
+    "p95": 23.959914211044087
+  },
+  "simulated_duration_s": {
+    "mean": 4.95,
+    "p50": 5.6000000000000005,
+    "p95": 6.1000000000000005
+  },
+  "failure_reasons": {
+    "committed_action_infeasible": 10
+  },
+  "scenario_id": "S5_hard_brake_lead",
+  "local_route": "R1_entry_straight",
+  "seeds": [
+    17,
+    23,
+    31,
+    47,
+    59,
+    71,
+    83,
+    97,
+    109,
+    127
+  ],
+  "horizon": 200,
+  "decision_policy": "rule_maker",
+  "planning_policy": "lattice",
+  "control_policy": "adaptive"
+}

@@ -5,7 +5,7 @@ import copy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 import numpy as np
 
@@ -36,6 +36,24 @@ class _LaneChangeCommitment:
     target_lane_index: tuple
     target_lane_chain: tuple[tuple, ...]
     commit_step: int
+
+
+@dataclass(frozen=True)
+class JointActionProposal:
+    """One deterministic RuleMaker joint-action proposal awaiting planning."""
+
+    proposal_id: int
+    rank: int
+    rule_score: float
+    decisions: Mapping[str, Mapping[str, object]]
+
+
+@dataclass(frozen=True)
+class RuleMakerProposalBatch:
+    """All coarse-safe proposals produced by one RuleMaker decision step."""
+
+    batch_id: int
+    proposals: tuple[JointActionProposal, ...]
 
 
 def load_rule_maker_config(
@@ -205,6 +223,10 @@ class MultiAgentRuleMaker(RuleMaker):
         self._lane_change_commitments: dict[str, _LaneChangeCommitment] = {}
         self._pending_lane_change_commitments: dict[str, _LaneChangeCommitment] = {}
         self._completed_lane_change_commitments: dict[str, dict] = {}
+        self._proposal_batch_counter = 0
+        self._outstanding_proposal_batch: RuleMakerProposalBatch | None = None
+        self._outstanding_proposal_candidates: dict[int, tuple[dict, ...]] = {}
+        self._last_ranked_combos: list[tuple[tuple[dict, ...], float]] = []
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
         self._s7_route_lanes_debug_plot_counter = 0
@@ -219,6 +241,10 @@ class MultiAgentRuleMaker(RuleMaker):
         self._lane_change_commitments.clear()
         self._pending_lane_change_commitments.clear()
         self._completed_lane_change_commitments.clear()
+        self._proposal_batch_counter = 0
+        self._outstanding_proposal_batch = None
+        self._outstanding_proposal_candidates.clear()
+        self._last_ranked_combos.clear()
         reset_detector = getattr(self._risk_detector, "reset", None)
         if callable(reset_detector):
             reset_detector()
@@ -237,7 +263,151 @@ class MultiAgentRuleMaker(RuleMaker):
         env,
         agent_ids: list[str],
         planner_batch: dict[str, dict],
+    ) -> dict[str, dict]:
+        """Return the highest-ranked pure proposal without committing it."""
+
+        batch = self.propose_joint_actions(env, agent_ids, planner_batch)
+        if not batch.proposals:
+            return {}
+        return {
+            agent_id: dict(decision)
+            for agent_id, decision in batch.proposals[0].decisions.items()
+        }
+
+    def propose_joint_actions(
+        self,
+        env,
+        agent_ids: list[str],
+        planner_batch: dict[str, dict],
+    ) -> RuleMakerProposalBatch:
+        """Return all coarse-safe joint actions in deterministic score order."""
+
+        self._compute_primary_decision(env, agent_ids, planner_batch)
+        self._proposal_batch_counter += 1
+        batch_id = int(self._proposal_batch_counter)
+        ordered_ids = tuple(str(value) for value in agent_ids)
+        proposals: list[JointActionProposal] = []
+        candidates_by_id: dict[int, tuple[dict, ...]] = {}
+        formation_enabled = bool(self._formation_locked)
+        coordination_mode = (
+            "LOCKED" if formation_enabled else "EMERGENCY_INDEPENDENT"
+        )
+        for rank, (combo, score) in enumerate(self._last_ranked_combos):
+            proposal_id = int(rank)
+            decisions: dict[str, dict[str, object]] = {}
+            for agent_id, candidate in zip(ordered_ids, combo):
+                decisions[agent_id] = self._decision_from_candidate(
+                    candidate,
+                    formation_constraint_enabled=formation_enabled,
+                    coordination_mode=coordination_mode,
+                )
+            proposals.append(
+                JointActionProposal(
+                    proposal_id=proposal_id,
+                    rank=int(rank),
+                    rule_score=float(score),
+                    decisions=decisions,
+                )
+            )
+            candidates_by_id[proposal_id] = combo
+        batch = RuleMakerProposalBatch(batch_id=batch_id, proposals=tuple(proposals))
+        self._outstanding_proposal_batch = batch
+        self._outstanding_proposal_candidates = candidates_by_id
+        if self._last_debug is not None:
+            self._last_debug["proposal_batch_id"] = batch_id
+            self._last_debug["proposal_count"] = len(proposals)
+            self._last_debug["proposal_ranking"] = [
+                {
+                    "proposal_id": value.proposal_id,
+                    "rank": value.rank,
+                    "rule_score": value.rule_score,
+                    "actions": {
+                        agent_id: int(decision["action"])
+                        for agent_id, decision in value.decisions.items()
+                    },
+                }
+                for value in proposals
+            ]
+        return batch
+
+    def accept_joint_action(self, batch_id: int, proposal_id: int) -> None:
+        """Commit a proposal only after the native planner accepted it."""
+
+        batch = self._outstanding_proposal_batch
+        if batch is None or int(batch.batch_id) != int(batch_id):
+            raise LaneChangeCommitmentError(
+                "lane_change_commitment_invalid: stale proposal batch"
+            )
+        combo = self._outstanding_proposal_candidates.get(int(proposal_id))
+        if combo is None:
+            raise LaneChangeCommitmentError(
+                "lane_change_commitment_invalid: unknown proposal id"
+            )
+        agent_ids = list(batch.proposals[0].decisions) if batch.proposals else []
+        accepted = next(
+            value
+            for value in batch.proposals
+            if int(value.proposal_id) == int(proposal_id)
+        )
+        self._schedule_lane_change_commitments(agent_ids, combo)
+        if self._last_debug is not None:
+            self._last_debug["accepted_proposal_id"] = int(proposal_id)
+            self._last_debug["accepted_proposal_rank"] = int(accepted.rank)
+            self._last_debug["best_score"] = float(accepted.rule_score)
+            self._last_debug["best_actions"] = {
+                agent_id: int(candidate.get("action", 0))
+                for agent_id, candidate in zip(agent_ids, combo)
+            }
+            self._last_debug["lane_change_commitments"] = (
+                self._lane_change_commitment_debug()
+            )
+        self._outstanding_proposal_batch = None
+        self._outstanding_proposal_candidates.clear()
+
+    @staticmethod
+    def _decision_from_candidate(
+        candidate: Mapping[str, object],
+        *,
+        formation_constraint_enabled: bool,
+        coordination_mode: str,
+    ) -> dict[str, object]:
+        return {
+            "action": int(candidate["action"]),
+            "target_point": np.asarray(
+                candidate["target_point"], dtype=np.float32
+            ).reshape(2),
+            "source_lane_index": tuple(
+                candidate.get("source_lane_index", ()) or ()
+            ),
+            "target_lane_index": tuple(
+                candidate.get("target_lane_index", ()) or ()
+            ),
+            "target_lane_chain": tuple(
+                tuple(value)
+                for value in candidate.get("target_lane_chain_indices", ())
+                if value
+            ),
+            "maneuver_committed": bool(
+                candidate.get("maneuver_committed", False)
+            ),
+            "commitment_elapsed_s": (
+                float(candidate["commitment_elapsed_s"])
+                if candidate.get("maneuver_committed", False)
+                else None
+            ),
+            "formation_constraint_enabled": bool(
+                formation_constraint_enabled
+            ),
+            "coordination_mode": str(coordination_mode),
+        }
+
+    def _compute_primary_decision(
+        self,
+        env,
+        agent_ids: list[str],
+        planner_batch: dict[str, dict],
     ) -> dict[str, np.ndarray]:
+        self._last_ranked_combos = []
         agents = getattr(env, "agents", {})
         self._promote_pending_lane_change_commitments()
         self._refresh_lane_change_commitments(env, agent_ids)
@@ -256,22 +426,18 @@ class MultiAgentRuleMaker(RuleMaker):
                     commitment=commitment,
                 )
             )
-            if not candidates:
-                pp = self._from_coarse_fallback(planner_batch, agent_id)
-                if pp is None:
-                    continue
-                candidates = [
-                    {
-                        "action": 0,
-                        "valid": True,
-                        "score": 0.0,
-                        "trajectory_world": None,
-                        "target_point": pp,
-                    }
-                ]
-            candidates_by_agent[agent_id] = candidates
+            if candidates:
+                candidates_by_agent[agent_id] = candidates
 
-        if not candidates_by_agent:
+        if any(agent_id not in candidates_by_agent for agent_id in agent_ids):
+            self._last_debug = {
+                "agent_ids": list(agent_ids),
+                "failure_reason": "rule_maker_agent_has_no_candidate",
+                "missing_agents": [
+                    value for value in agent_ids if value not in candidates_by_agent
+                ],
+                "lane_change_commitments": self._lane_change_commitment_debug(),
+            }
             return {}
 
         self._decision_step += 1
@@ -309,6 +475,11 @@ class MultiAgentRuleMaker(RuleMaker):
                 else forced_combo
             )
             best_score = 0.0 if best_combo is not None else -float("inf")
+            ranked_combos = (
+                [(tuple(best_combo), float(best_score))]
+                if best_combo is not None
+                else []
+            )
             action_search_debug = {
                 "strategy": "forced_combo",
                 "prefix_counts": [1 if best_combo is not None else 0],
@@ -336,13 +507,18 @@ class MultiAgentRuleMaker(RuleMaker):
             else:
                 best_combo = keep_combo
             best_score = 0.0 if best_combo is not None else -float("inf")
+            ranked_combos = (
+                [(tuple(best_combo), float(best_score))]
+                if best_combo is not None
+                else []
+            )
             action_search_debug = {
                 "strategy": "s5_pre_brake_keep",
                 "prefix_counts": [1 if best_combo is not None else 0],
                 "pairwise_conflict_counts": pre_brake_conflicts,
             }
         elif self._formation_locked:
-            best_combo, best_score, action_search_debug = self._best_locked_combo(
+            best_combo, best_score, action_search_debug, ranked_combos = self._best_locked_combo(
                 env=env,
                 ordered_agent_ids=ordered_agent_ids,
                 candidates_by_agent=candidates_by_agent,
@@ -354,7 +530,7 @@ class MultiAgentRuleMaker(RuleMaker):
                 or candidates_by_agent[agent_id]
                 for agent_id in ordered_agent_ids
             ]
-            best_combo, best_score, action_search_debug = self._best_conditional_combo(
+            best_combo, best_score, action_search_debug, ranked_combos = self._best_conditional_combo(
                 env=env,
                 ordered_agent_ids=ordered_agent_ids,
                 candidate_sets=candidate_sets,
@@ -362,6 +538,7 @@ class MultiAgentRuleMaker(RuleMaker):
                 formation_constraint_enabled=False,
             )
 
+        self._last_ranked_combos = list(ranked_combos)
         result: dict[str, dict] = {}
 
         # !!!!!!!!!【DEBUG】
@@ -439,8 +616,6 @@ class MultiAgentRuleMaker(RuleMaker):
 
 
 
-
-        self._schedule_lane_change_commitments(ordered_agent_ids, best_combo)
 
         if self._formation_locked:
             dynamic_roles = self._locked_roles(ordered_agent_ids)
@@ -746,8 +921,7 @@ class MultiAgentRuleMaker(RuleMaker):
             if not valid:
                 continue
             candidate_sets.append(tuple(combo))
-        best_combo = None
-        best_score = -float("inf")
+        scored: list[tuple[tuple[dict, ...], float]] = []
         conflict_counts: dict[str, int] = {}
         for combo_tuple in candidate_sets:
             if self._combo_has_hard_conflict(
@@ -761,14 +935,19 @@ class MultiAgentRuleMaker(RuleMaker):
                 traffic_vehicles=traffic_vehicles,
                 formation_constraint_enabled=True,
             )
-            if score > best_score:
-                best_score = score
-                best_combo = combo_tuple
+            scored.append((combo_tuple, float(score)))
+        scored.sort(
+            key=lambda value: (
+                -float(value[1]),
+                tuple(int(candidate.get("action", 0)) for candidate in value[0]),
+            )
+        )
+        best_combo, best_score = scored[0] if scored else (None, -float("inf"))
         return best_combo, best_score, {
             "strategy": "locked_shared_action",
             "prefix_counts": [len(candidate_sets)],
             "pairwise_conflict_counts": conflict_counts,
-        }
+        }, scored
 
     def _best_conditional_combo(
         self,
@@ -810,8 +989,7 @@ class MultiAgentRuleMaker(RuleMaker):
             if not prefixes:
                 break
 
-        best_combo = None
-        best_score = -float("inf")
+        scored: list[tuple[tuple[dict, ...], float]] = []
         for combo in prefixes:
             if len(combo) != len(ordered_agent_ids):
                 continue
@@ -822,9 +1000,14 @@ class MultiAgentRuleMaker(RuleMaker):
                 traffic_vehicles=traffic_vehicles,
                 formation_constraint_enabled=formation_constraint_enabled,
             )
-            if score > best_score:
-                best_score = score
-                best_combo = combo
+            scored.append((combo, float(score)))
+        scored.sort(
+            key=lambda value: (
+                -float(value[1]),
+                tuple(int(candidate.get("action", 0)) for candidate in value[0]),
+            )
+        )
+        best_combo, best_score = scored[0] if scored else (None, -float("inf"))
         return best_combo, best_score, {
             "strategy": "leader_to_rear_complete_prefix",
             "prefix_counts": prefix_counts,
@@ -832,7 +1015,7 @@ class MultiAgentRuleMaker(RuleMaker):
             "complete_combo_count": sum(
                 1 for value in prefixes if len(value) == len(ordered_agent_ids)
             ),
-        }
+        }, scored
 
     def _combo_has_hard_conflict(
         self,
@@ -885,16 +1068,24 @@ class MultiAgentRuleMaker(RuleMaker):
         )
 
     def _dense_coarse_pose(self, trajectory, vehicle) -> np.ndarray | None:
-        xy = np.asarray(trajectory, dtype=np.float64).copy()
-        if xy.ndim != 2 or xy.shape[0] < 2 or xy.shape[1] < 2:
+        future_xy = np.asarray(trajectory, dtype=np.float64)
+        if future_xy.ndim != 2 or future_xy.shape[0] < 2 or future_xy.shape[1] < 2:
             return None
         current_position = np.asarray(
             getattr(vehicle, "position", ()), dtype=np.float64
         ).reshape(-1)
         if current_position.size < 2 or not np.isfinite(current_position[:2]).all():
             return None
-        xy[0, :2] = current_position[:2]
-        source_times = np.linspace(0.0, self.horizon_s, len(xy))
+        xy = np.concatenate(
+            [current_position[None, :2], future_xy[:, :2]], axis=0
+        )
+        source_times = np.concatenate(
+            [
+                np.asarray([0.0], dtype=np.float64),
+                np.arange(1, len(future_xy) + 1, dtype=np.float64)
+                * (self.horizon_s / len(future_xy)),
+            ]
+        )
         dense_times = np.arange(0.0, self.horizon_s + 0.05, 0.1)
         dense_xy = np.column_stack(
             [np.interp(dense_times, source_times, xy[:, axis]) for axis in (0, 1)]
@@ -988,6 +1179,19 @@ class MultiAgentRuleMaker(RuleMaker):
             if candidate is not None:
                 if commitment is not None:
                     candidate["maneuver_committed"] = True
+                    config = getattr(env, "config", {}) or {}
+                    decision_dt_s = float(
+                        config.get("physics_world_step_size", 0.02)
+                    ) * float(config.get("decision_repeat", 5))
+                    candidate["commitment_elapsed_s"] = max(
+                        0.0,
+                        float(
+                            self._decision_step
+                            - int(commitment.commit_step)
+                            + 1
+                        )
+                        * decision_dt_s,
+                    )
                 candidates.append(candidate)
 
         debug = 0
@@ -1151,14 +1355,14 @@ class MultiAgentRuleMaker(RuleMaker):
         terminal_accel_mps2: float,
         lane_len: float,
     ) -> np.ndarray:
-        if self.num_waypoints <= 1:
-            return np.asarray([start_s], dtype=np.float32)
+        if self.num_waypoints <= 0:
+            return np.zeros((0,), dtype=np.float32)
         v = np.clip(float(speed_km_h) / 3.6, 0.0, float(self.target_speed_km_h) / 3.6)  # 速度上下限
-        dt = float(self.horizon_s) / float(self.num_waypoints - 1)
-        longs = [float(start_s)]
+        dt = float(self.horizon_s) / float(self.num_waypoints)
+        longs = []
         s = float(start_s)
         accel = float(terminal_accel_mps2)
-        for _ in range(self.num_waypoints - 1):
+        for _ in range(self.num_waypoints):
             s = min(float(lane_len), s + v * dt + 0.5 * accel * dt * dt)
             v = max(0.0, v + accel * dt)
             longs.append(float(s))
@@ -1182,7 +1386,7 @@ class MultiAgentRuleMaker(RuleMaker):
         target_lateral = float(target_lateral)
         if num_points == 1:
             return np.asarray([target_lateral], dtype=np.float32)
-        us = np.linspace(0.0, 1.0, num_points, dtype=np.float32)
+        us = np.arange(1, num_points + 1, dtype=np.float32) / float(num_points)
         # Quintic smootherstep: zero first/second derivative at both ends.
         ratios = 6.0 * us**5 - 15.0 * us**4 + 10.0 * us**3
         return (target_lateral * ratios).astype(np.float32, copy=False)
@@ -1203,7 +1407,7 @@ class MultiAgentRuleMaker(RuleMaker):
         num_points = int(len(longitudinals))
         if num_points <= 0:
             return np.zeros((0, 2), dtype=np.float32)
-        us = np.linspace(0.0, 1.0, num_points, dtype=np.float32)
+        us = np.arange(1, num_points + 1, dtype=np.float32) / float(num_points)
         ratios = 6.0 * us**5 - 15.0 * us**4 + 10.0 * us**3
         points = []
         for s, ratio in zip(longitudinals, ratios):
@@ -1491,7 +1695,11 @@ class MultiAgentRuleMaker(RuleMaker):
                 continue
             trajectory = np.asarray(trajectory, dtype=np.float32)
             action = int(candidate.get("action", 0))
-            progress = float(np.linalg.norm(trajectory[-1] - trajectory[0]))
+            current_position = np.asarray(
+                getattr(agents.get(agent_id), "position", trajectory[0])[:2],
+                dtype=np.float32,
+            )
+            progress = float(np.linalg.norm(trajectory[-1, :2] - current_position))
             score += self.w_progress * progress
             score += self.w_mobil * float(candidate.get("mobil_gain", 0.0))
             if action == 0:
@@ -1589,11 +1797,9 @@ class MultiAgentRuleMaker(RuleMaker):
             float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
             0.0,
         )
-        times = np.linspace(
-            0.0,
-            float(self.horizon_s),
-            int(count),
-            dtype=np.float32,
+        times = (
+            np.arange(1, int(count) + 1, dtype=np.float32)
+            * (float(self.horizon_s) / float(count))
         )
         lane = getattr(vehicle, "lane", None)
         if lane is not None:

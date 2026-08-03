@@ -14,11 +14,34 @@ from models.bev_planner.mode_contract import (
     ModeContractError,
     validate_trajectory_kinematics,
 )
-from models.platoon_planner.collision_geometry import obb_overlap_series
+from models.platoon_planner.collision_geometry import (
+    obb_overlap_series,
+    world_trajectory_to_ego_local,
+)
 
 
 class NormalPlannerKinematicError(RuntimeError):
     """Raised when a selected native trajectory violates the fixed-time contract."""
+
+
+class NormalPlannerNoFeasiblePlan(RuntimeError):
+    """Raised when no ranked RuleMaker proposal has a native joint trajectory."""
+
+    def __init__(self, message: str, *, reason_code: str, debug: dict) -> None:
+        super().__init__(message)
+        self.reason_code = str(reason_code)
+        self.debug = copy.deepcopy(debug)
+
+
+@dataclass(frozen=True)
+class RankedJointPlan:
+    proposal_id: int
+    proposal_rank: int
+    rule_score: float
+    decisions: Mapping[str, Mapping[str, object]]
+    trajectories_world: Mapping[str, np.ndarray]
+    trajectories_local: Mapping[str, np.ndarray]
+    selected_candidate_indices: Mapping[str, int]
 
 
 @dataclass(frozen=True)
@@ -111,7 +134,13 @@ class PlatoonNormalPlanner:
         )
         self._last_debug: dict | None = None
 
-    def plan(self, env, agent_decisions) -> dict[str, np.ndarray]:
+    def plan(
+        self,
+        env,
+        agent_decisions,
+        *,
+        _pool_cache: dict | None = None,
+    ) -> dict[str, np.ndarray]:
         planning_started_at = time.perf_counter()
         agents = getattr(env, "agents", {}) or {}
         ordered_ids = [
@@ -137,12 +166,39 @@ class PlatoonNormalPlanner:
             target_point = np.asarray(
                 decision.get("target_point", [15.0, 0.0]), dtype=np.float32
             ).reshape(2)
-            pool, agent_debug = self._generate_candidate_pool(
-                env,
-                agents[agent_id],
-                action,
-                target_point,
+            target_lane_index = tuple(
+                decision.get("target_lane_index", ()) or ()
             )
+            commitment_elapsed_s = decision.get("commitment_elapsed_s")
+            commitment_elapsed_s = (
+                None
+                if commitment_elapsed_s is None
+                else float(commitment_elapsed_s)
+            )
+            cache_key = (
+                str(agent_id),
+                int(action),
+                target_lane_index,
+                commitment_elapsed_s,
+                np.ascontiguousarray(target_point).tobytes(),
+            )
+            cached = None if _pool_cache is None else _pool_cache.get(cache_key)
+            if cached is None:
+                pool, agent_debug = self._generate_candidate_pool(
+                    env,
+                    agents[agent_id],
+                    action,
+                    target_point,
+                    target_lane_index=target_lane_index,
+                    commitment_elapsed_s=commitment_elapsed_s,
+                )
+                if _pool_cache is not None:
+                    _pool_cache[cache_key] = (pool, copy.deepcopy(agent_debug))
+                agent_debug["pool_cache_hit"] = False
+            else:
+                pool, cached_debug = cached
+                agent_debug = copy.deepcopy(cached_debug)
+                agent_debug["pool_cache_hit"] = True
             agent_debug["rule_action"] = action
             agent_debug["rule_target_point"] = target_point.astype(
                 np.float32,
@@ -243,6 +299,127 @@ class PlatoonNormalPlanner:
         self._last_debug = debug
         return results
 
+    def plan_ranked(self, env, proposals) -> RankedJointPlan:
+        """Select the first RuleMaker-ranked proposal with a native joint plan."""
+
+        ordered = sorted(
+            tuple(proposals),
+            key=lambda value: (int(value.rank), int(value.proposal_id)),
+        )
+        if not ordered:
+            debug = {"proposal_attempts": [], "selected_proposal_id": None}
+            self._last_debug = debug
+            raise NormalPlannerNoFeasiblePlan(
+                "RuleMaker produced no joint action proposal",
+                reason_code="all_rule_proposals_infeasible",
+                debug=debug,
+            )
+        pool_cache: dict = {}
+        attempts: list[dict] = []
+        pool_cache_hit_count = 0
+        pool_request_count = 0
+        last_attempt_debug: dict = {}
+        for proposal in ordered:
+            trajectories = self.plan(
+                env,
+                proposal.decisions,
+                _pool_cache=pool_cache,
+            )
+            attempt_debug = self.get_last_debug() or {}
+            last_attempt_debug = attempt_debug
+            joint_debug = attempt_debug.get("_joint", {})
+            per_agent_debug = [
+                value
+                for key, value in attempt_debug.items()
+                if key != "_joint" and isinstance(value, Mapping)
+            ]
+            pool_request_count += len(per_agent_debug)
+            pool_cache_hit_count += sum(
+                int(bool(value.get("pool_cache_hit", False)))
+                for value in per_agent_debug
+            )
+            attempt = {
+                "proposal_id": int(proposal.proposal_id),
+                "rank": int(proposal.rank),
+                "rule_score": float(proposal.rule_score),
+                "actions": {
+                    agent_id: int(decision["action"])
+                    for agent_id, decision in proposal.decisions.items()
+                },
+                "fallback_reason": joint_debug.get("fallback_reason"),
+                "missing_agents": list(joint_debug.get("missing_agents", ())),
+                "native_feasible": not bool(
+                    joint_debug.get("fallback_used", True)
+                ),
+            }
+            attempts.append(attempt)
+            if not attempt["native_feasible"]:
+                continue
+
+            local: dict[str, np.ndarray] = {}
+            indices: dict[str, int] = {}
+            for agent_id, trajectory in trajectories.items():
+                vehicle = env.agents[agent_id]
+                origin = np.asarray(
+                    [
+                        float(vehicle.position[0]),
+                        float(vehicle.position[1]),
+                        float(getattr(vehicle, "heading_theta", 0.0)),
+                    ],
+                    dtype=np.float64,
+                )
+                local[agent_id] = world_trajectory_to_ego_local(
+                    trajectory, origin
+                )
+                indices[agent_id] = int(attempt_debug[agent_id]["best_index"])
+            attempt_debug["_ranked"] = {
+                "proposal_attempts": attempts,
+                "selected_proposal_id": int(proposal.proposal_id),
+                "selected_proposal_rank": int(proposal.rank),
+                "pool_cache_entry_count": len(pool_cache),
+                "pool_request_count": int(pool_request_count),
+                "pool_cache_hit_count": int(pool_cache_hit_count),
+            }
+            self._last_debug = attempt_debug
+            return RankedJointPlan(
+                proposal_id=int(proposal.proposal_id),
+                proposal_rank=int(proposal.rank),
+                rule_score=float(proposal.rule_score),
+                decisions=proposal.decisions,
+                trajectories_world={
+                    key: np.ascontiguousarray(value, dtype=np.float32)
+                    for key, value in trajectories.items()
+                },
+                trajectories_local=local,
+                selected_candidate_indices=indices,
+            )
+
+        committed = any(
+            bool(decision.get("maneuver_committed", False))
+            for proposal in ordered
+            for decision in proposal.decisions.values()
+        )
+        reason_code = (
+            "committed_action_infeasible"
+            if committed
+            else "all_rule_proposals_infeasible"
+        )
+        debug = {
+            "proposal_attempts": attempts,
+            "selected_proposal_id": None,
+            "pool_cache_entry_count": len(pool_cache),
+            "pool_request_count": int(pool_request_count),
+            "pool_cache_hit_count": int(pool_cache_hit_count),
+            "reason_code": reason_code,
+        }
+        last_attempt_debug["_ranked"] = debug
+        self._last_debug = last_attempt_debug
+        raise NormalPlannerNoFeasiblePlan(
+            "no ranked RuleMaker proposal has a native joint trajectory",
+            reason_code=reason_code,
+            debug=debug,
+        )
+
     def get_last_debug(self) -> dict | None:
         return copy.deepcopy(self._last_debug)
 
@@ -252,10 +429,14 @@ class PlatoonNormalPlanner:
         vehicle,
         action: int,
         target_point: np.ndarray,
+        *,
+        target_lane_index: tuple = (),
+        commitment_elapsed_s: float | None = None,
     ) -> tuple[list[_TrajectoryCandidate], dict]:
         stats = {
             "raw_candidate_count": 0,
             "kinematic_rejection_count": 0,
+            "local_kinematic_rejection_count": 0,
             "corridor_rejection_count": 0,
             "road_rejection_count": 0,
             "background_collision_rejection_count": 0,
@@ -293,7 +474,11 @@ class PlatoonNormalPlanner:
                     "invalid_continuation_lane_projection", stats, collision_hits
                 )
 
-        target_lane = self._resolve_target_lane(env, source_lane, int(action))
+        target_lane = (
+            self._lane_from_index(env, target_lane_index)
+            if target_lane_index
+            else self._resolve_target_lane(env, source_lane, int(action))
+        )
         if target_lane is None:
             return [], self._empty_debug("target_lane_unavailable", stats, collision_hits)
 
@@ -334,6 +519,13 @@ class PlatoonNormalPlanner:
             action=int(action),
             lane_end_restricted=lane_end_restricted,
         )
+        commitment_deadline_remaining_s = None
+        if int(action) != 0 and commitment_elapsed_s is not None:
+            durations, commitment_deadline_remaining_s = (
+                self._committed_lane_change_durations(
+                    durations, commitment_elapsed_s
+                )
+            )
         lateral_targets = self._candidate_lateral_targets(
             int(action),
             start_d,
@@ -389,6 +581,8 @@ class PlatoonNormalPlanner:
                 float(duration),
                 target_envelope,
             )
+            if commitment_elapsed_s is not None and int(action) != 0:
+                start_delays = (0.0,)
             if lane_end_restricted and int(action) != 0:
                 start_delays = (0.0,)
             profile_options = []
@@ -490,6 +684,37 @@ class PlatoonNormalPlanner:
                             stats["kinematic_rejection_count"] += 1
                             kinematic_hits.update(kinematic_audit.violations)
                             continue
+                        local_output = world_trajectory_to_ego_local(
+                            output,
+                            np.asarray(
+                                [
+                                    float(vehicle.position[0]),
+                                    float(vehicle.position[1]),
+                                    float(
+                                        getattr(vehicle, "heading_theta", 0.0)
+                                    ),
+                                ],
+                                dtype=np.float64,
+                            ),
+                        )
+                        try:
+                            local_audit = validate_trajectory_kinematics(
+                                local_output,
+                                ego_speed,
+                                np.zeros((3,), dtype=np.float64),
+                                HardModeMaskConfig(),
+                            )
+                        except ModeContractError as exc:
+                            raise NormalPlannerKinematicError(
+                                f"invalid local trajectory tensor: {exc}"
+                            ) from exc
+                        if not local_audit.valid:
+                            stats["local_kinematic_rejection_count"] += 1
+                            kinematic_hits.update(
+                                f"local:{reason}"
+                                for reason in local_audit.violations
+                            )
+                            continue
                         hits = self._collision_names_against_predictions(
                             candidate_dense,
                             self._vehicle_dimensions(vehicle),
@@ -588,6 +813,8 @@ class PlatoonNormalPlanner:
             ),
             "source_lane_usable_progress_m": float(usable_source_progress),
             "lane_end_restricted": bool(lane_end_restricted),
+            "commitment_elapsed_s": commitment_elapsed_s,
+            "commitment_deadline_remaining_s": commitment_deadline_remaining_s,
             "lane_change_durations_s": [
                 float(value) for value in durations
             ],
@@ -1467,6 +1694,20 @@ class PlatoonNormalPlanner:
             )
         )
 
+    def _committed_lane_change_durations(
+        self,
+        durations: tuple[float, ...],
+        elapsed_s: float,
+    ) -> tuple[tuple[float, ...], float]:
+        remaining = max(
+            self.OUTPUT_DT_S,
+            max(self.LANE_CHANGE_DURATIONS_S) - max(float(elapsed_s), 0.0),
+        )
+        values = tuple(
+            sorted({min(float(value), remaining) for value in durations})
+        )
+        return values, float(remaining)
+
     def _lane_end_restricted(
         self,
         *,
@@ -2002,6 +2243,20 @@ class PlatoonNormalPlanner:
             return road_network.get_lane(
                 (lane_index[0], lane_index[1], int(lane_index[2]) + int(action))
             )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _lane_from_index(env, lane_index: tuple):
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        if road_network is None or not hasattr(road_network, "get_lane"):
+            return None
+        try:
+            return road_network.get_lane(tuple(lane_index))
         except Exception:
             return None
 

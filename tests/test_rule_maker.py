@@ -126,9 +126,52 @@ def test_rule_maker_traffic_prediction_advances_actor_at_matching_times():
     np.testing.assert_allclose(
         predicted,
         np.asarray(
-            [[10.0, 0.0], [20.0, 0.0], [30.0, 0.0]],
+            [[16.666666, 0.0], [23.333334, 0.0], [30.0, 0.0]],
             dtype=np.float32,
         ),
+        atol=1e-5,
+    )
+
+
+def test_rule_maker_coarse_trajectory_contains_only_future_half_second_points():
+    vehicle = _vehicle("agent0", 10.0, 0.0, 1, speed_km_h=18.0)
+    env = _env(agents={"agent0": vehicle}, traffic=[])
+    rule_maker = MultiAgentRuleMaker(horizon_s=4.0, num_waypoints=8)
+
+    candidate = rule_maker._build_coarse_trajectory(
+        env, vehicle, 0, other_vehicles=[]
+    )
+
+    trajectory = np.asarray(candidate["trajectory_world"])
+    assert trajectory.shape == (8, 2)
+    assert trajectory[0, 0] > vehicle.position[0]
+    dense = rule_maker._dense_coarse_pose(trajectory, vehicle)
+    np.testing.assert_allclose(dense[0, :2], vehicle.position, atol=1e-6)
+    np.testing.assert_allclose(dense[-1, :2], trajectory[-1], atol=1e-6)
+
+
+def test_lane_change_commitment_is_transactional_until_plan_acceptance():
+    vehicle = _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=20.0)
+    env = _env(agents={"agent0": vehicle}, traffic=[])
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=False,
+        lane_change_preference=20.0,
+        lc_cost=0.0,
+        w_mobil=0.0,
+        w_keep_bias=0.0,
+    )
+
+    batch = rule_maker.propose_joint_actions(env, ["agent0"], {})
+    proposal = next(
+        value
+        for value in batch.proposals
+        if int(value.decisions["agent0"]["action"]) != 0
+    )
+
+    assert rule_maker._pending_lane_change_commitments == {}
+    rule_maker.accept_joint_action(batch.batch_id, proposal.proposal_id)
+    assert rule_maker._pending_lane_change_commitments["agent0"].action == int(
+        proposal.decisions["agent0"]["action"]
     )
 
 
@@ -171,6 +214,35 @@ def test_risk_detector_unlocks_immediately_for_new_s5_hard_brake_marker():
     assert first["reason"] == "hard_brake_lead_triggered"
     assert first["emergency_event"]["trigger_step"] == 30
     assert second["triggered"] is False
+
+
+def test_s5_risk_detector_ignores_stale_previous_episode_brake_marker():
+    lead = _vehicle("lead", 30.0, 0.0, 1, speed_km_h=18.0)
+    lead.scenario_role = "hard_brake_lead"
+    lead.scenario_id = "S5_hard_brake_lead"
+    lead.scenario_brake_trigger_step = 30
+    summary = {
+        "scenario_id": "S5_hard_brake_lead",
+        "scenario_triggered": False,
+        "scenario_trigger_step": None,
+    }
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1)},
+        traffic=[lead],
+    )
+    env._scenario_orchestrator = SimpleNamespace(
+        get_episode_summary=lambda: dict(summary)
+    )
+    detector = SimpleRuleRiskDetector(ttc_trigger_s=100.0)
+
+    waiting = detector.detect(env, ["agent0"], [lead], "LOCKED")
+    summary.update(scenario_triggered=True, scenario_trigger_step=30)
+    triggered = detector.detect(env, ["agent0"], [lead], "LOCKED")
+
+    assert waiting["next_state"] == "LOCKED"
+    assert waiting["waiting_for_s5_hard_brake"] is True
+    assert triggered["transition"] == "LOCKED_TO_UNLOCKED"
+    assert triggered["reason"] == "hard_brake_lead_triggered"
 
 
 def test_rule_maker_applies_emergency_independent_mode_before_action_selection():
@@ -1647,6 +1719,7 @@ def test_rule_maker_unlocks_after_partial_forced_lane_wait_timeout_and_blocks_ea
     assert debug["forced_lane_wait_info"]["all_forced_ready"] is False
     assert debug["forced_lane_wait_info"]["partial_forced_wait_steps"] == 10
     assert debug["forced_lane_wait_info"]["forced_wait_active"] is True
+    rule_maker.accept_joint_action(debug["proposal_batch_id"], 0)
 
     env.agents["agent1"] = _vehicle("agent1", 2.0, 0.0, 1)
     rule_maker.compute(env, ["agent0", "agent1"], planner_batch={})
@@ -1764,9 +1837,14 @@ def test_lane_change_commitment_blocks_reversal_until_target_lane_entry():
         w_keep_bias=0.0,
     )
 
-    first = rule_maker.compute(env, ["agent0"], planner_batch={})
+    first_batch = rule_maker.propose_joint_actions(
+        env, ["agent0"], planner_batch={}
+    )
+    first = first_batch.proposals[0].decisions
     committed_action = int(first["agent0"]["action"])
     assert committed_action in (-1, 1)
+    assert rule_maker.get_last_debug()["lane_change_commitments"]["pending"] == {}
+    rule_maker.accept_joint_action(first_batch.batch_id, 0)
     assert rule_maker.get_last_debug()["lane_change_commitments"]["pending"]
 
     rule_maker.lane_change_preference = -100.0
@@ -1799,7 +1877,8 @@ def test_reset_clears_lane_change_commitment_state():
         lane_change_preference=20.0,
         lc_cost=0.0,
     )
-    rule_maker.compute(env, ["agent0"], planner_batch={})
+    batch = rule_maker.propose_joint_actions(env, ["agent0"], planner_batch={})
+    rule_maker.accept_joint_action(batch.batch_id, batch.proposals[0].proposal_id)
     assert rule_maker._pending_lane_change_commitments
 
     rule_maker.reset(env, ["agent0"])
