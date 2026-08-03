@@ -358,18 +358,45 @@ def _reachable_distance(
     acceleration_mps2: float,
     config: HardModeMaskConfig,
 ) -> np.ndarray:
+    """Integrate the constant-acceleration reachability envelope exactly.
+
+    A clipped trapezoid over a whole 0.5 s interval overestimates the minimum
+    distance when a low-speed vehicle stops before the interval ends.  Normal
+    planner profiles use continuous stop-and-hold kinematics, so the envelope
+    must use the same time semantics.
+    """
+
     speed = float(current_speed_mps)
     distance = 0.0
     values = []
     for _ in range(TRAJECTORY_STEPS):
-        next_speed = float(
-            np.clip(
-                speed + acceleration_mps2 * config.dt_s,
-                0.0,
-                config.max_speed_mps,
+        dt = float(config.dt_s)
+        acceleration = float(acceleration_mps2)
+        if acceleration < 0.0 and speed + acceleration * dt < 0.0:
+            active_dt = speed / -acceleration
+            distance += speed * active_dt + 0.5 * acceleration * active_dt**2
+            next_speed = 0.0
+        elif (
+            acceleration > 0.0
+            and speed + acceleration * dt > config.max_speed_mps
+        ):
+            active_dt = (config.max_speed_mps - speed) / acceleration
+            active_dt = float(np.clip(active_dt, 0.0, dt))
+            distance += (
+                speed * active_dt
+                + 0.5 * acceleration * active_dt**2
+                + config.max_speed_mps * (dt - active_dt)
             )
-        )
-        distance += 0.5 * (speed + next_speed) * config.dt_s
+            next_speed = float(config.max_speed_mps)
+        else:
+            distance += speed * dt + 0.5 * acceleration * dt**2
+            next_speed = float(
+                np.clip(
+                    speed + acceleration * dt,
+                    0.0,
+                    config.max_speed_mps,
+                )
+            )
         values.append(distance)
         speed = next_speed
     return np.asarray(values, dtype=np.float64)

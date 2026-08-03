@@ -1,0 +1,254 @@
+{
+  "seed": 23,
+  "initial_speed_km_h": 24.0,
+  "simulator_steps": 46,
+  "simulated_duration_s": 4.6000000000000005,
+  "rollout_wall_time_s": 17.06767823791597,
+  "planning_attempt_steps": 47,
+  "native_joint_success_steps": 46,
+  "native_joint_planning_success_rate": 0.9787234042553191,
+  "collection_ready_attempt_steps": 36,
+  "collection_ready_success_steps": 36,
+  "collection_ready_step_success_rate": 1.0,
+  "planning_time_ms": {
+    "mean": 243.92750566983793,
+    "p50": 302.34024999663234,
+    "p95": 344.6873941109516
+  },
+  "collision": false,
+  "collision_agents": [],
+  "out_of_road": false,
+  "out_of_road_agents": [],
+  "failure_reason": "normal_planner_no_safe_joint_combination",
+  "rejection_counts": {
+    "normal_planner_no_safe_joint_combination": 1
+  },
+  "rejection_details": {
+    "normal planner has no safe three-vehicle joint combination": 1
+  },
+  "rule_action_counts": {
+    "agent0:+0": 14,
+    "agent1:+0": 14,
+    "agent2:+0": 14,
+    "agent0:+1": 20,
+    "agent1:+1": 20,
+    "agent2:+1": 20,
+    "agent0:-1": 12,
+    "agent1:-1": 12,
+    "agent2:-1": 12
+  },
+  "scenario_summary": {
+    "scenario_id": "S5_hard_brake_lead",
+    "scenario_triggered": true,
+    "scenario_realized": true,
+    "scenario_trigger_step": 30,
+    "scenario_realized_step": 1,
+    "scenario_notes": [
+      "adjacent_spawned:left_side",
+      "adjacent_spawned:right_side",
+      "lead_present",
+      "lead_brake_profile"
+    ],
+    "platoon_agent_ids": [
+      "agent0",
+      "agent1",
+      "agent2"
+    ],
+    "platoon_lead_agent_id": "agent0"
+  },
+  "final_debug": {
+    "rule_maker": {
+      "formation_locked": true,
+      "risk_triggered": false,
+      "best_actions": {
+        "agent0": 0,
+        "agent1": 0,
+        "agent2": 0
+      },
+      "best_score": -1774.3182896599865,
+      "dynamic_roles": {
+        "agent0": "leader",
+        "agent1": "follower",
+        "agent2": "follower"
+      },
+      "forced_lane_decision": false,
+      "forced_lane_wait_info": {
+        "decision_step": 47,
+        "threshold_steps": 10,
+        "forced_agents": [],
+        "all_forced_ready": false,
+        "partial_forced": false,
+        "partial_forced_wait_steps": 0,
+        "forced_wait_active": false,
+        "forced_wait_frozen": false,
+        "forced_lane_first_step": {},
+        "forced_lane_wait_steps_by_agent": {}
+      },
+      "risk_info": {
+        "triggered": false,
+        "transitioned": false,
+        "current_state": "LOCKED",
+        "next_state": "LOCKED",
+        "transition": null,
+        "reason": null,
+        "reasons": [],
+        "leader": {
+          "agent_id": "agent0",
+          "front_vehicle_id": "69f6aa64-90ad-4031-8079-739c09b2444d",
+          "front_net_gap_m": 12.873142700195311,
+          "closing_speed_mps": -0.613647176453531,
+          "ttc_s": null
+        },
+        "follower_pairs": [],
+        "min_follower_gap_m": null,
+        "forced_lane_wait_info": {
+          "decision_step": 47,
+          "threshold_steps": 10,
+          "forced_agents": [],
+          "all_forced_ready": false,
+          "partial_forced": false,
+          "partial_forced_wait_steps": 0,
+          "forced_wait_active": false,
+          "forced_wait_frozen": false,
+          "forced_lane_first_step": {},
+          "forced_lane_wait_steps_by_agent": {}
+        }
+      }
+    },
+    "planner_joint": {
+      "fallback_used": true,
+      "fallback_reason": "no_safe_joint_combination",
+      "combination_count": 576,
+      "pairwise_conflict_count": 576,
+      "pairwise_conflict_pair_count": 51,
+      "pairwise_conflict_counts_by_pair": {
+        "agent0:agent1": 48,
+        "agent0:agent2": 0,
+        "agent1:agent2": 3
+      },
+      "selected_indices": null,
+      "selected_score": null,
+      "planning_time_ms": 67.31169391423464
+    },
+    "planner_agents": {
+      "agent0": {
+        "candidate_count": 4,
+        "generated_valid_candidate_count": 4,
+        "raw_candidate_count": 48,
+        "kinematic_rejection_count": 44,
+        "corridor_rejection_count": 52,
+        "road_rejection_count": 0,
+        "background_collision_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {
+          "curvature_limit": 44
+        },
+        "lane_end_restricted": false,
+        "source_lane_remaining_m": 240.28150939941406,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            null,
+            11.454369525909431
+          ]
+        },
+        "fallback_used": true,
+        "fallback_reason": "no_safe_joint_combination"
+      },
+      "agent1": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 45,
+        "raw_candidate_count": 48,
+        "kinematic_rejection_count": 3,
+        "corridor_rejection_count": 0,
+        "road_rejection_count": 0,
+        "background_collision_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {
+          "acceleration_below_min": 3
+        },
+        "lane_end_restricted": false,
+        "source_lane_remaining_m": 246.7680206298828,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            null,
+            null
+          ]
+        },
+        "fallback_used": true,
+        "fallback_reason": "no_safe_joint_combination"
+      },
+      "agent2": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 48,
+        "raw_candidate_count": 48,
+        "kinematic_rejection_count": 0,
+        "corridor_rejection_count": 36,
+        "road_rejection_count": 0,
+        "background_collision_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {},
+        "lane_end_restricted": false,
+        "source_lane_remaining_m": 264.9122543334961,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            null,
+            36.39014633178711
+          ]
+        },
+        "fallback_used": true,
+        "fallback_reason": "no_safe_joint_combination"
+      }
+    },
+    "agent_states": {
+      "agent0": {
+        "position": [
+          109.71849060058594,
+          0.5585290789604187
+        ],
+        "heading": -0.050078081137849395,
+        "speed_km_h": 1.013974307909996,
+        "lane_index": [
+          ">>>",
+          "1S0_0_",
+          2
+        ]
+      },
+      "agent1": {
+        "position": [
+          103.23197937011719,
+          2.7681326866149902
+        ],
+        "heading": 0.12877049660805628,
+        "speed_km_h": 29.788749173046526,
+        "lane_index": [
+          ">>>",
+          "1S0_0_",
+          1
+        ]
+      },
+      "agent2": {
+        "position": [
+          85.0877456665039,
+          5.453781604766846
+        ],
+        "heading": 0.20946787290492885,
+        "speed_km_h": 26.383410210319028,
+        "lane_index": [
+          ">>>",
+          "1S0_0_",
+          0
+        ]
+      }
+    }
+  },
+  "persistable": false,
+  "episode": 1,
+  "scenario_id": "S5_hard_brake_lead",
+  "local_route": "R1_entry_straight",
+  "topdown_video_path": "outputs/bev-round13-73/postfix/S5_hard_brake_lead/video/episode_0001.mp4",
+  "semantic_bev_video_path": "outputs/bev-round13-73/postfix/S5_hard_brake_lead/semantic_bev_video/episode_0001.mp4",
+  "trajectory_path": "outputs/bev-round13-73/postfix/S5_hard_brake_lead/trajectories/episode_0001.npz"
+}

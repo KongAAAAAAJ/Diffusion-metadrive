@@ -49,6 +49,18 @@ class PIDTrajectoryController(BaseController):
         self.speed_kp = float(cfg.get("pid_speed_kp", 0.10))
         self.speed_ki = float(cfg.get("pid_speed_ki", 0.0))
         self.speed_kd = float(cfg.get("pid_speed_kd", 0.02))
+        self.preview_lookahead_time_s = float(
+            cfg.get("preview_lookahead_time_s", 0.6)
+        )
+        self.preview_lookahead_min_m = float(
+            cfg.get("preview_lookahead_min_m", 3.0)
+        )
+        self.preview_lookahead_max_m = float(
+            cfg.get("preview_lookahead_max_m", 8.0)
+        )
+        self.preview_heading_weight = float(
+            cfg.get("preview_heading_weight", 0.5)
+        )
         self._state: dict[str, dict[str, float]] = {}
 
     def reset(self) -> None:
@@ -80,15 +92,61 @@ class PIDTrajectoryController(BaseController):
         trajectory_local = np.asarray(trajectory_local, dtype=np.float32)
         if trajectory_local.ndim != 2 or trajectory_local.shape[0] == 0:
             return np.zeros((2,), dtype=np.float32)
-        valid_idx = min(max(self.lookahead_index, 0), trajectory_local.shape[0] - 1)
-        waypoint = trajectory_local[valid_idx]
-        forward = max(float(waypoint[0]), 1e-3)
-        lateral_angle_error = float(np.arctan2(float(waypoint[1]), forward))
-        # heading_error = float(waypoint[2]) if waypoint.shape[0] > 2 else 0.0
-        steering = self._pid(agent_id, "lat", lateral_angle_error, self.lateral_kp, self.lateral_ki, self.lateral_kd)
-        # steering += self._pid(agent_id, "heading", heading_error, self.heading_kp, self.heading_ki, self.heading_kd)
+        current_speed_mps = max(
+            float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
+            0.0,
+        )
+        lookahead_m = float(
+            np.clip(
+                self.preview_lookahead_time_s * current_speed_mps,
+                self.preview_lookahead_min_m,
+                self.preview_lookahead_max_m,
+            )
+        )
+        path_xy = np.concatenate(
+            (
+                np.zeros((1, 2), dtype=np.float64),
+                trajectory_local[:, :2].astype(np.float64, copy=False),
+            ),
+            axis=0,
+        )
+        arc = np.concatenate(
+            ([0.0], np.cumsum(np.linalg.norm(np.diff(path_xy, axis=0), axis=1)))
+        )
+        query = min(lookahead_m, float(arc[-1]))
+        if query <= 1.0e-6:
+            lateral_error = 0.0
+        else:
+            preview_x = float(np.interp(query, arc, path_xy[:, 0]))
+            preview_y = float(np.interp(query, arc, path_xy[:, 1]))
+            headings = np.concatenate(
+                (
+                    [0.0],
+                    np.unwrap(
+                        trajectory_local[:, 2].astype(
+                            np.float64, copy=False
+                        )
+                    ),
+                )
+            )
+            preview_heading = float(np.interp(query, arc, headings))
+            lateral_error = _wrap_to_pi(
+                float(np.arctan2(preview_y, max(preview_x, 1.0e-3)))
+                + self.preview_heading_weight * preview_heading
+            )
+        steering = self._pid(
+            agent_id,
+            "lat",
+            lateral_error,
+            self.lateral_kp,
+            self.lateral_ki,
+            self.lateral_kd,
+        )
 
         segment_distances = np.linalg.norm(np.diff(trajectory_local[:, :2], axis=0), axis=1)
+        valid_idx = min(
+            max(self.lookahead_index, 0), trajectory_local.shape[0] - 1
+        )
         if segment_distances.size > 0:
             reference_speeds = np.concatenate([segment_distances, segment_distances[-1:]], axis=0) / max(self.dt, 1e-6)
             trajectory_target_km_h = float(reference_speeds[min(valid_idx, len(reference_speeds) - 1)] * 3.6)

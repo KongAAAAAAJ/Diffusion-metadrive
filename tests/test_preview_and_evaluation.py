@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -263,17 +264,89 @@ def test_overlay_rule_maker_debug_draws_candidate_and_selected_trajectories() ->
     assert drawn.sum() > frame.sum()
 
 
-def test_pipeline_factory_runs_decision_lattice_and_pid_control(monkeypatch) -> None:
+def test_pipeline_factory_runs_strict_joint_expert_chain(monkeypatch) -> None:
     fake_rule_maker = _FakeRuleMaker()
     fake_planner = _FakeLatticePlanner()
-    monkeypatch.setattr(module, "make_rule_maker", lambda config=None: fake_rule_maker)
-    monkeypatch.setattr(module, "PlatoonNormalPlanner", lambda: fake_planner)
+
+    class FakeExpert:
+        def __init__(self, env, agent_ids):
+            assert tuple(agent_ids) == ("agent0", "agent1", "agent2")
+            self.env = env
+            self.agent_ids = agent_ids
+            self.rule_maker = fake_rule_maker
+            self.planner = fake_planner
+            self.pid_controller = SimpleNamespace(get_last_debug=lambda: {})
+            self.lqr_controller = self.pid_controller
+
+        def plan(self, env):
+            decisions = self.rule_maker.compute(
+                env,
+                self.agent_ids,
+                planner_batch={},
+            )
+            # The fake RuleMaker only populates agent0; make the strict joint
+            # test inputs explicit for all roles.
+            decisions = {
+                agent_id: decisions.get(
+                    agent_id,
+                    {
+                        "action": 0,
+                        "target_point": np.asarray(
+                            [5.0, 0.0],
+                            dtype=np.float32,
+                        ),
+                    },
+                )
+                for agent_id in self.agent_ids
+            }
+            trajectories = {
+                agent_id: np.asarray(
+                    [[float(index), 0.0, 0.0] for index in range(8)],
+                    dtype=np.float32,
+                )
+                for agent_id in self.agent_ids
+            }
+            fake_planner.calls.append(decisions)
+            fake_planner._last_debug = {
+                agent_id: {
+                    "candidates": [
+                        {
+                            "score": 0.0,
+                            "selected": True,
+                            "trajectory_world": trajectory.tolist(),
+                        }
+                    ]
+                }
+                for agent_id, trajectory in trajectories.items()
+            }
+            env.apply_dynamic_roles(
+                {
+                    "agent0": "leader",
+                    "agent1": "follower",
+                    "agent2": "follower",
+                }
+            )
+            return SimpleNamespace(
+                controls={
+                    agent_id: np.zeros(2, dtype=np.float32)
+                    for agent_id in self.agent_ids
+                },
+                trajectories_world=trajectories,
+                rule_actions={
+                    agent_id: 0 for agent_id in self.agent_ids
+                },
+            )
+
+    monkeypatch.setattr(module, "RulePlannerExpert", FakeExpert)
 
     env = type(
         "Env",
         (),
         {
-            "agents": {"agent0": _FakeVehicle()},
+            "agents": {
+                f"agent{index}": _FakeVehicle()
+                for index in range(3)
+            },
             "_last_planner_batch": {"agent0": {"coarse_trajectories": np.zeros((3, 8, 2), dtype=np.float32)}},
             "config": {
                 "target_speed_km_h": 30.0,
@@ -285,7 +358,11 @@ def test_pipeline_factory_runs_decision_lattice_and_pid_control(monkeypatch) -> 
         },
     )()
 
-    action_fn = module._build_pipeline_factory("rule_maker", "lattice", "pid")(env, ["agent0"], 59)
+    action_fn = module._build_pipeline_factory(
+        "rule_maker",
+        "lattice",
+        "pid",
+    )(env, ["agent0", "agent1", "agent2"], 59)
     actions = action_fn(env)
 
     assert "agent0" in actions
@@ -298,7 +375,13 @@ def test_pipeline_factory_runs_decision_lattice_and_pid_control(monkeypatch) -> 
     assert getattr(env, "_preview_planning_debug", None)["planning_policy"] == "lattice"
     assert getattr(env, "_preview_planning_debug", None)["coordinate_frame"] == "world"
     assert np.asarray(env._preview_planning_debug["trajectories_by_agent"]["agent0"]).shape == (8, 3)
-    assert env.applied_roles == [{"agent0": "leader"}]
+    assert env.applied_roles == [
+        {
+            "agent0": "leader",
+            "agent1": "follower",
+            "agent2": "follower",
+        }
+    ]
 
 
 def test_collect_episode_step_record_includes_control_debug() -> None:
@@ -537,8 +620,8 @@ def test_main_defaults_match_preview_scenario_script(monkeypatch) -> None:
     assert captured["num_episodes"] == 3
     assert captured["output_root"] == Path("/media/kong/Elements_SE/Diffusion_Data/outputs/run_results")
     assert captured["heading_up"] is False
-    assert captured["traffic_density"] == 0.10
-    assert captured["start_seed"] == 59
+    assert captured["traffic_density"] == 0.0
+    assert captured["start_seed"] == 11
     assert captured["fps"] == 10
     assert captured["decision_policy"] == "rule_maker"
     assert captured["planning_policy"] == "lattice"
@@ -621,7 +704,7 @@ def test_run_preview_uses_start_seed_for_each_episode(monkeypatch, tmp_path: Pat
     assert fake_env.spawn_seeds == [59, 60]
     assert fake_env.reset_seeds == [None, None]
     assert video_dir.exists()
-    assert len(written) == 2
+    assert len(written) == 4
 
 
 def test_run_scenario_forwards_horizon_to_env_config(monkeypatch, tmp_path: Path) -> None:
@@ -682,12 +765,13 @@ def test_run_preview_retries_episode_when_it_ends_immediately(monkeypatch, tmp_p
         start_seed=59,
         fps=10,
         env_factory=lambda config: fake_env,
+        max_episode_retries=2,
     )
 
     assert fake_env.spawn_seeds == [59, 60]
     assert fake_env.reset_seeds == [None, None]
-    assert len(written) == 1
-    assert written[0][1] > 1
+    assert len(written) == 2
+    assert all(item[1] > 1 for item in written)
 
 
 def test_format_episode_stop_reason_reports_crash_and_out_of_road_agents() -> None:
@@ -774,7 +858,10 @@ def test_run_single_episode_records_with_metadrive_low_level_step_dt(monkeypatch
     assert recorded_dts == [pytest.approx(0.12)]
 
 
-def test_run_preview_raises_when_no_frames_are_captured(monkeypatch, tmp_path: Path) -> None:
+def test_run_preview_writes_placeholder_when_no_topdown_frames_are_captured(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     fake_env = _FakeEnv([{"done_step": 3}, {"done_step": 3}, {"done_step": 3}])
 
     monkeypatch.setattr(module, "_pick_local_route", lambda scenario_id: "R8_narrow_channel")
@@ -785,19 +872,27 @@ def test_run_preview_raises_when_no_frames_are_captured(monkeypatch, tmp_path: P
         lambda *args, **kwargs: (lambda env, agent_ids, seed: (lambda env: {aid: np.zeros(2, dtype=np.float32) for aid in agent_ids})),
     )
 
-    with pytest.raises(RuntimeError, match="captured 0 frames"):
-        module.run_scenario(
-            scenario_id="S9_narrow_channel_negotiation",
-            local_route=None,
-            num_agents=3,
-            num_episodes=1,
-            output_root=tmp_path,
-            heading_up=False,
-            traffic_density=0.10,
-            start_seed=59,
-            fps=10,
-            env_factory=lambda config: fake_env,
-        )
+    written = []
+    monkeypatch.setattr(
+        module,
+        "_write_video",
+        lambda path, frames, fps: written.append((path, len(frames), fps)),
+    )
+    module.run_scenario(
+        scenario_id="S9_narrow_channel_negotiation",
+        local_route=None,
+        num_agents=3,
+        num_episodes=1,
+        output_root=tmp_path,
+        heading_up=False,
+        traffic_density=0.10,
+        start_seed=59,
+        fps=10,
+        env_factory=lambda config: fake_env,
+    )
+
+    assert len(written) == 2
+    assert written[0][1] == 1
 
 
 def test_evaluate_writes_episode_metrics_json_and_plots(monkeypatch, tmp_path: Path) -> None:
@@ -915,7 +1010,10 @@ def test_evaluate_writes_episode_metrics_json_and_plots(monkeypatch, tmp_path: P
     assert not (tmp_path / "S1_free_cruise_straight" / "reports" / "metrics").exists()
 
 
-def test_evaluate_false_does_not_write_metrices_dir(monkeypatch, tmp_path: Path) -> None:
+def test_evaluate_false_still_writes_expert_collection_metrics(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     fake_env = _FakeEnv([{"done_step": 1}])
 
     monkeypatch.setattr(module, "_pick_local_route", lambda scenario_id: "R0")
@@ -941,4 +1039,6 @@ def test_evaluate_false_does_not_write_metrices_dir(monkeypatch, tmp_path: Path)
         evaluate=False,
     )
 
-    assert not (tmp_path / "S1_free_cruise_straight" / "metrices").exists()
+    metrics_dir = tmp_path / "S1_free_cruise_straight" / "metrices"
+    assert (metrics_dir / "expert_collection_summary.json").exists()
+    assert not (metrics_dir / "formation_unlock_summary.json").exists()

@@ -299,28 +299,24 @@ def overlay_platoon_labels(
 
     surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
 
-    # !背景车标注符号
-    # for vehicle in traffic_vehicles:
-    #     marker = getattr(vehicle, "scenario_warning_marker", None)
-    #     if not marker:
-    #         continue
-    #     try:
-    #         screen_pos = renderer._world_to_screen_position(vehicle.position, off)
-    #     except Exception:
-    #         continue
-    #     if screen_pos is None:
-    #         continue
-    #     sx, sy = int(screen_pos[0]), int(screen_pos[1])
-    #     if sx < -40 or sx > screen_w + 40 or sy < -40 or sy > screen_h + 40:
-    #         continue
-    #     # text_surf = font.render(str(marker), True, SCENARIO_MARKER_FG, SCENARIO_MARKER_BG)
-    #     text_surf = font.render(str(marker), True, SCENARIO_MARKER_FG)
-    #     text_rect = text_surf.get_rect()
-    #     text_rect.center = (sx, sy - 16)
-    #     padded_rect = text_rect.inflate(10, 6)
-    #     # pygame.draw.rect(surf, SCENARIO_MARKER_BG, padded_rect, border_radius=6)  # 画红色圆角背景框
-    #     # pygame.draw.rect(surf, SCENARIO_MARKER_BORDER, padded_rect, width=1, border_radius=6)  # 画深红色边框
-    #     surf.blit(text_surf, text_rect)
+    # Scenario-controlled background traffic marker.
+    for vehicle in traffic_vehicles:
+        marker = getattr(vehicle, "scenario_warning_marker", None)
+        if not marker:
+            continue
+        try:
+            screen_pos = renderer._world_to_screen_position(vehicle.position, off)
+        except Exception:
+            continue
+        if screen_pos is None:
+            continue
+        sx, sy = int(screen_pos[0]), int(screen_pos[1])
+        if sx < -40 or sx > screen_w + 40 or sy < -40 or sy > screen_h + 40:
+            continue
+        text_surf = font.render(str(marker), True, SCENARIO_MARKER_FG)
+        text_rect = text_surf.get_rect()
+        text_rect.center = (sx, sy - 16)
+        surf.blit(text_surf, text_rect)
 
     # Per-vehicle ego labels
     for i, agent_id in enumerate(agent_ids):
@@ -391,14 +387,14 @@ def overlay_rule_maker_debug(
         return frame
 
     # ── Candidate / selected trajectory polylines ─────────────────────────────
-    # frame = _draw_world_trajectories(
-    #     frame,
-    #     env,
-    #     rule_maker_debug,
-    #     selected_color=(255, 255, 255, 220),
-    #     candidate_color=(255, 255, 255, 110),
-    #     color_by_action=True,
-    # )
+    frame = _draw_world_trajectories(
+        frame,
+        env,
+        rule_maker_debug,
+        selected_color=(255, 255, 255, 220),
+        candidate_color=(255, 255, 255, 110),
+        color_by_action=True,
+    )
 
     # ── Formation lock badge — top-left corner ────────────────────────────────
     formation_locked = rule_maker_debug.get("formation_locked")

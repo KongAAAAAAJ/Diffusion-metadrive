@@ -221,6 +221,34 @@ def test_low_speed_stop_limits_heading_change_to_kinematic_contract() -> None:
     assert np.max(audit.curvature_per_m) <= 0.25 + 1.0e-6
 
 
+def test_stop_anchor_uses_exact_stop_distance_inside_first_interval() -> None:
+    env = _Env()
+    vehicle = env.agents["agent0"]
+    vehicle.speed_km_h = 1.8
+    speed_mps = vehicle.speed_km_h / 3.6
+    acceleration = -4.5
+    stop_time_s = speed_mps / -acceleration
+    expected_distance_m = (
+        speed_mps * stop_time_s
+        + 0.5 * acceleration * stop_time_s**2
+    )
+
+    output = SimulatorDynamicAnchorGenerator().generate(env, "agent0")
+    stop = output.coarse_trajectories[ModeIndex.STOP]
+    audit = validate_trajectory_kinematics(
+        stop,
+        speed_mps,
+        np.zeros(3),
+    )
+
+    assert audit.valid
+    np.testing.assert_allclose(
+        audit.cumulative_distance_m,
+        expected_distance_m,
+        atol=1.0e-5,
+    )
+
+
 def test_moving_anchors_start_from_current_lane_offset() -> None:
     env = _Env()
     vehicle = env.agents["agent0"]

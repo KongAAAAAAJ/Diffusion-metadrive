@@ -100,6 +100,32 @@ def _env(agents, traffic):
     )
 
 
+def test_rule_maker_traffic_prediction_advances_actor_at_matching_times():
+    traffic = _vehicle(
+        "traffic",
+        10.0,
+        0.0,
+        1,
+        speed_km_h=36.0,
+    )
+    env = _env(agents={}, traffic=[traffic])
+    rule_maker = MultiAgentRuleMaker(horizon_s=2.0, num_waypoints=3)
+
+    predicted = rule_maker._predict_traffic_positions(
+        env,
+        traffic,
+        count=3,
+    )
+
+    np.testing.assert_allclose(
+        predicted,
+        np.asarray(
+            [[10.0, 0.0], [20.0, 0.0], [30.0, 0.0]],
+            dtype=np.float32,
+        ),
+    )
+
+
 def test_risk_detector_unlocks_when_leader_ttc_is_below_threshold():
     env = _env(
         agents={
@@ -628,6 +654,54 @@ def _env_s7_merge(vehicle, *, lane_id=3, scenario_id="S7_ego_merge_from_ramp", l
     )
 
 
+def _env_s7_real_lane_contract(vehicle):
+    road_network = SimpleNamespace()
+    source_lane = ConnectedFakeLane(
+        0,
+        0.0,
+        0.0,
+        "9g0_0_",
+        "9g1_4_",
+        length=60.0,
+    )
+    mainline_lanes = [
+        ConnectedFakeLane(
+            index,
+            10.5 - 3.5 * index,
+            0.0,
+            "9g0_0_",
+            "9g0_1_",
+            length=120.0,
+        )
+        for index in range(3)
+    ]
+    road_network.graph = {
+        "9g0_0_": {
+            "9g1_4_": [source_lane],
+            "9g0_1_": mainline_lanes,
+        }
+    }
+    road_network.get_lane = lambda lane_index: road_network.graph[
+        lane_index[0]
+    ][lane_index[1]][lane_index[2]]
+    vehicle.lane = source_lane
+    vehicle.position = np.asarray([25.0, 0.0], dtype=np.float32)
+    vehicle.navigation = SimpleNamespace(
+        checkpoints=["9g0_0_", "9g1_4_"],
+    )
+    return SimpleNamespace(
+        config={
+            "scenario_id": "S7_ego_merge_from_ramp",
+            "local_route": "R7_merge_core",
+        },
+        agents={"agent0": vehicle},
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=road_network),
+            traffic_manager=SimpleNamespace(_traffic_vehicles=[]),
+        ),
+    )
+
+
 def test_rule_maker_returns_target_points_for_all_agents():
     env = _env(
         agents={
@@ -1053,14 +1127,14 @@ def test_debug_compute_records_invalid_manual_action_without_fallback():
 
 
 def test_s7_left_lane_change_to_mainline_third_lane_is_marked_forced():
-    vehicle = _vehicle("agent0", 25.0, 0.0, 3, speed_km_h=25.0)
-    env = _env_s7_merge(vehicle)
+    vehicle = _vehicle("agent0", 25.0, 0.0, 0, speed_km_h=25.0)
+    env = _env_s7_real_lane_contract(vehicle)
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
 
     candidate = rule_maker._build_coarse_trajectory(env, env.agents["agent0"], -1, [])
 
     assert candidate is not None
-    assert candidate["target_lane_index"] == ("A", "B", 2)
+    assert candidate["target_lane_index"] == ("9g0_0_", "9g0_1_", 2)
     assert candidate["forced_lane_change"] is True
 
 
@@ -1083,20 +1157,20 @@ def test_s7_target_lane_uses_special_branch_for_left_action(monkeypatch):
     assert calls == [(env, env.agents["agent0"], env.agents["agent0"].lane)]
 
 
-def test_s7_downstream_target_lane_uses_placeholder_hardcoded_branch():
-    vehicle = _vehicle("agent0", 25.0, 0.0, 3, speed_km_h=25.0)
-    env = _env_s7_merge(vehicle)
+def test_s7_downstream_target_lane_uses_real_route_contract():
+    vehicle = _vehicle("agent0", 25.0, 0.0, 0, speed_km_h=25.0)
+    env = _env_s7_real_lane_contract(vehicle)
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
 
     target_lane = rule_maker._S7_downstream_target_lane(env, env.agents["agent0"], env.agents["agent0"].lane)
 
     assert target_lane is not None
-    assert tuple(target_lane.index) == ("A", "B", 2)
+    assert tuple(target_lane.index) == ("9g0_0_", "9g0_1_", 2)
 
 
 def test_s7_forced_lane_change_bypasses_joint_score_and_selects_left_action(monkeypatch):
-    vehicle = _vehicle("agent0", 25.0, 0.0, 3, speed_km_h=25.0)
-    env = _env_s7_merge(vehicle)
+    vehicle = _vehicle("agent0", 25.0, 0.0, 0, speed_km_h=25.0)
+    env = _env_s7_real_lane_contract(vehicle)
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
 
     def fail_if_scored(*args, **kwargs):  # noqa: ARG001

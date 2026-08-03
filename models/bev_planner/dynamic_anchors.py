@@ -402,11 +402,42 @@ class SimulatorDynamicAnchorGenerator:
 
     def _travel_distances(self, speed_mps: float, accel_mps2: float) -> np.ndarray:
         speed = max(float(speed_mps), 0.0)
+        acceleration = float(accel_mps2)
         distance = 0.0
         values = []
         for _ in range(TRAJECTORY_STEPS):
-            next_speed = float(np.clip(speed + accel_mps2 * self.config.dt_s, 0.0, self.config.max_speed_mps))
-            distance += 0.5 * (speed + next_speed) * self.config.dt_s
+            dt = float(self.config.dt_s)
+            if acceleration < 0.0 and speed + acceleration * dt < 0.0:
+                active_dt = speed / -acceleration
+                distance += (
+                    speed * active_dt
+                    + 0.5 * acceleration * active_dt**2
+                )
+                next_speed = 0.0
+            elif (
+                acceleration > 0.0
+                and speed + acceleration * dt
+                > self.config.max_speed_mps
+            ):
+                active_dt = (
+                    self.config.max_speed_mps - speed
+                ) / acceleration
+                active_dt = float(np.clip(active_dt, 0.0, dt))
+                distance += (
+                    speed * active_dt
+                    + 0.5 * acceleration * active_dt**2
+                    + self.config.max_speed_mps * (dt - active_dt)
+                )
+                next_speed = float(self.config.max_speed_mps)
+            else:
+                distance += speed * dt + 0.5 * acceleration * dt**2
+                next_speed = float(
+                    np.clip(
+                        speed + acceleration * dt,
+                        0.0,
+                        self.config.max_speed_mps,
+                    )
+                )
             values.append(distance)
             speed = next_speed
         return np.asarray(values, dtype=np.float64)

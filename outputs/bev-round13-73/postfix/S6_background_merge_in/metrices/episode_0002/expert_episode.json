@@ -1,0 +1,214 @@
+{
+  "seed": 31,
+  "initial_speed_km_h": 24.518867720327574,
+  "simulator_steps": 200,
+  "simulated_duration_s": 20.0,
+  "rollout_wall_time_s": 58.56999301700853,
+  "planning_attempt_steps": 200,
+  "native_joint_success_steps": 200,
+  "native_joint_planning_success_rate": 1.0,
+  "collection_ready_attempt_steps": 190,
+  "collection_ready_success_steps": 183,
+  "collection_ready_step_success_rate": 0.9631578947368421,
+  "planning_time_ms": {
+    "mean": 144.52433469879907,
+    "p50": 108.09980053454638,
+    "p95": 249.7797999822069
+  },
+  "collision": false,
+  "collision_agents": [],
+  "out_of_road": false,
+  "out_of_road_agents": [],
+  "failure_reason": "joint_step_rejected:dynamic_anchor_kinematic_invalid",
+  "rejection_counts": {
+    "dynamic_anchor_kinematic_invalid": 7
+  },
+  "rejection_details": {
+    "agent0 dynamic anchor is invalid: STOP anchor violates fixed-time kinematics: outside_reachable_distance": 3,
+    "agent1 dynamic anchor is invalid: STOP anchor violates fixed-time kinematics: outside_reachable_distance": 2,
+    "agent2 dynamic anchor is invalid: STOP anchor violates fixed-time kinematics: outside_reachable_distance": 2
+  },
+  "rule_action_counts": {
+    "agent0:+0": 140,
+    "agent1:+0": 140,
+    "agent2:+0": 140,
+    "agent0:-1": 60,
+    "agent1:-1": 60,
+    "agent2:-1": 60
+  },
+  "scenario_summary": {
+    "scenario_id": "S6_background_merge_in",
+    "scenario_triggered": true,
+    "scenario_realized": true,
+    "scenario_trigger_step": 1,
+    "scenario_realized_step": 1,
+    "scenario_notes": [
+      "injected:block_socket_road"
+    ],
+    "platoon_agent_ids": [
+      "agent0",
+      "agent1",
+      "agent2"
+    ],
+    "platoon_lead_agent_id": "agent0"
+  },
+  "final_debug": {
+    "rule_maker": {
+      "formation_locked": true,
+      "risk_triggered": false,
+      "best_actions": {
+        "agent0": 0,
+        "agent1": 0,
+        "agent2": 0
+      },
+      "best_score": 19.020134861077914,
+      "dynamic_roles": {
+        "agent0": "leader",
+        "agent1": "follower",
+        "agent2": "follower"
+      },
+      "forced_lane_decision": false,
+      "forced_lane_wait_info": {
+        "decision_step": 200,
+        "threshold_steps": 10,
+        "forced_agents": [],
+        "all_forced_ready": false,
+        "partial_forced": false,
+        "partial_forced_wait_steps": 0,
+        "forced_wait_active": false,
+        "forced_wait_frozen": false,
+        "forced_lane_first_step": {},
+        "forced_lane_wait_steps_by_agent": {}
+      },
+      "risk_info": {
+        "triggered": false,
+        "transitioned": false,
+        "current_state": "LOCKED",
+        "next_state": "LOCKED",
+        "transition": null,
+        "reason": null,
+        "reasons": [],
+        "leader": {
+          "agent_id": "agent0",
+          "front_vehicle_id": null,
+          "front_net_gap_m": null,
+          "closing_speed_mps": null,
+          "ttc_s": null
+        },
+        "follower_pairs": [],
+        "min_follower_gap_m": null,
+        "forced_lane_wait_info": {
+          "decision_step": 200,
+          "threshold_steps": 10,
+          "forced_agents": [],
+          "all_forced_ready": false,
+          "partial_forced": false,
+          "partial_forced_wait_steps": 0,
+          "forced_wait_active": false,
+          "forced_wait_frozen": false,
+          "forced_lane_first_step": {},
+          "forced_lane_wait_steps_by_agent": {}
+        }
+      }
+    },
+    "planner_joint": {
+      "fallback_used": false,
+      "fallback_reason": null,
+      "combination_count": 1728,
+      "pairwise_conflict_count": 808,
+      "pairwise_conflict_pair_count": 77,
+      "pairwise_conflict_counts_by_pair": {
+        "agent0:agent1": 41,
+        "agent0:agent2": 8,
+        "agent1:agent2": 28
+      },
+      "selected_indices": [
+        0,
+        0,
+        0
+      ],
+      "selected_score": 59.301592041845346,
+      "planning_time_ms": 98.32162701059133
+    },
+    "planner_agents": {
+      "agent0": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 48,
+        "raw_candidate_count": 48,
+        "kinematic_rejection_count": 0,
+        "corridor_rejection_count": 0,
+        "road_rejection_count": 0,
+        "background_collision_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {},
+        "lane_end_restricted": false,
+        "source_lane_remaining_m": 85.53592542456477,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            null,
+            null
+          ]
+        },
+        "fallback_used": false,
+        "fallback_reason": null
+      },
+      "agent1": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 42,
+        "raw_candidate_count": 48,
+        "kinematic_rejection_count": 6,
+        "corridor_rejection_count": 0,
+        "road_rejection_count": 0,
+        "background_collision_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {
+          "outside_reachable_distance": 6
+        },
+        "lane_end_restricted": false,
+        "source_lane_remaining_m": 1.2469537685744,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            -2.6782805606583278,
+            null
+          ]
+        },
+        "fallback_used": false,
+        "fallback_reason": null
+      },
+      "agent2": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 36,
+        "raw_candidate_count": 48,
+        "kinematic_rejection_count": 12,
+        "corridor_rejection_count": 0,
+        "road_rejection_count": 0,
+        "background_collision_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {
+          "acceleration_below_min": 12
+        },
+        "lane_end_restricted": false,
+        "source_lane_remaining_m": 14.371719416208496,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            null,
+            null
+          ]
+        },
+        "fallback_used": false,
+        "fallback_reason": null
+      }
+    },
+    "agent_states": {}
+  },
+  "persistable": false,
+  "episode": 2,
+  "scenario_id": "S6_background_merge_in",
+  "local_route": "R6_mainline_merge_approach",
+  "topdown_video_path": "outputs/bev-round13-73/postfix/S6_background_merge_in/video/episode_0002.mp4",
+  "semantic_bev_video_path": "outputs/bev-round13-73/postfix/S6_background_merge_in/semantic_bev_video/episode_0002.mp4",
+  "trajectory_path": "outputs/bev-round13-73/postfix/S6_background_merge_in/trajectories/episode_0002.npz"
+}

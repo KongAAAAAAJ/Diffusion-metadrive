@@ -1065,7 +1065,6 @@ class MultiAgentRuleMaker(RuleMaker):
         combo,
         traffic_vehicles: list,
     ) -> float:
-        # !!!!!!!!只保留 效率评分
         score = 0.0
         agents = getattr(env, "agents", {}) or {}
 
@@ -1073,54 +1072,141 @@ class MultiAgentRuleMaker(RuleMaker):
             trajectory = candidate.get("trajectory_world")
             if trajectory is None or len(trajectory) == 0:
                 continue
+            trajectory = np.asarray(trajectory, dtype=np.float32)
             action = int(candidate.get("action", 0))
             progress = float(np.linalg.norm(trajectory[-1] - trajectory[0]))
-            # score += self.w_progress * progress
+            score += self.w_progress * progress
             score += self.w_mobil * float(candidate.get("mobil_gain", 0.0))
-            # if action == 0:
-            #     score += self.w_keep_bias
-            # else:
-            #     if not (self._is_s8_exit_route(env) and s8_force_score is not None):
-            #         score += self.lane_change_preference
-            #     score -= self.lc_cost
+            if action == 0:
+                score += self.w_keep_bias
+            else:
+                score += self.lane_change_preference
+                score -= self.lc_cost
 
-        #     for traffic_vehicle in traffic_vehicles:
-        #         traffic_pos = np.asarray(getattr(traffic_vehicle, "position", (0.0, 0.0))[:2], dtype=np.float32)
-        #         min_dist = float(np.min(np.linalg.norm(trajectory - traffic_pos.reshape(1, 2), axis=1)))
-        #         if min_dist < self.traffic_safety_distance_m:
-        #             score -= 100.0 * (self.traffic_safety_distance_m - min_dist + 1.0)
-        #         else:
-        #             score += min(self.traffic_clearance_cap, self.w_traffic_clearance * min_dist)
+            for traffic_vehicle in traffic_vehicles:
+                predicted_xy = self._predict_traffic_positions(
+                    env,
+                    traffic_vehicle,
+                    count=len(trajectory),
+                )
+                min_dist = float(
+                    np.min(
+                        np.linalg.norm(
+                            trajectory[:, :2] - predicted_xy,
+                            axis=1,
+                        )
+                    )
+                )
+                if min_dist < self.traffic_safety_distance_m:
+                    score -= 100.0 * (
+                        self.traffic_safety_distance_m - min_dist + 1.0
+                    )
+                else:
+                    score += min(
+                        self.traffic_clearance_cap,
+                        self.w_traffic_clearance * min_dist,
+                    )
 
-        # score += self._joint_agent_safety_score(combo)
+        score += self._joint_agent_safety_score(combo)
 
-        # for idx in range(1, len(ordered_agent_ids)):
-        #     prev_agent_id = ordered_agent_ids[idx - 1]
-        #     agent_id = ordered_agent_ids[idx]
-        #     prev_candidate = combo[idx - 1]
-        #     candidate = combo[idx]
-        #     prev_vehicle = agents.get(prev_agent_id)
-        #     vehicle = agents.get(agent_id)
-        #     if prev_vehicle is None or vehicle is None:
-        #         continue
-        #     prev_action = int(prev_candidate.get("action", 0))
-        #     action = int(candidate.get("action", 0))
-        #     if prev_action == action:
-        #         score += self.w_formation_consistent
-        #     else:
-        #         score -= self.w_formation_inconsistent_cost
+        for idx in range(1, len(ordered_agent_ids)):
+            prev_agent_id = ordered_agent_ids[idx - 1]
+            agent_id = ordered_agent_ids[idx]
+            prev_candidate = combo[idx - 1]
+            candidate = combo[idx]
+            prev_vehicle = agents.get(prev_agent_id)
+            vehicle = agents.get(agent_id)
+            if prev_vehicle is None or vehicle is None:
+                continue
+            prev_action = int(prev_candidate.get("action", 0))
+            action = int(candidate.get("action", 0))
+            if prev_action == action:
+                score += self.w_formation_consistent
+            else:
+                score -= self.w_formation_inconsistent_cost
 
-        #     same_source_lane = tuple(prev_candidate.get("source_lane_index", ())) == tuple(candidate.get("source_lane_index", ()))
-        #     close_pair = self._current_pair_distance(prev_vehicle, vehicle) <= self.close_pair_threshold_m
-        #     if same_source_lane and close_pair:
-        #         if prev_action == 0 and action == 0:
-        #             score += self.w_close_keep
-        #         elif prev_action == action:
-        #             score -= self.w_close_lc_same_cost
-        #         else:
-        #             score -= self.w_close_lc_diff_cost
+            same_source_lane = tuple(
+                prev_candidate.get("source_lane_index", ())
+            ) == tuple(candidate.get("source_lane_index", ()))
+            close_pair = (
+                self._current_pair_distance(prev_vehicle, vehicle)
+                <= self.close_pair_threshold_m
+            )
+            if same_source_lane and close_pair:
+                if prev_action == 0 and action == 0:
+                    score += self.w_close_keep
+                elif prev_action == action:
+                    score -= self.w_close_lc_same_cost
+                else:
+                    score -= self.w_close_lc_diff_cost
 
         return float(score)
+
+    def _predict_traffic_positions(
+        self,
+        env,
+        vehicle,
+        *,
+        count: int,
+    ) -> np.ndarray:
+        """Predict background positions at the candidate trajectory timestamps.
+
+        RuleMaker previously compared every future waypoint with the actor's
+        current position.  Moving merge traffic therefore appeared as a
+        stationary obstacle for four seconds and could dominate the action
+        score by thousands of points.  This light-weight predictor follows the
+        current lane chain at constant speed; the Normal planner remains the
+        authority for dense merge-aware collision checking.
+        """
+
+        if int(count) <= 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        position = np.asarray(
+            getattr(vehicle, "position", (0.0, 0.0))[:2],
+            dtype=np.float32,
+        )
+        speed_mps = max(
+            float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
+            0.0,
+        )
+        times = np.linspace(
+            0.0,
+            float(self.horizon_s),
+            int(count),
+            dtype=np.float32,
+        )
+        lane = getattr(vehicle, "lane", None)
+        if lane is not None:
+            try:
+                start_s, start_d = lane.local_coordinates(position)
+                lane_chain = self._generic_reference_lane_chain(
+                    env,
+                    vehicle,
+                    lane,
+                )
+                predicted = np.asarray(
+                    [
+                        self._position_along_lane_chain(
+                            lane_chain,
+                            float(start_s) + speed_mps * float(time_s),
+                            float(start_d),
+                        )[:2]
+                        for time_s in times
+                    ],
+                    dtype=np.float32,
+                )
+                if predicted.shape == (int(count), 2) and np.isfinite(
+                    predicted
+                ).all():
+                    return predicted
+            except Exception:
+                pass
+        heading = float(getattr(vehicle, "heading_theta", 0.0))
+        velocity = speed_mps * np.asarray(
+            [np.cos(heading), np.sin(heading)],
+            dtype=np.float32,
+        )
+        return position[None, :] + times[:, None] * velocity[None, :]
 
     def _joint_agent_safety_score(self, combo) -> float:
         score = 0.0

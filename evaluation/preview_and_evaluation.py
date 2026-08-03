@@ -39,9 +39,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import sys
+import time
+from collections import Counter
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -64,10 +68,20 @@ from evaluation.platoon_performance import (
     compute_pairwise_formation_reward,
     compute_pdms_reward_batch,
 )
-from models.controller.LQRFollowerController import LQRFollowerController
-from models.controller.PIDController import PIDTrajectoryController, _world_trajectory_to_ego_local
-from models.decisioner.rule_decisioner import make_rule_maker, select_controller_by_formation
-from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
+from models.controller.PIDController import _world_trajectory_to_ego_local
+from models.decisioner.rule_decisioner import select_controller_by_formation
+from expert_dataset.collect_joint_bev import (
+    JointBEVSampleBuilder,
+    JointCollectionError,
+    JointStepRejected,
+    RulePlannerExpert,
+    SensorlessJointBEVPlatoonEnv,
+    simulator_decision_dt_s,
+)
+from scenarios.bev_round13_contract import (
+    PRIMARY_S5_S9_SCENARIOS,
+    deterministic_initial_speed_km_h,
+)
 from tools.topdown_view import (
     capture_topdown_frame as _capture_topdown_frame,
     overlay_planning_debug as _overlay_planning_debug,
@@ -89,6 +103,7 @@ DEFAULT_HORIZON = 600
 DEFAULT_DECISION_POLICY = "rule_maker"
 DEFAULT_PLANNING_POLICY = "lattice"
 DEFAULT_CONTROL_POLICY = "adaptive"
+DEFAULT_ROUND13_73_SEEDS = (17, 23, 31, 47, 59, 71, 83, 97, 109, 127)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +117,319 @@ def _write_video(path: Path, frames: list, fps: int) -> None:
     import mediapy
     path.parent.mkdir(parents=True, exist_ok=True)
     mediapy.write_video(str(path), frames, fps=int(fps))
+
+
+def _semantic_bev_to_rgb(bev: np.ndarray) -> np.ndarray:
+    """Render one strict eight-channel semantic BEV as an RGB diagnostic."""
+
+    value = np.asarray(bev)
+    if value.shape != (8, 256, 256) or value.dtype != np.uint8:
+        raise ValueError("semantic BEV frame must be uint8 [8,256,256]")
+    rgb = np.zeros((256, 256, 3), dtype=np.float32)
+
+    def blend(channel: int, color: tuple[int, int, int], alpha: float) -> None:
+        occupancy = value[channel].astype(np.float32) / 255.0
+        weight = np.clip(alpha * occupancy, 0.0, 1.0)[..., None]
+        rgb[:] = rgb * (1.0 - weight) + np.asarray(
+            color, dtype=np.float32
+        ) * weight
+
+    blend(0, (70, 70, 70), 0.85)    # drivable
+    blend(1, (235, 235, 235), 0.95) # lane geometry
+    blend(2, (40, 210, 80), 0.90)   # navigation route
+    blend(7, (255, 80, 20), 0.45)   # background t-1.0
+    blend(6, (255, 135, 20), 0.60)  # background t-0.5
+    blend(5, (255, 220, 30), 0.85)  # background t
+    blend(4, (210, 40, 220), 0.95)  # platoon vehicles
+    blend(3, (30, 170, 255), 1.00)  # ego history
+    return np.clip(rgb, 0.0, 255.0).astype(np.uint8)
+
+
+def _semantic_bev_mosaic(bev: np.ndarray | None) -> np.ndarray:
+    if bev is None:
+        return np.zeros((256, 256 * 3 + 8, 3), dtype=np.uint8)
+    value = np.asarray(bev)
+    if value.shape != (3, 8, 256, 256) or value.dtype != np.uint8:
+        raise ValueError("joint semantic BEV must be uint8 [3,8,256,256]")
+    separator = np.full((256, 4, 3), 20, dtype=np.uint8)
+    return np.concatenate(
+        [
+            _semantic_bev_to_rgb(value[0]),
+            separator,
+            _semantic_bev_to_rgb(value[1]),
+            separator,
+            _semantic_bev_to_rgb(value[2]),
+        ],
+        axis=1,
+    )
+
+
+def _fatal_info_reason(
+    info: Mapping[str, Mapping[str, object]] | None,
+    agent_ids: Sequence[str],
+) -> tuple[str | None, list[str], list[str]]:
+    crash_agents: list[str] = []
+    out_agents: list[str] = []
+    crash_priority = (
+        "crash_sidewalk",
+        "crash_vehicle",
+        "crash_object",
+        "crash_building",
+        "crash_human",
+        "crash",
+    )
+    crash_reason: str | None = None
+    for agent_id in agent_ids:
+        agent_info = (info or {}).get(agent_id, {})
+        if not isinstance(agent_info, Mapping):
+            continue
+        triggered = [
+            key for key in crash_priority if bool(agent_info.get(key, False))
+        ]
+        if triggered:
+            crash_agents.append(agent_id)
+            key = triggered[0]
+            if (
+                crash_reason is None
+                or crash_priority.index(key)
+                < crash_priority.index(crash_reason)
+            ):
+                crash_reason = key
+        if any(
+            bool(agent_info.get(key, False))
+            for key in ("out_of_road", "out_of_route")
+        ):
+            out_agents.append(agent_id)
+    if crash_agents:
+        return crash_reason or "crash", crash_agents, out_agents
+    if out_agents:
+        return "out_of_road", crash_agents, out_agents
+    return None, crash_agents, out_agents
+
+
+def _write_trajectory_npz(path: Path, records: Sequence[Mapping[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = len(records)
+    steps = np.asarray(
+        [int(record["step"]) for record in records], dtype=np.int32
+    )
+    actions = np.full((count, 3), -9, dtype=np.int8)
+    trajectories = np.full((count, 3, 8, 3), np.nan, dtype=np.float32)
+    controls = np.full((count, 3, 2), np.nan, dtype=np.float32)
+    gt_mode = np.full((count, 3), -1, dtype=np.int64)
+    mode_valid_mask = np.zeros((count, 3, 10), dtype=np.bool_)
+    collection_ready = np.zeros((count,), dtype=np.bool_)
+    for row, record in enumerate(records):
+        actions[row] = np.asarray(record["rule_actions"], dtype=np.int8)
+        trajectories[row] = np.asarray(
+            record["trajectories_world"], dtype=np.float32
+        )
+        controls[row] = np.asarray(record["controls"], dtype=np.float32)
+        collection_ready[row] = bool(record.get("collection_ready", False))
+        if record.get("gt_mode") is not None:
+            gt_mode[row] = np.asarray(record["gt_mode"], dtype=np.int64)
+        if record.get("mode_valid_mask") is not None:
+            mode_valid_mask[row] = np.asarray(
+                record["mode_valid_mask"], dtype=np.bool_
+            )
+    np.savez_compressed(
+        path,
+        step=steps,
+        rule_actions=actions,
+        trajectories_world=trajectories,
+        controls=controls,
+        collection_ready=collection_ready,
+        gt_mode=gt_mode,
+        mode_valid_mask=mode_valid_mask,
+    )
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    array = np.asarray(values, dtype=np.float64)
+    return (
+        float(np.percentile(array, percentile))
+        if array.size
+        else 0.0
+    )
+
+
+def _aggregate_expert_episode_summaries(
+    episodes: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    count = len(episodes)
+    attempted = sum(int(value.get("planning_attempt_steps", 0)) for value in episodes)
+    planned = sum(int(value.get("native_joint_success_steps", 0)) for value in episodes)
+    ready_attempted = sum(
+        int(value.get("collection_ready_attempt_steps", 0))
+        for value in episodes
+    )
+    ready = sum(
+        int(value.get("collection_ready_success_steps", 0))
+        for value in episodes
+    )
+    wall = [float(value.get("rollout_wall_time_s", 0.0)) for value in episodes]
+    simulated = [
+        float(value.get("simulated_duration_s", 0.0)) for value in episodes
+    ]
+    return {
+        "episode_count": count,
+        "collision_rate": (
+            sum(bool(value.get("collision", False)) for value in episodes)
+            / max(count, 1)
+        ),
+        "out_of_road_rate": (
+            sum(bool(value.get("out_of_road", False)) for value in episodes)
+            / max(count, 1)
+        ),
+        "persistable_episode_rate": (
+            sum(bool(value.get("persistable", False)) for value in episodes)
+            / max(count, 1)
+        ),
+        "native_joint_planning_success_rate": planned / max(attempted, 1),
+        "collection_ready_step_success_rate": ready / max(ready_attempted, 1),
+        "planning_attempt_steps": attempted,
+        "native_joint_success_steps": planned,
+        "collection_ready_attempt_steps": ready_attempted,
+        "collection_ready_success_steps": ready,
+        "rollout_wall_time_s": {
+            "mean": float(np.mean(wall)) if wall else 0.0,
+            "p50": _percentile(wall, 50),
+            "p95": _percentile(wall, 95),
+        },
+        "simulated_duration_s": {
+            "mean": float(np.mean(simulated)) if simulated else 0.0,
+            "p50": _percentile(simulated, 50),
+            "p95": _percentile(simulated, 95),
+        },
+        "failure_reasons": dict(
+            Counter(
+                str(value.get("failure_reason"))
+                for value in episodes
+                if value.get("failure_reason")
+            )
+        ),
+    }
+
+
+def _write_episode_summary_csv(
+    path: Path, episodes: Sequence[Mapping[str, object]]
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = (
+        "episode",
+        "seed",
+        "simulator_steps",
+        "simulated_duration_s",
+        "rollout_wall_time_s",
+        "planning_attempt_steps",
+        "native_joint_success_steps",
+        "native_joint_planning_success_rate",
+        "collection_ready_attempt_steps",
+        "collection_ready_success_steps",
+        "collection_ready_step_success_rate",
+        "collision",
+        "collision_agents",
+        "out_of_road",
+        "out_of_road_agents",
+        "persistable",
+        "failure_reason",
+    )
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for episode in episodes:
+            row = {key: episode.get(key) for key in fieldnames}
+            for key in ("collision_agents", "out_of_road_agents"):
+                row[key] = ",".join(str(value) for value in row[key] or ())
+            writer.writerow(row)
+
+
+def _expert_debug_snapshot(
+    env,
+    agent_ids: Sequence[str],
+) -> dict[str, object]:
+    rule_debug = getattr(env, "_preview_rule_maker_debug", None) or {}
+    planning = getattr(env, "_preview_planning_debug", None) or {}
+    planner_debug = planning.get("planner_debug", {}) if isinstance(planning, Mapping) else {}
+    rule_fields = (
+        "formation_locked",
+        "risk_triggered",
+        "best_actions",
+        "best_score",
+        "dynamic_roles",
+        "forced_lane_decision",
+        "forced_lane_wait_info",
+        "risk_info",
+    )
+    joint_fields = (
+        "fallback_used",
+        "fallback_reason",
+        "missing_agents",
+        "combination_count",
+        "pairwise_conflict_count",
+        "pairwise_conflict_pair_count",
+        "pairwise_conflict_counts_by_pair",
+        "selected_indices",
+        "selected_score",
+        "planning_time_ms",
+    )
+    agent_fields = (
+        "action",
+        "candidate_count",
+        "generated_valid_candidate_count",
+        "raw_candidate_count",
+        "kinematic_rejection_count",
+        "corridor_rejection_count",
+        "road_rejection_count",
+        "background_collision_rejection_count",
+        "lane_end_rejection_count",
+        "collision_rejections_by_object",
+        "kinematic_rejections_by_reason",
+        "lane_end_restricted",
+        "source_lane_remaining_m",
+        "lane_end_deadline_s",
+        "safe_corridor_by_duration_m",
+        "fallback_used",
+        "fallback_reason",
+    )
+    agents = getattr(env, "agents", {}) or {}
+    agent_states = {}
+    for agent_id in agent_ids:
+        vehicle = agents.get(agent_id)
+        if vehicle is None:
+            continue
+        agent_states[agent_id] = {
+            "position": np.asarray(
+                getattr(vehicle, "position", (np.nan, np.nan)),
+                dtype=np.float64,
+            )[:2].tolist(),
+            "heading": float(getattr(vehicle, "heading_theta", np.nan)),
+            "speed_km_h": float(getattr(vehicle, "speed_km_h", np.nan)),
+            "lane_index": list(getattr(vehicle, "lane_index", ()) or ()),
+        }
+    return {
+        "rule_maker": {
+            key: rule_debug.get(key)
+            for key in rule_fields
+            if isinstance(rule_debug, Mapping) and key in rule_debug
+        },
+        "planner_joint": {
+            key: (planner_debug.get("_joint", {}) or {}).get(key)
+            for key in joint_fields
+            if isinstance(planner_debug, Mapping)
+            and key in (planner_debug.get("_joint", {}) or {})
+        },
+        "planner_agents": {
+            agent_id: {
+                key: (planner_debug.get(agent_id, {}) or {}).get(key)
+                for key in agent_fields
+                if isinstance(planner_debug, Mapping)
+                and key in (planner_debug.get(agent_id, {}) or {})
+            }
+            for agent_id in agent_ids
+        },
+        "agent_states": agent_states,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -172,14 +500,11 @@ def build_rule_planner_pipeline_factory(
 
     def factory(env, agent_ids: list[str], seed: int) -> Callable:
         del seed
-        env_config = dict(getattr(env, "config", {}) or {})
-        rule_maker = make_rule_maker(env_config)
-        rule_maker.reset(env, agent_ids)
-        planner = PlatoonNormalPlanner()
-        pid_ctrl = PIDTrajectoryController(env_config)
-        pid_ctrl.reset()
-        lqr_ctrl = LQRFollowerController(env_config)
-        lqr_ctrl.reset()
+        if tuple(agent_ids) != ("agent0", "agent1", "agent2"):
+            raise ValueError(
+                "strict rule-planner evaluation requires agent0/1/2"
+            )
+        expert = RulePlannerExpert(env, agent_ids)
 
         def action_fn(env) -> dict[str, np.ndarray]:
             active_agent_ids = [aid for aid in agent_ids if aid in getattr(env, "agents", {})]
@@ -188,40 +513,59 @@ def build_rule_planner_pipeline_factory(
                 setattr(env, "_preview_planning_debug", None)
                 return {}
 
-            planner_batch = getattr(env, "_last_planner_batch", None) or {}
-            raw_decisions = rule_maker.compute(env, active_agent_ids, planner_batch)
-            decisions = _normalize_decisions(raw_decisions)
-            rule_debug = getattr(rule_maker, "get_last_debug", lambda: None)()
-            if rule_debug is None:
-                rule_debug = getattr(env, "_preview_rule_maker_debug", None)
-            setattr(env, "_preview_rule_maker_debug", rule_debug)
-
-            dynamic_roles = (rule_debug or {}).get("dynamic_roles", {}) if rule_debug else {}
-            if dynamic_roles:
-                apply_roles = getattr(env, "apply_dynamic_roles", None)
-                if callable(apply_roles):
-                    apply_roles(dynamic_roles)
-                else:
-                    setattr(env, "_agent_roles", dict(dynamic_roles))
-
-            trajectories = planner.plan(env, decisions)
+            try:
+                expert_step = expert.plan(env)
+            except JointCollectionError:
+                setattr(
+                    env,
+                    "_preview_rule_maker_debug",
+                    expert.rule_maker.get_last_debug() or {},
+                )
+                setattr(
+                    env,
+                    "_preview_planning_debug",
+                    _build_planning_debug(
+                        planning_policy=planning_policy,
+                        agent_ids=active_agent_ids,
+                        trajectories={},
+                        planner_debug=expert.planner.get_last_debug() or {},
+                    ),
+                )
+                raise
 
             planning_debug = _build_planning_debug(
                 planning_policy=planning_policy,
                 agent_ids=active_agent_ids,
-                trajectories=trajectories,
-                planner_debug=getattr(planner, "get_last_debug", lambda: None)(),
+                trajectories=dict(expert_step.trajectories_world),
+                planner_debug=expert.planner.get_last_debug() or {},
+            )
+            setattr(
+                env,
+                "_preview_rule_maker_debug",
+                expert.rule_maker.get_last_debug() or {},
             )
             setattr(env, "_preview_planning_debug", planning_debug)
-            if control_policy == "adaptive":
-                ctrl = select_controller_by_formation(rule_maker, pid_ctrl, lqr_ctrl)
-            else:
-                ctrl = pid_ctrl
-            actions = ctrl.compute_actions(env, trajectories)
-            control_debug = getattr(ctrl, "get_last_debug", lambda: None)()
-            setattr(env, "_preview_control_debug", control_debug)
-            return actions
+            setattr(env, "_preview_expert_step", expert_step)
+            setattr(
+                env,
+                "_preview_control_debug",
+                getattr(
+                    (
+                        select_controller_by_formation(
+                            expert.rule_maker,
+                            expert.pid_controller,
+                            expert.lqr_controller,
+                        )
+                        if control_policy == "adaptive"
+                        else expert.pid_controller
+                    ),
+                    "get_last_debug",
+                    lambda: None,
+                )(),
+            )
+            return dict(expert_step.controls)
 
+        setattr(action_fn, "expert", expert)
         return action_fn
 
     return factory
@@ -421,14 +765,35 @@ def _run_single_episode(
     pdms_records: Optional[list] = None,
     episode_step_records: Optional[list] = None,
     unlock_tracker: FormationUnlockTracker | None = None,
+    sample_builder: JointBEVSampleBuilder | None = None,
+    semantic_bev_frames: Optional[list[np.ndarray]] = None,
+    trajectory_records: Optional[list[dict[str, object]]] = None,
+    episode_diagnostics: Optional[dict[str, object]] = None,
 ):
     spawn_manager = getattr(getattr(env, "engine", None), "spawn_manager", None)
     if spawn_manager is not None and hasattr(spawn_manager, "set_episode_spawn_seed"):
         spawn_manager.set_episode_spawn_seed(int(seed))
     obs = env.reset()
     action_fn = action_fn_factory(env, agent_ids, seed)
+    strict_expert_chain = hasattr(action_fn, "expert")
+    builder = sample_builder or JointBEVSampleBuilder(agent_ids)
+    builder.reset()
     frames: list[np.ndarray] = []
     terminated = truncated = info = None
+    dt_s = simulator_decision_dt_s(env)
+    rollout_started = time.perf_counter()
+    planning_times_s: list[float] = []
+    planning_attempt_steps = 0
+    native_joint_success_steps = 0
+    collection_ready_attempt_steps = 0
+    collection_ready_success_steps = 0
+    rejection_counts: Counter[str] = Counter()
+    rejection_details: Counter[str] = Counter()
+    rule_action_counts: Counter[str] = Counter()
+    failure_reason: str | None = None
+    collision_agents: list[str] = []
+    out_of_road_agents: list[str] = []
+    simulator_steps = 0
 
     if platoon_metrics is not None:
         platoon_metrics.start_episode()
@@ -444,9 +809,109 @@ def _run_single_episode(
     previous_velocity_mps: dict[str, np.ndarray] = {}
 
     for _step in range(1000):
-        actions = action_fn(env)
-        if not actions:
+        try:
+            builder.capture_state(env, timestamp_s=_step * dt_s)
+        except JointCollectionError as exc:
+            failure_reason = exc.reason_code
+            rejection_counts[exc.reason_code] += 1
+            rejection_details[str(exc)] += 1
             break
+
+        planning_attempt_steps += 1
+        planning_started = time.perf_counter()
+        try:
+            actions = action_fn(env)
+        except JointCollectionError as exc:
+            planning_times_s.append(time.perf_counter() - planning_started)
+            failure_reason = exc.reason_code
+            rejection_counts[exc.reason_code] += 1
+            rejection_details[str(exc)] += 1
+            planning_debug = getattr(env, "_preview_planning_debug", None)
+            rule_maker_debug = getattr(env, "_preview_rule_maker_debug", None)
+            frame = _capture_topdown_frame(
+                env,
+                lead_id,
+                heading_up,
+                agent_ids,
+                rule_maker_debug=rule_maker_debug,
+                planning_debug=planning_debug,
+            )
+            if frame is not None:
+                frames.append(frame)
+            if semantic_bev_frames is not None:
+                semantic_bev_frames.append(_semantic_bev_mosaic(None))
+            break
+        planning_times_s.append(time.perf_counter() - planning_started)
+        if not actions:
+            failure_reason = "rule_maker_no_action"
+            break
+        native_joint_success_steps += 1
+        expert_step = getattr(env, "_preview_expert_step", None)
+        if strict_expert_chain and expert_step is None:
+            failure_reason = "preview_expert_step_missing"
+            break
+
+        sample = None
+        model_inputs = None
+        if strict_expert_chain and builder.history_ready():
+            collection_ready_attempt_steps += 1
+            try:
+                sample = builder.build_sample(env, expert_step)
+                model_inputs = sample
+                collection_ready_success_steps += 1
+            except JointStepRejected as exc:
+                rejection_counts[exc.reason_code] += 1
+                rejection_details[str(exc)] += 1
+                try:
+                    model_inputs = builder.build_model_inputs(env)
+                except JointCollectionError:
+                    model_inputs = None
+        if semantic_bev_frames is not None:
+            semantic_bev_frames.append(
+                _semantic_bev_mosaic(
+                    None if model_inputs is None else np.asarray(model_inputs.bev)
+                )
+            )
+
+        if expert_step is not None:
+            ordered_rule_actions = [
+                int(expert_step.rule_actions[agent_id]) for agent_id in agent_ids
+            ]
+            for agent_id, action in zip(agent_ids, ordered_rule_actions):
+                rule_action_counts[f"{agent_id}:{action:+d}"] += 1
+        else:
+            ordered_rule_actions = []
+        if trajectory_records is not None and expert_step is not None:
+            trajectory_records.append(
+                {
+                    "step": int(_step),
+                    "rule_actions": np.asarray(
+                        ordered_rule_actions, dtype=np.int8
+                    ),
+                    "trajectories_world": np.stack(
+                        [
+                            np.asarray(
+                                expert_step.trajectories_world[agent_id],
+                                dtype=np.float32,
+                            )
+                            for agent_id in agent_ids
+                        ]
+                    ),
+                    "controls": np.stack(
+                        [
+                            np.asarray(
+                                expert_step.controls[agent_id], dtype=np.float32
+                            )
+                            for agent_id in agent_ids
+                        ]
+                    ),
+                    "collection_ready": sample is not None,
+                    "gt_mode": None if sample is None else sample.gt_mode,
+                    "mode_valid_mask": (
+                        None if sample is None else sample.mode_valid_mask
+                    ),
+                }
+            )
         planning_debug = getattr(env, "_preview_planning_debug", None)
         rule_maker_debug = getattr(env, "_preview_rule_maker_debug", None)
         if unlock_tracker is not None:
@@ -464,6 +929,7 @@ def _run_single_episode(
             frames.append(frame)
 
         obs, reward, terminated, truncated, info = env.low_level_step(actions)
+        simulator_steps += 1
 
         if platoon_metrics is not None:
             platoon_metrics.update(info)
@@ -490,12 +956,99 @@ def _run_single_episode(
                 )
             )
 
+        fatal_reason, crash_now, out_now = _fatal_info_reason(info, agent_ids)
+        if crash_now:
+            collision_agents = sorted(set(collision_agents).union(crash_now))
+        if out_now:
+            out_of_road_agents = sorted(
+                set(out_of_road_agents).union(out_now)
+            )
+        if fatal_reason is not None:
+            failed_agents = (
+                crash_now if fatal_reason.startswith("crash") else out_now
+            )
+            suffix = ",".join(failed_agents)
+            failure_reason = f"{fatal_reason}:{suffix}" if suffix else fatal_reason
+            print(_format_episode_stop_reason(_step, terminated, truncated, info))
+            break
+
         if terminated.get("__all__", False) or truncated.get("__all__", False):
             print(_format_episode_stop_reason(_step, terminated, truncated, info))
             break
 
     if platoon_metrics is not None and not _episode_failed_immediately(frames, terminated, truncated, info):
         platoon_metrics.end_episode()
+
+    scenario_summary: Mapping[str, object] = {}
+    orchestrator = getattr(env, "_scenario_orchestrator", None)
+    if orchestrator is not None and hasattr(orchestrator, "get_episode_summary"):
+        scenario_summary = dict(orchestrator.get_episode_summary() or {})
+    if failure_reason is None and scenario_summary:
+        if not bool(scenario_summary.get("scenario_realized", False)):
+            failure_reason = "scenario_not_realized"
+    if failure_reason is None and rejection_counts:
+        reason, _ = sorted(
+            rejection_counts.items(), key=lambda item: (-item[1], item[0])
+        )[0]
+        failure_reason = f"joint_step_rejected:{reason}"
+
+    rollout_wall_time_s = time.perf_counter() - rollout_started
+    if episode_diagnostics is not None:
+        episode_diagnostics.clear()
+        episode_diagnostics.update(
+            {
+                "seed": int(seed),
+                "initial_speed_km_h": float(
+                    getattr(env, "config", {}).get(
+                        "initial_speed_km_h", np.nan
+                    )
+                ),
+                "simulator_steps": int(simulator_steps),
+                "simulated_duration_s": float(simulator_steps * dt_s),
+                "rollout_wall_time_s": float(rollout_wall_time_s),
+                "planning_attempt_steps": int(planning_attempt_steps),
+                "native_joint_success_steps": int(native_joint_success_steps),
+                "native_joint_planning_success_rate": (
+                    native_joint_success_steps / max(planning_attempt_steps, 1)
+                ),
+                "collection_ready_attempt_steps": int(
+                    collection_ready_attempt_steps
+                ),
+                "collection_ready_success_steps": int(
+                    collection_ready_success_steps
+                ),
+                "collection_ready_step_success_rate": (
+                    collection_ready_success_steps
+                    / max(collection_ready_attempt_steps, 1)
+                ),
+                "planning_time_ms": {
+                    "mean": (
+                        1000.0 * float(np.mean(planning_times_s))
+                        if planning_times_s
+                        else 0.0
+                    ),
+                    "p50": 1000.0 * _percentile(planning_times_s, 50),
+                    "p95": 1000.0 * _percentile(planning_times_s, 95),
+                },
+                "collision": bool(collision_agents),
+                "collision_agents": collision_agents,
+                "out_of_road": bool(out_of_road_agents),
+                "out_of_road_agents": out_of_road_agents,
+                "failure_reason": failure_reason,
+                "rejection_counts": dict(rejection_counts),
+                "rejection_details": dict(rejection_details),
+                "rule_action_counts": dict(rule_action_counts),
+                "scenario_summary": dict(scenario_summary),
+                "final_debug": _expert_debug_snapshot(env, agent_ids),
+                "persistable": bool(
+                    failure_reason is None
+                    and not collision_agents
+                    and not out_of_road_agents
+                    and collection_ready_success_steps > 0
+                    and native_joint_success_steps == planning_attempt_steps
+                ),
+            }
+        )
 
     return frames, terminated, truncated, info
 
@@ -543,11 +1096,15 @@ def run_scenario(
     decision_policy: str = DEFAULT_DECISION_POLICY,
     planning_policy: str = DEFAULT_PLANNING_POLICY,
     control_policy: str = DEFAULT_CONTROL_POLICY,
-    max_episode_retries: int = 3,
+    max_episode_retries: int = 1,
     env_factory: Optional[Callable] = None,
     evaluate: bool = False,
     metric_params: Optional[dict] = None,
     horizon: int = DEFAULT_HORIZON,
+    seeds: Sequence[int] | None = None,
+    save_topdown_video: bool = True,
+    save_semantic_bev_video: bool = True,
+    save_trajectory_data: bool = True,
 ) -> Path:
     if local_route is None:
         local_route = _pick_local_route(scenario_id)
@@ -556,8 +1113,28 @@ def run_scenario(
         f"scenario={scenario_id} local_route={local_route}"
     )
 
-    video_dir = output_root / scenario_id / "video"
-    video_dir.mkdir(parents=True, exist_ok=True)
+    scenario_root = output_root / scenario_id
+    video_dir = scenario_root / "video"
+    semantic_video_dir = scenario_root / "semantic_bev_video"
+    trajectory_dir = scenario_root / "trajectories"
+    if save_topdown_video:
+        video_dir.mkdir(parents=True, exist_ok=True)
+    if save_semantic_bev_video:
+        semantic_video_dir.mkdir(parents=True, exist_ok=True)
+    if save_trajectory_data:
+        trajectory_dir.mkdir(parents=True, exist_ok=True)
+
+    episode_seeds = (
+        tuple(int(value) for value in seeds)
+        if seeds is not None
+        else tuple(int(start_seed + index) for index in range(num_episodes))
+    )
+    if len(episode_seeds) != int(num_episodes):
+        raise ValueError(
+            "num_episodes must exactly match the number of explicit seeds"
+        )
+    if len(set(episode_seeds)) != len(episode_seeds):
+        raise ValueError("episode seeds must be unique")
 
     env_config = {
         "num_agents": num_agents,
@@ -574,8 +1151,7 @@ def run_scenario(
     if env_factory is not None:
         env = env_factory(env_config)
     else:
-        from envs.platoon_env import PlatoonEnv
-        env = PlatoonEnv(env_config)
+        env = SensorlessJointBEVPlatoonEnv(env_config)
     agent_ids = [f"agent{i}" for i in range(num_agents)]
     lead_id = agent_ids[0]
     action_fn_factory = _build_pipeline_factory(decision_policy, planning_policy, control_policy)
@@ -589,16 +1165,42 @@ def run_scenario(
     metrics_dir = output_root / scenario_id / "metrices"
     all_episode_step_records: list[list[dict]] = []
     formation_unlock_records: list[dict] = []
+    expert_episode_summaries: list[dict[str, object]] = []
 
     try:
         for ep_idx in range(num_episodes):
             frames: list[np.ndarray] = []
-            used_seed = start_seed + ep_idx
+            semantic_frames: list[np.ndarray] = []
+            trajectory_records: list[dict[str, object]] = []
+            episode_diagnostics: dict[str, object] = {}
+            used_seed = episode_seeds[ep_idx]
             pdms_records: Optional[list] = [] if pdms_params is not None else None
             episode_step_records: Optional[list] = [] if evaluate else None
             episode_unlock_record: dict | None = None
             for retry in range(max(1, int(max_episode_retries))):
                 episode_seed = used_seed + retry
+                initial_speed_km_h = deterministic_initial_speed_km_h(
+                    scenario_id, episode_seed
+                )
+                runtime_updates = {
+                    "traffic_density": float(traffic_density),
+                    "initial_speed_km_h": float(initial_speed_km_h),
+                }
+                env.config.update(runtime_updates)
+                platoon_config = getattr(env, "platoon_config", None)
+                if platoon_config is not None:
+                    platoon_config.traffic_density = float(traffic_density)
+                    platoon_config.initial_speed_km_h = float(
+                        initial_speed_km_h
+                    )
+                global_config = getattr(
+                    getattr(env, "engine", None), "global_config", None
+                )
+                if global_config is not None:
+                    global_config.update(runtime_updates)
+                semantic_frames.clear()
+                trajectory_records.clear()
+                episode_diagnostics.clear()
                 unlock_tracker = FormationUnlockTracker(ep_idx)
                 frames, terminated, truncated, info = _run_single_episode(
                     env, agent_ids, lead_id, heading_up, episode_seed, action_fn_factory,
@@ -607,6 +1209,10 @@ def run_scenario(
                     pdms_records=pdms_records,
                     episode_step_records=episode_step_records,
                     unlock_tracker=unlock_tracker,
+                    sample_builder=JointBEVSampleBuilder(agent_ids),
+                    semantic_bev_frames=semantic_frames,
+                    trajectory_records=trajectory_records,
+                    episode_diagnostics=episode_diagnostics,
                 )
                 episode_unlock_record = unlock_tracker.finalize(len(frames) - 1)
                 if not _episode_failed_immediately(frames, terminated, truncated, info):
@@ -616,19 +1222,54 @@ def run_scenario(
 
             video_path = video_dir / f"episode_{ep_idx:04d}.mp4"
             if not frames:
-                agent0_info = (info or {}).get("agent0", {}) if isinstance(info, dict) else {}
-                raise RuntimeError(
-                    f"{scenario_id} local_route={local_route} seed={used_seed} captured 0 frames; "
-                    f"terminated={terminated} truncated={truncated} agent0_info={agent0_info}"
-                )
-            _write_video(video_path, frames, fps)
+                frames.append(_semantic_bev_mosaic(None))
+            if not semantic_frames:
+                semantic_frames.append(_semantic_bev_mosaic(None))
+            if save_topdown_video:
+                _write_video(video_path, frames, fps)
+            semantic_video_path = (
+                semantic_video_dir / f"episode_{ep_idx:04d}.mp4"
+            )
+            if save_semantic_bev_video:
+                _write_video(semantic_video_path, semantic_frames, fps)
+            trajectory_path = trajectory_dir / f"episode_{ep_idx:04d}.npz"
+            if save_trajectory_data:
+                _write_trajectory_npz(trajectory_path, trajectory_records)
             print(
-                f"  [{scenario_id}] ep {ep_idx + 1}/{num_episodes} -> {video_path.name} "
-                f"({len(frames)} frames, seed={used_seed})"
+                f"  [{scenario_id}] ep {ep_idx + 1}/{num_episodes} "
+                f"frames={len(frames)} seed={used_seed} "
+                f"planning={episode_diagnostics.get('native_joint_success_steps', 0)}/"
+                f"{episode_diagnostics.get('planning_attempt_steps', 0)} "
+                f"failure={episode_diagnostics.get('failure_reason')}"
             )
             if episode_unlock_record is None:
                 episode_unlock_record = FormationUnlockTracker(ep_idx).finalize()
             formation_unlock_records.append(episode_unlock_record)
+            episode_diagnostics.update(
+                {
+                    "episode": int(ep_idx),
+                    "scenario_id": scenario_id,
+                    "local_route": local_route,
+                    "topdown_video_path": (
+                        str(video_path) if save_topdown_video else None
+                    ),
+                    "semantic_bev_video_path": (
+                        str(semantic_video_path)
+                        if save_semantic_bev_video
+                        else None
+                    ),
+                    "trajectory_path": (
+                        str(trajectory_path) if save_trajectory_data else None
+                    ),
+                }
+            )
+            expert_episode_summaries.append(dict(episode_diagnostics))
+            _save_episode_metrics_json(
+                metrics_dir
+                / f"episode_{ep_idx:04d}"
+                / "expert_episode.json",
+                episode_diagnostics,
+            )
 
             if evaluate:
                 episode_pdms = {}
@@ -646,7 +1287,10 @@ def run_scenario(
                     "episode": ep_idx,
                     "seed": used_seed,
                     "video_path": str(video_path),
+                    "semantic_bev_video_path": str(semantic_video_path),
+                    "trajectory_path": str(trajectory_path),
                     "formation_unlock": episode_unlock_record,
+                    "expert_collection": episode_diagnostics,
                     "pdms": episode_pdms,
                     "steps": episode_steps,
                 }
@@ -667,6 +1311,28 @@ def run_scenario(
         _save_episode_metrics_json(metrics_dir / "formation_unlock_summary.json", unlock_summary)
         _plot_average_episode_pdms(metrics_dir / "ave_metrice.png", all_episode_step_records)
 
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    expert_summary = _aggregate_expert_episode_summaries(
+        expert_episode_summaries
+    )
+    expert_summary.update(
+        {
+            "scenario_id": scenario_id,
+            "local_route": local_route,
+            "seeds": list(episode_seeds),
+            "horizon": int(horizon),
+            "decision_policy": decision_policy,
+            "planning_policy": planning_policy,
+            "control_policy": control_policy,
+        }
+    )
+    _save_episode_metrics_json(
+        metrics_dir / "expert_collection_summary.json", expert_summary
+    )
+    _write_episode_summary_csv(
+        metrics_dir / "episode_summary.csv", expert_episode_summaries
+    )
+
     return video_dir
 
 
@@ -684,9 +1350,18 @@ def run_all_scenarios(
     evaluate: bool = False,
     metric_params: Optional[dict] = None,
     horizon: int = DEFAULT_HORIZON,
+    scenario_pairs: Sequence[tuple[str, str]] | None = None,
+    seeds: Sequence[int] | None = None,
+    save_topdown_video: bool = True,
+    save_semantic_bev_video: bool = True,
+    save_trajectory_data: bool = True,
 ) -> None:
     """Evaluate all defined scenarios (one env per scenario to avoid map conflicts)."""
-    pairs = _all_scenario_route_pairs()
+    pairs = list(
+        _all_scenario_route_pairs()
+        if scenario_pairs is None
+        else scenario_pairs
+    )
     print(
         f"\n=== Evaluating {len(pairs)} scenarios with "
         f"{decision_policy}/{planning_policy}/{control_policy} ===\n"
@@ -712,6 +1387,10 @@ def run_all_scenarios(
                 evaluate=evaluate,
                 metric_params=metric_params,
                 horizon=horizon,
+                seeds=seeds,
+                save_topdown_video=save_topdown_video,
+                save_semantic_bev_video=save_semantic_bev_video,
+                save_trajectory_data=save_trajectory_data,
             )
             results.append((scenario_id, route, f"OK  -> {video_dir}"))
         except Exception as exc:
@@ -730,6 +1409,64 @@ def run_all_scenarios(
     if evaluate:
         print(f"\nPer-episode metrics are saved under: {output_root}/<scenario_id>/metrices/")
 
+    combined: dict[str, object] = {
+        "scenario_count": len(pairs),
+        "completed_scenario_count": ok,
+        "scenarios": {},
+    }
+    combined_rows: list[dict[str, object]] = []
+    for scenario_id, route in pairs:
+        path = (
+            output_root
+            / scenario_id
+            / "metrices"
+            / "expert_collection_summary.json"
+        )
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as handle:
+            summary = json.load(handle)
+        combined["scenarios"][scenario_id] = summary
+        row = {
+            "scenario_id": scenario_id,
+            "local_route": route,
+            "episode_count": summary.get("episode_count", 0),
+            "collision_rate": summary.get("collision_rate", 0.0),
+            "out_of_road_rate": summary.get("out_of_road_rate", 0.0),
+            "persistable_episode_rate": summary.get(
+                "persistable_episode_rate", 0.0
+            ),
+            "native_joint_planning_success_rate": summary.get(
+                "native_joint_planning_success_rate", 0.0
+            ),
+            "collection_ready_step_success_rate": summary.get(
+                "collection_ready_step_success_rate", 0.0
+            ),
+            "mean_rollout_wall_time_s": (
+                summary.get("rollout_wall_time_s", {}).get("mean", 0.0)
+            ),
+            "mean_simulated_duration_s": (
+                summary.get("simulated_duration_s", {}).get("mean", 0.0)
+            ),
+            "failure_reasons": json.dumps(
+                summary.get("failure_reasons", {}),
+                sort_keys=True,
+                ensure_ascii=False,
+            ),
+        }
+        combined_rows.append(row)
+    _save_episode_metrics_json(
+        output_root / "expert_collection_summary.json", combined
+    )
+    if combined_rows:
+        csv_path = output_root / "expert_collection_summary.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle, fieldnames=tuple(combined_rows[0].keys())
+            )
+            writer.writeheader()
+            writer.writerows(combined_rows)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -742,12 +1479,24 @@ def main() -> None:
     parser.add_argument("--local-route", default=None)
     parser.add_argument("--all-scenarios", action="store_true",
                         help="Run all defined scenarios sequentially")
+    parser.add_argument(
+        "--primary-s5-s9",
+        action="store_true",
+        help="Run the frozen S5-S9 expert collection scenarios and routes",
+    )
     parser.add_argument("--num-agents", type=int, default=DEFAULT_NUM_AGENTS)
     parser.add_argument("--num-episodes", type=int, default=DEFAULT_NUM_EPISODES)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--heading-up", default="false")
     parser.add_argument("--traffic-density", type=float, default=DEFAULT_TRAFFIC_DENSITY)
     parser.add_argument("--start-seed", type=int, default=DEFAULT_START_SEED)
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Explicit unique episode seeds; count must equal --num-episodes",
+    )
     parser.add_argument("--video-fps", type=int, default=DEFAULT_VIDEO_FPS)
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON,
                         help=f"Override environment horizon / max steps per agent (default: {DEFAULT_HORIZON})")
@@ -761,13 +1510,40 @@ def main() -> None:
     parser.add_argument("--evaluate", action="store_true",
                         help="Compute PDMS reward from planner trajectories, "
                              "saving per-episode metrices files")
+    parser.add_argument(
+        "--no-topdown-video",
+        action="store_true",
+        help="Disable top-down trajectory-overlay video output",
+    )
+    parser.add_argument(
+        "--no-semantic-bev-video",
+        action="store_true",
+        help="Disable three-role semantic BEV mosaic video output",
+    )
+    parser.add_argument(
+        "--no-trajectory-data",
+        action="store_true",
+        help="Disable exact expert trajectory NPZ output",
+    )
     args = parser.parse_args()
-    args.evaluate = True
+    if args.all_scenarios and args.primary_s5_s9:
+        parser.error("--all-scenarios and --primary-s5-s9 are mutually exclusive")
 
     heading_up = args.heading_up.lower() in ("true", "1", "yes")
     output_root = Path(args.output_root)
 
-    if args.all_scenarios:
+    explicit_seeds = args.seeds
+    if args.primary_s5_s9 and explicit_seeds is None:
+        if args.num_episodes > len(DEFAULT_ROUND13_73_SEEDS):
+            parser.error(
+                "primary S5-S9 defaults provide at most 10 fixed seeds; "
+                "pass --seeds for a larger run"
+            )
+        explicit_seeds = list(
+            DEFAULT_ROUND13_73_SEEDS[: args.num_episodes]
+        )
+
+    if args.all_scenarios or args.primary_s5_s9:
         run_all_scenarios(
             num_agents=args.num_agents,
             num_episodes=args.num_episodes,
@@ -781,6 +1557,13 @@ def main() -> None:
             control_policy=args.control_policy,
             evaluate=args.evaluate,
             horizon=args.horizon,
+            scenario_pairs=(
+                PRIMARY_S5_S9_SCENARIOS if args.primary_s5_s9 else None
+            ),
+            seeds=explicit_seeds,
+            save_topdown_video=not args.no_topdown_video,
+            save_semantic_bev_video=not args.no_semantic_bev_video,
+            save_trajectory_data=not args.no_trajectory_data,
         )
     else:
         if not args.scenario_id:
@@ -800,6 +1583,10 @@ def main() -> None:
             control_policy=args.control_policy,
             evaluate=args.evaluate,
             horizon=args.horizon,
+            seeds=explicit_seeds,
+            save_topdown_video=not args.no_topdown_video,
+            save_semantic_bev_video=not args.no_semantic_bev_video,
+            save_trajectory_data=not args.no_trajectory_data,
         )
         print(f"\n=== Videos saved to: {video_dir} ===")
 

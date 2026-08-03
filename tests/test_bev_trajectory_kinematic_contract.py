@@ -52,6 +52,28 @@ def test_origin_to_first_point_and_reachability_are_enforced() -> None:
     assert "outside_reachable_distance" in result.violations
 
 
+def test_low_speed_stop_before_first_sample_is_reachable() -> None:
+    speed = 0.5
+    acceleration = -8.0
+    stop_time = speed / -acceleration
+    stop_distance = speed * stop_time + 0.5 * acceleration * stop_time**2
+    trajectory = np.zeros((8, 3), dtype=np.float32)
+    trajectory[:, 0] = stop_distance
+
+    result = validate_trajectory_kinematics(
+        trajectory,
+        speed,
+        np.zeros(3, dtype=np.float32),
+    )
+
+    assert result.valid
+    np.testing.assert_allclose(
+        result.reachable_min_distance_m,
+        stop_distance,
+        atol=1.0e-7,
+    )
+
+
 def test_acceleration_reverse_and_turning_violations_are_named() -> None:
     spike = _straight(8.0)
     spike[0, 0] = 8.0

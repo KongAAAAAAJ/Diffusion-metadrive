@@ -133,21 +133,27 @@ scenario_overrides:
     lc_cost: 1.5
     w_close_keep: 2.5
     mobil_lane_change_threshold: 0.5
-    w_formation_consistent: 0.1  # * 弱化编队一致性
-    lane_change_preference: 2  # * 强化主动换道
+    w_mobil: 0.4
+    w_formation_consistent: 1.0
+    lane_change_preference: -1.0
 
   # S6: 背景车从匝道合流 — 强化侧方安全，允许适度换道躲避
   S6_background_merge_in:
     traffic_safety_distance_m: 10.0
     agent_safety_distance_m: 8.0
-    lane_change_preference: 0.3
-    lc_cost: 0.5
-    w_mobil: 1.4
-    mobil_lane_change_threshold: 0.1
+    lane_change_preference: -2.0
+    lc_cost: 1.5
+    w_keep_bias: 2.0
+    w_close_keep: 2.0
+    w_formation_consistent: 1.0
+    w_mobil: 0.4
+    mobil_lane_change_threshold: 0.5
 
   # S7: ego编队从匝道合流 — 主动执行左换道汇入主路
   S7_ego_merge_from_ramp:
-    lane_change_preference: 8
+    # Generic scoring must KEEP before the route-gated forced merge window.
+    # The special merge action bypasses this bias once its trigger is valid.
+    lane_change_preference: -0.5
     lc_cost: 0.3
     w_mobil: 1.5
     mobil_lane_change_threshold: 0.05
