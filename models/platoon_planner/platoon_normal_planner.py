@@ -27,6 +27,86 @@ from models.platoon_planner.collision_geometry import (
 )
 
 
+def _point_in_triangle(
+    point: np.ndarray,
+    first: np.ndarray,
+    second: np.ndarray,
+    third: np.ndarray,
+) -> bool:
+    vectors = (
+        (second - first, point - first),
+        (third - second, point - second),
+        (first - third, point - third),
+    )
+    crosses = np.asarray(
+        [
+            float(edge[0] * relative[1] - edge[1] * relative[0])
+            for edge, relative in vectors
+        ],
+        dtype=np.float64,
+    )
+    return bool(np.all(crosses >= -1e-9) or np.all(crosses <= 1e-9))
+
+
+def _point_in_connected_lane_seam(point: np.ndarray, lanes: list[object]) -> bool:
+    """Return whether a point lies in a physical end-to-start lane seam."""
+
+    for predecessor in lanes:
+        predecessor_index = tuple(getattr(predecessor, "index", ()) or ())
+        if len(predecessor_index) < 2:
+            continue
+        predecessor_length = float(
+            getattr(predecessor, "length", 0.0) or 0.0
+        )
+        predecessor_width = float(
+            getattr(predecessor, "width", 3.5) or 3.5
+        )
+        for successor in lanes:
+            if successor is predecessor:
+                continue
+            successor_index = tuple(getattr(successor, "index", ()) or ())
+            if (
+                len(successor_index) < 2
+                or predecessor_index[1] != successor_index[0]
+            ):
+                continue
+            successor_width = float(
+                getattr(successor, "width", 3.5) or 3.5
+            )
+            try:
+                predecessor_center = np.asarray(
+                    predecessor.position(predecessor_length, 0.0)[:2],
+                    dtype=np.float64,
+                )
+                successor_center = np.asarray(
+                    successor.position(0.0, 0.0)[:2], dtype=np.float64
+                )
+                if np.linalg.norm(predecessor_center - successor_center) > (
+                    0.5 * (predecessor_width + successor_width) + 1.0
+                ):
+                    continue
+                polygon = tuple(
+                    np.asarray(value, dtype=np.float64)
+                    for value in (
+                        predecessor.position(
+                            predecessor_length, 0.5 * predecessor_width
+                        )[:2],
+                        successor.position(0.0, 0.5 * successor_width)[:2],
+                        successor.position(0.0, -0.5 * successor_width)[:2],
+                        predecessor.position(
+                            predecessor_length, -0.5 * predecessor_width
+                        )[:2],
+                    )
+                )
+            except Exception:
+                continue
+            if _point_in_triangle(point, polygon[0], polygon[1], polygon[2]) or (
+                _point_in_triangle(point, polygon[0], polygon[2], polygon[3])
+            ):
+                return True
+    return False
+
+
 def audit_dense_footprint_on_lanes(
     trajectory: np.ndarray,
     lanes: list[object] | tuple[object, ...],
@@ -101,6 +181,10 @@ def audit_dense_footprint_on_lanes(
                 ):
                     inside = True
                     break
+            if not inside and _point_in_connected_lane_seam(
+                point, valid_lanes
+            ):
+                inside = True
             if not inside:
                 return False, {
                     "reason": "footprint_point_outside_execution_lanes",
@@ -546,6 +630,37 @@ class PlatoonNormalPlanner:
                 "native_feasible": not bool(
                     joint_debug.get("fallback_used", True)
                 ),
+                "agent_diagnostics": {
+                    str(agent_id): {
+                        "fallback_reason": value.get("fallback_reason"),
+                        "raw_candidate_count": int(
+                            value.get("raw_candidate_count", 0) or 0
+                        ),
+                        "generated_valid_candidate_count": int(
+                            value.get("generated_valid_candidate_count", 0) or 0
+                        ),
+                        "road_rejection_count": int(
+                            value.get("road_rejection_count", 0) or 0
+                        ),
+                        "road_rejections_by_reason": dict(
+                            value.get("road_rejections_by_reason", {}) or {}
+                        ),
+                        "first_road_rejection": copy.deepcopy(
+                            value.get("first_road_rejection")
+                        ),
+                        "lane_end_rejection_count": int(
+                            value.get("lane_end_rejection_count", 0) or 0
+                        ),
+                        "kinematic_rejection_count": int(
+                            value.get("kinematic_rejection_count", 0) or 0
+                        ),
+                        "kinematic_rejections_by_reason": dict(
+                            value.get("kinematic_rejections_by_reason", {}) or {}
+                        ),
+                    }
+                    for agent_id, value in attempt_debug.items()
+                    if agent_id != "_joint" and isinstance(value, Mapping)
+                },
             }
             attempts.append(attempt)
             if not attempt["native_feasible"]:
@@ -796,6 +911,7 @@ class PlatoonNormalPlanner:
         collision_hits: Counter[str] = Counter()
         kinematic_hits: Counter[str] = Counter()
         road_hits: Counter[str] = Counter()
+        first_road_rejection: dict | None = None
         source_lane = getattr(vehicle, "lane", None)
         if source_lane is None:
             return [], self._empty_debug("missing_source_lane", stats, collision_hits)
@@ -833,6 +949,9 @@ class PlatoonNormalPlanner:
         )
         if target_lane is None:
             return [], self._empty_debug("target_lane_unavailable", stats, collision_hits)
+        predecessor_lane = self._get_predecessor_lane(
+            env, vehicle, source_lane
+        )
 
         continuation = self._continuation_context(source_lane, continuation_lane)
         total_length = source_length + continuation["remaining_length"]
@@ -1030,7 +1149,12 @@ class PlatoonNormalPlanner:
                         footprint_valid, footprint_detail = (
                             audit_dense_footprint_on_lanes(
                                 candidate_dense,
-                                (source_lane, target_lane, continuation_lane),
+                                (
+                                    predecessor_lane,
+                                    source_lane,
+                                    target_lane,
+                                    continuation_lane,
+                                ),
                                 self._vehicle_dimensions(vehicle),
                                 dense_dt_s=self.DENSE_DT_S,
                             )
@@ -1040,6 +1164,10 @@ class PlatoonNormalPlanner:
                             road_hits[
                                 str(footprint_detail.get("reason", "unknown"))
                             ] += 1
+                            if first_road_rejection is None:
+                                first_road_rejection = copy.deepcopy(
+                                    footprint_detail
+                                )
                             continue
                         output = candidate_dense[self._output_indices].astype(
                             np.float32, copy=False
@@ -1190,6 +1318,7 @@ class PlatoonNormalPlanner:
             **stats,
             "collision_rejections_by_object": dict(sorted(collision_hits.items())),
             "road_rejections_by_reason": dict(sorted(road_hits.items())),
+            "first_road_rejection": first_road_rejection,
             "kinematic_rejections_by_reason": dict(
                 sorted(kinematic_hits.items())
             ),
@@ -2620,6 +2749,56 @@ class PlatoonNormalPlanner:
         return best if best_distance <= 10.0 else None
 
     @staticmethod
+    def _get_predecessor_lane(env, vehicle, source_lane):
+        lane_index = tuple(getattr(source_lane, "index", ()) or ())
+        if len(lane_index) < 2:
+            return None
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        graph = getattr(road_network, "graph", None) or {}
+        try:
+            source_start = np.asarray(
+                source_lane.position(0.0, 0.0)[:2], dtype=np.float64
+            )
+            source_heading = float(source_lane.heading_theta_at(0.0))
+        except Exception:
+            return None
+        candidates = []
+        for start_node, end_dict in graph.items():
+            lanes = (end_dict or {}).get(lane_index[0], ()) or ()
+            for lane in lanes:
+                candidate_index = tuple(getattr(lane, "index", ()) or ())
+                if (
+                    len(candidate_index) < 2
+                    or candidate_index[0] != start_node
+                    or candidate_index[1] != lane_index[0]
+                ):
+                    continue
+                try:
+                    length = float(getattr(lane, "length", 0.0) or 0.0)
+                    endpoint = np.asarray(
+                        lane.position(length, 0.0)[:2], dtype=np.float64
+                    )
+                    heading = float(lane.heading_theta_at(length))
+                except Exception:
+                    continue
+                distance = float(np.linalg.norm(endpoint - source_start))
+                heading_error = abs(
+                    math.atan2(
+                        math.sin(heading - source_heading),
+                        math.cos(heading - source_heading),
+                    )
+                )
+                candidates.append((distance + heading_error, distance, lane))
+        if not candidates:
+            return None
+        _, distance, best = min(candidates, key=lambda value: value[:2])
+        return best if distance <= 10.0 else None
+
+    @staticmethod
     def _resolve_target_lane(env, source_lane, action: int):
         if int(action) == 0:
             return source_lane
@@ -3282,6 +3461,12 @@ class JointTrajectoryExecutor:
         trajectory: np.ndarray,
         spec: TrajectoryExecutionSpec,
     ) -> tuple[bool, dict]:
+        source_lane = self.planner._lane_from_index(
+            env, spec.source_lane_index
+        )
+        predecessor_lane = self.planner._get_predecessor_lane(
+            env, vehicle, source_lane
+        ) if source_lane is not None else None
         lanes = [
             self.planner._lane_from_index(env, lane_index)
             for lane_index in (
@@ -3291,6 +3476,7 @@ class JointTrajectoryExecutor:
             )
             if lane_index
         ]
+        lanes.insert(0, predecessor_lane)
         return audit_dense_footprint_on_lanes(
             trajectory,
             lanes,

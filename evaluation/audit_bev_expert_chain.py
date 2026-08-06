@@ -45,11 +45,7 @@ from scenarios.bev_round13_contract import (  # noqa: E402
 from scenarios.definitions import get_scenario_definition  # noqa: E402
 
 
-AUDIT_SCENARIOS = tuple(
-    value
-    for value in PRIMARY_S5_S9_SCENARIOS
-    if not value[0].startswith("S8_")
-)
+AUDIT_SCENARIOS = PRIMARY_S5_S9_SCENARIOS
 
 
 def _json_value(value):
@@ -140,6 +136,7 @@ def _compact_rule_debug(debug: Mapping[str, object]) -> dict[str, object]:
 def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
     result: dict[str, object] = {
         "joint": debug.get("_joint", {}),
+        "ranked": debug.get("_ranked", {}),
         "execution": debug.get("_execution", {}),
     }
     for agent_id in ("agent0", "agent1", "agent2"):

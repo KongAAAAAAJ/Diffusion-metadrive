@@ -7,11 +7,12 @@ from evaluation.audit_bev_expert_chain import (
 )
 
 
-def test_audit_scope_excludes_only_s8_from_primary_scenarios():
+def test_audit_scope_covers_complete_primary_scenarios():
     assert [value[0][:2] for value in AUDIT_SCENARIOS] == [
         "S5",
         "S6",
         "S7",
+        "S8",
         "S9",
     ]
 

@@ -38,6 +38,38 @@ class FakeLane:
         return 0.0
 
 
+class AngledLane:
+    def __init__(self, index, start, heading, length=10.0, width=3.5):
+        self.index = tuple(index)
+        self.start = np.asarray(start, dtype=np.float64)
+        self.heading = float(heading)
+        self.length = float(length)
+        self.width = float(width)
+        self.direction = np.asarray(
+            [np.cos(self.heading), np.sin(self.heading)], dtype=np.float64
+        )
+        self.direction_lateral = np.asarray(
+            [-np.sin(self.heading), np.cos(self.heading)], dtype=np.float64
+        )
+
+    def local_coordinates(self, position):
+        delta = np.asarray(position, dtype=np.float64) - self.start
+        return (
+            float(np.dot(delta, self.direction)),
+            float(np.dot(delta, self.direction_lateral)),
+        )
+
+    def position(self, longitudinal: float, lateral: float):
+        return (
+            self.start
+            + float(longitudinal) * self.direction
+            + float(lateral) * self.direction_lateral
+        )
+
+    def heading_theta_at(self, longitudinal: float):  # noqa: ARG002
+        return self.heading
+
+
 class FakeRoadNetwork:
     def __init__(self):
         self._lanes = {
@@ -277,6 +309,31 @@ def test_candidate_and_executor_share_identical_footprint_contract():
 
     assert candidate_result == executor_result
     assert candidate_result[0] is False
+
+
+def test_dense_footprint_accepts_connected_lane_seam_without_boundary_relaxation():
+    predecessor = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0)
+    successor = AngledLane(("B", "C", 0), (10.0, 0.0), 0.1)
+    trajectory = np.asarray([[7.24, 0.0, 0.0]], dtype=np.float64)
+
+    connected = audit_dense_footprint_on_lanes(
+        trajectory,
+        (predecessor, successor),
+        (5.74, 2.3),
+        dense_dt_s=0.1,
+    )
+    disconnected = audit_dense_footprint_on_lanes(
+        trajectory,
+        (
+            predecessor,
+            AngledLane(("X", "C", 0), (10.0, 0.0), 0.1),
+        ),
+        (5.74, 2.3),
+        dense_dt_s=0.1,
+    )
+
+    assert connected == (True, {"reason": "passed"})
+    assert disconnected[0] is False
 
 
 def test_ranked_planner_uses_first_rule_rank_with_native_trajectory(monkeypatch):
