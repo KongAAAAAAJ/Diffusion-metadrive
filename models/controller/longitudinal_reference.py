@@ -16,6 +16,7 @@ MAX_ACCEL_MPS2 = 5.0
 # authority, not a relaxed safety boundary.
 EXECUTABLE_MIN_ACCEL_MPS2 = -2.6
 EXECUTABLE_MAX_ACCEL_MPS2 = 0.4
+ACCELERATION_BIAS_MPS2 = 0.0
 
 
 class LongitudinalReferenceError(ValueError):
@@ -38,6 +39,7 @@ class LongitudinalCascadeController:
         integral_limit: float = 2.0,
         actuator_delay_s: float = 0.30,
         stop_release_speed_mps: float = 0.30,
+        acceleration_bias_mps2: float = ACCELERATION_BIAS_MPS2,
     ) -> None:
         values = np.asarray(
             [
@@ -50,13 +52,14 @@ class LongitudinalCascadeController:
                 integral_limit,
                 actuator_delay_s,
                 stop_release_speed_mps,
+                acceleration_bias_mps2,
             ],
             dtype=np.float64,
         )
         if (
             dt_s <= 0.0
             or not np.isfinite(values).all()
-            or np.any(values < 0.0)
+            or np.any(values[:-1] < 0.0)
             or integral_limit <= 0.0
             or actuator_delay_s < 0.0
         ):
@@ -75,6 +78,7 @@ class LongitudinalCascadeController:
         self.integral_limit = float(integral_limit)
         self.actuator_delay_s = float(actuator_delay_s)
         self.stop_release_speed_mps = float(stop_release_speed_mps)
+        self.acceleration_bias_mps2 = float(acceleration_bias_mps2)
         self._integral: dict[str, float] = {}
         self._control_regime: dict[str, str] = {}
 
@@ -160,12 +164,15 @@ class LongitudinalCascadeController:
             desired_acceleration = 0.0
             overzero_guard = True
             self._integral[key] = 0.0
+        compensated_acceleration = float(
+            desired_acceleration - self.acceleration_bias_mps2
+        )
         scale = (
             EXECUTABLE_MAX_ACCEL_MPS2
-            if desired_acceleration >= 0.0
+            if compensated_acceleration >= 0.0
             else abs(EXECUTABLE_MIN_ACCEL_MPS2)
         )
-        throttle = float(np.clip(desired_acceleration / scale, -1.0, 1.0))
+        throttle = float(np.clip(compensated_acceleration / scale, -1.0, 1.0))
         return throttle, {
             "longitudinal_reference_source": reference.source,
             "reference_speed_mps": float(target_speed),
@@ -179,6 +186,8 @@ class LongitudinalCascadeController:
             "position_feedback_mps2": position_term,
             "gap_feedback_mps2": gap,
             "desired_acceleration_mps2": desired_acceleration,
+            "compensated_acceleration_mps2": compensated_acceleration,
+            "acceleration_bias_mps2": self.acceleration_bias_mps2,
             "raw_desired_acceleration_mps2": float(raw_acceleration),
             "control_saturated": bool(saturated or abs(throttle) >= 0.999),
             "normalized_throttle": throttle,
@@ -557,6 +566,7 @@ def build_feedback_executable_profile(
 
 
 __all__ = [
+    "ACCELERATION_BIAS_MPS2",
     "EXECUTABLE_MAX_ACCEL_MPS2",
     "EXECUTABLE_MIN_ACCEL_MPS2",
     "LongitudinalReferenceError",

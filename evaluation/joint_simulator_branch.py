@@ -582,6 +582,9 @@ class JointSimulatorBranchEvaluator:
                     "formation_control_increment": [],
                     "actual_speed_mps": [],
                     "actual_acceleration_mps2": [],
+                    "desired_acceleration_mps2": [],
+                    "acceleration_bias_mps2": [],
+                    "controller_speed_error_mps": [],
                     "control_saturated": [],
                     "lateral_heading_contaminated": [],
                     "maximum_continuous_saturation_s": 0.0,
@@ -714,6 +717,10 @@ class JointSimulatorBranchEvaluator:
                         )
                         for agent_id in AGENT_IDS
                     }
+                    controller_debug = dict(
+                        getattr(env, "_last_longitudinal_control_debug", {})
+                        or {}
+                    )
                     _, _, terminated, truncated, info = env.step(low_level_action)
                     executed_controls = (
                         getattr(env, "_pending_low_level_actions", {}) or {}
@@ -841,6 +848,16 @@ class JointSimulatorBranchEvaluator:
                                 - diagnostic["current_speed"]
                             )
                             / dt_s
+                        )
+                        debug = controller_debug.get(agent_id, {})
+                        trace["desired_acceleration_mps2"].append(
+                            float(debug.get("desired_acceleration_mps2", 0.0))
+                        )
+                        trace["acceleration_bias_mps2"].append(
+                            float(debug.get("acceleration_bias_mps2", 0.0))
+                        )
+                        trace["controller_speed_error_mps"].append(
+                            float(debug.get("speed_error_mps", 0.0))
                         )
                         trace["control_saturated"].append(
                             abs(float(controls[agent_id][1])) >= 0.999

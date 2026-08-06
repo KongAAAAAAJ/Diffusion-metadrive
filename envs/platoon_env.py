@@ -129,6 +129,7 @@ class PlatoonEnvConfig:
         preview_lookahead_min_m: float = 3.0,
         preview_lookahead_max_m: float = 8.0,
         preview_heading_weight: float = 0.5,
+        acceleration_bias_mps2: float = 0.0,
     ) -> None:
         self.num_agents = int(num_agents)
         self.use_render = bool(use_render)
@@ -174,6 +175,7 @@ class PlatoonEnvConfig:
         self.preview_lookahead_min_m = float(preview_lookahead_min_m)
         self.preview_lookahead_max_m = float(preview_lookahead_max_m)
         self.preview_heading_weight = float(preview_heading_weight)
+        self.acceleration_bias_mps2 = float(acceleration_bias_mps2)
 
 
 class PlatoonEnv(BaseMultiEnv):
@@ -218,9 +220,13 @@ class PlatoonEnv(BaseMultiEnv):
         self._pending_step_mode_valid_masks: dict[str, np.ndarray] = {}   # (num_modes,) bool
         self._trajectory_reward_cache: Optional[dict[str, object]] = None
         self._lateral_preview_pid_state: dict[str, tuple[float, float, bool]] = {}
+        self._last_longitudinal_control_debug: dict[str, dict[str, object]] = {}
         self._trajectory_longitudinal_controller = LongitudinalCascadeController(
             dt_s=float(merged.get("physics_world_step_size", 0.02))
-            * int(merged.get("decision_repeat", 5))
+            * int(merged.get("decision_repeat", 5)),
+            acceleration_bias_mps2=float(
+                merged.get("acceleration_bias_mps2", 0.0)
+            ),
         )
         super().__init__(config=self._build_metadrive_config())
         self._install_platoon_runtime_config()
@@ -312,6 +318,7 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_min_m": self.platoon_config.preview_lookahead_min_m,
             "preview_lookahead_max_m": self.platoon_config.preview_lookahead_max_m,
             "preview_heading_weight": self.platoon_config.preview_heading_weight,
+            "acceleration_bias_mps2": self.platoon_config.acceleration_bias_mps2,
         }
 
     def _install_platoon_runtime_config(self) -> None:
@@ -467,6 +474,7 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_min_m",
             "preview_lookahead_max_m",
             "preview_heading_weight",
+            "acceleration_bias_mps2",
         }
         return {key: config[key] for key in keys if key in config}
 
@@ -510,6 +518,7 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_min_m",
             "preview_lookahead_max_m",
             "preview_heading_weight",
+            "acceleration_bias_mps2",
             # scenario_id / local_route are intentionally excluded here so they pass
             # through to the MetaDrive config via _build_metadrive_config explicitly.
         }
@@ -793,6 +802,7 @@ class PlatoonEnv(BaseMultiEnv):
         self._pending_step_all_candidates = {}
         self._pending_step_mode_valid_masks = {}
         self._lateral_preview_pid_state = {}
+        self._last_longitudinal_control_debug = {}
         self._trajectory_longitudinal_controller.reset()
 
         return self._augment_observations(obs)
@@ -1873,14 +1883,20 @@ class PlatoonEnv(BaseMultiEnv):
         if longitudinal_controller is None:
             longitudinal_controller = LongitudinalCascadeController(
                 dt_s=self._cfg_float("physics_world_step_size", 0.02)
-                * self._cfg_int("decision_repeat", 5)
+                * self._cfg_int("decision_repeat", 5),
+                acceleration_bias_mps2=self._cfg_float(
+                    "acceleration_bias_mps2", 0.0
+                ),
             )
             self._trajectory_longitudinal_controller = longitudinal_controller
-        throttle, _ = longitudinal_controller.compute(
+        throttle, longitudinal_debug = longitudinal_controller.compute(
             agent_id,
             current_speed,
             longitudinal_reference,
             gap_acceleration_mps2=gap_acceleration,
+        )
+        self._last_longitudinal_control_debug[agent_id] = dict(
+            longitudinal_debug
         )
         return np.asarray([steering, throttle], dtype=np.float32)
 

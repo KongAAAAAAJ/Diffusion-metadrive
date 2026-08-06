@@ -143,6 +143,24 @@ def test_time_preview_does_not_mix_arc_position_error_into_speed() -> None:
     assert acceleration == pytest.approx(0.0)
 
 
+def test_acceleration_bias_compensates_zero_acceleration_mapping() -> None:
+    reference = trajectory_to_longitudinal_reference(
+        _trajectory(4.0), 4.0, source="bias"
+    )
+    default_throttle, default_debug = LongitudinalCascadeController().compute(
+        "agent0", 4.0, reference
+    )
+    corrected_throttle, corrected_debug = LongitudinalCascadeController(
+        acceleration_bias_mps2=-0.08
+    ).compute("agent0", 4.0, reference)
+    assert default_throttle == pytest.approx(0.0)
+    assert default_debug["acceleration_bias_mps2"] == pytest.approx(0.0)
+    assert corrected_debug["desired_acceleration_mps2"] == pytest.approx(0.0)
+    assert corrected_debug["compensated_acceleration_mps2"] == pytest.approx(0.08)
+    assert corrected_debug["acceleration_bias_mps2"] == pytest.approx(-0.08)
+    assert corrected_throttle == pytest.approx(0.2)
+
+
 def test_drive_and_brake_pi_use_separate_regimes_and_stop_overzero_guard() -> None:
     controller = LongitudinalCascadeController()
     cruise = trajectory_to_longitudinal_reference(

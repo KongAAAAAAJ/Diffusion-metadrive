@@ -67,7 +67,12 @@ class PIDTrajectoryController(BaseController):
         decision_dt = float(cfg.get("physics_world_step_size", 0.02)) * int(
             cfg.get("decision_repeat", 5)
         )
-        self._longitudinal = LongitudinalCascadeController(dt_s=decision_dt)
+        self._longitudinal = LongitudinalCascadeController(
+            dt_s=decision_dt,
+            acceleration_bias_mps2=float(
+                cfg.get("acceleration_bias_mps2", 0.0)
+            ),
+        )
         self._last_debug: dict[str, dict[str, object]] = {}
 
     def reset(self) -> None:

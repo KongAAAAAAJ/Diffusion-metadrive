@@ -61,14 +61,20 @@ class _IndependentControlEnv(SensorlessJointBEVPlatoonEnv):
         if controller is None:
             controller = LongitudinalCascadeController(
                 dt_s=self._cfg_float("physics_world_step_size", 0.02)
-                * self._cfg_int("decision_repeat", 5)
+                * self._cfg_int("decision_repeat", 5),
+                acceleration_bias_mps2=self._cfg_float(
+                    "acceleration_bias_mps2", 0.0
+                ),
             )
             self._trajectory_longitudinal_controller = controller
-        throttle, _ = controller.compute(
+        throttle, longitudinal_debug = controller.compute(
             agent_id,
             current_speed,
             longitudinal_reference,
             gap_acceleration_mps2=0.0,
+        )
+        self._last_longitudinal_control_debug[agent_id] = dict(
+            longitudinal_debug
         )
         return np.asarray([steering, throttle], dtype=np.float32)
 
@@ -427,8 +433,12 @@ def _episode_spec(
     case: ControlTrackingCase,
     *,
     seed: int,
+    acceleration_bias_mps2: float,
 ) -> JointEpisodeSpec:
-    config = {"initial_speed_km_h": case.initial_speed_mps * 3.6}
+    config = {
+        "initial_speed_km_h": case.initial_speed_mps * 3.6,
+        "acceleration_bias_mps2": float(acceleration_bias_mps2),
+    }
     provisional = JointEpisodeSpec(
         DEFAULT_SCENARIO,
         DEFAULT_ROUTE,
@@ -457,6 +467,7 @@ def run_control_tracking_benchmark(
     seed: int = 17,
     evaluator: JointSimulatorBranchEvaluator | None = None,
     control_modes: Sequence[str] | None = None,
+    acceleration_bias_mps2: float = 0.0,
 ) -> dict[str, object]:
     output = Path(output_root)
     output.mkdir(parents=True, exist_ok=True)
@@ -475,6 +486,8 @@ def run_control_tracking_benchmark(
         raise ControlBenchmarkError(
             "control_modes must contain locked and/or independent"
         )
+    if not np.isfinite(float(acceleration_bias_mps2)):
+        raise ControlBenchmarkError("acceleration_bias_mps2 must be finite")
     evaluators = {
         "locked": evaluator or JointSimulatorBranchEvaluator(),
         "independent": (
@@ -487,7 +500,12 @@ def run_control_tracking_benchmark(
     for control_mode in modes:
         branch = evaluators[control_mode]
         for case in selected:
-            spec = _episode_spec(branch, case, seed=seed)
+            spec = _episode_spec(
+                branch,
+                case,
+                seed=seed,
+                acceleration_bias_mps2=float(acceleration_bias_mps2),
+            )
             candidates = np.stack([[case.trajectory] * 3]).astype(np.float32)
             result = branch.evaluate(spec, (), candidates)
             row = summarize_control_result(
@@ -532,6 +550,18 @@ def run_control_tracking_benchmark(
                     [trace["actual_acceleration_mps2"] for trace in traces],
                     dtype=np.float64,
                 ),
+                desired_acceleration_mps2=np.asarray(
+                    [trace["desired_acceleration_mps2"] for trace in traces],
+                    dtype=np.float64,
+                ),
+                acceleration_bias_mps2=np.asarray(
+                    [trace["acceleration_bias_mps2"] for trace in traces],
+                    dtype=np.float64,
+                ),
+                controller_speed_error_mps=np.asarray(
+                    [trace["controller_speed_error_mps"] for trace in traces],
+                    dtype=np.float64,
+                ),
                 reference_speed_mps=np.asarray(
                     [trace["reference_feedforward_speed_mps"] for trace in traces],
                     dtype=np.float64,
@@ -571,6 +601,7 @@ def run_control_tracking_benchmark(
         "route": DEFAULT_ROUTE,
         "seed": int(seed),
         "control_modes": list(modes),
+        "acceleration_bias_mps2": float(acceleration_bias_mps2),
         "thresholds": {
             "longitudinal_p95_m": 1.0,
             "longitudinal_p99_m": 1.5,
@@ -602,6 +633,7 @@ def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--acceleration-bias-mps2", type=float, default=0.0)
     parser.add_argument("--cases", nargs="+", default=None)
     parser.add_argument(
         "--control-modes",
@@ -615,6 +647,7 @@ def _main() -> int:
         case_names=args.cases,
         seed=args.seed,
         control_modes=args.control_modes,
+        acceleration_bias_mps2=args.acceleration_bias_mps2,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["passed"] else 2
