@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 
 from evaluation.audit_bev_expert_chain import (
@@ -8,6 +9,18 @@ from evaluation.audit_bev_expert_chain import (
     audit_episode,
 )
 from expert_dataset.run_joint_bev_collection import load_run_config
+from metadrive.engine.base_engine import BaseEngine, COLOR_SPACE
+from metadrive.engine.core.engine_core import EngineCore
+
+
+def _assert_process_engine_state_is_clean() -> None:
+    """Enforce the process-local teardown contract between real episodes."""
+
+    assert BaseEngine.singleton is None
+    assert EngineCore.global_config is None
+    assert not BaseEngine.COLORS_OCCUPIED
+    assert BaseEngine.COLORS_FREE == set(COLOR_SPACE)
+    assert not hasattr(builtins, "base")
 
 
 def _run_episode(scenario_id: str, route: str, seed: int, max_steps: int):
@@ -25,6 +38,7 @@ def _run_episode(scenario_id: str, route: str, seed: int, max_steps: int):
         )
     finally:
         env.close()
+        _assert_process_engine_state_is_clean()
 
 
 def _signature(result: dict) -> tuple:
