@@ -164,6 +164,8 @@ def test_benchmark_writes_json_and_numeric_npz(tmp_path) -> None:
             assert data["actual_world"].shape == (3, 8, 3)
             assert data["steering"].shape == (3, 8)
             assert data["actual_acceleration_mps2"].shape == (3, 8)
+            assert data["warmup_speed_mps"].shape == (0,)
+            assert data["warmup_throttle"].shape == (0,)
 
 
 def test_unknown_case_is_rejected(tmp_path) -> None:

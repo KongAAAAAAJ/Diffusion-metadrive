@@ -25,7 +25,10 @@ from evaluation.joint_simulator_branch import (
 from evaluation.longitudinal_tracking_diagnostics import (
     build_longitudinal_tracking_report,
 )
-from expert_dataset.collect_joint_bev import SensorlessJointBEVPlatoonEnv
+from expert_dataset.collect_joint_bev import (
+    SensorlessJointBEVPlatoonEnv,
+    simulator_decision_dt_s,
+)
 from models.bev_planner.mode_contract import validate_trajectory_kinematics
 from models.controller.longitudinal_reference import (
     LongitudinalCascadeController,
@@ -77,6 +80,42 @@ class _IndependentControlEnv(SensorlessJointBEVPlatoonEnv):
             longitudinal_debug
         )
         return np.asarray([steering, throttle], dtype=np.float32)
+
+
+class _ControlBenchmarkBranchEvaluator(JointSimulatorBranchEvaluator):
+    """Branch evaluator that additionally replays low-level warm-start controls.
+
+    The production reward evaluator deliberately keeps its trajectory-only
+    prefix contract.  This diagnostic subclass broadens that contract only for
+    the isolated controller benchmark.
+    """
+
+    @staticmethod
+    def _validate_prefix(
+        prefix_actions: Sequence[Mapping[str, np.ndarray]],
+    ) -> tuple[dict[str, np.ndarray], ...]:
+        checked: list[dict[str, np.ndarray]] = []
+        for step in prefix_actions:
+            if not isinstance(step, Mapping) or set(step) != set(AGENT_IDS):
+                raise ControlBenchmarkError(
+                    "each warm-start action must contain exactly agent0/1/2"
+                )
+            values: dict[str, np.ndarray] = {}
+            for agent_id in AGENT_IDS:
+                control = np.asarray(step[agent_id])
+                if (
+                    control.shape != (2,)
+                    or not np.issubdtype(control.dtype, np.floating)
+                    or not np.isfinite(control).all()
+                ):
+                    raise ControlBenchmarkError(
+                        "warm-start controls must be finite floating-point [2]"
+                    )
+                values[agent_id] = np.ascontiguousarray(
+                    control, dtype=np.float32
+                )
+            checked.append(values)
+        return tuple(checked)
 
 
 @dataclass(frozen=True)
@@ -428,15 +467,26 @@ def summarize_control_result(
     }
 
 
-def _episode_spec(
+def _prepare_natural_start(
     evaluator: JointSimulatorBranchEvaluator,
     case: ControlTrackingCase,
     *,
     seed: int,
     acceleration_bias_mps2: float,
-) -> JointEpisodeSpec:
+) -> tuple[
+    JointEpisodeSpec,
+    tuple[Mapping[str, np.ndarray], ...],
+    dict[str, object],
+]:
+    """Reach the case initial speed through vehicle dynamics, never teleporting it.
+
+    The returned low-level prefix is replayed by every simulator branch.  Its
+    samples are diagnostic initialization data and are deliberately excluded
+    from the four-second trajectory tracking metrics.
+    """
+
     config = {
-        "initial_speed_km_h": case.initial_speed_mps * 3.6,
+        "initial_speed_km_h": 0.0,
         "acceleration_bias_mps2": float(acceleration_bias_mps2),
     }
     provisional = JointEpisodeSpec(
@@ -448,16 +498,116 @@ def _episode_spec(
     )
     env = evaluator._make_env(provisional)
     try:
+        # Lightweight test evaluators do not expose a real simulation step.
+        # Preserve their isolated summary contract without pretending that a
+        # physical warm start was performed.
+        if not callable(getattr(env, "step", None)):
+            reference = capture_joint_pose_global(env)
+            direct_config = dict(config)
+            direct_config["initial_speed_km_h"] = case.initial_speed_mps * 3.6
+            return (
+                JointEpisodeSpec(
+                    DEFAULT_SCENARIO,
+                    DEFAULT_ROUTE,
+                    int(seed),
+                    reference,
+                    env_config=direct_config,
+                ),
+                (),
+                {
+                    "mode": "test_double_direct_start",
+                    "target_speed_mps": case.initial_speed_mps,
+                    "steps": 0,
+                    "duration_s": 0.0,
+                    "terminal_speed_mps": [case.initial_speed_mps] * 3,
+                    "speed_history_mps": [],
+                    "throttle_history": [],
+                },
+            )
+
+        target = float(case.initial_speed_mps)
+        dt_s = float(simulator_decision_dt_s(env))
+        maximum_steps = max(1, int(math.ceil(20.0 / dt_s)))
+        required_stable_steps = max(1, int(math.ceil(1.0 / dt_s)))
+        stable_steps = 0
+        prefix: list[Mapping[str, np.ndarray]] = []
+        speed_history: list[list[float]] = []
+        throttle_history: list[list[float]] = []
+        for _ in range(maximum_steps):
+            speeds = [
+                float(signed_longitudinal_speed_mps(env.agents[agent_id]))
+                for agent_id in AGENT_IDS
+            ]
+            controls: dict[str, np.ndarray] = {}
+            throttles: list[float] = []
+            for agent_id, speed in zip(AGENT_IDS, speeds):
+                error = target - speed
+                # This is only a deterministic physical-state initializer.  It
+                # intentionally does not reuse or tune the controller under
+                # test, and permits mild braking to settle an overshoot.
+                throttle = float(np.clip(0.05 + 0.22 * error, -0.25, 0.65))
+                controls[agent_id] = np.asarray(
+                    [0.0, throttle], dtype=np.float32
+                )
+                throttles.append(throttle)
+            prefix.append(
+                {key: value.copy() for key, value in controls.items()}
+            )
+            speed_history.append(speeds)
+            throttle_history.append(throttles)
+            _, _, terminated, truncated, _ = env.step(controls)
+            terminated_all = (
+                bool(terminated.get("__all__", False))
+                if isinstance(terminated, Mapping)
+                else bool(terminated)
+            )
+            truncated_all = (
+                bool(truncated.get("__all__", False))
+                if isinstance(truncated, Mapping)
+                else bool(truncated)
+            )
+            if terminated_all or truncated_all:
+                raise ControlBenchmarkError(
+                    "natural-start initialization terminated before target speed"
+                )
+            next_speeds = [
+                float(signed_longitudinal_speed_mps(env.agents[agent_id]))
+                for agent_id in AGENT_IDS
+            ]
+            if max(abs(target - value) for value in next_speeds) <= 0.15:
+                stable_steps += 1
+            else:
+                stable_steps = 0
+            if stable_steps >= required_stable_steps:
+                break
+        else:
+            raise ControlBenchmarkError(
+                "natural-start initialization did not stabilize within 20s"
+            )
+
         reference = capture_joint_pose_global(env)
+        terminal_speeds = [
+            float(signed_longitudinal_speed_mps(env.agents[agent_id]))
+            for agent_id in AGENT_IDS
+        ]
     finally:
         env.close()
-    return JointEpisodeSpec(
-        DEFAULT_SCENARIO,
-        DEFAULT_ROUTE,
-        int(seed),
-        reference,
-        env_config=config,
+    spec = JointEpisodeSpec(
+        DEFAULT_SCENARIO, DEFAULT_ROUTE, int(seed), reference, env_config=config
     )
+    diagnostics = {
+        "mode": "natural_from_rest",
+        "target_speed_mps": target,
+        "steps": len(prefix),
+        "duration_s": len(prefix) * dt_s,
+        "terminal_speed_mps": terminal_speeds,
+        "maximum_terminal_speed_error_mps": max(
+            abs(target - value) for value in terminal_speeds
+        ),
+        "speed_history_mps": speed_history,
+        "throttle_history": throttle_history,
+    }
+    return spec, tuple(prefix), diagnostics
 
 
 def run_control_tracking_benchmark(
@@ -489,28 +639,35 @@ def run_control_tracking_benchmark(
     if not np.isfinite(float(acceleration_bias_mps2)):
         raise ControlBenchmarkError("acceleration_bias_mps2 must be finite")
     evaluators = {
-        "locked": evaluator or JointSimulatorBranchEvaluator(),
+        "locked": evaluator or _ControlBenchmarkBranchEvaluator(),
         "independent": (
             evaluator
             if evaluator is not None
-            else JointSimulatorBranchEvaluator(env_factory=_IndependentControlEnv)
+            else _ControlBenchmarkBranchEvaluator(
+                env_factory=_IndependentControlEnv
+            )
         ),
     }
     rows = []
     for control_mode in modes:
         branch = evaluators[control_mode]
         for case in selected:
-            spec = _episode_spec(
+            spec, prefix_actions, initialization = _prepare_natural_start(
                 branch,
                 case,
                 seed=seed,
                 acceleration_bias_mps2=float(acceleration_bias_mps2),
             )
             candidates = np.stack([[case.trajectory] * 3]).astype(np.float32)
-            result = branch.evaluate(spec, (), candidates)
+            result = branch.evaluate(spec, prefix_actions, candidates)
             row = summarize_control_result(
                 case, result, control_mode=control_mode
             )
+            row["initialization"] = {
+                key: value
+                for key, value in initialization.items()
+                if key not in {"speed_history_mps", "throttle_history"}
+            }
             rows.append(row)
             traces = result.tracking_traces[0]
             np.savez_compressed(
@@ -592,6 +749,12 @@ def run_control_tracking_benchmark(
                     [trace["control_saturated"] for trace in traces],
                     dtype=np.bool_,
                 ),
+                warmup_speed_mps=np.asarray(
+                    initialization["speed_history_mps"], dtype=np.float64
+                ),
+                warmup_throttle=np.asarray(
+                    initialization["throttle_history"], dtype=np.float64
+                ),
             )
     gap_contract = evaluate_gap_feedback_contract()
     report = {
@@ -602,6 +765,7 @@ def run_control_tracking_benchmark(
         "seed": int(seed),
         "control_modes": list(modes),
         "acceleration_bias_mps2": float(acceleration_bias_mps2),
+        "initialization": "natural_from_rest",
         "thresholds": {
             "longitudinal_p95_m": 1.0,
             "longitudinal_p99_m": 1.5,
