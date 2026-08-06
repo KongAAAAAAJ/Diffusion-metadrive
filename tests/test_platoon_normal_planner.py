@@ -570,6 +570,15 @@ def test_resolve_target_lane_uses_s8_hardcoded_branch_for_3c0_right_lane():
     assert tuple(target_lane.index) == ("3C0_1_", "4G1_0_", 0)
 
 
+def test_resolve_target_lane_rejects_negative_lane_id():
+    env = _env(agent_lane_id=0)
+    source_lane = env.engine.current_map.road_network.get_lane(("A", "B", 0))
+
+    assert PlatoonNormalPlanner._resolve_target_lane(
+        env, source_lane, action=-1
+    ) is None
+
+
 def test_target_point_changes_terminal_progress():
     env = _env(agent_lane_id=1)
     planner = PlatoonNormalPlanner()
@@ -1040,11 +1049,11 @@ def test_joint_selection_replaces_conflicting_local_optimum():
     env = _env()
     lane = env.agents["agent0"].lane
     env.agents = {
-        "agent0": _vehicle("agent0", 12.0, 0.0, lane),
+        "agent0": _vehicle("agent0", 14.0, 0.0, lane),
         "agent1": _vehicle("agent1", 0.0, 0.0, lane),
     }
-    front_fast = _candidate(np.linspace(12.0, 28.0, 9), 0.0)
-    front_slow = _candidate(np.linspace(12.0, 20.0, 9), 1.0)
+    front_fast = _candidate(np.linspace(14.0, 30.0, 9), 0.0)
+    front_slow = _candidate(np.linspace(14.0, 22.0, 9), 1.0)
     rear_fast = _candidate(np.linspace(0.0, 24.0, 9), 0.0)
     rear_slow = _candidate(np.linspace(0.0, 8.0, 9), 1.0)
 
@@ -1069,11 +1078,11 @@ def test_independent_joint_selection_skips_formation_penalty(monkeypatch):
     env = _env()
     lane = env.agents["agent0"].lane
     env.agents = {
-        "agent0": _vehicle("agent0", 20.0, 0.0, lane),
+        "agent0": _vehicle("agent0", 22.0, 0.0, lane),
         "agent1": _vehicle("agent1", 8.0, 0.0, lane),
     }
     candidates = {
-        "agent0": [_candidate(np.linspace(20.0, 28.0, 9), 0.0)],
+        "agent0": [_candidate(np.linspace(22.0, 30.0, 9), 0.0)],
         "agent1": [_candidate(np.linspace(8.0, 16.0, 9), 0.0)],
     }
 

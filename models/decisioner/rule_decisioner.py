@@ -1992,14 +1992,20 @@ class MultiAgentRuleMaker(RuleMaker):
         lane_index = tuple(getattr(source_lane, "index", ()) or ())
         if len(lane_index) < 3:
             return None
-        target_index = tuple(list(lane_index[:2]) + [int(lane_index[2]) + int(action)])
+        target_lane_id = int(lane_index[2]) + int(action)
+        if target_lane_id < 0:
+            return None
+        target_index = tuple(list(lane_index[:2]) + [target_lane_id])
         road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
         if road_network is None or not hasattr(road_network, "get_lane"):
             return None
         try:
-            return road_network.get_lane(target_index)
+            target_lane = road_network.get_lane(target_index)
         except Exception:
             return None
+        if tuple(getattr(target_lane, "index", ()) or ()) != target_index:
+            return None
+        return target_lane
 
     def _S8_downstream_target_lane(self, env, vehicle, source_lane):
         debug = 0

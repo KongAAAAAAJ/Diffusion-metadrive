@@ -45,11 +45,18 @@ class PIDTrajectoryController(BaseController):
     def __init__(self, config: dict | None = None) -> None:
         super().__init__(config)
         cfg = self.config
+        decision_dt = float(cfg.get("physics_world_step_size", 0.02)) * int(
+            cfg.get("decision_repeat", 5)
+        )
+        if not np.isfinite(decision_dt) or decision_dt <= 0.0:
+            raise ValueError("controller decision timestep must be positive")
         self.lookahead_index = int(cfg.get("pid_lookahead_index", cfg.get("lookahead_index", 2)))
-        self.dt = float(cfg.get("pid_dt", 0.5))
-        self.lateral_kp = float(cfg.get("pid_lateral_kp", 0.85))
+        self.dt = float(cfg.get("pid_dt", decision_dt))
+        if not np.isfinite(self.dt) or self.dt <= 0.0:
+            raise ValueError("pid_dt must be positive")
+        self.lateral_kp = float(cfg.get("pid_lateral_kp", 1.6))
         self.lateral_ki = float(cfg.get("pid_lateral_ki", 0.0))
-        self.lateral_kd = float(cfg.get("pid_lateral_kd", 0.08))
+        self.lateral_kd = float(cfg.get("pid_lateral_kd", 0.12))
         self.heading_kp = float(cfg.get("pid_heading_kp", 0.35))
         self.heading_ki = float(cfg.get("pid_heading_ki", 0.0))
         self.heading_kd = float(cfg.get("pid_heading_kd", 0.04))
@@ -66,9 +73,6 @@ class PIDTrajectoryController(BaseController):
             cfg.get("preview_heading_weight", 0.5)
         )
         self._state: dict[str, dict[str, float]] = {}
-        decision_dt = float(cfg.get("physics_world_step_size", 0.02)) * int(
-            cfg.get("decision_repeat", 5)
-        )
         self._longitudinal = LongitudinalCascadeController(
             dt_s=decision_dt,
             acceleration_bias_mps2=float(

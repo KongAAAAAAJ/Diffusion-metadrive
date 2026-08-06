@@ -58,6 +58,20 @@ def test_pid_trajectory_controller_implements_base_controller() -> None:
     assert controller.config["pid_dt"] == 0.2
 
 
+def test_pid_default_dt_matches_simulator_decision_period() -> None:
+    controller = PIDTrajectoryController(
+        {"physics_world_step_size": 0.02, "decision_repeat": 5}
+    )
+
+    assert controller.dt == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("value", [0.0, -0.1, float("nan")])
+def test_pid_rejects_invalid_control_period(value: float) -> None:
+    with pytest.raises(ValueError, match="pid_dt"):
+        PIDTrajectoryController({"pid_dt": value})
+
+
 def test_pid_compute_actions_returns_low_level_action_dict() -> None:
     controller = PIDTrajectoryController({"pid_dt": 0.5})
     env = _FakeEnv()

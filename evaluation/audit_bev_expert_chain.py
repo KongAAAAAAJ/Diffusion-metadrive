@@ -158,6 +158,7 @@ def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
                 "corridor_rejection_count",
                 "road_rejection_count",
                 "background_collision_rejection_count",
+                "background_gap_rejection_count",
                 "lane_end_rejection_count",
                 "kinematic_rejections_by_reason",
                 "collision_rejections_by_object",

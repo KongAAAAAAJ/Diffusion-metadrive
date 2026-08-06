@@ -106,6 +106,18 @@ def _env(agents, traffic):
     )
 
 
+def test_target_lane_rejects_negative_lane_id_instead_of_python_wraparound():
+    env = _env(agents={}, traffic=[])
+    source_lane = env.engine.current_map.road_network.get_lane(("A", "B", 0))
+    vehicle = _vehicle("agent0", 0.0, 3.5, 0)
+
+    target = MultiAgentRuleMaker()._target_lane(
+        env, vehicle, source_lane, action=-1
+    )
+
+    assert target is None
+
+
 def test_rule_maker_traffic_prediction_advances_actor_at_matching_times():
     traffic = _vehicle(
         "traffic",

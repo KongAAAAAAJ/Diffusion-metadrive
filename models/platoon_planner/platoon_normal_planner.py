@@ -107,6 +107,51 @@ def _point_in_connected_lane_seam(point: np.ndarray, lanes: list[object]) -> boo
     return False
 
 
+def minimum_dense_pair_gap(
+    first: np.ndarray,
+    first_dimensions: tuple[float, float],
+    second: np.ndarray,
+    second_dimensions: tuple[float, float],
+) -> float:
+    """Return the minimum longitudinal bumper gap in a shared corridor."""
+
+    first = np.asarray(first, dtype=np.float64)
+    second = np.asarray(second, dtype=np.float64)
+    if first.shape != second.shape:
+        return -float("inf")
+    forward = np.column_stack((np.cos(first[:, 2]), np.sin(first[:, 2])))
+    lateral_axis = np.column_stack((-forward[:, 1], forward[:, 0]))
+    delta = second[:, :2] - first[:, :2]
+    longitudinal = np.abs(np.einsum("ij,ij->i", delta, forward))
+    lateral = np.abs(np.einsum("ij,ij->i", delta, lateral_axis))
+    lateral_limit = 0.5 * (
+        float(first_dimensions[1]) + float(second_dimensions[1])
+    )
+    same_corridor = lateral <= lateral_limit + 1e-6
+    if not np.any(same_corridor):
+        return float("inf")
+    bumper = longitudinal - 0.5 * (
+        float(first_dimensions[0]) + float(second_dimensions[0])
+    )
+    return float(np.min(bumper[same_corridor]))
+
+
+def minimum_dense_background_gap(
+    trajectory: np.ndarray,
+    dimensions: tuple[float, float],
+    predictions: list[tuple[str, np.ndarray, tuple[float, float]]],
+) -> float:
+    value = float("inf")
+    for _, predicted, other_dimensions in predictions:
+        value = min(
+            value,
+            minimum_dense_pair_gap(
+                trajectory, dimensions, predicted, other_dimensions
+            ),
+        )
+    return value
+
+
 def audit_dense_footprint_on_lanes(
     trajectory: np.ndarray,
     lanes: list[object] | tuple[object, ...],
@@ -642,6 +687,9 @@ class PlatoonNormalPlanner:
                         "road_rejection_count": int(
                             value.get("road_rejection_count", 0) or 0
                         ),
+                        "background_gap_rejection_count": int(
+                            value.get("background_gap_rejection_count", 0) or 0
+                        ),
                         "road_rejections_by_reason": dict(
                             value.get("road_rejections_by_reason", {}) or {}
                         ),
@@ -906,6 +954,7 @@ class PlatoonNormalPlanner:
             "corridor_rejection_count": 0,
             "road_rejection_count": 0,
             "background_collision_rejection_count": 0,
+            "background_gap_rejection_count": 0,
             "lane_end_rejection_count": 0,
         }
         collision_hits: Counter[str] = Counter()
@@ -1218,6 +1267,17 @@ class PlatoonNormalPlanner:
                         if hits:
                             stats["background_collision_rejection_count"] += 1
                             collision_hits.update(hits)
+                            continue
+                        minimum_background_gap = minimum_dense_background_gap(
+                            candidate_dense,
+                            self._vehicle_dimensions(vehicle),
+                            background_predictions,
+                        )
+                        if (
+                            minimum_background_gap
+                            < self.background_safe_gap_m - 1e-6
+                        ):
+                            stats["background_gap_rejection_count"] += 1
                             continue
                         score = self._score_candidate(
                             output,
@@ -1536,6 +1596,17 @@ class PlatoonNormalPlanner:
                                 second_candidate.dense,
                                 agents[ordered_ids[second]],
                             )
+                            or minimum_dense_pair_gap(
+                                first_candidate.dense,
+                                self._vehicle_dimensions(
+                                    agents[ordered_ids[first]]
+                                ),
+                                second_candidate.dense,
+                                self._vehicle_dimensions(
+                                    agents[ordered_ids[second]]
+                                ),
+                            )
+                            < self.platoon_safe_gap_m - 1e-6
                         )
                 conflict_pair_count += int(np.count_nonzero(table))
                 conflict_counts_by_pair[
@@ -2817,12 +2888,17 @@ class PlatoonNormalPlanner:
                 return road_network.get_lane(("3C0_1_", "4G1_0_", 0))
             except Exception:
                 return None
+        target_lane_id = int(lane_index[2]) + int(action)
+        if target_lane_id < 0:
+            return None
+        target_index = (lane_index[0], lane_index[1], target_lane_id)
         try:
-            return road_network.get_lane(
-                (lane_index[0], lane_index[1], int(lane_index[2]) + int(action))
-            )
+            target_lane = road_network.get_lane(target_index)
         except Exception:
             return None
+        if tuple(getattr(target_lane, "index", ()) or ()) != target_index:
+            return None
+        return target_lane
 
     @staticmethod
     def _lane_from_index(env, lane_index: tuple):
@@ -3491,15 +3567,9 @@ class JointTrajectoryExecutor:
         dimensions: tuple[float, float],
         predictions: list[tuple[str, np.ndarray, tuple[float, float]]],
     ) -> float:
-        value = float("inf")
-        for _, predicted, other_dimensions in predictions:
-            value = min(
-                value,
-                cls._minimum_pair_gap(
-                    trajectory, dimensions, predicted, other_dimensions
-                ),
-            )
-        return value
+        return minimum_dense_background_gap(
+            trajectory, dimensions, predictions
+        )
 
     @staticmethod
     def _minimum_pair_gap(
@@ -3508,20 +3578,6 @@ class JointTrajectoryExecutor:
         second: np.ndarray,
         second_dimensions: tuple[float, float],
     ) -> float:
-        first = np.asarray(first, dtype=np.float64)
-        second = np.asarray(second, dtype=np.float64)
-        if first.shape != second.shape:
-            return -float("inf")
-        forward = np.column_stack((np.cos(first[:, 2]), np.sin(first[:, 2])))
-        lateral_axis = np.column_stack((-forward[:, 1], forward[:, 0]))
-        delta = second[:, :2] - first[:, :2]
-        longitudinal = np.abs(np.einsum("ij,ij->i", delta, forward))
-        lateral = np.abs(np.einsum("ij,ij->i", delta, lateral_axis))
-        lateral_limit = 0.5 * (float(first_dimensions[1]) + float(second_dimensions[1]))
-        same_corridor = lateral <= lateral_limit + 1e-6
-        if not np.any(same_corridor):
-            return float("inf")
-        bumper = longitudinal - 0.5 * (
-            float(first_dimensions[0]) + float(second_dimensions[0])
+        return minimum_dense_pair_gap(
+            first, first_dimensions, second, second_dimensions
         )
-        return float(np.min(bumper[same_corridor]))
