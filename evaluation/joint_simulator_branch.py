@@ -583,9 +583,19 @@ class JointSimulatorBranchEvaluator:
                     "actual_speed_mps": [],
                     "actual_acceleration_mps2": [],
                     "desired_acceleration_mps2": [],
+                    "compensated_acceleration_mps2": [],
+                    "raw_desired_acceleration_mps2": [],
                     "acceleration_bias_mps2": [],
+                    "drive_acceleration_scale_mps2": [],
                     "brake_acceleration_scale_mps2": [],
                     "controller_speed_error_mps": [],
+                    "controller_preview_speed_mps": [],
+                    "controller_preview_acceleration_mps2": [],
+                    "position_feedback_mps2": [],
+                    "gap_feedback_mps2": [],
+                    "speed_integral": [],
+                    "speed_overzero_guard": [],
+                    "control_regime": [],
                     "control_saturated": [],
                     "lateral_heading_contaminated": [],
                     "maximum_continuous_saturation_s": 0.0,
@@ -854,8 +864,21 @@ class JointSimulatorBranchEvaluator:
                         trace["desired_acceleration_mps2"].append(
                             float(debug.get("desired_acceleration_mps2", 0.0))
                         )
+                        trace["compensated_acceleration_mps2"].append(
+                            float(debug.get("compensated_acceleration_mps2", 0.0))
+                        )
+                        trace["raw_desired_acceleration_mps2"].append(
+                            float(debug.get("raw_desired_acceleration_mps2", 0.0))
+                        )
                         trace["acceleration_bias_mps2"].append(
                             float(debug.get("acceleration_bias_mps2", 0.0))
+                        )
+                        trace["drive_acceleration_scale_mps2"].append(
+                            float(
+                                debug.get(
+                                    "drive_acceleration_scale_mps2", 0.0
+                                )
+                            )
                         )
                         trace["brake_acceleration_scale_mps2"].append(
                             float(
@@ -866,6 +889,29 @@ class JointSimulatorBranchEvaluator:
                         )
                         trace["controller_speed_error_mps"].append(
                             float(debug.get("speed_error_mps", 0.0))
+                        )
+                        trace["controller_preview_speed_mps"].append(
+                            float(debug.get("reference_speed_mps", 0.0))
+                        )
+                        trace[
+                            "controller_preview_acceleration_mps2"
+                        ].append(
+                            float(debug.get("reference_acceleration_mps2", 0.0))
+                        )
+                        trace["position_feedback_mps2"].append(
+                            float(debug.get("position_feedback_mps2", 0.0))
+                        )
+                        trace["gap_feedback_mps2"].append(
+                            float(debug.get("gap_feedback_mps2", 0.0))
+                        )
+                        trace["speed_integral"].append(
+                            float(debug.get("speed_integral", 0.0))
+                        )
+                        trace["speed_overzero_guard"].append(
+                            bool(debug.get("speed_overzero_guard", False))
+                        )
+                        trace["control_regime"].append(
+                            str(debug.get("control_regime", "unknown"))
                         )
                         trace["control_saturated"].append(
                             abs(float(controls[agent_id][1])) >= 0.999

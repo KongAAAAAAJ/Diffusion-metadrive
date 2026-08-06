@@ -199,6 +199,12 @@ def test_run_collection_commits_joint_episode_with_real_store(
         max_episode_steps=11,
     )
 
+    spawn_seeds = []
+
+    class _Spawn:
+        def set_episode_spawn_seed(self, seed):
+            spawn_seeds.append(seed)
+
     class _FakeEnv:
         def __init__(self, env_config):
             self.config = dict(env_config)
@@ -212,9 +218,7 @@ def test_run_collection_commits_joint_episode_with_real_store(
                 (),
                 {
                     "global_config": {},
-                    "spawn_manager": type(
-                        "Spawn", (), {"set_episode_spawn_seed": lambda self, seed: None}
-                    )(),
+                    "spawn_manager": _Spawn(),
                 },
             )()
             self.closed = False
@@ -231,23 +235,31 @@ def test_run_collection_commits_joint_episode_with_real_store(
     monkeypatch.setattr(
         runner, "SensorlessJointBEVPlatoonEnv", lambda env_config: fake_env
     )
-    monkeypatch.setattr(
-        runner,
-        "collect_joint_episode",
-        lambda env, max_steps: JointEpisodeRollout(
+    reset_seeds = []
+
+    def _fake_collect(env, *, max_steps, reset_seed=None):
+        reset_seeds.append(reset_seed)
+        return JointEpisodeRollout(
             samples=(_sample(),),
             simulator_steps=max_steps,
             rejected_joint_steps=0,
             failure_reason=None,
             terminated=False,
             truncated=True,
-        ),
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "collect_joint_episode",
+        _fake_collect,
     )
 
     summary = runner.run_collection(config)
 
     assert summary["stored_episodes"] == 1
     assert summary["total_joint_samples"] == 1
+    assert reset_seeds == spawn_seeds
+    assert len(reset_seeds) == 1
     assert fake_env.closed
     split = next(
         name for name, values in summary["splits"].items() if values["episodes"] == 1

@@ -258,6 +258,44 @@ def test_stop_anchor_uses_exact_stop_distance_inside_first_interval() -> None:
     )
 
 
+def test_stop_anchor_advances_stale_lane_reference_to_successor() -> None:
+    class _SegmentLane(_Lane):
+        def __init__(self, start: str, end: str, x0: float, length: float):
+            super().__init__(0, 0.0)
+            self.index = (start, end, 0)
+            self.x0 = float(x0)
+            self.length = float(length)
+
+        def position(self, longitudinal: float, lateral: float) -> np.ndarray:
+            return np.asarray([self.x0 + longitudinal, lateral], dtype=np.float32)
+
+        def local_coordinates(self, position: np.ndarray) -> tuple[float, float]:
+            return float(position[0] - self.x0), float(position[1])
+
+    source = _SegmentLane("A", "B", 0.0, 20.0)
+    successor = _SegmentLane("B", "C", 20.0, 200.0)
+    network = SimpleNamespace(
+        graph={"A": {"B": [source]}, "B": {"C": [successor]}},
+        get_all_lanes=lambda: [source, successor],
+        get_lane=lambda index: {
+            source.index: source,
+            successor.index: successor,
+        }[tuple(index)],
+    )
+    vehicle = _vehicle("agent0", 20.2, source)
+    env = SimpleNamespace(
+        agents={"agent0": vehicle},
+        current_map=SimpleNamespace(road_network=network),
+    )
+
+    output = SimulatorDynamicAnchorGenerator().generate(env, "agent0")
+    stop = output.coarse_trajectories[ModeIndex.STOP]
+    assert validate_trajectory_kinematics(
+        stop, vehicle.speed_km_h / 3.6, np.zeros(3)
+    ).valid
+    assert float(stop[0, 0]) > 0.0
+
+
 def test_moving_anchors_start_from_current_lane_offset() -> None:
     env = _Env()
     vehicle = env.agents["agent0"]

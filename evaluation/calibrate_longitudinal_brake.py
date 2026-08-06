@@ -34,10 +34,14 @@ class BrakeScaleFit:
     intercept_mps2: float
     correlation: float
     rmse_mps2: float
+    through_origin_scale_mps2_per_brake: float
 
     @property
     def recommended_brake_acceleration_scale_mps2(self) -> float:
-        return float(self.slope_mps2_per_brake)
+        # The controller already has an independently calibrated zero-throttle
+        # bias, so its one-parameter brake inverse must use the through-origin
+        # gain rather than the slope of a separate affine fit.
+        return float(self.through_origin_scale_mps2_per_brake)
 
     def as_dict(self) -> dict[str, int | float]:
         return {
@@ -46,6 +50,9 @@ class BrakeScaleFit:
             "intercept_mps2": self.intercept_mps2,
             "correlation": self.correlation,
             "rmse_mps2": self.rmse_mps2,
+            "through_origin_scale_mps2_per_brake": (
+                self.through_origin_scale_mps2_per_brake
+            ),
             "recommended_brake_acceleration_scale_mps2": (
                 self.recommended_brake_acceleration_scale_mps2
             ),
@@ -81,6 +88,9 @@ def fit_brake_scale(
     prediction = slope * command + intercept
     correlation = float(np.corrcoef(command, acceleration)[0, 1])
     rmse = float(np.sqrt(np.mean((prediction - acceleration) ** 2)))
+    through_origin_scale = float(
+        np.dot(command, acceleration) / np.dot(command, command)
+    )
     if not math.isfinite(slope) or slope <= 0.0 or correlation < 0.90:
         raise BrakeCalibrationError("brake response is not sufficiently linear")
     return BrakeScaleFit(
@@ -89,6 +99,7 @@ def fit_brake_scale(
         intercept_mps2=float(intercept),
         correlation=correlation,
         rmse_mps2=rmse,
+        through_origin_scale_mps2_per_brake=through_origin_scale,
     )
 
 

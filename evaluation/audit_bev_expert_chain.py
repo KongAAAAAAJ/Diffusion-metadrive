@@ -105,17 +105,43 @@ def _crash_reason(agent_info: Mapping[str, object], agent_id: str) -> str | None
 
 
 def _compact_rule_debug(debug: Mapping[str, object]) -> dict[str, object]:
+    selected_candidates = {}
+    candidates_by_agent = debug.get("candidates_by_agent", {}) or {}
+    if isinstance(candidates_by_agent, Mapping):
+        for agent_id, candidates in candidates_by_agent.items():
+            if not isinstance(candidates, Sequence):
+                continue
+            selected = next(
+                (
+                    value
+                    for value in candidates
+                    if isinstance(value, Mapping)
+                    and bool(value.get("selected", False))
+                ),
+                None,
+            )
+            if selected is not None:
+                selected_candidates[str(agent_id)] = {
+                    "action": selected.get("action"),
+                    "target_point": selected.get("target_point"),
+                    "source_lane_index": selected.get("source_lane_index"),
+                    "target_lane_index": selected.get("target_lane_index"),
+                }
     return {
         "best_actions": dict(debug.get("best_actions", {}) or {}),
         "formation_locked": bool(debug.get("formation_locked", False)),
         "risk_triggered": bool(debug.get("risk_triggered", False)),
         "risk_info": debug.get("risk_info", {}),
         "best_score": debug.get("best_score"),
+        "selected_candidates": selected_candidates,
     }
 
 
 def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
-    result: dict[str, object] = {"joint": debug.get("_joint", {})}
+    result: dict[str, object] = {
+        "joint": debug.get("_joint", {}),
+        "execution": debug.get("_execution", {}),
+    }
     for agent_id in ("agent0", "agent1", "agent2"):
         value = debug.get(agent_id, {})
         if not isinstance(value, Mapping):
@@ -125,6 +151,9 @@ def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
             for key in (
                 "rule_action",
                 "rule_target_point",
+                "source_lane_index",
+                "target_lane_index",
+                "target_lane_chain",
                 "raw_candidate_count",
                 "generated_valid_candidate_count",
                 "candidate_count",
@@ -301,7 +330,7 @@ def audit_episode(
     max_steps: int,
 ) -> dict[str, object]:
     _configure_episode(env, spec)
-    env.reset()
+    env.reset(seed=int(spec.spawn_seed))
     agent_ids = ("agent0", "agent1", "agent2")
     expert = RulePlannerExpert(env, agent_ids)
     builder = JointBEVSampleBuilder(agent_ids)
@@ -444,11 +473,15 @@ def run_audit(
     max_steps: int,
 ) -> dict[str, object]:
     config = load_run_config(config_path)
-    env = SensorlessJointBEVPlatoonEnv(dict(config.env_config))
     episodes = []
-    try:
-        for scenario_id, local_route in AUDIT_SCENARIOS:
-            for seed in seeds:
+    for scenario_id, local_route in AUDIT_SCENARIOS:
+        for seed in seeds:
+            env_config = dict(config.env_config)
+            env_config.update(
+                {"start_seed": int(seed), "num_scenarios": 1}
+            )
+            env = SensorlessJointBEVPlatoonEnv(env_config)
+            try:
                 episodes.append(
                     audit_episode(
                         env,
@@ -456,8 +489,8 @@ def run_audit(
                         max_steps=max_steps,
                     )
                 )
-    finally:
-        env.close()
+            finally:
+                env.close()
     return {
         "format": "bev_expert_chain_audit_v1",
         "scenarios": [list(value) for value in AUDIT_SCENARIOS],

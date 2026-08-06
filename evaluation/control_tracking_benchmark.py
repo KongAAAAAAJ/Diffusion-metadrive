@@ -32,6 +32,7 @@ from expert_dataset.collect_joint_bev import (
 from models.bev_planner.mode_contract import validate_trajectory_kinematics
 from models.controller.longitudinal_reference import (
     BRAKE_ACCELERATION_SCALE_MPS2,
+    DRIVE_ACCELERATION_SCALE_MPS2,
     LongitudinalCascadeController,
     signed_longitudinal_speed_mps,
     trajectory_to_longitudinal_reference,
@@ -68,6 +69,10 @@ class _IndependentControlEnv(SensorlessJointBEVPlatoonEnv):
                 * self._cfg_int("decision_repeat", 5),
                 acceleration_bias_mps2=self._cfg_float(
                     "acceleration_bias_mps2", 0.0
+                ),
+                drive_acceleration_scale_mps2=self._cfg_float(
+                    "drive_acceleration_scale_mps2",
+                    DRIVE_ACCELERATION_SCALE_MPS2,
                 ),
                 brake_acceleration_scale_mps2=self._cfg_float(
                     "brake_acceleration_scale_mps2",
@@ -352,8 +357,6 @@ def summarize_control_result(
     role_rows = []
     lateral_all: list[float] = []
     heading_all: list[float] = []
-    speed_error_all: list[float] = []
-    follower_gap_error_all: list[float] = []
     for role, trace in enumerate(result.tracking_traces[0]):
         lateral = np.asarray(trace["lateral_errors_m"], dtype=np.float64)
         heading = np.asarray(trace["heading_errors_rad"], dtype=np.float64)
@@ -366,12 +369,9 @@ def summarize_control_result(
         if actual_speed.shape != reference_speed.shape:
             raise ControlBenchmarkError("speed tracking trace shape mismatch")
         speed_error = reference_speed - actual_speed
-        speed_error_all.extend(speed_error.tolist())
         gap_error = np.asarray(
             trace["formation_gap_error_m"], dtype=np.float64
         )
-        if role > 0:
-            follower_gap_error_all.extend(gap_error.tolist())
         role_rows.append(
             {
                 "role": role,
@@ -404,11 +404,19 @@ def summarize_control_result(
         if case.category == "stop"
         else 0.0
     )
-    speed_error_p95 = _percentile(speed_error_all, 95)
-    gap_error_p95 = (
-        _percentile(follower_gap_error_all, 95)
-        if follower_gap_error_all
-        else 0.0
+    # Acceptance is role-wise: pooling three traces can hide a single bad
+    # vehicle behind the other two.  Independent mode judges the worst speed
+    # tracker; locked mode judges the worst follower gap tracker.
+    speed_error_p95 = max(
+        float(row["signed_speed_error_p95_mps"]) for row in role_rows
+    )
+    gap_error_p95 = max(
+        (
+            float(row["desired_center_gap_error_p95_m"])
+            for row in role_rows
+            if int(row["role"]) > 0
+        ),
+        default=0.0,
     )
     terminal_gap_error = max(
         (float(row["terminal_desired_center_gap_error_m"]) for row in role_rows),
@@ -478,6 +486,7 @@ def _prepare_natural_start(
     *,
     seed: int,
     acceleration_bias_mps2: float,
+    drive_acceleration_scale_mps2: float,
     brake_acceleration_scale_mps2: float,
 ) -> tuple[
     JointEpisodeSpec,
@@ -493,7 +502,14 @@ def _prepare_natural_start(
 
     config = {
         "initial_speed_km_h": 0.0,
+        # R3 has three lanes.  Starting on the centre lane makes both signed
+        # lane-change references physically meaningful instead of driving one
+        # direction out of the road from edge lane 0.
+        "platoon_route_spawn_lane_index": 1,
         "acceleration_bias_mps2": float(acceleration_bias_mps2),
+        "drive_acceleration_scale_mps2": float(
+            drive_acceleration_scale_mps2
+        ),
         "brake_acceleration_scale_mps2": float(
             brake_acceleration_scale_mps2
         ),
@@ -599,6 +615,21 @@ def _prepare_natural_start(
             float(signed_longitudinal_speed_mps(env.agents[agent_id]))
             for agent_id in AGENT_IDS
         ]
+        dynamics_keys = (
+            "max_engine_force",
+            "max_brake_force",
+            "wheel_friction",
+            "mass",
+        )
+        vehicle_dynamics = []
+        for agent_id in AGENT_IDS:
+            parameters = env.agents[agent_id].get_dynamics_parameters()
+            vehicle_dynamics.append(
+                {
+                    key: float(parameters[key])
+                    for key in dynamics_keys
+                }
+            )
     finally:
         env.close()
     spec = JointEpisodeSpec(
@@ -613,6 +644,7 @@ def _prepare_natural_start(
         "maximum_terminal_speed_error_mps": max(
             abs(target - value) for value in terminal_speeds
         ),
+        "vehicle_dynamics": vehicle_dynamics,
         "speed_history_mps": speed_history,
         "throttle_history": throttle_history,
     }
@@ -627,6 +659,7 @@ def run_control_tracking_benchmark(
     evaluator: JointSimulatorBranchEvaluator | None = None,
     control_modes: Sequence[str] | None = None,
     acceleration_bias_mps2: float = 0.0,
+    drive_acceleration_scale_mps2: float = DRIVE_ACCELERATION_SCALE_MPS2,
     brake_acceleration_scale_mps2: float = BRAKE_ACCELERATION_SCALE_MPS2,
 ) -> dict[str, object]:
     output = Path(output_root)
@@ -648,6 +681,13 @@ def run_control_tracking_benchmark(
         )
     if not np.isfinite(float(acceleration_bias_mps2)):
         raise ControlBenchmarkError("acceleration_bias_mps2 must be finite")
+    if (
+        not np.isfinite(float(drive_acceleration_scale_mps2))
+        or float(drive_acceleration_scale_mps2) <= 0.0
+    ):
+        raise ControlBenchmarkError(
+            "drive_acceleration_scale_mps2 must be finite and positive"
+        )
     if (
         not np.isfinite(float(brake_acceleration_scale_mps2))
         or float(brake_acceleration_scale_mps2) <= 0.0
@@ -674,6 +714,9 @@ def run_control_tracking_benchmark(
                 case,
                 seed=seed,
                 acceleration_bias_mps2=float(acceleration_bias_mps2),
+                drive_acceleration_scale_mps2=float(
+                    drive_acceleration_scale_mps2
+                ),
                 brake_acceleration_scale_mps2=float(
                     brake_acceleration_scale_mps2
                 ),
@@ -731,6 +774,14 @@ def run_control_tracking_benchmark(
                     [trace["desired_acceleration_mps2"] for trace in traces],
                     dtype=np.float64,
                 ),
+                compensated_acceleration_mps2=np.asarray(
+                    [trace["compensated_acceleration_mps2"] for trace in traces],
+                    dtype=np.float64,
+                ),
+                raw_desired_acceleration_mps2=np.asarray(
+                    [trace["raw_desired_acceleration_mps2"] for trace in traces],
+                    dtype=np.float64,
+                ),
                 acceleration_bias_mps2=np.asarray(
                     [trace["acceleration_bias_mps2"] for trace in traces],
                     dtype=np.float64,
@@ -745,6 +796,37 @@ def run_control_tracking_benchmark(
                 controller_speed_error_mps=np.asarray(
                     [trace["controller_speed_error_mps"] for trace in traces],
                     dtype=np.float64,
+                ),
+                controller_preview_speed_mps=np.asarray(
+                    [trace["controller_preview_speed_mps"] for trace in traces],
+                    dtype=np.float64,
+                ),
+                controller_preview_acceleration_mps2=np.asarray(
+                    [
+                        trace["controller_preview_acceleration_mps2"]
+                        for trace in traces
+                    ],
+                    dtype=np.float64,
+                ),
+                position_feedback_mps2=np.asarray(
+                    [trace["position_feedback_mps2"] for trace in traces],
+                    dtype=np.float64,
+                ),
+                gap_feedback_mps2=np.asarray(
+                    [trace["gap_feedback_mps2"] for trace in traces],
+                    dtype=np.float64,
+                ),
+                speed_integral=np.asarray(
+                    [trace["speed_integral"] for trace in traces],
+                    dtype=np.float64,
+                ),
+                speed_overzero_guard=np.asarray(
+                    [trace["speed_overzero_guard"] for trace in traces],
+                    dtype=np.bool_,
+                ),
+                control_regime=np.asarray(
+                    [trace["control_regime"] for trace in traces],
+                    dtype=np.str_,
                 ),
                 reference_speed_mps=np.asarray(
                     [trace["reference_feedforward_speed_mps"] for trace in traces],
@@ -792,6 +874,9 @@ def run_control_tracking_benchmark(
         "seed": int(seed),
         "control_modes": list(modes),
         "acceleration_bias_mps2": float(acceleration_bias_mps2),
+        "drive_acceleration_scale_mps2": float(
+            drive_acceleration_scale_mps2
+        ),
         "brake_acceleration_scale_mps2": float(
             brake_acceleration_scale_mps2
         ),
@@ -829,6 +914,11 @@ def _main() -> int:
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--acceleration-bias-mps2", type=float, default=0.0)
     parser.add_argument(
+        "--drive-acceleration-scale-mps2",
+        type=float,
+        default=DRIVE_ACCELERATION_SCALE_MPS2,
+    )
+    parser.add_argument(
         "--brake-acceleration-scale-mps2",
         type=float,
         default=BRAKE_ACCELERATION_SCALE_MPS2,
@@ -847,6 +937,7 @@ def _main() -> int:
         seed=args.seed,
         control_modes=args.control_modes,
         acceleration_bias_mps2=args.acceleration_bias_mps2,
+        drive_acceleration_scale_mps2=args.drive_acceleration_scale_mps2,
         brake_acceleration_scale_mps2=args.brake_acceleration_scale_mps2,
     )
     print(json.dumps(report, indent=2, sort_keys=True))

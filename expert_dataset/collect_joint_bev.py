@@ -846,12 +846,16 @@ def collect_joint_episode(
     *,
     max_steps: int,
     builder: JointBEVSampleBuilder | None = None,
+    reset_seed: int | None = None,
 ) -> JointEpisodeRollout:
     """Collect one episode in memory; persistence is deliberately out of scope."""
 
     if max_steps <= 0:
         raise ValueError("max_steps must be positive")
-    env.reset()
+    if reset_seed is None:
+        env.reset()
+    else:
+        env.reset(seed=int(reset_seed))
     agent_ids = ("agent0", "agent1", "agent2")
     expert = RulePlannerExpert(env, agent_ids)
     sample_builder = builder or JointBEVSampleBuilder(agent_ids)

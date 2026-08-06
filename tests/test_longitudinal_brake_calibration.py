@@ -19,7 +19,10 @@ def test_brake_scale_fit_recovers_affine_mapping() -> None:
     assert result.slope_mps2_per_brake == pytest.approx(9.5)
     assert result.intercept_mps2 == pytest.approx(-0.02)
     assert result.correlation == pytest.approx(1.0)
-    assert result.recommended_brake_acceleration_scale_mps2 == pytest.approx(9.5)
+    expected_origin = float(np.dot(command, acceleration) / np.dot(command, command))
+    assert result.recommended_brake_acceleration_scale_mps2 == pytest.approx(
+        expected_origin
+    )
 
 
 def test_brake_scale_fit_rejects_insufficient_commands() -> None:

@@ -495,8 +495,13 @@ def _configure_episode(
     updates = {
         "traffic_density": spec.traffic_density,
         "initial_speed_km_h": spec.initial_speed_km_h,
+        "start_seed": int(spec.spawn_seed),
     }
     env.config.update(updates)
+    # MetaDrive validates reset(seed) against the construction-time scenario
+    # window.  This collector deliberately reuses one num_scenarios=1 env, so
+    # move that single-scenario window atomically with the episode contract.
+    env.start_index = int(spec.spawn_seed)
     env.platoon_config.traffic_density = spec.traffic_density
     env.platoon_config.initial_speed_km_h = spec.initial_speed_km_h
     global_config = getattr(getattr(env, "engine", None), "global_config", None)
@@ -526,7 +531,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
             print("[INFO] target already satisfied; no simulator started", flush=True)
             return summary
 
-        env = SensorlessJointBEVPlatoonEnv(dict(config.env_config))
+        env: SensorlessJointBEVPlatoonEnv | None = None
         diagnostic_quotas = (
             None
             if config.diagnostic_scenario_quotas is None
@@ -579,10 +584,23 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     spec = sample_episode_spec_for_scenario(
                         config, episode_index, scenario_id
                     )
+                # Managers such as traffic/scenario policies retain internal
+                # episode state beyond BaseEnv.reset().  Recreate the
+                # sensorless environment so a fixed episode spec is invariant
+                # to which scenarios ran before it.
+                if env is not None:
+                    env.close()
+                episode_env_config = dict(config.env_config)
+                episode_env_config.update(
+                    {"start_seed": int(spec.spawn_seed), "num_scenarios": 1}
+                )
+                env = SensorlessJointBEVPlatoonEnv(episode_env_config)
                 _configure_episode(env, spec)
                 try:
                     rollout = collect_joint_episode(
-                        env, max_steps=config.max_episode_steps
+                        env,
+                        max_steps=config.max_episode_steps,
+                        reset_seed=spec.spawn_seed,
                     )
                 except JointCollectionError as exc:
                     reason = getattr(exc, "reason_code", "collection_contract")
@@ -698,7 +716,8 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     flush=True,
                 )
         finally:
-            env.close()
+            if env is not None:
+                env.close()
         summary = store.summary()
         if diagnostic_quotas is not None:
             summary["diagnostic_64"] = {

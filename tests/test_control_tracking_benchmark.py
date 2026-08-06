@@ -27,9 +27,19 @@ def _trace(
         "position_error_speed_increment_mps": [0.0] * count,
         "actual_acceleration_mps2": [0.0] * count,
         "desired_acceleration_mps2": [0.0] * count,
+        "compensated_acceleration_mps2": [0.0] * count,
+        "raw_desired_acceleration_mps2": [0.0] * count,
         "acceleration_bias_mps2": [0.0] * count,
-        "brake_acceleration_scale_mps2": [9.82788311581157] * count,
+        "drive_acceleration_scale_mps2": [1.4999988847662202] * count,
+        "brake_acceleration_scale_mps2": [9.374925668233] * count,
         "controller_speed_error_mps": [0.0] * count,
+        "controller_preview_speed_mps": [speed] * count,
+        "controller_preview_acceleration_mps2": [0.0] * count,
+        "position_feedback_mps2": [0.0] * count,
+        "gap_feedback_mps2": [0.0] * count,
+        "speed_integral": [0.0] * count,
+        "speed_overzero_guard": [False] * count,
+        "control_regime": ["acceleration"] * count,
         "formation_control_increment": [0.0] * count,
         "formation_gap_error_m": [gap_error] * count,
         "control_saturated": [False] * count,
@@ -111,6 +121,27 @@ def test_summary_uses_speed_for_independent_and_gap_for_locked() -> None:
     assert "desired_center_gap_error_p95" in locked["blockers"]
 
 
+def test_summary_uses_worst_role_instead_of_pooled_percentile() -> None:
+    case = standard_control_cases()[0]
+    independent_result = _result(case)
+    independent_result.tracking_traces[0][2][
+        "reference_feedforward_speed_mps"
+    ] = [4.6] * 8
+    independent = summarize_control_result(
+        case, independent_result, control_mode="independent"
+    )
+    assert independent["signed_speed_error_p95_mps"] == pytest.approx(0.6)
+    assert "signed_speed_error_p95" in independent["blockers"]
+
+    locked_result = _result(case)
+    locked_result.tracking_traces[0][1]["formation_gap_error_m"] = [1.6] * 8
+    locked = summarize_control_result(
+        case, locked_result, control_mode="locked"
+    )
+    assert locked["desired_center_gap_error_p95_m"] == pytest.approx(1.6)
+    assert "desired_center_gap_error_p95" in locked["blockers"]
+
+
 def test_gap_feedback_contract_has_bounded_direction() -> None:
     report = evaluate_gap_feedback_contract()
     assert report["passed"] is True
@@ -165,6 +196,9 @@ def test_benchmark_writes_json_and_numeric_npz(tmp_path) -> None:
             assert data["actual_world"].shape == (3, 8, 3)
             assert data["steering"].shape == (3, 8)
             assert data["actual_acceleration_mps2"].shape == (3, 8)
+            assert data["gap_feedback_mps2"].shape == (3, 8)
+            assert data["controller_preview_speed_mps"].shape == (3, 8)
+            assert data["control_regime"].shape == (3, 8)
             assert data["warmup_speed_mps"].shape == (0,)
             assert data["warmup_throttle"].shape == (0,)
 

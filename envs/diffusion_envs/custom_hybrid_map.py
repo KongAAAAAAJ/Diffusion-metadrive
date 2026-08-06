@@ -67,6 +67,11 @@ class MAHybridPGMapManager(PGMapManager):
 
         config = self.engine.global_config
         current_seed = self.engine.global_seed
+        # Long-running collection rebinds its single-scenario window to the
+        # explicit episode seed before reset.  PGMapManager preallocates only
+        # the construction-time key, so admit the newly bound deterministic
+        # seed instead of depending on episode execution order.
+        self.maps.setdefault(current_seed, None)
 
         if self.maps[current_seed] is None:
             map_config = config["map_config"].copy(unchangeable=False)

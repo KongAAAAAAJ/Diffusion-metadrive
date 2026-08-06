@@ -267,6 +267,48 @@ class SimulatorDynamicAnchorGenerator:
                 continue
         return sorted(valid, key=cost)
 
+    def _resolve_source_lane(
+        self,
+        road_network: object,
+        lane: object,
+        position: np.ndarray,
+    ) -> tuple[object, float, float]:
+        """Advance a stale MetaDrive lane reference across its successor.
+
+        Around connector boundaries ``vehicle.lane`` can lag the physical
+        pose by one decision step.  Sampling a STOP anchor from the clamped
+        endpoint then creates a backwards first segment or an unreachable
+        distance.  Resolve only genuine past-end projections; this does not
+        alter the requested manoeuvre or choose a lateral lane.
+        """
+
+        current = lane
+        for _ in range(6):
+            longitudinal, lateral = self._project(current, position)
+            length = max(
+                float(getattr(current, "length", 0.0) or 0.0),
+                0.0,
+            )
+            if longitudinal <= length + 1.0e-3:
+                return current, longitudinal, lateral
+            successors = self._successors(road_network, current)
+            if not successors:
+                return current, longitudinal, lateral
+
+            def projection_cost(candidate: object) -> float:
+                candidate_s, candidate_d = self._project(candidate, position)
+                candidate_length = max(
+                    float(getattr(candidate, "length", 0.0) or 0.0),
+                    0.0,
+                )
+                range_error = max(-candidate_s, 0.0) + max(
+                    candidate_s - candidate_length, 0.0
+                )
+                return abs(candidate_d) + 5.0 * range_error
+
+            current = min(successors, key=projection_cost)
+        raise DynamicAnchorError("lane successor chain exceeded six segments")
+
     def _sample_lane_path(
         self,
         road_network: object,
@@ -623,7 +665,9 @@ class SimulatorDynamicAnchorGenerator:
             raise DynamicAnchorError(f"agent {ego_id!r} has invalid kinematics")
 
         road_network = self._road_network(env)
-        source_s, source_d = self._project(source_lane, position[:2])
+        source_lane, source_s, source_d = self._resolve_source_lane(
+            road_network, source_lane, position[:2]
+        )
         left_lane = self._lateral_lane(road_network, source_lane, ego_pose, direction=1)
         right_lane = self._lateral_lane(road_network, source_lane, ego_pose, direction=-1)
         left_s = self._project(left_lane, position[:2])[0] if left_lane is not None else 0.0

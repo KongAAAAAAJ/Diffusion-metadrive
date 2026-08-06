@@ -702,7 +702,7 @@ def test_run_preview_uses_start_seed_for_each_episode(monkeypatch, tmp_path: Pat
     )
 
     assert fake_env.spawn_seeds == [59, 60]
-    assert fake_env.reset_seeds == [None, None]
+    assert fake_env.reset_seeds == [59, 60]
     assert video_dir.exists()
     assert len(written) == 4
 
@@ -769,7 +769,7 @@ def test_run_preview_retries_episode_when_it_ends_immediately(monkeypatch, tmp_p
     )
 
     assert fake_env.spawn_seeds == [59, 60]
-    assert fake_env.reset_seeds == [None, None]
+    assert fake_env.reset_seeds == [59, 60]
     assert len(written) == 2
     assert all(item[1] > 1 for item in written)
 

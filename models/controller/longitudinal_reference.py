@@ -17,10 +17,14 @@ MAX_ACCEL_MPS2 = 5.0
 EXECUTABLE_MIN_ACCEL_MPS2 = -2.6
 EXECUTABLE_MAX_ACCEL_MPS2 = 0.4
 ACCELERATION_BIAS_MPS2 = 0.0
+# Pooled through-origin fit over natural zero-start warmups (seeds 17/31/47,
+# all three XL vehicles).  This is actuator gain; it is intentionally distinct
+# from EXECUTABLE_MAX_ACCEL_MPS2, which remains the requested-acceleration cap.
+DRIVE_ACCELERATION_SCALE_MPS2 = 1.4999988847662202
 # Fixed-command calibration on the sensorless XL vehicle, from a natural
 # zero-speed start at 8 m/s.  Negative MetaDrive throttle is a brake fraction,
 # not a normalized request over EXECUTABLE_MIN_ACCEL_MPS2.
-BRAKE_ACCELERATION_SCALE_MPS2 = 9.82788311581157
+BRAKE_ACCELERATION_SCALE_MPS2 = 9.374925668233
 
 
 class LongitudinalReferenceError(ValueError):
@@ -44,6 +48,7 @@ class LongitudinalCascadeController:
         actuator_delay_s: float = 0.30,
         stop_release_speed_mps: float = 0.30,
         acceleration_bias_mps2: float = ACCELERATION_BIAS_MPS2,
+        drive_acceleration_scale_mps2: float = DRIVE_ACCELERATION_SCALE_MPS2,
         brake_acceleration_scale_mps2: float = BRAKE_ACCELERATION_SCALE_MPS2,
     ) -> None:
         values = np.asarray(
@@ -57,6 +62,7 @@ class LongitudinalCascadeController:
                 integral_limit,
                 actuator_delay_s,
                 stop_release_speed_mps,
+                drive_acceleration_scale_mps2,
                 brake_acceleration_scale_mps2,
                 acceleration_bias_mps2,
             ],
@@ -68,6 +74,8 @@ class LongitudinalCascadeController:
             or np.any(values[:-1] < 0.0)
             or integral_limit <= 0.0
             or actuator_delay_s < 0.0
+            or drive_acceleration_scale_mps2 <= 0.0
+            or brake_acceleration_scale_mps2 <= 0.0
         ):
             raise LongitudinalReferenceError("cascade timing and limits must be positive")
         self.dt_s = float(dt_s)
@@ -85,6 +93,9 @@ class LongitudinalCascadeController:
         self.actuator_delay_s = float(actuator_delay_s)
         self.stop_release_speed_mps = float(stop_release_speed_mps)
         self.acceleration_bias_mps2 = float(acceleration_bias_mps2)
+        self.drive_acceleration_scale_mps2 = float(
+            drive_acceleration_scale_mps2
+        )
         self.brake_acceleration_scale_mps2 = float(
             brake_acceleration_scale_mps2
         )
@@ -177,7 +188,7 @@ class LongitudinalCascadeController:
             desired_acceleration - self.acceleration_bias_mps2
         )
         scale = (
-            EXECUTABLE_MAX_ACCEL_MPS2
+            self.drive_acceleration_scale_mps2
             if compensated_acceleration >= 0.0
             else self.brake_acceleration_scale_mps2
         )
@@ -197,6 +208,9 @@ class LongitudinalCascadeController:
             "desired_acceleration_mps2": desired_acceleration,
             "compensated_acceleration_mps2": compensated_acceleration,
             "acceleration_bias_mps2": self.acceleration_bias_mps2,
+            "drive_acceleration_scale_mps2": (
+                self.drive_acceleration_scale_mps2
+            ),
             "brake_acceleration_scale_mps2": (
                 self.brake_acceleration_scale_mps2
             ),
@@ -580,6 +594,7 @@ def build_feedback_executable_profile(
 __all__ = [
     "ACCELERATION_BIAS_MPS2",
     "BRAKE_ACCELERATION_SCALE_MPS2",
+    "DRIVE_ACCELERATION_SCALE_MPS2",
     "EXECUTABLE_MAX_ACCEL_MPS2",
     "EXECUTABLE_MIN_ACCEL_MPS2",
     "LongitudinalReferenceError",

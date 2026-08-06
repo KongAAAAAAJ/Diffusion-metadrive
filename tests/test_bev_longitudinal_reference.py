@@ -10,6 +10,7 @@ from evaluation.joint_simulator_branch import (
 )
 from models.bev_planner.mode_contract import validate_trajectory_kinematics
 from models.controller.longitudinal_reference import (
+    DRIVE_ACCELERATION_SCALE_MPS2,
     EXECUTABLE_MAX_ACCEL_MPS2,
     EXECUTABLE_MIN_ACCEL_MPS2,
     LongitudinalReferenceError,
@@ -158,7 +159,9 @@ def test_acceleration_bias_compensates_zero_acceleration_mapping() -> None:
     assert corrected_debug["desired_acceleration_mps2"] == pytest.approx(0.0)
     assert corrected_debug["compensated_acceleration_mps2"] == pytest.approx(0.08)
     assert corrected_debug["acceleration_bias_mps2"] == pytest.approx(-0.08)
-    assert corrected_throttle == pytest.approx(0.2)
+    assert corrected_throttle == pytest.approx(
+        0.08 / DRIVE_ACCELERATION_SCALE_MPS2
+    )
 
 
 def test_brake_mapping_uses_independent_calibrated_scale() -> None:
@@ -181,6 +184,32 @@ def test_brake_mapping_uses_independent_calibrated_scale() -> None:
         calibrated_debug["compensated_acceleration_mps2"] / 10.0
     )
     assert abs(calibrated) < abs(legacy)
+
+
+def test_drive_mapping_uses_independent_calibrated_scale() -> None:
+    reference = trajectory_to_longitudinal_reference(
+        _trajectory(6.0), 4.0, source="drive-scale"
+    )
+    throttle, debug = LongitudinalCascadeController(
+        drive_acceleration_scale_mps2=1.6
+    ).compute("agent0", 4.0, reference)
+    assert debug["desired_acceleration_mps2"] > 0.0
+    assert debug["drive_acceleration_scale_mps2"] == pytest.approx(1.6)
+    assert throttle == pytest.approx(
+        debug["compensated_acceleration_mps2"] / 1.6
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    (
+        {"drive_acceleration_scale_mps2": 0.0},
+        {"brake_acceleration_scale_mps2": 0.0},
+    ),
+)
+def test_actuator_scales_must_be_strictly_positive(kwargs) -> None:
+    with pytest.raises(LongitudinalReferenceError, match="timing and limits"):
+        LongitudinalCascadeController(**kwargs)
 
 
 def test_drive_and_brake_pi_use_separate_regimes_and_stop_overzero_guard() -> None:

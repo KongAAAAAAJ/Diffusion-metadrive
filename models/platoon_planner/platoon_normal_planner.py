@@ -2984,13 +2984,16 @@ class JointTrajectoryExecutor:
                         ),
                     },
                 )
-            if not self._footprint_on_road(env, vehicle, dense, spec):
+            footprint_on_road, footprint_detail = self._footprint_road_audit(
+                env, vehicle, dense, spec
+            )
+            if not footprint_on_road:
                 self._raise(
                     plan,
                     elapsed_s,
                     "rolled trajectory footprint leaves the road",
                     "committed_trajectory_out_of_road",
-                    {"agent_id": agent_id},
+                    {"agent_id": agent_id, "road_audit": footprint_detail},
                 )
             background = self.planner._predicted_obstacles(
                 env,
@@ -3164,6 +3167,16 @@ class JointTrajectoryExecutor:
         }
 
     def _footprint_on_road(self, env, vehicle, trajectory: np.ndarray, spec: TrajectoryExecutionSpec) -> bool:
+        valid, _ = self._footprint_road_audit(env, vehicle, trajectory, spec)
+        return valid
+
+    def _footprint_road_audit(
+        self,
+        env,
+        vehicle,
+        trajectory: np.ndarray,
+        spec: TrajectoryExecutionSpec,
+    ) -> tuple[bool, dict]:
         lanes = [
             self.planner._lane_from_index(env, lane_index)
             for lane_index in (
@@ -3175,7 +3188,7 @@ class JointTrajectoryExecutor:
         ]
         lanes = [lane for lane in lanes if lane is not None]
         if not lanes:
-            return False
+            return False, {"reason": "no_execution_lanes"}
         length, width = self.planner._vehicle_dimensions(vehicle)
         offsets = np.asarray(
             [
@@ -3187,12 +3200,13 @@ class JointTrajectoryExecutor:
             ],
             dtype=np.float64,
         )
-        for pose in np.asarray(trajectory, dtype=np.float64):
+        for pose_index, pose in enumerate(np.asarray(trajectory, dtype=np.float64)):
             c, s = math.cos(float(pose[2])), math.sin(float(pose[2]))
             rotation = np.asarray([[c, -s], [s, c]], dtype=np.float64)
             points = pose[:2][None, :] + offsets @ rotation.T
-            for point in points:
+            for corner_index, point in enumerate(points):
                 inside = False
+                lane_coordinates = []
                 for lane in lanes:
                     try:
                         longitudinal, lateral = lane.local_coordinates(point)
@@ -3200,6 +3214,15 @@ class JointTrajectoryExecutor:
                         lane_width = float(getattr(lane, "width", 3.5) or 3.5)
                     except Exception:
                         continue
+                    lane_coordinates.append(
+                        {
+                            "lane_index": list(getattr(lane, "index", ())),
+                            "longitudinal_m": float(longitudinal),
+                            "lateral_m": float(lateral),
+                            "length_m": lane_length,
+                            "width_m": lane_width,
+                        }
+                    )
                     if (
                         -1e-3 <= float(longitudinal) <= lane_length + 1e-3
                         and abs(float(lateral)) <= 0.5 * lane_width + 1e-3
@@ -3207,8 +3230,16 @@ class JointTrajectoryExecutor:
                         inside = True
                         break
                 if not inside:
-                    return False
-        return True
+                    return False, {
+                        "reason": "footprint_point_outside_execution_lanes",
+                        "trajectory_index": int(pose_index),
+                        "time_offset_s": float(pose_index * self.planner.DENSE_DT_S),
+                        "corner_index": int(corner_index),
+                        "pose": [float(value) for value in pose],
+                        "point": [float(value) for value in point],
+                        "lane_coordinates": lane_coordinates,
+                    }
+        return True, {"reason": "passed"}
 
     @classmethod
     def _minimum_gap(

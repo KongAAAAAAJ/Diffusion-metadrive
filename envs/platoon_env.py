@@ -33,6 +33,7 @@ except Exception as exc:  # pragma: no cover - import errors are surfaced at run
 from evaluation.platoon_metrics import PlatoonMetrics
 from models.controller.longitudinal_reference import (
     BRAKE_ACCELERATION_SCALE_MPS2,
+    DRIVE_ACCELERATION_SCALE_MPS2,
     LongitudinalCascadeController,
     LongitudinalTrackingReference,
     signed_longitudinal_speed_mps,
@@ -131,7 +132,13 @@ class PlatoonEnvConfig:
         preview_lookahead_max_m: float = 8.0,
         preview_heading_weight: float = 0.5,
         acceleration_bias_mps2: float = 0.0,
+        drive_acceleration_scale_mps2: float = DRIVE_ACCELERATION_SCALE_MPS2,
         brake_acceleration_scale_mps2: float = BRAKE_ACCELERATION_SCALE_MPS2,
+        platoon_max_engine_force: float = 600.0,
+        platoon_max_brake_force: float = 75.0,
+        platoon_wheel_friction: float = 0.7,
+        platoon_vehicle_mass: float = 1600.0,
+        platoon_route_spawn_lane_index: int = 0,
     ) -> None:
         self.num_agents = int(num_agents)
         self.use_render = bool(use_render)
@@ -178,9 +185,34 @@ class PlatoonEnvConfig:
         self.preview_lookahead_max_m = float(preview_lookahead_max_m)
         self.preview_heading_weight = float(preview_heading_weight)
         self.acceleration_bias_mps2 = float(acceleration_bias_mps2)
+        self.drive_acceleration_scale_mps2 = float(
+            drive_acceleration_scale_mps2
+        )
         self.brake_acceleration_scale_mps2 = float(
             brake_acceleration_scale_mps2
         )
+        self.platoon_max_engine_force = float(platoon_max_engine_force)
+        self.platoon_max_brake_force = float(platoon_max_brake_force)
+        self.platoon_wheel_friction = float(platoon_wheel_friction)
+        self.platoon_vehicle_mass = float(platoon_vehicle_mass)
+        self.platoon_route_spawn_lane_index = int(
+            platoon_route_spawn_lane_index
+        )
+        fixed_dynamics = np.asarray(
+            [
+                self.platoon_max_engine_force,
+                self.platoon_max_brake_force,
+                self.platoon_wheel_friction,
+                self.platoon_vehicle_mass,
+            ],
+            dtype=np.float64,
+        )
+        if not np.isfinite(fixed_dynamics).all() or np.any(fixed_dynamics <= 0.0):
+            raise ValueError(
+                "fixed platoon dynamics must be finite and strictly positive"
+            )
+        if self.platoon_route_spawn_lane_index < 0:
+            raise ValueError("platoon_route_spawn_lane_index must be non-negative")
 
 
 class PlatoonEnv(BaseMultiEnv):
@@ -231,6 +263,12 @@ class PlatoonEnv(BaseMultiEnv):
             * int(merged.get("decision_repeat", 5)),
             acceleration_bias_mps2=float(
                 merged.get("acceleration_bias_mps2", 0.0)
+            ),
+            drive_acceleration_scale_mps2=float(
+                merged.get(
+                    "drive_acceleration_scale_mps2",
+                    DRIVE_ACCELERATION_SCALE_MPS2,
+                )
             ),
             brake_acceleration_scale_mps2=float(
                 merged.get(
@@ -330,8 +368,14 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_max_m": self.platoon_config.preview_lookahead_max_m,
             "preview_heading_weight": self.platoon_config.preview_heading_weight,
             "acceleration_bias_mps2": self.platoon_config.acceleration_bias_mps2,
+            "drive_acceleration_scale_mps2": (
+                self.platoon_config.drive_acceleration_scale_mps2
+            ),
             "brake_acceleration_scale_mps2": (
                 self.platoon_config.brake_acceleration_scale_mps2
+            ),
+            "platoon_route_spawn_lane_index": (
+                self.platoon_config.platoon_route_spawn_lane_index
             ),
         }
 
@@ -489,7 +533,13 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_max_m",
             "preview_heading_weight",
             "acceleration_bias_mps2",
+            "drive_acceleration_scale_mps2",
             "brake_acceleration_scale_mps2",
+            "platoon_max_engine_force",
+            "platoon_max_brake_force",
+            "platoon_wheel_friction",
+            "platoon_vehicle_mass",
+            "platoon_route_spawn_lane_index",
         }
         return {key: config[key] for key in keys if key in config}
 
@@ -534,7 +584,13 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_max_m",
             "preview_heading_weight",
             "acceleration_bias_mps2",
+            "drive_acceleration_scale_mps2",
             "brake_acceleration_scale_mps2",
+            "platoon_max_engine_force",
+            "platoon_max_brake_force",
+            "platoon_wheel_friction",
+            "platoon_vehicle_mass",
+            "platoon_route_spawn_lane_index",
             # scenario_id / local_route are intentionally excluded here so they pass
             # through to the MetaDrive config via _build_metadrive_config explicitly.
         }
@@ -558,6 +614,10 @@ class PlatoonEnv(BaseMultiEnv):
                 "spawn_lateral": 0.0,
                 "spawn_velocity": (speed_m_s, 0.0),
                 "spawn_velocity_car_frame": True,
+                "max_engine_force": self.platoon_config.platoon_max_engine_force,
+                "max_brake_force": self.platoon_config.platoon_max_brake_force,
+                "wheel_friction": self.platoon_config.platoon_wheel_friction,
+                "mass": self.platoon_config.platoon_vehicle_mass,
             }
             for i in range(self.platoon_config.num_agents)
         }
@@ -658,10 +718,12 @@ class PlatoonEnv(BaseMultiEnv):
 
         speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
         gap_m = self._desired_center_spacing_m()
-        lane_idx = 0
-        if fixed_agent0_config is not None:
-            if len(fixed_lane_index) == 3 and tuple(fixed_lane_index[:2]) == (road_start, road_end):
-                lane_idx = int(fixed_lane_index[2])
+        # The platoon-level lane selection is authoritative.  In particular,
+        # controller diagnostics deliberately start on an interior lane so
+        # both signed lane-change references remain on-road.  The generated
+        # agent0 spawn config may still select the road and longitude, but it
+        # must not silently force the platoon back to its edge-lane index.
+        lane_idx = self._cfg_int("platoon_route_spawn_lane_index", 0)
         lane_idx = max(0, min(lane_idx, len(lanes) - 1))
         lane = lanes[lane_idx]
         if fixed_agent0_config is not None:
@@ -1902,6 +1964,10 @@ class PlatoonEnv(BaseMultiEnv):
                 * self._cfg_int("decision_repeat", 5),
                 acceleration_bias_mps2=self._cfg_float(
                     "acceleration_bias_mps2", 0.0
+                ),
+                drive_acceleration_scale_mps2=self._cfg_float(
+                    "drive_acceleration_scale_mps2",
+                    DRIVE_ACCELERATION_SCALE_MPS2,
                 ),
                 brake_acceleration_scale_mps2=self._cfg_float(
                     "brake_acceleration_scale_mps2",

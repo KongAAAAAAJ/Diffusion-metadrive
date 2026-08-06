@@ -859,7 +859,12 @@ def _run_single_episode(
     spawn_manager = getattr(getattr(env, "engine", None), "spawn_manager", None)
     if spawn_manager is not None and hasattr(spawn_manager, "set_episode_spawn_seed"):
         spawn_manager.set_episode_spawn_seed(int(seed))
-    obs = env.reset()
+    env.start_index = int(seed)
+    env.config["start_seed"] = int(seed)
+    global_config = getattr(getattr(env, "engine", None), "global_config", None)
+    if global_config is not None:
+        global_config["start_seed"] = int(seed)
+    obs = env.reset(seed=int(seed))
     action_fn = action_fn_factory(env, agent_ids, seed)
     strict_expert_chain = hasattr(action_fn, "expert")
     builder = sample_builder or JointBEVSampleBuilder(agent_ids)
