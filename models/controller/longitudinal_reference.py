@@ -60,7 +60,11 @@ class LongitudinalCascadeController:
         gap = float(np.clip(gap_acceleration_mps2, -1.0, 1.0))
         if not np.isfinite(speed) or speed < 0.0 or not np.isfinite(gap):
             raise LongitudinalReferenceError("cascade inputs must be finite")
-        target_speed = 0.0 if reference.stop_requested else reference.target_speed_mps
+        # ``stop_requested`` describes the terminal state of the four-second
+        # profile.  It must not erase the time-parameterized deceleration that
+        # precedes the stop.  The immediate reference already reaches exactly
+        # zero when the vehicle is supposed to be stationary.
+        target_speed = reference.target_speed_mps
         speed_error = float(target_speed - speed)
         previous_integral = float(self._integral.get(str(agent_id), 0.0))
         proposed_integral = float(
@@ -95,7 +99,7 @@ class LongitudinalCascadeController:
         saturated = not np.isclose(raw_acceleration, desired_acceleration, atol=1.0e-9)
         if not saturated:
             self._integral[str(agent_id)] = proposed_integral
-        if reference.stop_requested and speed <= 0.1:
+        if reference.stop_requested and target_speed <= 0.1 and speed <= 0.1:
             desired_acceleration = 0.0
         scale = (
             EXECUTABLE_MAX_ACCEL_MPS2

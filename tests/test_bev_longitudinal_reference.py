@@ -13,6 +13,7 @@ from models.controller.longitudinal_reference import (
     EXECUTABLE_MAX_ACCEL_MPS2,
     EXECUTABLE_MIN_ACCEL_MPS2,
     LongitudinalReferenceError,
+    LongitudinalCascadeController,
     LongitudinalTrackingReference,
     build_feedback_executable_profile,
     project_point_to_path_arc,
@@ -77,6 +78,43 @@ def test_stop_reference_freezes_after_zero_speed() -> None:
     assert stop.stop_requested
     np.testing.assert_allclose(stop.speed_mps[1:], 0.0)
     np.testing.assert_allclose(stop.arc_position_m, 0.0)
+
+
+def test_terminal_stop_does_not_request_zero_speed_before_stop_time() -> None:
+    trajectory = np.zeros((8, 3), dtype=np.float32)
+    times = np.arange(1, 9, dtype=np.float32) * 0.5
+    active = np.minimum(times, 3.0)
+    trajectory[:, 0] = 6.0 * active - active**2
+    reference = trajectory_to_longitudinal_reference(
+        trajectory,
+        6.0,
+        source="decelerating_stop",
+    )
+    assert reference.stop_requested
+    assert reference.target_speed_mps == pytest.approx(5.9)
+
+    throttle, debug = LongitudinalCascadeController().compute(
+        "agent0",
+        6.0,
+        reference,
+    )
+    assert debug["reference_speed_mps"] == pytest.approx(5.9)
+    assert throttle > -1.0
+
+
+def test_terminal_stop_holds_zero_only_after_reference_reaches_zero() -> None:
+    reference = trajectory_to_longitudinal_reference(
+        np.zeros((8, 3), dtype=np.float32),
+        0.05,
+        source="stationary_stop",
+    )
+    throttle, debug = LongitudinalCascadeController().compute(
+        "agent0",
+        0.05,
+        reference,
+    )
+    assert debug["reference_speed_mps"] == pytest.approx(0.04)
+    assert throttle == pytest.approx(0.0)
 
 
 def test_reference_rejects_invalid_time_or_acceleration() -> None:
