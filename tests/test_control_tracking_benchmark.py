@@ -28,6 +28,7 @@ def _trace(
         "actual_acceleration_mps2": [0.0] * count,
         "desired_acceleration_mps2": [0.0] * count,
         "acceleration_bias_mps2": [0.0] * count,
+        "brake_acceleration_scale_mps2": [9.82788311581157] * count,
         "controller_speed_error_mps": [0.0] * count,
         "formation_control_increment": [0.0] * count,
         "formation_gap_error_m": [gap_error] * count,

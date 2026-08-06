@@ -32,6 +32,7 @@ except Exception as exc:  # pragma: no cover - import errors are surfaced at run
 
 from evaluation.platoon_metrics import PlatoonMetrics
 from models.controller.longitudinal_reference import (
+    BRAKE_ACCELERATION_SCALE_MPS2,
     LongitudinalCascadeController,
     LongitudinalTrackingReference,
     signed_longitudinal_speed_mps,
@@ -130,6 +131,7 @@ class PlatoonEnvConfig:
         preview_lookahead_max_m: float = 8.0,
         preview_heading_weight: float = 0.5,
         acceleration_bias_mps2: float = 0.0,
+        brake_acceleration_scale_mps2: float = BRAKE_ACCELERATION_SCALE_MPS2,
     ) -> None:
         self.num_agents = int(num_agents)
         self.use_render = bool(use_render)
@@ -176,6 +178,9 @@ class PlatoonEnvConfig:
         self.preview_lookahead_max_m = float(preview_lookahead_max_m)
         self.preview_heading_weight = float(preview_heading_weight)
         self.acceleration_bias_mps2 = float(acceleration_bias_mps2)
+        self.brake_acceleration_scale_mps2 = float(
+            brake_acceleration_scale_mps2
+        )
 
 
 class PlatoonEnv(BaseMultiEnv):
@@ -226,6 +231,12 @@ class PlatoonEnv(BaseMultiEnv):
             * int(merged.get("decision_repeat", 5)),
             acceleration_bias_mps2=float(
                 merged.get("acceleration_bias_mps2", 0.0)
+            ),
+            brake_acceleration_scale_mps2=float(
+                merged.get(
+                    "brake_acceleration_scale_mps2",
+                    BRAKE_ACCELERATION_SCALE_MPS2,
+                )
             ),
         )
         super().__init__(config=self._build_metadrive_config())
@@ -319,6 +330,9 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_max_m": self.platoon_config.preview_lookahead_max_m,
             "preview_heading_weight": self.platoon_config.preview_heading_weight,
             "acceleration_bias_mps2": self.platoon_config.acceleration_bias_mps2,
+            "brake_acceleration_scale_mps2": (
+                self.platoon_config.brake_acceleration_scale_mps2
+            ),
         }
 
     def _install_platoon_runtime_config(self) -> None:
@@ -475,6 +489,7 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_max_m",
             "preview_heading_weight",
             "acceleration_bias_mps2",
+            "brake_acceleration_scale_mps2",
         }
         return {key: config[key] for key in keys if key in config}
 
@@ -519,6 +534,7 @@ class PlatoonEnv(BaseMultiEnv):
             "preview_lookahead_max_m",
             "preview_heading_weight",
             "acceleration_bias_mps2",
+            "brake_acceleration_scale_mps2",
             # scenario_id / local_route are intentionally excluded here so they pass
             # through to the MetaDrive config via _build_metadrive_config explicitly.
         }
@@ -1886,6 +1902,10 @@ class PlatoonEnv(BaseMultiEnv):
                 * self._cfg_int("decision_repeat", 5),
                 acceleration_bias_mps2=self._cfg_float(
                     "acceleration_bias_mps2", 0.0
+                ),
+                brake_acceleration_scale_mps2=self._cfg_float(
+                    "brake_acceleration_scale_mps2",
+                    BRAKE_ACCELERATION_SCALE_MPS2,
                 ),
             )
             self._trajectory_longitudinal_controller = longitudinal_controller

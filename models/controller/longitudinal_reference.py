@@ -17,6 +17,10 @@ MAX_ACCEL_MPS2 = 5.0
 EXECUTABLE_MIN_ACCEL_MPS2 = -2.6
 EXECUTABLE_MAX_ACCEL_MPS2 = 0.4
 ACCELERATION_BIAS_MPS2 = 0.0
+# Fixed-command calibration on the sensorless XL vehicle, from a natural
+# zero-speed start at 8 m/s.  Negative MetaDrive throttle is a brake fraction,
+# not a normalized request over EXECUTABLE_MIN_ACCEL_MPS2.
+BRAKE_ACCELERATION_SCALE_MPS2 = 9.82788311581157
 
 
 class LongitudinalReferenceError(ValueError):
@@ -40,6 +44,7 @@ class LongitudinalCascadeController:
         actuator_delay_s: float = 0.30,
         stop_release_speed_mps: float = 0.30,
         acceleration_bias_mps2: float = ACCELERATION_BIAS_MPS2,
+        brake_acceleration_scale_mps2: float = BRAKE_ACCELERATION_SCALE_MPS2,
     ) -> None:
         values = np.asarray(
             [
@@ -52,6 +57,7 @@ class LongitudinalCascadeController:
                 integral_limit,
                 actuator_delay_s,
                 stop_release_speed_mps,
+                brake_acceleration_scale_mps2,
                 acceleration_bias_mps2,
             ],
             dtype=np.float64,
@@ -79,6 +85,9 @@ class LongitudinalCascadeController:
         self.actuator_delay_s = float(actuator_delay_s)
         self.stop_release_speed_mps = float(stop_release_speed_mps)
         self.acceleration_bias_mps2 = float(acceleration_bias_mps2)
+        self.brake_acceleration_scale_mps2 = float(
+            brake_acceleration_scale_mps2
+        )
         self._integral: dict[str, float] = {}
         self._control_regime: dict[str, str] = {}
 
@@ -170,7 +179,7 @@ class LongitudinalCascadeController:
         scale = (
             EXECUTABLE_MAX_ACCEL_MPS2
             if compensated_acceleration >= 0.0
-            else abs(EXECUTABLE_MIN_ACCEL_MPS2)
+            else self.brake_acceleration_scale_mps2
         )
         throttle = float(np.clip(compensated_acceleration / scale, -1.0, 1.0))
         return throttle, {
@@ -188,6 +197,9 @@ class LongitudinalCascadeController:
             "desired_acceleration_mps2": desired_acceleration,
             "compensated_acceleration_mps2": compensated_acceleration,
             "acceleration_bias_mps2": self.acceleration_bias_mps2,
+            "brake_acceleration_scale_mps2": (
+                self.brake_acceleration_scale_mps2
+            ),
             "raw_desired_acceleration_mps2": float(raw_acceleration),
             "control_saturated": bool(saturated or abs(throttle) >= 0.999),
             "normalized_throttle": throttle,
@@ -567,6 +579,7 @@ def build_feedback_executable_profile(
 
 __all__ = [
     "ACCELERATION_BIAS_MPS2",
+    "BRAKE_ACCELERATION_SCALE_MPS2",
     "EXECUTABLE_MAX_ACCEL_MPS2",
     "EXECUTABLE_MIN_ACCEL_MPS2",
     "LongitudinalReferenceError",

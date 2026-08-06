@@ -7,6 +7,7 @@ import numpy as np
 from models.controller.base_controller import BaseController
 from models.controller.controller_helper import save_pid_debug_plot
 from models.controller.longitudinal_reference import (
+    BRAKE_ACCELERATION_SCALE_MPS2,
     LongitudinalCascadeController,
     LongitudinalTrackingReference,
     signed_longitudinal_speed_mps,
@@ -71,6 +72,12 @@ class PIDTrajectoryController(BaseController):
             dt_s=decision_dt,
             acceleration_bias_mps2=float(
                 cfg.get("acceleration_bias_mps2", 0.0)
+            ),
+            brake_acceleration_scale_mps2=float(
+                cfg.get(
+                    "brake_acceleration_scale_mps2",
+                    BRAKE_ACCELERATION_SCALE_MPS2,
+                )
             ),
         )
         self._last_debug: dict[str, dict[str, object]] = {}

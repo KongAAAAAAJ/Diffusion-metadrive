@@ -584,6 +584,7 @@ class JointSimulatorBranchEvaluator:
                     "actual_acceleration_mps2": [],
                     "desired_acceleration_mps2": [],
                     "acceleration_bias_mps2": [],
+                    "brake_acceleration_scale_mps2": [],
                     "controller_speed_error_mps": [],
                     "control_saturated": [],
                     "lateral_heading_contaminated": [],
@@ -855,6 +856,13 @@ class JointSimulatorBranchEvaluator:
                         )
                         trace["acceleration_bias_mps2"].append(
                             float(debug.get("acceleration_bias_mps2", 0.0))
+                        )
+                        trace["brake_acceleration_scale_mps2"].append(
+                            float(
+                                debug.get(
+                                    "brake_acceleration_scale_mps2", 0.0
+                                )
+                            )
                         )
                         trace["controller_speed_error_mps"].append(
                             float(debug.get("speed_error_mps", 0.0))

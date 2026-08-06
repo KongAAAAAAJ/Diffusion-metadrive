@@ -161,6 +161,28 @@ def test_acceleration_bias_compensates_zero_acceleration_mapping() -> None:
     assert corrected_throttle == pytest.approx(0.2)
 
 
+def test_brake_mapping_uses_independent_calibrated_scale() -> None:
+    trajectory = np.zeros((8, 3), dtype=np.float32)
+    trajectory[:, 0] = np.asarray(
+        [3.5, 6.0, 7.5, 8.0, 8.0, 8.0, 8.0, 8.0], dtype=np.float32
+    )
+    reference = trajectory_to_longitudinal_reference(
+        trajectory, 8.0, source="brake-scale"
+    )
+    calibrated, calibrated_debug = LongitudinalCascadeController(
+        brake_acceleration_scale_mps2=10.0
+    ).compute("agent0", 8.0, reference)
+    legacy, _ = LongitudinalCascadeController(
+        brake_acceleration_scale_mps2=2.6
+    ).compute("agent0", 8.0, reference)
+    assert calibrated_debug["desired_acceleration_mps2"] < 0.0
+    assert calibrated_debug["brake_acceleration_scale_mps2"] == pytest.approx(10.0)
+    assert calibrated == pytest.approx(
+        calibrated_debug["compensated_acceleration_mps2"] / 10.0
+    )
+    assert abs(calibrated) < abs(legacy)
+
+
 def test_drive_and_brake_pi_use_separate_regimes_and_stop_overzero_guard() -> None:
     controller = LongitudinalCascadeController()
     cruise = trajectory_to_longitudinal_reference(

@@ -31,6 +31,7 @@ from expert_dataset.collect_joint_bev import (
 )
 from models.bev_planner.mode_contract import validate_trajectory_kinematics
 from models.controller.longitudinal_reference import (
+    BRAKE_ACCELERATION_SCALE_MPS2,
     LongitudinalCascadeController,
     signed_longitudinal_speed_mps,
     trajectory_to_longitudinal_reference,
@@ -67,6 +68,10 @@ class _IndependentControlEnv(SensorlessJointBEVPlatoonEnv):
                 * self._cfg_int("decision_repeat", 5),
                 acceleration_bias_mps2=self._cfg_float(
                     "acceleration_bias_mps2", 0.0
+                ),
+                brake_acceleration_scale_mps2=self._cfg_float(
+                    "brake_acceleration_scale_mps2",
+                    BRAKE_ACCELERATION_SCALE_MPS2,
                 ),
             )
             self._trajectory_longitudinal_controller = controller
@@ -473,6 +478,7 @@ def _prepare_natural_start(
     *,
     seed: int,
     acceleration_bias_mps2: float,
+    brake_acceleration_scale_mps2: float,
 ) -> tuple[
     JointEpisodeSpec,
     tuple[Mapping[str, np.ndarray], ...],
@@ -488,6 +494,9 @@ def _prepare_natural_start(
     config = {
         "initial_speed_km_h": 0.0,
         "acceleration_bias_mps2": float(acceleration_bias_mps2),
+        "brake_acceleration_scale_mps2": float(
+            brake_acceleration_scale_mps2
+        ),
     }
     provisional = JointEpisodeSpec(
         DEFAULT_SCENARIO,
@@ -618,6 +627,7 @@ def run_control_tracking_benchmark(
     evaluator: JointSimulatorBranchEvaluator | None = None,
     control_modes: Sequence[str] | None = None,
     acceleration_bias_mps2: float = 0.0,
+    brake_acceleration_scale_mps2: float = BRAKE_ACCELERATION_SCALE_MPS2,
 ) -> dict[str, object]:
     output = Path(output_root)
     output.mkdir(parents=True, exist_ok=True)
@@ -638,6 +648,13 @@ def run_control_tracking_benchmark(
         )
     if not np.isfinite(float(acceleration_bias_mps2)):
         raise ControlBenchmarkError("acceleration_bias_mps2 must be finite")
+    if (
+        not np.isfinite(float(brake_acceleration_scale_mps2))
+        or float(brake_acceleration_scale_mps2) <= 0.0
+    ):
+        raise ControlBenchmarkError(
+            "brake_acceleration_scale_mps2 must be finite and positive"
+        )
     evaluators = {
         "locked": evaluator or _ControlBenchmarkBranchEvaluator(),
         "independent": (
@@ -657,6 +674,9 @@ def run_control_tracking_benchmark(
                 case,
                 seed=seed,
                 acceleration_bias_mps2=float(acceleration_bias_mps2),
+                brake_acceleration_scale_mps2=float(
+                    brake_acceleration_scale_mps2
+                ),
             )
             candidates = np.stack([[case.trajectory] * 3]).astype(np.float32)
             result = branch.evaluate(spec, prefix_actions, candidates)
@@ -715,6 +735,13 @@ def run_control_tracking_benchmark(
                     [trace["acceleration_bias_mps2"] for trace in traces],
                     dtype=np.float64,
                 ),
+                brake_acceleration_scale_mps2=np.asarray(
+                    [
+                        trace["brake_acceleration_scale_mps2"]
+                        for trace in traces
+                    ],
+                    dtype=np.float64,
+                ),
                 controller_speed_error_mps=np.asarray(
                     [trace["controller_speed_error_mps"] for trace in traces],
                     dtype=np.float64,
@@ -765,6 +792,9 @@ def run_control_tracking_benchmark(
         "seed": int(seed),
         "control_modes": list(modes),
         "acceleration_bias_mps2": float(acceleration_bias_mps2),
+        "brake_acceleration_scale_mps2": float(
+            brake_acceleration_scale_mps2
+        ),
         "initialization": "natural_from_rest",
         "thresholds": {
             "longitudinal_p95_m": 1.0,
@@ -798,6 +828,11 @@ def _main() -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--acceleration-bias-mps2", type=float, default=0.0)
+    parser.add_argument(
+        "--brake-acceleration-scale-mps2",
+        type=float,
+        default=BRAKE_ACCELERATION_SCALE_MPS2,
+    )
     parser.add_argument("--cases", nargs="+", default=None)
     parser.add_argument(
         "--control-modes",
@@ -812,6 +847,7 @@ def _main() -> int:
         seed=args.seed,
         control_modes=args.control_modes,
         acceleration_bias_mps2=args.acceleration_bias_mps2,
+        brake_acceleration_scale_mps2=args.brake_acceleration_scale_mps2,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["passed"] else 2
