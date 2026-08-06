@@ -12,6 +12,7 @@ from models.platoon_planner.platoon_normal_planner import (
     NormalPlannerNoFeasiblePlan,
     PlatoonNormalPlanner,
     TrajectoryExecutionSpec,
+    audit_dense_footprint_on_lanes,
     _Neighbor,
     _TrafficEnvelope,
     _TrajectoryCandidate,
@@ -221,6 +222,61 @@ def test_default_hard_safety_gaps_match_collection_contract():
 
     assert planner.background_safe_gap_m == 5.0
     assert planner.platoon_safe_gap_m == 7.0
+
+
+def test_candidate_pool_rejects_rotated_footprint_before_joint_search():
+    env = _env(agent_lane_id=0)
+    planner = PlatoonNormalPlanner()
+    vehicle = env.agents["agent0"]
+
+    pool, debug = planner._generate_candidate_pool(
+        env,
+        vehicle,
+        1,
+        np.asarray([20.0, -3.5], dtype=np.float32),
+    )
+
+    assert debug["road_rejection_count"] > 0
+    assert debug["road_rejections_by_reason"][
+        "footprint_point_outside_execution_lanes"
+    ] > 0
+    lanes = (
+        env.engine.current_map.road_network.get_lane(("A", "B", 0)),
+        env.engine.current_map.road_network.get_lane(("A", "B", 1)),
+    )
+    for candidate in pool:
+        valid, detail = audit_dense_footprint_on_lanes(
+            candidate.dense,
+            lanes,
+            planner._vehicle_dimensions(vehicle),
+            dense_dt_s=planner.DENSE_DT_S,
+        )
+        assert valid, detail
+
+
+def test_candidate_and_executor_share_identical_footprint_contract():
+    env, plan = _execution_fixture()
+    planner = PlatoonNormalPlanner()
+    executor = JointTrajectoryExecutor(planner)
+    spec = plan.agent_specs["agent0"]
+    vehicle = env.agents["agent0"]
+    trajectory = spec.trajectory_world[:41].copy()
+    trajectory[5, 2] = -0.35
+    trajectory[5, 1] = 1.65
+    lane = env.engine.current_map.road_network.get_lane(spec.source_lane_index)
+
+    candidate_result = audit_dense_footprint_on_lanes(
+        trajectory,
+        (lane,),
+        planner._vehicle_dimensions(vehicle),
+        dense_dt_s=planner.DENSE_DT_S,
+    )
+    executor_result = executor._footprint_road_audit(
+        env, vehicle, trajectory, spec
+    )
+
+    assert candidate_result == executor_result
+    assert candidate_result[0] is False
 
 
 def test_ranked_planner_uses_first_rule_rank_with_native_trajectory(monkeypatch):

@@ -27,6 +27,93 @@ from models.platoon_planner.collision_geometry import (
 )
 
 
+def audit_dense_footprint_on_lanes(
+    trajectory: np.ndarray,
+    lanes: list[object] | tuple[object, ...],
+    dimensions: tuple[float, float],
+    *,
+    dense_dt_s: float,
+) -> tuple[bool, dict]:
+    """Check every vehicle footprint point against the same execution lanes.
+
+    This is the single road-footprint contract shared by candidate generation
+    and committed execution.  A point is valid when it lies in the union of
+    the source, target and continuation lane surfaces.
+    """
+
+    trajectory = np.asarray(trajectory, dtype=np.float64)
+    if trajectory.ndim != 2 or trajectory.shape[1] != 3:
+        raise ValueError("road footprint trajectory must have shape [N,3]")
+    if not np.isfinite(trajectory).all():
+        raise ValueError("road footprint trajectory must be finite")
+    valid_lanes = []
+    seen_lane_keys = set()
+    for lane in lanes:
+        if lane is None:
+            continue
+        lane_index = tuple(getattr(lane, "index", ()) or ())
+        lane_key = lane_index if lane_index else ("object", id(lane))
+        if lane_key in seen_lane_keys:
+            continue
+        seen_lane_keys.add(lane_key)
+        valid_lanes.append(lane)
+    if not valid_lanes:
+        return False, {"reason": "no_execution_lanes"}
+    length, width = (float(dimensions[0]), float(dimensions[1]))
+    if not np.isfinite([length, width]).all() or length <= 0.0 or width <= 0.0:
+        raise ValueError("vehicle footprint dimensions must be positive and finite")
+    offsets = np.asarray(
+        [
+            [0.5 * length, 0.5 * width],
+            [0.5 * length, -0.5 * width],
+            [-0.5 * length, 0.5 * width],
+            [-0.5 * length, -0.5 * width],
+            [0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    for pose_index, pose in enumerate(trajectory):
+        cosine, sine = math.cos(float(pose[2])), math.sin(float(pose[2]))
+        rotation = np.asarray([[cosine, -sine], [sine, cosine]], dtype=np.float64)
+        points = pose[:2][None, :] + offsets @ rotation.T
+        for corner_index, point in enumerate(points):
+            inside = False
+            lane_coordinates = []
+            for lane in valid_lanes:
+                try:
+                    longitudinal, lateral = lane.local_coordinates(point)
+                    lane_length = float(getattr(lane, "length", 0.0) or 0.0)
+                    lane_width = float(getattr(lane, "width", 3.5) or 3.5)
+                except Exception:
+                    continue
+                lane_coordinates.append(
+                    {
+                        "lane_index": list(getattr(lane, "index", ())),
+                        "longitudinal_m": float(longitudinal),
+                        "lateral_m": float(lateral),
+                        "length_m": lane_length,
+                        "width_m": lane_width,
+                    }
+                )
+                if (
+                    -1e-3 <= float(longitudinal) <= lane_length + 1e-3
+                    and abs(float(lateral)) <= 0.5 * lane_width + 1e-3
+                ):
+                    inside = True
+                    break
+            if not inside:
+                return False, {
+                    "reason": "footprint_point_outside_execution_lanes",
+                    "trajectory_index": int(pose_index),
+                    "time_offset_s": float(pose_index * dense_dt_s),
+                    "corner_index": int(corner_index),
+                    "pose": [float(value) for value in pose],
+                    "point": [float(value) for value in point],
+                    "lane_coordinates": lane_coordinates,
+                }
+    return True, {"reason": "passed"}
+
+
 class NormalPlannerKinematicError(RuntimeError):
     """Raised when a selected native trajectory violates the fixed-time contract."""
 
@@ -708,6 +795,7 @@ class PlatoonNormalPlanner:
         }
         collision_hits: Counter[str] = Counter()
         kinematic_hits: Counter[str] = Counter()
+        road_hits: Counter[str] = Counter()
         source_lane = getattr(vehicle, "lane", None)
         if source_lane is None:
             return [], self._empty_debug("missing_source_lane", stats, collision_hits)
@@ -937,6 +1025,21 @@ class PlatoonNormalPlanner:
                         )
                         if candidate_dense is None:
                             stats["road_rejection_count"] += 1
+                            road_hits["path_parameterization_failed"] += 1
+                            continue
+                        footprint_valid, footprint_detail = (
+                            audit_dense_footprint_on_lanes(
+                                candidate_dense,
+                                (source_lane, target_lane, continuation_lane),
+                                self._vehicle_dimensions(vehicle),
+                                dense_dt_s=self.DENSE_DT_S,
+                            )
+                        )
+                        if not footprint_valid:
+                            stats["road_rejection_count"] += 1
+                            road_hits[
+                                str(footprint_detail.get("reason", "unknown"))
+                            ] += 1
                             continue
                         output = candidate_dense[self._output_indices].astype(
                             np.float32, copy=False
@@ -1086,6 +1189,7 @@ class PlatoonNormalPlanner:
             "generated_valid_candidate_count": len(candidates),
             **stats,
             "collision_rejections_by_object": dict(sorted(collision_hits.items())),
+            "road_rejections_by_reason": dict(sorted(road_hits.items())),
             "kinematic_rejections_by_reason": dict(
                 sorted(kinematic_hits.items())
             ),
@@ -1241,6 +1345,7 @@ class PlatoonNormalPlanner:
             "generated_valid_candidate_count": 0,
             **dict(stats),
             "collision_rejections_by_object": dict(collision_hits),
+            "road_rejections_by_reason": {},
             "source_envelope": {"front": None, "rear": None},
             "target_envelope": {"front": None, "rear": None},
             "reachable_progress_m": None,
@@ -3186,60 +3291,12 @@ class JointTrajectoryExecutor:
             )
             if lane_index
         ]
-        lanes = [lane for lane in lanes if lane is not None]
-        if not lanes:
-            return False, {"reason": "no_execution_lanes"}
-        length, width = self.planner._vehicle_dimensions(vehicle)
-        offsets = np.asarray(
-            [
-                [0.5 * length, 0.5 * width],
-                [0.5 * length, -0.5 * width],
-                [-0.5 * length, 0.5 * width],
-                [-0.5 * length, -0.5 * width],
-                [0.0, 0.0],
-            ],
-            dtype=np.float64,
+        return audit_dense_footprint_on_lanes(
+            trajectory,
+            lanes,
+            self.planner._vehicle_dimensions(vehicle),
+            dense_dt_s=self.planner.DENSE_DT_S,
         )
-        for pose_index, pose in enumerate(np.asarray(trajectory, dtype=np.float64)):
-            c, s = math.cos(float(pose[2])), math.sin(float(pose[2]))
-            rotation = np.asarray([[c, -s], [s, c]], dtype=np.float64)
-            points = pose[:2][None, :] + offsets @ rotation.T
-            for corner_index, point in enumerate(points):
-                inside = False
-                lane_coordinates = []
-                for lane in lanes:
-                    try:
-                        longitudinal, lateral = lane.local_coordinates(point)
-                        lane_length = float(getattr(lane, "length", 0.0) or 0.0)
-                        lane_width = float(getattr(lane, "width", 3.5) or 3.5)
-                    except Exception:
-                        continue
-                    lane_coordinates.append(
-                        {
-                            "lane_index": list(getattr(lane, "index", ())),
-                            "longitudinal_m": float(longitudinal),
-                            "lateral_m": float(lateral),
-                            "length_m": lane_length,
-                            "width_m": lane_width,
-                        }
-                    )
-                    if (
-                        -1e-3 <= float(longitudinal) <= lane_length + 1e-3
-                        and abs(float(lateral)) <= 0.5 * lane_width + 1e-3
-                    ):
-                        inside = True
-                        break
-                if not inside:
-                    return False, {
-                        "reason": "footprint_point_outside_execution_lanes",
-                        "trajectory_index": int(pose_index),
-                        "time_offset_s": float(pose_index * self.planner.DENSE_DT_S),
-                        "corner_index": int(corner_index),
-                        "pose": [float(value) for value in pose],
-                        "point": [float(value) for value in point],
-                        "lane_coordinates": lane_coordinates,
-                    }
-        return True, {"reason": "passed"}
 
     @classmethod
     def _minimum_gap(
