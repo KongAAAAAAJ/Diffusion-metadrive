@@ -6,6 +6,11 @@ import numpy as np
 
 from models.controller.base_controller import BaseController
 from models.controller.controller_helper import save_pid_debug_plot
+from models.controller.longitudinal_reference import (
+    LongitudinalCascadeController,
+    LongitudinalTrackingReference,
+    trajectory_to_longitudinal_reference,
+)
 
 
 def _wrap_to_pi(angle: float) -> float:
@@ -39,16 +44,12 @@ class PIDTrajectoryController(BaseController):
         cfg = self.config
         self.lookahead_index = int(cfg.get("pid_lookahead_index", cfg.get("lookahead_index", 2)))
         self.dt = float(cfg.get("pid_dt", 0.5))
-        self.target_speed_km_h = float(cfg.get("target_speed_km_h", 30.0))
         self.lateral_kp = float(cfg.get("pid_lateral_kp", 0.85))
         self.lateral_ki = float(cfg.get("pid_lateral_ki", 0.0))
         self.lateral_kd = float(cfg.get("pid_lateral_kd", 0.08))
         self.heading_kp = float(cfg.get("pid_heading_kp", 0.35))
         self.heading_ki = float(cfg.get("pid_heading_ki", 0.0))
         self.heading_kd = float(cfg.get("pid_heading_kd", 0.04))
-        self.speed_kp = float(cfg.get("pid_speed_kp", 0.10))
-        self.speed_ki = float(cfg.get("pid_speed_ki", 0.0))
-        self.speed_kd = float(cfg.get("pid_speed_kd", 0.02))
         self.preview_lookahead_time_s = float(
             cfg.get("preview_lookahead_time_s", 0.6)
         )
@@ -62,19 +63,45 @@ class PIDTrajectoryController(BaseController):
             cfg.get("preview_heading_weight", 0.5)
         )
         self._state: dict[str, dict[str, float]] = {}
+        decision_dt = float(cfg.get("physics_world_step_size", 0.02)) * int(
+            cfg.get("decision_repeat", 5)
+        )
+        self._longitudinal = LongitudinalCascadeController(dt_s=decision_dt)
+        self._last_debug: dict[str, dict[str, object]] = {}
 
     def reset(self) -> None:
         self._state.clear()
+        self._longitudinal.reset()
+        self._last_debug = {}
 
-    def compute_actions(self, env, trajectories_world: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    def get_last_debug(self) -> dict[str, dict[str, object]]:
+        return {key: dict(value) for key, value in self._last_debug.items()}
+
+    def compute_actions(
+        self,
+        env,
+        trajectories_world: dict[str, np.ndarray],
+        longitudinal_references: dict[str, LongitudinalTrackingReference] | None = None,
+    ) -> dict[str, np.ndarray]:
         actions: dict[str, np.ndarray] = {}
+        debug: dict[str, dict[str, object]] = {}
         agents = getattr(env, "agents", {}) or {}
         for agent_id, trajectory_world in (trajectories_world or {}).items():
             vehicle = agents.get(agent_id)
             if vehicle is None:
                 continue
             trajectory_local = _world_trajectory_to_ego_local(vehicle, trajectory_world)
-            actions[agent_id] = self._single_control(agent_id, vehicle, trajectory_local)
+            reference = (
+                (longitudinal_references or {}).get(agent_id)
+                if longitudinal_references is not None
+                else None
+            )
+            action, agent_debug = self._single_control_with_debug(
+                agent_id, vehicle, trajectory_local, reference
+            )
+            actions[agent_id] = action
+            debug[agent_id] = agent_debug
+        self._last_debug = debug
         return actions
 
     def _pid(self, agent_id: str, key: str, error: float, kp: float, ki: float, kd: float) -> float:
@@ -89,9 +116,26 @@ class PIDTrajectoryController(BaseController):
         return kp * error + ki * integral + kd * derivative
 
     def _single_control(self, agent_id: str, vehicle, trajectory_local: np.ndarray) -> np.ndarray:
+        action, _ = self._single_control_with_debug(
+            agent_id, vehicle, trajectory_local, None
+        )
+        return action
+
+    def _single_control_with_debug(
+        self,
+        agent_id: str,
+        vehicle,
+        trajectory_local: np.ndarray,
+        longitudinal_reference: LongitudinalTrackingReference | None,
+        *,
+        gap_acceleration_mps2: float = 0.0,
+    ) -> tuple[np.ndarray, dict[str, object]]:
         trajectory_local = np.asarray(trajectory_local, dtype=np.float32)
         if trajectory_local.ndim != 2 or trajectory_local.shape[0] == 0:
-            return np.zeros((2,), dtype=np.float32)
+            return np.zeros((2,), dtype=np.float32), {
+                "mode": "no_trajectory",
+                "gap_feedback_mps2": 0.0,
+            }
         current_speed_mps = max(
             float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
             0.0,
@@ -143,20 +187,27 @@ class PIDTrajectoryController(BaseController):
             self.lateral_kd,
         )
 
-        segment_distances = np.linalg.norm(np.diff(trajectory_local[:, :2], axis=0), axis=1)
-        valid_idx = min(
-            max(self.lookahead_index, 0), trajectory_local.shape[0] - 1
+        reference = longitudinal_reference or trajectory_to_longitudinal_reference(
+            trajectory_local,
+            current_speed_mps,
+            source="online_trajectory",
         )
-        if segment_distances.size > 0:
-            reference_speeds = np.concatenate([segment_distances, segment_distances[-1:]], axis=0) / max(self.dt, 1e-6)
-            trajectory_target_km_h = float(reference_speeds[min(valid_idx, len(reference_speeds) - 1)] * 3.6)
-        else:
-            trajectory_target_km_h = 0.0
-        target_speed_km_h = min(self.target_speed_km_h, trajectory_target_km_h)
-        current_speed_km_h = float(getattr(vehicle, "speed_km_h", 0.0) or 0.0)
-        speed_error = (target_speed_km_h - current_speed_km_h) / 10.0
-        throttle = self._pid(agent_id, "speed", speed_error, self.speed_kp, self.speed_ki, self.speed_kd)
-        return np.asarray(
-            [np.clip(steering, -1.0, 1.0), np.clip(throttle, -1.0, 1.0)],
+        throttle, longitudinal_debug = self._longitudinal.compute(
+            agent_id,
+            current_speed_mps,
+            reference,
+            gap_acceleration_mps2=gap_acceleration_mps2,
+        )
+        action = np.asarray(
+            [np.clip(steering, -1.0, 1.0), throttle],
             dtype=np.float32,
         )
+        debug: dict[str, object] = {
+            "mode": "trajectory_cascade",
+            "current_speed_mps": float(current_speed_mps),
+            "raw_steering": float(steering),
+            "clipped_steering": float(action[0]),
+            "clipped_throttle": float(action[1]),
+        }
+        debug.update(longitudinal_debug)
+        return action, debug

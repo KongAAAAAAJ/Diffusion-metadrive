@@ -38,6 +38,7 @@ class _BranchEnv:
         self.local_route = local_route
 
     def reset(self):
+        self._branch_trajectories = {}
         self.agents = {
             f"agent{role}": SimpleNamespace(
                 name=f"agent{role}",
@@ -59,12 +60,18 @@ class _BranchEnv:
             "branch diagnostics must not invoke the stateful controller outside step()"
         )
 
+    def trajectory_reference_to_control(self, agent_id, trajectory, reference):
+        assert reference.source == "simulator_branch"
+        self._branch_trajectories[agent_id] = np.asarray(trajectory).copy()
+        return np.asarray([0.1, 0.2], dtype=np.float32)
+
     def step(self, actions):
         self._pending_low_level_actions = {
             agent_id: np.asarray([0.1, 0.2], dtype=np.float32)
             for agent_id in actions
         }
-        for agent_id, trajectory in actions.items():
+        for agent_id in actions:
+            trajectory = self._branch_trajectories[agent_id]
             vehicle = self.agents[agent_id]
             point = np.asarray(trajectory, dtype=np.float64)[0]
             heading = float(vehicle.heading_theta)

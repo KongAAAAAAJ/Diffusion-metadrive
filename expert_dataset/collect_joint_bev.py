@@ -32,6 +32,10 @@ from models.bev_planner.mode_contract import (
 )
 from models.controller.LQRFollowerController import LQRFollowerController
 from models.controller.PIDController import PIDTrajectoryController
+from models.controller.longitudinal_reference import (
+    LongitudinalTrackingReference,
+    trajectory_to_longitudinal_reference,
+)
 from models.decisioner.rule_decisioner import (
     LaneChangeCommitmentError,
     make_rule_maker,
@@ -353,6 +357,7 @@ class RulePlannerExpert:
                     trajectories_local=rolled.trajectories_local,
                     trajectory_source="committed_roll",
                     execution_debug=dict(rolled.debug),
+                    longitudinal_references=rolled.longitudinal_references,
                 )
         try:
             proposal_batch = self.rule_maker.propose_joint_actions(
@@ -426,6 +431,7 @@ class RulePlannerExpert:
             trajectories_local=trajectories_local,
             trajectory_source="new_native_plan",
             execution_debug=self.trajectory_executor.get_last_debug(),
+            longitudinal_references=None,
         )
 
     def _build_expert_step(
@@ -437,6 +443,9 @@ class RulePlannerExpert:
         trajectories_local: Mapping[str, np.ndarray],
         trajectory_source: str,
         execution_debug: Mapping[str, object] | None,
+        longitudinal_references: Mapping[
+            str, LongitudinalTrackingReference
+        ] | None,
     ) -> ExpertJointStep:
         rule_debug = getattr(self.rule_maker, "get_last_debug", lambda: None)() or {}
         dynamic_roles = rule_debug.get("dynamic_roles", {}) if isinstance(rule_debug, Mapping) else {}
@@ -489,7 +498,22 @@ class RulePlannerExpert:
         if self._last_formation_locked is None or formation_locked != self._last_formation_locked:
             controller.reset()
         self._last_formation_locked = formation_locked
-        controls = controller.compute_actions(env, dict(trajectories))
+        references = dict(longitudinal_references or {})
+        if not references:
+            for agent_id in self.agent_ids:
+                vehicle = env.agents[agent_id]
+                references[agent_id] = trajectory_to_longitudinal_reference(
+                    np.asarray(trajectories_local[agent_id], dtype=np.float32),
+                    max(
+                        float(getattr(vehicle, "speed_km_h", 0.0) or 0.0)
+                        / 3.6,
+                        0.0,
+                    ),
+                    source="native_plan",
+                )
+        controls = controller.compute_actions(
+            env, dict(trajectories), references
+        )
         for agent_id in self.agent_ids:
             control = np.asarray(controls.get(agent_id), dtype=np.float32)
             if control.shape != (2,) or not np.isfinite(control).all():

@@ -20,6 +20,7 @@ from models.bev_planner.joint_reward import (
     compose_joint_reward,
 )
 from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
+from models.controller.longitudinal_reference import LongitudinalTrackingReference
 from scenarios.bev_round13_contract import deterministic_initial_speed_km_h
 
 
@@ -260,6 +261,41 @@ def _reference_arc_kinematics(
         )
     )
     return arc_position, speed, acceleration
+
+
+def _fixed_world_longitudinal_reference(
+    world_reference: np.ndarray,
+    current_pose: np.ndarray,
+    elapsed_s: float,
+) -> LongitudinalTrackingReference:
+    """Preserve fixed-world timing without turning position lag into speed."""
+
+    offsets = np.arange(9, dtype=np.float64) * 0.5
+    absolute = np.clip(float(elapsed_s) + offsets, 0.0, 4.0)
+    kinematics = np.asarray(
+        [_reference_arc_kinematics(world_reference, value) for value in absolute],
+        dtype=np.float64,
+    )
+    longitudinal, _, _, _ = _tracking_error_against_reference(
+        np.asarray(current_pose, dtype=np.float64),
+        world_reference,
+        float(elapsed_s),
+    )
+    speed = kinematics[:, 1]
+    acceleration = np.clip(kinematics[:, 2], -8.0, 5.0)
+    stop_requested = bool(
+        np.allclose(kinematics[-2:, 0], kinematics[-1, 0], atol=1.0e-8)
+        and speed[-1] <= 1.0e-6
+    )
+    return LongitudinalTrackingReference(
+        sample_times_s=offsets,
+        arc_position_m=kinematics[:, 0],
+        speed_mps=np.clip(speed, 0.0, 100.0 / 3.6),
+        acceleration_mps2=acceleration,
+        original_arc_error_m=float(-longitudinal),
+        stop_requested=stop_requested,
+        source="simulator_branch",
+    )
 
 
 def _tracking_error_against_reference(
@@ -609,22 +645,24 @@ class JointSimulatorBranchEvaluator:
                         )
                         for role, agent_id in enumerate(AGENT_IDS)
                     }
+                    explicit_references = {
+                        agent_id: _fixed_world_longitudinal_reference(
+                            references[role], current[role], elapsed
+                        )
+                        for role, agent_id in enumerate(AGENT_IDS)
+                    }
                     controller_diagnostics = []
                     for role, agent_id in enumerate(AGENT_IDS):
-                        _, feedforward_speed, feedforward_acceleration = (
-                            _reference_arc_kinematics(
-                                references[role], elapsed
-                            )
+                        feedforward_speed = float(
+                            explicit_references[agent_id].target_speed_mps
                         )
-                        target_speed_getter = getattr(
-                            env, "_trajectory_target_speed_mps", None
+                        feedforward_acceleration = float(
+                            explicit_references[
+                                agent_id
+                            ].feedforward_acceleration_mps2
                         )
-                        target_speed = (
-                            float(target_speed_getter(action[agent_id]))
-                            if callable(target_speed_getter)
-                            else _trajectory_target_speed_mps(
-                                action[agent_id]
-                            )
+                        target_speed = float(
+                            explicit_references[agent_id].target_speed_mps
                         )
                         current_speed = float(
                             getattr(
@@ -667,7 +705,15 @@ class JointSimulatorBranchEvaluator:
                                 "formation_gap_error": formation_gap_error,
                             }
                         )
-                    _, _, terminated, truncated, info = env.step(action)
+                    low_level_action = {
+                        agent_id: env.trajectory_reference_to_control(
+                            agent_id,
+                            action[agent_id],
+                            explicit_references[agent_id],
+                        )
+                        for agent_id in AGENT_IDS
+                    }
+                    _, _, terminated, truncated, info = env.step(low_level_action)
                     executed_controls = (
                         getattr(env, "_pending_low_level_actions", {}) or {}
                     )

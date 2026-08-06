@@ -96,25 +96,32 @@ def test_lqr_follower_controller_records_lateral_debug_for_followers() -> None:
         },
     )()
 
-    actions = controller.compute_actions(env, {})
+    trajectories = {
+        agent_id: np.asarray(
+            [
+                [vehicle.position[0] + 4.0 * (index + 1), vehicle.position[1], 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for agent_id, vehicle in env.agents.items()
+    }
+    actions = controller.compute_actions(env, trajectories)
     debug = controller.get_last_debug()
 
     assert set(actions) == {"agent0", "agent1"}
-    # agent0 has no vehicle ahead → speed tracking
-    assert debug["agent0"]["mode"] == "free_speed_tracking"
+    assert debug["agent0"]["mode"] == "trajectory_no_front"
     # agent1 finds agent0 (platoon member) ahead
     follower_debug = debug["agent1"]
     assert follower_debug["mode"] == "follower_platoon"
     assert follower_debug["leader_id"] == "agent0"
-    assert follower_debug["lat_error"] == pytest.approx(1.0)
-    assert follower_debug["heading_error"] == pytest.approx(0.1)
     assert follower_debug["desired_gap_m"] == pytest.approx(10.0)
-    assert follower_debug["lon_q"] == {"spacing": 100.0, "velocity": 20.0, "accel": 0.01}
-    assert follower_debug["lon_r"] == 0.1
+    assert abs(follower_debug["gap_feedback_mps2"]) <= 1.0
+    assert follower_debug["longitudinal_reference_source"] == "online_trajectory"
     assert -1.0 <= follower_debug["clipped_steering"] <= 1.0
 
 
-def test_lqr_follower_controller_uses_third_order_longitudinal_lqr_debug() -> None:
+def test_lqr_follower_controller_uses_bounded_gap_cascade_debug() -> None:
     shared_lane = _FakeLane()
     controller = LQRFollowerController(
         {
@@ -135,24 +142,28 @@ def test_lqr_follower_controller_uses_third_order_longitudinal_lqr_debug() -> No
         },
     )()
 
-    controller.compute_actions(env, {})
+    def trajectories():
+        return {
+            agent_id: np.asarray(
+                [
+                    [vehicle.position[0] + 4.0 * (index + 1), vehicle.position[1], 0.0]
+                    for index in range(8)
+                ],
+                dtype=np.float32,
+            )
+            for agent_id, vehicle in env.agents.items()
+        }
+
+    controller.compute_actions(env, trajectories())
     env.agents["agent1"].speed_km_h = 31.6
-    actions = controller.compute_actions(env, {})
+    actions = controller.compute_actions(env, trajectories())
     follower_debug = controller.get_last_debug()["agent1"]
 
     assert set(actions) == {"agent0", "agent1"}
-    assert len(follower_debug["K_lon"]) == 3
-    assert len(follower_debug["lon_state"]) == 3
-    assert follower_debug["lon_dt"] == pytest.approx(0.1)
-    assert follower_debug["lon_Ts"] == pytest.approx(0.1)
-    assert follower_debug["ego_accel_mps2"] == pytest.approx(10.0)
-    assert follower_debug["lon_state"][2] == pytest.approx(10.0)
-    accel_scale = 1.0 if follower_debug["desired_accel_mps2"] >= 0.0 else 2.0
-    assert follower_debug["raw_throttle"] == pytest.approx(
-        follower_debug["desired_accel_mps2"] / accel_scale
-    )
-    assert follower_debug["max_accel_mps2"] == pytest.approx(1.0)
-    assert follower_debug["min_accel_mps2"] == pytest.approx(-2.0)
+    assert abs(follower_debug["gap_feedback_mps2"]) <= 1.0
+    assert np.isfinite(follower_debug["desired_acceleration_mps2"])
+    assert -2.6 <= follower_debug["desired_acceleration_mps2"] <= 0.4
+    assert follower_debug["longitudinal_reference_source"] == "online_trajectory"
     assert -1.0 <= follower_debug["clipped_throttle"] <= 1.0
 
 

@@ -183,7 +183,11 @@ def test_execution_spec_sampling_uses_original_absolute_lateral_curve():
     spec = plan.agent_specs["agent0"]
     curved = TrajectoryExecutionSpec(
         **{
-            **spec.__dict__,
+            **{
+                key: value
+                for key, value in spec.__dict__.items()
+                if key != "path_arc_m"
+            },
             "trajectory_world": np.column_stack(
                 (
                     spec.trajectory_world[:, 0],

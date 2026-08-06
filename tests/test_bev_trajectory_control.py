@@ -16,6 +16,7 @@ class _ControlHarness:
     _lateral_preview_pid = PlatoonEnv._lateral_preview_pid
     _solve_lqr_gain = PlatoonEnv._solve_lqr_gain
     trajectory_to_control = PlatoonEnv.trajectory_to_control
+    trajectory_reference_to_control = PlatoonEnv.trajectory_reference_to_control
     _agent_speed_km_h = PlatoonEnv._agent_speed_km_h
     _agent_pose = PlatoonEnv._agent_pose
     _desired_center_spacing_m = PlatoonEnv._desired_center_spacing_m
@@ -104,9 +105,9 @@ def test_leader_control_tracks_trajectory_speed() -> None:
 def test_follower_combines_gap_and_trajectory_speed() -> None:
     desired = _ControlHarness(speed_kmh=18.0, follower_x=-15.74)
     close = _ControlHarness(speed_kmh=18.0, follower_x=-9.0)
-    fast_reference = desired.trajectory_to_control("agent1", _trajectory(8.0))
+    fast_reference = desired.trajectory_to_control("agent1", _trajectory(5.0))
     slow_reference = desired.trajectory_to_control("agent1", _trajectory(2.0))
-    close_reference = close.trajectory_to_control("agent1", _trajectory(8.0))
+    close_reference = close.trajectory_to_control("agent1", _trajectory(5.0))
     assert slow_reference[1] < fast_reference[1]
     assert close_reference[1] < fast_reference[1]
 

@@ -482,7 +482,9 @@ def test_rule_planner_expert_uses_independent_pid_when_formation_is_unlocked() -
         def reset(self):
             self.reset_calls += 1
 
-        def compute_actions(self, env, trajectories_world):  # noqa: ARG002
+        def compute_actions(
+            self, env, trajectories_world, longitudinal_references=None
+        ):  # noqa: ARG002
             self.compute_calls += 1
             return {
                 agent_id: np.asarray([0.0, -0.2], dtype=np.float32)

@@ -24,6 +24,10 @@ from models.controller.PIDController import (
     _world_trajectory_to_ego_local,
     _wrap_to_pi,
 )
+from models.controller.longitudinal_reference import (
+    LongitudinalTrackingReference,
+    trajectory_to_longitudinal_reference,
+)
 
 LQR_LON_Q1 = 10.0  # s
 LQR_LON_Q2 = 1  # v
@@ -171,6 +175,7 @@ class LQRFollowerController(BaseController):
         self,
         env,
         trajectories_world: dict[str, np.ndarray],
+        longitudinal_references: dict[str, LongitudinalTrackingReference] | None = None,
     ) -> dict[str, np.ndarray]:
         agents = getattr(env, "agents", {}) or {}
         all_ids: list[str] = list(getattr(env, "_agent_ids", sorted(agents.keys())))
@@ -189,36 +194,61 @@ class LQRFollowerController(BaseController):
                 else np.zeros((0, 3), dtype=np.float32)
             )
             front_veh, gap_m, is_platoon = self._find_front_vehicle(vehicle, agents, traffic_vehicles)
-
-            if front_veh is None:
-                ego_spd_ms = float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6
-                speed_diff = self.target_speed_mps - ego_spd_ms
-                raw_throttle, lon_debug = self._lon_lqr(0.0, speed_diff, agent_id, ego_spd_ms)
-                raw_steering = self._pid._single_control(agent_id, vehicle, traj_local)[0]
-                action = np.asarray(
-                    [np.clip(raw_steering, -1.0, 1.0), np.clip(raw_throttle, -1.0, 1.0)],
-                    dtype=np.float32,
+            ego_speed = float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6
+            reference = (longitudinal_references or {}).get(agent_id)
+            if reference is None and traj_local.shape == (8, 3):
+                reference = trajectory_to_longitudinal_reference(
+                    traj_local, ego_speed, source="online_trajectory"
                 )
-                actions[agent_id] = action
-                debug[agent_id] = {
-                    "mode": "free_speed_tracking",
-                    "target_speed_mps": float(self.target_speed_mps),
-                    "ego_speed_mps": float(ego_spd_ms),
-                    "raw_steering": float(raw_steering),
-                    "clipped_steering": float(action[0]),
-                    "raw_throttle": float(raw_throttle),
-                    "clipped_throttle": float(action[1]),
-                }
-                debug[agent_id].update(lon_debug)
-            else:
+            gap_acceleration = 0.0
+            mode = "trajectory_no_front"
+            front_id = None
+            desired_gap = None
+            actual_gap = None
+            if front_veh is not None and gap_m is not None:
                 desired_gap = self.desired_gap_m if is_platoon else self.desired_outgap_m
+                actual_gap = float(gap_m)
+                front_speed = float(
+                    getattr(front_veh, "speed_km_h", 0.0) or 0.0
+                ) / 3.6
+                gap_acceleration = float(
+                    np.clip(
+                        0.15 * (actual_gap - desired_gap)
+                        + 0.20 * (front_speed - ego_speed),
+                        -1.0,
+                        1.0,
+                    )
+                )
                 front_id = next(
-                    (k for k, v in agents.items() if v is front_veh), "background"
+                    (key for key, value in agents.items() if value is front_veh),
+                    "background",
                 )
                 mode = "follower_platoon" if is_platoon else "follower_background"
-                actions[agent_id], debug[agent_id] = self._lqr_follow(
-                    agent_id, vehicle, front_id, front_veh, desired_gap, mode, traj_local
+            if reference is None:
+                action = np.zeros((2,), dtype=np.float32)
+                agent_debug: dict[str, object] = {
+                    "mode": "no_trajectory",
+                    "gap_feedback_mps2": 0.0,
+                }
+            else:
+                action, agent_debug = self._pid._single_control_with_debug(
+                    agent_id,
+                    vehicle,
+                    traj_local,
+                    reference,
+                    gap_acceleration_mps2=gap_acceleration,
                 )
+                agent_debug["mode"] = mode
+            agent_debug.update(
+                {
+                    "leader_id": front_id,
+                    "desired_gap_m": desired_gap,
+                    "actual_gap_m": actual_gap,
+                    "gap_feedback_mps2": float(gap_acceleration),
+                }
+            )
+            actions[agent_id] = action
+            debug[agent_id] = agent_debug
 
         for aid in active_ids:
             v = agents.get(aid)

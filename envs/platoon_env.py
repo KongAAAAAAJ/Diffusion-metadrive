@@ -31,6 +31,11 @@ except Exception as exc:  # pragma: no cover - import errors are surfaced at run
 
 
 from evaluation.platoon_metrics import PlatoonMetrics
+from models.controller.longitudinal_reference import (
+    LongitudinalCascadeController,
+    LongitudinalTrackingReference,
+    trajectory_to_longitudinal_reference,
+)
 from routes.route_definitions import ROUTE_BY_NAME, get_required_preset, get_route_blocks
 from scenarios.definitions import SCENARIO_BY_ID
 
@@ -212,6 +217,10 @@ class PlatoonEnv(BaseMultiEnv):
         self._pending_step_mode_valid_masks: dict[str, np.ndarray] = {}   # (num_modes,) bool
         self._trajectory_reward_cache: Optional[dict[str, object]] = None
         self._lateral_preview_pid_state: dict[str, tuple[float, float, bool]] = {}
+        self._trajectory_longitudinal_controller = LongitudinalCascadeController(
+            dt_s=float(merged.get("physics_world_step_size", 0.02))
+            * int(merged.get("decision_repeat", 5))
+        )
         super().__init__(config=self._build_metadrive_config())
         self._install_platoon_runtime_config()
 
@@ -783,6 +792,7 @@ class PlatoonEnv(BaseMultiEnv):
         self._pending_step_all_candidates = {}
         self._pending_step_mode_valid_masks = {}
         self._lateral_preview_pid_state = {}
+        self._trajectory_longitudinal_controller.reset()
 
         return self._augment_observations(obs)
 
@@ -1755,19 +1765,10 @@ class PlatoonEnv(BaseMultiEnv):
             trajectory
         ).all():
             raise ValueError("Trajectory must contain finite floating-point values")
-        first_second = np.concatenate(
-            (
-                np.zeros((1, 2), dtype=np.float64),
-                trajectory[:2, :2].astype(np.float64, copy=False),
-            ),
-            axis=0,
-        )
-        # The first two waypoints represent t=0.5 s and t=1.0 s.  Their
-        # accumulated arc length therefore gives the trajectory-implied speed
-        # over the next second, including lateral motion during a lane change.
-        target_speed = float(
-            np.linalg.norm(np.diff(first_second, axis=0), axis=1).sum()
-        )
+        # This helper is only valid for a trajectory rooted at the current ego
+        # pose.  Fixed-world references must pass an explicit longitudinal
+        # profile and may not encode position lag as extra target speed.
+        target_speed = float(np.linalg.norm(trajectory[0, :2]) / 0.5)
         path = np.concatenate(
             (
                 np.zeros((1, 3), dtype=np.float64),
@@ -1828,12 +1829,65 @@ class PlatoonEnv(BaseMultiEnv):
         accel = -float((gain @ state.reshape(-1, 1)).item())
         return float(np.clip(accel, -1.0, 1.0))
 
+    def trajectory_reference_to_control(
+        self,
+        agent_id: str,
+        trajectory: np.ndarray,
+        longitudinal_reference: LongitudinalTrackingReference,
+    ) -> np.ndarray:
+        trajectory = np.asarray(trajectory)
+        if trajectory.shape != (8, 3) or not np.issubdtype(
+            trajectory.dtype, np.floating
+        ) or not np.isfinite(trajectory).all():
+            raise ValueError("trajectory must be finite floating-point [8,3]")
+        steering = self._lateral_preview_pid(agent_id, trajectory)
+        ego_idx = self._agent_ids.index(agent_id)
+        current_speed = self._agent_speed_km_h(agent_id) / 3.6
+        gap_acceleration = 0.0
+        if ego_idx > 0:
+            front_id = self._agent_ids[ego_idx - 1]
+            ego_pose = self._agent_pose(agent_id)
+            front_pose = self._agent_pose(front_id)
+            if ego_pose is not None and front_pose is not None:
+                actual_gap = float(_world_to_ego(ego_pose, front_pose)[0])
+                desired_gap = self._desired_center_spacing_m(agent_id, front_id)
+                front_speed = self._agent_speed_km_h(front_id) / 3.6
+                gap_acceleration = float(
+                    np.clip(
+                        0.15 * (actual_gap - desired_gap)
+                        + 0.20 * (front_speed - current_speed),
+                        -1.0,
+                        1.0,
+                    )
+                )
+        longitudinal_controller = getattr(
+            self, "_trajectory_longitudinal_controller", None
+        )
+        if longitudinal_controller is None:
+            longitudinal_controller = LongitudinalCascadeController(
+                dt_s=self._cfg_float("physics_world_step_size", 0.02)
+                * self._cfg_int("decision_repeat", 5)
+            )
+            self._trajectory_longitudinal_controller = longitudinal_controller
+        throttle, _ = longitudinal_controller.compute(
+            agent_id,
+            current_speed,
+            longitudinal_reference,
+            gap_acceleration_mps2=gap_acceleration,
+        )
+        return np.asarray([steering, throttle], dtype=np.float32)
+
     def trajectory_to_control(self, agent_id: str, trajectory: np.ndarray) -> np.ndarray:
         trajectory = np.asarray(trajectory)
-        target_speed = self._trajectory_target_speed_mps(trajectory)
-        steering = self._lateral_preview_pid(agent_id, trajectory)
-        throttle = self._longitudinal_lqr(agent_id, target_speed)
-        return np.asarray([steering, throttle], dtype=np.float32)
+        current_speed = self._agent_speed_km_h(agent_id) / 3.6
+        reference = trajectory_to_longitudinal_reference(
+            trajectory,
+            current_speed,
+            source="online_trajectory",
+        )
+        return self.trajectory_reference_to_control(
+            agent_id, trajectory, reference
+        )
 
     def get_platoon_metrics(self) -> dict:
         return self._metrics.compute()

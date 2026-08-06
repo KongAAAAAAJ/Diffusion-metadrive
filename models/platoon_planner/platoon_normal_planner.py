@@ -4,7 +4,7 @@ import copy
 import math
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 import numpy as np
@@ -13,6 +13,13 @@ from models.bev_planner.mode_contract import (
     HardModeMaskConfig,
     ModeContractError,
     validate_trajectory_kinematics,
+)
+from models.controller.longitudinal_reference import (
+    LongitudinalReferenceError,
+    LongitudinalTrackingReference,
+    build_feedback_executable_profile,
+    project_point_to_path_arc,
+    sample_path_at_arc,
 )
 from models.platoon_planner.collision_geometry import (
     obb_overlap_series,
@@ -64,22 +71,41 @@ class TrajectoryExecutionSpec:
     rule_target_point: tuple[float, float]
     sample_times_s: np.ndarray
     trajectory_world: np.ndarray
+    path_arc_m: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         times = np.ascontiguousarray(self.sample_times_s, dtype=np.float64)
         trajectory = np.ascontiguousarray(self.trajectory_world, dtype=np.float64)
+        path_arc = np.concatenate(
+            (
+                [0.0],
+                np.cumsum(
+                    np.linalg.norm(np.diff(trajectory[:, :2], axis=0), axis=1)
+                ),
+            )
+        )
         if times.ndim != 1 or trajectory.shape != (times.size, 3):
             raise ValueError("execution trajectory/time shape mismatch")
+        if path_arc.shape != times.shape:
+            raise ValueError("execution path arc/time shape mismatch")
         if times.size < 2 or abs(float(times[0])) > 1e-9:
             raise ValueError("execution trajectory must start at t=0")
-        if not np.isfinite(times).all() or not np.isfinite(trajectory).all():
+        if (
+            not np.isfinite(times).all()
+            or not np.isfinite(trajectory).all()
+            or not np.isfinite(path_arc).all()
+        ):
             raise ValueError("execution trajectory must be finite")
         if np.any(np.diff(times) <= 0.0):
             raise ValueError("execution trajectory times must increase")
+        if abs(float(path_arc[0])) > 1e-9 or np.any(np.diff(path_arc) < -1e-9):
+            raise ValueError("execution path arc must start at zero and be monotonic")
         times.setflags(write=False)
         trajectory.setflags(write=False)
+        path_arc.setflags(write=False)
         object.__setattr__(self, "sample_times_s", times)
         object.__setattr__(self, "trajectory_world", trajectory)
+        object.__setattr__(self, "path_arc_m", path_arc)
 
 
 @dataclass(frozen=True)
@@ -103,6 +129,7 @@ class RolledJointTrajectory:
     elapsed_s: float
     trajectories_world: Mapping[str, np.ndarray]
     trajectories_local: Mapping[str, np.ndarray]
+    longitudinal_references: Mapping[str, LongitudinalTrackingReference]
     rule_actions: Mapping[str, int]
     debug: Mapping[str, object]
 
@@ -2811,6 +2838,7 @@ class JointTrajectoryExecutor:
         dense_by_agent: dict[str, np.ndarray] = {}
         world: dict[str, np.ndarray] = {}
         local: dict[str, np.ndarray] = {}
+        longitudinal_references: dict[str, LongitudinalTrackingReference] = {}
         per_agent: dict[str, dict] = {}
 
         for agent_id, spec in plan.agent_specs.items():
@@ -2851,7 +2879,6 @@ class JointTrajectoryExecutor:
                     "committed_trajectory_tracking_deviation",
                     {"agent_id": agent_id, "tracking_error": tracking},
                 )
-            dense_future = self._sample_spec(spec, elapsed_s + dense_offsets[1:])
             current_pose = np.asarray(
                 [
                     float(vehicle.position[0]),
@@ -2860,12 +2887,66 @@ class JointTrajectoryExecutor:
                 ],
                 dtype=np.float64,
             )
-            dense = np.concatenate((current_pose[None, :], dense_future), axis=0)
-            output = self._sample_spec(spec, elapsed_s + sparse_offsets).astype(
-                np.float32
-            )
-            local_output = world_trajectory_to_ego_local(output, current_pose)
             speed = max(float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6, 0.0)
+            try:
+                actual_arc, path_error = project_point_to_path_arc(
+                    current_pose[:2], spec.trajectory_world[:, :2], spec.path_arc_m
+                )
+                path_distance = np.diff(spec.path_arc_m)
+                path_heading_delta = np.abs(
+                    np.arctan2(
+                        np.sin(np.diff(spec.trajectory_world[:, 2])),
+                        np.cos(np.diff(spec.trajectory_world[:, 2])),
+                    )
+                )
+                path_curvature = path_heading_delta / np.maximum(
+                    path_distance, 1.0e-3
+                )
+                segment_speed_limit = np.where(
+                    path_curvature > 1.0e-6,
+                    np.sqrt(6.0 / np.maximum(path_curvature, 1.0e-6)),
+                    self.planner.MAX_SPEED_MPS,
+                )
+                path_speed_limit = np.concatenate(
+                    (segment_speed_limit[:1], segment_speed_limit)
+                )
+                path_speed_limit = np.clip(
+                    0.97 * path_speed_limit, 0.1, self.planner.MAX_SPEED_MPS
+                )
+                longitudinal_reference = build_feedback_executable_profile(
+                    path_times_s=spec.sample_times_s,
+                    path_arc_m=spec.path_arc_m,
+                    elapsed_s=elapsed_s,
+                    actual_arc_m=actual_arc,
+                    actual_speed_mps=speed,
+                    path_speed_limit_mps=path_speed_limit,
+                    source="committed_roll",
+                )
+                dense_arc = np.interp(
+                    dense_offsets,
+                    longitudinal_reference.sample_times_s,
+                    longitudinal_reference.arc_position_m,
+                )
+                dense_future = sample_path_at_arc(
+                    spec.trajectory_world,
+                    spec.path_arc_m,
+                    dense_arc[1:],
+                )
+                dense = np.concatenate((current_pose[None, :], dense_future), axis=0)
+                output = sample_path_at_arc(
+                    spec.trajectory_world,
+                    spec.path_arc_m,
+                    longitudinal_reference.arc_position_m[1:],
+                ).astype(np.float32)
+            except LongitudinalReferenceError as exc:
+                self._raise(
+                    plan,
+                    elapsed_s,
+                    "committed longitudinal reference cannot be rolled",
+                    "committed_trajectory_kinematic_infeasible",
+                    {"agent_id": agent_id, "longitudinal_reference_error": str(exc)},
+                )
+            local_output = world_trajectory_to_ego_local(output, current_pose)
             world_audit = validate_trajectory_kinematics(
                 output, speed, current_pose, HardModeMaskConfig()
             )
@@ -2886,6 +2967,21 @@ class JointTrajectoryExecutor:
                         "world_violations": list(world_audit.violations),
                         "local_violations": list(local_audit.violations),
                         "tracking_error": tracking,
+                        "world_max_speed_mps": float(
+                            world_audit.speed_mps.max(initial=0.0)
+                        ),
+                        "world_min_acceleration_mps2": float(
+                            world_audit.acceleration_mps2.min(initial=0.0)
+                        ),
+                        "world_max_acceleration_mps2": float(
+                            world_audit.acceleration_mps2.max(initial=0.0)
+                        ),
+                        "world_max_curvature_per_m": float(
+                            world_audit.curvature_per_m.max(initial=0.0)
+                        ),
+                        "world_max_lateral_acceleration_mps2": float(
+                            world_audit.lateral_acceleration_mps2.max(initial=0.0)
+                        ),
                     },
                 )
             if not self._footprint_on_road(env, vehicle, dense, spec):
@@ -2927,8 +3023,19 @@ class JointTrajectoryExecutor:
             dense_by_agent[agent_id] = dense
             world[agent_id] = np.ascontiguousarray(output)
             local[agent_id] = np.ascontiguousarray(local_output)
+            longitudinal_references[agent_id] = longitudinal_reference
             per_agent[agent_id] = {
                 "tracking_error": tracking,
+                "spatial_path_projection_error_m": float(path_error),
+                "original_arc_error_m": float(
+                    longitudinal_reference.original_arc_error_m
+                ),
+                "reference_speed_mps": float(
+                    longitudinal_reference.target_speed_mps
+                ),
+                "reference_acceleration_mps2": float(
+                    longitudinal_reference.feedforward_acceleration_mps2
+                ),
                 "minimum_background_gap_m": minimum_background_gap,
                 "selected_lane_change_duration_s": float(
                     spec.lane_change_duration_s
@@ -2985,6 +3092,7 @@ class JointTrajectoryExecutor:
             elapsed_s=float(elapsed_s),
             trajectories_world=world,
             trajectories_local=local,
+            longitudinal_references=longitudinal_references,
             rule_actions=dict(plan.rule_actions),
             debug=debug,
         )
