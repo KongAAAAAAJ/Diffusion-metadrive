@@ -29,6 +29,7 @@ from expert_dataset.collect_joint_bev import SensorlessJointBEVPlatoonEnv
 from models.bev_planner.mode_contract import validate_trajectory_kinematics
 from models.controller.longitudinal_reference import (
     LongitudinalCascadeController,
+    signed_longitudinal_speed_mps,
     trajectory_to_longitudinal_reference,
 )
 
@@ -55,7 +56,7 @@ class _IndependentControlEnv(SensorlessJointBEVPlatoonEnv):
         if value.shape != (8, 3) or not np.isfinite(value).all():
             raise ControlBenchmarkError("independent trajectory must be finite [8,3]")
         steering = self._lateral_preview_pid(agent_id, value)
-        current_speed = self._agent_speed_km_h(agent_id) / 3.6
+        current_speed = signed_longitudinal_speed_mps(self.agents[agent_id])
         controller = getattr(self, "_trajectory_longitudinal_controller", None)
         if controller is None:
             controller = LongitudinalCascadeController(
@@ -301,11 +302,26 @@ def summarize_control_result(
     role_rows = []
     lateral_all: list[float] = []
     heading_all: list[float] = []
+    speed_error_all: list[float] = []
+    follower_gap_error_all: list[float] = []
     for role, trace in enumerate(result.tracking_traces[0]):
         lateral = np.asarray(trace["lateral_errors_m"], dtype=np.float64)
         heading = np.asarray(trace["heading_errors_rad"], dtype=np.float64)
         lateral_all.extend(lateral.tolist())
         heading_all.extend(heading.tolist())
+        actual_speed = np.asarray(trace["actual_speed_mps"], dtype=np.float64)
+        reference_speed = np.asarray(
+            trace["reference_feedforward_speed_mps"], dtype=np.float64
+        )
+        if actual_speed.shape != reference_speed.shape:
+            raise ControlBenchmarkError("speed tracking trace shape mismatch")
+        speed_error = reference_speed - actual_speed
+        speed_error_all.extend(speed_error.tolist())
+        gap_error = np.asarray(
+            trace["formation_gap_error_m"], dtype=np.float64
+        )
+        if role > 0:
+            follower_gap_error_all.extend(gap_error.tolist())
         role_rows.append(
             {
                 "role": role,
@@ -318,6 +334,13 @@ def summarize_control_result(
                     trace["maximum_continuous_saturation_s"]
                 ),
                 "terminal_speed_mps": float(trace["actual_speed_mps"][-1]),
+                "signed_speed_error_p95_mps": _percentile(speed_error, 95),
+                "desired_center_gap_error_p95_m": (
+                    _percentile(gap_error, 95) if role > 0 else 0.0
+                ),
+                "terminal_desired_center_gap_error_m": (
+                    float(abs(gap_error[-1])) if role > 0 else 0.0
+                ),
                 "formation_control_increment_abs_max_normalized": float(
                     np.max(np.abs(trace["formation_control_increment"]))
                 ),
@@ -327,17 +350,45 @@ def summarize_control_result(
     heading_p95 = _percentile(heading_all, 95)
     unsafe = bool(result.reward.unsafe[0])
     stop_speed = (
-        float(longitudinal.maximum_stop_terminal_speed_mps)
+        max(abs(float(row["terminal_speed_mps"])) for row in role_rows)
         if case.category == "stop"
         else 0.0
     )
-    blockers = list(longitudinal.blockers)
+    speed_error_p95 = _percentile(speed_error_all, 95)
+    gap_error_p95 = (
+        _percentile(follower_gap_error_all, 95)
+        if follower_gap_error_all
+        else 0.0
+    )
+    terminal_gap_error = max(
+        (float(row["terminal_desired_center_gap_error_m"]) for row in role_rows),
+        default=0.0,
+    )
+    reverse_motion = any(
+        np.any(np.asarray(trace["actual_speed_mps"], dtype=np.float64) < -0.05)
+        for trace in result.tracking_traces[0]
+    )
+    blockers: list[str] = []
+    if control_mode == "independent":
+        if speed_error_p95 > 0.5:
+            blockers.append("signed_speed_error_p95")
+    elif control_mode == "locked":
+        if gap_error_p95 > 1.5:
+            blockers.append("desired_center_gap_error_p95")
+        if terminal_gap_error > 1.0:
+            blockers.append("terminal_desired_center_gap_error")
+    else:
+        raise ControlBenchmarkError(f"unknown control mode {control_mode!r}")
+    if longitudinal.maximum_continuous_saturation_s > 1.0:
+        blockers.append("continuous_control_saturation")
     if lateral_p95 > 0.5:
         blockers.append("lateral_p95")
     if heading_p95 > 0.1:
         blockers.append("heading_p95")
     if stop_speed > 0.3:
         blockers.append("stop_terminal_speed")
+    if reverse_motion:
+        blockers.append("reverse_motion")
     if longitudinal.target_reference_speed_delta_p95_mps > 0.1:
         blockers.append("target_reference_speed_pollution")
     if unsafe:
@@ -350,6 +401,9 @@ def summarize_control_result(
         "trajectory_contract_valid": True,
         "longitudinal_p95_m": longitudinal.longitudinal_error_p95_m,
         "longitudinal_p99_m": longitudinal.longitudinal_error_p99_m,
+        "signed_speed_error_p95_mps": speed_error_p95,
+        "desired_center_gap_error_p95_m": gap_error_p95,
+        "terminal_desired_center_gap_error_m": terminal_gap_error,
         "lateral_p95_m": lateral_p95,
         "heading_p95_rad": heading_p95,
         "target_reference_speed_delta_p95_mps": (
@@ -359,6 +413,7 @@ def summarize_control_result(
             longitudinal.maximum_continuous_saturation_s
         ),
         "stop_terminal_speed_mps": stop_speed,
+        "reverse_motion": reverse_motion,
         "unsafe": unsafe,
         "failure_reasons": list(result.failure_reasons[0]),
         "roles": role_rows,
@@ -499,6 +554,10 @@ def run_control_tracking_benchmark(
                     [trace["formation_control_increment"] for trace in traces],
                     dtype=np.float64,
                 ),
+                formation_gap_error_m=np.asarray(
+                    [trace["formation_gap_error_m"] for trace in traces],
+                    dtype=np.float64,
+                ),
                 control_saturated=np.asarray(
                     [trace["control_saturated"] for trace in traces],
                     dtype=np.bool_,
@@ -515,6 +574,9 @@ def run_control_tracking_benchmark(
         "thresholds": {
             "longitudinal_p95_m": 1.0,
             "longitudinal_p99_m": 1.5,
+            "independent_signed_speed_error_p95_mps": 0.5,
+            "locked_desired_center_gap_error_p95_m": 1.5,
+            "locked_terminal_desired_center_gap_error_m": 1.0,
             "lateral_p95_m": 0.5,
             "heading_p95_rad": 0.1,
             "stop_terminal_speed_mps": 0.3,

@@ -23,30 +23,64 @@ class LongitudinalReferenceError(ValueError):
 
 
 class LongitudinalCascadeController:
-    """Stateful acceleration feedforward plus speed/position PI controller."""
+    """Previewed acceleration feedforward with asymmetric speed PID control."""
 
     def __init__(
         self,
         *,
         dt_s: float = 0.1,
-        speed_kp: float = 0.6,
-        speed_ki: float = 0.1,
+        acceleration_speed_kp: float = 0.45,
+        acceleration_speed_ki: float = 0.08,
+        braking_speed_kp: float = 0.30,
+        braking_speed_ki: float = 0.04,
         position_kp: float = 0.15,
         position_term_limit_mps2: float = 0.5,
         integral_limit: float = 2.0,
+        actuator_delay_s: float = 0.30,
+        stop_release_speed_mps: float = 0.30,
     ) -> None:
-        if dt_s <= 0.0 or integral_limit <= 0.0:
+        values = np.asarray(
+            [
+                acceleration_speed_kp,
+                acceleration_speed_ki,
+                braking_speed_kp,
+                braking_speed_ki,
+                position_kp,
+                position_term_limit_mps2,
+                integral_limit,
+                actuator_delay_s,
+                stop_release_speed_mps,
+            ],
+            dtype=np.float64,
+        )
+        if (
+            dt_s <= 0.0
+            or not np.isfinite(values).all()
+            or np.any(values < 0.0)
+            or integral_limit <= 0.0
+            or actuator_delay_s < 0.0
+        ):
             raise LongitudinalReferenceError("cascade timing and limits must be positive")
         self.dt_s = float(dt_s)
-        self.speed_kp = float(speed_kp)
-        self.speed_ki = float(speed_ki)
+        self.acceleration_speed_pid = (
+            float(acceleration_speed_kp),
+            float(acceleration_speed_ki),
+        )
+        self.braking_speed_pid = (
+            float(braking_speed_kp),
+            float(braking_speed_ki),
+        )
         self.position_kp = float(position_kp)
         self.position_term_limit_mps2 = float(position_term_limit_mps2)
         self.integral_limit = float(integral_limit)
+        self.actuator_delay_s = float(actuator_delay_s)
+        self.stop_release_speed_mps = float(stop_release_speed_mps)
         self._integral: dict[str, float] = {}
+        self._control_regime: dict[str, str] = {}
 
     def reset(self) -> None:
         self._integral.clear()
+        self._control_regime.clear()
 
     def compute(
         self,
@@ -58,14 +92,26 @@ class LongitudinalCascadeController:
     ) -> tuple[float, dict[str, float | bool | str]]:
         speed = float(current_speed_mps)
         gap = float(np.clip(gap_acceleration_mps2, -1.0, 1.0))
-        if not np.isfinite(speed) or speed < 0.0 or not np.isfinite(gap):
+        if not np.isfinite(speed) or not np.isfinite(gap):
             raise LongitudinalReferenceError("cascade inputs must be finite")
         # ``stop_requested`` describes the terminal state of the four-second
         # profile.  It must not erase the time-parameterized deceleration that
         # precedes the stop.  The immediate reference already reaches exactly
         # zero when the vehicle is supposed to be stationary.
-        target_speed = reference.target_speed_mps
+        target_speed, preview_acceleration = reference.sample_speed_acceleration_at_time(
+            self.actuator_delay_s
+        )
         speed_error = float(target_speed - speed)
+        feedforward = float(preview_acceleration)
+        regime = "braking" if feedforward < -1.0e-6 or speed_error < 0.0 else "acceleration"
+        gains = (
+            self.braking_speed_pid
+            if regime == "braking"
+            else self.acceleration_speed_pid
+        )
+        key = str(agent_id)
+        if self._control_regime.get(key) != regime:
+            self._integral[key] = 0.0
         previous_integral = float(self._integral.get(str(agent_id), 0.0))
         proposed_integral = float(
             np.clip(
@@ -81,11 +127,10 @@ class LongitudinalCascadeController:
                 self.position_term_limit_mps2,
             )
         )
-        feedforward = float(reference.feedforward_acceleration_mps2)
         raw_acceleration = (
             feedforward
-            + self.speed_kp * speed_error
-            + self.speed_ki * proposed_integral
+            + gains[0] * speed_error
+            + gains[1] * proposed_integral
             + position_term
             + gap
         )
@@ -98,9 +143,23 @@ class LongitudinalCascadeController:
         )
         saturated = not np.isclose(raw_acceleration, desired_acceleration, atol=1.0e-9)
         if not saturated:
-            self._integral[str(agent_id)] = proposed_integral
-        if reference.stop_requested and target_speed <= 0.1 and speed <= 0.1:
+            self._integral[key] = proposed_integral
+        self._control_regime[key] = regime
+        overzero_guard = False
+        if speed < -1.0e-3:
+            # A negative chassis speed is already a contract violation.  Do
+            # not invent an uncalibrated recovery throttle near a STOP point.
             desired_acceleration = 0.0
+            overzero_guard = True
+            self._integral[key] = 0.0
+        elif (
+            reference.stop_requested
+            and target_speed <= self.stop_release_speed_mps
+            and speed <= self.stop_release_speed_mps
+        ):
+            desired_acceleration = 0.0
+            overzero_guard = True
+            self._integral[key] = 0.0
         scale = (
             EXECUTABLE_MAX_ACCEL_MPS2
             if desired_acceleration >= 0.0
@@ -113,6 +172,9 @@ class LongitudinalCascadeController:
             "reference_acceleration_mps2": feedforward,
             "original_arc_error_m": float(reference.original_arc_error_m),
             "speed_error_mps": speed_error,
+            "signed_current_speed_mps": speed,
+            "actuator_delay_s": self.actuator_delay_s,
+            "control_regime": regime,
             "speed_integral": float(self._integral.get(str(agent_id), previous_integral)),
             "position_feedback_mps2": position_term,
             "gap_feedback_mps2": gap,
@@ -120,6 +182,7 @@ class LongitudinalCascadeController:
             "raw_desired_acceleration_mps2": float(raw_acceleration),
             "control_saturated": bool(saturated or abs(throttle) >= 0.999),
             "normalized_throttle": throttle,
+            "speed_overzero_guard": overzero_guard,
         }
 
 
@@ -196,9 +259,56 @@ class LongitudinalTrackingReference:
 
         return float(np.interp(0.1, self.sample_times_s, self.speed_mps))
 
+    def sample_speed_acceleration_at_time(
+        self, preview_time_s: float
+    ) -> tuple[float, float]:
+        """Sample the explicit time profile without mixing in position error."""
+
+        preview = float(preview_time_s)
+        if not np.isfinite(preview) or preview < 0.0:
+            raise LongitudinalReferenceError(
+                "preview_time_s must be finite and non-negative"
+            )
+        query = min(preview, float(self.sample_times_s[-1]))
+        return (
+            float(np.interp(query, self.sample_times_s, self.speed_mps)),
+            float(
+                np.interp(query, self.sample_times_s, self.acceleration_mps2)
+            ),
+        )
+
     @property
     def feedforward_acceleration_mps2(self) -> float:
         return float(self.acceleration_mps2[0])
+
+
+def signed_longitudinal_speed_mps(vehicle) -> float:
+    """Return velocity projected onto the vehicle's forward heading.
+
+    MetaDrive's ``speed`` and ``speed_km_h`` are magnitudes and therefore hide
+    reverse motion.  Strict trajectory control must preserve the sign.
+    """
+
+    velocity = np.asarray(getattr(vehicle, "velocity", ()), dtype=np.float64).reshape(-1)
+    if velocity.size < 2 or not np.isfinite(velocity[:2]).all():
+        raise LongitudinalReferenceError(
+            "vehicle.velocity must provide a finite world-frame [vx, vy]"
+        )
+    heading = getattr(vehicle, "heading", None)
+    if heading is None:
+        theta = float(getattr(vehicle, "heading_theta", np.nan))
+        if not np.isfinite(theta):
+            raise LongitudinalReferenceError("vehicle heading must be finite")
+        tangent = np.asarray([np.cos(theta), np.sin(theta)], dtype=np.float64)
+    else:
+        tangent = np.asarray(heading, dtype=np.float64).reshape(-1)
+        if tangent.size < 2 or not np.isfinite(tangent[:2]).all():
+            raise LongitudinalReferenceError("vehicle.heading must be finite [x,y]")
+        tangent = tangent[:2]
+    norm = float(np.linalg.norm(tangent))
+    if norm <= 1.0e-9:
+        raise LongitudinalReferenceError("vehicle heading has zero norm")
+    return float(np.dot(velocity[:2], tangent / norm))
 
 
 def trajectory_to_longitudinal_reference(
@@ -455,5 +565,6 @@ __all__ = [
     "build_feedback_executable_profile",
     "project_point_to_path_arc",
     "sample_path_at_arc",
+    "signed_longitudinal_speed_mps",
     "trajectory_to_longitudinal_reference",
 ]

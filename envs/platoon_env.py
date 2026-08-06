@@ -34,6 +34,7 @@ from evaluation.platoon_metrics import PlatoonMetrics
 from models.controller.longitudinal_reference import (
     LongitudinalCascadeController,
     LongitudinalTrackingReference,
+    signed_longitudinal_speed_mps,
     trajectory_to_longitudinal_reference,
 )
 from routes.route_definitions import ROUTE_BY_NAME, get_required_preset, get_route_blocks
@@ -1592,6 +1593,12 @@ class PlatoonEnv(BaseMultiEnv):
         heading = float(vehicle.heading_theta)
         return np.asarray([speed * np.cos(heading), speed * np.sin(heading)], dtype=np.float32)
 
+    def _agent_longitudinal_speed_mps(self, agent_id: str) -> float:
+        vehicle = self.agents.get(agent_id)
+        if vehicle is None:
+            return 0.0
+        return signed_longitudinal_speed_mps(vehicle)
+
     def _vehicle_length_m(self, agent_id: Optional[str] = None) -> float:
         return self._cfg_float("vehicle_length_m", 5.74)
 
@@ -1798,7 +1805,7 @@ class PlatoonEnv(BaseMultiEnv):
         self, agent_id: str, trajectory_target_speed_mps: float
     ) -> float:
         ego_idx = self._agent_ids.index(agent_id)
-        current_speed = self._agent_speed_km_h(agent_id) / 3.6
+        current_speed = self._agent_longitudinal_speed_mps(agent_id)
         target_speed = float(trajectory_target_speed_mps)
         if not np.isfinite(target_speed) or target_speed < 0.0:
             raise ValueError(
@@ -1842,7 +1849,7 @@ class PlatoonEnv(BaseMultiEnv):
             raise ValueError("trajectory must be finite floating-point [8,3]")
         steering = self._lateral_preview_pid(agent_id, trajectory)
         ego_idx = self._agent_ids.index(agent_id)
-        current_speed = self._agent_speed_km_h(agent_id) / 3.6
+        current_speed = self._agent_longitudinal_speed_mps(agent_id)
         gap_acceleration = 0.0
         if ego_idx > 0:
             front_id = self._agent_ids[ego_idx - 1]
@@ -1851,7 +1858,7 @@ class PlatoonEnv(BaseMultiEnv):
             if ego_pose is not None and front_pose is not None:
                 actual_gap = float(_world_to_ego(ego_pose, front_pose)[0])
                 desired_gap = self._desired_center_spacing_m(agent_id, front_id)
-                front_speed = self._agent_speed_km_h(front_id) / 3.6
+                front_speed = self._agent_longitudinal_speed_mps(front_id)
                 gap_acceleration = float(
                     np.clip(
                         0.15 * (actual_gap - desired_gap)
@@ -1879,10 +1886,10 @@ class PlatoonEnv(BaseMultiEnv):
 
     def trajectory_to_control(self, agent_id: str, trajectory: np.ndarray) -> np.ndarray:
         trajectory = np.asarray(trajectory)
-        current_speed = self._agent_speed_km_h(agent_id) / 3.6
+        current_speed = self._agent_longitudinal_speed_mps(agent_id)
         reference = trajectory_to_longitudinal_reference(
             trajectory,
-            current_speed,
+            max(current_speed, 0.0),
             source="online_trajectory",
         )
         return self.trajectory_reference_to_control(

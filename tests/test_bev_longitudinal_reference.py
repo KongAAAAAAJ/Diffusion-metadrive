@@ -18,6 +18,7 @@ from models.controller.longitudinal_reference import (
     build_feedback_executable_profile,
     project_point_to_path_arc,
     sample_path_at_arc,
+    signed_longitudinal_speed_mps,
     trajectory_to_longitudinal_reference,
 )
 
@@ -98,7 +99,8 @@ def test_terminal_stop_does_not_request_zero_speed_before_stop_time() -> None:
         6.0,
         reference,
     )
-    assert debug["reference_speed_mps"] == pytest.approx(5.9)
+    expected_speed, _ = reference.sample_speed_acceleration_at_time(0.3)
+    assert debug["reference_speed_mps"] == pytest.approx(expected_speed)
     assert throttle > -1.0
 
 
@@ -113,7 +115,57 @@ def test_terminal_stop_holds_zero_only_after_reference_reaches_zero() -> None:
         0.05,
         reference,
     )
-    assert debug["reference_speed_mps"] == pytest.approx(0.04)
+    expected_speed, _ = reference.sample_speed_acceleration_at_time(0.3)
+    assert debug["reference_speed_mps"] == pytest.approx(expected_speed)
+    assert throttle == pytest.approx(0.0)
+
+
+def test_signed_longitudinal_speed_preserves_reverse_direction() -> None:
+    vehicle = type(
+        "Vehicle",
+        (),
+        {
+            "velocity": np.asarray([-2.0, 0.0]),
+            "heading": np.asarray([1.0, 0.0]),
+            "speed_km_h": 7.2,
+        },
+    )()
+    assert vehicle.speed_km_h > 0.0
+    assert signed_longitudinal_speed_mps(vehicle) == pytest.approx(-2.0)
+
+
+def test_time_preview_does_not_mix_arc_position_error_into_speed() -> None:
+    reference = trajectory_to_longitudinal_reference(
+        _trajectory(4.0), 4.0, source="preview"
+    )
+    speed, acceleration = reference.sample_speed_acceleration_at_time(0.3)
+    assert speed == pytest.approx(4.0)
+    assert acceleration == pytest.approx(0.0)
+
+
+def test_drive_and_brake_pi_use_separate_regimes_and_stop_overzero_guard() -> None:
+    controller = LongitudinalCascadeController()
+    cruise = trajectory_to_longitudinal_reference(
+        _trajectory(6.0), 4.0, source="drive"
+    )
+    _, drive = controller.compute("agent0", 4.0, cruise)
+    assert drive["control_regime"] == "acceleration"
+
+    braking_trajectory = np.zeros((8, 3), dtype=np.float32)
+    braking_trajectory[:, 0] = np.asarray(
+        [3.5, 6.0, 7.5, 8.0, 8.0, 8.0, 8.0, 8.0], dtype=np.float32
+    )
+    brake = trajectory_to_longitudinal_reference(
+        braking_trajectory, 8.0, source="brake"
+    )
+    _, brake_debug = controller.compute("agent0", 8.0, brake)
+    assert brake_debug["control_regime"] == "braking"
+
+    stationary = trajectory_to_longitudinal_reference(
+        np.zeros((8, 3), dtype=np.float32), 0.0, source="stop"
+    )
+    throttle, stopped = controller.compute("agent0", 0.05, stationary)
+    assert stopped["speed_overzero_guard"] is True
     assert throttle == pytest.approx(0.0)
 
 

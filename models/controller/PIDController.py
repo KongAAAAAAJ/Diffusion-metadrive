@@ -9,6 +9,7 @@ from models.controller.controller_helper import save_pid_debug_plot
 from models.controller.longitudinal_reference import (
     LongitudinalCascadeController,
     LongitudinalTrackingReference,
+    signed_longitudinal_speed_mps,
     trajectory_to_longitudinal_reference,
 )
 
@@ -136,13 +137,10 @@ class PIDTrajectoryController(BaseController):
                 "mode": "no_trajectory",
                 "gap_feedback_mps2": 0.0,
             }
-        current_speed_mps = max(
-            float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
-            0.0,
-        )
+        current_speed_mps = signed_longitudinal_speed_mps(vehicle)
         lookahead_m = float(
             np.clip(
-                self.preview_lookahead_time_s * current_speed_mps,
+                self.preview_lookahead_time_s * abs(current_speed_mps),
                 self.preview_lookahead_min_m,
                 self.preview_lookahead_max_m,
             )
@@ -189,7 +187,7 @@ class PIDTrajectoryController(BaseController):
 
         reference = longitudinal_reference or trajectory_to_longitudinal_reference(
             trajectory_local,
-            current_speed_mps,
+            max(current_speed_mps, 0.0),
             source="online_trajectory",
         )
         throttle, longitudinal_debug = self._longitudinal.compute(

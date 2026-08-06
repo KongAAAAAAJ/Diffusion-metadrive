@@ -14,7 +14,9 @@ from evaluation.control_tracking_benchmark import (
 )
 
 
-def _trace(*, lateral=0.0, heading=0.0, saturation=0.0, speed=4.0):
+def _trace(
+    *, lateral=0.0, heading=0.0, saturation=0.0, speed=4.0, gap_error=0.0
+):
     count = 8
     return {
         "reference_world": np.zeros((count, 3)).tolist(),
@@ -25,6 +27,7 @@ def _trace(*, lateral=0.0, heading=0.0, saturation=0.0, speed=4.0):
         "position_error_speed_increment_mps": [0.0] * count,
         "actual_acceleration_mps2": [0.0] * count,
         "formation_control_increment": [0.0] * count,
+        "formation_gap_error_m": [gap_error] * count,
         "control_saturated": [False] * count,
         "lateral_heading_contaminated": [False] * count,
         "actual_speed_mps": [speed] * count,
@@ -84,6 +87,24 @@ def test_summary_separates_lateral_and_heading_thresholds() -> None:
     assert failed["passed"] is False
     assert "lateral_p95" in failed["blockers"]
     assert "heading_p95" in failed["blockers"]
+
+
+def test_summary_uses_speed_for_independent_and_gap_for_locked() -> None:
+    case = standard_control_cases()[0]
+    independent = summarize_control_result(
+        case,
+        _result(case),
+        control_mode="independent",
+    )
+    assert independent["signed_speed_error_p95_mps"] == pytest.approx(0.0)
+    assert independent["passed"] is True
+
+    result = _result(case)
+    for trace in result.tracking_traces[0][1:]:
+        trace["formation_gap_error_m"] = [2.0] * 8
+    locked = summarize_control_result(case, result, control_mode="locked")
+    assert locked["passed"] is False
+    assert "desired_center_gap_error_p95" in locked["blockers"]
 
 
 def test_gap_feedback_contract_has_bounded_direction() -> None:

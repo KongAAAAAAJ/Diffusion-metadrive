@@ -44,6 +44,8 @@ class _BranchEnv:
                 name=f"agent{role}",
                 position=np.asarray([x, 0.0], dtype=np.float64),
                 heading_theta=0.0,
+                heading=np.asarray([1.0, 0.0], dtype=np.float64),
+                velocity=np.asarray([0.0, 0.0], dtype=np.float64),
                 speed_km_h=0.0,
                 LENGTH=5.74,
                 WIDTH=2.3,
@@ -85,6 +87,11 @@ class _BranchEnv:
             )
             vehicle.heading_theta = float(heading + point[2])
             vehicle.speed_km_h = float(np.linalg.norm(point[:2]) / 0.5 * 3.6)
+            vehicle.heading = np.asarray(
+                [np.cos(vehicle.heading_theta), np.sin(vehicle.heading_theta)],
+                dtype=np.float64,
+            )
+            vehicle.velocity = vehicle.heading * (vehicle.speed_km_h / 3.6)
         flags = {agent_id: False for agent_id in self.agents}
         flags["__all__"] = False
         info = {agent_id: {} for agent_id in self.agents}

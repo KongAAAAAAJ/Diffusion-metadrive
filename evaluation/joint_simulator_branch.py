@@ -20,7 +20,10 @@ from models.bev_planner.joint_reward import (
     compose_joint_reward,
 )
 from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
-from models.controller.longitudinal_reference import LongitudinalTrackingReference
+from models.controller.longitudinal_reference import (
+    LongitudinalTrackingReference,
+    signed_longitudinal_speed_mps,
+)
 from scenarios.bev_round13_contract import deterministic_initial_speed_km_h
 
 
@@ -615,9 +618,9 @@ class JointSimulatorBranchEvaluator:
 
                 initial = replay_pose.copy()
                 for role, agent_id in enumerate(AGENT_IDS):
-                    initial_speed[group, role] = float(
-                        getattr(env.agents[agent_id], "speed_km_h", 0.0)
-                    ) / 3.6
+                    initial_speed[group, role] = signed_longitudinal_speed_mps(
+                        env.agents[agent_id]
+                    )
                 references = [
                     _local_reference_to_world(candidates[group, role], initial[role])
                     for role in range(3)
@@ -664,11 +667,9 @@ class JointSimulatorBranchEvaluator:
                         target_speed = float(
                             explicit_references[agent_id].target_speed_mps
                         )
-                        current_speed = float(
-                            getattr(
-                                env.agents[agent_id], "speed_km_h", 0.0
-                            )
-                        ) / 3.6
+                        current_speed = signed_longitudinal_speed_mps(
+                            env.agents[agent_id]
+                        )
                         speed_only_control = float(
                             np.clip(
                                 -0.35 * (current_speed - target_speed),
@@ -769,12 +770,7 @@ class JointSimulatorBranchEvaluator:
                         positions[role].append(current[role, :2].copy())
                         headings[role].append(float(current[role, 2]))
                         speeds[role].append(
-                            float(
-                                getattr(
-                                    env.agents[agent_id], "speed_km_h", 0.0
-                                )
-                            )
-                            / 3.6
+                            signed_longitudinal_speed_mps(env.agents[agent_id])
                         )
                         reference_pose = _world_reference_pose_at(
                             references[role], (step_index + 1) * dt_s

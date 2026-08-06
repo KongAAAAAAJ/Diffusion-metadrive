@@ -9,6 +9,11 @@ class _FakeVehicle:
         self.position = np.asarray([0.0, 0.0], dtype=np.float32)
         self.heading_theta = float(heading)
         self.speed_km_h = float(speed_km_h)
+        self.heading = np.asarray(
+            [np.cos(self.heading_theta), np.sin(self.heading_theta)],
+            dtype=np.float32,
+        )
+        self.velocity = self.heading * (self.speed_km_h / 3.6)
 
 
 def test_save_pid_debug_plot_saves_png_and_accumulates_history(tmp_path) -> None:
