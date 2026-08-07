@@ -224,6 +224,48 @@ def test_committed_execution_advances_state_without_generating_proposals():
     assert rule_maker.has_active_lane_change_commitments is False
 
 
+def test_commitment_is_not_completed_at_lane_assignment_boundary():
+    vehicle = _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=20.0)
+    env = _env(agents={"agent0": vehicle}, traffic=[])
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=False,
+        lane_change_preference=20.0,
+        lc_cost=0.0,
+        w_mobil=0.0,
+        w_keep_bias=0.0,
+    )
+    batch = rule_maker.propose_joint_actions(env, ["agent0"], {})
+    proposal = next(
+        value
+        for value in batch.proposals
+        if int(value.decisions["agent0"]["action"]) != 0
+    )
+    action = int(proposal.decisions["agent0"]["action"])
+    rule_maker.accept_joint_action(batch.batch_id, proposal.proposal_id)
+    rule_maker.advance_committed_execution(env, ["agent0"], 12)
+
+    target_lane_id = 1 + action
+    target_y = {0: 3.5, 2: -3.5}[target_lane_id]
+    # The simulator may already assign the target lane at the half-lane
+    # boundary.  The accepted maneuver must continue until its centreline is
+    # actually reached.
+    halfway_y = 0.5 * target_y
+    env.agents["agent0"] = _vehicle(
+        "agent0", 22.0, halfway_y, target_lane_id, speed_km_h=20.0
+    )
+    active = rule_maker.advance_committed_execution(env, ["agent0"], 12)
+    assert "agent0" in active["lane_change_commitments"]["active"]
+
+    env.agents["agent0"] = _vehicle(
+        "agent0", 24.0, target_y, target_lane_id, speed_km_h=20.0
+    )
+    completed = rule_maker.advance_committed_execution(env, ["agent0"], 12)
+    assert completed["lane_change_commitments"]["active"] == {}
+    assert completed["lane_change_commitments"]["completed"]["agent0"][
+        "completion_reason"
+    ] == "converged_to_target_lane_center"
+
+
 def test_risk_detector_unlocks_when_leader_ttc_is_below_threshold():
     env = _env(
         agents={
@@ -1226,7 +1268,7 @@ def test_rule_maker_lane_change_continues_on_target_lane_family_across_blocks():
     assert traj[-1, 1] < -4.0
 
 
-def test_s8_reference_lane_chain_uses_rightmost_exit_lane_then_ramp_lane():
+def test_s8_intermediate_lane_chain_preserves_slot_before_exit():
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s8_exit(vehicle)
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
@@ -1236,12 +1278,11 @@ def test_s8_reference_lane_chain_uses_rightmost_exit_lane_then_ramp_lane():
 
     assert lane_indices == [
         ("A", "B", 1),
-        ("B", "C", 2),
-        ("C", "D", 0),
+        ("B", "C", 1),
     ]
 
 
-def test_reference_lane_chain_keeps_current_lane_slot_for_non_s8_routes():
+def test_s7_reference_lane_chain_enters_rightmost_mainline_lane():
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s8_exit(vehicle, scenario_id="S7_ego_merge_from_ramp", local_route="R7_merge_core")
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
@@ -1251,7 +1292,7 @@ def test_reference_lane_chain_keeps_current_lane_slot_for_non_s8_routes():
 
     assert lane_indices == [
         ("A", "B", 1),
-        ("B", "C", 1),
+        ("B", "C", 2),
         ("C", "D", 0),
     ]
 
@@ -1939,7 +1980,7 @@ def test_lane_change_commitment_blocks_reversal_until_target_lane_entry():
     assert debug["lane_change_commitments"]["active"] == {}
     assert debug["lane_change_commitments"]["completed"]["agent0"][
         "completion_reason"
-    ] == "entered_target_lane_family"
+    ] == "converged_to_target_lane_center"
     assert int(third["agent0"]["action"]) != committed_action
 
 
@@ -1960,3 +2001,36 @@ def test_reset_clears_lane_change_commitment_state():
 
     assert rule_maker._lane_change_commitments == {}
     assert rule_maker._pending_lane_change_commitments == {}
+
+
+def test_proposals_exclude_actions_without_hard_valid_modes():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 20.0, 0.0, 1)},
+        traffic=[],
+    )
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=False,
+        lane_change_preference=20.0,
+        lc_cost=0.0,
+    )
+
+    batch = rule_maker.propose_joint_actions(
+        env,
+        ["agent0"],
+        planner_batch={},
+        hard_valid_modes_by_action={
+            "agent0": {-1: (), 0: (0, 9), 1: ()}
+        },
+    )
+
+    assert batch.proposals
+    assert all(
+        int(proposal.decisions["agent0"]["action"]) == 0
+        for proposal in batch.proposals
+    )
+    assert all(
+        proposal.decisions["agent0"]["hard_mode_action_valid"]
+        for proposal in batch.proposals
+    )
+    debug = rule_maker.get_last_debug()
+    assert debug["hard_mode_action_rejections"]

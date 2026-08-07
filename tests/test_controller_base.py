@@ -100,6 +100,52 @@ def test_pid_compute_actions_skips_missing_agent_and_preserves_empty_trajectory_
     np.testing.assert_array_equal(actions["agent0"], np.zeros((2,), dtype=np.float32))
 
 
+def test_pid_does_not_double_count_fixed_time_heading_on_top_of_preview() -> None:
+    trajectory = np.asarray(
+        [
+            [4.0, -0.1, 0.12],
+            [8.0, -0.8, -0.08],
+            [12.0, -2.0, -0.18],
+            [16.0, -3.4, -0.24],
+            [20.0, -4.8, -0.28],
+            [24.0, -6.0, -0.30],
+            [28.0, -7.0, -0.30],
+            [32.0, -7.8, -0.30],
+        ],
+        dtype=np.float32,
+    )
+    controller = PIDTrajectoryController({"pid_dt": 0.1})
+    vehicle = _FakeVehicle(speed_km_h=30.0)
+
+    action, debug = controller._single_control_with_debug(
+        "agent0", vehicle, trajectory, None
+    )
+
+    assert np.isfinite(action).all()
+    assert debug["tracking_heading_error_rad"] == pytest.approx(0.12)
+    assert debug["heading_correction"] == 0.0
+
+
+def test_pid_cross_track_feedback_opposes_lateral_path_error() -> None:
+    trajectory = np.asarray(
+        [[4.0 * (index + 1), 0.0, 0.0] for index in range(8)],
+        dtype=np.float32,
+    )
+    controller = PIDTrajectoryController({"pid_dt": 0.1})
+    vehicle = _FakeVehicle(speed_km_h=30.0)
+
+    action, debug = controller._single_control_with_debug(
+        "agent0",
+        vehicle,
+        trajectory,
+        None,
+        cross_track_error_m=-0.5,
+    )
+
+    assert float(action[0]) > 0.0
+    assert debug["cross_track_correction"] == pytest.approx(0.2)
+
+
 def test_lqr_follower_controller_records_lateral_debug_for_followers() -> None:
     shared_lane = _FakeLane()
     controller = LQRFollowerController()

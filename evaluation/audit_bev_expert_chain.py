@@ -340,8 +340,27 @@ def audit_episode(
 
     for step in range(int(max_steps)):
         builder.capture_state(env, step * dt_s)
+        model_inputs = None
+        if builder.history_ready():
+            try:
+                model_inputs = builder.build_model_inputs(env)
+            except JointCollectionError as exc:
+                failure_reason = exc.reason_code
+                rows.append(
+                    {
+                        "step": step,
+                        "failure_reason": failure_reason,
+                        "error": str(exc),
+                        "agents": {
+                            agent_id: _agent_state(env, agent_id)
+                            for agent_id in agent_ids
+                            if agent_id in env.agents
+                        },
+                    }
+                )
+                break
         try:
-            expert_step = expert.plan(env)
+            expert_step = expert.plan(env, model_inputs=model_inputs)
         except JointCollectionError as exc:
             failure_reason = exc.reason_code
             rows.append(
@@ -374,14 +393,18 @@ def audit_episode(
                 name: np.asarray(value, dtype=np.float32).tolist()
                 for name, value in expert_step.controls.items()
             },
+            "controller_debug": (
+                expert.lqr_controller.get_last_debug()
+                if expert.rule_maker.is_formation_locked
+                else expert.pid_controller.get_last_debug()
+            ),
             "agents": {
                 agent_id: _agent_state(env, agent_id)
                 for agent_id in agent_ids
             },
         }
-        if builder.history_ready():
+        if model_inputs is not None:
             try:
-                model_inputs = builder.build_model_inputs(env)
                 row["mode_valid_mask"] = model_inputs.mode_valid_mask.tolist()
                 row["mode_mask_components"] = _mode_mask_components(
                     env,
@@ -390,7 +413,9 @@ def audit_episode(
                     expert_step,
                     agent_ids,
                 )
-                sample = builder.build_sample(env, expert_step)
+                sample = builder.build_sample(
+                    env, expert_step, model_inputs=model_inputs
+                )
                 row["gt_mode"] = sample.gt_mode.tolist()
             except (JointCollectionError, JointStepRejected) as exc:
                 failure_reason = exc.reason_code

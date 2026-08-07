@@ -72,6 +72,7 @@ class PIDTrajectoryController(BaseController):
         self.preview_heading_weight = float(
             cfg.get("preview_heading_weight", 0.5)
         )
+        self.cross_track_kp = float(cfg.get("pid_cross_track_kp", 0.4))
         self._state: dict[str, dict[str, float]] = {}
         self._longitudinal = LongitudinalCascadeController(
             dt_s=decision_dt,
@@ -106,6 +107,7 @@ class PIDTrajectoryController(BaseController):
         env,
         trajectories_world: dict[str, np.ndarray],
         longitudinal_references: dict[str, LongitudinalTrackingReference] | None = None,
+        lateral_tracking_errors_m: dict[str, float] | None = None,
     ) -> dict[str, np.ndarray]:
         actions: dict[str, np.ndarray] = {}
         debug: dict[str, dict[str, object]] = {}
@@ -121,7 +123,13 @@ class PIDTrajectoryController(BaseController):
                 else None
             )
             action, agent_debug = self._single_control_with_debug(
-                agent_id, vehicle, trajectory_local, reference
+                agent_id,
+                vehicle,
+                trajectory_local,
+                reference,
+                cross_track_error_m=float(
+                    (lateral_tracking_errors_m or {}).get(agent_id, 0.0)
+                ),
             )
             actions[agent_id] = action
             debug[agent_id] = agent_debug
@@ -140,9 +148,18 @@ class PIDTrajectoryController(BaseController):
         return kp * error + ki * integral + kd * derivative
 
     def _single_control(self, agent_id: str, vehicle, trajectory_local: np.ndarray) -> np.ndarray:
-        action, _ = self._single_control_with_debug(
+        action, debug = self._single_control_with_debug(
             agent_id, vehicle, trajectory_local, None
         )
+        trajectory_local = np.asarray(trajectory_local, dtype=np.float32)
+        if trajectory_local.ndim == 2 and trajectory_local.shape[0] > 0:
+            debug_index = min(max(self.lookahead_index, 0), trajectory_local.shape[0] - 1)
+            save_pid_debug_plot(
+                agent_id=agent_id,
+                steering=float(action[0]),
+                actual_heading=float(getattr(vehicle, "heading_theta", 0.0)),
+                heading_error=_wrap_to_pi(float(trajectory_local[debug_index, 2])),
+            )
         return action
 
     def _single_control_with_debug(
@@ -153,6 +170,7 @@ class PIDTrajectoryController(BaseController):
         longitudinal_reference: LongitudinalTrackingReference | None,
         *,
         gap_acceleration_mps2: float = 0.0,
+        cross_track_error_m: float = 0.0,
     ) -> tuple[np.ndarray, dict[str, object]]:
         trajectory_local = np.asarray(trajectory_local, dtype=np.float32)
         if trajectory_local.ndim != 2 or trajectory_local.shape[0] == 0:
@@ -207,6 +225,18 @@ class PIDTrajectoryController(BaseController):
             self.lateral_ki,
             self.lateral_kd,
         )
+        if not np.isfinite(cross_track_error_m):
+            raise ValueError("cross_track_error_m must be finite")
+        cross_track_correction = -self.cross_track_kp * float(
+            cross_track_error_m
+        )
+        steering += cross_track_correction
+        # Keep the first fixed-time heading visible in diagnostics.  It is not
+        # an instantaneous heading target: on a high-curvature path a preview
+        # tracker is expected to rotate before reaching that waypoint.  Adding
+        # a second PID term here double-counts the same future curvature.
+        tracking_heading_error = _wrap_to_pi(float(trajectory_local[0, 2]))
+        heading_correction = 0.0
 
         reference = longitudinal_reference or trajectory_to_longitudinal_reference(
             trajectory_local,
@@ -226,6 +256,12 @@ class PIDTrajectoryController(BaseController):
         debug: dict[str, object] = {
             "mode": "trajectory_cascade",
             "current_speed_mps": float(current_speed_mps),
+            "preview_lookahead_m": float(lookahead_m),
+            "preview_lateral_error_rad": float(lateral_error),
+            "cross_track_error_m": float(cross_track_error_m),
+            "cross_track_correction": float(cross_track_correction),
+            "tracking_heading_error_rad": float(tracking_heading_error),
+            "heading_correction": float(heading_correction),
             "raw_steering": float(steering),
             "clipped_steering": float(action[0]),
             "clipped_throttle": float(action[1]),

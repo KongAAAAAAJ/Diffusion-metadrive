@@ -68,6 +68,11 @@ def test_pid_single_control_calls_debug_plot_for_valid_trajectory(monkeypatch) -
             [1.0, 0.0, 0.00],
             [2.0, 0.4, 0.07],
             [3.0, 0.6, 0.09],
+            [4.0, 0.8, 0.10],
+            [5.0, 1.0, 0.10],
+            [6.0, 1.2, 0.10],
+            [7.0, 1.4, 0.10],
+            [8.0, 1.6, 0.10],
         ],
         dtype=np.float32,
     )
@@ -81,7 +86,7 @@ def test_pid_single_control_calls_debug_plot_for_valid_trajectory(monkeypatch) -
     assert len(calls) == 1
     assert calls[0]["agent_id"] == "agent0"
     assert calls[0]["actual_heading"] == 0.3
-    assert calls[0]["heading_error"] == float(trajectory_local[1, 2])
+    assert calls[0]["heading_error"] == pytest.approx(float(trajectory_local[1, 2]))
 
 
 def test_pid_single_control_empty_trajectory_does_not_plot(monkeypatch) -> None:

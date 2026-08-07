@@ -74,6 +74,37 @@ def test_low_speed_stop_before_first_sample_is_reachable() -> None:
     )
 
 
+def test_curved_hard_braking_uses_arc_distance_not_shorter_chord() -> None:
+    speed = 9.22
+    acceleration = -8.0
+    times = np.arange(1, 9, dtype=np.float64) * 0.5
+    stop_time = speed / -acceleration
+    active = np.minimum(times, stop_time)
+    arc = speed * active + 0.5 * acceleration * active**2
+    curvature = 0.03
+    heading = curvature * arc
+    trajectory = np.column_stack(
+        (
+            np.sin(heading) / curvature,
+            (1.0 - np.cos(heading)) / curvature,
+            heading,
+        )
+    )
+
+    result = validate_trajectory_kinematics(
+        trajectory,
+        speed,
+        np.zeros(3, dtype=np.float64),
+    )
+
+    assert result.valid, result.violations
+    np.testing.assert_allclose(
+        result.cumulative_distance_m,
+        arc,
+        atol=1.0e-6,
+    )
+
+
 def test_acceleration_reverse_and_turning_violations_are_named() -> None:
     spike = _straight(8.0)
     spike[0, 0] = 8.0

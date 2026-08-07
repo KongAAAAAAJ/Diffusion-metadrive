@@ -445,8 +445,18 @@ def validate_trajectory_kinematics(
         [origin[None], values], axis=0
     )
     segments = np.diff(poses[:, :2], axis=0)
-    distances = np.linalg.norm(segments, axis=1)
+    chord_distances = np.linalg.norm(segments, axis=1)
     heading_delta = _wrap_to_pi(np.diff(poses[:, 2]))
+    # Fixed-time waypoints on a curved path delimit an arc, while their XY
+    # difference is only its chord.  Using the chord as longitudinal travel
+    # makes a physically reachable, hard-braking curve appear shorter than
+    # the minimum reachable distance.  Recover the constant-curvature arc
+    # implied by the endpoint tangents; the straight-line limit is exact.
+    half_angle = 0.5 * np.abs(heading_delta)
+    arc_scale = np.ones_like(chord_distances)
+    curved = half_angle > 1.0e-8
+    arc_scale[curved] = half_angle[curved] / np.sin(half_angle[curved])
+    distances = chord_distances * arc_scale
     previous_heading = poses[:-1, 2]
     forward = (
         segments[:, 0] * np.cos(previous_heading)
@@ -598,14 +608,30 @@ def build_hard_mode_valid_mask(
     )
 
 
-def _candidate_modes_for_action(rule_action: RuleAction) -> tuple[int, ...]:
-    if rule_action == RuleAction.LEFT:
+def mode_indices_for_rule_action(
+    rule_action: int | RuleAction,
+) -> tuple[int, ...]:
+    """Return the frozen mode group represented by a RuleMaker action."""
+
+    if isinstance(rule_action, (bool, np.bool_)) or not isinstance(
+        rule_action, (int, np.integer, RuleAction)
+    ):
+        raise ModeContractError(
+            f"RuleMaker action must be one of -1, 0, 1; got {rule_action!r}"
+        )
+    try:
+        action = RuleAction(int(rule_action))
+    except (TypeError, ValueError) as exc:
+        raise ModeContractError(
+            f"RuleMaker action must be one of -1, 0, 1; got {rule_action!r}"
+        ) from exc
+    if action == RuleAction.LEFT:
         return LEFT_MODES
-    if rule_action == RuleAction.KEEP:
+    if action == RuleAction.KEEP:
         return KEEP_MODES + (int(ModeIndex.STOP),)
-    if rule_action == RuleAction.RIGHT:
+    if action == RuleAction.RIGHT:
         return RIGHT_MODES
-    raise ModeContractError(f"unsupported RuleMaker action: {int(rule_action)}")
+    raise AssertionError("unreachable RuleMaker action")
 
 
 def label_gt_mode(
@@ -632,7 +658,7 @@ def label_gt_mode(
     if not np.isfinite(weight) or weight < 0.0:
         raise ModeContractError("heading_error_weight must be finite and non-negative")
 
-    candidates = tuple(index for index in _candidate_modes_for_action(action) if valid_mask[index])
+    candidates = tuple(index for index in mode_indices_for_rule_action(action) if valid_mask[index])
     if not candidates:
         raise ModeContractError(
             f"RuleMaker action {action.name} has no hard-valid mode; the joint sample must be discarded"

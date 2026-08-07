@@ -5,13 +5,18 @@ import copy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 import numpy as np
 
 from models.decisioner.risk import SimpleRuleRiskDetector
 from models.decisioner.risk.safety_potential import pairwise_agent_safety_score
 from models.platoon_planner.collision_geometry import obb_overlap_series
+from models.controller.longitudinal_reference import sample_path_at_arc
+from models.platoon_planner.route_chain_geometry import (
+    RouteChainGeometryError,
+    build_continuous_lane_chain_path,
+)
 from models.decisioner.rule_decisioner_helper import (
     save_candidate_debug_plot,
     save_lane_pair_debug_plot,
@@ -280,6 +285,11 @@ class MultiAgentRuleMaker(RuleMaker):
         env,
         agent_ids: list[str],
         planner_batch: dict[str, dict],
+        *,
+        hard_valid_modes_by_action: Mapping[
+            str, Mapping[int, Sequence[int]]
+        ]
+        | None = None,
     ) -> RuleMakerProposalBatch:
         """Return all coarse-safe joint actions in deterministic score order."""
 
@@ -293,15 +303,69 @@ class MultiAgentRuleMaker(RuleMaker):
         coordination_mode = (
             "LOCKED" if formation_enabled else "EMERGENCY_INDEPENDENT"
         )
-        for rank, (combo, score) in enumerate(self._last_ranked_combos):
+        ranked_combos = list(self._last_ranked_combos)
+        hard_mask_rejections: list[dict[str, object]] = []
+        if hard_valid_modes_by_action is not None:
+            missing_agents = [
+                agent_id
+                for agent_id in ordered_ids
+                if agent_id not in hard_valid_modes_by_action
+            ]
+            if missing_agents:
+                raise LaneChangeCommitmentError(
+                    "hard mode action feasibility omitted agents: "
+                    + ",".join(missing_agents)
+                )
+            filtered = []
+            for original_rank, (combo, score) in enumerate(ranked_combos):
+                invalid_agents = []
+                for agent_id, candidate in zip(ordered_ids, combo):
+                    action = int(candidate["action"])
+                    valid_modes = tuple(
+                        int(value)
+                        for value in hard_valid_modes_by_action[agent_id].get(
+                            action, ()
+                        )
+                    )
+                    if not valid_modes:
+                        invalid_agents.append(agent_id)
+                if invalid_agents:
+                    hard_mask_rejections.append(
+                        {
+                            "original_rank": int(original_rank),
+                            "actions": {
+                                agent_id: int(candidate["action"])
+                                for agent_id, candidate in zip(
+                                    ordered_ids, combo
+                                )
+                            },
+                            "invalid_agents": invalid_agents,
+                        }
+                    )
+                    continue
+                filtered.append((combo, score))
+            ranked_combos = filtered
+
+        for rank, (combo, score) in enumerate(ranked_combos):
             proposal_id = int(rank)
             decisions: dict[str, dict[str, object]] = {}
             for agent_id, candidate in zip(ordered_ids, combo):
-                decisions[agent_id] = self._decision_from_candidate(
+                decision = self._decision_from_candidate(
                     candidate,
                     formation_constraint_enabled=formation_enabled,
                     coordination_mode=coordination_mode,
                 )
+                if hard_valid_modes_by_action is not None:
+                    action = int(candidate["action"])
+                    valid_modes = tuple(
+                        int(value)
+                        for value in hard_valid_modes_by_action[agent_id][
+                            action
+                        ]
+                    )
+                    decision["hard_mode_action_valid"] = True
+                    decision["hard_valid_mode_indices"] = valid_modes
+                decisions[agent_id] = decision
             proposals.append(
                 JointActionProposal(
                     proposal_id=proposal_id,
@@ -317,6 +381,9 @@ class MultiAgentRuleMaker(RuleMaker):
         if self._last_debug is not None:
             self._last_debug["proposal_batch_id"] = batch_id
             self._last_debug["proposal_count"] = len(proposals)
+            self._last_debug["hard_mode_action_rejections"] = (
+                hard_mask_rejections
+            )
             self._last_debug["proposal_ranking"] = [
                 {
                     "proposal_id": value.proposal_id,
@@ -838,15 +905,89 @@ class MultiAgentRuleMaker(RuleMaker):
             )
             if current_index not in set(commitment.target_lane_chain):
                 continue
+            # MetaDrive changes ``vehicle.lane`` as soon as the vehicle centre
+            # crosses the Voronoi boundary between adjacent lanes.  At that
+            # instant a lane change is only about half complete.  Releasing the
+            # commitment there used to discard the accepted execution plan and
+            # restart decision making while the vehicle was still roughly half
+            # a lane-width away from its target centre (notably in S8).
+            #
+            # Completion therefore requires geometric convergence to the lane
+            # which currently represents the accepted target family.  This is
+            # a state-machine criterion only; it does not relax the planner's
+            # road footprint or collision contracts.
+            target_lane = self._lane_from_index(env, current_index)
+            if target_lane is None or vehicle is None:
+                continue
+            try:
+                _, target_lateral_m = target_lane.local_coordinates(
+                    np.asarray(vehicle.position, dtype=np.float64)[:2]
+                )
+            except Exception:
+                continue
+            footprint_inside, footprint_margin_m = (
+                self._vehicle_footprint_inside_lane(vehicle, target_lane)
+            )
+            if not np.isfinite(target_lateral_m) or not footprint_inside:
+                continue
             self._completed_lane_change_commitments[agent_id] = {
                 "action": int(commitment.action),
                 "source_lane_index": commitment.source_lane_index,
                 "target_lane_index": commitment.target_lane_index,
                 "commit_step": int(commitment.commit_step),
                 "completion_step": int(self._decision_step + 1),
-                "completion_reason": "entered_target_lane_family",
+                "completion_reason": "converged_to_target_lane_center",
+                "target_lateral_error_m": float(target_lateral_m),
+                "target_lane_footprint_margin_m": float(footprint_margin_m),
             }
             self._lane_change_commitments.pop(agent_id, None)
+
+    @staticmethod
+    def _vehicle_footprint_inside_lane(vehicle, lane) -> tuple[bool, float]:
+        """Return whether the full oriented vehicle footprint is in ``lane``.
+
+        Lane assignment only tests the vehicle centre and is therefore too
+        early to define completion.  This exact footprint predicate matches
+        the geometric meaning used by the downstream road audit without
+        changing any road boundary.
+        """
+
+        position = np.asarray(getattr(vehicle, "position", ()), dtype=np.float64)
+        heading = float(getattr(vehicle, "heading_theta", np.nan))
+        length = float(getattr(vehicle, "LENGTH", np.nan))
+        width = float(getattr(vehicle, "WIDTH", np.nan))
+        if (
+            position.shape[0] < 2
+            or not np.isfinite(position[:2]).all()
+            or not np.isfinite([heading, length, width]).all()
+            or length <= 0.0
+            or width <= 0.0
+        ):
+            return False, -float("inf")
+        forward = np.asarray([np.cos(heading), np.sin(heading)], dtype=np.float64)
+        lateral = np.asarray([-forward[1], forward[0]], dtype=np.float64)
+        margins = []
+        for longitudinal_sign in (-1.0, 1.0):
+            for lateral_sign in (-1.0, 1.0):
+                point = (
+                    position[:2]
+                    + longitudinal_sign * 0.5 * length * forward
+                    + lateral_sign * 0.5 * width * lateral
+                )
+                try:
+                    lane_s, lane_d = lane.local_coordinates(point)
+                    lane_width = float(
+                        lane.width_at(float(lane_s))
+                        if hasattr(lane, "width_at")
+                        else getattr(lane, "width", np.nan)
+                    )
+                except Exception:
+                    return False, -float("inf")
+                if not np.isfinite([lane_s, lane_d, lane_width]).all():
+                    return False, -float("inf")
+                margins.append(0.5 * lane_width - abs(float(lane_d)))
+        minimum_margin = float(min(margins))
+        return minimum_margin >= -1.0e-6, minimum_margin
 
     def _schedule_lane_change_commitments(
         self,
@@ -1386,7 +1527,10 @@ class MultiAgentRuleMaker(RuleMaker):
                 target_lane_chain=target_lane_chain,
                 longitudinals=longs,
                 action=action,
+                continuous_keep_path=self._is_s7_merge_route(env),
             )
+            if trajectory.shape != (self.num_waypoints, 2):
+                return None
 
             # Step 7: 计算目标点在车辆坐标系下的坐标
             target_point = self._world_to_ego_local(vehicle, trajectory[-1])
@@ -1501,8 +1645,46 @@ class MultiAgentRuleMaker(RuleMaker):
         target_lane_chain: list,
         longitudinals: np.ndarray,
         action: int,
+        continuous_keep_path: bool = False,
     ) -> np.ndarray:
         if action == 0:
+            if continuous_keep_path:
+                try:
+                    path = build_continuous_lane_chain_path(
+                        source_lane_chain,
+                        start_s=0.0,
+                        start_lateral_m=0.0,
+                        step_m=0.25,
+                        seam_transition_m=float(
+                            getattr(
+                                source_lane_chain[0],
+                                "route_seam_transition_m",
+                                8.0,
+                            )
+                        ),
+                    )
+                    path_arc = np.concatenate(
+                        (
+                            [0.0],
+                            np.cumsum(
+                                np.linalg.norm(
+                                    np.diff(path[:, :2], axis=0), axis=1
+                                )
+                            ),
+                        )
+                    )
+                    query = np.clip(
+                        np.asarray(longitudinals, dtype=np.float64),
+                        0.0,
+                        float(path_arc[-1]),
+                    )
+                    return sample_path_at_arc(path, path_arc, query)[
+                        :, :2
+                    ].astype(np.float32)
+                except (RouteChainGeometryError, ValueError) as exc:
+                    raise ValueError(
+                        "S7 route-chain geometry is not continuous"
+                    ) from exc
             return np.asarray(
                 [self._position_along_lane_chain(source_lane_chain, float(s), 0.0)[:2] for s in longitudinals],
                 dtype=np.float32,
@@ -1534,7 +1716,73 @@ class MultiAgentRuleMaker(RuleMaker):
             s8_chain = self._S8_reference_lane_chain(env, vehicle, source_lane)
             if s8_chain is not None and len(s8_chain) > 1:
                 return s8_chain
+        if self._is_s7_merge_route(env):
+            s7_chain = self._S7_reference_lane_chain(
+                env, vehicle, source_lane
+            )
+            if s7_chain is not None and len(s7_chain) > 1:
+                return s7_chain
         return self._generic_reference_lane_chain(env, vehicle, source_lane)
+
+    def _S7_reference_lane_chain(
+        self, env, vehicle, source_lane
+    ) -> list | None:
+        """Follow the physically adjacent ramp-to-mainline merge lane.
+
+        The S7 ramp connector has lane id 0, while its first navigation
+        successor is a three-lane mainline.  Carrying lane slot 0 across that
+        merge selects the far-left mainline and creates a non-physical seam.
+        The ramp surface joins the right-most mainline lane; after that first
+        merge, the selected lane slot is preserved along the route.
+        """
+
+        lane_index = tuple(getattr(source_lane, "index", ()) or ())
+        if len(lane_index) < 3:
+            return None
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        navigation = getattr(vehicle, "navigation", None)
+        checkpoints = list(
+            getattr(navigation, "checkpoints", []) or []
+        )
+        if road_network is None or len(checkpoints) < 2:
+            return None
+
+        found_index = None
+        for index in range(len(checkpoints) - 1):
+            if (
+                checkpoints[index] == lane_index[0]
+                and checkpoints[index + 1] == lane_index[1]
+            ):
+                found_index = index
+                break
+        if found_index is None:
+            return None
+
+        chain = [source_lane]
+        selected_slot = int(lane_index[2])
+        entering_mainline = True
+        for index in range(found_index + 1, len(checkpoints) - 1):
+            lanes = self._graph_lanes(
+                road_network,
+                checkpoints[index],
+                checkpoints[index + 1],
+            )
+            if not lanes:
+                break
+            if entering_mainline and len(lanes) > 1:
+                selected = self._rightmost_lane(lanes)
+                selected_slot = int(
+                    tuple(getattr(selected, "index", ()) or (0, 0, 0))[2]
+                )
+                entering_mainline = False
+            else:
+                selected = lanes[min(selected_slot, len(lanes) - 1)]
+            chain.append(selected)
+        return chain
 
     @staticmethod
     def _config_value(config, key: str):
@@ -1600,14 +1848,72 @@ class MultiAgentRuleMaker(RuleMaker):
         if not found:
             return None
 
+        selected_slot = int(lane_index[2])
         for from_node, to_node in next_pairs:
             lanes = self._graph_lanes(road_network, from_node, to_node)
             if not lanes:
                 break
-            if len(lanes) == 1:
-                lane_chain.append(lanes[0])
+            if len(lanes) > 1:
+                selected = lanes[min(selected_slot, len(lanes) - 1)]
+                selected_slot = int(
+                    tuple(getattr(selected, "index", ()) or (0, 0, 0))[2]
+                )
+                lane_chain.append(selected)
                 continue
-            lane_chain.append(self._rightmost_lane(lanes))
+            current = lane_chain[-1]
+            current_index = tuple(getattr(current, "index", ()) or ())
+            siblings = self._graph_lanes(
+                road_network, current_index[0], current_index[1]
+            )
+            rightmost_slot = max(
+                (
+                    int(tuple(getattr(lane, "index", ()) or (0, 0, 0))[2])
+                    for lane in siblings
+                ),
+                default=selected_slot,
+            )
+            if selected_slot != rightmost_slot:
+                # An intermediate mainline lane must continue in the same
+                # slot.  It may not teleport to the single exit connector;
+                # the next explicit RIGHT action moves it to the rightmost
+                # lane before KEEP follows the ramp.
+                current_length = float(
+                    getattr(current, "length", 0.0) or 0.0
+                )
+                current_end = np.asarray(
+                    current.position(current_length, 0.0)[:2],
+                    dtype=np.float64,
+                )
+                continuations = []
+                for alternative_lanes in (
+                    getattr(road_network, "graph", {})
+                    .get(current_index[1], {})
+                    .values()
+                ):
+                    if selected_slot >= len(alternative_lanes):
+                        continue
+                    alternative = alternative_lanes[selected_slot]
+                    try:
+                        gap = float(
+                            np.linalg.norm(
+                                np.asarray(
+                                    alternative.position(0.0, 0.0)[:2],
+                                    dtype=np.float64,
+                                )
+                                - current_end
+                            )
+                        )
+                    except Exception:
+                        continue
+                    continuations.append((gap, alternative))
+                if continuations:
+                    gap, continuation = min(
+                        continuations, key=lambda value: value[0]
+                    )
+                    if gap <= 1.0e-3:
+                        lane_chain.append(continuation)
+                break
+            lane_chain.append(lanes[0])
         return lane_chain
 
     @staticmethod

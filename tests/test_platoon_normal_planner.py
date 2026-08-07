@@ -373,6 +373,56 @@ def test_candidate_and_executor_share_identical_footprint_contract():
     assert candidate_result[0] is False
 
 
+def test_road_audit_surface_includes_same_edge_drivable_siblings():
+    env = _env(agent_lane_id=1)
+    road_network = env.engine.current_map.road_network
+    road_network.graph = {
+        "A": {"B": [road_network._lanes[("A", "B", index)] for index in range(3)]}
+    }
+    planner = PlatoonNormalPlanner()
+
+    surfaces = planner._expand_drivable_lane_surfaces(
+        env,
+        (road_network._lanes[("A", "B", 1)],),
+    )
+
+    assert [lane.index for lane in surfaces] == [
+        ("A", "B", 0),
+        ("A", "B", 1),
+        ("A", "B", 2),
+    ]
+
+
+def test_execution_chain_appends_only_unambiguous_downstream_successors():
+    first = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0)
+    second = AngledLane(("B", "C", 0), (10.0, 0.0), 0.0)
+    third = AngledLane(("C", "D", 0), (20.0, 0.0), 0.0)
+    branch0 = AngledLane(("D", "E", 0), (30.0, 0.0), 0.0)
+    branch1 = AngledLane(("D", "F", 0), (30.0, 0.0), 0.0)
+    road_network = SimpleNamespace(
+        graph={
+            "B": {"C": [second]},
+            "C": {"D": [third]},
+            "D": {"E": [branch0], "F": [branch1]},
+        }
+    )
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=road_network)
+        )
+    )
+
+    result = PlatoonNormalPlanner._append_unique_execution_successors(
+        env, [first]
+    )
+
+    assert [lane.index for lane in result] == [
+        ("A", "B", 0),
+        ("B", "C", 0),
+        ("C", "D", 0),
+    ]
+
+
 def test_dense_footprint_accepts_connected_lane_seam_without_boundary_relaxation():
     predecessor = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0)
     successor = AngledLane(("B", "C", 0), (10.0, 0.0), 0.1)
@@ -538,6 +588,23 @@ def test_ranked_planner_caches_repeated_infeasible_action_pool(monkeypatch):
     assert error.value.reason_code == "all_rule_proposals_infeasible"
     assert calls == [-1]
     assert error.value.debug["pool_cache_hit_count"] == 1
+
+
+def test_planner_rejects_empty_hard_mode_action_metadata():
+    env = _env(agent_lane_id=1)
+    planner = PlatoonNormalPlanner()
+    decision = {
+        "agent0": {
+            "action": 0,
+            "target_point": np.asarray([20.0, 0.0], dtype=np.float32),
+            "formation_constraint_enabled": False,
+            "hard_mode_action_valid": True,
+            "hard_valid_mode_indices": (),
+        }
+    }
+
+    with pytest.raises(ValueError, match="has no mode indices"):
+        planner.plan(env, decision)
 
 
 def test_keep_lateral_search_includes_current_and_desired_offsets():
@@ -1083,6 +1150,46 @@ def test_profile_selection_preserves_brake_wait_recover_shape():
         acceleration == -8.0 and duration == 4.0 and recovery == 0.0
         for _, acceleration, duration, recovery, _ in selected
     )
+
+
+def test_execution_extension_holds_four_second_terminal_speed():
+    planner = PlatoonNormalPlanner()
+    times = np.arange(0.0, 8.1, 0.1, dtype=np.float64)
+    extended = planner._longitudinal_progress(
+        6.0,
+        -4.0,
+        times,
+        acceleration_duration_s=1.0,
+        recovery_acceleration_mps2=3.0,
+    )
+    audited = planner._longitudinal_progress(
+        6.0,
+        -4.0,
+        times[times <= planner.HORIZON_S],
+        acceleration_duration_s=1.0,
+        recovery_acceleration_mps2=3.0,
+    )
+
+    np.testing.assert_allclose(
+        extended[: audited.size], audited, rtol=0.0, atol=1.0e-10
+    )
+    post_horizon_speed = np.diff(extended[times >= planner.HORIZON_S]) / 0.1
+    assert np.ptp(post_horizon_speed) <= 1.0e-9
+    assert post_horizon_speed[0] == pytest.approx(
+        min(6.0 - 4.0 * 1.0 + 3.0 * 3.0, planner.MAX_SPEED_MPS)
+    )
+
+
+def test_s8_adds_long_footprint_safe_lane_change_duration():
+    planner = PlatoonNormalPlanner()
+    base = planner._lane_change_durations(
+        action=1, lane_end_restricted=False
+    )
+    assert 6.0 not in base
+
+    # The scenario-specific extension is exercised by the integration gate;
+    # the generic lattice remains unchanged for every other scenario.
+    assert max(base) == pytest.approx(5.0)
 
 
 def test_tight_target_lane_gap_delays_lane_change_start():

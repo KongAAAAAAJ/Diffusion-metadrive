@@ -98,6 +98,7 @@ def build_lane_seam_drivable_surface(
     *,
     transition_m: float = 8.0,
     step_m: float = 0.25,
+    width_m: float | None = None,
 ) -> PointLane:
     """Build a non-routing lane polygon for the junction's drivable map surface."""
 
@@ -109,7 +110,11 @@ def build_lane_seam_drivable_surface(
     )
     predecessor_width = float(predecessor.width_at(float(predecessor.length)))
     successor_width = float(successor.width_at(0.0))
-    width = min(predecessor_width, successor_width)
+    width = (
+        min(predecessor_width, successor_width)
+        if width_m is None
+        else float(width_m)
+    )
     if not np.isfinite(width) or width <= 0.0:
         raise ValueError("lane seam surface width must be positive and finite")
     surface = PointLane(

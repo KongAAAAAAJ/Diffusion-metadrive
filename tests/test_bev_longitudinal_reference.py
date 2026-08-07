@@ -10,9 +10,11 @@ from evaluation.joint_simulator_branch import (
 )
 from models.bev_planner.mode_contract import validate_trajectory_kinematics
 from models.controller.longitudinal_reference import (
+    BRAKE_ACCELERATION_SCALE_MPS2,
     DRIVE_ACCELERATION_SCALE_MPS2,
     EXECUTABLE_MAX_ACCEL_MPS2,
     EXECUTABLE_MIN_ACCEL_MPS2,
+    PROFILE_ACCELERATION_GUARD_MPS2,
     LongitudinalReferenceError,
     LongitudinalCascadeController,
     LongitudinalTrackingReference,
@@ -22,6 +24,15 @@ from models.controller.longitudinal_reference import (
     signed_longitudinal_speed_mps,
     trajectory_to_longitudinal_reference,
 )
+
+
+def test_executable_authority_uses_latest_asymmetric_actuator_calibration() -> None:
+    assert EXECUTABLE_MAX_ACCEL_MPS2 == pytest.approx(
+        DRIVE_ACCELERATION_SCALE_MPS2
+    )
+    assert EXECUTABLE_MIN_ACCEL_MPS2 == pytest.approx(
+        max(-8.0, -BRAKE_ACCELERATION_SCALE_MPS2)
+    )
 
 
 def _trajectory(speed_mps: float) -> np.ndarray:
@@ -71,6 +82,22 @@ def test_feedback_governor_reanchors_small_lag_to_valid_trajectory() -> None:
     assert reference.original_arc_error_m == pytest.approx(0.032)
     assert np.all(reference.acceleration_mps2 >= EXECUTABLE_MIN_ACCEL_MPS2)
     assert np.all(reference.acceleration_mps2 <= EXECUTABLE_MAX_ACCEL_MPS2)
+
+
+def test_feedback_governor_keeps_float32_guard_inside_hard_brake_boundary() -> None:
+    times = np.arange(81, dtype=np.float64) * 0.1
+    arc = np.zeros_like(times)
+    reference = build_feedback_executable_profile(
+        path_times_s=times,
+        path_arc_m=arc,
+        elapsed_s=0.0,
+        actual_arc_m=0.0,
+        actual_speed_mps=20.0,
+    )
+
+    assert np.min(reference.acceleration_mps2) == pytest.approx(
+        EXECUTABLE_MIN_ACCEL_MPS2 + PROFILE_ACCELERATION_GUARD_MPS2
+    )
 
 
 def test_stop_reference_freezes_after_zero_speed() -> None:

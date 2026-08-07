@@ -28,6 +28,7 @@ from models.bev_planner.mode_contract import (
     ModeIndex,
     build_hard_mode_valid_mask,
     label_gt_mode,
+    mode_indices_for_rule_action,
     validate_trajectory_kinematics,
 )
 from models.controller.LQRFollowerController import LQRFollowerController
@@ -294,6 +295,7 @@ class RulePlannerExpert:
         self.lqr_controller = LQRFollowerController(config)
         self.lqr_controller.reset()
         self._last_formation_locked: bool | None = None
+        self._last_execution_id: int | None = None
 
     @staticmethod
     def _normalize_decision(value: object) -> tuple[int, np.ndarray, bool, str]:
@@ -318,10 +320,67 @@ class RulePlannerExpert:
             raise JointCollectionError("RuleMaker coordination metadata is inconsistent")
         return action, target, formation_enabled, coordination_mode
 
-    def plan(self, env: PlatoonEnv) -> ExpertJointStep:
+    def _hard_valid_modes_by_action(
+        self,
+        model_inputs: JointBEVModelInputs | None,
+    ) -> dict[str, dict[int, tuple[int, ...]]] | None:
+        if model_inputs is None:
+            return None
+        masks = np.asarray(model_inputs.mode_valid_mask)
+        if masks.shape != (NUM_PLATOON_AGENTS, NUM_MODES):
+            raise JointCollectionError(
+                "online mode_valid_mask does not match the joint action contract"
+            )
+        result: dict[str, dict[int, tuple[int, ...]]] = {}
+        for role_index, agent_id in enumerate(self.agent_ids):
+            result[agent_id] = {
+                action: tuple(
+                    mode_index
+                    for mode_index in mode_indices_for_rule_action(action)
+                    if bool(masks[role_index, mode_index])
+                )
+                for action in (-1, 0, 1)
+            }
+        return result
+
+    @staticmethod
+    def _validate_actions_have_hard_modes(
+        actions: Mapping[str, int],
+        hard_valid_modes_by_action: Mapping[
+            str, Mapping[int, Sequence[int]]
+        ]
+        | None,
+    ) -> None:
+        if hard_valid_modes_by_action is None:
+            return
+        invalid = [
+            agent_id
+            for agent_id, action in actions.items()
+            if not tuple(
+                hard_valid_modes_by_action.get(agent_id, {}).get(
+                    int(action), ()
+                )
+            )
+        ]
+        if invalid:
+            raise JointCollectionError(
+                "accepted RuleMaker action has no hard-valid dynamic mode for "
+                + ",".join(invalid),
+                reason_code="gt_action_group_has_no_valid_mode",
+            )
+
+    def plan(
+        self,
+        env: PlatoonEnv,
+        *,
+        model_inputs: JointBEVModelInputs | None = None,
+    ) -> ExpertJointStep:
         active = [agent_id for agent_id in self.agent_ids if agent_id in getattr(env, "agents", {})]
         if tuple(active) != self.agent_ids:
             raise JointCollectionError("all three ordered platoon agents must be active")
+        hard_valid_modes_by_action = self._hard_valid_modes_by_action(
+            model_inputs
+        )
         if self.trajectory_executor.active:
             execution_plan = self.trajectory_executor.plan
             assert execution_plan is not None
@@ -350,6 +409,9 @@ class RulePlannerExpert:
                     raise JointCollectionError(
                         str(exc), reason_code=exc.reason_code
                     ) from exc
+                self._validate_actions_have_hard_modes(
+                    rolled.rule_actions, hard_valid_modes_by_action
+                )
                 return self._build_expert_step(
                     env,
                     actions=dict(rolled.rule_actions),
@@ -364,6 +426,7 @@ class RulePlannerExpert:
                 env,
                 active,
                 getattr(env, "_last_planner_batch", None) or {},
+                hard_valid_modes_by_action=hard_valid_modes_by_action,
             )
         except LaneChangeCommitmentError as exc:
             raise JointCollectionError(
@@ -424,6 +487,9 @@ class RulePlannerExpert:
 
         trajectories = plan_result.trajectories_world
         trajectories_local = plan_result.trajectories_local
+        self._validate_actions_have_hard_modes(
+            actions, hard_valid_modes_by_action
+        )
         return self._build_expert_step(
             env,
             actions=actions,
@@ -495,9 +561,24 @@ class RulePlannerExpert:
             self.rule_maker, self.pid_controller, self.lqr_controller
         )
         formation_locked = bool(self.rule_maker.is_formation_locked)
-        if self._last_formation_locked is None or formation_locked != self._last_formation_locked:
+        execution_id = (
+            int(execution_debug["execution_id"])
+            if isinstance(execution_debug, Mapping)
+            and execution_debug.get("execution_id") is not None
+            else None
+        )
+        execution_changed = (
+            execution_id is not None
+            and execution_id != self._last_execution_id
+        )
+        if (
+            self._last_formation_locked is None
+            or formation_locked != self._last_formation_locked
+            or execution_changed
+        ):
             controller.reset()
         self._last_formation_locked = formation_locked
+        self._last_execution_id = execution_id
         references = dict(longitudinal_references or {})
         if not references:
             for agent_id in self.agent_ids:
@@ -511,8 +592,27 @@ class RulePlannerExpert:
                     ),
                     source="native_plan",
                 )
+        execution_agents = (
+            dict(execution_debug.get("agents", {}))
+            if isinstance(execution_debug, Mapping)
+            else {}
+        )
+        lateral_tracking_errors_m = {
+            agent_id: float(
+                (
+                    execution_agents.get(agent_id, {}).get(
+                        "tracking_error", {}
+                    )
+                    or {}
+                ).get("lateral_m", 0.0)
+            )
+            for agent_id in self.agent_ids
+        }
         controls = controller.compute_actions(
-            env, dict(trajectories), references
+            env,
+            dict(trajectories),
+            references,
+            lateral_tracking_errors_m=lateral_tracking_errors_m,
         )
         for agent_id in self.agent_ids:
             control = np.asarray(controls.get(agent_id), dtype=np.float32)
@@ -732,19 +832,26 @@ class JointBEVSampleBuilder:
 
         return self._build_model_inputs(env)
 
-    def build_sample(self, env: PlatoonEnv, expert_step: ExpertJointStep) -> JointBEVSample:
-        try:
-            model_inputs = self._build_model_inputs(env)
-        except JointCollectionError as exc:
-            if exc.reason_code not in {
-                "dynamic_anchor_kinematic_invalid",
-                "hard_mode_contract_invalid",
-            }:
-                raise
-            raise JointStepRejected(
-                str(exc),
-                reason_code=exc.reason_code,
-            ) from exc
+    def build_sample(
+        self,
+        env: PlatoonEnv,
+        expert_step: ExpertJointStep,
+        *,
+        model_inputs: JointBEVModelInputs | None = None,
+    ) -> JointBEVSample:
+        if model_inputs is None:
+            try:
+                model_inputs = self._build_model_inputs(env)
+            except JointCollectionError as exc:
+                if exc.reason_code not in {
+                    "dynamic_anchor_kinematic_invalid",
+                    "hard_mode_contract_invalid",
+                }:
+                    raise
+                raise JointStepRejected(
+                    str(exc),
+                    reason_code=exc.reason_code,
+                ) from exc
 
         poses = []
         gt_modes = []
@@ -872,10 +979,19 @@ def collect_joint_episode(
 
     for joint_step in range(int(max_steps)):
         sample_builder.capture_state(env, timestamp_s=joint_step * dt_s)
-        expert_step = expert.plan(env)
-        if sample_builder.history_ready():
+        model_inputs = (
+            sample_builder.build_model_inputs(env)
+            if sample_builder.history_ready()
+            else None
+        )
+        expert_step = expert.plan(env, model_inputs=model_inputs)
+        if model_inputs is not None:
             try:
-                samples.append(sample_builder.build_sample(env, expert_step))
+                samples.append(
+                    sample_builder.build_sample(
+                        env, expert_step, model_inputs=model_inputs
+                    )
+                )
                 sample_step_indices.append(int(joint_step))
             except JointStepRejected as exc:
                 # The expert controls remain valid, but a joint label/mask

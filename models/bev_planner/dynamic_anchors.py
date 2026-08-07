@@ -38,6 +38,7 @@ class DynamicAnchorConfig:
     max_speed_mps: float = 100.0 / 3.6
     max_lateral_lane_distance_m: float = 12.0
     max_lane_heading_error_rad: float = 0.35
+    minimum_lane_change_progress_m: float = 8.0
 
     def __post_init__(self) -> None:
         numeric = (
@@ -49,6 +50,7 @@ class DynamicAnchorConfig:
             "max_speed_mps",
             "max_lateral_lane_distance_m",
             "max_lane_heading_error_rad",
+            "minimum_lane_change_progress_m",
         )
         for name in numeric:
             value = float(getattr(self, name))
@@ -57,7 +59,11 @@ class DynamicAnchorConfig:
             object.__setattr__(self, name, value)
         if self.dt_s <= 0.0 or self.max_speed_mps <= 0.0:
             raise DynamicAnchorError("dt_s and max_speed_mps must be positive")
-        if self.max_lateral_lane_distance_m <= 0.0 or self.max_lane_heading_error_rad <= 0.0:
+        if (
+            self.max_lateral_lane_distance_m <= 0.0
+            or self.max_lane_heading_error_rad <= 0.0
+            or self.minimum_lane_change_progress_m <= 0.0
+        ):
             raise DynamicAnchorError("lane search limits must be positive")
 
 
@@ -578,7 +584,16 @@ class SimulatorDynamicAnchorGenerator:
         else:
             target_world = self._sample_lane_path(road_network, target_lane, target_s, distances)
             target_local = self._world_to_ego(target_world, ego_pose)
-            progress = np.linspace(1.0 / TRAJECTORY_STEPS, 1.0, TRAJECTORY_STEPS)
+            # Use the same arc-length lane-change semantics as the Normal
+            # planner.  A fixed time-index blend forces a full lane-width
+            # displacement even when a slow/stopping vehicle travels only a
+            # few metres, which can make every anchor in an otherwise
+            # executable action group violate the hard curvature contract.
+            transition_progress = max(
+                float(distances[-1]),
+                self.config.minimum_lane_change_progress_m,
+            )
+            progress = np.clip(distances / transition_progress, 0.0, 1.0)
             blend = 10.0 * progress**3 - 15.0 * progress**4 + 6.0 * progress**5
             xy = source_local * (1.0 - blend[:, None]) + target_local * blend[:, None]
         heading = self._headings_from_xy(xy)

@@ -20,6 +20,7 @@ from models.controller.longitudinal_reference import (
     build_feedback_executable_profile,
     project_point_to_path_arc,
     sample_path_at_arc,
+    trajectory_to_longitudinal_reference,
 )
 from models.platoon_planner.collision_geometry import (
     obb_overlap_series,
@@ -525,6 +526,18 @@ class PlatoonNormalPlanner:
         for agent_id in ordered_ids:
             decision = (agent_decisions or {})[agent_id] or {}
             action = int(decision.get("action", 0))
+            if "hard_mode_action_valid" in decision and not bool(
+                decision["hard_mode_action_valid"]
+            ):
+                raise ValueError(
+                    f"{agent_id} proposal violates hard mode action feasibility"
+                )
+            if "hard_mode_action_valid" in decision and not tuple(
+                decision.get("hard_valid_mode_indices", ()) or ()
+            ):
+                raise ValueError(
+                    f"{agent_id} hard-valid action metadata has no mode indices"
+                )
             target_point = np.asarray(
                 decision.get("target_point", [15.0, 0.0]), dtype=np.float32
             ).reshape(2)
@@ -748,6 +761,20 @@ class PlatoonNormalPlanner:
                         ),
                         "first_road_rejection": copy.deepcopy(
                             value.get("first_road_rejection")
+                        ),
+                        "first_committed_road_rejection": copy.deepcopy(
+                            value.get("first_committed_road_rejection")
+                        ),
+                        "committed_road_rejections_by_duration": dict(
+                            value.get(
+                                "committed_road_rejections_by_duration", {}
+                            )
+                            or {}
+                        ),
+                        "committed_first_rejection_by_duration": copy.deepcopy(
+                            value.get(
+                                "committed_first_rejection_by_duration", {}
+                            )
                         ),
                         "lane_end_rejection_count": int(
                             value.get("lane_end_rejection_count", 0) or 0
@@ -1099,7 +1126,62 @@ class PlatoonNormalPlanner:
         fallback_index = tuple(getattr(fallback_lane, "index", ()) or ())
         if fallback_index and tuple(getattr(lanes[0], "index", ()) or ()) != fallback_index:
             lanes.insert(0, fallback_lane)
-        return lanes
+        return self._append_unique_execution_successors(env, lanes)
+
+    @staticmethod
+    def _append_unique_execution_successors(env, lanes: list, *, max_hops: int = 8) -> list:
+        """Extend a committed route through unambiguous downstream lanes.
+
+        Navigation decisions stop at the semantic exit connector.  A 4-second
+        rolling execution buffer can extend farther, through the connector's
+        straight/bend/ramp successors.  Once the chosen branch has only one
+        physical continuation, appending it does not make a new route choice;
+        stopping at the connector instead creates a truncated spatial path.
+        """
+
+        result = list(lanes)
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        graph = getattr(road_network, "graph", {}) or {}
+        seen = {
+            tuple(getattr(lane, "index", ()) or ())
+            for lane in result
+        }
+        for _ in range(max(int(max_hops), 0)):
+            last_index = tuple(getattr(result[-1], "index", ()) or ())
+            if len(last_index) < 2:
+                break
+            outgoing = graph.get(last_index[1], {}) or {}
+            candidates = [
+                lane
+                for lane_group in outgoing.values()
+                for lane in (lane_group or ())
+                if tuple(getattr(lane, "index", ()) or ()) not in seen
+            ]
+            if not candidates:
+                break
+            same_role = [
+                lane
+                for lane in candidates
+                if len(tuple(getattr(lane, "index", ()) or ())) >= 3
+                and tuple(getattr(lane, "index", ()) or ())[2]
+                == last_index[2]
+            ]
+            if len(same_role) == 1:
+                successor = same_role[0]
+            elif len(candidates) == 1:
+                successor = candidates[0]
+            else:
+                break
+            successor_index = tuple(
+                getattr(successor, "index", ()) or ()
+            )
+            result.append(successor)
+            seen.add(successor_index)
+        return result
 
     def _build_execution_spatial_path(
         self,
@@ -1122,6 +1204,11 @@ class PlatoonNormalPlanner:
             start_s=float(start_s),
             start_lateral_m=float(start_d),
             step_m=0.25,
+            seam_transition_m=float(
+                getattr(
+                    source_chain[0], "route_seam_transition_m", 8.0
+                )
+            ),
         )
         target_first = target_chain[0]
         target_s, _ = target_first.local_coordinates(current_xy)
@@ -1130,6 +1217,11 @@ class PlatoonNormalPlanner:
             start_s=float(target_s),
             start_lateral_m=0.0,
             step_m=0.25,
+            seam_transition_m=float(
+                getattr(
+                    target_chain[0], "route_seam_transition_m", 8.0
+                )
+            ),
         )
         source_arc = np.concatenate(
             ([0.0], np.cumsum(np.linalg.norm(np.diff(source_path[:, :2], axis=0), axis=1)))
@@ -1178,6 +1270,20 @@ class PlatoonNormalPlanner:
                     reference_arc,
                 )
             )
+            if float(lane_change_duration_s) > float(sample_times_s[-1]):
+                observed_duration = max(
+                    float(sample_times_s[-1])
+                    - float(lane_change_start_delay_s),
+                    self.DENSE_DT_S,
+                )
+                full_duration = max(
+                    float(lane_change_duration_s)
+                    - float(lane_change_start_delay_s),
+                    observed_duration,
+                )
+                completion_progress = start_progress + (
+                    completion_progress - start_progress
+                ) * full_duration / observed_duration
             transition_length = max(completion_progress - start_progress, 8.0)
             ratio = np.clip((progress - start_progress) / transition_length, 0.0, 1.0)
             ratio = 6.0 * ratio**5 - 15.0 * ratio**4 + 10.0 * ratio**3
@@ -1266,6 +1372,9 @@ class PlatoonNormalPlanner:
         kinematic_hits: Counter[str] = Counter()
         road_hits: Counter[str] = Counter()
         first_road_rejection: dict | None = None
+        first_committed_road_rejection: dict | None = None
+        committed_road_rejections_by_duration: Counter[str] = Counter()
+        committed_first_rejection_by_duration: dict[str, dict] = {}
         source_lane = getattr(vehicle, "lane", None)
         if source_lane is None:
             return [], self._empty_debug("missing_source_lane", stats, collision_hits)
@@ -1319,6 +1428,9 @@ class PlatoonNormalPlanner:
             getattr(source_lane, "index", ()) or ()
         ):
             source_lane_chain.insert(0, source_lane)
+        source_lane_chain = self._append_unique_execution_successors(
+            env, source_lane_chain
+        )
         target_lane_chain = [
             lane
             for lane in (
@@ -1333,6 +1445,9 @@ class PlatoonNormalPlanner:
             getattr(target_lane, "index", ()) or ()
         ):
             target_lane_chain.insert(0, target_lane)
+        target_lane_chain = self._append_unique_execution_successors(
+            env, target_lane_chain
+        )
         predecessor_lane = self._get_predecessor_lane(
             env, vehicle, source_lane
         )
@@ -1374,6 +1489,9 @@ class PlatoonNormalPlanner:
             action=int(action),
             lane_end_restricted=lane_end_restricted,
         )
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        if scenario_id == "S8_ego_exit_to_ramp" and int(action) != 0:
+            durations = tuple(value for value in durations if value >= 3.5)
         commitment_deadline_remaining_s = None
         if int(action) != 0 and commitment_elapsed_s is not None:
             durations, commitment_deadline_remaining_s = (
@@ -1388,6 +1506,19 @@ class PlatoonNormalPlanner:
             source_lane,
             target_lane,
         )
+        if scenario_id == "S8_ego_exit_to_ramp" and int(action) != 0:
+            # The forced exit sequence has a fixed lane-centre goal.  Margin
+            # variants do not represent distinct RuleMaker actions and triple
+            # the expensive dense XL-footprint audit without adding a route
+            # option; keep the longitudinal/delay lattice intact.
+            lateral_targets = (round(float(desired_end_d), 4),)
+        if int(action) == 0 and len(source_lane_chain) > 1:
+            # A KEEP route-chain trajectory samples one frozen spatial path;
+            # _build_dense_candidate deliberately does not consume end_d in
+            # this branch.  Repeating the same geometry for four nominal
+            # lateral targets crowds longitudinally distinct profiles out of
+            # the bounded joint-search pool.
+            lateral_targets = (round(float(start_d), 4),)
         background_predictions = self._predicted_obstacles(
             env,
             vehicle,
@@ -1436,6 +1567,10 @@ class PlatoonNormalPlanner:
                 float(duration),
                 target_envelope,
             )
+            if scenario_id == "S8_ego_exit_to_ramp" and int(action) != 0:
+                start_delays = tuple(
+                    value for value in start_delays if value <= 2.0
+                ) or (0.0,)
             if commitment_elapsed_s is not None and int(action) != 0:
                 start_delays = (0.0,)
             if lane_end_restricted and int(action) != 0:
@@ -1536,10 +1671,13 @@ class PlatoonNormalPlanner:
                         footprint_valid, footprint_detail = (
                             audit_dense_footprint_on_lanes(
                                 candidate_dense,
-                                tuple(
-                                    [predecessor_lane]
-                                    + source_lane_chain
-                                    + target_lane_chain
+                                self._expand_drivable_lane_surfaces(
+                                    env,
+                                    tuple(
+                                        [predecessor_lane]
+                                        + source_lane_chain
+                                        + target_lane_chain
+                                    ),
                                 ),
                                 self._vehicle_dimensions(vehicle),
                                 dense_dt_s=self.DENSE_DT_S,
@@ -1663,8 +1801,7 @@ class PlatoonNormalPlanner:
                             )
                             else None
                         )
-                        candidates.append(
-                            _TrajectoryCandidate(
+                        candidate = _TrajectoryCandidate(
                                 dense=candidate_dense,
                                 output=output,
                                 score=float(score),
@@ -1710,10 +1847,127 @@ class PlatoonNormalPlanner:
                                     ),
                                 },
                             )
-                        )
+                        candidates.append(candidate)
 
         candidates.sort(key=lambda value: value.score)
         pool = self._diverse_candidate_pool(candidates)
+        if int(action) != 0 and target_lane_chain_indices:
+            committed_pool = []
+            committed_prediction_cache = {}
+            for candidate in pool:
+                audited_path = np.empty((0, 3), dtype=np.float64)
+                try:
+                    execution_spec = self._build_execution_spec(
+                        env,
+                        str(getattr(vehicle, "name", "agent")),
+                        candidate,
+                        selected_candidate_index=0,
+                        maximum_time_s=(
+                            float(candidate.lane_change_start_delay_s)
+                            + float(candidate.lane_change_duration_s)
+                            + self.HORIZON_S
+                            + self.DENSE_DT_S
+                        ),
+                    )
+                    audited_arc_end = min(
+                        float(execution_spec.path_arc_m[-1]),
+                        float(execution_spec.reference_arc_m[-1])
+                        + 0.5 * float(self._vehicle_dimensions(vehicle)[0]),
+                    )
+                    prefix_mask = execution_spec.path_arc_m < audited_arc_end
+                    audited_path = np.concatenate(
+                        (
+                            execution_spec.spatial_path_world[prefix_mask],
+                            sample_path_at_arc(
+                                execution_spec.spatial_path_world,
+                                execution_spec.path_arc_m,
+                                np.asarray([audited_arc_end], dtype=np.float64),
+                            ),
+                        ),
+                        axis=0,
+                    )
+                    extended_footprint_valid, extended_detail = (
+                        audit_dense_footprint_on_lanes(
+                            audited_path,
+                            self._expand_drivable_lane_surfaces(
+                                env,
+                                tuple(
+                                    [predecessor_lane]
+                                    + source_lane_chain
+                                    + target_lane_chain
+                                ),
+                            ),
+                            self._vehicle_dimensions(vehicle),
+                            dense_dt_s=0.25,
+                        )
+                    )
+                except NormalPlannerKinematicError:
+                    extended_footprint_valid = False
+                    extended_detail = {
+                        "reason": "committed_path_parameterization_failed"
+                    }
+                if extended_footprint_valid:
+                    prediction_key = (
+                        int(execution_spec.sample_times_s.size),
+                        float(execution_spec.sample_times_s[-1]),
+                    )
+                    extended_background = committed_prediction_cache.get(
+                        prediction_key
+                    )
+                    if extended_background is None:
+                        extended_background = self._predicted_obstacles(
+                            env,
+                            vehicle,
+                            execution_spec.sample_times_s,
+                            include_platoon=False,
+                        )
+                        committed_prediction_cache[prediction_key] = (
+                            extended_background
+                        )
+                    extended_collision_names = (
+                        self._collision_names_against_predictions(
+                            execution_spec.trajectory_world,
+                            self._vehicle_dimensions(vehicle),
+                            extended_background,
+                        )
+                    )
+                    extended_gap = minimum_dense_background_gap(
+                        execution_spec.trajectory_world,
+                        self._vehicle_dimensions(vehicle),
+                        extended_background,
+                    )
+                    if not extended_collision_names and (
+                        extended_gap >= self.background_safe_gap_m - 1.0e-6
+                    ):
+                        committed_pool.append(candidate)
+                        continue
+                    stats["background_collision_rejection_count"] += int(
+                        bool(extended_collision_names)
+                    )
+                    collision_hits.update(extended_collision_names)
+                    stats["background_gap_rejection_count"] += int(
+                        extended_gap < self.background_safe_gap_m - 1.0e-6
+                    )
+                    continue
+                failed_index = int(extended_detail.get("trajectory_index", 0))
+                extended_detail["path_window"] = audited_path[
+                    max(failed_index - 2, 0) : failed_index + 3
+                ].tolist()
+                stats["road_rejection_count"] += 1
+                reason = "committed_horizon:" + str(
+                    extended_detail.get("reason", "unknown")
+                )
+                road_hits[reason] += 1
+                duration_key = f"{float(candidate.lane_change_duration_s):.1f}"
+                committed_road_rejections_by_duration[duration_key] += 1
+                committed_first_rejection_by_duration.setdefault(
+                    duration_key, copy.deepcopy(extended_detail)
+                )
+                if first_committed_road_rejection is None:
+                    first_committed_road_rejection = copy.deepcopy(extended_detail)
+                if first_road_rejection is None:
+                    first_road_rejection = copy.deepcopy(extended_detail)
+            pool = committed_pool
         debug = {
             "fallback_used": not bool(pool),
             "fallback_reason": None if pool else "no_safe_candidate",
@@ -1725,6 +1979,15 @@ class PlatoonNormalPlanner:
             "collision_rejections_by_object": dict(sorted(collision_hits.items())),
             "road_rejections_by_reason": dict(sorted(road_hits.items())),
             "first_road_rejection": first_road_rejection,
+            "first_committed_road_rejection": (
+                first_committed_road_rejection
+            ),
+            "committed_road_rejections_by_duration": dict(
+                sorted(committed_road_rejections_by_duration.items())
+            ),
+            "committed_first_rejection_by_duration": copy.deepcopy(
+                committed_first_rejection_by_duration
+            ),
             "kinematic_rejections_by_reason": dict(
                 sorted(kinematic_hits.items())
             ),
@@ -2203,6 +2466,61 @@ class PlatoonNormalPlanner:
         acceleration = float(
             np.clip(acceleration_mps2, self.MIN_ACCEL_MPS2, self.MAX_ACCEL_MPS2)
         )
+        # Acceleration/recovery profiles are selected and hard-audited only on
+        # the planner's four-second horizon.  A committed execution keeps a
+        # longer spatial/reference buffer so that it can roll a fresh four-
+        # second window on every control tick.  Extending a short recovery
+        # acceleration indefinitely beyond its audited horizon can make a
+        # follower accelerate into its predecessor even though the accepted
+        # 0--4 s candidate was safe.  Preserve the selected profile exactly on
+        # [0, HORIZON_S], then continue at its terminal speed.
+        if (
+            acceleration_duration_s is not None
+            and times.size
+            and float(np.max(times)) > self.HORIZON_S + 1.0e-9
+        ):
+            clipped_times = np.minimum(times, self.HORIZON_S)
+            audited_progress = self._longitudinal_progress(
+                speed,
+                acceleration,
+                clipped_times,
+                acceleration_duration_s=acceleration_duration_s,
+                recovery_acceleration_mps2=recovery_acceleration_mps2,
+            )
+            terminal_progress = float(
+                self._longitudinal_progress(
+                    speed,
+                    acceleration,
+                    np.asarray([self.HORIZON_S], dtype=np.float64),
+                    acceleration_duration_s=acceleration_duration_s,
+                    recovery_acceleration_mps2=recovery_acceleration_mps2,
+                )[0]
+            )
+            active_duration = float(
+                np.clip(acceleration_duration_s, 0.0, self.HORIZON_S)
+            )
+            active_terminal_speed = float(
+                np.clip(
+                    speed + acceleration * active_duration,
+                    0.0,
+                    self.MAX_SPEED_MPS,
+                )
+            )
+            terminal_speed = float(
+                np.clip(
+                    active_terminal_speed
+                    + float(recovery_acceleration_mps2)
+                    * (self.HORIZON_S - active_duration),
+                    0.0,
+                    self.MAX_SPEED_MPS,
+                )
+            )
+            return np.where(
+                times <= self.HORIZON_S,
+                audited_progress,
+                terminal_progress
+                + terminal_speed * (times - self.HORIZON_S),
+            )
         if acceleration_duration_s is not None:
             active_duration = float(
                 np.clip(acceleration_duration_s, 0.0, self.HORIZON_S)
@@ -2285,7 +2603,21 @@ class PlatoonNormalPlanner:
                     start_s=float(start_s),
                     start_lateral_m=float(start_d),
                     step_m=0.25,
+                    seam_transition_m=float(
+                        getattr(
+                            connected_chain[0],
+                            "route_seam_transition_m",
+                            8.0,
+                        )
+                    ),
                 )
+                if hasattr(
+                    connected_chain[0], "route_seam_transition_m"
+                ):
+                    route_path = self._anchor_route_path_heading(
+                        route_path,
+                        start_heading=float(default_heading),
+                    )
                 route_arc = np.concatenate(
                     (
                         [0.0],
@@ -2374,6 +2706,44 @@ class PlatoonNormalPlanner:
         if points_xy.shape != (len(evaluation_times), 2) or not np.isfinite(points_xy).all():
             return None
         return self._append_heading(points_xy, default_heading=default_heading)
+
+    @staticmethod
+    def _anchor_route_path_heading(
+        route_path: np.ndarray,
+        *,
+        start_heading: float,
+        alignment_progress_m: float = 8.0,
+    ) -> np.ndarray:
+        """Join the real vehicle tangent to a frozen route-chain path."""
+
+        path = np.asarray(route_path, dtype=np.float64).copy()
+        if path.ndim != 2 or path.shape[1] != 3 or path.shape[0] < 2:
+            raise RouteChainGeometryError("route heading anchor is invalid")
+        arc = np.concatenate(
+            (
+                [0.0],
+                np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1)),
+            )
+        )
+        if not np.isfinite(start_heading) or alignment_progress_m <= 0.0:
+            raise RouteChainGeometryError("route heading anchor inputs are invalid")
+        direction = np.asarray(
+            [math.cos(float(start_heading)), math.sin(float(start_heading))],
+            dtype=np.float64,
+        )
+        tangent_path = path[0, :2][None, :] + arc[:, None] * direction[None, :]
+        ratio = np.clip(arc / float(alignment_progress_m), 0.0, 1.0)
+        weight = 6.0 * ratio**5 - 15.0 * ratio**4 + 10.0 * ratio**3
+        path[:, :2] = (
+            (1.0 - weight[:, None]) * tangent_path
+            + weight[:, None] * path[:, :2]
+        )
+        delta = np.gradient(path[:, :2], axis=0)
+        path[:, 2] = np.arctan2(delta[:, 1], delta[:, 0])
+        path[0, 2] = float(start_heading)
+        if not np.isfinite(path).all():
+            raise RouteChainGeometryError("route heading anchor is non-finite")
+        return np.ascontiguousarray(path, dtype=np.float64)
 
     @staticmethod
     def _lane_positions(lane, longitudinal: np.ndarray, lateral: np.ndarray) -> np.ndarray:
@@ -2818,7 +3188,7 @@ class PlatoonNormalPlanner:
         ego_dimensions: tuple[float, float],
         predictions: list[tuple[str, np.ndarray, tuple[float, float]]],
     ) -> float:
-        """Softly prefer trajectories that preserve the 8 m background gap."""
+        """Prefer clearance above the unchanged 5 m hard boundary."""
 
         if self.safety_weight <= 0.0 or not predictions:
             return 0.0
@@ -2851,14 +3221,18 @@ class PlatoonNormalPlanner:
                 minimum_gap,
                 float(np.min(bumper_gap[same_corridor])),
             )
-        if not np.isfinite(minimum_gap) or minimum_gap >= self.background_safe_gap_m:
+        soft_target_gap = max(
+            self.background_safe_gap_m,
+            self.safety_distance_m,
+        )
+        if not np.isfinite(minimum_gap) or minimum_gap >= soft_target_gap:
             return 0.0
-        deficit = self.background_safe_gap_m - max(minimum_gap, 0.0)
+        deficit = soft_target_gap - max(minimum_gap, 0.0)
         return float(
             2.0
             * self.safety_weight
             * deficit
-            / max(self.background_safe_gap_m, 1e-6)
+            / max(soft_target_gap, 1e-6)
         )
 
     def _candidate_collides_with_predicted_vehicles(
@@ -3285,6 +3659,45 @@ class PlatoonNormalPlanner:
             return None
 
     @staticmethod
+    def _expand_drivable_lane_surfaces(env, lanes) -> tuple:
+        """Return the real drivable road surface around execution lanes.
+
+        A lane change rotates the XL footprint before its centre crosses the
+        lane divider.  Restricting the road audit to only the semantic source
+        and target lanes can therefore reject a corner that remains on a
+        third, same-road drivable lane.  Dynamic-anchor road validity already
+        uses the complete drivable raster; candidate admission and committed
+        execution must use the equivalent simulator geometry.
+        """
+
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        graph = getattr(road_network, "graph", {}) or {}
+        result = []
+        seen = set()
+        for lane in lanes:
+            if lane is None:
+                continue
+            lane_index = tuple(getattr(lane, "index", ()) or ())
+            siblings = []
+            if len(lane_index) >= 2:
+                siblings = list(
+                    graph.get(lane_index[0], {}).get(lane_index[1], ()) or ()
+                )
+            for surface in (siblings or [lane]):
+                key = tuple(getattr(surface, "index", ()) or ())
+                if not key:
+                    key = ("object", id(surface))
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(surface)
+        return tuple(result)
+
+    @staticmethod
     def _ego_local_to_world(vehicle, target_point: np.ndarray) -> np.ndarray:
         position = np.asarray(vehicle.position[:2], dtype=np.float64)
         heading = float(getattr(vehicle, "heading_theta", 0.0))
@@ -3498,6 +3911,7 @@ class JointTrajectoryExecutor:
         self.planner = planner
         self._plan: JointTrajectoryExecutionPlan | None = None
         self._last_debug: dict | None = None
+        self._expected_executable_pose: dict[str, np.ndarray] = {}
 
     @property
     def active(self) -> bool:
@@ -3510,6 +3924,7 @@ class JointTrajectoryExecutor:
     def reset(self) -> None:
         self._plan = None
         self._last_debug = None
+        self._expected_executable_pose.clear()
 
     def start(self, env, plan: JointTrajectoryExecutionPlan) -> None:
         if self._plan is not None:
@@ -3529,6 +3944,7 @@ class JointTrajectoryExecutor:
                 debug={"expected_agents": expected, "active_agents": active},
             )
         self._plan = plan
+        self._expected_executable_pose.clear()
         self._last_debug = {
             "trajectory_source": "new_native_plan",
             "execution_id": int(plan.execution_id),
@@ -3602,7 +4018,58 @@ class JointTrajectoryExecutor:
                         {"agent_id": agent_id, "lane_index": lane_index},
                     )
             planned_now = self._sample_spec(spec, np.asarray([elapsed_s]))[0]
-            tracking = self._tracking_error(vehicle, planned_now)
+            nominal_tracking = self._tracking_error(vehicle, planned_now)
+            expected_pose = self._expected_executable_pose.get(agent_id)
+            tracking_baseline = (
+                planned_now if expected_pose is None else expected_pose
+            )
+            tracking = self._tracking_error(vehicle, tracking_baseline)
+            speed = max(
+                float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
+                0.0,
+            )
+            try:
+                actual_arc, path_error = project_point_to_path_arc(
+                    np.asarray(vehicle.position[:2], dtype=np.float64),
+                    spec.spatial_path_world[:, :2],
+                    spec.path_arc_m,
+                )
+            except LongitudinalReferenceError as exc:
+                self._raise(
+                    plan,
+                    elapsed_s,
+                    "vehicle cannot be projected onto the committed path",
+                    "committed_trajectory_tracking_deviation",
+                    {"agent_id": agent_id, "path_projection_error": str(exc)},
+                )
+            projected_path_pose = sample_path_at_arc(
+                spec.spatial_path_world,
+                spec.path_arc_m,
+                np.asarray([actual_arc], dtype=np.float64),
+            )[0]
+            path_tracking = self._tracking_error(vehicle, projected_path_pose)
+            time_aligned_lateral_error = float(tracking["lateral_m"])
+            # Frenet decomposition: temporal progress error remains measured
+            # against the next executable pose, while lateral error is the
+            # signed distance to the closest point on the unchanged spatial
+            # path.  Using the timed pose for both axes turns longitudinal lag
+            # into a false lateral deviation on curved roads.
+            tracking["time_aligned_lateral_m"] = time_aligned_lateral_error
+            tracking["lateral_m"] = float(path_tracking["lateral_m"])
+            tracking["path_projection_distance_m"] = float(path_error)
+            instantaneous_heading_error = float(tracking["heading_rad"])
+            heading_error, preview_heading, preview_heading_arc = (
+                self._preview_aligned_heading_error(
+                    vehicle,
+                    spec,
+                    actual_arc_m=actual_arc,
+                    lookahead_m=float(np.clip(0.6 * speed, 3.0, 8.0)),
+                )
+            )
+            tracking["instantaneous_heading_rad"] = instantaneous_heading_error
+            tracking["heading_rad"] = heading_error
+            tracking["preview_reference_heading_rad"] = preview_heading
+            tracking["preview_reference_arc_m"] = preview_heading_arc
             if (
                 abs(tracking["longitudinal_m"])
                 > self.TRACKING_LONGITUDINAL_LIMIT_M
@@ -3614,7 +4081,16 @@ class JointTrajectoryExecutor:
                     elapsed_s,
                     "vehicle tracking error left the committed trajectory envelope",
                     "committed_trajectory_tracking_deviation",
-                    {"agent_id": agent_id, "tracking_error": tracking},
+                    {
+                        "agent_id": agent_id,
+                        "tracking_error": tracking,
+                        "tracking_baseline": (
+                            "nominal_preflight"
+                            if expected_pose is None
+                            else "previous_executable_reference"
+                        ),
+                        "nominal_tracking_error": nominal_tracking,
+                    },
                 )
             current_pose = np.asarray(
                 [
@@ -3624,11 +4100,7 @@ class JointTrajectoryExecutor:
                 ],
                 dtype=np.float64,
             )
-            speed = max(float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6, 0.0)
             try:
-                actual_arc, path_error = project_point_to_path_arc(
-                    current_pose[:2], spec.spatial_path_world[:, :2], spec.path_arc_m
-                )
                 path_distance = np.diff(spec.path_arc_m)
                 path_heading_delta = np.abs(
                     np.arctan2(
@@ -3677,10 +4149,13 @@ class JointTrajectoryExecutor:
                     dense_arc[1:],
                 )
                 dense = np.concatenate((current_pose[None, :], dense_future), axis=0)
-                output = sample_path_at_arc(
-                    spec.spatial_path_world,
-                    spec.path_arc_m,
-                    longitudinal_reference.arc_position_m[1:],
+                output = self._sample_executable_path_by_travel(
+                    spec,
+                    current_pose=current_pose,
+                    current_path_arc_m=actual_arc,
+                    requested_arc_positions_m=(
+                        longitudinal_reference.arc_position_m
+                    ),
                 ).astype(np.float32)
             except LongitudinalReferenceError as exc:
                 self._raise(
@@ -3691,6 +4166,35 @@ class JointTrajectoryExecutor:
                     {"agent_id": agent_id, "longitudinal_reference_error": str(exc)},
                 )
             local_output = world_trajectory_to_ego_local(output, current_pose)
+            executed_reference = trajectory_to_longitudinal_reference(
+                local_output,
+                speed,
+                source="committed_roll",
+            )
+            longitudinal_reference = LongitudinalTrackingReference(
+                sample_times_s=executed_reference.sample_times_s,
+                arc_position_m=(
+                    actual_arc + executed_reference.arc_position_m
+                ),
+                speed_mps=executed_reference.speed_mps,
+                acceleration_mps2=executed_reference.acceleration_mps2,
+                original_arc_error_m=(
+                    longitudinal_reference.original_arc_error_m
+                ),
+                stop_requested=executed_reference.stop_requested,
+                source="committed_roll",
+            )
+            dense_arc = np.interp(
+                dense_offsets,
+                longitudinal_reference.sample_times_s,
+                longitudinal_reference.arc_position_m,
+            )
+            dense_future = sample_path_at_arc(
+                spec.spatial_path_world,
+                spec.path_arc_m,
+                dense_arc[1:],
+            )
+            dense = np.concatenate((current_pose[None, :], dense_future), axis=0)
             world_audit = validate_trajectory_kinematics(
                 output, speed, current_pose, HardModeMaskConfig()
             )
@@ -3726,6 +4230,20 @@ class JointTrajectoryExecutor:
                         "world_max_lateral_acceleration_mps2": float(
                             world_audit.lateral_acceleration_mps2.max(initial=0.0)
                         ),
+                        "world_cumulative_distance_m": (
+                            world_audit.cumulative_distance_m.tolist()
+                        ),
+                        "reachable_min_distance_m": (
+                            world_audit.reachable_min_distance_m.tolist()
+                        ),
+                        "reachable_max_distance_m": (
+                            world_audit.reachable_max_distance_m.tolist()
+                        ),
+                        "longitudinal_reference_arc_m": (
+                            longitudinal_reference.arc_position_m.tolist()
+                        ),
+                        "actual_path_arc_m": float(actual_arc),
+                        "spatial_path_projection_error_m": float(path_error),
                     },
                 )
             footprint_on_road, footprint_detail = self._footprint_road_audit(
@@ -3773,6 +4291,12 @@ class JointTrajectoryExecutor:
             longitudinal_references[agent_id] = longitudinal_reference
             per_agent[agent_id] = {
                 "tracking_error": tracking,
+                "tracking_baseline": (
+                    "nominal_preflight"
+                    if expected_pose is None
+                    else "previous_executable_reference"
+                ),
+                "nominal_tracking_error": nominal_tracking,
                 "spatial_path_projection_error_m": float(path_error),
                 "original_arc_error_m": float(
                     longitudinal_reference.original_arc_error_m
@@ -3788,6 +4312,14 @@ class JointTrajectoryExecutor:
                     spec.lane_change_duration_s
                 ),
                 "reference_cursor_s": float(elapsed_s),
+                "actual_path_arc_m": float(actual_arc),
+                "output_final_arc_m": float(
+                    longitudinal_reference.arc_position_m[-1]
+                ),
+                "spatial_path_length_m": float(spec.path_arc_m[-1]),
+                "spatial_path_remaining_m": float(
+                    spec.path_arc_m[-1] - actual_arc
+                ),
             }
 
         minimum_platoon_gap = float("inf")
@@ -3819,12 +4351,32 @@ class JointTrajectoryExecutor:
                 )
                 minimum_platoon_gap = min(minimum_platoon_gap, pair_gap)
                 if pair_gap < self.planner.platoon_safe_gap_m - 1e-6:
+                    gap_series = np.asarray(
+                        [
+                            self._minimum_pair_gap(
+                                first_dense[index : index + 1],
+                                self.planner._vehicle_dimensions(agents[first_id]),
+                                second_dense[index : index + 1],
+                                self.planner._vehicle_dimensions(agents[second_id]),
+                            )
+                            for index in range(first_dense.shape[0])
+                        ],
+                        dtype=np.float64,
+                    )
+                    minimum_index = int(np.argmin(gap_series))
                     self._raise(
                         plan,
                         elapsed_s,
                         "rolled joint trajectory violates platoon safety gap",
                         "committed_trajectory_pairwise_unsafe",
-                        {"pair": [first_id, second_id], "minimum_gap_m": pair_gap},
+                        {
+                            "pair": [first_id, second_id],
+                            "minimum_gap_m": pair_gap,
+                            "minimum_gap_time_s": float(
+                                minimum_index * self.planner.DENSE_DT_S
+                            ),
+                            "agents": copy.deepcopy(per_agent),
+                        },
                     )
 
         debug = self._base_debug(plan, elapsed_s)
@@ -3834,6 +4386,10 @@ class JointTrajectoryExecutor:
             agents=per_agent,
         )
         self._last_debug = debug
+        self._expected_executable_pose = {
+            agent_id: np.ascontiguousarray(trajectory[1], dtype=np.float64)
+            for agent_id, trajectory in dense_by_agent.items()
+        }
         return RolledJointTrajectory(
             execution_id=int(plan.execution_id),
             elapsed_s=float(elapsed_s),
@@ -3893,6 +4449,83 @@ class JointTrajectoryExecutor:
         return np.column_stack((x, y, heading))
 
     @staticmethod
+    def _sample_executable_path_by_travel(
+        spec: TrajectoryExecutionSpec,
+        *,
+        current_pose: np.ndarray,
+        current_path_arc_m: float,
+        requested_arc_positions_m: np.ndarray,
+    ) -> np.ndarray:
+        """Map governor travel to the unchanged spatial path.
+
+        The vehicle can be laterally offset from the frozen path.  Adding a
+        requested travel distance directly to its projected path coordinate
+        then shortens the actual pose-to-waypoint distance and can violate the
+        same reachability contract that produced the governor profile.  Solve
+        each segment on the original path so its physical tangent arc equals
+        the requested longitudinal increment.
+        """
+
+        requested = np.asarray(requested_arc_positions_m, dtype=np.float64)
+        pose = np.asarray(current_pose, dtype=np.float64)
+        if requested.ndim != 1 or requested.size < 2:
+            raise LongitudinalReferenceError(
+                "executable path sampling requires at least two arc positions"
+            )
+        increments = np.diff(requested)
+        if np.any(increments < -1.0e-8) or not np.isfinite(increments).all():
+            raise LongitudinalReferenceError(
+                "executable path travel increments must be finite and non-negative"
+            )
+        path_end = float(spec.path_arc_m[-1])
+        start_arc = float(np.clip(current_path_arc_m, 0.0, path_end))
+        target = np.maximum(increments, 0.0)
+        path_increments = target.copy()
+        rows = None
+        # A few vectorized secant-style corrections are both deterministic
+        # and much cheaper than a scalar bisection for every waypoint.
+        for _ in range(12):
+            queries = start_arc + np.cumsum(path_increments)
+            if np.any(queries > path_end + 1.0e-6):
+                raise LongitudinalReferenceError(
+                    "spatial path is exhausted before executable travel is reached"
+                )
+            rows = sample_path_at_arc(
+                spec.spatial_path_world,
+                spec.path_arc_m,
+                np.clip(queries, 0.0, path_end),
+            )
+            poses = np.concatenate((pose[None, :], rows), axis=0)
+            chords = np.linalg.norm(np.diff(poses[:, :2], axis=0), axis=1)
+            angles = np.abs(
+                np.arctan2(
+                    np.sin(np.diff(poses[:, 2])),
+                    np.cos(np.diff(poses[:, 2])),
+                )
+            )
+            half = 0.5 * angles
+            scale = np.ones_like(chords)
+            curved = half > 1.0e-8
+            scale[curved] = half[curved] / np.sin(half[curved])
+            measured = chords * scale
+            # The longitudinal governor may request a stop part-way through a
+            # bend.  The physical travel of the last moving segment must still
+            # be long enough for the unchanged path's heading change to obey
+            # the same 0.25 1/m curvature contract used everywhere else.
+            curvature_distance = angles / (0.25 - 1.0e-4)
+            executable_target = np.maximum(target, curvature_distance)
+            active = executable_target > 1.0e-10
+            ratio = np.ones_like(target)
+            ratio[active] = executable_target[active] / np.maximum(
+                measured[active], 1.0e-9
+            )
+            path_increments[active] *= np.clip(ratio[active], 0.5, 2.0)
+            path_increments[~active] = 0.0
+        if rows is None:
+            raise LongitudinalReferenceError("executable path sampling failed")
+        return np.ascontiguousarray(rows, dtype=np.float64)
+
+    @staticmethod
     def _tracking_error(vehicle, planned_pose: np.ndarray) -> dict[str, float]:
         heading = float(planned_pose[2])
         delta = np.asarray(vehicle.position[:2], dtype=np.float64) - planned_pose[:2]
@@ -3909,6 +4542,42 @@ class JointTrajectoryExecutor:
             "lateral_m": lateral,
             "heading_rad": heading_error,
         }
+
+    @staticmethod
+    def _preview_aligned_heading_error(
+        vehicle,
+        spec: TrajectoryExecutionSpec,
+        *,
+        actual_arc_m: float,
+        lookahead_m: float,
+    ) -> tuple[float, float, float]:
+        """Compare heading with the reachable forward path-heading envelope.
+
+        A preview controller intentionally leads the tangent at the closest
+        path point when curvature changes.  Treating that lead as tracking
+        failure rejects a vehicle that is following the accepted path.  The
+        longitudinal/lateral errors remain tied to the next executable pose;
+        only heading is aligned with the closest tangent in the same preview
+        window consumed by the controller.
+        """
+
+        arc = np.asarray(spec.path_arc_m, dtype=np.float64)
+        headings = np.unwrap(
+            np.asarray(spec.spatial_path_world[:, 2], dtype=np.float64)
+        )
+        start = float(np.clip(actual_arc_m, arc[0], arc[-1]))
+        end = float(np.clip(start + max(float(lookahead_m), 0.0), arc[0], arc[-1]))
+        interior = arc[(arc > start) & (arc < end)]
+        query = np.unique(np.concatenate(([start, end], interior)))
+        reference = np.interp(query, arc, headings)
+        actual = float(getattr(vehicle, "heading_theta", 0.0))
+        errors = np.arctan2(np.sin(actual - reference), np.cos(actual - reference))
+        index = int(np.argmin(np.abs(errors)))
+        return (
+            float(errors[index]),
+            float(np.arctan2(np.sin(reference[index]), np.cos(reference[index]))),
+            float(query[index]),
+        )
 
     def _footprint_on_road(self, env, vehicle, trajectory: np.ndarray, spec: TrajectoryExecutionSpec) -> bool:
         valid, _ = self._footprint_road_audit(env, vehicle, trajectory, spec)
@@ -3943,6 +4612,9 @@ class JointTrajectoryExecutor:
             if lane_index
         ]
         lanes.insert(0, predecessor_lane)
+        lanes = list(
+            self.planner._expand_drivable_lane_surfaces(env, lanes)
+        )
         return audit_dense_footprint_on_lanes(
             trajectory,
             lanes,

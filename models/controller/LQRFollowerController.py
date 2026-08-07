@@ -176,6 +176,7 @@ class LQRFollowerController(BaseController):
         env,
         trajectories_world: dict[str, np.ndarray],
         longitudinal_references: dict[str, LongitudinalTrackingReference] | None = None,
+        lateral_tracking_errors_m: dict[str, float] | None = None,
     ) -> dict[str, np.ndarray]:
         agents = getattr(env, "agents", {}) or {}
         all_ids: list[str] = list(getattr(env, "_agent_ids", sorted(agents.keys())))
@@ -237,6 +238,9 @@ class LQRFollowerController(BaseController):
                     traj_local,
                     reference,
                     gap_acceleration_mps2=gap_acceleration,
+                    cross_track_error_m=float(
+                        (lateral_tracking_errors_m or {}).get(agent_id, 0.0)
+                    ),
                 )
                 agent_debug["mode"] = mode
             agent_debug.update(

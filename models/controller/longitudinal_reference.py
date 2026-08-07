@@ -11,11 +11,6 @@ MAX_SPEED_MPS = 100.0 / 3.6
 MIN_ACCEL_MPS2 = -8.0
 MAX_ACCEL_MPS2 = 5.0
 
-# Measured on the sensorless XL vehicle in S1 at 24 km/h.  These limits are
-# deliberately inside the hard kinematic contract: they describe actuator
-# authority, not a relaxed safety boundary.
-EXECUTABLE_MIN_ACCEL_MPS2 = -2.6
-EXECUTABLE_MAX_ACCEL_MPS2 = 0.4
 ACCELERATION_BIAS_MPS2 = 0.0
 # Pooled through-origin fit over natural zero-start warmups (seeds 17/31/47,
 # all three XL vehicles).  This is actuator gain; it is intentionally distinct
@@ -25,6 +20,19 @@ DRIVE_ACCELERATION_SCALE_MPS2 = 1.4999988847662202
 # zero-speed start at 8 m/s.  Negative MetaDrive throttle is a brake fraction,
 # not a normalized request over EXECUTABLE_MIN_ACCEL_MPS2.
 BRAKE_ACCELERATION_SCALE_MPS2 = 9.374925668233
+# The earlier +0.4/-2.6 authority cap came from a non-zero-speed transient.
+# The accepted zero-start drive fit and fixed-command brake fit supersede it.
+# Keep authority within the unchanged hard trajectory contract.
+EXECUTABLE_MIN_ACCEL_MPS2 = max(
+    MIN_ACCEL_MPS2, -BRAKE_ACCELERATION_SCALE_MPS2
+)
+EXECUTABLE_MAX_ACCEL_MPS2 = min(
+    MAX_ACCEL_MPS2, DRIVE_ACCELERATION_SCALE_MPS2
+)
+# Generated references are later represented by float32 XY/heading and
+# independently reconstructed.  Stay conservatively inside the hard boundary
+# so representation error cannot turn -8.0 into an invalid -8.00004.
+PROFILE_ACCELERATION_GUARD_MPS2 = 1.0e-3
 
 
 class LongitudinalReferenceError(ValueError):
@@ -548,8 +556,10 @@ def build_feedback_executable_profile(
                 original_acceleration[index]
                 + float(position_gain) * (original_arc[index] - executed_arc[index])
                 + float(speed_gain) * (target_speed - executed_speed[index]),
-                EXECUTABLE_MIN_ACCEL_MPS2,
-                EXECUTABLE_MAX_ACCEL_MPS2,
+                EXECUTABLE_MIN_ACCEL_MPS2
+                + PROFILE_ACCELERATION_GUARD_MPS2,
+                EXECUTABLE_MAX_ACCEL_MPS2
+                - PROFILE_ACCELERATION_GUARD_MPS2,
             )
         )
         dt = float(internal_dt_s)
@@ -597,6 +607,7 @@ __all__ = [
     "DRIVE_ACCELERATION_SCALE_MPS2",
     "EXECUTABLE_MAX_ACCEL_MPS2",
     "EXECUTABLE_MIN_ACCEL_MPS2",
+    "PROFILE_ACCELERATION_GUARD_MPS2",
     "LongitudinalReferenceError",
     "LongitudinalCascadeController",
     "LongitudinalTrackingReference",

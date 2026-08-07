@@ -535,6 +535,20 @@ class FreeInRampOnStraight(FreeRamp):
         acc_lane.line_types = [PGLineType.NONE, PGLineType.CONTINUOUS]
         bend_2_road = Road(connect_road.end_node, self.road_node(0, 0))
         self.block_network.add_lane(bend_2_road.start_node, bend_2_road.end_node, bend_2)
+        mainline_right_lane = acc_road.get_lanes(self.block_network)[-1]
+        junction_surface = build_lane_seam_drivable_surface(
+            bend_2, mainline_right_lane
+        )
+        junction_surface.index = (
+            f"{self.name}-merge-junction",
+            f"{self.name}-merge-junction-surface",
+            0,
+        )
+        self.junction_drivable_surfaces = (junction_surface,)
+        bend_2.junction_drivable_surfaces = self.junction_drivable_surfaces
+        mainline_right_lane.junction_drivable_surfaces = (
+            self.junction_drivable_surfaces
+        )
         next_node = self.add_road_node()
         branch_road = Road(acc_road.start_node, next_node)
         self.block_network.add_lane(branch_road.start_node, branch_road.end_node, acc_lane)

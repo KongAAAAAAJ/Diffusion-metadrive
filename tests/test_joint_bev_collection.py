@@ -195,6 +195,25 @@ def test_dynamic_anchors_have_fixed_modes_and_simulator_topology() -> None:
     assert np.all(stop[first:, 2] == stop[first, 2])
 
 
+def test_low_speed_lane_change_anchor_uses_executable_arc_progress() -> None:
+    env = _Env()
+    vehicle = env.agents["agent2"]
+    vehicle.speed_km_h = 1.3
+    vehicle.heading_theta = -0.01
+
+    output = SimulatorDynamicAnchorGenerator().generate(env, "agent2")
+    right_high = output.coarse_trajectories[ModeIndex.RIGHT_HIGH]
+    audit = validate_trajectory_kinematics(
+        right_high,
+        vehicle.speed_km_h / 3.6,
+        np.zeros(3),
+    )
+
+    assert audit.valid
+    assert float(right_high[-1, 1]) < -3.0
+    assert np.max(audit.curvature_per_m) <= 0.25 + 1.0e-6
+
+
 def test_stop_anchor_preserves_current_lane_offset_without_recentering() -> None:
     env = _Env()
     vehicle = env.agents["agent0"]
@@ -521,7 +540,11 @@ def test_rule_planner_expert_uses_independent_pid_when_formation_is_unlocked() -
             self.reset_calls += 1
 
         def compute_actions(
-            self, env, trajectories_world, longitudinal_references=None
+            self,
+            env,
+            trajectories_world,
+            longitudinal_references=None,
+            lateral_tracking_errors_m=None,
         ):  # noqa: ARG002
             self.compute_calls += 1
             return {
