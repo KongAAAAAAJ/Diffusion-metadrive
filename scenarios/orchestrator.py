@@ -8,8 +8,11 @@ TriggerEvaluator abstraction. The old path
 from __future__ import annotations
 
 import math
+import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Tuple
+
+import numpy as np
 
 from scenarios.definitions import ScenarioDefinition, TriggerSpec
 from metadrive.policy.idm_policy import IDMPolicy
@@ -101,6 +104,9 @@ class ScenarioOrchestrator:
         self._lead_vehicle_name: str | None = None
         self._completed_recipe_keys: set[str] = set()
         self._spawned_adjacent_vehicle_keys: set[str] = set()
+        self._scenario_random_seed: int | None = None
+        self._scenario_rng = None
+        self._resolved_recipe_parameters: Dict[str, Dict[str, float]] = {}
 
     def reset(self, env, agent_id: str) -> None:
         self.summary = ScenarioEpisodeSummary(scenario_id=self.definition.scenario_id)
@@ -109,6 +115,9 @@ class ScenarioOrchestrator:
         self._lead_vehicle_name = None
         self._completed_recipe_keys = set()
         self._spawned_adjacent_vehicle_keys = set()
+        self._scenario_random_seed = self._derive_scenario_random_seed(env)
+        self._scenario_rng = np.random.RandomState(self._scenario_random_seed)
+        self._resolved_recipe_parameters = {}
 
     def before_step(self, env, agent_id: str, step_count: int) -> None:
         self._apply_speed_profiles(env)
@@ -130,6 +139,11 @@ class ScenarioOrchestrator:
             "scenario_trigger_step": self.summary.trigger_step,
             "scenario_realized_step": self.summary.realized_step,
             "scenario_notes": list(self.summary.notes),
+            "scenario_random_seed": self._scenario_random_seed,
+            "resolved_recipe_parameters": {
+                key: dict(value)
+                for key, value in self._resolved_recipe_parameters.items()
+            },
         }
 
     def _execute_recipe(self, env, ego_vehicle, step_count: int) -> None:
@@ -190,6 +204,12 @@ class ScenarioOrchestrator:
 
     def _handle_hard_brake_lead(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         params = self._resolve_hard_brake_params(env, params)
+        self._resolved_recipe_parameters["hard_brake_lead"] = {
+            "lead_bumper_gap_m": float(params["lead_bumper_gap_m"]),
+            "lead_target_speed_kmh": float(params["lead_target_speed_kmh"]),
+            "brake_target_speed_kmh": float(params["brake_target_speed_kmh"]),
+            "brake_deceleration_mps2": float(params["brake_deceleration_mps2"]),
+        }
         front_vehicle, front_distance = self._find_front_vehicle_with_distance(ego_vehicle)
         gap_range = params["lead_bumper_gap_range_m"]
         min_distance = float(gap_range[0])
@@ -297,6 +317,7 @@ class ScenarioOrchestrator:
             policy_class=policy_class,
             policy_kwargs=policy_kwargs,
             vehicle_config_overrides=vehicle_config_overrides,
+            vehicle_type=self._scenario_vehicle_type(),
         )
         if spawned is None:
             self.summary.notes.append(f"inject_failed:{reference_kind}")
@@ -368,6 +389,7 @@ class ScenarioOrchestrator:
                 target_speed_kmh=float(vehicle_params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0))),
                 min_clearance_m=vehicle_params.get("min_agent_clearance_m"),
                 clearance_scope=str(vehicle_params.get("clearance_scope", params.get("clearance_scope", "all_agents"))),
+                vehicle_type=self._scenario_vehicle_type(),
             )
             if spawned is None:
                 self.summary.notes.append(f"adjacent_spawn_failed:{vehicle_name}")
@@ -627,13 +649,38 @@ class ScenarioOrchestrator:
             return rng
         return getattr(getattr(env, "engine", None), "np_random", None)
 
+    def _derive_scenario_random_seed(self, env) -> int:
+        """Build an episode-local seed independent of traffic-manager RNG use.
+
+        The traffic manager also samples vehicle types, object seeds and policy
+        seeds.  Using that shared stream for scenario parameters made S5's
+        braking strength depend on unrelated object lifecycle details.  A
+        stable digest avoids Python's process-randomized ``hash()`` and makes
+        scenario parameters a pure function of the episode contract.
+        """
+
+        raw_seed = getattr(env, "current_seed", None)
+        if raw_seed is None:
+            raw_seed = getattr(getattr(env, "engine", None), "global_random_seed", 0)
+        payload = (
+            f"{int(raw_seed or 0)}\0{self.definition.scenario_id}"
+            f"\0{self.local_route}"
+        ).encode("utf-8")
+        return int.from_bytes(hashlib.sha256(payload).digest()[:4], "little")
+
     @staticmethod
     def _is_float_range(value) -> bool:
         return isinstance(value, (tuple, list)) and len(value) == 2
 
     def _sample_float_range(self, env, value_range) -> float:
         low, high = value_range
-        rng = self._rng_from_env(env)
+        rng = (
+            self._scenario_rng
+            if self.definition.scenario_id == "S5_hard_brake_lead"
+            else self._rng_from_env(env)
+        )
+        if rng is None:
+            rng = self._scenario_rng
         if rng is not None and hasattr(rng, "uniform"):
             return float(rng.uniform(float(low), float(high)))
         return float((float(low) + float(high)) * 0.5)
@@ -642,7 +689,13 @@ class ScenarioOrchestrator:
         low, high = value_range
         low_i = int(low)
         high_i = int(high)
-        rng = self._rng_from_env(env)
+        rng = (
+            self._scenario_rng
+            if self.definition.scenario_id == "S5_hard_brake_lead"
+            else self._rng_from_env(env)
+        )
+        if rng is None:
+            rng = self._scenario_rng
         if rng is not None and hasattr(rng, "randint"):
             return int(rng.randint(low_i, high_i + 1))
         if rng is not None and hasattr(rng, "integers"):
@@ -739,6 +792,7 @@ class ScenarioOrchestrator:
         policy_class=None,
         policy_kwargs=None,
         vehicle_config_overrides=None,
+        vehicle_type=None,
     ):
         lane_tuple = self._resolve_lane_index(
             env,
@@ -763,6 +817,7 @@ class ScenarioOrchestrator:
             policy_class=policy_class,
             policy_kwargs=policy_kwargs,
             vehicle_config_overrides=vehicle_config_overrides,
+            vehicle_type=vehicle_type,
         )
 
     def _spawn_on_lane_tuple(
@@ -780,6 +835,7 @@ class ScenarioOrchestrator:
         policy_class=None,
         policy_kwargs=None,
         vehicle_config_overrides=None,
+        vehicle_type=None,
     ):
         current_map = getattr(getattr(env, "engine", None), "current_map", None)
         if current_map is None:
@@ -805,7 +861,8 @@ class ScenarioOrchestrator:
         traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
         if traffic_manager is None or not hasattr(traffic_manager, "_spawn_traffic_vehicle_if_safe"):
             return None
-        vehicle_type = traffic_manager.random_vehicle_type()
+        if vehicle_type is None:
+            vehicle_type = traffic_manager.random_vehicle_type()
         spawn_speed_mps = max(float(target_speed_kmh), 0.0) / 3.6
         spawned = traffic_manager._spawn_traffic_vehicle_if_safe(
             vehicle_type,
@@ -895,6 +952,7 @@ class ScenarioOrchestrator:
             reference_kind="ego_lane",
             spawn_longitude_offset=bumper_gap_m + ego_length,
             target_speed_kmh=float(params["lead_target_speed_kmh"]),
+            vehicle_type=self._scenario_vehicle_type(),
         )
         if spawned is None:
             return None
@@ -919,6 +977,18 @@ class ScenarioOrchestrator:
         except Exception:
             return spawned
         return spawned
+
+    def _scenario_vehicle_type(self):
+        """Return the fixed physical type for reproducible scenario actors."""
+
+        if self.definition.scenario_id not in {
+            "S5_hard_brake_lead",
+            "S8_ego_exit_to_ramp",
+        }:
+            return None
+        from metadrive.component.vehicle.vehicle_type import TrafficDefaultVehicle
+
+        return TrafficDefaultVehicle
 
     def _resolve_lane_index(
         self,

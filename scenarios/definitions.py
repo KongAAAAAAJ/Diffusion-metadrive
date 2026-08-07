@@ -253,6 +253,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_longitude_m=30,
         ego_spawn_lane_id=1,
         ego_initial_speed_km_h=24.0,
+        override_traffic_density=0.0,
         expert_recipe="提前换道驶离",
         description="ego 从主线驶出",
     ),

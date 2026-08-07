@@ -1192,6 +1192,50 @@ def test_s8_adds_long_footprint_safe_lane_change_duration():
     assert max(base) == pytest.approx(5.0)
 
 
+def test_s8_uses_probe_justified_longitudinal_profile_resolution_only_for_lane_change():
+    planner = PlatoonNormalPlanner(candidate_pool_size=12)
+    generic = (-8.0, -6.0, -4.0, -2.0, 0.0)
+
+    s8 = planner._scenario_candidate_accelerations(
+        scenario_id="S8_ego_exit_to_ramp",
+        action=1,
+        accelerations=generic,
+    )
+    assert {-7.0, -5.0, -3.0, -1.0}.issubset(set(s8))
+    assert planner._scenario_acceleration_durations(
+        scenario_id="S8_ego_exit_to_ramp",
+        action=1,
+        acceleration_mps2=-5.0,
+    ) == (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
+    assert planner._scenario_recovery_accelerations(
+        scenario_id="S8_ego_exit_to_ramp",
+        action=1,
+        acceleration_mps2=-5.0,
+        acceleration_duration_s=1.5,
+    ) == (-2.0, 0.0, 1.5, 3.0, 5.0)
+    assert planner._scenario_longitudinal_profile_limit(
+        scenario_id="S8_ego_exit_to_ramp", action=1
+    ) == 24
+    assert planner._scenario_candidate_pool_limit(
+        scenario_id="S8_ego_exit_to_ramp", action=1
+    ) == 24
+
+    assert planner._scenario_candidate_accelerations(
+        scenario_id="S7_ramp_merge", action=1, accelerations=generic
+    ) == generic
+    assert planner._scenario_acceleration_durations(
+        scenario_id="S8_ego_exit_to_ramp",
+        action=0,
+        acceleration_mps2=-5.0,
+    ) == planner._acceleration_durations(-5.0)
+    assert planner._scenario_longitudinal_profile_limit(
+        scenario_id="S7_ramp_merge", action=1
+    ) == 6
+    assert planner._scenario_candidate_pool_limit(
+        scenario_id="S7_ramp_merge", action=1
+    ) == 12
+
+
 def test_tight_target_lane_gap_delays_lane_change_start():
     planner = PlatoonNormalPlanner()
     env = _env()

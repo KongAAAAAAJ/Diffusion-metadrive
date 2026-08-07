@@ -1,93 +1,87 @@
-# Round 13.882: S5--S9 expert-chain gate
+# Round 13.882a/b: S5 determinism and S8 feasibility
 
-## Outcome
+## Result
 
-The round is **blocked**.  The required `10 x 200` gate was not started and
-the diagnostic-64 collector was not started.
+Round 13.882a is complete.  S5 now has a deterministic scenario-local random
+stream and fixed physical vehicle type for every controlled actor.  The strict
+in-process seed-23/seed-17/seed-23 sandwich test compares every state, action
+and control step and passes.
 
-The development gate uses one MetaDrive episode per process.  At 80 steps,
-seed 17 produced:
+Round 13.882b resolves the reported S8 `all_rule_proposals_infeasible`
+failure, but the complete S8 episode gate remains blocked by a separate
+closed-loop heading-tracking error.  Diagnostic-64 collection must not start.
 
-| Scenario | Result |
-|---|---|
-| S5 | pass, 80/80 |
-| S6 | pass, 80/80 |
-| S7 | pass, 80/80 |
-| S8 | `all_rule_proposals_infeasible`, step 39 |
-| S9 | pass, 80/80 |
+## 13.882a: S5
 
-S8 reproduced the same step-39 failure for seeds 17 and 23.  After extending
-the chosen exit connector through its unambiguous downstream ramp successors,
-the committed-horizon road rejections disappeared.  Agent2 then had 17
-dynamically and geometrically valid candidates, but none satisfied the frozen
-5 m background-vehicle gap.  No safety boundary or scenario parameter was
-changed to force acceptance.
+The divergence first appeared only after the hard-brake trigger.  Two shared
+global-state dependencies were removed:
 
-## Implemented contract fixes
+- hard-brake and adjacent-vehicle recipe parameters now use a private seed
+  derived from `(episode seed, scenario id, route)`;
+- S5 controlled traffic uses `TrafficDefaultVehicle` instead of consuming the
+  traffic manager's random vehicle-type stream.
 
-- RuleMaker proposals are filtered against dynamic-anchor hard-valid action
-  groups before Normal planner search.
-- S7/S8 route geometry includes the merge/exit connector seams and continuous
-  downstream lane chain where the successor is unambiguous.
-- Candidate and committed execution use the same expanded drivable surfaces
-  and dense XL footprint audit.
-- The longitudinal governor keeps generated acceleration 0.001 m/s2 inside
-  the hard boundary to survive float32 re-audit without changing the
-  `[-8, 5] m/s2` validator.
-- Curved-path travel uses arc distance and keeps the final moving segment long
-  enough to satisfy the unchanged `0.25 1/m` curvature contract.
-- Temporal longitudinal error and spatial cross-track error are separated in
-  Frenet coordinates.
-- PID preview receives bounded cross-track feedback.  A new execution id
-  resets controller derivative/integral state, while committed rolls retain
-  state continuously.
-- Audit JSON records preview, cross-track, heading, longitudinal and actuator
-  components per role.
+Episode summaries now persist the derived scenario seed and all realized S5
+brake parameters.  Consuming arbitrary values from the traffic manager RNG no
+longer changes these values.
 
-## Determinism blocker
-
-The in-process S5 sandwich test no longer passes.  Strong process isolation
-also failed: two independent S5 seed-23 runs first diverged at step 31.  Agent0
-speed was 26.85092 km/h in one process and 25.97634 km/h in the other, while
-agent1 and agent2 still matched.  This points to the S5 lead-brake trigger or
-lead longitudinal response, not engine teardown.
-
-Evidence:
+Acceptance:
 
 ```text
-/tmp/bev-stage-census/round13_882_isolated_s5_seed23_a.json
-/tmp/bev-stage-census/round13_882_isolated_s5_seed23_b.json
+tests/test_bev_episode_determinism.py       1 passed (164.13 s)
+S5 seed 17, 80 steps                       pass
+S5 seed 23, 80 steps                       pass
 ```
 
-## Saved smoke evidence
+## 13.882b: S8
+
+The original production lattice rejected the exit at step 39 even though its
+closest background gaps were 4.89--4.95 m.  An exact-state feasibility probe
+kept the road footprint, kinematics, 5 m/7 m gaps and OBB checks unchanged and
+found a safe joint plan.  The missing production dimensions were:
+
+- intermediate braking accelerations including `-5 m/s2`;
+- 0.5 s braking-duration resolution, including 1.5 s and 2.5 s;
+- a `-2 m/s2` recovery segment;
+- sufficient longitudinal-profile and local-pool coverage.
+
+These values are enabled only for a non-KEEP S8 action.  Generic planner
+search remains unchanged.  S8 also now freezes random traffic density at zero
+and uses only its two explicitly configured lane-2 vehicles with a fixed
+physical type.
+
+After the change, seeds 17 and 23 are exactly reproducible and both start the
+same native joint execution at step 38.  Neither reports
+`all_rule_proposals_infeasible`.  Both then stop at step 41 with the identical
+independent blocker:
 
 ```text
-/tmp/bev-stage-census/round13_882d_s5_seed17_preview80.json
-/tmp/bev-stage-census/round13_882_gate_s6_seed17_80.json
-/tmp/bev-stage-census/round13_882_gate_s7_seed17_80.json
-/tmp/bev-stage-census/round13_882_gate_s9_seed17_80.json
-/tmp/bev-stage-census/round13_882ac_s8_seed17_poolchain80.json
-/tmp/bev-stage-census/round13_882_gate_s8_seed23_80.json
+reason                         committed_trajectory_tracking_deviation
+agent                          agent1
+elapsed execution time         0.3 s
+longitudinal error             0.145428 m
+lateral error                  0.039059 m
+heading error                  0.137151 rad
+heading limit                  0.1 rad
 ```
 
-## Regression
+The low spatial error combined with the heading-limit violation during the
+initial exit curve identifies a planner/controller closed-loop executability
+issue.  It is not evidence that the S8 traffic layout is dynamically
+infeasible.  Therefore no vehicle was removed or moved and no safety boundary
+was relaxed.
 
-Focused controller/planner tests passed (`82 passed`), and the broader run
-reported `214 passed, 3 failed`:
+## Evidence
 
-- `test_bev_episode_determinism.py`: real determinism blocker described above.
-- two legacy semantic-anchor assertions compare `[8,3]` source trajectories
-  with the generator's current `[8,2]` anchors; unrelated to Round 13.882.
+```text
+/tmp/bev-stage-census/round13_882ab_s5_s9_seed17_23_80.json
+/tmp/bev-stage-census/round13_882b_s8_seed17_dense_probe_after_prod.json
+/tmp/bev-stage-census/round13_882b_s8_fixed_seed17.json
+/tmp/bev-stage-census/round13_882b_s8_fixed_seed23.json
+```
 
-`git diff --check` passes.  The worktree remains intentionally uncommitted.
-
-## Required next decision
-
-Before resuming `10 x 200`, independently fix and verify:
-
-1. deterministic S5 lead-brake trigger/actuation at step 31;
-2. whether S8 scenario traffic timing should be changed, or whether its
-   5 m-safe infeasibility is the intended negative case.
-
-Do not start diagnostic-64 until both issues are resolved and the full gate is
-10/10.
+Focused planner/orchestrator/controller tests pass (`116 passed`), in addition
+to the real sandwich determinism test.  The remaining S8
+heading-tracking blocker must be handled in a separate controller/path
+executability round before rerunning the full `10 x 200` gate or collecting
+diagnostic-64.

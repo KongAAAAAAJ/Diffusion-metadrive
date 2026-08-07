@@ -159,6 +159,8 @@ def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
                 "road_rejection_count",
                 "background_collision_rejection_count",
                 "background_gap_rejection_count",
+                "best_rejected_background_gap_m",
+                "best_rejected_background_profile",
                 "lane_end_rejection_count",
                 "kinematic_rejections_by_reason",
                 "collision_rejections_by_object",
@@ -168,6 +170,8 @@ def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
                 "lane_end_restricted",
                 "lane_change_durations_s",
                 "selected_acceleration_mps2",
+                "selected_acceleration_duration_s",
+                "selected_recovery_acceleration_mps2",
                 "selected_lane_change_duration_s",
                 "selected_lane_change_start_delay_s",
             )

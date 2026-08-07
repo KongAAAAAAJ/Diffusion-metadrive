@@ -317,7 +317,7 @@ def test_s7_mainline_background_spawns_on_three_g1_lanes() -> None:
     assert orchestrator.summary.scenario_realized is True
 
 
-def test_s5_hard_brake_recipe_randomizes_from_traffic_manager_rng(monkeypatch) -> None:
+def test_s5_hard_brake_recipe_uses_episode_local_scenario_rng(monkeypatch) -> None:
     rng = np.random.RandomState(123)
     env, ego, traffic_manager = make_env_and_ego(rng=rng)
     ego.speed_km_h = 30.0
@@ -345,7 +345,7 @@ def test_s5_hard_brake_recipe_randomizes_from_traffic_manager_rng(monkeypatch) -
 
     orchestrator.before_step(env, "agent0", 31)
 
-    expected_rng = np.random.RandomState(123)
+    expected_rng = np.random.RandomState(orchestrator._scenario_random_seed)
     assert captured_params["lead_bumper_gap_m"] == float(
         expected_rng.uniform(9.0, 13.0)
     )
@@ -361,7 +361,7 @@ def test_s5_hard_brake_recipe_randomizes_from_traffic_manager_rng(monkeypatch) -
     )
 
 
-def test_s5_adjacent_recipe_randomizes_each_vehicle_from_traffic_manager_rng() -> None:
+def test_s5_adjacent_recipe_uses_episode_local_scenario_rng() -> None:
     rng = np.random.RandomState(321)
     env, ego, traffic_manager = make_env_and_ego(rng=rng)
     ego.position = (20.0, ego.position[1])
@@ -374,7 +374,7 @@ def test_s5_adjacent_recipe_randomizes_each_vehicle_from_traffic_manager_rng() -
 
     orchestrator.before_step(env, "agent0", 1)
 
-    expected_rng = np.random.RandomState(321)
+    expected_rng = np.random.RandomState(orchestrator._scenario_random_seed)
     left_offset = float(expected_rng.uniform(-15.0, -13.0))
     right_offset = float(expected_rng.uniform(13.0, 15.0))
 
@@ -390,6 +390,61 @@ def test_s5_adjacent_recipe_randomizes_each_vehicle_from_traffic_manager_rng() -
         24.0,
         24.0,
     ]
+
+
+def test_s5_scenario_parameters_ignore_unrelated_traffic_rng_consumption(
+    monkeypatch,
+) -> None:
+    def resolve_after_consuming(draw_count: int):
+        manager_rng = np.random.RandomState(77)
+        env, _ego, _traffic_manager = make_env_and_ego(rng=manager_rng)
+        env.current_seed = 23
+        for _ in range(draw_count):
+            manager_rng.uniform(-100.0, 100.0)
+        orchestrator = ScenarioOrchestrator(
+            SCENARIO_BY_ID["S5_hard_brake_lead"],
+            "R1_entry_straight",
+        )
+        orchestrator.reset(env, "agent0")
+        return orchestrator._resolve_hard_brake_params(
+            env,
+            dict(
+                SCENARIO_BY_ID["S5_hard_brake_lead"].traffic_recipes[0].params
+            ),
+        )
+
+    assert resolve_after_consuming(0) == resolve_after_consuming(19)
+
+
+def test_s5_controlled_vehicles_use_fixed_physical_type() -> None:
+    from metadrive.component.vehicle.vehicle_type import TrafficDefaultVehicle
+
+    env, ego, traffic_manager = make_env_and_ego(rng=np.random.RandomState(8))
+    ego.position = (20.0, ego.position[1])
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"],
+        "R1_entry_straight",
+    )
+    orchestrator.reset(env, "agent0")
+    orchestrator._road_to_block_id = {("road_a", "road_b"): "s0"}
+
+    orchestrator.before_step(env, "agent0", 1)
+
+    assert [call[0] for call in traffic_manager.spawn_calls] == [
+        TrafficDefaultVehicle,
+        TrafficDefaultVehicle,
+    ]
+
+
+def test_s8_injected_traffic_uses_fixed_physical_type() -> None:
+    from metadrive.component.vehicle.vehicle_type import TrafficDefaultVehicle
+
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S8_ego_exit_to_ramp"],
+        "R6_exit_to_ramp",
+    )
+
+    assert orchestrator._scenario_vehicle_type() is TrafficDefaultVehicle
 
 
 def test_hard_brake_recipe_rejects_legacy_static_contract(monkeypatch) -> None:

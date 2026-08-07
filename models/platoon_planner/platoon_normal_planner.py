@@ -756,6 +756,12 @@ class PlatoonNormalPlanner:
                         "background_gap_rejection_count": int(
                             value.get("background_gap_rejection_count", 0) or 0
                         ),
+                        "best_rejected_background_gap_m": value.get(
+                            "best_rejected_background_gap_m"
+                        ),
+                        "best_rejected_background_profile": copy.deepcopy(
+                            value.get("best_rejected_background_profile")
+                        ),
                         "road_rejections_by_reason": dict(
                             value.get("road_rejections_by_reason", {}) or {}
                         ),
@@ -1375,6 +1381,8 @@ class PlatoonNormalPlanner:
         first_committed_road_rejection: dict | None = None
         committed_road_rejections_by_duration: Counter[str] = Counter()
         committed_first_rejection_by_duration: dict[str, dict] = {}
+        best_rejected_background_gap_m = -float("inf")
+        best_rejected_background_profile: dict[str, float] | None = None
         source_lane = getattr(vehicle, "lane", None)
         if source_lane is None:
             return [], self._empty_debug("missing_source_lane", stats, collision_hits)
@@ -1562,6 +1570,11 @@ class PlatoonNormalPlanner:
                 corridor=(lower, upper),
                 evaluation_time_s=evaluation_time,
             )
+            accelerations = self._scenario_candidate_accelerations(
+                scenario_id=scenario_id,
+                action=int(action),
+                accelerations=accelerations,
+            )
             start_delays = self._lane_change_start_delays(
                 int(action),
                 float(duration),
@@ -1577,10 +1590,17 @@ class PlatoonNormalPlanner:
                 start_delays = (0.0,)
             profile_options = []
             for acceleration in accelerations:
-                for acceleration_duration in self._acceleration_durations(float(acceleration)):
-                    recovery_values = self._recovery_accelerations(
-                        float(acceleration),
-                        float(acceleration_duration),
+                acceleration_durations = self._scenario_acceleration_durations(
+                    scenario_id=scenario_id,
+                    action=int(action),
+                    acceleration_mps2=float(acceleration),
+                )
+                for acceleration_duration in acceleration_durations:
+                    recovery_values = self._scenario_recovery_accelerations(
+                        scenario_id=scenario_id,
+                        action=int(action),
+                        acceleration_mps2=float(acceleration),
+                        acceleration_duration_s=float(acceleration_duration),
                     )
                     for recovery_acceleration in recovery_values:
                         progress = self._longitudinal_progress(
@@ -1631,7 +1651,10 @@ class PlatoonNormalPlanner:
                 progress,
             ) in self._select_longitudinal_profiles(
                 profile_options,
-                maximum=12 if int(action) == 0 else 6,
+                maximum=self._scenario_longitudinal_profile_limit(
+                    scenario_id=scenario_id,
+                    action=int(action),
+                ),
             ):
                 for start_delay in start_delays:
                     if lane_end_restricted and int(action) != 0:
@@ -1753,6 +1776,24 @@ class PlatoonNormalPlanner:
                             < self.background_safe_gap_m - 1e-6
                         ):
                             stats["background_gap_rejection_count"] += 1
+                            if minimum_background_gap > best_rejected_background_gap_m:
+                                best_rejected_background_gap_m = float(
+                                    minimum_background_gap
+                                )
+                                best_rejected_background_profile = {
+                                    "acceleration_mps2": float(acceleration),
+                                    "acceleration_duration_s": float(
+                                        acceleration_duration
+                                    ),
+                                    "recovery_acceleration_mps2": float(
+                                        recovery_acceleration
+                                    ),
+                                    "lane_change_duration_s": float(duration),
+                                    "lane_change_start_delay_s": float(start_delay),
+                                    "minimum_background_gap_m": float(
+                                        minimum_background_gap
+                                    ),
+                                }
                             continue
                         score = self._score_candidate(
                             output,
@@ -1850,7 +1891,14 @@ class PlatoonNormalPlanner:
                         candidates.append(candidate)
 
         candidates.sort(key=lambda value: value.score)
-        pool = self._diverse_candidate_pool(candidates)
+        candidate_pool_limit = self._scenario_candidate_pool_limit(
+            scenario_id=scenario_id,
+            action=int(action),
+        )
+        pool = self._diverse_candidate_pool(
+            candidates,
+            maximum=candidate_pool_limit,
+        )
         if int(action) != 0 and target_lane_chain_indices:
             committed_pool = []
             committed_prediction_cache = {}
@@ -1948,6 +1996,30 @@ class PlatoonNormalPlanner:
                     stats["background_gap_rejection_count"] += int(
                         extended_gap < self.background_safe_gap_m - 1.0e-6
                     )
+                    if (
+                        extended_gap < self.background_safe_gap_m - 1.0e-6
+                        and extended_gap > best_rejected_background_gap_m
+                    ):
+                        best_rejected_background_gap_m = float(extended_gap)
+                        best_rejected_background_profile = {
+                            "acceleration_mps2": float(
+                                candidate.acceleration_mps2
+                            ),
+                            "acceleration_duration_s": float(
+                                candidate.acceleration_duration_s
+                            ),
+                            "recovery_acceleration_mps2": float(
+                                candidate.recovery_acceleration_mps2
+                            ),
+                            "lane_change_duration_s": float(
+                                candidate.lane_change_duration_s
+                            ),
+                            "lane_change_start_delay_s": float(
+                                candidate.lane_change_start_delay_s
+                            ),
+                            "minimum_background_gap_m": float(extended_gap),
+                            "committed_horizon": True,
+                        }
                     continue
                 failed_index = int(extended_detail.get("trajectory_index", 0))
                 extended_detail["path_window"] = audited_path[
@@ -1991,6 +2063,14 @@ class PlatoonNormalPlanner:
             "kinematic_rejections_by_reason": dict(
                 sorted(kinematic_hits.items())
             ),
+            "best_rejected_background_gap_m": (
+                None
+                if not np.isfinite(best_rejected_background_gap_m)
+                else float(best_rejected_background_gap_m)
+            ),
+            "best_rejected_background_profile": copy.deepcopy(
+                best_rejected_background_profile
+            ),
             "source_envelope": self._serialize_envelope(source_envelope),
             "target_envelope": self._serialize_envelope(target_envelope),
             "reachable_progress_m": [float(reachable[0]), float(reachable[1])],
@@ -2013,10 +2093,15 @@ class PlatoonNormalPlanner:
     def _diverse_candidate_pool(
         self,
         candidates: list[_TrajectoryCandidate],
+        *,
+        maximum: int | None = None,
     ) -> list[_TrajectoryCandidate]:
         """Retain local optima while spanning the safe progress interval."""
 
-        if len(candidates) <= self.candidate_pool_size:
+        pool_limit = self.candidate_pool_size if maximum is None else int(maximum)
+        if pool_limit <= 0:
+            raise ValueError("candidate pool maximum must be positive")
+        if len(candidates) <= pool_limit:
             return list(candidates)
         selected: list[_TrajectoryCandidate] = []
         selected_ids: set[int] = set()
@@ -2027,7 +2112,7 @@ class PlatoonNormalPlanner:
                 selected_ids.add(id(candidate))
 
         # Preserve the strongest local choices.
-        local_slots = min(4, self.candidate_pool_size)
+        local_slots = min(4, pool_limit)
         for candidate in candidates[:local_slots]:
             add(candidate)
 
@@ -2038,7 +2123,7 @@ class PlatoonNormalPlanner:
             candidates,
             key=lambda value: (value.terminal_progress_m, value.score),
         )
-        progress_slots = max(self.candidate_pool_size - local_slots, 1)
+        progress_slots = max(pool_limit - local_slots, 1)
         for index in np.linspace(
             0,
             len(by_progress) - 1,
@@ -2049,9 +2134,9 @@ class PlatoonNormalPlanner:
 
         for candidate in candidates:
             add(candidate)
-            if len(selected) >= self.candidate_pool_size:
+            if len(selected) >= pool_limit:
                 break
-        return selected[: self.candidate_pool_size]
+        return selected[:pool_limit]
 
     @staticmethod
     def _select_longitudinal_profiles(
@@ -2405,6 +2490,84 @@ class PlatoonNormalPlanner:
         if acceleration_mps2 >= -0.25:
             return (self.HORIZON_S,)
         return (0.5, 1.0, 2.0, self.HORIZON_S)
+
+    def _scenario_candidate_accelerations(
+        self,
+        *,
+        scenario_id: str,
+        action: int,
+        accelerations: tuple[float, ...],
+    ) -> tuple[float, ...]:
+        """Add only the longitudinal resolution justified by a scenario probe.
+
+        The S8 exit state can require a braking profile between the generic
+        two-metre-per-second-squared samples.  The added values remain inside
+        the shared production kinematic limits; no safety boundary changes.
+        """
+
+        if str(scenario_id) != "S8_ego_exit_to_ramp" or int(action) == 0:
+            return tuple(accelerations)
+        return tuple(
+            sorted(
+                {
+                    *(round(float(value), 3) for value in accelerations),
+                    -7.0,
+                    -5.0,
+                    -3.0,
+                    -1.0,
+                }
+            )
+        )
+
+    def _scenario_acceleration_durations(
+        self,
+        *,
+        scenario_id: str,
+        action: int,
+        acceleration_mps2: float,
+    ) -> tuple[float, ...]:
+        if str(scenario_id) != "S8_ego_exit_to_ramp" or int(action) == 0:
+            return self._acceleration_durations(float(acceleration_mps2))
+        if float(acceleration_mps2) >= -0.25:
+            return (1.0, 2.0, 3.0, self.HORIZON_S)
+        return tuple(float(value) for value in np.arange(0.5, 4.01, 0.5))
+
+    def _scenario_recovery_accelerations(
+        self,
+        *,
+        scenario_id: str,
+        action: int,
+        acceleration_mps2: float,
+        acceleration_duration_s: float,
+    ) -> tuple[float, ...]:
+        if str(scenario_id) != "S8_ego_exit_to_ramp" or int(action) == 0:
+            return self._recovery_accelerations(
+                float(acceleration_mps2),
+                float(acceleration_duration_s),
+            )
+        if float(acceleration_duration_s) >= self.HORIZON_S:
+            return (0.0,)
+        return (-2.0, 0.0, 1.5, 3.0, 5.0)
+
+    def _scenario_longitudinal_profile_limit(
+        self,
+        *,
+        scenario_id: str,
+        action: int,
+    ) -> int:
+        if str(scenario_id) == "S8_ego_exit_to_ramp" and int(action) != 0:
+            return 24
+        return 12 if int(action) == 0 else 6
+
+    def _scenario_candidate_pool_limit(
+        self,
+        *,
+        scenario_id: str,
+        action: int,
+    ) -> int:
+        if str(scenario_id) == "S8_ego_exit_to_ramp" and int(action) != 0:
+            return max(int(self.candidate_pool_size), 24)
+        return int(self.candidate_pool_size)
 
     def _recovery_accelerations(
         self,

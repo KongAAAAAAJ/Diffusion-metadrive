@@ -128,6 +128,7 @@ def test_s8_declares_explicit_ego_spawn_controls() -> None:
     assert scenario.ego_spawn_reference_block_id == "g0"
     assert scenario.ego_spawn_longitude_m == pytest.approx(30.0)
     assert scenario.ego_spawn_lane_id == 1
+    assert scenario.override_traffic_density == pytest.approx(0.0)
 
 
 def test_s8_injected_background_recipes_declare_lane_index() -> None:
