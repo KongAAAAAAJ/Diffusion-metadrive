@@ -269,3 +269,56 @@ traffic adjustment.  Round 13.882b4 therefore has a verified functional fix
 through the original failure interval, but remains blocked on efficient,
 semantics-preserving exhaustive full-horizon search before the `2 x 80`,
 `10 x 200`, or diagnostic-64 gates can be claimed.
+
+## 13.882b4.1: cached full-horizon joint search
+
+The repeated-exclusion loop has been replaced by one cost-ordered enumeration
+of the short-horizon-safe joint selections. Admission now maintains two strict
+caches:
+
+- `(agent, candidate, completion deadline)` stores the exact
+  feedback-executable rolling windows plus kinematic, road, tracking and 5 m
+  background audit result;
+- `(candidate A, candidate B, completion deadline)` stores the OBB/7 m
+  pairwise result over those same windows.
+
+The ordinary committed executor's full-horizon audit now calls the same
+candidate and pairwise audit primitives. A failed cache entry is reusable as
+well as a successful one. Diagnostics retain aggregate rejection counts and
+only a bounded example trace instead of serializing thousands of duplicate
+failures.
+
+The current-code seed-17 gate now returns deterministically at step 71 instead
+of remaining inside repeated search. RuleMaker supplies one joint LEFT
+proposal containing 4,821 short-horizon-safe combinations. Under the
+executor-identical initial tracking audit, all 4,821 contain at least one
+candidate outside the 0.1 rad heading envelope:
+
+```text
+candidate audit requests       9,639
+candidate audits computed        127
+candidate cache hits            9,512
+full-horizon result             infeasible
+failure                         committed_trajectory_tracking_deviation
+```
+
+Evidence:
+
+```text
+/tmp/bev-stage-census/round13_882b41_final_seed17_72.json
+/tmp/bev-stage-census/round13_882b41_seed23_80.json
+```
+
+The seed-23 run independently reaches the same step, action tuple and 4,821
+combination count. It was produced immediately before moving the initial
+tracking predicate into the candidate cache, and therefore shows the same
+infeasibility decomposed later as pairwise/preflight failures. The final
+seed-17 run is the authoritative current-code result.
+
+Consequently the search/caching objective of 13.882b4.1 is complete, but the
+S8 `2 x 80` behavioral gate is not: it is `0/2`, with the first mandatory seed
+already failing at step 71. Per the gate order, `10 x 200` and diagnostic-64
+were not started. The next fix must investigate why the post-exit RuleMaker
+requests a new all-LEFT maneuver while the three vehicles still differ from
+that path's preview heading by more than 0.1 rad; it must not undo the cache,
+relax the tracking envelope, or change the 5 m/7 m boundaries.

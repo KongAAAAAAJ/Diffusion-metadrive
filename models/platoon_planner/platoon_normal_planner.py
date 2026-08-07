@@ -565,6 +565,19 @@ class RolledJointTrajectory:
 
 
 @dataclass(frozen=True)
+class _CandidateFullHorizonAudit:
+    """Cached feedback-executable windows for one native candidate."""
+
+    agent_id: str
+    completion_deadline_s: float
+    elapsed_values_s: np.ndarray
+    dense_windows: tuple[np.ndarray, ...]
+    minimum_background_gap_m: float
+    minimum_background_gap_detail: Mapping[str, object] | None
+    debug: Mapping[str, object]
+
+
+@dataclass(frozen=True)
 class RankedJointPlan:
     proposal_id: int
     proposal_rank: int
@@ -669,6 +682,8 @@ class PlatoonNormalPlanner:
         self._last_debug: dict | None = None
         self._execution_counter = 0
         self._last_selected_candidates: dict[str, _TrajectoryCandidate] = {}
+        self._last_candidate_pools: dict[str, list[_TrajectoryCandidate]] = {}
+        self._last_joint_selection_order: tuple[tuple[int, ...], ...] = ()
 
     def plan(
         self,
@@ -676,10 +691,11 @@ class PlatoonNormalPlanner:
         agent_decisions,
         *,
         _pool_cache: dict | None = None,
-        _excluded_joint_selections: set[tuple[int, ...]] | None = None,
     ) -> dict[str, np.ndarray]:
         planning_started_at = time.perf_counter()
         self._last_selected_candidates = {}
+        self._last_candidate_pools = {}
+        self._last_joint_selection_order = ()
         agents = getattr(env, "agents", {}) or {}
         ordered_ids = [
             str(agent_id)
@@ -771,6 +787,8 @@ class PlatoonNormalPlanner:
             pools[agent_id] = pool
             debug[agent_id] = agent_debug
 
+        self._last_candidate_pools = pools
+
         missing = [agent_id for agent_id in ordered_ids if not pools[agent_id]]
         if missing:
             results = {}
@@ -807,7 +825,6 @@ class PlatoonNormalPlanner:
             agents,
             pools,
             formation_constraint_enabled=formation_constraint_enabled,
-            excluded_selections=_excluded_joint_selections,
         )
         debug["_joint"] = joint_debug
         if selection is None:
@@ -825,7 +842,31 @@ class PlatoonNormalPlanner:
             self._last_debug = debug
             return results
 
-        results = {}
+        results = self._materialize_joint_selection(
+            ordered_ids,
+            agents,
+            pools,
+            selection,
+            debug,
+        )
+        debug["_joint"]["planning_time_ms"] = (
+            time.perf_counter() - planning_started_at
+        ) * 1000.0
+        self._last_debug = debug
+        return results
+
+    def _materialize_joint_selection(
+        self,
+        ordered_ids: list[str],
+        agents: Mapping[str, object],
+        pools: Mapping[str, list[_TrajectoryCandidate]],
+        selection: tuple[int, ...],
+        debug: dict[str, dict],
+    ) -> dict[str, np.ndarray]:
+        """Activate one already-ranked native joint candidate selection."""
+
+        self._last_selected_candidates = {}
+        results: dict[str, np.ndarray] = {}
         for agent_id, selected_index in zip(ordered_ids, selection):
             candidate = pools[agent_id][selected_index]
             final_audit = self._candidate_kinematics_audit(
@@ -891,15 +932,18 @@ class PlatoonNormalPlanner:
             )
             for index, item in enumerate(debug[agent_id]["candidates"]):
                 item["selected"] = index == selected_index
-        debug["_joint"]["planning_time_ms"] = (
-            time.perf_counter() - planning_started_at
-        ) * 1000.0
-        self._last_debug = debug
         return results
 
     def plan_ranked(self, env, proposals) -> RankedJointPlan:
-        """Select the first RuleMaker-ranked proposal with a native joint plan."""
+        """Select the first proposal with one fully audited joint candidate.
 
+        Short-horizon-safe combinations are enumerated once in joint-cost
+        order.  Feedback-executable candidate windows and pairwise matrices
+        are then cached, so rejecting one combination never rebuilds an
+        already-audited candidate or pair.
+        """
+
+        ranked_started_at = time.perf_counter()
         ordered = sorted(
             tuple(proposals),
             key=lambda value: (int(value.rank), int(value.proposal_id)),
@@ -913,37 +957,39 @@ class PlatoonNormalPlanner:
                 debug=debug,
             )
         pool_cache: dict = {}
+        candidate_cache: dict[tuple, dict] = {}
+        pairwise_cache: dict[tuple, dict] = {}
         attempts: list[dict] = []
         pool_cache_hit_count = 0
         pool_request_count = 0
+        candidate_cache_hit_count = 0
+        candidate_cache_request_count = 0
+        pairwise_cache_hit_count = 0
+        pairwise_cache_request_count = 0
         last_attempt_debug: dict = {}
-        pending_proposals = list(ordered)
-        excluded_by_proposal: dict[int, set[tuple[int, ...]]] = {
-            int(proposal.proposal_id): set() for proposal in ordered
-        }
-        while pending_proposals:
-            proposal = pending_proposals.pop(0)
-            proposal_exclusions = excluded_by_proposal[
-                int(proposal.proposal_id)
-            ]
+        config = getattr(env, "config", {}) or {}
+        decision_dt_s = float(config.get("physics_world_step_size", 0.02)) * float(
+            config.get("decision_repeat", 5)
+        )
+
+        for proposal in ordered:
             trajectories = self.plan(
                 env,
                 proposal.decisions,
                 _pool_cache=pool_cache,
-                _excluded_joint_selections=proposal_exclusions,
             )
             attempt_debug = self.get_last_debug() or {}
             last_attempt_debug = attempt_debug
             joint_debug = attempt_debug.get("_joint", {})
-            per_agent_debug = [
-                value
+            per_agent_debug = {
+                str(key): value
                 for key, value in attempt_debug.items()
                 if key != "_joint" and isinstance(value, Mapping)
-            ]
+            }
             pool_request_count += len(per_agent_debug)
             pool_cache_hit_count += sum(
                 int(bool(value.get("pool_cache_hit", False)))
-                for value in per_agent_debug
+                for value in per_agent_debug.values()
             )
             attempt = {
                 "proposal_id": int(proposal.proposal_id),
@@ -955,15 +1001,16 @@ class PlatoonNormalPlanner:
                 },
                 "fallback_reason": joint_debug.get("fallback_reason"),
                 "missing_agents": list(joint_debug.get("missing_agents", ())),
-                "native_feasible": not bool(
-                    joint_debug.get("fallback_used", True)
+                "native_feasible": False,
+                "short_horizon_combination_count": int(
+                    len(self._last_joint_selection_order)
                 ),
-                "joint_retry_index": int(len(proposal_exclusions)),
-                "excluded_joint_combination_count": int(
-                    len(proposal_exclusions)
-                ),
+                "joint_candidate_attempt_count": 0,
+                "joint_candidate_attempts": [],
+                "joint_candidate_rejections_by_reason": {},
+                "first_joint_candidate_rejection_by_reason": {},
                 "agent_diagnostics": {
-                    str(agent_id): {
+                    agent_id: {
                         "fallback_reason": value.get("fallback_reason"),
                         "raw_candidate_count": int(
                             value.get("raw_candidate_count", 0) or 0
@@ -971,68 +1018,269 @@ class PlatoonNormalPlanner:
                         "generated_valid_candidate_count": int(
                             value.get("generated_valid_candidate_count", 0) or 0
                         ),
+                        "candidate_count": int(
+                            value.get("candidate_count", 0) or 0
+                        ),
                         "road_rejection_count": int(
                             value.get("road_rejection_count", 0) or 0
                         ),
                         "background_gap_rejection_count": int(
                             value.get("background_gap_rejection_count", 0) or 0
                         ),
-                        "best_rejected_background_gap_m": value.get(
-                            "best_rejected_background_gap_m"
-                        ),
-                        "best_rejected_background_profile": copy.deepcopy(
-                            value.get("best_rejected_background_profile")
-                        ),
-                        "road_rejections_by_reason": dict(
-                            value.get("road_rejections_by_reason", {}) or {}
-                        ),
-                        "first_road_rejection": copy.deepcopy(
-                            value.get("first_road_rejection")
-                        ),
-                        "first_committed_road_rejection": copy.deepcopy(
-                            value.get("first_committed_road_rejection")
-                        ),
-                        "committed_road_rejections_by_duration": dict(
-                            value.get(
-                                "committed_road_rejections_by_duration", {}
-                            )
-                            or {}
-                        ),
-                        "committed_first_rejection_by_duration": copy.deepcopy(
-                            value.get(
-                                "committed_first_rejection_by_duration", {}
-                            )
-                        ),
-                        "lane_end_rejection_count": int(
-                            value.get("lane_end_rejection_count", 0) or 0
-                        ),
-                        "dense_dynamics_rejection_count": int(
-                            value.get(
-                                "dense_dynamics_rejection_count", 0
-                            )
-                            or 0
-                        ),
-                        "best_rejected_dense_dynamics": copy.deepcopy(
-                            value.get("best_rejected_dense_dynamics")
-                        ),
                         "kinematic_rejection_count": int(
                             value.get("kinematic_rejection_count", 0) or 0
                         ),
-                        "kinematic_rejections_by_reason": dict(
-                            value.get("kinematic_rejections_by_reason", {}) or {}
-                        ),
                     }
-                    for agent_id, value in attempt_debug.items()
-                    if agent_id != "_joint" and isinstance(value, Mapping)
+                    for agent_id, value in per_agent_debug.items()
                 },
             }
             attempts.append(attempt)
-            if not attempt["native_feasible"]:
+
+            def record_candidate_attempt(candidate_attempt: dict) -> None:
+                attempt["joint_candidate_attempt_count"] += 1
+                result = str(candidate_attempt.get("result", "unknown"))
+                if result == "rejected":
+                    rejection = candidate_attempt.get("rejection", {}) or {}
+                    reason = str(rejection.get("reason", "unknown"))
+                    counts = attempt["joint_candidate_rejections_by_reason"]
+                    counts[reason] = int(counts.get(reason, 0)) + 1
+                    first = attempt[
+                        "first_joint_candidate_rejection_by_reason"
+                    ]
+                    first.setdefault(reason, copy.deepcopy(candidate_attempt))
+                if (
+                    len(attempt["joint_candidate_attempts"]) < 16
+                    or result == "selected"
+                ):
+                    attempt["joint_candidate_attempts"].append(
+                        copy.deepcopy(candidate_attempt)
+                    )
+
+            if bool(joint_debug.get("fallback_used", True)):
                 continue
 
+            ordered_ids = list(self._last_candidate_pools)
+            agents = getattr(env, "agents", {}) or {}
+            pools = self._last_candidate_pools
+            selections = self._last_joint_selection_order
+            committed_agents = tuple(
+                agent_id
+                for agent_id, decision in proposal.decisions.items()
+                if int(decision.get("action", 0)) != 0
+            )
+            if not committed_agents:
+                selection = tuple(
+                    int(attempt_debug[agent_id]["best_index"])
+                    for agent_id in ordered_ids
+                )
+                selected_trajectories = trajectories
+                execution_plan = None
+                selected_full_debug = None
+            else:
+                selected_trajectories = None
+                execution_plan = None
+                selection = None
+                selected_full_debug = None
+                audit_executor = JointTrajectoryExecutor(self)
+                for selection_rank, candidate_indices in enumerate(selections):
+                    selected_candidates = {
+                        agent_id: pools[agent_id][candidate_index]
+                        for agent_id, candidate_index in zip(
+                            ordered_ids, candidate_indices
+                        )
+                    }
+                    deadline = max(
+                        float(
+                            selected_candidates[agent_id].lane_change_start_delay_s
+                        )
+                        + float(
+                            selected_candidates[agent_id].lane_change_duration_s
+                        )
+                        for agent_id in committed_agents
+                    )
+                    deadline_key = round(float(deadline), 6)
+                    specs: dict[str, TrajectoryExecutionSpec] = {}
+                    candidate_audits: dict[str, _CandidateFullHorizonAudit] = {}
+                    candidate_attempt = {
+                        "selection_rank": int(selection_rank),
+                        "selected_indices": [int(value) for value in candidate_indices],
+                        "completion_deadline_s": float(deadline),
+                        "candidate_cache_hits": 0,
+                        "pairwise_cache_hits": 0,
+                    }
+                    rejection = None
+                    for agent_id in ordered_ids:
+                        candidate = selected_candidates[agent_id]
+                        key = (str(agent_id), id(candidate), deadline_key)
+                        candidate_cache_request_count += 1
+                        cached = candidate_cache.get(key)
+                        if cached is None:
+                            try:
+                                spec = self._build_execution_spec(
+                                    env,
+                                    agent_id,
+                                    candidate,
+                                    selected_candidate_index=int(
+                                        candidate_indices[
+                                            ordered_ids.index(agent_id)
+                                        ]
+                                    ),
+                                    maximum_time_s=(
+                                        deadline + self.HORIZON_S + decision_dt_s
+                                    ),
+                                )
+                                audit = audit_executor.audit_candidate_full_horizon(
+                                    env,
+                                    agent_id,
+                                    spec,
+                                    completion_deadline_s=deadline,
+                                )
+                                cached = {"spec": spec, "audit": audit, "error": None}
+                            except (NormalPlannerKinematicError, CommittedTrajectoryError) as exc:
+                                cached = {
+                                    "spec": None,
+                                    "audit": None,
+                                    "error": {
+                                        "reason": getattr(
+                                            exc,
+                                            "reason_code",
+                                            "execution_geometry_invalid",
+                                        ),
+                                        "message": str(exc),
+                                        "debug": copy.deepcopy(
+                                            getattr(exc, "debug", {})
+                                        ),
+                                    },
+                                }
+                            candidate_cache[key] = cached
+                        else:
+                            candidate_cache_hit_count += 1
+                            candidate_attempt["candidate_cache_hits"] += 1
+                        if cached["error"] is not None:
+                            rejection = dict(cached["error"])
+                            rejection["agent_id"] = str(agent_id)
+                            break
+                        specs[agent_id] = cached["spec"]
+                        candidate_audits[agent_id] = cached["audit"]
+
+                    pair_results: dict[str, dict] = {}
+                    if rejection is None:
+                        for first_index, first_id in enumerate(ordered_ids):
+                            for second_id in ordered_ids[first_index + 1 :]:
+                                first_candidate = selected_candidates[first_id]
+                                second_candidate = selected_candidates[second_id]
+                                key = (
+                                    str(first_id),
+                                    id(first_candidate),
+                                    str(second_id),
+                                    id(second_candidate),
+                                    deadline_key,
+                                )
+                                pairwise_cache_request_count += 1
+                                cached_pair = pairwise_cache.get(key)
+                                if cached_pair is None:
+                                    try:
+                                        result = audit_executor.audit_pairwise_full_horizon(
+                                            env,
+                                            candidate_audits[first_id],
+                                            candidate_audits[second_id],
+                                        )
+                                        cached_pair = {"result": result, "error": None}
+                                    except CommittedTrajectoryError as exc:
+                                        cached_pair = {
+                                            "result": None,
+                                            "error": {
+                                                "reason": str(exc.reason_code),
+                                                "message": str(exc),
+                                                "debug": copy.deepcopy(exc.debug),
+                                            },
+                                        }
+                                    pairwise_cache[key] = cached_pair
+                                else:
+                                    pairwise_cache_hit_count += 1
+                                    candidate_attempt["pairwise_cache_hits"] += 1
+                                if cached_pair["error"] is not None:
+                                    rejection = dict(cached_pair["error"])
+                                    break
+                                pair_results[f"{first_id}:{second_id}"] = (
+                                    cached_pair["result"]
+                                )
+                            if rejection is not None:
+                                break
+
+                    if rejection is not None:
+                        candidate_attempt["result"] = "rejected"
+                        candidate_attempt["rejection"] = rejection
+                        record_candidate_attempt(candidate_attempt)
+                        continue
+
+                    selected_trajectories = self._materialize_joint_selection(
+                        ordered_ids,
+                        agents,
+                        pools,
+                        tuple(candidate_indices),
+                        attempt_debug,
+                    )
+                    selection = tuple(int(value) for value in candidate_indices)
+                    next_execution_id = int(self._execution_counter + 1)
+                    start_step = int(
+                        getattr(env, "_scenario_step_count", 0) or 0
+                    )
+                    execution_plan = JointTrajectoryExecutionPlan(
+                        execution_id=next_execution_id,
+                        proposal_id=int(proposal.proposal_id),
+                        proposal_rank=int(proposal.rank),
+                        start_step=start_step,
+                        start_time_s=float(start_step * decision_dt_s),
+                        rule_actions={
+                            agent_id: int(decision.get("action", 0))
+                            for agent_id, decision in proposal.decisions.items()
+                        },
+                        agent_specs=specs,
+                        committed_agents=committed_agents,
+                        completion_deadline_s=float(deadline),
+                    )
+                    try:
+                        preflight_executor = JointTrajectoryExecutor(self)
+                        preflight_executor.start(env, execution_plan)
+                        preflight_executor.roll(env)
+                    except CommittedTrajectoryError as exc:
+                        candidate_attempt["result"] = "rejected"
+                        candidate_attempt["rejection"] = {
+                            "reason": str(exc.reason_code),
+                            "message": str(exc),
+                            "debug": copy.deepcopy(exc.debug),
+                        }
+                        record_candidate_attempt(candidate_attempt)
+                        execution_plan = None
+                        selected_trajectories = None
+                        selection = None
+                        continue
+                    self._execution_counter = next_execution_id
+                    candidate_attempt["result"] = "selected"
+                    record_candidate_attempt(candidate_attempt)
+                    selected_full_debug = {
+                        "audit": "cached_full_committed_rolling_horizon",
+                        "candidate_audits": {
+                            agent_id: dict(audit.debug)
+                            for agent_id, audit in candidate_audits.items()
+                        },
+                        "pairwise": pair_results,
+                    }
+                    break
+
+                if selected_trajectories is None or selection is None:
+                    attempt["fallback_reason"] = (
+                        "all_full_horizon_joint_candidates_infeasible"
+                    )
+                    continue
+
             local: dict[str, np.ndarray] = {}
-            indices: dict[str, int] = {}
-            for agent_id, trajectory in trajectories.items():
+            indices = {
+                agent_id: int(candidate_index)
+                for agent_id, candidate_index in zip(ordered_ids, selection)
+            }
+            for agent_id, trajectory in selected_trajectories.items():
                 vehicle = env.agents[agent_id]
                 origin = np.asarray(
                     [
@@ -1045,121 +1293,37 @@ class PlatoonNormalPlanner:
                 local[agent_id] = world_trajectory_to_ego_local(
                     trajectory, origin
                 )
-                indices[agent_id] = int(attempt_debug[agent_id]["best_index"])
-            attempt_debug["_ranked"] = {
+            attempt["native_feasible"] = True
+            attempt["fallback_reason"] = None
+            attempt["selected_indices"] = list(selection)
+            attempt_debug["_joint"]["selected_indices"] = list(selection)
+            if selected_full_debug is not None:
+                attempt["execution_preflight"] = "passed"
+                attempt["execution_full_horizon_audit"] = selected_full_debug
+            ranked_debug = {
                 "proposal_attempts": attempts,
                 "selected_proposal_id": int(proposal.proposal_id),
                 "selected_proposal_rank": int(proposal.rank),
                 "pool_cache_entry_count": len(pool_cache),
                 "pool_request_count": int(pool_request_count),
                 "pool_cache_hit_count": int(pool_cache_hit_count),
+                "candidate_audit_cache_entry_count": len(candidate_cache),
+                "candidate_audit_request_count": int(
+                    candidate_cache_request_count
+                ),
+                "candidate_audit_cache_hit_count": int(
+                    candidate_cache_hit_count
+                ),
+                "pairwise_cache_entry_count": len(pairwise_cache),
+                "pairwise_request_count": int(pairwise_cache_request_count),
+                "pairwise_cache_hit_count": int(pairwise_cache_hit_count),
+                "ranked_planning_time_ms": (
+                    time.perf_counter() - ranked_started_at
+                )
+                * 1000.0,
             }
+            attempt_debug["_ranked"] = ranked_debug
             self._last_debug = attempt_debug
-            committed_agents = tuple(
-                agent_id
-                for agent_id, decision in proposal.decisions.items()
-                if int(decision.get("action", 0)) != 0
-            )
-            execution_plan = None
-            if committed_agents:
-                self._execution_counter += 1
-                config = getattr(env, "config", {}) or {}
-                decision_dt_s = float(
-                    config.get("physics_world_step_size", 0.02)
-                ) * float(config.get("decision_repeat", 5))
-                deadline = max(
-                    float(self._last_selected_candidates[agent_id].lane_change_start_delay_s)
-                    + float(self._last_selected_candidates[agent_id].lane_change_duration_s)
-                    for agent_id in committed_agents
-                )
-                try:
-                    specs = {
-                        agent_id: self._build_execution_spec(
-                            env,
-                            agent_id,
-                            self._last_selected_candidates[agent_id],
-                            selected_candidate_index=indices[agent_id],
-                            maximum_time_s=(
-                                deadline + self.HORIZON_S + decision_dt_s
-                            ),
-                        )
-                        for agent_id in trajectories
-                    }
-                except NormalPlannerKinematicError as exc:
-                    attempt["native_feasible"] = False
-                    attempt["fallback_reason"] = "execution_geometry_invalid"
-                    attempt["execution_geometry_error"] = str(exc)
-                    attempt_debug["_ranked"] = {
-                        "proposal_attempts": attempts,
-                        "selected_proposal_id": None,
-                        "selected_proposal_rank": None,
-                        "pool_cache_entry_count": len(pool_cache),
-                        "pool_request_count": int(pool_request_count),
-                        "pool_cache_hit_count": int(pool_cache_hit_count),
-                    }
-                    self._last_debug = attempt_debug
-                    rejected_selection = tuple(
-                        indices[agent_id] for agent_id in trajectories
-                    )
-                    proposal_exclusions.add(rejected_selection)
-                    attempt["rejected_joint_selection"] = list(
-                        rejected_selection
-                    )
-                    pending_proposals.insert(0, proposal)
-                    continue
-                start_step = int(getattr(env, "_scenario_step_count", 0) or 0)
-                execution_plan = JointTrajectoryExecutionPlan(
-                    execution_id=int(self._execution_counter),
-                    proposal_id=int(proposal.proposal_id),
-                    proposal_rank=int(proposal.rank),
-                    start_step=start_step,
-                    start_time_s=float(start_step * decision_dt_s),
-                    rule_actions={
-                        agent_id: int(decision.get("action", 0))
-                        for agent_id, decision in proposal.decisions.items()
-                    },
-                    agent_specs=specs,
-                    committed_agents=committed_agents,
-                    completion_deadline_s=float(deadline),
-                )
-                try:
-                    preflight_executor = JointTrajectoryExecutor(self)
-                    preflight_executor.start(env, execution_plan)
-                    preflight_executor.roll(env)
-                    initial_preflight_debug = (
-                        preflight_executor.get_last_debug()
-                    )
-                    full_horizon_debug = (
-                        preflight_executor.audit_full_horizon(env)
-                    )
-                except CommittedTrajectoryError as exc:
-                    attempt["native_feasible"] = False
-                    attempt["fallback_reason"] = "execution_preflight_failed"
-                    attempt["execution_preflight_reason"] = str(exc.reason_code)
-                    attempt["execution_preflight_debug"] = copy.deepcopy(
-                        exc.debug
-                    )
-                    attempt_debug["_ranked"] = {
-                        "proposal_attempts": attempts,
-                        "selected_proposal_id": None,
-                        "selected_proposal_rank": None,
-                        "pool_cache_entry_count": len(pool_cache),
-                        "pool_request_count": int(pool_request_count),
-                        "pool_cache_hit_count": int(pool_cache_hit_count),
-                    }
-                    self._last_debug = attempt_debug
-                    rejected_selection = tuple(
-                        indices[agent_id] for agent_id in trajectories
-                    )
-                    proposal_exclusions.add(rejected_selection)
-                    attempt["rejected_joint_selection"] = list(
-                        rejected_selection
-                    )
-                    pending_proposals.insert(0, proposal)
-                    continue
-                attempt["execution_preflight"] = "passed"
-                attempt["execution_preflight_debug"] = initial_preflight_debug
-                attempt["execution_full_horizon_audit"] = full_horizon_debug
             return RankedJointPlan(
                 proposal_id=int(proposal.proposal_id),
                 proposal_rank=int(proposal.rank),
@@ -1167,7 +1331,7 @@ class PlatoonNormalPlanner:
                 decisions=proposal.decisions,
                 trajectories_world={
                     key: np.ascontiguousarray(value, dtype=np.float32)
-                    for key, value in trajectories.items()
+                    for key, value in selected_trajectories.items()
                 },
                 trajectories_local=local,
                 selected_candidate_indices=indices,
@@ -1190,6 +1354,16 @@ class PlatoonNormalPlanner:
             "pool_cache_entry_count": len(pool_cache),
             "pool_request_count": int(pool_request_count),
             "pool_cache_hit_count": int(pool_cache_hit_count),
+            "candidate_audit_cache_entry_count": len(candidate_cache),
+            "candidate_audit_request_count": int(candidate_cache_request_count),
+            "candidate_audit_cache_hit_count": int(candidate_cache_hit_count),
+            "pairwise_cache_entry_count": len(pairwise_cache),
+            "pairwise_request_count": int(pairwise_cache_request_count),
+            "pairwise_cache_hit_count": int(pairwise_cache_hit_count),
+            "ranked_planning_time_ms": (
+                time.perf_counter() - ranked_started_at
+            )
+            * 1000.0,
             "reason_code": reason_code,
         }
         last_attempt_debug["_ranked"] = debug
@@ -2638,7 +2812,6 @@ class PlatoonNormalPlanner:
         pools: Mapping[str, list[_TrajectoryCandidate]],
         *,
         formation_constraint_enabled: bool = True,
-        excluded_selections: set[tuple[int, ...]] | None = None,
     ) -> tuple[tuple[int, ...] | None, dict]:
         combination_count = 0
         pairwise_conflict_count = 0
@@ -2700,18 +2873,11 @@ class PlatoonNormalPlanner:
             if not prefixes:
                 break
 
-        excluded = set(excluded_selections or ())
-        excluded_combination_count = 0
-        best_selection: tuple[int, ...] | None = None
-        best_score = float("inf")
+        ranked_selections: list[tuple[float, tuple[int, ...]]] = []
         for selection in prefixes:
             if len(selection) != len(ordered_ids):
                 continue
             selection = tuple(int(value) for value in selection)
-            if selection in excluded:
-                excluded_combination_count += 1
-                continue
-            combination_count += 1
             chosen = [
                 pools[agent_id][candidate_index]
                 for agent_id, candidate_index in zip(ordered_ids, selection)
@@ -2724,16 +2890,23 @@ class PlatoonNormalPlanner:
                     agents,
                     chosen,
                 )
-            if score < best_score:
-                best_score = float(score)
-                best_selection = tuple(int(value) for value in selection)
+            ranked_selections.append((float(score), selection))
+        ranked_selections.sort(key=lambda value: (value[0], value[1]))
+        self._last_joint_selection_order = tuple(
+            selection for _score, selection in ranked_selections
+        )
+        combination_count = len(ranked_selections)
+        if ranked_selections:
+            best_score, best_selection = ranked_selections[0]
+        else:
+            best_score, best_selection = None, None
         return best_selection, {
             "fallback_used": best_selection is None,
             "fallback_reason": (
                 "no_safe_joint_combination" if best_selection is None else None
             ),
             "combination_count": int(combination_count),
-            "excluded_combination_count": int(excluded_combination_count),
+            "excluded_combination_count": 0,
             "pairwise_conflict_count": int(pairwise_conflict_count),
             "pairwise_conflict_pair_count": int(conflict_pair_count),
             "pairwise_conflict_counts_by_pair": conflict_counts_by_pair,
@@ -2747,7 +2920,8 @@ class PlatoonNormalPlanner:
             "selected_indices": (
                 None if best_selection is None else list(best_selection)
             ),
-            "selected_score": None if best_selection is None else float(best_score),
+            "selected_score": best_score,
+            "ranked_combination_count": int(len(ranked_selections)),
         }
 
     def _joint_formation_penalty(
@@ -4514,220 +4688,48 @@ class JointTrajectoryExecutor:
         return copy.deepcopy(self._last_debug)
 
     def audit_full_horizon(self, env) -> dict:
-        """Recursively audit every four-second window before commitment.
-
-        The simulation advances an ideal tracked state by one decision step
-        using the exact feedback-executable window builder used by ``roll``.
-        Background actors remain anchored at the real admission state and are
-        predicted at absolute execution times, so the last audited window ends
-        at ``completion_deadline + HORIZON_S``.
-        """
+        """Audit cached per-candidate windows and their pairwise matrices."""
 
         plan = self._plan
         if plan is None:
             raise RuntimeError("no committed joint trajectory is active")
-        config = getattr(env, "config", {}) or {}
-        decision_dt_s = float(config.get("physics_world_step_size", 0.02)) * float(
-            config.get("decision_repeat", 5)
-        )
-        if not np.isclose(
-            decision_dt_s,
-            self.planner.DENSE_DT_S,
-            atol=1.0e-9,
-        ):
-            raise CommittedTrajectoryError(
-                "full-horizon audit requires the planner decision timestep",
-                reason_code="committed_trajectory_kinematic_infeasible",
-                debug={
-                    "decision_dt_s": decision_dt_s,
-                    "planner_dense_dt_s": self.planner.DENSE_DT_S,
-                },
+        candidate_audits = {
+            agent_id: self.audit_candidate_full_horizon(
+                env,
+                agent_id,
+                spec,
+                completion_deadline_s=plan.completion_deadline_s,
             )
+            for agent_id, spec in plan.agent_specs.items()
+        }
         agents = getattr(env, "agents", {}) or {}
-        states: dict[str, dict[str, object]] = {}
-        for agent_id, spec in plan.agent_specs.items():
-            vehicle = agents.get(agent_id)
-            if vehicle is None:
-                raise CommittedTrajectoryError(
-                    "full-horizon audit is missing a platoon agent",
-                    reason_code="committed_trajectory_tracking_deviation",
-                    debug={"agent_id": agent_id},
-                )
-            pose = np.asarray(
-                [
-                    float(vehicle.position[0]),
-                    float(vehicle.position[1]),
-                    float(getattr(vehicle, "heading_theta", 0.0)),
-                ],
-                dtype=np.float64,
-            )
-            actual_arc, _ = project_point_to_path_arc(
-                pose[:2], spec.spatial_path_world[:, :2], spec.path_arc_m
-            )
-            states[agent_id] = {
-                "pose": pose,
-                "speed_mps": max(
-                    float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
-                    0.0,
-                ),
-                "arc_m": float(actual_arc),
-            }
-
-        elapsed_values = np.arange(
-            0.0,
-            float(plan.completion_deadline_s)
-            + 0.5 * decision_dt_s,
-            decision_dt_s,
-            dtype=np.float64,
-        )
-        minimum_background_gap = float("inf")
-        minimum_background_detail = None
         minimum_platoon_gap = float("inf")
-        windows_checked = 0
-
-        def fail(reason_code: str, message: str, detail: Mapping[str, object]):
-            debug = {
-                "audit": "full_committed_rolling_horizon",
-                "coverage_end_s": float(plan.completion_deadline_s)
-                + self.planner.HORIZON_S,
-                "windows_checked": int(windows_checked),
-                **dict(detail),
-            }
-            raise CommittedTrajectoryError(
-                message,
-                reason_code=reason_code,
-                debug=debug,
-            )
-
-        for elapsed_s in elapsed_values:
-            dense_by_agent: dict[str, np.ndarray] = {}
-            next_states: dict[str, dict[str, object]] = {}
-            absolute_times = elapsed_s + (
-                np.arange(0, 41, dtype=np.float64) * self.planner.DENSE_DT_S
-            )
-            for agent_id, spec in plan.agent_specs.items():
-                vehicle = agents[agent_id]
-                state = states[agent_id]
-                pose = np.asarray(state["pose"], dtype=np.float64)
-                speed = float(state["speed_mps"])
-                actual_arc = float(state["arc_m"])
-                try:
-                    reference, dense, _output, _local_output, dense_arc = (
-                        self._build_feedback_executable_window(
-                            spec,
-                            current_pose=pose,
-                            current_speed_mps=speed,
-                            current_path_arc_m=actual_arc,
-                            elapsed_s=float(elapsed_s),
-                        )
-                    )
-                except LongitudinalReferenceError as exc:
-                    fail(
-                        "committed_trajectory_kinematic_infeasible",
-                        "full-horizon longitudinal reference cannot be rolled",
-                        {
-                            "agent_id": agent_id,
-                            "elapsed_s": float(elapsed_s),
-                            "longitudinal_reference_error": str(exc),
-                        },
-                    )
-                footprint_valid, footprint_detail = self._footprint_road_audit(
-                    env, vehicle, dense, spec
-                )
-                if not footprint_valid:
-                    fail(
-                        "committed_trajectory_out_of_road",
-                        "full-horizon window leaves the road",
-                        {
-                            "agent_id": agent_id,
-                            "elapsed_s": float(elapsed_s),
-                            "road_audit": footprint_detail,
-                        },
-                    )
-                background = self.planner._predicted_obstacles(
+        ordered_ids = tuple(plan.agent_specs)
+        pair_debug: dict[str, dict] = {}
+        for first_index, first_id in enumerate(ordered_ids):
+            for second_id in ordered_ids[first_index + 1 :]:
+                result = self.audit_pairwise_full_horizon(
                     env,
-                    vehicle,
-                    absolute_times,
-                    include_platoon=False,
+                    candidate_audits[first_id],
+                    candidate_audits[second_id],
                 )
-                collision_names = self.planner._collision_names_against_predictions(
-                    dense,
-                    self.planner._vehicle_dimensions(vehicle),
-                    background,
+                minimum_platoon_gap = min(
+                    minimum_platoon_gap,
+                    float(result["minimum_gap_m"]),
                 )
-                gap_detail = minimum_dense_background_gap_detail(
-                    dense,
-                    self.planner._vehicle_dimensions(vehicle),
-                    background,
-                )
-                gap = float(gap_detail["minimum_gap_m"])
-                if gap < minimum_background_gap:
-                    minimum_background_gap = gap
-                    minimum_background_detail = {
-                        **gap_detail,
-                        "agent_id": agent_id,
-                        "window_elapsed_s": float(elapsed_s),
-                        "absolute_execution_time_s": (
-                            None
-                            if gap_detail.get("time_index") is None
-                            else float(elapsed_s)
-                            + float(gap_detail["time_index"])
-                            * self.planner.DENSE_DT_S
-                        ),
-                    }
-                if collision_names or gap < self.planner.background_safe_gap_m - 1e-6:
-                    fail(
-                        "committed_trajectory_background_unsafe",
-                        "full-horizon window violates background safety",
-                        {
-                            "agent_id": agent_id,
-                            "elapsed_s": float(elapsed_s),
-                            "collision_objects": collision_names,
-                            "minimum_background_gap_m": gap,
-                            "minimum_background_gap_detail": gap_detail,
-                        },
-                    )
-                next_speed, _ = reference.sample_speed_acceleration_at_time(
-                    decision_dt_s
-                )
-                next_states[agent_id] = {
-                    "pose": np.ascontiguousarray(dense[1], dtype=np.float64),
-                    "speed_mps": float(next_speed),
-                    "arc_m": float(dense_arc[1]),
-                }
-                dense_by_agent[agent_id] = dense
-
-            ordered_ids = list(plan.agent_specs)
-            for first_index, first_id in enumerate(ordered_ids):
-                for second_id in ordered_ids[first_index + 1 :]:
-                    pair_gap = self._minimum_pair_gap(
-                        dense_by_agent[first_id],
-                        self.planner._vehicle_dimensions(agents[first_id]),
-                        dense_by_agent[second_id],
-                        self.planner._vehicle_dimensions(agents[second_id]),
-                    )
-                    minimum_platoon_gap = min(minimum_platoon_gap, pair_gap)
-                    if (
-                        self.planner._trajectory_pair_collides(
-                            dense_by_agent[first_id],
-                            agents[first_id],
-                            dense_by_agent[second_id],
-                            agents[second_id],
-                        )
-                        or pair_gap < self.planner.platoon_safe_gap_m - 1e-6
-                    ):
-                        fail(
-                            "committed_trajectory_pairwise_unsafe",
-                            "full-horizon window violates platoon safety",
-                            {
-                                "pair": [first_id, second_id],
-                                "elapsed_s": float(elapsed_s),
-                                "minimum_gap_m": float(pair_gap),
-                            },
-                        )
-            states = next_states
-            windows_checked += 1
-
+                pair_debug[f"{first_id}:{second_id}"] = result
+        minimum_background_gap = min(
+            value.minimum_background_gap_m
+            for value in candidate_audits.values()
+        )
+        minimum_background_detail = next(
+            value.minimum_background_gap_detail
+            for value in candidate_audits.values()
+            if value.minimum_background_gap_m == minimum_background_gap
+        )
+        windows_checked = min(
+            len(value.dense_windows) for value in candidate_audits.values()
+        )
         debug = {
             "audit": "full_committed_rolling_horizon",
             "windows_checked": int(windows_checked),
@@ -4737,9 +4739,301 @@ class JointTrajectoryExecutor:
             "minimum_background_gap_m": float(minimum_background_gap),
             "minimum_background_gap_detail": minimum_background_detail,
             "minimum_platoon_gap_m": float(minimum_platoon_gap),
+            "candidate_audit_count": int(len(candidate_audits)),
+            "pairwise_audit_count": int(len(pair_debug)),
+            "pairwise": pair_debug,
         }
         self._last_debug = debug
         return copy.deepcopy(debug)
+
+    def audit_candidate_full_horizon(
+        self,
+        env,
+        agent_id: str,
+        spec: TrajectoryExecutionSpec,
+        *,
+        completion_deadline_s: float,
+    ) -> _CandidateFullHorizonAudit:
+        """Build and audit one candidate's rolling windows exactly once."""
+
+        config = getattr(env, "config", {}) or {}
+        decision_dt_s = float(config.get("physics_world_step_size", 0.02)) * float(
+            config.get("decision_repeat", 5)
+        )
+        if not np.isclose(decision_dt_s, self.planner.DENSE_DT_S, atol=1.0e-9):
+            raise CommittedTrajectoryError(
+                "full-horizon audit requires the planner decision timestep",
+                reason_code="committed_trajectory_kinematic_infeasible",
+                debug={
+                    "agent_id": str(agent_id),
+                    "decision_dt_s": decision_dt_s,
+                    "planner_dense_dt_s": self.planner.DENSE_DT_S,
+                },
+            )
+        vehicle = (getattr(env, "agents", {}) or {}).get(str(agent_id))
+        if vehicle is None:
+            raise CommittedTrajectoryError(
+                "full-horizon audit is missing a platoon agent",
+                reason_code="committed_trajectory_tracking_deviation",
+                debug={"agent_id": str(agent_id)},
+            )
+        pose = np.asarray(
+            [
+                float(vehicle.position[0]),
+                float(vehicle.position[1]),
+                float(getattr(vehicle, "heading_theta", 0.0)),
+            ],
+            dtype=np.float64,
+        )
+        try:
+            actual_arc, _ = project_point_to_path_arc(
+                pose[:2], spec.spatial_path_world[:, :2], spec.path_arc_m
+            )
+        except LongitudinalReferenceError as exc:
+            raise CommittedTrajectoryError(
+                "candidate cannot be projected onto its committed path",
+                reason_code="committed_trajectory_tracking_deviation",
+                debug={"agent_id": str(agent_id), "projection_error": str(exc)},
+            ) from exc
+        speed = max(
+            float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
+            0.0,
+        )
+        planned_now = self._sample_spec(spec, np.asarray([0.0]))[0]
+        tracking = self._tracking_error(vehicle, planned_now)
+        projected_path_pose = sample_path_at_arc(
+            spec.spatial_path_world,
+            spec.path_arc_m,
+            np.asarray([actual_arc], dtype=np.float64),
+        )[0]
+        path_tracking = self._tracking_error(vehicle, projected_path_pose)
+        tracking["lateral_m"] = float(path_tracking["lateral_m"])
+        heading_error, preview_heading, preview_heading_arc = (
+            self._preview_aligned_heading_error(
+                vehicle,
+                spec,
+                actual_arc_m=float(actual_arc),
+                lookahead_m=float(np.clip(0.6 * speed, 3.0, 8.0)),
+            )
+        )
+        tracking["heading_rad"] = float(heading_error)
+        tracking["preview_reference_heading_rad"] = float(preview_heading)
+        tracking["preview_reference_arc_m"] = float(preview_heading_arc)
+        if (
+            abs(float(tracking["longitudinal_m"]))
+            > self.TRACKING_LONGITUDINAL_LIMIT_M
+            or abs(float(tracking["lateral_m"]))
+            > self.TRACKING_LATERAL_LIMIT_M
+            or abs(float(tracking["heading_rad"]))
+            > self.TRACKING_HEADING_LIMIT_RAD
+        ):
+            raise CommittedTrajectoryError(
+                "candidate starts outside the committed tracking envelope",
+                reason_code="committed_trajectory_tracking_deviation",
+                debug={
+                    "audit": "candidate_full_committed_rolling_horizon",
+                    "agent_id": str(agent_id),
+                    "elapsed_s": 0.0,
+                    "tracking_error": tracking,
+                },
+            )
+        elapsed_values = np.arange(
+            0.0,
+            float(completion_deadline_s) + 0.5 * decision_dt_s,
+            decision_dt_s,
+            dtype=np.float64,
+        )
+        dense_windows: list[np.ndarray] = []
+        minimum_background_gap = float("inf")
+        minimum_background_detail = None
+
+        def fail(reason_code: str, message: str, detail: Mapping[str, object]):
+            raise CommittedTrajectoryError(
+                message,
+                reason_code=reason_code,
+                debug={
+                    "audit": "candidate_full_committed_rolling_horizon",
+                    "agent_id": str(agent_id),
+                    "coverage_end_s": float(completion_deadline_s)
+                    + self.planner.HORIZON_S,
+                    "windows_checked": int(len(dense_windows)),
+                    **dict(detail),
+                },
+            )
+
+        for elapsed_s in elapsed_values:
+            absolute_times = elapsed_s + self.planner._dense_times
+            try:
+                reference, dense, output, local_output, dense_arc = (
+                    self._build_feedback_executable_window(
+                        spec,
+                        current_pose=pose,
+                        current_speed_mps=speed,
+                        current_path_arc_m=actual_arc,
+                        elapsed_s=float(elapsed_s),
+                    )
+                )
+            except LongitudinalReferenceError as exc:
+                fail(
+                    "committed_trajectory_kinematic_infeasible",
+                    "full-horizon longitudinal reference cannot be rolled",
+                    {
+                        "elapsed_s": float(elapsed_s),
+                        "longitudinal_reference_error": str(exc),
+                    },
+                )
+            world_audit = validate_trajectory_kinematics(
+                output, speed, pose, HardModeMaskConfig()
+            )
+            local_audit = validate_trajectory_kinematics(
+                local_output,
+                speed,
+                np.zeros((3,), dtype=np.float64),
+                HardModeMaskConfig(),
+            )
+            if not world_audit.valid or not local_audit.valid:
+                fail(
+                    "committed_trajectory_kinematic_infeasible",
+                    "full-horizon window violates the trajectory contract",
+                    {
+                        "elapsed_s": float(elapsed_s),
+                        "world_violations": list(world_audit.violations),
+                        "local_violations": list(local_audit.violations),
+                    },
+                )
+            footprint_valid, footprint_detail = self._footprint_road_audit(
+                env, vehicle, dense, spec
+            )
+            if not footprint_valid:
+                fail(
+                    "committed_trajectory_out_of_road",
+                    "full-horizon window leaves the road",
+                    {
+                        "elapsed_s": float(elapsed_s),
+                        "road_audit": footprint_detail,
+                    },
+                )
+            background = self.planner._predicted_obstacles(
+                env,
+                vehicle,
+                absolute_times,
+                include_platoon=False,
+            )
+            collision_names = self.planner._collision_names_against_predictions(
+                dense,
+                self.planner._vehicle_dimensions(vehicle),
+                background,
+            )
+            gap_detail = minimum_dense_background_gap_detail(
+                dense,
+                self.planner._vehicle_dimensions(vehicle),
+                background,
+            )
+            gap = float(gap_detail["minimum_gap_m"])
+            if gap < minimum_background_gap:
+                minimum_background_gap = gap
+                minimum_background_detail = {
+                    **gap_detail,
+                    "agent_id": str(agent_id),
+                    "window_elapsed_s": float(elapsed_s),
+                    "absolute_execution_time_s": (
+                        None
+                        if gap_detail.get("time_index") is None
+                        else float(elapsed_s)
+                        + float(gap_detail["time_index"])
+                        * self.planner.DENSE_DT_S
+                    ),
+                }
+            if collision_names or gap < self.planner.background_safe_gap_m - 1e-6:
+                fail(
+                    "committed_trajectory_background_unsafe",
+                    "full-horizon window violates background safety",
+                    {
+                        "elapsed_s": float(elapsed_s),
+                        "collision_objects": collision_names,
+                        "minimum_background_gap_m": gap,
+                        "minimum_background_gap_detail": gap_detail,
+                    },
+                )
+            dense_windows.append(np.ascontiguousarray(dense, dtype=np.float64))
+            next_speed, _ = reference.sample_speed_acceleration_at_time(
+                decision_dt_s
+            )
+            pose = np.ascontiguousarray(dense[1], dtype=np.float64)
+            speed = float(next_speed)
+            actual_arc = float(dense_arc[1])
+
+        elapsed_values.setflags(write=False)
+        for dense in dense_windows:
+            dense.setflags(write=False)
+        debug = {
+            "audit": "candidate_full_committed_rolling_horizon",
+            "agent_id": str(agent_id),
+            "windows_checked": int(len(dense_windows)),
+            "coverage_start_s": 0.0,
+            "coverage_end_s": float(completion_deadline_s)
+            + self.planner.HORIZON_S,
+            "minimum_background_gap_m": float(minimum_background_gap),
+            "minimum_background_gap_detail": minimum_background_detail,
+        }
+        return _CandidateFullHorizonAudit(
+            agent_id=str(agent_id),
+            completion_deadline_s=float(completion_deadline_s),
+            elapsed_values_s=elapsed_values,
+            dense_windows=tuple(dense_windows),
+            minimum_background_gap_m=float(minimum_background_gap),
+            minimum_background_gap_detail=minimum_background_detail,
+            debug=debug,
+        )
+
+    def audit_pairwise_full_horizon(
+        self,
+        env,
+        first: _CandidateFullHorizonAudit,
+        second: _CandidateFullHorizonAudit,
+    ) -> dict:
+        """Audit and summarize one cached candidate-pair matrix entry."""
+
+        if not np.array_equal(first.elapsed_values_s, second.elapsed_values_s):
+            raise ValueError("pairwise candidate audits must share one time grid")
+        agents = getattr(env, "agents", {}) or {}
+        first_vehicle = agents[first.agent_id]
+        second_vehicle = agents[second.agent_id]
+        minimum_gap = float("inf")
+        for window_index, (first_dense, second_dense) in enumerate(
+            zip(first.dense_windows, second.dense_windows)
+        ):
+            gap = self._minimum_pair_gap(
+                first_dense,
+                self.planner._vehicle_dimensions(first_vehicle),
+                second_dense,
+                self.planner._vehicle_dimensions(second_vehicle),
+            )
+            minimum_gap = min(minimum_gap, float(gap))
+            collision = self.planner._trajectory_pair_collides(
+                first_dense,
+                first_vehicle,
+                second_dense,
+                second_vehicle,
+            )
+            if collision or gap < self.planner.platoon_safe_gap_m - 1e-6:
+                raise CommittedTrajectoryError(
+                    "full-horizon window violates platoon safety",
+                    reason_code="committed_trajectory_pairwise_unsafe",
+                    debug={
+                        "audit": "pairwise_full_committed_rolling_horizon",
+                        "pair": [first.agent_id, second.agent_id],
+                        "window_index": int(window_index),
+                        "elapsed_s": float(first.elapsed_values_s[window_index]),
+                        "minimum_gap_m": float(gap),
+                        "obb_collision": bool(collision),
+                    },
+                )
+        return {
+            "pair": [first.agent_id, second.agent_id],
+            "windows_checked": int(len(first.dense_windows)),
+            "minimum_gap_m": float(minimum_gap),
+        }
 
     def roll(self, env) -> RolledJointTrajectory:
         plan = self._plan

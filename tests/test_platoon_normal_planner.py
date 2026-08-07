@@ -769,8 +769,16 @@ def test_ranked_planner_backtracks_after_full_horizon_candidate_rejection(
 
     audited_indices = []
 
-    def fake_full_audit(executor, _env):
-        index = executor.plan.agent_specs["agent0"].selected_candidate_index
+    def fake_candidate_audit(
+        _executor,
+        _env,
+        _agent_id,
+        spec,
+        *,
+        completion_deadline_s,
+    ):
+        del completion_deadline_s
+        index = spec.selected_candidate_index
         audited_indices.append(index)
         if index == 0:
             raise CommittedTrajectoryError(
@@ -778,12 +786,21 @@ def test_ranked_planner_backtracks_after_full_horizon_candidate_rejection(
                 reason_code="committed_trajectory_background_unsafe",
                 debug={"elapsed_s": 1.0, "minimum_background_gap_m": 4.9},
             )
-        return {"audit": "full_committed_rolling_horizon", "windows_checked": 41}
+        return SimpleNamespace(
+            debug={
+                "audit": "candidate_full_committed_rolling_horizon",
+                "windows_checked": 41,
+            }
+        )
 
     planner = PlatoonNormalPlanner()
     monkeypatch.setattr(planner, "_generate_candidate_pool", fake_pool)
     monkeypatch.setattr(planner, "_build_execution_spec", fake_execution_spec)
-    monkeypatch.setattr(JointTrajectoryExecutor, "audit_full_horizon", fake_full_audit)
+    monkeypatch.setattr(
+        JointTrajectoryExecutor,
+        "audit_candidate_full_horizon",
+        fake_candidate_audit,
+    )
     decision = {
         "agent0": {
             "action": 1,
@@ -802,9 +819,182 @@ def test_ranked_planner_backtracks_after_full_horizon_candidate_rejection(
     assert result.selected_candidate_indices == {"agent0": 1}
     assert audited_indices == [0, 1]
     attempts = planner.get_last_debug()["_ranked"]["proposal_attempts"]
-    assert attempts[0]["rejected_joint_selection"] == [0]
-    assert attempts[1]["joint_retry_index"] == 1
-    assert attempts[1]["execution_preflight"] == "passed"
+    candidate_attempts = attempts[0]["joint_candidate_attempts"]
+    assert candidate_attempts[0]["selected_indices"] == [0]
+    assert candidate_attempts[0]["result"] == "rejected"
+    assert candidate_attempts[1]["selected_indices"] == [1]
+    assert candidate_attempts[1]["result"] == "selected"
+    assert attempts[0]["execution_preflight"] == "passed"
+
+
+def test_ranked_planner_caches_candidate_audits_and_pairwise_entries(
+    monkeypatch,
+):
+    env, _plan = _execution_fixture()
+    env._scenario_step_count = 0
+    lane = env.agents["agent0"].lane
+    dense_times = np.arange(41, dtype=np.float64) * 0.1
+    spec_times = np.arange(0.0, 8.2, 0.1, dtype=np.float64)
+
+    def make_candidate(vehicle, score):
+        start_x = float(vehicle.position[0])
+        dense = np.column_stack(
+            (
+                start_x + 5.0 * dense_times,
+                np.zeros_like(dense_times),
+                np.zeros_like(dense_times),
+            )
+        )
+        return _TrajectoryCandidate(
+            dense=dense,
+            output=dense[np.arange(5, 41, 5)].astype(np.float32),
+            score=float(score),
+            acceleration_mps2=0.0,
+            acceleration_duration_s=4.0,
+            recovery_acceleration_mps2=0.0,
+            lane_change_duration_s=4.0,
+            lane_change_start_delay_s=0.0,
+            stop_time_s=None,
+            terminal_progress_m=20.0,
+            execution_parameters={"action": -1},
+        )
+
+    pools = {}
+
+    def fake_pool(_env, vehicle, *_args, **_kwargs):
+        count = 2 if vehicle.name == "agent2" else 1
+        pool = [make_candidate(vehicle, index) for index in range(count)]
+        pools[vehicle.name] = pool
+        return pool, {
+            "fallback_used": False,
+            "fallback_reason": None,
+            "candidate_count": count,
+            "candidates": [
+                PlatoonNormalPlanner._candidate_debug(value) for value in pool
+            ],
+        }
+
+    def fake_spec(
+        _env,
+        agent_id,
+        _candidate,
+        *,
+        selected_candidate_index,
+        maximum_time_s,
+    ):
+        del _env, maximum_time_s
+        start_x = float(env.agents[agent_id].position[0])
+        trajectory = np.column_stack(
+            (
+                start_x + 5.0 * spec_times,
+                np.zeros_like(spec_times),
+                np.zeros_like(spec_times),
+            )
+        )
+        return TrajectoryExecutionSpec(
+            agent_id=agent_id,
+            source_lane_index=lane.index,
+            continuation_lane_index=(),
+            target_lane_index=lane.index,
+            start_s=start_x,
+            start_d=0.0,
+            end_d=0.0,
+            initial_speed_mps=5.0,
+            acceleration_mps2=0.0,
+            acceleration_duration_s=4.0,
+            recovery_acceleration_mps2=0.0,
+            lane_change_duration_s=4.0,
+            lane_change_start_delay_s=0.0,
+            default_heading=0.0,
+            selected_candidate_index=int(selected_candidate_index),
+            rule_target_point=(start_x + 20.0, 0.0),
+            sample_times_s=spec_times,
+            trajectory_world=trajectory,
+        )
+
+    candidate_calls = []
+    pair_calls = []
+
+    def fake_candidate_audit(
+        _executor,
+        _env,
+        agent_id,
+        spec,
+        *,
+        completion_deadline_s,
+    ):
+        del completion_deadline_s
+        key = (agent_id, int(spec.selected_candidate_index))
+        candidate_calls.append(key)
+        return SimpleNamespace(
+            agent_id=agent_id,
+            selected_candidate_index=int(spec.selected_candidate_index),
+            debug={"agent_id": agent_id},
+        )
+
+    def fake_pair_audit(_executor, _env, first, second):
+        key = (
+            first.agent_id,
+            first.selected_candidate_index,
+            second.agent_id,
+            second.selected_candidate_index,
+        )
+        pair_calls.append(key)
+        if second.agent_id == "agent2" and second.selected_candidate_index == 0:
+            raise CommittedTrajectoryError(
+                "first rear candidate conflicts",
+                reason_code="committed_trajectory_pairwise_unsafe",
+                debug={"pair": [first.agent_id, second.agent_id]},
+            )
+        return {"minimum_gap_m": 8.0}
+
+    planner = PlatoonNormalPlanner(joint_pair_weight=0.0)
+    monkeypatch.setattr(planner, "_generate_candidate_pool", fake_pool)
+    monkeypatch.setattr(planner, "_build_execution_spec", fake_spec)
+    monkeypatch.setattr(
+        JointTrajectoryExecutor,
+        "audit_candidate_full_horizon",
+        fake_candidate_audit,
+    )
+    monkeypatch.setattr(
+        JointTrajectoryExecutor,
+        "audit_pairwise_full_horizon",
+        fake_pair_audit,
+    )
+    monkeypatch.setattr(JointTrajectoryExecutor, "roll", lambda *_args: None)
+    decisions = {
+        agent_id: {
+            "action": -1,
+            "target_point": np.asarray([20.0, 3.5], dtype=np.float32),
+            "source_lane_index": lane.index,
+            "target_lane_index": lane.index,
+            "formation_constraint_enabled": False,
+        }
+        for agent_id in env.agents
+    }
+
+    result = planner.plan_ranked(
+        env,
+        (JointActionProposal(0, 0, 1.0, decisions),),
+    )
+
+    assert result.selected_candidate_indices == {
+        "agent0": 0,
+        "agent1": 0,
+        "agent2": 1,
+    }
+    assert candidate_calls == [
+        ("agent0", 0),
+        ("agent1", 0),
+        ("agent2", 0),
+        ("agent2", 1),
+    ]
+    ranked = planner.get_last_debug()["_ranked"]
+    assert ranked["candidate_audit_request_count"] == 6
+    assert ranked["candidate_audit_cache_hit_count"] == 2
+    assert ranked["pairwise_request_count"] == 5
+    assert ranked["pairwise_cache_hit_count"] == 1
+    assert len(pair_calls) == 4
 
 
 def test_planner_rejects_empty_hard_mode_action_metadata():
