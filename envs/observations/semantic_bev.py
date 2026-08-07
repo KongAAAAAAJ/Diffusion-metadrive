@@ -436,6 +436,19 @@ class MetaDriveSceneAdapter:
             boundaries.append(_xy_array(left, name="lane.left_boundary"))
             boundaries.append(_xy_array(right, name="lane.right_boundary"))
 
+        for surface in _deduplicate_objects(
+            getattr(road_network, "drivable_geometry_overlays", ()) or ()
+        ):
+            try:
+                polygon = _xy_array(
+                    getattr(surface, "polygon"),
+                    name="drivable_geometry_overlay.polygon",
+                )
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if polygon.shape[0] >= 3:
+                drivable.append(polygon)
+
         self._cached_network_id = network_id
         self._cached_drivable = tuple(drivable)
         self._cached_centers = tuple(centers)

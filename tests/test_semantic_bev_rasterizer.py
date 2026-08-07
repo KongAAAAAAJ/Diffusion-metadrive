@@ -271,3 +271,19 @@ def test_metadrive_adapter_uses_navigation_not_rule_maker_output() -> None:
     oldest_px = _pixel(SemanticBEVRasterizer(), 16.0, 3.5)
     assert bev_before[BEVChannel.BACKGROUND_T0][current_px] == 255
     assert bev_before[BEVChannel.BACKGROUND_T_MINUS_1_0][oldest_px] == 255
+
+
+def test_metadrive_adapter_adds_junction_overlays_only_to_drivable_geometry() -> None:
+    route_lane = _FakeLane(0.0, ("A", "B", 0))
+    network = _FakeRoadNetwork([route_lane])
+    overlay = SimpleNamespace(
+        polygon=_rectangle(10.0, 20.0, -5.0, -2.0),
+    )
+    network.drivable_geometry_overlays = (overlay,)
+
+    drivable, centers, boundaries = MetaDriveSceneAdapter()._map_geometry(network)
+
+    assert len(drivable) == 2
+    assert len(centers) == 1
+    assert len(boundaries) == 2
+    np.testing.assert_array_equal(drivable[-1], overlay.polygon)

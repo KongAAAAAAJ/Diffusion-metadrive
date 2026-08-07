@@ -5,6 +5,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from metadrive.component.lane.junction_lane import (
+    build_lane_seam_drivable_surface,
+    build_lane_seam_transition_centerline,
+)
 from models.platoon_planner.platoon_normal_planner import (
     CommittedTrajectoryError,
     JointTrajectoryExecutor,
@@ -71,6 +75,9 @@ class AngledLane:
 
     def heading_theta_at(self, longitudinal: float):  # noqa: ARG002
         return self.heading
+
+    def width_at(self, longitudinal: float):  # noqa: ARG002
+        return self.width
 
 
 class FakeRoadNetwork:
@@ -389,6 +396,52 @@ def test_dense_footprint_accepts_connected_lane_seam_without_boundary_relaxation
 
     assert connected == (True, {"reason": "passed"})
     assert disconnected[0] is False
+
+
+def test_offset_g_block_seam_uses_explicit_drivable_surface_without_widening():
+    predecessor = AngledLane(("A", "B", 2), (0.0, 0.0), 0.0, length=20.0)
+    successor = AngledLane(("B", "C", 0), (20.0, -3.5), 0.0, length=30.0)
+    transition = build_lane_seam_transition_centerline(
+        predecessor, successor, transition_m=8.0, step_m=0.1
+    )
+    surface = build_lane_seam_drivable_surface(
+        predecessor, successor, transition_m=8.0, step_m=0.1
+    )
+    surface.index = ("junction", "surface", 0)
+
+    without_surface = audit_dense_footprint_on_lanes(
+        transition,
+        (predecessor, successor),
+        (5.74, 2.3),
+        dense_dt_s=0.1,
+    )
+    predecessor.junction_drivable_surfaces = (surface,)
+    with_surface = audit_dense_footprint_on_lanes(
+        transition,
+        (predecessor, successor),
+        (5.74, 2.3),
+        dense_dt_s=0.1,
+    )
+
+    assert without_surface[0] is False
+    assert with_surface == (True, {"reason": "passed"})
+    assert surface.width == pytest.approx(3.5)
+    assert surface.need_lane_localization is False
+
+
+def test_offset_seam_path_does_not_backtrack_when_starting_inside_transition():
+    predecessor = AngledLane(("A", "B", 2), (0.0, 0.0), 0.0, length=20.0)
+    successor = AngledLane(("B", "C", 0), (20.0, -3.5), 0.0, length=30.0)
+
+    path = build_continuous_lane_chain_path(
+        (predecessor, successor),
+        start_s=16.0,
+        step_m=0.1,
+        seam_transition_m=8.0,
+    )
+
+    np.testing.assert_allclose(path[0, :2], predecessor.position(16.0, 0.0), atol=1e-8)
+    assert float(np.min(path[:, 0])) >= 16.0 - 1e-8
 
 
 def test_ranked_planner_uses_first_rule_rank_with_native_trajectory(monkeypatch):

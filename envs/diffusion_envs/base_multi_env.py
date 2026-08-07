@@ -202,12 +202,19 @@ class BaseMultiEnv(MultiAgentMetaDrive):
 
         lanes = []
         seen = set()
-        for lane in candidates:
+        pending = list(candidates)
+        while pending:
+            lane = pending.pop(0)
+            if lane is None:
+                continue
             lane_id = id(lane)
-            if lane is None or lane_id in seen:
+            if lane_id in seen:
                 continue
             seen.add(lane_id)
             lanes.append(lane)
+            pending.extend(
+                tuple(getattr(lane, "junction_drivable_surfaces", ()) or ())
+            )
         return lanes
 
     def _is_out_of_road(self, vehicle):

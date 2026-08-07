@@ -49,6 +49,15 @@ class MAHybridMap(PGMap):
             raise ValueError("hybrid_map_blocks_config is required when use_hybrid_map=True")
 
         self._config_generate(blocks_config, parent_node_path, physics_world)
+        overlays = tuple(
+            surface
+            for block in self.blocks
+            for surface in tuple(
+                getattr(block, "junction_drivable_surfaces", ()) or ()
+            )
+        )
+        self.drivable_geometry_overlays = overlays
+        self.road_network.drivable_geometry_overlays = overlays
         self.road_network.after_init()
 
 

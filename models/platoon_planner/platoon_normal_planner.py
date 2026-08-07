@@ -177,7 +177,9 @@ def audit_dense_footprint_on_lanes(
         raise ValueError("road footprint trajectory must be finite")
     valid_lanes = []
     seen_lane_keys = set()
-    for lane in lanes:
+    pending_lanes = list(lanes)
+    while pending_lanes:
+        lane = pending_lanes.pop(0)
         if lane is None:
             continue
         lane_index = tuple(getattr(lane, "index", ()) or ())
@@ -186,6 +188,9 @@ def audit_dense_footprint_on_lanes(
             continue
         seen_lane_keys.add(lane_key)
         valid_lanes.append(lane)
+        pending_lanes.extend(
+            tuple(getattr(lane, "junction_drivable_surfaces", ()) or ())
+        )
     if not valid_lanes:
         return False, {"reason": "no_execution_lanes"}
     length, width = (float(dimensions[0]), float(dimensions[1]))
@@ -217,7 +222,7 @@ def audit_dense_footprint_on_lanes(
                     continue
                 lane_coordinates.append(
                     {
-                        "lane_index": list(getattr(lane, "index", ())),
+                        "lane_index": list(getattr(lane, "index", ()) or ()),
                         "longitudinal_m": float(longitudinal),
                         "lateral_m": float(lateral),
                         "length_m": lane_length,

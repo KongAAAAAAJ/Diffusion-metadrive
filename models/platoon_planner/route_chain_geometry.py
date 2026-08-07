@@ -7,6 +7,10 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from metadrive.component.lane.junction_lane import (
+    build_lane_seam_transition_centerline,
+)
+
 
 class RouteChainGeometryError(ValueError):
     """Raised when a navigation lane chain cannot form a continuous path."""
@@ -48,40 +52,6 @@ def _lane_samples(
         heading = float(lane.heading_theta_at(float(value)))
         rows.append((float(point[0]), float(point[1]), heading))
     return np.asarray(rows, dtype=np.float64)
-
-
-def _hermite_join(
-    start: np.ndarray,
-    start_heading: float,
-    end: np.ndarray,
-    end_heading: float,
-    step_m: float,
-) -> np.ndarray:
-    chord = float(np.linalg.norm(end - start))
-    if chord <= 1.0e-8:
-        return np.asarray([[start[0], start[1], start_heading]], dtype=np.float64)
-    tangent_length = max(chord * 0.75, 1.0)
-    tangent_start = tangent_length * np.asarray(
-        [math.cos(start_heading), math.sin(start_heading)], dtype=np.float64
-    )
-    tangent_end = tangent_length * np.asarray(
-        [math.cos(end_heading), math.sin(end_heading)], dtype=np.float64
-    )
-    count = max(int(math.ceil(chord / step_m)) * 2, 4)
-    u = np.linspace(0.0, 1.0, count + 1)
-    h00 = 2.0 * u**3 - 3.0 * u**2 + 1.0
-    h10 = u**3 - 2.0 * u**2 + u
-    h01 = -2.0 * u**3 + 3.0 * u**2
-    h11 = u**3 - u**2
-    xy = (
-        h00[:, None] * start[None, :]
-        + h10[:, None] * tangent_start[None, :]
-        + h01[:, None] * end[None, :]
-        + h11[:, None] * tangent_end[None, :]
-    )
-    delta = np.gradient(xy, axis=0)
-    heading = np.arctan2(delta[:, 1], delta[:, 0])
-    return np.column_stack((xy, heading))
 
 
 def build_continuous_lane_chain_path(
@@ -145,15 +115,14 @@ def build_continuous_lane_chain_path(
         join_start_s = lane_length - back
         join_end_s = ahead
         pieces.append(_lane_samples(lane, current_start, join_start_s, step_m, lateral))
-        join_start = np.asarray(lane.position(join_start_s, 0.0)[:2], dtype=np.float64)
-        join_end = np.asarray(successor.position(join_end_s, 0.0)[:2], dtype=np.float64)
         pieces.append(
-            _hermite_join(
-                join_start,
-                float(lane.heading_theta_at(join_start_s)),
-                join_end,
-                float(successor.heading_theta_at(join_end_s)),
-                step_m,
+            build_lane_seam_transition_centerline(
+                lane,
+                successor,
+                transition_m=float(seam_transition_m),
+                step_m=float(step_m),
+                predecessor_start_s=float(join_start_s),
+                successor_end_s=float(join_end_s),
             )
         )
         current_start = join_end_s

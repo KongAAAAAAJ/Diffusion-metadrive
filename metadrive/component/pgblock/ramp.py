@@ -2,6 +2,7 @@ import math
 import numpy as np
 
 from metadrive.component.lane.straight_lane import StraightLane
+from metadrive.component.lane.junction_lane import build_lane_seam_drivable_surface
 from metadrive.component.pgblock.create_pg_block_utils import ExtendStraightLane, CreateRoadFrom, CreateAdverseRoad, \
     create_bend_straight, create_extension
 from metadrive.component.pgblock.pg_block import PGBlock
@@ -653,6 +654,15 @@ class FreeOutRampOnStraight(FreeRamp):
         connect_road = Road(bend_1_road.end_node, self.add_road_node())
         self.block_network.add_lane(bend_1_road.start_node, bend_1_road.end_node, bend_1)
         self.block_network.add_lane(connect_road.start_node, connect_road.end_node, connect_part)
+        junction_surface = build_lane_seam_drivable_surface(dec_right_lane, bend_1)
+        junction_surface.index = (
+            f"{self.name}-junction",
+            f"{self.name}-junction-surface",
+            0,
+        )
+        self.junction_drivable_surfaces = (junction_surface,)
+        dec_right_lane.junction_drivable_surfaces = self.junction_drivable_surfaces
+        bend_1.junction_drivable_surfaces = self.junction_drivable_surfaces
         no_cross = (
             not check_lane_on_road(
                 self._global_network, bend_1, 0.95, ignore_intersection_checking=self.ignore_intersection_checking
