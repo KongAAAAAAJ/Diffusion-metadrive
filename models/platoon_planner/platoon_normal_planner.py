@@ -1103,6 +1103,12 @@ class PlatoonNormalPlanner:
                     preflight_executor = JointTrajectoryExecutor(self)
                     preflight_executor.start(env, execution_plan)
                     preflight_executor.roll(env)
+                    initial_preflight_debug = (
+                        preflight_executor.get_last_debug()
+                    )
+                    full_horizon_debug = (
+                        preflight_executor.audit_full_horizon(env)
+                    )
                 except CommittedTrajectoryError as exc:
                     attempt["native_feasible"] = False
                     attempt["fallback_reason"] = "execution_preflight_failed"
@@ -1121,9 +1127,8 @@ class PlatoonNormalPlanner:
                     self._last_debug = attempt_debug
                     continue
                 attempt["execution_preflight"] = "passed"
-                attempt["execution_preflight_debug"] = (
-                    preflight_executor.get_last_debug()
-                )
+                attempt["execution_preflight_debug"] = initial_preflight_debug
+                attempt["execution_full_horizon_audit"] = full_horizon_debug
             return RankedJointPlan(
                 proposal_id=int(proposal.proposal_id),
                 proposal_rank=int(proposal.rank),
@@ -4469,6 +4474,234 @@ class JointTrajectoryExecutor:
     def get_last_debug(self) -> dict | None:
         return copy.deepcopy(self._last_debug)
 
+    def audit_full_horizon(self, env) -> dict:
+        """Recursively audit every four-second window before commitment.
+
+        The simulation advances an ideal tracked state by one decision step
+        using the exact feedback-executable window builder used by ``roll``.
+        Background actors remain anchored at the real admission state and are
+        predicted at absolute execution times, so the last audited window ends
+        at ``completion_deadline + HORIZON_S``.
+        """
+
+        plan = self._plan
+        if plan is None:
+            raise RuntimeError("no committed joint trajectory is active")
+        config = getattr(env, "config", {}) or {}
+        decision_dt_s = float(config.get("physics_world_step_size", 0.02)) * float(
+            config.get("decision_repeat", 5)
+        )
+        if not np.isclose(
+            decision_dt_s,
+            self.planner.DENSE_DT_S,
+            atol=1.0e-9,
+        ):
+            raise CommittedTrajectoryError(
+                "full-horizon audit requires the planner decision timestep",
+                reason_code="committed_trajectory_kinematic_infeasible",
+                debug={
+                    "decision_dt_s": decision_dt_s,
+                    "planner_dense_dt_s": self.planner.DENSE_DT_S,
+                },
+            )
+        agents = getattr(env, "agents", {}) or {}
+        states: dict[str, dict[str, object]] = {}
+        for agent_id, spec in plan.agent_specs.items():
+            vehicle = agents.get(agent_id)
+            if vehicle is None:
+                raise CommittedTrajectoryError(
+                    "full-horizon audit is missing a platoon agent",
+                    reason_code="committed_trajectory_tracking_deviation",
+                    debug={"agent_id": agent_id},
+                )
+            pose = np.asarray(
+                [
+                    float(vehicle.position[0]),
+                    float(vehicle.position[1]),
+                    float(getattr(vehicle, "heading_theta", 0.0)),
+                ],
+                dtype=np.float64,
+            )
+            actual_arc, _ = project_point_to_path_arc(
+                pose[:2], spec.spatial_path_world[:, :2], spec.path_arc_m
+            )
+            states[agent_id] = {
+                "pose": pose,
+                "speed_mps": max(
+                    float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
+                    0.0,
+                ),
+                "arc_m": float(actual_arc),
+            }
+
+        elapsed_values = np.arange(
+            0.0,
+            float(plan.completion_deadline_s)
+            + 0.5 * decision_dt_s,
+            decision_dt_s,
+            dtype=np.float64,
+        )
+        minimum_background_gap = float("inf")
+        minimum_background_detail = None
+        minimum_platoon_gap = float("inf")
+        windows_checked = 0
+
+        def fail(reason_code: str, message: str, detail: Mapping[str, object]):
+            debug = {
+                "audit": "full_committed_rolling_horizon",
+                "coverage_end_s": float(plan.completion_deadline_s)
+                + self.planner.HORIZON_S,
+                "windows_checked": int(windows_checked),
+                **dict(detail),
+            }
+            raise CommittedTrajectoryError(
+                message,
+                reason_code=reason_code,
+                debug=debug,
+            )
+
+        for elapsed_s in elapsed_values:
+            dense_by_agent: dict[str, np.ndarray] = {}
+            next_states: dict[str, dict[str, object]] = {}
+            absolute_times = elapsed_s + (
+                np.arange(0, 41, dtype=np.float64) * self.planner.DENSE_DT_S
+            )
+            for agent_id, spec in plan.agent_specs.items():
+                vehicle = agents[agent_id]
+                state = states[agent_id]
+                pose = np.asarray(state["pose"], dtype=np.float64)
+                speed = float(state["speed_mps"])
+                actual_arc = float(state["arc_m"])
+                try:
+                    reference, dense, _output, _local_output, dense_arc = (
+                        self._build_feedback_executable_window(
+                            spec,
+                            current_pose=pose,
+                            current_speed_mps=speed,
+                            current_path_arc_m=actual_arc,
+                            elapsed_s=float(elapsed_s),
+                        )
+                    )
+                except LongitudinalReferenceError as exc:
+                    fail(
+                        "committed_trajectory_kinematic_infeasible",
+                        "full-horizon longitudinal reference cannot be rolled",
+                        {
+                            "agent_id": agent_id,
+                            "elapsed_s": float(elapsed_s),
+                            "longitudinal_reference_error": str(exc),
+                        },
+                    )
+                footprint_valid, footprint_detail = self._footprint_road_audit(
+                    env, vehicle, dense, spec
+                )
+                if not footprint_valid:
+                    fail(
+                        "committed_trajectory_out_of_road",
+                        "full-horizon window leaves the road",
+                        {
+                            "agent_id": agent_id,
+                            "elapsed_s": float(elapsed_s),
+                            "road_audit": footprint_detail,
+                        },
+                    )
+                background = self.planner._predicted_obstacles(
+                    env,
+                    vehicle,
+                    absolute_times,
+                    include_platoon=False,
+                )
+                collision_names = self.planner._collision_names_against_predictions(
+                    dense,
+                    self.planner._vehicle_dimensions(vehicle),
+                    background,
+                )
+                gap_detail = minimum_dense_background_gap_detail(
+                    dense,
+                    self.planner._vehicle_dimensions(vehicle),
+                    background,
+                )
+                gap = float(gap_detail["minimum_gap_m"])
+                if gap < minimum_background_gap:
+                    minimum_background_gap = gap
+                    minimum_background_detail = {
+                        **gap_detail,
+                        "agent_id": agent_id,
+                        "window_elapsed_s": float(elapsed_s),
+                        "absolute_execution_time_s": (
+                            None
+                            if gap_detail.get("time_index") is None
+                            else float(elapsed_s)
+                            + float(gap_detail["time_index"])
+                            * self.planner.DENSE_DT_S
+                        ),
+                    }
+                if collision_names or gap < self.planner.background_safe_gap_m - 1e-6:
+                    fail(
+                        "committed_trajectory_background_unsafe",
+                        "full-horizon window violates background safety",
+                        {
+                            "agent_id": agent_id,
+                            "elapsed_s": float(elapsed_s),
+                            "collision_objects": collision_names,
+                            "minimum_background_gap_m": gap,
+                            "minimum_background_gap_detail": gap_detail,
+                        },
+                    )
+                next_speed, _ = reference.sample_speed_acceleration_at_time(
+                    decision_dt_s
+                )
+                next_states[agent_id] = {
+                    "pose": np.ascontiguousarray(dense[1], dtype=np.float64),
+                    "speed_mps": float(next_speed),
+                    "arc_m": float(dense_arc[1]),
+                }
+                dense_by_agent[agent_id] = dense
+
+            ordered_ids = list(plan.agent_specs)
+            for first_index, first_id in enumerate(ordered_ids):
+                for second_id in ordered_ids[first_index + 1 :]:
+                    pair_gap = self._minimum_pair_gap(
+                        dense_by_agent[first_id],
+                        self.planner._vehicle_dimensions(agents[first_id]),
+                        dense_by_agent[second_id],
+                        self.planner._vehicle_dimensions(agents[second_id]),
+                    )
+                    minimum_platoon_gap = min(minimum_platoon_gap, pair_gap)
+                    if (
+                        self.planner._trajectory_pair_collides(
+                            dense_by_agent[first_id],
+                            agents[first_id],
+                            dense_by_agent[second_id],
+                            agents[second_id],
+                        )
+                        or pair_gap < self.planner.platoon_safe_gap_m - 1e-6
+                    ):
+                        fail(
+                            "committed_trajectory_pairwise_unsafe",
+                            "full-horizon window violates platoon safety",
+                            {
+                                "pair": [first_id, second_id],
+                                "elapsed_s": float(elapsed_s),
+                                "minimum_gap_m": float(pair_gap),
+                            },
+                        )
+            states = next_states
+            windows_checked += 1
+
+        debug = {
+            "audit": "full_committed_rolling_horizon",
+            "windows_checked": int(windows_checked),
+            "coverage_start_s": 0.0,
+            "coverage_end_s": float(plan.completion_deadline_s)
+            + self.planner.HORIZON_S,
+            "minimum_background_gap_m": float(minimum_background_gap),
+            "minimum_background_gap_detail": minimum_background_detail,
+            "minimum_platoon_gap_m": float(minimum_platoon_gap),
+        }
+        self._last_debug = debug
+        return copy.deepcopy(debug)
+
     def roll(self, env) -> RolledJointTrajectory:
         plan = self._plan
         if plan is None:
@@ -4489,8 +4722,6 @@ class JointTrajectoryExecutor:
                 debug=debug,
             )
 
-        dense_offsets = np.arange(0, 41, dtype=np.float64) * self.planner.DENSE_DT_S
-        sparse_offsets = np.arange(1, 9, dtype=np.float64) * self.planner.OUTPUT_DT_S
         agents = getattr(env, "agents", {}) or {}
         dense_by_agent: dict[str, np.ndarray] = {}
         world: dict[str, np.ndarray] = {}
@@ -4612,62 +4843,19 @@ class JointTrajectoryExecutor:
                 dtype=np.float64,
             )
             try:
-                path_distance = np.diff(spec.path_arc_m)
-                path_heading_delta = np.abs(
-                    np.arctan2(
-                        np.sin(np.diff(spec.spatial_path_world[:, 2])),
-                        np.cos(np.diff(spec.spatial_path_world[:, 2])),
-                    )
-                )
-                path_curvature = path_heading_delta / np.maximum(
-                    path_distance, 1.0e-3
-                )
-                segment_speed_limit = np.where(
-                    path_curvature > 1.0e-6,
-                    np.sqrt(6.0 / np.maximum(path_curvature, 1.0e-6)),
-                    self.planner.MAX_SPEED_MPS,
-                )
-                path_speed_limit = np.concatenate(
-                    (segment_speed_limit[:1], segment_speed_limit)
-                )
-                path_speed_limit = np.clip(
-                    0.97 * path_speed_limit, 0.1, self.planner.MAX_SPEED_MPS
-                )
-                reference_speed_limit = np.interp(
-                    spec.reference_arc_m,
-                    spec.path_arc_m,
-                    path_speed_limit,
-                    left=float(path_speed_limit[0]),
-                    right=float(path_speed_limit[-1]),
-                )
-                longitudinal_reference = build_feedback_executable_profile(
-                    path_times_s=spec.sample_times_s,
-                    path_arc_m=spec.reference_arc_m,
-                    elapsed_s=elapsed_s,
-                    actual_arc_m=actual_arc,
-                    actual_speed_mps=speed,
-                    path_speed_limit_mps=reference_speed_limit,
-                    source="committed_roll",
-                )
-                dense_arc = np.interp(
-                    dense_offsets,
-                    longitudinal_reference.sample_times_s,
-                    longitudinal_reference.arc_position_m,
-                )
-                dense_future = sample_path_at_arc(
-                    spec.spatial_path_world,
-                    spec.path_arc_m,
-                    dense_arc[1:],
-                )
-                dense = np.concatenate((current_pose[None, :], dense_future), axis=0)
-                output = self._sample_executable_path_by_travel(
+                (
+                    longitudinal_reference,
+                    dense,
+                    output,
+                    local_output,
+                    dense_arc,
+                ) = self._build_feedback_executable_window(
                     spec,
                     current_pose=current_pose,
+                    current_speed_mps=speed,
                     current_path_arc_m=actual_arc,
-                    requested_arc_positions_m=(
-                        longitudinal_reference.arc_position_m
-                    ),
-                ).astype(np.float32)
+                    elapsed_s=elapsed_s,
+                )
             except LongitudinalReferenceError as exc:
                 self._raise(
                     plan,
@@ -4676,36 +4864,6 @@ class JointTrajectoryExecutor:
                     "committed_trajectory_kinematic_infeasible",
                     {"agent_id": agent_id, "longitudinal_reference_error": str(exc)},
                 )
-            local_output = world_trajectory_to_ego_local(output, current_pose)
-            executed_reference = trajectory_to_longitudinal_reference(
-                local_output,
-                speed,
-                source="committed_roll",
-            )
-            longitudinal_reference = LongitudinalTrackingReference(
-                sample_times_s=executed_reference.sample_times_s,
-                arc_position_m=(
-                    actual_arc + executed_reference.arc_position_m
-                ),
-                speed_mps=executed_reference.speed_mps,
-                acceleration_mps2=executed_reference.acceleration_mps2,
-                original_arc_error_m=(
-                    longitudinal_reference.original_arc_error_m
-                ),
-                stop_requested=executed_reference.stop_requested,
-                source="committed_roll",
-            )
-            dense_arc = np.interp(
-                dense_offsets,
-                longitudinal_reference.sample_times_s,
-                longitudinal_reference.arc_position_m,
-            )
-            dense_future = sample_path_at_arc(
-                spec.spatial_path_world,
-                spec.path_arc_m,
-                dense_arc[1:],
-            )
-            dense = np.concatenate((current_pose[None, :], dense_future), axis=0)
             world_audit = validate_trajectory_kinematics(
                 output, speed, current_pose, HardModeMaskConfig()
             )
@@ -5028,6 +5186,106 @@ class JointTrajectoryExecutor:
         heading = np.interp(query, spec.sample_times_s, headings)
         heading = np.arctan2(np.sin(heading), np.cos(heading))
         return np.column_stack((x, y, heading))
+
+    def _build_feedback_executable_window(
+        self,
+        spec: TrajectoryExecutionSpec,
+        *,
+        current_pose: np.ndarray,
+        current_speed_mps: float,
+        current_path_arc_m: float,
+        elapsed_s: float,
+    ) -> tuple[
+        LongitudinalTrackingReference,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]:
+        """Build the exact four-second window consumed by committed roll.
+
+        Both online execution and the full-horizon admission audit call this
+        method.  In particular, the float32 local trajectory reconstruction is
+        part of the contract; auditing the nominal candidate before this step
+        previously overstated S8 background clearance.
+        """
+
+        pose = np.asarray(current_pose, dtype=np.float64)
+        speed = float(current_speed_mps)
+        actual_arc = float(current_path_arc_m)
+        path_distance = np.diff(spec.path_arc_m)
+        path_heading_delta = np.abs(
+            np.arctan2(
+                np.sin(np.diff(spec.spatial_path_world[:, 2])),
+                np.cos(np.diff(spec.spatial_path_world[:, 2])),
+            )
+        )
+        path_curvature = path_heading_delta / np.maximum(
+            path_distance, 1.0e-3
+        )
+        segment_speed_limit = np.where(
+            path_curvature > 1.0e-6,
+            np.sqrt(6.0 / np.maximum(path_curvature, 1.0e-6)),
+            self.planner.MAX_SPEED_MPS,
+        )
+        path_speed_limit = np.concatenate(
+            (segment_speed_limit[:1], segment_speed_limit)
+        )
+        path_speed_limit = np.clip(
+            0.97 * path_speed_limit, 0.1, self.planner.MAX_SPEED_MPS
+        )
+        reference_speed_limit = np.interp(
+            spec.reference_arc_m,
+            spec.path_arc_m,
+            path_speed_limit,
+            left=float(path_speed_limit[0]),
+            right=float(path_speed_limit[-1]),
+        )
+        nominal_reference = build_feedback_executable_profile(
+            path_times_s=spec.sample_times_s,
+            path_arc_m=spec.reference_arc_m,
+            elapsed_s=float(elapsed_s),
+            actual_arc_m=actual_arc,
+            actual_speed_mps=speed,
+            path_speed_limit_mps=reference_speed_limit,
+            source="committed_roll",
+        )
+        output = self._sample_executable_path_by_travel(
+            spec,
+            current_pose=pose,
+            current_path_arc_m=actual_arc,
+            requested_arc_positions_m=nominal_reference.arc_position_m,
+        ).astype(np.float32)
+        local_output = world_trajectory_to_ego_local(output, pose)
+        reconstructed = trajectory_to_longitudinal_reference(
+            local_output,
+            speed,
+            source="committed_roll",
+        )
+        reference = LongitudinalTrackingReference(
+            sample_times_s=reconstructed.sample_times_s,
+            arc_position_m=actual_arc + reconstructed.arc_position_m,
+            speed_mps=reconstructed.speed_mps,
+            acceleration_mps2=reconstructed.acceleration_mps2,
+            original_arc_error_m=nominal_reference.original_arc_error_m,
+            stop_requested=reconstructed.stop_requested,
+            source="committed_roll",
+        )
+        dense_offsets = (
+            np.arange(0, 41, dtype=np.float64) * self.planner.DENSE_DT_S
+        )
+        dense_arc = np.interp(
+            dense_offsets,
+            reference.sample_times_s,
+            reference.arc_position_m,
+        )
+        dense_future = sample_path_at_arc(
+            spec.spatial_path_world,
+            spec.path_arc_m,
+            dense_arc[1:],
+        )
+        dense = np.concatenate((pose[None, :], dense_future), axis=0)
+        return reference, dense, output, local_output, dense_arc
 
     @staticmethod
     def _sample_executable_path_by_travel(

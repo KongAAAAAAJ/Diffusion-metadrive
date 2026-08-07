@@ -314,6 +314,90 @@ def test_joint_trajectory_executor_rejects_tracking_deviation():
     assert error.value.reason_code == "committed_trajectory_tracking_deviation"
 
 
+def test_full_horizon_audit_rejects_t4_safe_t5_unsafe_background_closure():
+    env = _env(agent_lane_id=1)
+    lane = env.agents["agent0"].lane
+    ego = _vehicle("agent0", 20.0, lane.y, lane, speed_km_h=18.0)
+    background = _vehicle(
+        "closing_background",
+        4.5,
+        lane.y,
+        lane,
+        speed_km_h=21.6,
+        velocity=(6.0, 0.0),
+    )
+    env.agents = {"agent0": ego}
+    env.config = {"physics_world_step_size": 0.02, "decision_repeat": 5}
+    env._scenario_step_count = 0
+    env.engine.traffic_manager = SimpleNamespace(
+        _traffic_vehicles=[background]
+    )
+    times = np.arange(0.0, 8.2, 0.1, dtype=np.float64)
+    trajectory = np.column_stack(
+        (
+            20.0 + 5.0 * times,
+            np.zeros_like(times),
+            np.zeros_like(times),
+        )
+    )
+    spec = TrajectoryExecutionSpec(
+        agent_id="agent0",
+        source_lane_index=lane.index,
+        continuation_lane_index=(),
+        target_lane_index=lane.index,
+        start_s=20.0,
+        start_d=0.0,
+        end_d=0.0,
+        initial_speed_mps=5.0,
+        acceleration_mps2=0.0,
+        acceleration_duration_s=4.0,
+        recovery_acceleration_mps2=0.0,
+        lane_change_duration_s=4.0,
+        lane_change_start_delay_s=0.0,
+        default_heading=0.0,
+        selected_candidate_index=0,
+        rule_target_point=(40.0, 0.0),
+        sample_times_s=times,
+        trajectory_world=trajectory,
+    )
+    plan = JointTrajectoryExecutionPlan(
+        execution_id=8,
+        proposal_id=3,
+        proposal_rank=0,
+        start_step=0,
+        start_time_s=0.0,
+        rule_actions={"agent0": 1},
+        agent_specs={"agent0": spec},
+        committed_agents=("agent0",),
+        completion_deadline_s=4.0,
+    )
+    executor = JointTrajectoryExecutor(PlatoonNormalPlanner())
+    executor.start(env, plan)
+
+    first_window = executor.roll(env)
+    assert first_window.debug["agents"]["agent0"][
+        "minimum_background_gap_m"
+    ] > 5.0
+
+    with pytest.raises(CommittedTrajectoryError) as error:
+        executor.audit_full_horizon(env)
+
+    assert error.value.reason_code == "committed_trajectory_background_unsafe"
+    assert error.value.debug["elapsed_s"] > 0.0
+    assert error.value.debug["minimum_background_gap_m"] < 5.0
+    assert error.value.debug["coverage_end_s"] == pytest.approx(8.0)
+
+    background.speed_km_h = 18.0
+    background.velocity = np.asarray([5.0, 0.0], dtype=np.float32)
+    safe_executor = JointTrajectoryExecutor(PlatoonNormalPlanner())
+    safe_executor.start(env, plan)
+    safe_debug = safe_executor.audit_full_horizon(env)
+
+    assert safe_debug["windows_checked"] == 41
+    assert safe_debug["coverage_end_s"] == pytest.approx(8.0)
+    assert safe_debug["minimum_background_gap_m"] > 5.0
+
+
 def test_default_hard_safety_gaps_match_collection_contract():
     planner = PlatoonNormalPlanner()
 

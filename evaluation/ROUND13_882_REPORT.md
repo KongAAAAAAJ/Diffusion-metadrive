@@ -168,3 +168,57 @@ Evidence:
 The 13.882b2 predictor investigation is complete.  S8 episode acceptance is
 still blocked, so the `10 x 200` gate and diagnostic-64 remain intentionally
 disabled.
+
+## 13.882b3: full committed rolling-horizon admission audit
+
+The committed executor's feedback-executable window construction is now a
+single shared implementation.  Both online `roll()` and plan admission use
+the same:
+
+- curvature-derived speed limit;
+- longitudinal feedback governor;
+- float32 world/local trajectory reconstruction;
+- spatial-path resampling.
+
+Before any commitment is registered, admission recursively advances an ideal
+tracked state in 0.1 s decision steps from `elapsed=0` through
+`completion_deadline`.  At every state it audits the next four-second window
+against road footprint, absolute-time background predictions, 5 m background
+clearance, three-agent OBB collision and 7 m platoon clearance.  The union of
+the windows therefore ends at `completion_deadline + 4 s`; it no longer ends
+at the first candidate's four-second horizon.
+
+A deterministic regression constructs a slower ego trajectory with a closing
+background actor for which the first four-second window remains above 5 m but
+the fifth second falls below 5 m.  The ordinary first `roll()` passes and the
+full admission audit rejects it before execution.  A matched-speed version
+checks all 41 windows and passes with coverage through 8.0 s.
+
+On the real S8 state, the old plan is now rejected at step 38 before an active
+execution is created:
+
+```text
+                                  seed 17       seed 23
+proposal step                     38            38
+full-audit window elapsed         0.9 s         0.9 s
+unsafe actor                      agent0        agent0
+minimum background gap           4.476696 m    4.476682 m
+relative dense index              28            28
+full coverage endpoint            10.5 s        10.5 s
+result                            proposal rejected before commitment
+```
+
+The RuleMaker currently supplies only the joint RIGHT exit proposal at this
+state, so the externally visible result is the strict typed rejection
+`all_rule_proposals_infeasible`.  This is the intended 13.882b3 behavior: the
+system no longer accepts the plan and then fails ten control steps later.
+It does not claim that S8 has become feasible.  A later S8 feasibility round
+must search/select a different native trajectory or adjust the explicit S8
+traffic design; it must not bypass this audit or relax the 5 m boundary.
+
+Evidence:
+
+```text
+/tmp/bev-stage-census/round13_882b3_seed17_v3.json
+/tmp/bev-stage-census/round13_882b3_seed23.json
+```
