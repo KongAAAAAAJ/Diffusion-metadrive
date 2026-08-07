@@ -176,6 +176,30 @@ def test_pid_preview_does_not_skip_initial_opposite_curve_direction() -> None:
     assert float(action[0]) > 0.0
 
 
+def test_pid_debug_separates_world_reference_tangent_and_actual_yaw_response() -> None:
+    trajectory = np.asarray(
+        [[4.0 * (index + 1), 0.2 * (index + 1), 0.05] for index in range(8)],
+        dtype=np.float32,
+    )
+    controller = PIDTrajectoryController({"pid_dt": 0.1})
+    vehicle = _FakeVehicle(heading=0.4, speed_km_h=20.0)
+
+    _, first = controller._single_control_with_debug(
+        "agent0", vehicle, trajectory, None
+    )
+    vehicle.heading_theta = 0.42
+    _, second = controller._single_control_with_debug(
+        "agent0", vehicle, trajectory, None
+    )
+
+    assert first["actual_yaw_rate_rad_s"] == pytest.approx(0.0)
+    assert second["actual_yaw_rate_rad_s"] == pytest.approx(0.2)
+    assert second["preview_reference_heading_world_rad"] == pytest.approx(
+        0.42 + second["preview_heading_rad"]
+    )
+    assert second["first_reference_heading_world_rad"] == pytest.approx(0.47)
+
+
 def test_lqr_follower_controller_records_lateral_debug_for_followers() -> None:
     shared_lane = _FakeLane()
     controller = LQRFollowerController()

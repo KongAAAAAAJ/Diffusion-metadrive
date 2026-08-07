@@ -1539,6 +1539,74 @@ def test_non_s7_left_lane_change_to_mainline_third_lane_is_not_marked_forced():
     assert "forced_lane_change" not in candidate
 
 
+def test_s6_locked_no_risk_keeps_lane_until_merge_conflict_is_detected(monkeypatch):
+    vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
+    env = _env_s7_merge(
+        vehicle,
+        lane_id=1,
+        scenario_id="S6_background_merge_in",
+        local_route="R6_mainline_merge_approach",
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+        locked_on_reset=True,
+    )
+
+    def fail_if_generic_scored(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("no-risk S6 must not use generic MOBIL ranking")
+
+    monkeypatch.setattr(rule_maker, "_best_locked_combo", fail_if_generic_scored)
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == 0
+    assert debug["risk_triggered"] is False
+    assert debug["action_search"]["strategy"] == "s6_no_risk_keep"
+    assert debug["action_search"]["final_feasibility_authority"] == "normal_planner"
+
+
+def test_s6_detected_risk_preserves_joint_action_search(monkeypatch):
+    vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
+    env = _env_s7_merge(
+        vehicle,
+        lane_id=1,
+        scenario_id="S6_background_merge_in",
+        local_route="R6_mainline_merge_approach",
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+        locked_on_reset=True,
+    )
+    monkeypatch.setattr(
+        rule_maker._risk_detector,
+        "detect",
+        lambda *args, **kwargs: {
+            "triggered": True,
+            "next_state": "EMERGENCY_INDEPENDENT",
+            "transition": "LOCKED_TO_EMERGENCY_INDEPENDENT",
+        },
+    )
+
+    def choose_right(*, candidate_sets, **kwargs):
+        combo = tuple(
+            next(value for value in candidates if int(value["action"]) == 1)
+            for candidates in candidate_sets
+        )
+        return combo, 1.0, {"strategy": "risk_joint_search"}, [(combo, 1.0)]
+
+    monkeypatch.setattr(rule_maker, "_best_conditional_combo", choose_right)
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == 1
+    assert debug["risk_triggered"] is True
+    assert debug["action_search"]["strategy"] == "risk_joint_search"
+
+
 def test_s8_candidates_mark_right_lane_change_as_forced():
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s8_exit(vehicle)

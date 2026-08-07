@@ -718,6 +718,42 @@ class MultiAgentRuleMaker(RuleMaker):
                 "prefix_counts": [1 if best_combo is not None else 0],
                 "pairwise_conflict_counts": pre_brake_conflicts,
             }
+        elif (
+            self._formation_locked
+            and self._is_s6_background_merge_route(env)
+            and not bool(risk_info.get("triggered", False))
+        ):
+            # S6 is a controlled gap-creation scenario: the ramp actor is
+            # intended to enter the leader--middle gap while the platoon
+            # yields longitudinally.  A lane change is meaningful only after
+            # the risk detector has identified a real conflict.  Allowing the
+            # generic MOBIL score to select a late RIGHT maneuver while the
+            # detector reports no risk makes an otherwise identical episode
+            # depend on sub-centimetre traffic-state drift and sends the
+            # platoon through an unnecessary curved commitment.  KEEP remains
+            # a proposal, not a trajectory fallback; the Normal planner still
+            # applies every hard feasibility check and may reject it.
+            keep_combo = tuple(
+                self._candidate_for_action(
+                    candidates_by_agent.get(agent_id, []), 0
+                )
+                for agent_id in ordered_agent_ids
+            )
+            if any(candidate is None for candidate in keep_combo):
+                best_combo = None
+                best_score = -float("inf")
+                ranked_combos = []
+            else:
+                best_combo = keep_combo
+                best_score = 0.0
+                ranked_combos = [(tuple(keep_combo), best_score)]
+            best_score = float(best_score)
+            action_search_debug = {
+                "strategy": "s6_no_risk_keep",
+                "prefix_counts": [1 if best_combo is not None else 0],
+                "risk_required_for_lane_change": True,
+                "final_feasibility_authority": "normal_planner",
+            }
         elif self._formation_locked:
             best_combo, best_score, action_search_debug, ranked_combos = self._best_locked_combo(
                 env=env,
@@ -1919,6 +1955,16 @@ class MultiAgentRuleMaker(RuleMaker):
         return (
             cls._config_value(config, "scenario_id") == "S8_ego_exit_to_ramp"
             and cls._config_value(config, "local_route") == "R6_exit_to_ramp"
+        )
+
+    @classmethod
+    def _is_s6_background_merge_route(cls, env) -> bool:
+        config = getattr(env, "config", {}) or {}
+        return (
+            cls._config_value(config, "scenario_id")
+            == "S6_background_merge_in"
+            and cls._config_value(config, "local_route")
+            == "R6_mainline_merge_approach"
         )
 
     @classmethod

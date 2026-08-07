@@ -268,6 +268,22 @@ class PIDTrajectoryController(BaseController):
         # a second PID term here double-counts the same future curvature.
         tracking_heading_error = _wrap_to_pi(float(trajectory_local[0, 2]))
         heading_correction = 0.0
+        actual_heading = float(getattr(vehicle, "heading_theta", 0.0))
+        controller_state = self._state.setdefault(agent_id, {})
+        previous_actual_heading = controller_state.get("actual_heading_rad")
+        actual_yaw_rate = (
+            0.0
+            if previous_actual_heading is None
+            else _wrap_to_pi(actual_heading - float(previous_actual_heading))
+            / self.dt
+        )
+        controller_state["actual_heading_rad"] = actual_heading
+        preview_reference_heading_world = _wrap_to_pi(
+            actual_heading + float(preview_heading)
+        )
+        first_reference_heading_world = _wrap_to_pi(
+            actual_heading + float(first_path_heading)
+        )
 
         reference = longitudinal_reference or trajectory_to_longitudinal_reference(
             trajectory_local,
@@ -299,6 +315,14 @@ class PIDTrajectoryController(BaseController):
             "cross_track_correction": float(cross_track_correction),
             "tracking_heading_error_rad": float(tracking_heading_error),
             "heading_correction": float(heading_correction),
+            "actual_heading_rad": float(actual_heading),
+            "actual_yaw_rate_rad_s": float(actual_yaw_rate),
+            "preview_reference_heading_world_rad": float(
+                preview_reference_heading_world
+            ),
+            "first_reference_heading_world_rad": float(
+                first_reference_heading_world
+            ),
             "raw_steering": float(steering),
             "clipped_steering": float(action[0]),
             "clipped_throttle": float(action[1]),
