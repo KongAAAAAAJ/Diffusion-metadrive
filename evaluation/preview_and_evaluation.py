@@ -100,6 +100,7 @@ DEFAULT_TRAFFIC_DENSITY = 0
 DEFAULT_START_SEED = 11
 DEFAULT_VIDEO_FPS = 10
 DEFAULT_HORIZON = 600
+DEFAULT_TARGET_SPEED_KM_H = 30.0
 DEFAULT_DECISION_POLICY = "rule_maker"
 DEFAULT_PLANNING_POLICY = "lattice"
 DEFAULT_CONTROL_POLICY = "adaptive"
@@ -1332,6 +1333,7 @@ def run_scenario(
     save_topdown_video: bool = True,
     save_semantic_bev_video: bool = True,
     save_trajectory_data: bool = True,
+    target_speed_km_h: float = DEFAULT_TARGET_SPEED_KM_H,
 ) -> Path:
     if local_route is None:
         local_route = _pick_local_route(scenario_id)
@@ -1374,6 +1376,7 @@ def run_scenario(
         "crash_done": False,
         "out_of_road_done": False,
         "horizon": int(horizon),
+        "target_speed_km_h": float(target_speed_km_h),
     }
     if env_factory is not None:
         env = env_factory(env_config)
@@ -1582,6 +1585,7 @@ def run_all_scenarios(
     save_topdown_video: bool = True,
     save_semantic_bev_video: bool = True,
     save_trajectory_data: bool = True,
+    target_speed_km_h: float = DEFAULT_TARGET_SPEED_KM_H,
 ) -> None:
     """Evaluate all defined scenarios (one env per scenario to avoid map conflicts)."""
     pairs = list(
@@ -1618,6 +1622,7 @@ def run_all_scenarios(
                 save_topdown_video=save_topdown_video,
                 save_semantic_bev_video=save_semantic_bev_video,
                 save_trajectory_data=save_trajectory_data,
+                target_speed_km_h=target_speed_km_h,
             )
             results.append((scenario_id, route, f"OK  -> {video_dir}"))
         except Exception as exc:
@@ -1727,6 +1732,15 @@ def main() -> None:
     parser.add_argument("--video-fps", type=int, default=DEFAULT_VIDEO_FPS)
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON,
                         help=f"Override environment horizon / max steps per agent (default: {DEFAULT_HORIZON})")
+    parser.add_argument(
+        "--target-speed-km-h",
+        type=float,
+        default=DEFAULT_TARGET_SPEED_KM_H,
+        help=(
+            "Expert target speed, explicitly shared with the BEV collection "
+            f"contract (default: {DEFAULT_TARGET_SPEED_KM_H:g})"
+        ),
+    )
     parser.add_argument("--decision-policy", default=DEFAULT_DECISION_POLICY, choices=["rule_maker"],
                         help=f"Decision policy (default: {DEFAULT_DECISION_POLICY})")
     parser.add_argument("--planning-policy", default=DEFAULT_PLANNING_POLICY, choices=["lattice"],
@@ -1791,6 +1805,7 @@ def main() -> None:
             save_topdown_video=not args.no_topdown_video,
             save_semantic_bev_video=not args.no_semantic_bev_video,
             save_trajectory_data=not args.no_trajectory_data,
+            target_speed_km_h=args.target_speed_km_h,
         )
     else:
         if not args.scenario_id:
@@ -1814,6 +1829,7 @@ def main() -> None:
             save_topdown_video=not args.no_topdown_video,
             save_semantic_bev_video=not args.no_semantic_bev_video,
             save_trajectory_data=not args.no_trajectory_data,
+            target_speed_km_h=args.target_speed_km_h,
         )
         print(f"\n=== Videos saved to: {video_dir} ===")
 

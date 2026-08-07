@@ -623,6 +623,7 @@ def test_main_defaults_match_preview_scenario_script(monkeypatch) -> None:
     assert captured["traffic_density"] == 0.0
     assert captured["start_seed"] == 11
     assert captured["fps"] == 10
+    assert captured["target_speed_km_h"] == pytest.approx(30.0)
     assert captured["decision_policy"] == "rule_maker"
     assert captured["planning_policy"] == "lattice"
     assert captured["control_policy"] == "adaptive"
@@ -735,6 +736,50 @@ def test_run_scenario_forwards_horizon_to_env_config(monkeypatch, tmp_path: Path
     )
 
     assert captured_config["horizon"] == 123
+
+
+def test_run_scenario_forwards_explicit_target_speed_to_env_config(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fake_env = _FakeEnv([{"done_step": 1}])
+    captured_config = {}
+
+    monkeypatch.setattr(module, "_pick_local_route", lambda scenario_id: "R0")
+    monkeypatch.setattr(
+        module,
+        "_capture_topdown_frame",
+        lambda *args, **kwargs: np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(module, "_write_video", lambda path, frames, fps: None)
+    monkeypatch.setattr(
+        module,
+        "_build_pipeline_factory",
+        lambda *args, **kwargs: (
+            lambda env, agent_ids, seed: (
+                lambda env: {
+                    aid: np.zeros(2, dtype=np.float32) for aid in agent_ids
+                }
+            )
+        ),
+    )
+
+    module.run_scenario(
+        scenario_id="S1_free_cruise_straight",
+        local_route=None,
+        num_agents=3,
+        num_episodes=1,
+        output_root=tmp_path,
+        heading_up=False,
+        traffic_density=0.0,
+        start_seed=17,
+        fps=10,
+        env_factory=lambda config: (
+            captured_config.update(config) or fake_env
+        ),
+        target_speed_km_h=30.0,
+    )
+
+    assert captured_config["target_speed_km_h"] == pytest.approx(30.0)
 
 
 def test_run_preview_retries_episode_when_it_ends_immediately(monkeypatch, tmp_path: Path) -> None:

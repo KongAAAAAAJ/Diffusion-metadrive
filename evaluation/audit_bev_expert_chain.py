@@ -102,11 +102,30 @@ def _crash_reason(agent_info: Mapping[str, object], agent_id: str) -> str | None
 
 def _compact_rule_debug(debug: Mapping[str, object]) -> dict[str, object]:
     selected_candidates = {}
+    candidate_summaries = {}
     candidates_by_agent = debug.get("candidates_by_agent", {}) or {}
     if isinstance(candidates_by_agent, Mapping):
         for agent_id, candidates in candidates_by_agent.items():
             if not isinstance(candidates, Sequence):
                 continue
+            candidate_summaries[str(agent_id)] = [
+                {
+                    key: value.get(key)
+                    for key in (
+                        "action",
+                        "score",
+                        "source_lane_index",
+                        "target_lane_index",
+                        "source_lane_chain_indices",
+                        "target_lane_chain_indices",
+                        "forced_lane_change",
+                        "forced_route_action",
+                        "selected",
+                    )
+                }
+                for value in candidates
+                if isinstance(value, Mapping)
+            ]
             selected = next(
                 (
                     value
@@ -129,7 +148,13 @@ def _compact_rule_debug(debug: Mapping[str, object]) -> dict[str, object]:
         "risk_triggered": bool(debug.get("risk_triggered", False)),
         "risk_info": debug.get("risk_info", {}),
         "best_score": debug.get("best_score"),
+        "forced_lane_decision": bool(
+            debug.get("forced_lane_decision", False)
+        ),
+        "action_search": debug.get("action_search", {}),
+        "proposal_ranking": debug.get("proposal_ranking", []),
         "selected_candidates": selected_candidates,
+        "candidates_by_agent": candidate_summaries,
     }
 
 

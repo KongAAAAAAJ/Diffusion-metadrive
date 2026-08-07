@@ -322,3 +322,66 @@ were not started. The next fix must investigate why the post-exit RuleMaker
 requests a new all-LEFT maneuver while the three vehicles still differ from
 that path's preview heading by more than 0.1 rad; it must not undo the cache,
 relax the tracking envelope, or change the 5 m/7 m boundaries.
+
+## 13.882b4.2: S8 decision and route-path semantic closure
+
+The step-71 failure was a decision/path contract error rather than missing
+planner search capacity.  All vehicles were already on the rightmost source
+lane `(3C0_1_, 4G0_0_, 2)`.  KEEP follows that lane's navigation continuation
+into the exit connector `(4G0_0_, 4G1_1_, 0)`, whereas the selected LEFT action
+returned to the mainline continuation `(4G0_0_, 4G0_1_, 1)`.  Three corrections
+close that semantic gap without changing any safety threshold:
+
+- a lane-change commitment completes only after target-family membership,
+  centreline convergence, footprint containment and target-lane heading
+  convergence; merely entering the target lane no longer permits an immediate
+  reverse decision;
+- S8's rightmost-lane KEEP is represented as a required route action, and an
+  apparent collision in RuleMaker's coarse ranking trajectory no longer
+  deletes the only route-correct proposal.  The proposal is deferred to the
+  Normal planner, which remains the sole final authority for dense footprint,
+  dynamics, 5 m/7 m clearance and three-vehicle OBB safety;
+- route-chain candidates and committed spatial paths anchor their initial
+  tangent to the measured vehicle heading even when a MetaDrive lane omits the
+  optional seam-transition marker.  This removes the artificial heading jump
+  observed near the source-lane/exit-connector seam while retaining all hard
+  kinematic and road audits.
+
+The preview evaluator also now pins the expert contract's 30 km/h target speed.
+Previously its implicit environment default was 90 km/h, which produced an
+unrelated deterministic `committed_trajectory_deadline_missed` failure and did
+not match the collection/probe configuration.
+
+Diagnostic evidence for the original wrong LEFT decision and the corrected
+route KEEP proposal is stored at:
+
+```text
+/tmp/bev-stage-census/round13_882b42_s8_rule_semantics_seed17.json
+/tmp/bev-stage-census/round13_882b42_s8_route_keep_diag_seed17.json
+```
+
+The isolated-process gates now pass:
+
+```text
+2 x 80 seeds                       17, 23
+10 x 200 seeds                     17,23,31,47,59,71,83,97,109,127
+persistable episodes               10 / 10
+native joint planning              2000 / 2000 (100%)
+collision / out-of-road            0 / 0
+failure reason                     none for all ten episodes
+```
+
+The combined RuleMaker, Normal planner, preview evaluator, joint collection,
+mode-contract and S7/S8 G-block regression suite reports `206 passed`.
+`git diff --check` is clean.
+
+Each 200-step report is available under:
+
+```text
+/tmp/bev-stage-census/round13_882b42_gate_v3_seed<SEED>/
+  S8_ego_exit_to_ramp/metrices/episode_0000/expert_episode.json
+```
+
+This completes the S8 decision/path semantic gate.  It does not relax the
+tracking envelope, road boundary, dynamics, 5 m background clearance or 7 m
+platoon clearance, and it does not add a synthetic trajectory fallback.

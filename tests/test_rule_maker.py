@@ -277,11 +277,20 @@ def test_commitment_is_not_completed_at_lane_assignment_boundary():
     env.agents["agent0"] = _vehicle(
         "agent0", 24.0, target_y, target_lane_id, speed_km_h=20.0
     )
+    env.agents["agent0"].heading_theta = 0.2
+    heading_not_converged = rule_maker.advance_committed_execution(
+        env, ["agent0"], 12
+    )
+    assert "agent0" in heading_not_converged[
+        "lane_change_commitments"
+    ]["active"]
+
+    env.agents["agent0"].heading_theta = 0.0
     completed = rule_maker.advance_committed_execution(env, ["agent0"], 12)
     assert completed["lane_change_commitments"]["active"] == {}
     assert completed["lane_change_commitments"]["completed"]["agent0"][
         "completion_reason"
-    ] == "converged_to_target_lane_center"
+    ] == "converged_to_target_lane_pose"
 
 
 def test_risk_detector_unlocks_when_leader_ttc_is_below_threshold():
@@ -1334,6 +1343,44 @@ def test_s8_rightmost_lane_follows_exit_route_with_keep_not_fake_right():
         ("A", "B", 2),
         ("B", "C", 0),
     )
+    assert keep_candidate["forced_route_action"] is True
+
+
+def test_s8_rightmost_lane_forces_keep_instead_of_returning_left():
+    vehicle = _vehicle("agent0", 25.0, -3.5, 2, speed_km_h=25.0)
+    env = _env_s8_immediate_ramp(vehicle)
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+        locked_on_reset=True,
+        lane_change_preference=100.0,
+        lc_cost=0.0,
+        w_mobil=0.0,
+        w_keep_bias=-100.0,
+    )
+
+    batch = rule_maker.propose_joint_actions(
+        env, ["agent0"], planner_batch={}
+    )
+
+    assert len(batch.proposals) == 1
+    decision = batch.proposals[0].decisions["agent0"]
+    assert int(decision["action"]) == 0
+    assert decision["source_lane_index"] == ("A", "B", 2)
+    assert decision["target_lane_index"] == ("A", "B", 2)
+    assert decision["target_lane_chain"] == (
+        ("A", "B", 2),
+        ("B", "C", 0),
+    )
+    debug = rule_maker.get_last_debug()
+    assert debug["forced_lane_decision"] is True
+    selected = next(
+        value
+        for value in debug["candidates_by_agent"]["agent0"]
+        if value["selected"]
+    )
+    assert selected["forced_route_action"] is True
 
 
 def test_s8_rightmost_lane_rejects_wrong_upstream_branch():
@@ -1958,6 +2005,51 @@ def test_rule_maker_all_forced_ready_does_not_trigger_wait_unlock(monkeypatch):
     assert debug["forced_lane_wait_info"]["partial_forced_wait_steps"] == 0
 
 
+def test_route_required_combo_defers_coarse_conflict_to_normal_planner(
+    monkeypatch,
+):
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 10.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 2.0, 0.0, 1),
+        },
+        traffic=[],
+    )
+    rule_maker = MultiAgentRuleMaker(locked_on_reset=True)
+
+    def fake_candidates(_env, vehicle, _traffic_vehicles, **_kwargs):
+        candidate = _forced_wait_candidate(
+            0,
+            origin_x=float(vehicle.position[0]),
+            origin_y=float(vehicle.position[1]),
+        )
+        candidate["forced_route_action"] = True
+        return [candidate]
+
+    monkeypatch.setattr(rule_maker, "_build_agent_candidates", fake_candidates)
+    monkeypatch.setattr(
+        rule_maker,
+        "_combo_has_hard_conflict",
+        lambda *_args, **_kwargs: True,
+    )
+
+    batch = rule_maker.propose_joint_actions(
+        env, ["agent0", "agent1"], planner_batch={}
+    )
+
+    assert len(batch.proposals) == 1
+    assert {
+        agent_id: int(decision["action"])
+        for agent_id, decision in batch.proposals[0].decisions.items()
+    } == {"agent0": 0, "agent1": 0}
+    debug = rule_maker.get_last_debug()
+    assert debug["action_search"]["coarse_conflict_detected"] is True
+    assert (
+        debug["action_search"]["final_feasibility_authority"]
+        == "normal_planner"
+    )
+
+
 def test_lane_change_commitment_blocks_reversal_until_target_lane_entry():
     vehicle = _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=20.0)
     env = _env(agents={"agent0": vehicle}, traffic=[])
@@ -1998,7 +2090,7 @@ def test_lane_change_commitment_blocks_reversal_until_target_lane_entry():
     assert debug["lane_change_commitments"]["active"] == {}
     assert debug["lane_change_commitments"]["completed"]["agent0"][
         "completion_reason"
-    ] == "converged_to_target_lane_center"
+    ] == "converged_to_target_lane_pose"
     assert int(third["agent0"]["action"]) != committed_action
 
 

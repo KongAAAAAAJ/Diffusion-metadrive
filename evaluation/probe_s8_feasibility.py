@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from evaluation.audit_bev_expert_chain import (  # noqa: E402
     _compact_planner_debug,
+    _compact_rule_debug,
     _episode_spec,
     _json_value,
 )
@@ -102,6 +103,7 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
                 expert_step = expert.plan(env, model_inputs=model_inputs)
             except JointCollectionError as exc:
                 production_debug = expert.planner.get_last_debug() or {}
+                rule_debug = expert.rule_maker.get_last_debug() or {}
                 batch = expert.rule_maker._outstanding_proposal_batch
                 if exc.reason_code != "all_rule_proposals_infeasible" or batch is None:
                     return {
@@ -109,6 +111,7 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
                         "seed": int(seed),
                         "step": int(step),
                         "reason": exc.reason_code,
+                        "rule": _compact_rule_debug(rule_debug),
                         "production": _compact_planner_debug(production_debug),
                         "trace_tail": trace[-16:],
                     }
@@ -126,6 +129,7 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
                     "step": int(step),
                     "reason": exc.reason_code,
                     "selected_rank": selected_rank,
+                    "rule": _compact_rule_debug(rule_debug),
                     "production": _compact_planner_debug(production_debug),
                     "dense_probe": _compact_planner_debug(
                         probe.get_last_debug() or {}
@@ -153,6 +157,9 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
                     "controller_debug": controller_debug,
                     "planner": _compact_planner_debug(
                         expert.planner.get_last_debug() or {}
+                    ),
+                    "rule": _compact_rule_debug(
+                        expert.rule_maker.get_last_debug() or {}
                     ),
                     "agents": {
                         agent_id: {

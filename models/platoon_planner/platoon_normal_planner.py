@@ -1644,6 +1644,10 @@ class PlatoonNormalPlanner:
                 )
             ),
         )
+        source_path = self._anchor_route_path_heading(
+            source_path,
+            start_heading=float(trajectory_world[0, 2]),
+        )
         target_first = target_chain[0]
         target_s, _ = target_first.local_coordinates(current_xy)
         target_path = build_continuous_lane_chain_path(
@@ -3327,13 +3331,18 @@ class PlatoonNormalPlanner:
                         )
                     ),
                 )
-                if hasattr(
-                    connected_chain[0], "route_seam_transition_m"
-                ):
-                    route_path = self._anchor_route_path_heading(
-                        route_path,
-                        start_heading=float(default_heading),
-                    )
+                # Every route-chain candidate starts at the measured vehicle
+                # pose/heading.  S8's native G-block junction owns an explicit
+                # drivable seam surface but does not carry the optional
+                # ``route_seam_transition_m`` marker used by the synthesized
+                # S7 seam.  Conditioning heading continuity on that marker
+                # therefore introduced an instantaneous tangent jump exactly
+                # on the exit approach.  The unchanged dense road and
+                # kinematic audits remain the authority on the anchored path.
+                route_path = self._anchor_route_path_heading(
+                    route_path,
+                    start_heading=float(default_heading),
+                )
                 route_arc = np.concatenate(
                     (
                         [0.0],

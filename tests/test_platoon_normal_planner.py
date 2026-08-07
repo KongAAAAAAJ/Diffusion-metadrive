@@ -240,6 +240,37 @@ def test_route_chain_geometry_smoothly_joins_offset_exit_connector():
     assert np.any((path[:, 1] < -0.1) & (path[:, 1] > -3.4))
 
 
+def test_dense_route_candidate_anchors_measured_heading_without_lane_marker():
+    source = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=30.0)
+    successor = AngledLane(("B", "C", 0), (30.0, 0.0), 0.0, length=30.0)
+    planner = PlatoonNormalPlanner()
+    times = np.arange(0.0, 4.0 + 1.0e-9, 0.1, dtype=np.float64)
+    progress = 4.0 * times
+
+    dense = planner._build_dense_candidate(
+        source_lane=source,
+        continuation_lane=successor,
+        continuation={"remaining_length": 30.0, "s_base": 0.0, "d_offset": 0.0},
+        start_s=10.0,
+        start_d=0.0,
+        progress=progress,
+        end_d=0.0,
+        lane_change_duration_s=4.0,
+        lane_change_start_delay_s=0.0,
+        default_heading=0.08,
+        times=times,
+        route_lane_chain=[source, successor],
+    )
+
+    assert dense is not None
+    assert dense[0, 2] == pytest.approx(0.08, abs=2.0e-3)
+    heading_delta = np.arctan2(
+        np.sin(np.diff(dense[:, 2])), np.cos(np.diff(dense[:, 2]))
+    )
+    assert float(np.max(np.abs(heading_delta / 0.1))) <= 1.0
+    assert abs(float(dense[-1, 2])) < 1.0e-3
+
+
 def test_execution_spec_separates_stopped_reference_from_extended_spatial_path():
     times = np.arange(0.0, 8.1, 0.1, dtype=np.float64)
     stop_x = np.minimum(5.0 * times, 2.778)

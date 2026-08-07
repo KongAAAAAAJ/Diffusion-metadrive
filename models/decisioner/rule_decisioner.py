@@ -140,6 +140,7 @@ class MultiAgentRuleMaker(RuleMaker):
 
     ACTIONS = (-1, 0, 1)  # left, keep, right. Lane ids follow MetaDrive convention.
     LANE_CHANGE_COMPLETION_LATERAL_TOLERANCE_M = 0.25
+    LANE_CHANGE_COMPLETION_HEADING_TOLERANCE_RAD = 0.1
 
     def __init__(
         self,
@@ -661,26 +662,29 @@ class MultiAgentRuleMaker(RuleMaker):
         forced_lane_decision = forced_combo is not None
         if forced_lane_decision:
             forced_conflicts: dict[str, int] = {}
-            best_combo = (
-                None
-                if self._combo_has_hard_conflict(
-                    env,
-                    ordered_agent_ids,
-                    forced_combo,
-                    forced_conflicts,
-                )
-                else forced_combo
+            coarse_conflict = self._combo_has_hard_conflict(
+                env,
+                ordered_agent_ids,
+                forced_combo,
+                forced_conflicts,
             )
-            best_score = 0.0 if best_combo is not None else -float("inf")
-            ranked_combos = (
-                [(tuple(best_combo), float(best_score))]
-                if best_combo is not None
-                else []
-            )
+            # A route-required action is a navigation constraint, not a
+            # promise that RuleMaker's coarse independent trajectories are
+            # the trajectories which will be executed.  The Normal planner
+            # is the sole final feasibility authority and checks the complete
+            # dense joint candidate with identical road/OBB/gap contracts.
+            # Dropping the only route-valid action here can turn a coarse
+            # prediction mismatch into ``rule_maker_no_action`` before that
+            # authoritative check runs.
+            best_combo = forced_combo
+            best_score = 0.0
+            ranked_combos = [(tuple(best_combo), float(best_score))]
             action_search_debug = {
-                "strategy": "forced_combo",
-                "prefix_counts": [1 if best_combo is not None else 0],
+                "strategy": "forced_route_combo_deferred_to_normal_planner",
+                "prefix_counts": [1],
                 "pairwise_conflict_counts": forced_conflicts,
+                "coarse_conflict_detected": bool(coarse_conflict),
+                "final_feasibility_authority": "normal_planner",
             }
         elif self._formation_locked and bool(
             risk_info.get("waiting_for_s5_hard_brake", False)
@@ -927,6 +931,9 @@ class MultiAgentRuleMaker(RuleMaker):
             ),
             "selected": bool(selected),
             "forced_lane_change": bool(candidate.get("forced_lane_change", False)),
+            "forced_route_action": bool(
+                candidate.get("forced_route_action", False)
+            ),
             "maneuver_committed": bool(candidate.get("maneuver_committed", False)),
         }
 
@@ -966,18 +973,30 @@ class MultiAgentRuleMaker(RuleMaker):
             if target_lane is None or vehicle is None:
                 continue
             try:
-                _, target_lateral_m = target_lane.local_coordinates(
+                target_s_m, target_lateral_m = target_lane.local_coordinates(
                     np.asarray(vehicle.position, dtype=np.float64)[:2]
                 )
             except Exception:
                 continue
+            target_heading_rad = self._lane_tangent_heading(
+                target_lane, float(target_s_m)
+            )
+            heading_error_rad = float(
+                np.arctan2(
+                    np.sin(float(vehicle.heading_theta) - target_heading_rad),
+                    np.cos(float(vehicle.heading_theta) - target_heading_rad),
+                )
+            )
             footprint_inside, footprint_margin_m = (
                 self._vehicle_footprint_inside_lane(vehicle, target_lane)
             )
             if (
                 not np.isfinite(target_lateral_m)
+                or not np.isfinite(heading_error_rad)
                 or abs(float(target_lateral_m))
                 > self.LANE_CHANGE_COMPLETION_LATERAL_TOLERANCE_M
+                or abs(heading_error_rad)
+                > self.LANE_CHANGE_COMPLETION_HEADING_TOLERANCE_RAD
                 or not footprint_inside
             ):
                 continue
@@ -987,11 +1006,35 @@ class MultiAgentRuleMaker(RuleMaker):
                 "target_lane_index": commitment.target_lane_index,
                 "commit_step": int(commitment.commit_step),
                 "completion_step": int(self._decision_step + 1),
-                "completion_reason": "converged_to_target_lane_center",
+                "completion_reason": "converged_to_target_lane_pose",
                 "target_lateral_error_m": float(target_lateral_m),
+                "target_heading_error_rad": float(heading_error_rad),
                 "target_lane_footprint_margin_m": float(footprint_margin_m),
             }
             self._lane_change_commitments.pop(agent_id, None)
+
+    @staticmethod
+    def _lane_tangent_heading(lane, longitudinal_m: float) -> float:
+        lane_length = float(getattr(lane, "length", 0.0) or 0.0)
+        sample_s = float(np.clip(longitudinal_m, 0.0, lane_length))
+        if hasattr(lane, "heading_theta_at"):
+            try:
+                heading = float(lane.heading_theta_at(sample_s))
+                if np.isfinite(heading):
+                    return heading
+            except Exception:
+                pass
+        delta = min(0.25, max(0.05, 0.25 * lane_length))
+        lo = max(0.0, sample_s - delta)
+        hi = min(lane_length, sample_s + delta)
+        if hi <= lo + 1.0e-9:
+            raise ValueError("lane tangent cannot be evaluated")
+        first = np.asarray(lane.position(lo, 0.0)[:2], dtype=np.float64)
+        second = np.asarray(lane.position(hi, 0.0)[:2], dtype=np.float64)
+        direction = second - first
+        if not np.isfinite(direction).all() or np.linalg.norm(direction) <= 1.0e-9:
+            raise ValueError("lane tangent is non-finite or degenerate")
+        return float(np.arctan2(direction[1], direction[0]))
 
     @staticmethod
     def _vehicle_footprint_inside_lane(vehicle, lane) -> tuple[bool, float]:
@@ -1111,7 +1154,7 @@ class MultiAgentRuleMaker(RuleMaker):
             forced = [
                 candidate
                 for candidate in candidates_by_agent.get(agent_id, [])
-                if bool(candidate.get("forced_lane_change", False))
+                if MultiAgentRuleMaker._is_forced_route_candidate(candidate)
             ]
             if not forced:
                 return None
@@ -1123,8 +1166,15 @@ class MultiAgentRuleMaker(RuleMaker):
         return [
             candidate
             for candidate in candidates
-            if bool(candidate.get("forced_lane_change", False))
+            if MultiAgentRuleMaker._is_forced_route_candidate(candidate)
         ]
+
+    @staticmethod
+    def _is_forced_route_candidate(candidate: Mapping[str, object]) -> bool:
+        return bool(
+            candidate.get("forced_lane_change", False)
+            or candidate.get("forced_route_action", False)
+        )
 
     def _update_forced_lane_wait_info(
         self,
@@ -1137,7 +1187,10 @@ class MultiAgentRuleMaker(RuleMaker):
         forced_agents = [
             agent_id
             for agent_id in ordered_agent_ids
-            if any(bool(candidate.get("forced_lane_change", False)) for candidate in candidates_by_agent.get(agent_id, []))
+            if any(
+                self._is_forced_route_candidate(candidate)
+                for candidate in candidates_by_agent.get(agent_id, [])
+            )
         ]
         all_forced_ready = forced_combo is not None
         current_forced = set(forced_agents)
@@ -1620,8 +1673,22 @@ class MultiAgentRuleMaker(RuleMaker):
                 == tuple(getattr(target_lane, "index", ())[:2])
             ):
                 candidate["forced_lane_change"] = True
+                candidate["forced_route_action"] = True
+            if self._is_s8_required_exit_keep(
+                env,
+                source_lane=source_lane,
+                source_lane_chain=source_lane_chain,
+                action=int(action),
+            ):
+                # Once the platoon reaches the right-most mainline lane, the
+                # navigation continuation is the single-lane exit connector.
+                # A LEFT action here returns to the through mainline and is
+                # therefore not a valid route-level alternative, even if its
+                # MOBIL/clearance score is larger.
+                candidate["forced_route_action"] = True
             if self._is_s7_forced_lane_candidate(env, candidate):
                 candidate["forced_lane_change"] = True
+                candidate["forced_route_action"] = True
             return candidate
         except Exception:
             return None
@@ -1853,6 +1920,43 @@ class MultiAgentRuleMaker(RuleMaker):
             cls._config_value(config, "scenario_id") == "S8_ego_exit_to_ramp"
             and cls._config_value(config, "local_route") == "R6_exit_to_ramp"
         )
+
+    @classmethod
+    def _is_s8_required_exit_keep(
+        cls,
+        env,
+        *,
+        source_lane,
+        source_lane_chain: Sequence,
+        action: int,
+    ) -> bool:
+        if not cls._is_s8_exit_route(env) or int(action) != 0:
+            return False
+        source_index = tuple(getattr(source_lane, "index", ()) or ())
+        if len(source_index) < 3 or len(source_lane_chain) < 2:
+            return False
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        if road_network is None:
+            return False
+        siblings = cls._graph_lanes(
+            road_network, source_index[0], source_index[1]
+        )
+        if not siblings:
+            return False
+        rightmost_slot = max(
+            int(tuple(getattr(lane, "index", ()) or (0, 0, -1))[2])
+            for lane in siblings
+        )
+        if int(source_index[2]) != rightmost_slot:
+            return False
+        next_index = tuple(
+            getattr(source_lane_chain[1], "index", ()) or ()
+        )
+        return len(next_index) >= 2 and next_index[:2] != source_index[:2]
 
     @classmethod
     def _is_s7_merge_route(cls, env) -> bool:
