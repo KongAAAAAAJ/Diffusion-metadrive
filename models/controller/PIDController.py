@@ -197,8 +197,39 @@ class PIDTrajectoryController(BaseController):
             ([0.0], np.cumsum(np.linalg.norm(np.diff(path_xy, axis=0), axis=1)))
         )
         query = min(lookahead_m, float(arc[-1]))
+        preview_direction_guarded = False
+        first_path_heading = float(trajectory_local[0, 2])
+        if query > 1.0e-6:
+            preview_headings = np.concatenate(
+                (
+                    [0.0],
+                    np.unwrap(
+                        trajectory_local[:, 2].astype(
+                            np.float64, copy=False
+                        )
+                    ),
+                )
+            )
+            raw_preview_heading = float(
+                np.interp(query, arc, preview_headings)
+            )
+            # At an exit transition the path can finish a shallow left bend
+            # before beginning the requested right turn.  A long pure-pursuit
+            # lookahead must not skip across that sign change and command the
+            # later turn while the first reachable segment still turns the
+            # other way.  Cap only that sign-changing case at the first fixed
+            # waypoint; ordinary same-direction preview is unchanged.
+            direction_threshold = 0.005
+            if (
+                abs(first_path_heading) >= direction_threshold
+                and abs(raw_preview_heading) >= direction_threshold
+                and first_path_heading * raw_preview_heading < 0.0
+            ):
+                query = min(query, float(arc[1]))
+                preview_direction_guarded = True
         if query <= 1.0e-6:
             lateral_error = 0.0
+            preview_heading = 0.0
         else:
             preview_x = float(np.interp(query, arc, path_xy[:, 0]))
             preview_y = float(np.interp(query, arc, path_xy[:, 1]))
@@ -257,6 +288,12 @@ class PIDTrajectoryController(BaseController):
             "mode": "trajectory_cascade",
             "current_speed_mps": float(current_speed_mps),
             "preview_lookahead_m": float(lookahead_m),
+            "preview_query_m": float(query),
+            "preview_heading_rad": float(preview_heading),
+            "first_path_heading_rad": float(first_path_heading),
+            "preview_direction_guarded": bool(
+                preview_direction_guarded
+            ),
             "preview_lateral_error_rad": float(lateral_error),
             "cross_track_error_m": float(cross_track_error_m),
             "cross_track_correction": float(cross_track_correction),

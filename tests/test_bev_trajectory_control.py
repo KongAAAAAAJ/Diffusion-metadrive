@@ -18,6 +18,9 @@ class _ControlHarness:
     trajectory_to_control = PlatoonEnv.trajectory_to_control
     trajectory_reference_to_control = PlatoonEnv.trajectory_reference_to_control
     _agent_speed_km_h = PlatoonEnv._agent_speed_km_h
+    _agent_longitudinal_speed_mps = (
+        PlatoonEnv._agent_longitudinal_speed_mps
+    )
     _agent_pose = PlatoonEnv._agent_pose
     _desired_center_spacing_m = PlatoonEnv._desired_center_spacing_m
     _vehicle_length_m = PlatoonEnv._vehicle_length_m
@@ -42,6 +45,9 @@ class _ControlHarness:
                 position=np.asarray([0.0, 0.0], dtype=np.float32),
                 heading_theta=0.0,
                 speed_km_h=float(speed_kmh),
+                velocity=np.asarray(
+                    [float(speed_kmh) / 3.6, 0.0], dtype=np.float32
+                ),
                 FRONT_WHEELBASE=1.4,
                 REAR_WHEELBASE=1.4,
                 max_steering=60.0,
@@ -50,6 +56,9 @@ class _ControlHarness:
                 position=np.asarray([follower_x, 0.0], dtype=np.float32),
                 heading_theta=0.0,
                 speed_km_h=float(speed_kmh),
+                velocity=np.asarray(
+                    [float(speed_kmh) / 3.6, 0.0], dtype=np.float32
+                ),
                 FRONT_WHEELBASE=1.4,
                 REAR_WHEELBASE=1.4,
                 max_steering=60.0,
@@ -58,12 +67,16 @@ class _ControlHarness:
                 position=np.asarray([2.0 * follower_x, 0.0], dtype=np.float32),
                 heading_theta=0.0,
                 speed_km_h=float(speed_kmh),
+                velocity=np.asarray(
+                    [float(speed_kmh) / 3.6, 0.0], dtype=np.float32
+                ),
                 FRONT_WHEELBASE=1.4,
                 REAR_WHEELBASE=1.4,
                 max_steering=60.0,
             ),
         }
         self._lateral_preview_pid_state = {}
+        self._last_longitudinal_control_debug = {}
 
 
 def _trajectory(speed_mps: float) -> np.ndarray:

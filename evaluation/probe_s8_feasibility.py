@@ -92,6 +92,7 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
         builder = JointBEVSampleBuilder(agent_ids)
         builder.reset()
         dt_s = simulator_decision_dt_s(env)
+        trace: list[dict[str, object]] = []
         for step in range(int(max_steps)):
             builder.capture_state(env, step * dt_s)
             model_inputs = (
@@ -109,6 +110,7 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
                         "step": int(step),
                         "reason": exc.reason_code,
                         "production": _compact_planner_debug(production_debug),
+                        "trace_tail": trace[-8:],
                     }
                 probe = _DenseS8FeasibilityPlanner()
                 try:
@@ -128,12 +130,52 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
                     "dense_probe": _compact_planner_debug(
                         probe.get_last_debug() or {}
                     ),
+                    "trace_tail": trace[-8:],
                 }
+            controller_debug = (
+                expert.lqr_controller.get_last_debug()
+                if expert.rule_maker.is_formation_locked
+                else expert.pid_controller.get_last_debug()
+            )
+            trace.append(
+                {
+                    "step": int(step),
+                    "controls": {
+                        agent_id: np.asarray(control, dtype=np.float32).tolist()
+                        for agent_id, control in expert_step.controls.items()
+                    },
+                    "trajectories_local": {
+                        agent_id: np.asarray(trajectory, dtype=np.float32).tolist()
+                        for agent_id, trajectory in (
+                            expert_step.trajectories_local or {}
+                        ).items()
+                    },
+                    "controller_debug": controller_debug,
+                    "planner": _compact_planner_debug(
+                        expert.planner.get_last_debug() or {}
+                    ),
+                    "agents": {
+                        agent_id: {
+                            "position": np.asarray(
+                                env.agents[agent_id].position[:2],
+                                dtype=np.float64,
+                            ).tolist(),
+                            "heading": float(env.agents[agent_id].heading_theta),
+                            "speed_km_h": float(env.agents[agent_id].speed_km_h),
+                            "steering": float(
+                                getattr(env.agents[agent_id], "steering", 0.0)
+                            ),
+                        }
+                        for agent_id in agent_ids
+                    },
+                }
+            )
             env.low_level_step(dict(expert_step.controls))
         return {
             "status": "no_failure_within_horizon",
             "seed": int(seed),
             "max_steps": int(max_steps),
+            "trace_tail": trace[-8:],
         }
     finally:
         env.close()

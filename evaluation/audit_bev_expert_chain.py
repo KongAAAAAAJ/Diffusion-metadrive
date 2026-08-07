@@ -154,6 +154,8 @@ def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
                 "raw_candidate_count",
                 "generated_valid_candidate_count",
                 "candidate_count",
+                "dense_dynamics_rejection_count",
+                "best_rejected_dense_dynamics",
                 "kinematic_rejection_count",
                 "corridor_rejection_count",
                 "road_rejection_count",
@@ -174,6 +176,7 @@ def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
                 "selected_recovery_acceleration_mps2",
                 "selected_lane_change_duration_s",
                 "selected_lane_change_start_delay_s",
+                "selected_minimum_background_gap_m",
             )
         }
     return result

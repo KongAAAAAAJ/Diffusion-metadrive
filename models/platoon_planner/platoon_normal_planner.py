@@ -276,6 +276,125 @@ class CommittedTrajectoryError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class DenseTrajectoryDynamicsAudit:
+    """Actuator-facing dynamics audit for a fixed-time dense trajectory.
+
+    Normal-planner candidates are executed at the simulator decision period,
+    not only at the eight 0.5 s dataset waypoints.  Keeping this audit
+    separate from :func:`validate_trajectory_kinematics` makes that distinction
+    explicit while retaining the exact same yaw-rate, curvature and lateral
+    acceleration limits.
+    """
+
+    violations: tuple[str, ...]
+    max_yaw_rate_rad_s: float
+    max_curvature_per_m: float
+    max_lateral_acceleration_mps2: float
+
+    @property
+    def valid(self) -> bool:
+        return not self.violations
+
+
+def audit_dense_trajectory_dynamics(
+    trajectory: np.ndarray,
+    *,
+    current_pose: np.ndarray,
+    dt_s: float,
+    config: HardModeMaskConfig | None = None,
+) -> DenseTrajectoryDynamicsAudit:
+    """Audit every timed segment, including the real pose-to-first segment.
+
+    ``trajectory`` includes the current XY row followed by future samples.
+    Its stored headings are outgoing path tangents.  The audit therefore uses
+    chord-to-chord heading change, while the executor's separate tracking
+    envelope handles any measured vehicle-to-path heading error at ``t=0``.
+    """
+
+    values = np.asarray(trajectory, dtype=np.float64)
+    origin = np.asarray(current_pose, dtype=np.float64)
+    cfg = config or HardModeMaskConfig()
+    if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] != 3:
+        raise ValueError("dense trajectory must have shape [N>=2,3]")
+    if origin.shape != (3,):
+        raise ValueError("current_pose must have shape [3]")
+    if not isinstance(cfg, HardModeMaskConfig):
+        raise ValueError("config must be HardModeMaskConfig")
+    dt = float(dt_s)
+    if (
+        not np.isfinite(values).all()
+        or not np.isfinite(origin).all()
+        or not np.isfinite(dt)
+        or dt <= 0.0
+    ):
+        raise ValueError("dense trajectory inputs must be finite and dt_s positive")
+
+    poses = values.copy()
+    poses[0, :2] = origin[:2]
+    segments = np.diff(poses[:, :2], axis=0)
+    chord_distance = np.linalg.norm(segments, axis=1)
+    # `_append_heading` stores the outgoing chord heading at each path node.
+    # Comparing the measured heading directly with row 1 would therefore
+    # introduce a one-segment preview and falsely double the initial yaw
+    # demand.  Derive segment tangents from XY and compare like with like.
+    segment_heading = np.empty_like(chord_distance)
+    last_heading = float(origin[2])
+    for index, (segment, distance_value) in enumerate(
+        zip(segments, chord_distance)
+    ):
+        if distance_value > cfg.movement_epsilon_m:
+            last_heading = math.atan2(float(segment[1]), float(segment[0]))
+        segment_heading[index] = last_heading
+    heading_delta = np.empty_like(segment_heading)
+    heading_delta[0] = 0.0
+    if heading_delta.size > 1:
+        heading_delta[1:] = np.arctan2(
+            np.sin(np.diff(segment_heading)),
+            np.cos(np.diff(segment_heading)),
+        )
+    half_angle = 0.5 * np.abs(heading_delta)
+    arc_scale = np.ones_like(chord_distance)
+    curved = half_angle > 1.0e-8
+    arc_scale[curved] = half_angle[curved] / np.sin(half_angle[curved])
+    distance = chord_distance * arc_scale
+    speed = distance / dt
+    yaw_rate = np.abs(heading_delta) / dt
+    curvature = np.zeros_like(distance)
+    moving = distance > cfg.movement_epsilon_m
+    curvature[moving] = np.abs(heading_delta[moving]) / distance[moving]
+    curvature[~moving & (np.abs(heading_delta) > 1.0e-8)] = np.inf
+    lateral_acceleration = speed * yaw_rate
+
+    epsilon = 1.0e-6
+    checks = (
+        (
+            "dense_yaw_rate_limit",
+            np.any(yaw_rate > cfg.max_yaw_rate_rad_s + epsilon),
+        ),
+        (
+            "dense_curvature_limit",
+            np.any(curvature > cfg.max_curvature_per_m + epsilon),
+        ),
+        (
+            "dense_lateral_acceleration_limit",
+            np.any(
+                lateral_acceleration
+                > cfg.max_lateral_accel_mps2 + epsilon
+            ),
+        ),
+    )
+    violations = tuple(name for name, failed in checks if bool(failed))
+    return DenseTrajectoryDynamicsAudit(
+        violations=violations,
+        max_yaw_rate_rad_s=float(np.max(yaw_rate, initial=0.0)),
+        max_curvature_per_m=float(np.max(curvature, initial=0.0)),
+        max_lateral_acceleration_mps2=float(
+            np.max(lateral_acceleration, initial=0.0)
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class TrajectoryExecutionSpec:
     """Immutable parameterization of one selected native trajectory."""
 
@@ -677,6 +796,13 @@ class PlatoonNormalPlanner:
                 selected_lane_change_start_delay_s=float(
                     candidate.lane_change_start_delay_s
                 ),
+                selected_minimum_background_gap_m=(
+                    None
+                    if candidate.execution_parameters is None
+                    else candidate.execution_parameters.get(
+                        "minimum_background_gap_m"
+                    )
+                ),
                 selected_stop_time_s=(
                     None if candidate.stop_time_s is None else float(candidate.stop_time_s)
                 ),
@@ -784,6 +910,15 @@ class PlatoonNormalPlanner:
                         ),
                         "lane_end_rejection_count": int(
                             value.get("lane_end_rejection_count", 0) or 0
+                        ),
+                        "dense_dynamics_rejection_count": int(
+                            value.get(
+                                "dense_dynamics_rejection_count", 0
+                            )
+                            or 0
+                        ),
+                        "best_rejected_dense_dynamics": copy.deepcopy(
+                            value.get("best_rejected_dense_dynamics")
                         ),
                         "kinematic_rejection_count": int(
                             value.get("kinematic_rejection_count", 0) or 0
@@ -1366,6 +1501,7 @@ class PlatoonNormalPlanner:
     ) -> tuple[list[_TrajectoryCandidate], dict]:
         stats = {
             "raw_candidate_count": 0,
+            "dense_dynamics_rejection_count": 0,
             "kinematic_rejection_count": 0,
             "local_kinematic_rejection_count": 0,
             "corridor_rejection_count": 0,
@@ -1378,6 +1514,7 @@ class PlatoonNormalPlanner:
         kinematic_hits: Counter[str] = Counter()
         road_hits: Counter[str] = Counter()
         first_road_rejection: dict | None = None
+        best_rejected_dense_dynamics: dict | None = None
         first_committed_road_rejection: dict | None = None
         committed_road_rejections_by_duration: Counter[str] = Counter()
         committed_first_rejection_by_duration: dict[str, dict] = {}
@@ -1691,6 +1828,57 @@ class PlatoonNormalPlanner:
                             stats["road_rejection_count"] += 1
                             road_hits["path_parameterization_failed"] += 1
                             continue
+                        current_pose = np.asarray(
+                            [
+                                float(vehicle.position[0]),
+                                float(vehicle.position[1]),
+                                float(
+                                    getattr(vehicle, "heading_theta", 0.0)
+                                ),
+                            ],
+                            dtype=np.float64,
+                        )
+                        dense_dynamics = audit_dense_trajectory_dynamics(
+                            candidate_dense,
+                            current_pose=current_pose,
+                            dt_s=self.DENSE_DT_S,
+                            config=HardModeMaskConfig(),
+                        )
+                        if not dense_dynamics.valid:
+                            stats["dense_dynamics_rejection_count"] += 1
+                            kinematic_hits.update(dense_dynamics.violations)
+                            dense_detail = {
+                                "violations": list(dense_dynamics.violations),
+                                "max_yaw_rate_rad_s": float(
+                                    dense_dynamics.max_yaw_rate_rad_s
+                                ),
+                                "max_curvature_per_m": float(
+                                    dense_dynamics.max_curvature_per_m
+                                ),
+                                "max_lateral_acceleration_mps2": float(
+                                    dense_dynamics.max_lateral_acceleration_mps2
+                                ),
+                                "acceleration_mps2": float(acceleration),
+                                "acceleration_duration_s": float(
+                                    acceleration_duration
+                                ),
+                                "recovery_acceleration_mps2": float(
+                                    recovery_acceleration
+                                ),
+                                "lane_change_duration_s": float(duration),
+                                "lane_change_start_delay_s": float(start_delay),
+                            }
+                            if (
+                                best_rejected_dense_dynamics is None
+                                or dense_detail[
+                                    "max_lateral_acceleration_mps2"
+                                ]
+                                < best_rejected_dense_dynamics[
+                                    "max_lateral_acceleration_mps2"
+                                ]
+                            ):
+                                best_rejected_dense_dynamics = dense_detail
+                            continue
                         footprint_valid, footprint_detail = (
                             audit_dense_footprint_on_lanes(
                                 candidate_dense,
@@ -1886,6 +2074,9 @@ class PlatoonNormalPlanner:
                                     "rule_target_point": tuple(
                                         float(value) for value in target_point
                                     ),
+                                    "minimum_background_gap_m": float(
+                                        minimum_background_gap
+                                    ),
                                 },
                             )
                         candidates.append(candidate)
@@ -2062,6 +2253,9 @@ class PlatoonNormalPlanner:
             ),
             "kinematic_rejections_by_reason": dict(
                 sorted(kinematic_hits.items())
+            ),
+            "best_rejected_dense_dynamics": copy.deepcopy(
+                best_rejected_dense_dynamics
             ),
             "best_rejected_background_gap_m": (
                 None
@@ -2254,6 +2448,13 @@ class PlatoonNormalPlanner:
                 None if candidate.stop_time_s is None else float(candidate.stop_time_s)
             ),
             "terminal_progress_m": float(candidate.terminal_progress_m),
+            "minimum_background_gap_m": (
+                None
+                if candidate.execution_parameters is None
+                else candidate.execution_parameters.get(
+                    "minimum_background_gap_m"
+                )
+            ),
             "trajectory_world": candidate.output.astype(
                 np.float32, copy=False
             ).tolist(),

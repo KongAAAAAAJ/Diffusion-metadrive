@@ -146,6 +146,36 @@ def test_pid_cross_track_feedback_opposes_lateral_path_error() -> None:
     assert debug["cross_track_correction"] == pytest.approx(0.2)
 
 
+def test_pid_preview_does_not_skip_initial_opposite_curve_direction() -> None:
+    trajectory = np.asarray(
+        [
+            [4.6055, 0.2317, 0.04176],
+            [8.4292, -0.0534, -0.28153],
+            [11.4874, -1.1772, -0.40417],
+            [13.7265, -2.0773, -0.32140],
+            [15.1328, -2.4798, -0.20691],
+            [15.7167, -2.5901, -0.15362],
+            [16.5216, -2.6833, -0.05916],
+            [18.5729, -2.6734, 0.04691],
+        ],
+        dtype=np.float32,
+    )
+    controller = PIDTrajectoryController({"pid_dt": 0.1})
+    vehicle = _FakeVehicle(speed_km_h=36.0)
+
+    action, debug = controller._single_control_with_debug(
+        "agent0", vehicle, trajectory, None
+    )
+
+    assert debug["preview_direction_guarded"] is True
+    assert debug["preview_query_m"] == pytest.approx(
+        float(np.linalg.norm(trajectory[0, :2]))
+    )
+    assert debug["first_path_heading_rad"] > 0.0
+    assert debug["preview_heading_rad"] > 0.0
+    assert float(action[0]) > 0.0
+
+
 def test_lqr_follower_controller_records_lateral_debug_for_followers() -> None:
     shared_lane = _FakeLane()
     controller = LQRFollowerController()

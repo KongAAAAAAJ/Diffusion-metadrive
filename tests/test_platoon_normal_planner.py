@@ -17,6 +17,7 @@ from models.platoon_planner.platoon_normal_planner import (
     PlatoonNormalPlanner,
     TrajectoryExecutionSpec,
     audit_dense_footprint_on_lanes,
+    audit_dense_trajectory_dynamics,
     _Neighbor,
     _TrafficEnvelope,
     _TrajectoryCandidate,
@@ -1234,6 +1235,42 @@ def test_s8_uses_probe_justified_longitudinal_profile_resolution_only_for_lane_c
     assert planner._scenario_candidate_pool_limit(
         scenario_id="S7_ramp_merge", action=1
     ) == 12
+
+
+def test_dense_dynamics_rejects_s8_style_compressed_lane_change():
+    times = np.arange(0.0, 4.0 + 0.05, 0.1, dtype=np.float64)
+    progress = 10.0 * times
+    ratio = np.clip(progress / 8.0, 0.0, 1.0)
+    smootherstep = 6.0 * ratio**5 - 15.0 * ratio**4 + 10.0 * ratio**3
+    xy = np.column_stack((progress, -3.6 * smootherstep))
+    dense = PlatoonNormalPlanner._append_heading(xy, default_heading=0.0)
+
+    audit = audit_dense_trajectory_dynamics(
+        dense,
+        current_pose=np.zeros((3,), dtype=np.float64),
+        dt_s=0.1,
+    )
+
+    assert not audit.valid
+    assert "dense_lateral_acceleration_limit" in audit.violations
+    assert audit.max_lateral_acceleration_mps2 > 6.0
+
+
+def test_dense_dynamics_accepts_longer_delayed_lane_change():
+    times = np.arange(0.0, 4.0 + 0.05, 0.1, dtype=np.float64)
+    progress = 8.0 * times
+    ratio = np.clip((progress - 8.0) / 28.0, 0.0, 1.0)
+    smootherstep = 6.0 * ratio**5 - 15.0 * ratio**4 + 10.0 * ratio**3
+    xy = np.column_stack((progress, -3.6 * smootherstep))
+    dense = PlatoonNormalPlanner._append_heading(xy, default_heading=0.0)
+
+    audit = audit_dense_trajectory_dynamics(
+        dense,
+        current_pose=np.zeros((3,), dtype=np.float64),
+        dt_s=0.1,
+    )
+
+    assert audit.valid, audit.violations
 
 
 def test_tight_target_lane_gap_delays_lane_change_start():

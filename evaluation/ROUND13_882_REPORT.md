@@ -8,8 +8,9 @@ in-process seed-23/seed-17/seed-23 sandwich test compares every state, action
 and control step and passes.
 
 Round 13.882b resolves the reported S8 `all_rule_proposals_infeasible`
-failure, but the complete S8 episode gate remains blocked by a separate
-closed-loop heading-tracking error.  Diagnostic-64 collection must not start.
+failure and the subsequent closed-loop heading/lateral tracking errors.  The
+complete S8 episode gate remains blocked by a separate background-prediction
+contract mismatch.  Diagnostic-64 collection must not start.
 
 ## 13.882a: S5
 
@@ -66,10 +67,37 @@ heading limit                  0.1 rad
 ```
 
 The low spatial error combined with the heading-limit violation during the
-initial exit curve identifies a planner/controller closed-loop executability
-issue.  It is not evidence that the S8 traffic layout is dynamically
-infeasible.  Therefore no vehicle was removed or moved and no safety boundary
-was relaxed.
+initial exit curve identified a planner/controller closed-loop executability
+issue.  The dense 0.1 s path showed the root cause: a `-6 m/s2` braking
+profile, 3.5 s lane change and zero start delay compressed the 3.6 m lateral
+transition into roughly 8 m of spatial arc.  Its dense lateral acceleration
+was about 8.8 m/s2, despite the eight 0.5 s waypoints nearly passing the 6
+m/s2 contract.
+
+The production planner now audits every 0.1 s chord transition against the
+same yaw-rate, curvature and lateral-acceleration limits before a candidate
+enters joint search.  The controller also guards the exit's initial
+left-to-right curvature reversal: if the first reachable tangent and the
+nominal long-lookahead tangent have opposite signs, preview is capped at the
+first 0.5 s waypoint.  Steering sign itself was verified correct and was not
+changed.
+
+With both fixes, seeds 17 and 23 no longer fail heading (`0.137 rad`) or
+lateral (`0.544 m`) tracking.  They progress deterministically to step 48 and
+then stop on the unchanged 5 m background hard boundary:
+
+```text
+reason                         committed_trajectory_background_unsafe
+agent                          agent1
+planned minimum gap            9.103910 m
+real committed-roll gap        4.915710 / 4.915704 m (seed 17 / 23)
+collision                      false
+```
+
+The size of the planned-to-real gap change rules out the small residual
+tracking error as the sole cause.  Background lane/route prediction versus
+committed execution must be audited next.  No vehicle was removed or moved,
+and the 5 m boundary was not relaxed.
 
 ## Evidence
 
@@ -78,10 +106,10 @@ was relaxed.
 /tmp/bev-stage-census/round13_882b_s8_seed17_dense_probe_after_prod.json
 /tmp/bev-stage-census/round13_882b_s8_fixed_seed17.json
 /tmp/bev-stage-census/round13_882b_s8_fixed_seed23.json
+/tmp/bev-stage-census/round13_882b_s8_dense_preview2_seed17.json
+/tmp/bev-stage-census/round13_882b_s8_dense_preview_seed23.json
 ```
 
-Focused planner/orchestrator/controller tests pass (`116 passed`), in addition
-to the real sandwich determinism test.  The remaining S8
-heading-tracking blocker must be handled in a separate controller/path
-executability round before rerunning the full `10 x 200` gate or collecting
-diagnostic-64.
+Focused dense-path and controller tests pass.  The remaining S8 background
+prediction blocker must be resolved before rerunning the full `10 x 200` gate
+or collecting diagnostic-64.
