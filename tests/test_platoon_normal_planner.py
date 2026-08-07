@@ -17,6 +17,9 @@ from models.platoon_planner.platoon_normal_planner import (
     _TrafficEnvelope,
     _TrajectoryCandidate,
 )
+from models.platoon_planner.route_chain_geometry import (
+    build_continuous_lane_chain_path,
+)
 from models.decisioner.rule_decisioner import JointActionProposal
 from scenarios.orchestrator import ScenarioOrchestrator
 
@@ -210,6 +213,58 @@ def test_joint_trajectory_executor_rolls_absolute_time_without_restart():
     assert result.debug["rolling_hard_audit"] == "passed"
 
 
+def test_route_chain_geometry_smoothly_joins_offset_exit_connector():
+    source = AngledLane(("A", "B", 2), (0.0, 0.0), 0.0, length=20.0)
+    connector = AngledLane(("B", "C", 0), (20.0, -3.5), 0.0, length=10.0)
+    target = AngledLane(("C", "D", 0), (30.0, -3.5), 0.0, length=15.0)
+
+    path = build_continuous_lane_chain_path(
+        [source, connector, target], start_s=0.0, step_m=0.25
+    )
+
+    spacing = np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1)
+    assert float(spacing.max()) <= 0.5 + 1e-6
+    assert np.all(np.diff(path[:, 0]) >= -1e-6)
+    assert path[0, :2] == pytest.approx([0.0, 0.0])
+    assert path[-1, :2] == pytest.approx([45.0, -3.5])
+    assert np.any((path[:, 1] < -0.1) & (path[:, 1] > -3.4))
+
+
+def test_execution_spec_separates_stopped_reference_from_extended_spatial_path():
+    times = np.arange(0.0, 8.1, 0.1, dtype=np.float64)
+    stop_x = np.minimum(5.0 * times, 2.778)
+    nominal = np.column_stack((stop_x, np.zeros_like(times), np.zeros_like(times)))
+    spatial_x = np.arange(0.0, 30.25, 0.25)
+    spatial = np.column_stack(
+        (spatial_x, np.zeros_like(spatial_x), np.zeros_like(spatial_x))
+    )
+
+    spec = TrajectoryExecutionSpec(
+        agent_id="agent0",
+        source_lane_index=("A", "B", 0),
+        continuation_lane_index=(),
+        target_lane_index=("A", "B", 0),
+        start_s=0.0,
+        start_d=0.0,
+        end_d=0.0,
+        initial_speed_mps=5.0,
+        acceleration_mps2=-4.5,
+        acceleration_duration_s=4.0,
+        recovery_acceleration_mps2=0.0,
+        lane_change_duration_s=4.0,
+        lane_change_start_delay_s=0.0,
+        default_heading=0.0,
+        selected_candidate_index=0,
+        rule_target_point=(2.778, 0.0),
+        sample_times_s=times,
+        trajectory_world=nominal,
+        spatial_path_world=spatial,
+    )
+
+    assert spec.reference_arc_m[-1] == pytest.approx(2.778)
+    assert spec.path_arc_m[-1] == pytest.approx(30.0)
+
+
 def test_execution_spec_sampling_uses_original_absolute_lateral_curve():
     env, plan = _execution_fixture()
     del env
@@ -219,7 +274,7 @@ def test_execution_spec_sampling_uses_original_absolute_lateral_curve():
             **{
                 key: value
                 for key, value in spec.__dict__.items()
-                if key != "path_arc_m"
+                if key not in {"path_arc_m", "reference_arc_m"}
             },
             "trajectory_world": np.column_stack(
                 (
@@ -560,14 +615,13 @@ def test_missing_adjacent_lane_falls_back_to_keep():
     assert np.allclose(traj[:, 1], 3.5, atol=0.6)
 
 
-def test_resolve_target_lane_uses_s8_hardcoded_branch_for_3c0_right_lane():
+def test_resolve_target_lane_rejects_s8_wrong_upstream_branch():
     env = _env_s8_hardcoded_target()
     source_lane = env.engine.current_map.road_network.get_lane(("3C0_1_", "4G0_0_", 2))
 
     target_lane = PlatoonNormalPlanner._resolve_target_lane(env, source_lane, action=1)
 
-    assert target_lane is not None
-    assert tuple(target_lane.index) == ("3C0_1_", "4G1_0_", 0)
+    assert target_lane is None
 
 
 def test_resolve_target_lane_rejects_negative_lane_id():

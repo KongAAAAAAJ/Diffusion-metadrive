@@ -1256,46 +1256,72 @@ def test_reference_lane_chain_keeps_current_lane_slot_for_non_s8_routes():
     ]
 
 
-def test_s8_action_one_targets_downstream_ramp_lane_when_current_right_lane_has_no_neighbor():
+def test_s8_rightmost_lane_follows_exit_route_with_keep_not_fake_right():
     vehicle = _vehicle("agent0", 25.0, -3.5, 2, speed_km_h=25.0)
     env = _env_s8_immediate_ramp(vehicle)
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
 
-    candidate = rule_maker._build_coarse_trajectory(env, env.agents["agent0"], 1, [])
+    right_candidate = rule_maker._build_coarse_trajectory(
+        env, env.agents["agent0"], 1, []
+    )
+    keep_candidate = rule_maker._build_coarse_trajectory(
+        env, env.agents["agent0"], 0, []
+    )
 
-    assert candidate is not None
-    assert candidate["target_lane_index"] == ("B", "C", 0)
+    assert right_candidate is None
+    assert keep_candidate is not None
+    assert keep_candidate["target_lane_index"] == ("A", "B", 2)
+    assert keep_candidate["target_lane_chain_indices"] == (
+        ("A", "B", 2),
+        ("B", "C", 0),
+    )
 
 
-def test_s8_downstream_target_lane_uses_hardcoded_exit_branch_for_3c0_right_lane():
+def test_s8_rightmost_lane_rejects_wrong_upstream_branch():
     vehicle = _vehicle("agent0", 25.0, -3.5, 2, speed_km_h=25.0)
     env = _env_s8_hardcoded_branch(vehicle)
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
 
-    target_lane = rule_maker._S8_downstream_target_lane(env, env.agents["agent0"], env.agents["agent0"].lane)
+    target_lane = rule_maker._target_lane(
+        env, env.agents["agent0"], env.agents["agent0"].lane, 1
+    )
 
-    assert target_lane is not None
-    assert tuple(target_lane.index) == ("3C0_1_", "4G1_0_", 0)
+    assert target_lane is None
+    chain = rule_maker._reference_lane_chain(
+        env, env.agents["agent0"], env.agents["agent0"].lane
+    )
+    assert ("3C0_1_", "4G1_0_", 0) not in {
+        tuple(lane.index) for lane in chain
+    }
+    assert ("4G0_0_", "4G1_1_", 0) in {
+        tuple(lane.index) for lane in chain
+    }
 
 
-def test_debug_compute_s8_action_one_uses_downstream_ramp_lane():
+def test_debug_compute_s8_rightmost_lane_does_not_emit_fake_right():
     vehicle = _vehicle("agent0", 25.0, -3.5, 2, speed_km_h=25.0)
     env = _env_s8_immediate_ramp(vehicle)
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
 
-    decisions = rule_maker.debug_compute(env, ["agent0"], planner_batch={}, manual_actions={"agent0": 1})
+    decisions = rule_maker.debug_compute(
+        env, ["agent0"], planner_batch={}, manual_actions={"agent0": 0}
+    )
     debug = rule_maker.get_last_debug()
 
-    assert decisions["agent0"]["action"] == 1
+    assert decisions["agent0"]["action"] == 0
     assert debug is not None
-    assert debug["best_actions"] == {"agent0": 1}
+    assert debug["best_actions"] == {"agent0": 0}
     selected_candidates = [
         candidate
         for candidate in debug["candidates_by_agent"]["agent0"]
         if candidate["selected"]
     ]
     assert len(selected_candidates) == 1
-    assert selected_candidates[0]["target_lane_index"] == ("B", "C", 0)
+    assert selected_candidates[0]["target_lane_index"] == ("A", "B", 2)
+    assert selected_candidates[0]["target_lane_chain_indices"] == (
+        ("A", "B", 2),
+        ("B", "C", 0),
+    )
 
 
 def test_non_s8_action_one_still_requires_current_road_neighbor_lane():

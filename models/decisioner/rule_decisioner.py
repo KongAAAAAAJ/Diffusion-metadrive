@@ -231,7 +231,6 @@ class MultiAgentRuleMaker(RuleMaker):
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
         self._s7_route_lanes_debug_plot_counter = 0
-        self._s8_route_lanes_debug_plot_counter = 0
 
     def reset(self, env, agent_ids: list[str]) -> None:  # noqa: ARG002
         self._formation_locked = bool(self.locked_on_reset)
@@ -458,6 +457,11 @@ class MultiAgentRuleMaker(RuleMaker):
             ).reshape(2),
             "source_lane_index": tuple(
                 candidate.get("source_lane_index", ()) or ()
+            ),
+            "source_lane_chain": tuple(
+                tuple(value)
+                for value in candidate.get("source_lane_chain_indices", ())
+                if value
             ),
             "target_lane_index": tuple(
                 candidate.get("target_lane_index", ()) or ()
@@ -797,7 +801,17 @@ class MultiAgentRuleMaker(RuleMaker):
             ),
             "target_point": np.asarray(candidate["target_point"], dtype=np.float32).tolist(),
             "source_lane_index": tuple(candidate.get("source_lane_index", ()) or ()),
+            "source_lane_chain_indices": tuple(
+                tuple(value)
+                for value in candidate.get("source_lane_chain_indices", ())
+                if value
+            ),
             "target_lane_index": tuple(candidate.get("target_lane_index", ()) or ()),
+            "target_lane_chain_indices": tuple(
+                tuple(value)
+                for value in candidate.get("target_lane_chain_indices", ())
+                if value
+            ),
             "selected": bool(selected),
             "forced_lane_change": bool(candidate.get("forced_lane_change", False)),
             "maneuver_committed": bool(candidate.get("maneuver_committed", False)),
@@ -1384,6 +1398,10 @@ class MultiAgentRuleMaker(RuleMaker):
                 "trajectory_world": trajectory,
                 "target_point": target_point,
                 "source_lane_index": tuple(getattr(source_lane, "index", ()) or ()),
+                "source_lane_chain_indices": tuple(
+                    tuple(getattr(lane, "index", ()) or ())
+                    for lane in source_lane_chain
+                ),
                 "target_lane_index": tuple(getattr(target_lane, "index", ()) or ()),
                 "target_lane_chain_indices": tuple(
                     tuple(getattr(lane, "index", ()) or ())
@@ -1400,7 +1418,12 @@ class MultiAgentRuleMaker(RuleMaker):
                 "rear_vehicle_post_accel_mps2": None if rear_vehicle_post_accel_mps2 is None else float(rear_vehicle_post_accel_mps2),
                 "mobil_gain": 0.0,
             }
-            if self._is_s8_exit_route(env) and int(action) == 1:
+            if (
+                self._is_s8_exit_route(env)
+                and int(action) == 1
+                and tuple(getattr(source_lane, "index", ())[:2])
+                == tuple(getattr(target_lane, "index", ())[:2])
+            ):
                 candidate["forced_lane_change"] = True
             if self._is_s7_forced_lane_candidate(env, candidate):
                 candidate["forced_lane_change"] = True
@@ -1981,10 +2004,6 @@ class MultiAgentRuleMaker(RuleMaker):
             return None
         if action == 0:
             return source_lane
-        if self._is_s8_exit_route(env) and int(action) == 1:
-            s8_target = self._S8_downstream_target_lane(env, vehicle, source_lane)
-            if s8_target is not None:
-                return s8_target
         if self._is_s7_merge_route(env) and int(action) == -1:
             s7_target = self._S7_downstream_target_lane(env, vehicle, source_lane)
             if s7_target is not None:
@@ -2006,42 +2025,6 @@ class MultiAgentRuleMaker(RuleMaker):
         if tuple(getattr(target_lane, "index", ()) or ()) != target_index:
             return None
         return target_lane
-
-    def _S8_downstream_target_lane(self, env, vehicle, source_lane):
-        debug = 0
-        if debug:
-            road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
-            navigation = getattr(vehicle, "navigation", None)
-            checkpoints = list(getattr(navigation, "checkpoints", []) or [])
-            if road_network is not None and len(checkpoints) >= 2:
-                self._s8_route_lanes_debug_plot_counter += 1
-                save_s8_route_lanes_debug_plot(
-                    vehicle,
-                    road_network,
-                    checkpoints,
-                    source_lane,
-                    self._s8_route_lanes_debug_plot_counter,
-                )
-
-        lane_index = tuple(getattr(source_lane, "index", ()) or ())
-        if lane_index == ("3C0_1_", "4G0_0_", 2):
-            road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
-            if road_network is not None and hasattr(road_network, "get_lane"):
-                try:
-                    return road_network.get_lane(("3C0_1_", "4G1_0_", 0))
-                except Exception:
-                    return None
-        if len(lane_index) < 3:
-            return None
-        s8_chain = self._S8_reference_lane_chain(env, vehicle, source_lane)
-        if not s8_chain:
-            return None
-        source_road = tuple(lane_index[:2])
-        for lane in s8_chain:
-            candidate_index = tuple(getattr(lane, "index", ()) or ())
-            if len(candidate_index) >= 3 and tuple(candidate_index[:2]) != source_road:
-                return lane
-        return None
 
     def _S7_downstream_target_lane(self, env, vehicle, source_lane):
         debug = 0

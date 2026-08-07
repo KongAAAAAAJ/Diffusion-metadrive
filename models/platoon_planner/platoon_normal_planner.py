@@ -25,6 +25,10 @@ from models.platoon_planner.collision_geometry import (
     obb_overlap_series,
     world_trajectory_to_ego_local,
 )
+from models.platoon_planner.route_chain_geometry import (
+    RouteChainGeometryError,
+    build_continuous_lane_chain_path,
+)
 
 
 def _point_in_triangle(
@@ -287,12 +291,16 @@ class TrajectoryExecutionSpec:
     rule_target_point: tuple[float, float]
     sample_times_s: np.ndarray
     trajectory_world: np.ndarray
+    source_lane_chain_indices: tuple[tuple, ...] = ()
+    target_lane_chain_indices: tuple[tuple, ...] = ()
+    spatial_path_world: np.ndarray | None = None
+    reference_arc_m: np.ndarray = field(init=False, repr=False)
     path_arc_m: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         times = np.ascontiguousarray(self.sample_times_s, dtype=np.float64)
         trajectory = np.ascontiguousarray(self.trajectory_world, dtype=np.float64)
-        path_arc = np.concatenate(
+        reference_arc = np.concatenate(
             (
                 [0.0],
                 np.cumsum(
@@ -300,27 +308,53 @@ class TrajectoryExecutionSpec:
                 ),
             )
         )
+        spatial_path = (
+            trajectory.copy()
+            if self.spatial_path_world is None
+            else np.ascontiguousarray(self.spatial_path_world, dtype=np.float64)
+        )
+        path_arc = np.concatenate(
+            (
+                [0.0],
+                np.cumsum(
+                    np.linalg.norm(np.diff(spatial_path[:, :2], axis=0), axis=1)
+                ),
+            )
+        )
         if times.ndim != 1 or trajectory.shape != (times.size, 3):
             raise ValueError("execution trajectory/time shape mismatch")
-        if path_arc.shape != times.shape:
-            raise ValueError("execution path arc/time shape mismatch")
+        if spatial_path.ndim != 2 or spatial_path.shape[1] != 3 or spatial_path.shape[0] < 2:
+            raise ValueError("execution spatial path must have shape [N>=2,3]")
+        if reference_arc.shape != times.shape or path_arc.shape != (spatial_path.shape[0],):
+            raise ValueError("execution reference/spatial arc shape mismatch")
         if times.size < 2 or abs(float(times[0])) > 1e-9:
             raise ValueError("execution trajectory must start at t=0")
         if (
             not np.isfinite(times).all()
             or not np.isfinite(trajectory).all()
+            or not np.isfinite(spatial_path).all()
+            or not np.isfinite(reference_arc).all()
             or not np.isfinite(path_arc).all()
         ):
             raise ValueError("execution trajectory must be finite")
         if np.any(np.diff(times) <= 0.0):
             raise ValueError("execution trajectory times must increase")
-        if abs(float(path_arc[0])) > 1e-9 or np.any(np.diff(path_arc) < -1e-9):
+        if (
+            abs(float(reference_arc[0])) > 1e-9
+            or np.any(np.diff(reference_arc) < -1e-9)
+            or abs(float(path_arc[0])) > 1e-9
+            or np.any(np.diff(path_arc) < -1e-9)
+        ):
             raise ValueError("execution path arc must start at zero and be monotonic")
         times.setflags(write=False)
         trajectory.setflags(write=False)
+        spatial_path.setflags(write=False)
+        reference_arc.setflags(write=False)
         path_arc.setflags(write=False)
         object.__setattr__(self, "sample_times_s", times)
         object.__setattr__(self, "trajectory_world", trajectory)
+        object.__setattr__(self, "spatial_path_world", spatial_path)
+        object.__setattr__(self, "reference_arc_m", reference_arc)
         object.__setattr__(self, "path_arc_m", path_arc)
 
 
@@ -492,6 +526,16 @@ class PlatoonNormalPlanner:
             target_lane_index = tuple(
                 decision.get("target_lane_index", ()) or ()
             )
+            source_lane_chain_indices = tuple(
+                tuple(value)
+                for value in decision.get("source_lane_chain", ()) or ()
+                if value
+            )
+            target_lane_chain_indices = tuple(
+                tuple(value)
+                for value in decision.get("target_lane_chain", ()) or ()
+                if value
+            )
             commitment_elapsed_s = decision.get("commitment_elapsed_s")
             commitment_elapsed_s = (
                 None
@@ -502,6 +546,8 @@ class PlatoonNormalPlanner:
                 str(agent_id),
                 int(action),
                 target_lane_index,
+                source_lane_chain_indices,
+                target_lane_chain_indices,
                 commitment_elapsed_s,
                 np.ascontiguousarray(target_point).tobytes(),
             )
@@ -513,6 +559,8 @@ class PlatoonNormalPlanner:
                     action,
                     target_point,
                     target_lane_index=target_lane_index,
+                    source_lane_chain_indices=source_lane_chain_indices,
+                    target_lane_chain_indices=target_lane_chain_indices,
                     commitment_elapsed_s=commitment_elapsed_s,
                 )
                 if _pool_cache is not None:
@@ -756,16 +804,33 @@ class PlatoonNormalPlanner:
                     + float(self._last_selected_candidates[agent_id].lane_change_duration_s)
                     for agent_id in committed_agents
                 )
-                specs = {
-                    agent_id: self._build_execution_spec(
-                        env,
-                        agent_id,
-                        self._last_selected_candidates[agent_id],
-                        selected_candidate_index=indices[agent_id],
-                        maximum_time_s=deadline + self.HORIZON_S + decision_dt_s,
-                    )
-                    for agent_id in trajectories
-                }
+                try:
+                    specs = {
+                        agent_id: self._build_execution_spec(
+                            env,
+                            agent_id,
+                            self._last_selected_candidates[agent_id],
+                            selected_candidate_index=indices[agent_id],
+                            maximum_time_s=(
+                                deadline + self.HORIZON_S + decision_dt_s
+                            ),
+                        )
+                        for agent_id in trajectories
+                    }
+                except NormalPlannerKinematicError as exc:
+                    attempt["native_feasible"] = False
+                    attempt["fallback_reason"] = "execution_geometry_invalid"
+                    attempt["execution_geometry_error"] = str(exc)
+                    attempt_debug["_ranked"] = {
+                        "proposal_attempts": attempts,
+                        "selected_proposal_id": None,
+                        "selected_proposal_rank": None,
+                        "pool_cache_entry_count": len(pool_cache),
+                        "pool_request_count": int(pool_request_count),
+                        "pool_cache_hit_count": int(pool_cache_hit_count),
+                    }
+                    self._last_debug = attempt_debug
+                    continue
                 start_step = int(getattr(env, "_scenario_step_count", 0) or 0)
                 execution_plan = JointTrajectoryExecutionPlan(
                     execution_id=int(self._execution_counter),
@@ -781,6 +846,28 @@ class PlatoonNormalPlanner:
                     committed_agents=committed_agents,
                     completion_deadline_s=float(deadline),
                 )
+                try:
+                    preflight_executor = JointTrajectoryExecutor(self)
+                    preflight_executor.start(env, execution_plan)
+                    preflight_executor.roll(env)
+                except CommittedTrajectoryError as exc:
+                    attempt["native_feasible"] = False
+                    attempt["fallback_reason"] = "execution_preflight_failed"
+                    attempt["execution_preflight_reason"] = str(exc.reason_code)
+                    attempt["execution_preflight_debug"] = copy.deepcopy(
+                        exc.debug
+                    )
+                    attempt_debug["_ranked"] = {
+                        "proposal_attempts": attempts,
+                        "selected_proposal_id": None,
+                        "selected_proposal_rank": None,
+                        "pool_cache_entry_count": len(pool_cache),
+                        "pool_request_count": int(pool_request_count),
+                        "pool_cache_hit_count": int(pool_cache_hit_count),
+                    }
+                    self._last_debug = attempt_debug
+                    continue
+                attempt["execution_preflight"] = "passed"
             return RankedJointPlan(
                 proposal_id=int(proposal.proposal_id),
                 proposal_rank=int(proposal.rank),
@@ -856,6 +943,25 @@ class PlatoonNormalPlanner:
             raise NormalPlannerKinematicError(
                 f"{agent_id} execution source lane is unavailable"
             )
+        source_chain_indices = tuple(
+            tuple(value)
+            for value in params.get("source_lane_chain_indices", ())
+            if value
+        )
+        target_chain_indices = tuple(
+            tuple(value)
+            for value in params.get("target_lane_chain_indices", ())
+            if value
+        )
+        source_chain = self._resolve_execution_lane_chain(
+            env, source_chain_indices, fallback_lane=source_lane
+        )
+        target_lane = self._lane_from_index(
+            env, tuple(params["target_lane_index"])
+        )
+        target_chain = self._resolve_execution_lane_chain(
+            env, target_chain_indices, fallback_lane=target_lane
+        )
         continuation = self._continuation_context(source_lane, continuation_lane)
         sample_times = np.arange(
             0.0,
@@ -886,6 +992,11 @@ class PlatoonNormalPlanner:
             ),
             default_heading=float(params["default_heading"]),
             times=sample_times,
+            route_lane_chain=(
+                source_chain
+                if int(params.get("action", 0)) == 0
+                else None
+            ),
         )
         if trajectory is None:
             raise NormalPlannerKinematicError(
@@ -909,6 +1020,26 @@ class PlatoonNormalPlanner:
             raise NormalPlannerKinematicError(
                 f"{agent_id} execution parameterization does not reproduce selected path"
             )
+        try:
+            spatial_path = self._build_execution_spatial_path(
+                source_chain=source_chain,
+                target_chain=target_chain,
+                trajectory_world=trajectory,
+                sample_times_s=sample_times,
+                start_s=float(params["start_s"]),
+                start_d=float(params["start_d"]),
+                action=(
+                    int(params.get("action", 0))
+                ),
+                lane_change_duration_s=float(candidate.lane_change_duration_s),
+                lane_change_start_delay_s=float(
+                    candidate.lane_change_start_delay_s
+                ),
+            )
+        except (RouteChainGeometryError, LongitudinalReferenceError, IndexError) as exc:
+            raise NormalPlannerKinematicError(
+                f"{agent_id} execution route geometry is invalid: {exc}"
+            ) from exc
         return TrajectoryExecutionSpec(
             agent_id=str(agent_id),
             source_lane_index=tuple(params["source_lane_index"]),
@@ -932,7 +1063,174 @@ class PlatoonNormalPlanner:
             rule_target_point=tuple(params["rule_target_point"]),
             sample_times_s=sample_times,
             trajectory_world=trajectory,
+            source_lane_chain_indices=tuple(
+                tuple(getattr(lane, "index", ()) or ()) for lane in source_chain
+            ),
+            target_lane_chain_indices=tuple(
+                tuple(getattr(lane, "index", ()) or ()) for lane in target_chain
+            ),
+            spatial_path_world=spatial_path,
         )
+
+    def _resolve_execution_lane_chain(
+        self,
+        env,
+        lane_indices: tuple[tuple, ...],
+        *,
+        fallback_lane,
+    ) -> list:
+        lanes = []
+        for lane_index in lane_indices:
+            lane = self._lane_from_index(env, tuple(lane_index))
+            if lane is None:
+                raise RouteChainGeometryError(
+                    f"execution route lane is unavailable: {tuple(lane_index)!r}"
+                )
+            lanes.append(lane)
+        if not lanes:
+            if fallback_lane is None:
+                raise RouteChainGeometryError("execution route has no fallback lane")
+            lanes = [fallback_lane]
+        fallback_index = tuple(getattr(fallback_lane, "index", ()) or ())
+        if fallback_index and tuple(getattr(lanes[0], "index", ()) or ()) != fallback_index:
+            lanes.insert(0, fallback_lane)
+        return lanes
+
+    def _build_execution_spatial_path(
+        self,
+        *,
+        source_chain: list,
+        target_chain: list,
+        trajectory_world: np.ndarray,
+        sample_times_s: np.ndarray,
+        start_s: float,
+        start_d: float,
+        action: int,
+        lane_change_duration_s: float,
+        lane_change_start_delay_s: float,
+    ) -> np.ndarray:
+        current_xy = np.asarray(trajectory_world[0, :2], dtype=np.float64)
+        source_chain = self._connected_execution_prefix(source_chain)
+        target_chain = self._connected_execution_prefix(target_chain)
+        source_path = build_continuous_lane_chain_path(
+            source_chain,
+            start_s=float(start_s),
+            start_lateral_m=float(start_d),
+            step_m=0.25,
+        )
+        target_first = target_chain[0]
+        target_s, _ = target_first.local_coordinates(current_xy)
+        target_path = build_continuous_lane_chain_path(
+            target_chain,
+            start_s=float(target_s),
+            start_lateral_m=0.0,
+            step_m=0.25,
+        )
+        source_arc = np.concatenate(
+            ([0.0], np.cumsum(np.linalg.norm(np.diff(source_path[:, :2], axis=0), axis=1)))
+        )
+        target_arc = np.concatenate(
+            ([0.0], np.cumsum(np.linalg.norm(np.diff(target_path[:, :2], axis=0), axis=1)))
+        )
+        if int(action) == 0:
+            result = source_path
+        else:
+            source_index = tuple(getattr(source_chain[0], "index", ()) or ())
+            target_index = tuple(getattr(target_chain[0], "index", ()) or ())
+            if len(source_index) < 3 or len(target_index) < 3 or source_index[:2] != target_index[:2]:
+                # Downstream merge maneuvers predate the route-chain contract.
+                # Preserve their selected native geometry; only adjacent-lane
+                # commitments use the new common-prefix route construction.
+                return np.ascontiguousarray(trajectory_world, dtype=np.float64)
+            maximum_arc = float(target_arc[-1])
+            progress = np.arange(0.0, maximum_arc, 0.25, dtype=np.float64)
+            progress = np.append(progress, maximum_arc)
+            target_rows = sample_path_at_arc(target_path, target_arc, progress)
+            source_query = np.minimum(progress, float(source_arc[-1]))
+            source_rows = sample_path_at_arc(source_path, source_arc, source_query)
+            reference_arc = np.concatenate(
+                (
+                    [0.0],
+                    np.cumsum(
+                        np.linalg.norm(
+                            np.diff(np.asarray(trajectory_world)[:, :2], axis=0),
+                            axis=1,
+                        )
+                    ),
+                )
+            )
+            start_progress = float(
+                np.interp(
+                    float(lane_change_start_delay_s),
+                    sample_times_s,
+                    reference_arc,
+                )
+            )
+            completion_progress = float(
+                np.interp(
+                    min(float(lane_change_duration_s), float(sample_times_s[-1])),
+                    sample_times_s,
+                    reference_arc,
+                )
+            )
+            transition_length = max(completion_progress - start_progress, 8.0)
+            ratio = np.clip((progress - start_progress) / transition_length, 0.0, 1.0)
+            ratio = 6.0 * ratio**5 - 15.0 * ratio**4 + 10.0 * ratio**3
+            xy = (
+                (1.0 - ratio[:, None]) * source_rows[:, :2]
+                + ratio[:, None] * target_rows[:, :2]
+            )
+            result = self._append_heading(
+                xy, default_heading=float(trajectory_world[0, 2])
+            )
+        result = np.ascontiguousarray(result, dtype=np.float64)
+        result[0] = np.asarray(trajectory_world[0], dtype=np.float64)
+        if result.shape[0] < 2:
+            raise RouteChainGeometryError("execution spatial path is too short")
+        return result
+
+    @staticmethod
+    def _connected_execution_prefix(lanes: list) -> list:
+        """Keep only the physically connected prefix of a navigation chain.
+
+        S8 navigation lists the exit connector after every current-road lane,
+        but only the rightmost lane surface touches it.  Earlier peer-lane
+        commitments finish locally; a later RIGHT reaches the exit approach.
+        """
+
+        if not lanes:
+            return []
+        result = [lanes[0]]
+        for successor in lanes[1:]:
+            predecessor = result[-1]
+            predecessor_index = tuple(
+                getattr(predecessor, "index", ()) or ()
+            )
+            successor_index = tuple(getattr(successor, "index", ()) or ())
+            if (
+                len(predecessor_index) < 2
+                or len(successor_index) < 2
+                or predecessor_index[1] != successor_index[0]
+            ):
+                break
+            predecessor_length = float(
+                getattr(predecessor, "length", 0.0) or 0.0
+            )
+            end = np.asarray(
+                predecessor.position(predecessor_length, 0.0)[:2],
+                dtype=np.float64,
+            )
+            start = np.asarray(
+                successor.position(0.0, 0.0)[:2], dtype=np.float64
+            )
+            maximum_surface_gap = 0.5 * (
+                float(getattr(predecessor, "width", 3.5) or 3.5)
+                + float(getattr(successor, "width", 3.5) or 3.5)
+            ) + 1.0
+            if float(np.linalg.norm(start - end)) > maximum_surface_gap + 1.0e-6:
+                break
+            result.append(successor)
+        return result
 
     def get_last_debug(self) -> dict | None:
         return copy.deepcopy(self._last_debug)
@@ -945,6 +1243,8 @@ class PlatoonNormalPlanner:
         target_point: np.ndarray,
         *,
         target_lane_index: tuple = (),
+        source_lane_chain_indices: tuple[tuple, ...] = (),
+        target_lane_chain_indices: tuple[tuple, ...] = (),
         commitment_elapsed_s: float | None = None,
     ) -> tuple[list[_TrajectoryCandidate], dict]:
         stats = {
@@ -998,6 +1298,36 @@ class PlatoonNormalPlanner:
         )
         if target_lane is None:
             return [], self._empty_debug("target_lane_unavailable", stats, collision_hits)
+        source_lane_chain = [
+            lane
+            for lane in (
+                self._lane_from_index(env, tuple(lane_index))
+                for lane_index in source_lane_chain_indices
+            )
+            if lane is not None
+        ]
+        if not source_lane_chain:
+            source_lane_chain = [source_lane]
+            if continuation_lane is not None:
+                source_lane_chain.append(continuation_lane)
+        elif tuple(getattr(source_lane_chain[0], "index", ()) or ()) != tuple(
+            getattr(source_lane, "index", ()) or ()
+        ):
+            source_lane_chain.insert(0, source_lane)
+        target_lane_chain = [
+            lane
+            for lane in (
+                self._lane_from_index(env, tuple(lane_index))
+                for lane_index in target_lane_chain_indices
+            )
+            if lane is not None
+        ]
+        if not target_lane_chain:
+            target_lane_chain = [target_lane]
+        elif tuple(getattr(target_lane_chain[0], "index", ()) or ()) != tuple(
+            getattr(target_lane, "index", ()) or ()
+        ):
+            target_lane_chain.insert(0, target_lane)
         predecessor_lane = self._get_predecessor_lane(
             env, vehicle, source_lane
         )
@@ -1190,6 +1520,9 @@ class PlatoonNormalPlanner:
                             default_heading=float(
                                 getattr(vehicle, "heading_theta", 0.0)
                             ),
+                            route_lane_chain=(
+                                source_lane_chain if int(action) == 0 else None
+                            ),
                         )
                         if candidate_dense is None:
                             stats["road_rejection_count"] += 1
@@ -1198,11 +1531,10 @@ class PlatoonNormalPlanner:
                         footprint_valid, footprint_detail = (
                             audit_dense_footprint_on_lanes(
                                 candidate_dense,
-                                (
-                                    predecessor_lane,
-                                    source_lane,
-                                    target_lane,
-                                    continuation_lane,
+                                tuple(
+                                    [predecessor_lane]
+                                    + source_lane_chain
+                                    + target_lane_chain
                                 ),
                                 self._vehicle_dimensions(vehicle),
                                 dense_dt_s=self.DENSE_DT_S,
@@ -1351,6 +1683,15 @@ class PlatoonNormalPlanner:
                                     ),
                                     "target_lane_index": tuple(
                                         getattr(target_lane, "index", ()) or ()
+                                    ),
+                                    "action": int(action),
+                                    "source_lane_chain_indices": tuple(
+                                        tuple(getattr(lane, "index", ()) or ())
+                                        for lane in source_lane_chain
+                                    ),
+                                    "target_lane_chain_indices": tuple(
+                                        tuple(getattr(lane, "index", ()) or ())
+                                        for lane in target_lane_chain
                                     ),
                                     "start_s": float(start_s),
                                     "start_d": float(start_d),
@@ -1919,6 +2260,7 @@ class PlatoonNormalPlanner:
         lane_change_start_delay_s: float,
         default_heading: float,
         times: np.ndarray | None = None,
+        route_lane_chain: list | None = None,
     ) -> np.ndarray | None:
         evaluation_times = (
             self._dense_times
@@ -1928,6 +2270,34 @@ class PlatoonNormalPlanner:
         progress = np.asarray(progress, dtype=np.float64)
         if progress.shape != evaluation_times.shape:
             return None
+        if route_lane_chain:
+            try:
+                connected_chain = self._connected_execution_prefix(
+                    list(route_lane_chain)
+                )
+                route_path = build_continuous_lane_chain_path(
+                    connected_chain,
+                    start_s=float(start_s),
+                    start_lateral_m=float(start_d),
+                    step_m=0.25,
+                )
+                route_arc = np.concatenate(
+                    (
+                        [0.0],
+                        np.cumsum(
+                            np.linalg.norm(
+                                np.diff(route_path[:, :2], axis=0), axis=1
+                            )
+                        ),
+                    )
+                )
+                if float(np.max(progress, initial=0.0)) > float(route_arc[-1]) + 1.0e-8:
+                    return None
+                return sample_path_at_arc(
+                    route_path, route_arc, np.asarray(progress, dtype=np.float64)
+                )
+            except (RouteChainGeometryError, LongitudinalReferenceError):
+                return None
         source_length = float(getattr(source_lane, "length", 0.0) or 0.0)
         total_length = source_length + float(continuation["remaining_length"])
         s_values = np.clip(float(start_s) + np.asarray(progress), 0.0, total_length)
@@ -2883,11 +3253,6 @@ class PlatoonNormalPlanner:
         )
         if road_network is None or not hasattr(road_network, "get_lane"):
             return None
-        if lane_index == ("3C0_1_", "4G0_0_", 2) and int(action) == 1:
-            try:
-                return road_network.get_lane(("3C0_1_", "4G1_0_", 0))
-            except Exception:
-                return None
         target_lane_id = int(lane_index[2]) + int(action)
         if target_lane_id < 0:
             return None
@@ -3211,11 +3576,18 @@ class JointTrajectoryExecutor:
                     "committed_trajectory_tracking_deviation",
                     {"agent_id": agent_id},
                 )
-            for lane_index in (
-                spec.source_lane_index,
-                spec.target_lane_index,
-                spec.continuation_lane_index,
-            ):
+            execution_lane_indices = tuple(
+                dict.fromkeys(
+                    tuple(spec.source_lane_chain_indices)
+                    + tuple(spec.target_lane_chain_indices)
+                    + (
+                        spec.source_lane_index,
+                        spec.target_lane_index,
+                        spec.continuation_lane_index,
+                    )
+                )
+            )
+            for lane_index in execution_lane_indices:
                 if lane_index and self.planner._lane_from_index(env, lane_index) is None:
                     self._raise(
                         plan,
@@ -3250,13 +3622,13 @@ class JointTrajectoryExecutor:
             speed = max(float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6, 0.0)
             try:
                 actual_arc, path_error = project_point_to_path_arc(
-                    current_pose[:2], spec.trajectory_world[:, :2], spec.path_arc_m
+                    current_pose[:2], spec.spatial_path_world[:, :2], spec.path_arc_m
                 )
                 path_distance = np.diff(spec.path_arc_m)
                 path_heading_delta = np.abs(
                     np.arctan2(
-                        np.sin(np.diff(spec.trajectory_world[:, 2])),
-                        np.cos(np.diff(spec.trajectory_world[:, 2])),
+                        np.sin(np.diff(spec.spatial_path_world[:, 2])),
+                        np.cos(np.diff(spec.spatial_path_world[:, 2])),
                     )
                 )
                 path_curvature = path_heading_delta / np.maximum(
@@ -3273,13 +3645,20 @@ class JointTrajectoryExecutor:
                 path_speed_limit = np.clip(
                     0.97 * path_speed_limit, 0.1, self.planner.MAX_SPEED_MPS
                 )
+                reference_speed_limit = np.interp(
+                    spec.reference_arc_m,
+                    spec.path_arc_m,
+                    path_speed_limit,
+                    left=float(path_speed_limit[0]),
+                    right=float(path_speed_limit[-1]),
+                )
                 longitudinal_reference = build_feedback_executable_profile(
                     path_times_s=spec.sample_times_s,
-                    path_arc_m=spec.path_arc_m,
+                    path_arc_m=spec.reference_arc_m,
                     elapsed_s=elapsed_s,
                     actual_arc_m=actual_arc,
                     actual_speed_mps=speed,
-                    path_speed_limit_mps=path_speed_limit,
+                    path_speed_limit_mps=reference_speed_limit,
                     source="committed_roll",
                 )
                 dense_arc = np.interp(
@@ -3288,13 +3667,13 @@ class JointTrajectoryExecutor:
                     longitudinal_reference.arc_position_m,
                 )
                 dense_future = sample_path_at_arc(
-                    spec.trajectory_world,
+                    spec.spatial_path_world,
                     spec.path_arc_m,
                     dense_arc[1:],
                 )
                 dense = np.concatenate((current_pose[None, :], dense_future), axis=0)
                 output = sample_path_at_arc(
-                    spec.trajectory_world,
+                    spec.spatial_path_world,
                     spec.path_arc_m,
                     longitudinal_reference.arc_position_m[1:],
                 ).astype(np.float32)
@@ -3545,10 +3924,16 @@ class JointTrajectoryExecutor:
         ) if source_lane is not None else None
         lanes = [
             self.planner._lane_from_index(env, lane_index)
-            for lane_index in (
-                spec.source_lane_index,
-                spec.target_lane_index,
-                spec.continuation_lane_index,
+            for lane_index in tuple(
+                dict.fromkeys(
+                    tuple(spec.source_lane_chain_indices)
+                    + tuple(spec.target_lane_chain_indices)
+                    + (
+                        spec.source_lane_index,
+                        spec.target_lane_index,
+                        spec.continuation_lane_index,
+                    )
+                )
             )
             if lane_index
         ]
