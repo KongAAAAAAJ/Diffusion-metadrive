@@ -18,6 +18,8 @@ from models.platoon_planner.platoon_normal_planner import (
     TrajectoryExecutionSpec,
     audit_dense_footprint_on_lanes,
     audit_dense_trajectory_dynamics,
+    minimum_dense_background_gap,
+    minimum_dense_background_gap_detail,
     _Neighbor,
     _TrafficEnvelope,
     _TrajectoryCandidate,
@@ -1419,3 +1421,61 @@ def test_scenario_front_lookup_uses_simulator_state_without_lidar():
 
     assert found is front
     assert distance == pytest.approx(20.0)
+
+
+def test_background_gap_detail_matches_scalar_and_identifies_actor_and_sample():
+    ego = np.column_stack(
+        (
+            np.arange(5, dtype=np.float64),
+            np.zeros(5, dtype=np.float64),
+            np.zeros(5, dtype=np.float64),
+        )
+    )
+    far = ego.copy()
+    far[:, 0] += 20.0
+    closing = ego.copy()
+    closing[:, 0] += np.asarray([15.0, 12.0, 9.0, 8.0, 10.0])
+    predictions = [
+        ("far", far, (4.0, 2.0)),
+        ("closing", closing, (4.0, 2.0)),
+    ]
+
+    detail = minimum_dense_background_gap_detail(
+        ego,
+        (4.0, 2.0),
+        predictions,
+    )
+
+    assert detail["minimum_gap_m"] == pytest.approx(4.0)
+    assert minimum_dense_background_gap(ego, (4.0, 2.0), predictions) == pytest.approx(4.0)
+    assert detail["obstacle_name"] == "closing"
+    assert detail["time_index"] == 3
+    assert detail["ego_pose"] == pytest.approx(ego[3].tolist())
+    assert detail["predicted_obstacle_pose"] == pytest.approx(closing[3].tolist())
+
+
+def test_background_continuation_prefers_navigation_route_at_junction():
+    source = AngledLane(("A", "B", 2), (0.0, 0.0), 0.0, length=10.0)
+    intended = AngledLane(("B", "C", 0), (10.0, 0.0), 0.0, length=20.0)
+    wrong_connector = AngledLane(
+        ("B", "D", 2), (10.0, 0.0), np.pi / 2.0, length=20.0
+    )
+    road_network = SimpleNamespace(
+        graph={"B": {"D": [wrong_connector], "C": [intended]}}
+    )
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=road_network)
+        )
+    )
+    vehicle = SimpleNamespace(
+        navigation=SimpleNamespace(next_ref_lanes=[intended])
+    )
+
+    selected = PlatoonNormalPlanner._get_continuation_lane(
+        env,
+        vehicle,
+        source,
+    )
+
+    assert selected is intended

@@ -110,7 +110,7 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
                         "step": int(step),
                         "reason": exc.reason_code,
                         "production": _compact_planner_debug(production_debug),
-                        "trace_tail": trace[-8:],
+                        "trace_tail": trace[-16:],
                     }
                 probe = _DenseS8FeasibilityPlanner()
                 try:
@@ -130,7 +130,7 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
                     "dense_probe": _compact_planner_debug(
                         probe.get_last_debug() or {}
                     ),
-                    "trace_tail": trace[-8:],
+                    "trace_tail": trace[-16:],
                 }
             controller_debug = (
                 expert.lqr_controller.get_last_debug()
@@ -175,7 +175,7 @@ def run_probe(*, config_path: Path, seed: int, max_steps: int) -> dict:
             "status": "no_failure_within_horizon",
             "seed": int(seed),
             "max_steps": int(max_steps),
-            "trace_tail": trace[-8:],
+            "trace_tail": trace[-16:],
         }
     finally:
         env.close()

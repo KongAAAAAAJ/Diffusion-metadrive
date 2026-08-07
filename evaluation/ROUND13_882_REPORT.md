@@ -113,3 +113,58 @@ and the 5 m boundary was not relaxed.
 Focused dense-path and controller tests pass.  The remaining S8 background
 prediction blocker must be resolved before rerunning the full `10 x 200` gate
 or collecting diagnostic-64.
+
+## 13.882b2: background predictor versus committed roll
+
+The scalar gap diagnostic was replaced by an evidence-preserving result that
+records the defining background actor, dense time index and both predicted
+poses.  The committed executor additionally records the actor's current pose,
+speed, lane, navigation successor and policy class.  Seeds 17 and 23 now give
+the same decomposition (apart from floating-point noise):
+
+```text
+                                  seed 17       seed 23
+new candidate, 4 s audit          9.103910 m    9.103897 m
+committed preflight, elapsed 0     7.263989 m    7.263975 m
+committed roll, elapsed 1.0 s      4.915710 m    4.915704 m
+minimum dense time                 4.0 s         4.0 s
+background speed                   17.999973     17.999978 km/h
+```
+
+All three measurements refer to the same explicitly injected S8 background
+vehicle.  Its speed is continuous and the minimum is always at the end of the
+rolling prediction window.  The drop therefore has two independent parts:
+
+1. the feedback-executable committed preflight is already about 1.84 m less
+   clear than the candidate geometry used during joint selection;
+2. advancing the four-second window by one second exposes another roughly
+   2.35 m of closing motion while the committed longitudinal governor advances
+   the terminal ego pose more slowly.
+
+The predictor did contain a real junction bug: `_get_continuation_lane()`
+mixed `navigation.next_ref_lanes` with every graph successor and selected the
+geometrically closest connector.  At the S8 G-block this chose
+`4G0_0_ -> 4G0_1_ lane 2` although the background policy route specifies
+`4G0_0_ -> 4G1_1_ lane 0`.  Continuation selection is now route-first, with
+graph geometry used only when navigation has no continuous successor.
+
+That correction does not change the reported 9.10/7.26/4.92 m values because
+the background vehicle remains on its current lane throughout the four-second
+failure horizon.  It rules out lane/route prediction as the direct cause.
+The remaining blocker is an acceptance-contract mismatch: the Normal planner
+ranks the original candidate geometry, preflights only the first executable
+four-second roll, and does not recursively audit the future rolling windows
+that a committed maneuver will expose.  Fixing that requires a separate
+planner/executor feasibility change; changing traffic, control gains or the
+5 m boundary would hide rather than resolve it.
+
+Evidence:
+
+```text
+/tmp/bev-stage-census/round13_882b2_contract_seed17.json
+/tmp/bev-stage-census/round13_882b2_contract_seed23.json
+```
+
+The 13.882b2 predictor investigation is complete.  S8 episode acceptance is
+still blocked, so the `10 x 200` gate and diagnostic-64 remain intentionally
+disabled.

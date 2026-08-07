@@ -146,15 +146,70 @@ def minimum_dense_background_gap(
     dimensions: tuple[float, float],
     predictions: list[tuple[str, np.ndarray, tuple[float, float]]],
 ) -> float:
-    value = float("inf")
-    for _, predicted, other_dimensions in predictions:
-        value = min(
-            value,
-            minimum_dense_pair_gap(
-                trajectory, dimensions, predicted, other_dimensions
-            ),
+    return float(
+        minimum_dense_background_gap_detail(
+            trajectory,
+            dimensions,
+            predictions,
+        )["minimum_gap_m"]
+    )
+
+
+def minimum_dense_background_gap_detail(
+    trajectory: np.ndarray,
+    dimensions: tuple[float, float],
+    predictions: list[tuple[str, np.ndarray, tuple[float, float]]],
+) -> dict:
+    """Return the exact actor and dense sample that define clearance.
+
+    This intentionally uses the same corridor projection as
+    :func:`minimum_dense_pair_gap`.  Keeping the scalar and diagnostic paths
+    identical is important when comparing a newly accepted candidate with a
+    later committed roll.
+    """
+
+    trajectory = np.asarray(trajectory, dtype=np.float64)
+    detail = {
+        "minimum_gap_m": float("inf"),
+        "obstacle_name": None,
+        "time_index": None,
+        "ego_pose": None,
+        "predicted_obstacle_pose": None,
+    }
+    if trajectory.ndim != 2 or trajectory.shape[1] != 3:
+        return detail
+    forward = np.column_stack(
+        (np.cos(trajectory[:, 2]), np.sin(trajectory[:, 2]))
+    )
+    lateral_axis = np.column_stack((-forward[:, 1], forward[:, 0]))
+    for name, predicted, other_dimensions in predictions:
+        predicted = np.asarray(predicted, dtype=np.float64)
+        if predicted.shape != trajectory.shape:
+            continue
+        delta = predicted[:, :2] - trajectory[:, :2]
+        longitudinal = np.abs(np.einsum("ij,ij->i", delta, forward))
+        lateral = np.abs(np.einsum("ij,ij->i", delta, lateral_axis))
+        lateral_limit = 0.5 * (
+            float(dimensions[1]) + float(other_dimensions[1])
         )
-    return value
+        same_corridor = lateral <= lateral_limit + 1e-6
+        if not np.any(same_corridor):
+            continue
+        bumper = longitudinal - 0.5 * (
+            float(dimensions[0]) + float(other_dimensions[0])
+        )
+        eligible = np.flatnonzero(same_corridor)
+        index = int(eligible[int(np.argmin(bumper[eligible]))])
+        value = float(bumper[index])
+        if value < float(detail["minimum_gap_m"]):
+            detail = {
+                "minimum_gap_m": value,
+                "obstacle_name": str(name),
+                "time_index": index,
+                "ego_pose": trajectory[index].tolist(),
+                "predicted_obstacle_pose": predicted[index].tolist(),
+            }
+    return detail
 
 
 def audit_dense_footprint_on_lanes(
@@ -803,6 +858,31 @@ class PlatoonNormalPlanner:
                         "minimum_background_gap_m"
                     )
                 ),
+                selected_minimum_background_gap_detail=(
+                    None
+                    if candidate.execution_parameters is None
+                    else copy.deepcopy(
+                        candidate.execution_parameters.get(
+                            "minimum_background_gap_detail"
+                        )
+                    )
+                ),
+                selected_committed_minimum_background_gap_m=(
+                    None
+                    if candidate.execution_parameters is None
+                    else candidate.execution_parameters.get(
+                        "committed_minimum_background_gap_m"
+                    )
+                ),
+                selected_committed_minimum_background_gap_detail=(
+                    None
+                    if candidate.execution_parameters is None
+                    else copy.deepcopy(
+                        candidate.execution_parameters.get(
+                            "committed_minimum_background_gap_detail"
+                        )
+                    )
+                ),
                 selected_stop_time_s=(
                     None if candidate.stop_time_s is None else float(candidate.stop_time_s)
                 ),
@@ -1041,6 +1121,9 @@ class PlatoonNormalPlanner:
                     self._last_debug = attempt_debug
                     continue
                 attempt["execution_preflight"] = "passed"
+                attempt["execution_preflight_debug"] = (
+                    preflight_executor.get_last_debug()
+                )
             return RankedJointPlan(
                 proposal_id=int(proposal.proposal_id),
                 proposal_rank=int(proposal.rank),
@@ -1954,10 +2037,18 @@ class PlatoonNormalPlanner:
                             stats["background_collision_rejection_count"] += 1
                             collision_hits.update(hits)
                             continue
-                        minimum_background_gap = minimum_dense_background_gap(
+                        background_gap_detail = minimum_dense_background_gap_detail(
                             candidate_dense,
                             self._vehicle_dimensions(vehicle),
                             background_predictions,
+                        )
+                        if background_gap_detail.get("time_index") is not None:
+                            background_gap_detail["relative_plan_time_s"] = (
+                                float(background_gap_detail["time_index"])
+                                * self.DENSE_DT_S
+                            )
+                        minimum_background_gap = float(
+                            background_gap_detail["minimum_gap_m"]
                         )
                         if (
                             minimum_background_gap
@@ -2077,6 +2168,9 @@ class PlatoonNormalPlanner:
                                     "minimum_background_gap_m": float(
                                         minimum_background_gap
                                     ),
+                                    "minimum_background_gap_detail": dict(
+                                        background_gap_detail
+                                    ),
                                 },
                             )
                         candidates.append(candidate)
@@ -2170,14 +2264,29 @@ class PlatoonNormalPlanner:
                             extended_background,
                         )
                     )
-                    extended_gap = minimum_dense_background_gap(
+                    extended_gap_detail = minimum_dense_background_gap_detail(
                         execution_spec.trajectory_world,
                         self._vehicle_dimensions(vehicle),
                         extended_background,
                     )
+                    if extended_gap_detail.get("time_index") is not None:
+                        extended_gap_detail["relative_plan_time_s"] = (
+                            float(extended_gap_detail["time_index"])
+                            * self.DENSE_DT_S
+                        )
+                    extended_gap = float(
+                        extended_gap_detail["minimum_gap_m"]
+                    )
                     if not extended_collision_names and (
                         extended_gap >= self.background_safe_gap_m - 1.0e-6
                     ):
+                        if isinstance(candidate.execution_parameters, dict):
+                            candidate.execution_parameters[
+                                "committed_minimum_background_gap_m"
+                            ] = float(extended_gap)
+                            candidate.execution_parameters[
+                                "committed_minimum_background_gap_detail"
+                            ] = dict(extended_gap_detail)
                         committed_pool.append(candidate)
                         continue
                     stats["background_collision_rejection_count"] += int(
@@ -2453,6 +2562,31 @@ class PlatoonNormalPlanner:
                 if candidate.execution_parameters is None
                 else candidate.execution_parameters.get(
                     "minimum_background_gap_m"
+                )
+            ),
+            "minimum_background_gap_detail": (
+                None
+                if candidate.execution_parameters is None
+                else copy.deepcopy(
+                    candidate.execution_parameters.get(
+                        "minimum_background_gap_detail"
+                    )
+                )
+            ),
+            "committed_minimum_background_gap_m": (
+                None
+                if candidate.execution_parameters is None
+                else candidate.execution_parameters.get(
+                    "committed_minimum_background_gap_m"
+                )
+            ),
+            "committed_minimum_background_gap_detail": (
+                None
+                if candidate.execution_parameters is None
+                else copy.deepcopy(
+                    candidate.execution_parameters.get(
+                        "committed_minimum_background_gap_detail"
+                    )
                 )
             ),
             "trajectory_world": candidate.output.astype(
@@ -3889,48 +4023,61 @@ class PlatoonNormalPlanner:
             "road_network",
             None,
         )
-        candidates = []
         navigation = getattr(vehicle, "navigation", None)
-        if navigation is not None:
-            candidates.extend(getattr(navigation, "next_ref_lanes", None) or [])
+
+        def closest(candidates):
+            best_lane = None
+            best_distance = float("inf")
+            for candidate_lane in candidates:
+                if candidate_lane is source_lane:
+                    continue
+                try:
+                    distance = float(
+                        np.linalg.norm(
+                            np.asarray(candidate_lane.position(0.0, 0.0)[:2])
+                            - source_end
+                        )
+                    )
+                except Exception:
+                    continue
+                if distance < best_distance:
+                    best_lane = candidate_lane
+                    best_distance = distance
+            return best_lane, best_distance
+
+        # A route-aware policy may face several geometrically coincident
+        # outgoing lanes at a junction.  Its navigation route is authoritative;
+        # choosing the globally closest lane can silently predict an exit actor
+        # along a different connector.  Only fall back to graph geometry when
+        # navigation has no continuous successor.
+        route_candidates = (
+            list(getattr(navigation, "next_ref_lanes", None) or [])
+            if navigation is not None
+            else []
+        )
+        best, best_distance = closest(route_candidates)
+        if best is not None and best_distance <= 10.0:
+            return best
+
+        local_candidates = []
         if road_network is not None:
             for lanes in (
                 (getattr(road_network, "graph", None) or {})
                 .get(lane_index[1], {})
                 .values()
             ):
-                candidates.extend(lanes)
-        best = None
-        best_distance = float("inf")
-        for lane in candidates:
-            try:
-                distance = float(
-                    np.linalg.norm(np.asarray(lane.position(0.0, 0.0)[:2]) - source_end)
-                )
-            except Exception:
-                continue
-            if distance < best_distance:
-                best = lane
-                best_distance = distance
-        if best_distance > 10.0 and road_network is not None:
+                local_candidates.extend(lanes)
+        best, best_distance = closest(local_candidates)
+        if best is not None and best_distance <= 10.0:
+            return best
+
+        all_candidates = []
+        if road_network is not None:
             for end_dict in (getattr(road_network, "graph", None) or {}).values():
                 for lanes in end_dict.values():
-                    for lane in lanes:
-                        if lane is source_lane:
-                            continue
-                        try:
-                            distance = float(
-                                np.linalg.norm(
-                                    np.asarray(lane.position(0.0, 0.0)[:2])
-                                    - source_end
-                                )
-                            )
-                        except Exception:
-                            continue
-                        if distance < best_distance:
-                            best = lane
-                            best_distance = distance
-        return best if best_distance <= 10.0 else None
+                    all_candidates.extend(lanes)
+        best, best_distance = closest(all_candidates)
+        return best if best is not None and best_distance <= 10.0 else None
 
     @staticmethod
     def _get_predecessor_lane(env, vehicle, source_lane):
@@ -4632,12 +4779,31 @@ class JointTrajectoryExecutor:
                 self.planner._vehicle_dimensions(vehicle),
                 background,
             )
-            minimum_background_gap = self._minimum_gap(
+            background_gap_detail = minimum_dense_background_gap_detail(
                 dense,
                 self.planner._vehicle_dimensions(vehicle),
                 background,
             )
+            minimum_background_gap = float(
+                background_gap_detail["minimum_gap_m"]
+            )
+            gap_time_index = background_gap_detail.get("time_index")
+            background_gap_detail["relative_roll_time_s"] = (
+                None
+                if gap_time_index is None
+                else float(gap_time_index) * self.planner.DENSE_DT_S
+            )
+            background_gap_detail["absolute_execution_time_s"] = (
+                None
+                if gap_time_index is None
+                else elapsed_s
+                + float(gap_time_index) * self.planner.DENSE_DT_S
+            )
             if collision_names or minimum_background_gap < self.planner.background_safe_gap_m - 1e-6:
+                obstacle_state = self._background_obstacle_state(
+                    env,
+                    background_gap_detail.get("obstacle_name"),
+                )
                 self._raise(
                     plan,
                     elapsed_s,
@@ -4647,6 +4813,8 @@ class JointTrajectoryExecutor:
                         "agent_id": agent_id,
                         "collision_objects": collision_names,
                         "minimum_background_gap_m": minimum_background_gap,
+                        "minimum_background_gap_detail": background_gap_detail,
+                        "background_obstacle_state": obstacle_state,
                     },
                 )
             dense_by_agent[agent_id] = dense
@@ -4672,6 +4840,7 @@ class JointTrajectoryExecutor:
                     longitudinal_reference.feedforward_acceleration_mps2
                 ),
                 "minimum_background_gap_m": minimum_background_gap,
+                "minimum_background_gap_detail": background_gap_detail,
                 "selected_lane_change_duration_s": float(
                     spec.lane_change_duration_s
                 ),
@@ -4763,6 +4932,54 @@ class JointTrajectoryExecutor:
             rule_actions=dict(plan.rule_actions),
             debug=debug,
         )
+
+    def _background_obstacle_state(self, env, obstacle_name) -> dict | None:
+        """Snapshot the actor behind a committed-background rejection."""
+
+        if obstacle_name is None:
+            return None
+        match = None
+        for vehicle_id, vehicle in self.planner._surrounding_vehicles(env):
+            name = str(getattr(vehicle, "name", vehicle_id))
+            if name == str(obstacle_name):
+                match = vehicle
+                break
+        if match is None:
+            return {"name": str(obstacle_name), "present": False}
+        navigation = getattr(match, "navigation", None)
+        policy = getattr(getattr(env, "engine", None), "get_policy", lambda *_: None)(
+            getattr(match, "name", None)
+        )
+
+        def lane_indices(values) -> list[list]:
+            return [
+                list(tuple(getattr(lane, "index", ()) or ()))
+                for lane in (values or [])
+            ]
+
+        lane = getattr(match, "lane", None)
+        continuation = self.planner._get_continuation_lane(env, match, lane)
+        return {
+            "name": str(obstacle_name),
+            "present": True,
+            "position": np.asarray(match.position[:2], dtype=np.float64).tolist(),
+            "heading": float(getattr(match, "heading_theta", 0.0)),
+            "speed_km_h": float(getattr(match, "speed_km_h", 0.0) or 0.0),
+            "lane_index": list(tuple(getattr(lane, "index", ()) or ())),
+            "continuation_lane_index": list(
+                tuple(getattr(continuation, "index", ()) or ())
+            ),
+            "navigation_current_ref_lanes": lane_indices(
+                getattr(navigation, "current_ref_lanes", None)
+            ),
+            "navigation_next_ref_lanes": lane_indices(
+                getattr(navigation, "next_ref_lanes", None)
+            ),
+            "policy_class": None if policy is None else type(policy).__name__,
+            "scenario_vehicle_role": getattr(
+                match, "scenario_vehicle_role", None
+            ),
+        }
 
     def _raise(
         self,

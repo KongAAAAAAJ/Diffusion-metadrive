@@ -177,6 +177,9 @@ def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
                 "selected_lane_change_duration_s",
                 "selected_lane_change_start_delay_s",
                 "selected_minimum_background_gap_m",
+                "selected_minimum_background_gap_detail",
+                "selected_committed_minimum_background_gap_m",
+                "selected_committed_minimum_background_gap_detail",
             )
         }
     return result
