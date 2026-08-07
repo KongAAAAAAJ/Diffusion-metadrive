@@ -142,3 +142,8 @@ def test_s8_injected_background_recipes_declare_lane_index() -> None:
         assert "socket_index" not in recipe.params
         assert recipe.params["internal_road_index"] == 0
         assert recipe.params["lane_index"] == 2
+    assert [recipe.params["spawn_longitude"] for recipe in recipes] == [
+        5.0,
+        80.0,
+    ]
+    assert all(recipe.params["target_speed_kmh"] == 18.0 for recipe in recipes)

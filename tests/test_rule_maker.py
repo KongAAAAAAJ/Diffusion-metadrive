@@ -212,6 +212,7 @@ def test_committed_execution_advances_state_without_generating_proposals():
     assert debug["action_search"]["proposal_generation_skipped"] is True
     assert debug["active_execution_id"] == 11
     assert debug["lane_change_commitments"]["active"]["agent0"]["action"] == action
+    assert rule_maker.active_lane_change_agent_ids == frozenset({"agent0"})
 
     target_lane_id = 1 + action
     target_y = {0: 3.5, 2: -3.5}[target_lane_id]
@@ -222,6 +223,7 @@ def test_committed_execution_advances_state_without_generating_proposals():
 
     assert completed["lane_change_commitments"]["active"] == {}
     assert rule_maker.has_active_lane_change_commitments is False
+    assert rule_maker.active_lane_change_agent_ids == frozenset()
 
 
 def test_commitment_is_not_completed_at_lane_assignment_boundary():
@@ -255,6 +257,22 @@ def test_commitment_is_not_completed_at_lane_assignment_boundary():
     )
     active = rule_maker.advance_committed_execution(env, ["agent0"], 12)
     assert "agent0" in active["lane_change_commitments"]["active"]
+    assert rule_maker.committed_execution_rule_actions(
+        env, {"agent0": action}
+    ) == {"agent0": 0}
+
+    # A footprint can be fully inside the target lane while its centre still
+    # has a material lateral error.  That is not completion of the accepted
+    # spatial manoeuvre.
+    env.agents["agent0"] = _vehicle(
+        "agent0", 23.0, target_y - np.sign(target_y) * 0.5, target_lane_id,
+        speed_km_h=20.0,
+    )
+    almost = rule_maker.advance_committed_execution(env, ["agent0"], 12)
+    assert "agent0" in almost["lane_change_commitments"]["active"]
+    assert rule_maker.committed_execution_rule_actions(
+        env, {"agent0": action}
+    ) == {"agent0": 0}
 
     env.agents["agent0"] = _vehicle(
         "agent0", 24.0, target_y, target_lane_id, speed_km_h=20.0

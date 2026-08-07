@@ -222,3 +222,50 @@ Evidence:
 /tmp/bev-stage-census/round13_882b3_seed17_v3.json
 /tmp/bev-stage-census/round13_882b3_seed23.json
 ```
+
+## 13.882b4: candidate backtracking and controlled S8 feasibility
+
+The planner now treats full committed-horizon admission as a candidate-level
+decision inside a RuleMaker proposal.  If the lowest-cost short-horizon-safe
+joint selection fails execution geometry or the recursive committed audit,
+only that selection is excluded and the next safe selection is tried.  A
+rejected selection cannot create a lane-change commitment or a fallback
+trajectory.
+
+Exhaustive evidence on the original S8 layout showed that this was necessary
+but insufficient: all 208 short-horizon-safe selections at seed 17 failed the
+full contract (202 background-clearance failures and 6 platoon-pair failures).
+Moving only the front actor from `s=50 m` to `s=70 m` still exhausted all 76
+selections (42 background and 34 pairwise failures).  Since the planner lattice
+was exhausted under the unchanged 5 m/7 m boundaries, the controlled S8
+background window was changed once to rear/front `s=5/80 m`, both at 18 km/h.
+
+This layout admits a native joint exit plan and removes the former 9.10 m to
+4.92 m committed-background failure.  During the resulting atomic execution,
+two state/label inconsistencies were also corrected without changing the
+trajectory:
+
+- a commitment now remains active until the vehicle centre is within 0.25 m
+  of the accepted target centreline, rather than merely having its footprint
+  enter the target lane;
+- once MetaDrive assigns a vehicle to the accepted target lane family, the
+  retained segment is labelled KEEP, while the execution commitment remains
+  active until geometric convergence.  Repeating LEFT/RIGHT at that point
+  would mean a second lane change to the dynamic-anchor topology.
+
+Seeds 17 and 23 both pass through step 70 with no collision, out-of-road,
+fallback, committed safety failure or GT/mask conflict:
+
+```text
+/tmp/bev-stage-census/round13_882b4_step70_seed17.json
+/tmp/bev-stage-census/round13_882b4_step70_seed23.json
+```
+
+The 80-step gate is not yet complete.  Near the commitment completion boundary
+the current exclusion implementation repeatedly rebuilds the same pairwise
+candidate conflict tables and did not return within the bounded diagnostic
+run.  The run was stopped rather than weakening safety or making a second S8
+traffic adjustment.  Round 13.882b4 therefore has a verified functional fix
+through the original failure interval, but remains blocked on efficient,
+semantics-preserving exhaustive full-horizon search before the `2 x 80`,
+`10 x 200`, or diagnostic-64 gates can be claimed.

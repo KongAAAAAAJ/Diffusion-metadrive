@@ -677,6 +677,136 @@ def test_ranked_planner_caches_repeated_infeasible_action_pool(monkeypatch):
     assert error.value.debug["pool_cache_hit_count"] == 1
 
 
+def test_ranked_planner_backtracks_after_full_horizon_candidate_rejection(
+    monkeypatch,
+):
+    env = _env(agent_lane_id=1)
+    env.config = {"physics_world_step_size": 0.02, "decision_repeat": 5}
+    env._scenario_step_count = 0
+    vehicle = env.agents["agent0"]
+    vehicle.position[:] = (10.0, 0.0)
+    vehicle.speed_km_h = 18.0
+    lane = vehicle.lane
+    times = np.arange(0.0, 8.2, 0.1, dtype=np.float64)
+    dense = np.column_stack(
+        (10.0 + 5.0 * np.arange(41) * 0.1, np.zeros(41), np.zeros(41))
+    )
+    output = dense[np.arange(5, 41, 5)].astype(np.float32)
+
+    def candidate(score):
+        return _TrajectoryCandidate(
+            dense=dense.copy(),
+            output=output.copy(),
+            score=float(score),
+            acceleration_mps2=0.0,
+            acceleration_duration_s=4.0,
+            recovery_acceleration_mps2=0.0,
+            lane_change_duration_s=4.0,
+            lane_change_start_delay_s=0.0,
+            stop_time_s=None,
+            terminal_progress_m=20.0,
+            execution_parameters={
+                "source_lane_index": lane.index,
+                "continuation_lane_index": (),
+                "target_lane_index": lane.index,
+                "action": 1,
+                "source_lane_chain_indices": (lane.index,),
+                "target_lane_chain_indices": (lane.index,),
+                "start_s": 10.0,
+                "start_d": 0.0,
+                "end_d": 0.0,
+                "initial_speed_mps": 5.0,
+                "default_heading": 0.0,
+                "rule_target_point": (30.0, 0.0),
+                "minimum_background_gap_m": float("inf"),
+            },
+        )
+
+    pool = [candidate(0.0), candidate(1.0)]
+
+    def fake_pool(*_args, **_kwargs):
+        return pool, {
+            "fallback_used": False,
+            "fallback_reason": None,
+            "candidate_count": 2,
+            "candidates": [
+                PlatoonNormalPlanner._candidate_debug(value) for value in pool
+            ],
+        }
+
+    def fake_execution_spec(
+        _env,
+        agent_id,
+        _candidate,
+        *,
+        selected_candidate_index,
+        maximum_time_s,
+    ):
+        del _env, maximum_time_s
+        trajectory = np.column_stack(
+            (10.0 + 5.0 * times, np.zeros_like(times), np.zeros_like(times))
+        )
+        return TrajectoryExecutionSpec(
+            agent_id=agent_id,
+            source_lane_index=lane.index,
+            continuation_lane_index=(),
+            target_lane_index=lane.index,
+            start_s=10.0,
+            start_d=0.0,
+            end_d=0.0,
+            initial_speed_mps=5.0,
+            acceleration_mps2=0.0,
+            acceleration_duration_s=4.0,
+            recovery_acceleration_mps2=0.0,
+            lane_change_duration_s=4.0,
+            lane_change_start_delay_s=0.0,
+            default_heading=0.0,
+            selected_candidate_index=int(selected_candidate_index),
+            rule_target_point=(30.0, 0.0),
+            sample_times_s=times,
+            trajectory_world=trajectory,
+        )
+
+    audited_indices = []
+
+    def fake_full_audit(executor, _env):
+        index = executor.plan.agent_specs["agent0"].selected_candidate_index
+        audited_indices.append(index)
+        if index == 0:
+            raise CommittedTrajectoryError(
+                "first combination is unsafe after four seconds",
+                reason_code="committed_trajectory_background_unsafe",
+                debug={"elapsed_s": 1.0, "minimum_background_gap_m": 4.9},
+            )
+        return {"audit": "full_committed_rolling_horizon", "windows_checked": 41}
+
+    planner = PlatoonNormalPlanner()
+    monkeypatch.setattr(planner, "_generate_candidate_pool", fake_pool)
+    monkeypatch.setattr(planner, "_build_execution_spec", fake_execution_spec)
+    monkeypatch.setattr(JointTrajectoryExecutor, "audit_full_horizon", fake_full_audit)
+    decision = {
+        "agent0": {
+            "action": 1,
+            "target_point": np.asarray([30.0, 0.0], dtype=np.float32),
+            "source_lane_index": lane.index,
+            "target_lane_index": lane.index,
+            "formation_constraint_enabled": False,
+        }
+    }
+
+    result = planner.plan_ranked(
+        env,
+        (JointActionProposal(0, 0, 1.0, decision),),
+    )
+
+    assert result.selected_candidate_indices == {"agent0": 1}
+    assert audited_indices == [0, 1]
+    attempts = planner.get_last_debug()["_ranked"]["proposal_attempts"]
+    assert attempts[0]["rejected_joint_selection"] == [0]
+    assert attempts[1]["joint_retry_index"] == 1
+    assert attempts[1]["execution_preflight"] == "passed"
+
+
 def test_planner_rejects_empty_hard_mode_action_metadata():
     env = _env(agent_lane_id=1)
     planner = PlatoonNormalPlanner()

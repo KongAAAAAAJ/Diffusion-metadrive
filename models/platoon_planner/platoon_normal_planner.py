@@ -676,6 +676,7 @@ class PlatoonNormalPlanner:
         agent_decisions,
         *,
         _pool_cache: dict | None = None,
+        _excluded_joint_selections: set[tuple[int, ...]] | None = None,
     ) -> dict[str, np.ndarray]:
         planning_started_at = time.perf_counter()
         self._last_selected_candidates = {}
@@ -806,6 +807,7 @@ class PlatoonNormalPlanner:
             agents,
             pools,
             formation_constraint_enabled=formation_constraint_enabled,
+            excluded_selections=_excluded_joint_selections,
         )
         debug["_joint"] = joint_debug
         if selection is None:
@@ -915,11 +917,20 @@ class PlatoonNormalPlanner:
         pool_cache_hit_count = 0
         pool_request_count = 0
         last_attempt_debug: dict = {}
-        for proposal in ordered:
+        pending_proposals = list(ordered)
+        excluded_by_proposal: dict[int, set[tuple[int, ...]]] = {
+            int(proposal.proposal_id): set() for proposal in ordered
+        }
+        while pending_proposals:
+            proposal = pending_proposals.pop(0)
+            proposal_exclusions = excluded_by_proposal[
+                int(proposal.proposal_id)
+            ]
             trajectories = self.plan(
                 env,
                 proposal.decisions,
                 _pool_cache=pool_cache,
+                _excluded_joint_selections=proposal_exclusions,
             )
             attempt_debug = self.get_last_debug() or {}
             last_attempt_debug = attempt_debug
@@ -946,6 +957,10 @@ class PlatoonNormalPlanner:
                 "missing_agents": list(joint_debug.get("missing_agents", ())),
                 "native_feasible": not bool(
                     joint_debug.get("fallback_used", True)
+                ),
+                "joint_retry_index": int(len(proposal_exclusions)),
+                "excluded_joint_combination_count": int(
+                    len(proposal_exclusions)
                 ),
                 "agent_diagnostics": {
                     str(agent_id): {
@@ -1083,6 +1098,14 @@ class PlatoonNormalPlanner:
                         "pool_cache_hit_count": int(pool_cache_hit_count),
                     }
                     self._last_debug = attempt_debug
+                    rejected_selection = tuple(
+                        indices[agent_id] for agent_id in trajectories
+                    )
+                    proposal_exclusions.add(rejected_selection)
+                    attempt["rejected_joint_selection"] = list(
+                        rejected_selection
+                    )
+                    pending_proposals.insert(0, proposal)
                     continue
                 start_step = int(getattr(env, "_scenario_step_count", 0) or 0)
                 execution_plan = JointTrajectoryExecutionPlan(
@@ -1125,6 +1148,14 @@ class PlatoonNormalPlanner:
                         "pool_cache_hit_count": int(pool_cache_hit_count),
                     }
                     self._last_debug = attempt_debug
+                    rejected_selection = tuple(
+                        indices[agent_id] for agent_id in trajectories
+                    )
+                    proposal_exclusions.add(rejected_selection)
+                    attempt["rejected_joint_selection"] = list(
+                        rejected_selection
+                    )
+                    pending_proposals.insert(0, proposal)
                     continue
                 attempt["execution_preflight"] = "passed"
                 attempt["execution_preflight_debug"] = initial_preflight_debug
@@ -2607,6 +2638,7 @@ class PlatoonNormalPlanner:
         pools: Mapping[str, list[_TrajectoryCandidate]],
         *,
         formation_constraint_enabled: bool = True,
+        excluded_selections: set[tuple[int, ...]] | None = None,
     ) -> tuple[tuple[int, ...] | None, dict]:
         combination_count = 0
         pairwise_conflict_count = 0
@@ -2668,10 +2700,16 @@ class PlatoonNormalPlanner:
             if not prefixes:
                 break
 
+        excluded = set(excluded_selections or ())
+        excluded_combination_count = 0
         best_selection: tuple[int, ...] | None = None
         best_score = float("inf")
         for selection in prefixes:
             if len(selection) != len(ordered_ids):
+                continue
+            selection = tuple(int(value) for value in selection)
+            if selection in excluded:
+                excluded_combination_count += 1
                 continue
             combination_count += 1
             chosen = [
@@ -2695,6 +2733,7 @@ class PlatoonNormalPlanner:
                 "no_safe_joint_combination" if best_selection is None else None
             ),
             "combination_count": int(combination_count),
+            "excluded_combination_count": int(excluded_combination_count),
             "pairwise_conflict_count": int(pairwise_conflict_count),
             "pairwise_conflict_pair_count": int(conflict_pair_count),
             "pairwise_conflict_counts_by_pair": conflict_counts_by_pair,

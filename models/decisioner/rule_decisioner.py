@@ -139,6 +139,7 @@ class MultiAgentRuleMaker(RuleMaker):
     """
 
     ACTIONS = (-1, 0, 1)  # left, keep, right. Lane ids follow MetaDrive convention.
+    LANE_CHANGE_COMPLETION_LATERAL_TOLERANCE_M = 0.25
 
     def __init__(
         self,
@@ -438,6 +439,51 @@ class MultiAgentRuleMaker(RuleMaker):
             self._lane_change_commitments
             or self._pending_lane_change_commitments
         )
+
+    @property
+    def active_lane_change_agent_ids(self) -> frozenset[str]:
+        """Agents whose accepted lateral manoeuvre has not completed yet."""
+
+        return frozenset(
+            {*self._lane_change_commitments, *self._pending_lane_change_commitments}
+        )
+
+    def committed_execution_rule_actions(
+        self,
+        env,
+        plan_actions: Mapping[str, int],
+    ) -> dict[str, int]:
+        """Map retained-plan actions to the current dynamic-mode semantics.
+
+        A commitment remains active until the vehicle converges to the target
+        centreline.  Dynamic anchors, however, are expressed relative to the
+        simulator's *current* lane.  Once that lane belongs to the accepted
+        target family, repeating LEFT/RIGHT would mean changing one lane
+        farther; the retained trajectory segment is therefore labelled KEEP.
+        """
+
+        agents = getattr(env, "agents", {}) or {}
+        commitments = {
+            **self._pending_lane_change_commitments,
+            **self._lane_change_commitments,
+        }
+        result: dict[str, int] = {}
+        for agent_id, plan_action in plan_actions.items():
+            action = int(plan_action)
+            commitment = commitments.get(str(agent_id))
+            vehicle = agents.get(str(agent_id))
+            current_lane_index = tuple(
+                getattr(getattr(vehicle, "lane", None), "index", ()) or ()
+            )
+            if (
+                action == 0
+                or commitment is None
+                or current_lane_index in set(commitment.target_lane_chain)
+            ):
+                result[str(agent_id)] = 0
+            else:
+                result[str(agent_id)] = action
+        return result
 
     def advance_committed_execution(
         self,
@@ -928,7 +974,12 @@ class MultiAgentRuleMaker(RuleMaker):
             footprint_inside, footprint_margin_m = (
                 self._vehicle_footprint_inside_lane(vehicle, target_lane)
             )
-            if not np.isfinite(target_lateral_m) or not footprint_inside:
+            if (
+                not np.isfinite(target_lateral_m)
+                or abs(float(target_lateral_m))
+                > self.LANE_CHANGE_COMPLETION_LATERAL_TOLERANCE_M
+                or not footprint_inside
+            ):
                 continue
             self._completed_lane_change_commitments[agent_id] = {
                 "action": int(commitment.action),

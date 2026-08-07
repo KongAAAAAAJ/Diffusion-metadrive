@@ -409,16 +409,29 @@ class RulePlannerExpert:
                     raise JointCollectionError(
                         str(exc), reason_code=exc.reason_code
                     ) from exc
+                effective_actions = (
+                    self.rule_maker.committed_execution_rule_actions(
+                        env,
+                        rolled.rule_actions,
+                    )
+                )
                 self._validate_actions_have_hard_modes(
-                    rolled.rule_actions, hard_valid_modes_by_action
+                    effective_actions, hard_valid_modes_by_action
+                )
+                execution_debug = dict(rolled.debug)
+                execution_debug["plan_rule_actions"] = {
+                    key: int(value) for key, value in rolled.rule_actions.items()
+                }
+                execution_debug["effective_rule_actions"] = dict(
+                    effective_actions
                 )
                 return self._build_expert_step(
                     env,
-                    actions=dict(rolled.rule_actions),
+                    actions=effective_actions,
                     trajectories=rolled.trajectories_world,
                     trajectories_local=rolled.trajectories_local,
                     trajectory_source="committed_roll",
-                    execution_debug=dict(rolled.debug),
+                    execution_debug=execution_debug,
                     longitudinal_references=rolled.longitudinal_references,
                 )
         try:

@@ -231,7 +231,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "block_id": "g0",
                     "internal_road_index": 0,
                     "lane_index": 2,
-                    "spawn_longitude": 20.0,
+                    "spawn_longitude": 5.0,
                     "target_speed_kmh": 18.0,
                 },
             ),
@@ -242,7 +242,12 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "block_id": "g0",
                     "internal_road_index": 0,
                     "lane_index": 2,
-                    "spawn_longitude": 50.0,
+                    # Round 13.882b4 exhaustively rejected both the old 30 m
+                    # window and a 50 m probe.  Keep controlled 18 km/h
+                    # traffic, but provide a 75 m centre-to-centre window so
+                    # three XL vehicles can satisfy both 5 m background and
+                    # 7 m pairwise gaps without changing safety boundaries.
+                    "spawn_longitude": 80.0,
                     "target_speed_kmh": 18.0,
                 },
             ),
