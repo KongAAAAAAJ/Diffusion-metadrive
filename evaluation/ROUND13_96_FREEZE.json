@@ -1,0 +1,679 @@
+{
+  "checkpoint_contract": {
+    "grpo_schema_version": 1,
+    "stage1_schema_version": 2
+  },
+  "data_contract": {
+    "bev_codec": {
+      "binary_values": [
+        0,
+        255
+      ],
+      "bitorder": "little",
+      "compression_ratio": 6.4,
+      "dtype": "uint8",
+      "ego_history_mapping": {
+        "0": 0,
+        "170": 2,
+        "255": 3,
+        "85": 1
+      },
+      "lane_geometry_mapping": {
+        "0": 0,
+        "128": 1,
+        "255": 2
+      },
+      "logical_shape": [
+        8,
+        256,
+        256
+      ],
+      "packed_bits_per_pixel": 10,
+      "packed_shape": [
+        10,
+        256,
+        32
+      ],
+      "plane_names": [
+        "drivable",
+        "lane_geometry_bit0",
+        "lane_geometry_bit1",
+        "navigation_route",
+        "ego_history_bit0",
+        "ego_history_bit1",
+        "platoon_vehicles",
+        "background_t0",
+        "background_t_minus_0_5",
+        "background_t_minus_1_0"
+      ],
+      "raw_bits_per_pixel": 64
+    },
+    "bev_codec_sha256": "a762933f0baac58ba02a37bc6a4e4ae06687fea446f43b0889f4798720f0a8f6",
+    "joint_first": true,
+    "storage_format": "joint-first-packed-semantic-bev-npy-episodes",
+    "storage_schema_version": 2
+  },
+  "evidence_sha256": {
+    "evaluation/ROUND13_89_REPORT.md": "f0fe92434854139d93ee8c3fb99cfa4933dc635e4f05d92817d87c8b11431b90",
+    "evaluation/ROUND13_91_REPORT.md": "7fad0d82a8ec5fac858608587a617d0578d1926c461690796e8044abf4e42f65",
+    "evaluation/ROUND13_92_REPORT.md": "64b4aeac4f83a0dc6a94bea7f96192736f7c00df4058b90ce4b987d2249e7b6a",
+    "evaluation/ROUND13_94_REPORT.md": "b63bb444f23ff385cdae497cb1af414be6fabdac97dade904a731048433b0c84",
+    "evaluation/ROUND13_95_REPORT.md": "b0786dbfd2dcd0e3b8d15d191801a2d9a7eeb4fb38da65202e846e29b0aefdcf"
+  },
+  "execution_contract": {
+    "config": {
+      "brake_time_constant_s": 0.0,
+      "drive_time_constant_s": 0.2,
+      "dt_s": 0.5,
+      "heading_residual_limit_rad": 0.2,
+      "internal_dt_s": 0.1,
+      "limit_safety_factor": 0.98,
+      "line_search_fractions": [
+        1.0,
+        0.75,
+        0.5,
+        0.25,
+        0.125,
+        0.0625,
+        0.03125,
+        0.0
+      ],
+      "max_accel_mps2": 1.0,
+      "max_brake_jerk_mps3": 80.0,
+      "max_curvature_per_m": 0.25,
+      "max_drive_jerk_mps3": 3.0,
+      "max_heading_alignment_error_rad": 0.15,
+      "max_lateral_accel_mps2": 6.0,
+      "max_speed_mps": 27.77777777777778,
+      "max_yaw_rate_rad_s": 1.0,
+      "min_accel_mps2": -8.0,
+      "movement_epsilon_m": 0.001,
+      "profile_jerk_regularizations": [
+        0.01,
+        0.03,
+        0.1,
+        0.3,
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        100.0
+      ],
+      "profile_speed_weight": 0.05,
+      "profile_terminal_arc_weight": 20.0,
+      "raw_residual_limit_m": 2.0
+    },
+    "sha256": "08dac4861f34443ece55b0f8468ab93aef93103e24e10bbdfd56b76d42aa69bd"
+  },
+  "formal_eligibility": {
+    "current_checkpoints_eligible": false,
+    "metadata_override_forbidden": true,
+    "required_order": [
+      "formal joint-BEV dataset pilot and full verifier",
+      "formal Stage 1 A/B training",
+      "fresh A/B reward calibration",
+      "formal A/B GRPO training",
+      "semantic-preserving Round 14 cleanup",
+      "formal multi-seed S5-S9 evaluation"
+    ]
+  },
+  "format": "bev_round13_closeout_v1",
+  "latency_evidence_ms": {
+    "full_planning_tick_p95_max": 125.14,
+    "full_tick_is_nonblocking_for_formal_training": true,
+    "model_inference_limit": 100.0,
+    "semantic_bev_build_p95_max": 89.97,
+    "three_role_model_inference_p95_max": 20.84
+  },
+  "mode_contract": {
+    "hard_mask": {
+      "config": {
+        "drivable_threshold": 1,
+        "dt_s": 0.5,
+        "max_accel_mps2": 5.0,
+        "max_curvature_per_m": 0.25,
+        "max_heading_alignment_error_rad": 0.6,
+        "max_lateral_accel_mps2": 6.0,
+        "max_speed_mps": 27.77777777777778,
+        "max_sweep_heading_step_rad": 0.05,
+        "max_sweep_step_m": 0.5,
+        "max_yaw_rate_rad_s": 1.0,
+        "min_accel_mps2": -8.0,
+        "min_forward_step_m": -0.001,
+        "movement_epsilon_m": 0.001,
+        "vehicle_length_m": 5.74,
+        "vehicle_width_m": 2.3
+      },
+      "sha256": "9346cddbf5021c2100c2127cdf6ce30c7bc51bf50cbaf4e6d146a03da7243fbc"
+    },
+    "mode_names": [
+      "KEEP_HIGH",
+      "KEEP_MEDIUM",
+      "KEEP_LOW",
+      "LEFT_HIGH",
+      "LEFT_MEDIUM",
+      "LEFT_LOW",
+      "RIGHT_HIGH",
+      "RIGHT_MEDIUM",
+      "RIGHT_LOW",
+      "STOP"
+    ],
+    "num_modes": 10,
+    "trajectory_dim": 3,
+    "trajectory_steps": 8
+  },
+  "next_hard_gate": {
+    "allows_old_diagnostic_data": false,
+    "name": "formal_joint_bev_15000_step_pilot",
+    "requires_full_verifier": true
+  },
+  "reproducibility_policy": {
+    "bit_exact_closed_loop_required": false,
+    "formal_results_require_multi_seed_statistics": true,
+    "identical_input_noise_model_output_exact_required": true,
+    "initial_scene_exact_required": true
+  },
+  "reward_contract": {
+    "config": {
+      "background_safe_gap_m": 5.0,
+      "formation_norm_m": 10.0,
+      "interpolation_dt_s": 0.1,
+      "local_clearance_weight": 0.8,
+      "local_comfort_weight": 0.05,
+      "local_formation_weight": 1.0,
+      "local_mix": 0.45,
+      "local_progress_weight": 0.8,
+      "platoon_safe_gap_m": 7.0,
+      "progress_norm_m": 30.0,
+      "team_formation_weight": 1.0,
+      "team_mix": 0.55,
+      "team_progress_weight": 0.2,
+      "team_safety_weight": 1.5,
+      "tracking_heading_margin_rad": 0.0,
+      "tracking_lateral_margin_m": 0.0,
+      "tracking_longitudinal_margin_m": 0.0,
+      "trajectory_dt_s": 0.5,
+      "unsafe_base_reward": -20.0,
+      "vehicle_length_m": 5.74,
+      "vehicle_width_m": 2.3
+    },
+    "sha256": "bd6e726135082d9e3ff983b2ce0fbf55021479c678d731250395341ca93cd7c1"
+  },
+  "round": "13.96",
+  "scenario_contract": {
+    "definitions": [
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R1_entry_straight"
+          ],
+          "code": "S5",
+          "description": "前车急减速",
+          "ego_initial_speed_km_h": 24.0,
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": null,
+          "ego_spawn_lane_id": null,
+          "ego_spawn_lane_preference": "middle",
+          "ego_spawn_lane_probabilities": null,
+          "ego_spawn_longitude_m": null,
+          "ego_spawn_reference_block_id": null,
+          "ego_spawn_reference_kind": null,
+          "env_overrides": null,
+          "expert_recipe": "提高安全时距",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": 0.0,
+          "scenario_id": "S5_hard_brake_lead",
+          "traffic_recipes": [
+            {
+              "operation": "hard_brake_lead",
+              "params": {
+                "brake_deceleration_range_mps2": [
+                  5.0,
+                  7.0
+                ],
+                "brake_target_speed_kmh": 1.0,
+                "brake_target_speed_range_kmh": [
+                  0.5,
+                  2.0
+                ],
+                "lead_bumper_gap_range_m": [
+                  9.0,
+                  13.0
+                ],
+                "lead_target_speed_range_kmh": [
+                  22.0,
+                  26.0
+                ],
+                "trigger_after_s": 3.0
+              }
+            },
+            {
+              "operation": "inject_adjacent_lane_vehicles",
+              "params": {
+                "clearance_scope": "same_lane",
+                "trigger_on_start": true,
+                "vehicles": [
+                  {
+                    "lane_side": "left",
+                    "name": "left_side",
+                    "spawn_longitude_offset_range_m": [
+                      -15.0,
+                      -13.0
+                    ],
+                    "target_speed_kmh": 24.0
+                  },
+                  {
+                    "lane_side": "right",
+                    "name": "right_side",
+                    "spawn_longitude_offset_range_m": [
+                      13.0,
+                      15.0
+                    ],
+                    "target_speed_kmh": 24.0
+                  }
+                ]
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R1_entry_straight": {
+              "block_id": "s0",
+              "longitudinal_max": 220.0,
+              "longitudinal_min": 50.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R1_entry_straight",
+        "scenario": "S5_hard_brake_lead"
+      },
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R6_mainline_merge_approach"
+          ],
+          "code": "S6",
+          "description": "背景车并入 ego 所在主线",
+          "ego_initial_speed_km_h": [
+            23.0,
+            25.0
+          ],
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": 1,
+          "ego_spawn_lane_id": null,
+          "ego_spawn_lane_preference": "rightmost",
+          "ego_spawn_lane_probabilities": null,
+          "ego_spawn_longitude_m": [
+            72.0,
+            78.0
+          ],
+          "ego_spawn_reference_block_id": "g1",
+          "ego_spawn_reference_kind": "block_internal_road",
+          "env_overrides": {
+            "traffic_spawn_exclusion_ahead_m": 100.0,
+            "traffic_spawn_exclusion_behind_m": 100.0
+          },
+          "expert_recipe": "保守让行",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": 0.0,
+          "scenario_id": "S6_background_merge_in",
+          "traffic_recipes": [
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "merge_arrival_offset_s": 1.2,
+                "merge_creep_speed_kmh": 20.0,
+                "merge_front_gap_m": 10.0,
+                "merge_rear_gap_m": 10.0,
+                "policy": "idm_merge",
+                "reference_kind": "block_socket_road",
+                "socket_index": 1,
+                "target_speed_kmh": 24.0,
+                "trigger_on_start": true
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R6_mainline_merge_approach": {
+              "block_id": "g1",
+              "longitudinal_max": 95.0,
+              "longitudinal_min": 10.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R6_mainline_merge_approach",
+        "scenario": "S6_background_merge_in"
+      },
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R7_merge_core"
+          ],
+          "code": "S7",
+          "description": "ego 从匝道汇入主线",
+          "ego_initial_speed_km_h": [
+            22,
+            23
+          ],
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": null,
+          "ego_spawn_lane_id": null,
+          "ego_spawn_lane_preference": null,
+          "ego_spawn_lane_probabilities": null,
+          "ego_spawn_longitude_m": [
+            5.0,
+            6.0
+          ],
+          "ego_spawn_reference_block_id": "h_ramp0",
+          "ego_spawn_reference_kind": null,
+          "env_overrides": null,
+          "expert_recipe": "汇入博弈",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": null,
+          "scenario_id": "S7_ego_merge_from_ramp",
+          "traffic_recipes": [
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 0,
+                "name": "main_lane_0_vehicle_1",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 15.0,
+                "target_speed_kmh": 22.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 0,
+                "name": "main_lane_0_vehicle_2",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 45.0,
+                "target_speed_kmh": 25.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 0,
+                "name": "main_lane_0_vehicle_3",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 75.0,
+                "target_speed_kmh": 27.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 1,
+                "name": "main_lane_1_vehicle_1",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 10.0,
+                "target_speed_kmh": 22.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 1,
+                "name": "main_lane_1_vehicle_2",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 40.0,
+                "target_speed_kmh": 24.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 1,
+                "name": "main_lane_1_vehicle_3",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 70.0,
+                "target_speed_kmh": 26.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 1,
+                "name": "main_lane_1_vehicle_4",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 100.0,
+                "target_speed_kmh": 28.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 2,
+                "name": "main_lane_2_vehicle_1",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 20.0,
+                "target_speed_kmh": 23.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 2,
+                "name": "main_lane_2_vehicle_2",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 55.0,
+                "target_speed_kmh": 26.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 2,
+                "name": "main_lane_2_vehicle_3",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 90.0,
+                "target_speed_kmh": 29.0,
+                "trigger_on_start": true
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R7_merge_core": {
+              "block_id": "h_ramp0",
+              "longitudinal_max": 60.0,
+              "longitudinal_min": 5.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R7_merge_core",
+        "scenario": "S7_ego_merge_from_ramp"
+      },
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R6_exit_to_ramp"
+          ],
+          "code": "S8",
+          "description": "ego 从主线驶出",
+          "ego_initial_speed_km_h": 24.0,
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": null,
+          "ego_spawn_lane_id": 1,
+          "ego_spawn_lane_preference": null,
+          "ego_spawn_lane_probabilities": null,
+          "ego_spawn_longitude_m": 30,
+          "ego_spawn_reference_block_id": "g0",
+          "ego_spawn_reference_kind": null,
+          "env_overrides": null,
+          "expert_recipe": "提前换道驶离",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": 0.0,
+          "scenario_id": "S8_ego_exit_to_ramp",
+          "traffic_recipes": [
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g0",
+                "internal_road_index": 0,
+                "lane_index": 2,
+                "reference_kind": "block_internal_road",
+                "spawn_longitude": 5.0,
+                "target_speed_kmh": 18.0
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g0",
+                "internal_road_index": 0,
+                "lane_index": 2,
+                "reference_kind": "block_internal_road",
+                "spawn_longitude": 80.0,
+                "target_speed_kmh": 18.0
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R6_exit_to_ramp": {
+              "block_id": "g0",
+              "longitudinal_max": 45.0,
+              "longitudinal_min": 5.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R6_exit_to_ramp",
+        "scenario": "S8_ego_exit_to_ramp"
+      },
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R8_narrow_channel"
+          ],
+          "code": "S9",
+          "description": "合流-分流窄通道博弈",
+          "ego_initial_speed_km_h": 18.0,
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": 1,
+          "ego_spawn_lane_id": null,
+          "ego_spawn_lane_preference": null,
+          "ego_spawn_lane_probabilities": {
+            "leftmost": 0.2,
+            "middle": 0.4,
+            "rightmost": 0.4
+          },
+          "ego_spawn_longitude_m": 10.0,
+          "ego_spawn_reference_block_id": "c3",
+          "ego_spawn_reference_kind": "block_internal_road",
+          "env_overrides": null,
+          "expert_recipe": "保守通过",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": null,
+          "scenario_id": "S9_narrow_channel_negotiation",
+          "traffic_recipes": [
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "merge0",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 12.0,
+                "target_speed_kmh": 14.0
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "split0",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 18.0,
+                "target_speed_kmh": 16.0
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R8_narrow_channel": {
+              "block_id": "c3",
+              "longitudinal_max": 90.0,
+              "longitudinal_min": 35.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R8_narrow_channel",
+        "scenario": "S9_narrow_channel_negotiation"
+      }
+    ],
+    "format": "bev_primary_s5_s9_contract_v1",
+    "scenarios": [
+      [
+        "S5_hard_brake_lead",
+        "R1_entry_straight"
+      ],
+      [
+        "S6_background_merge_in",
+        "R6_mainline_merge_approach"
+      ],
+      [
+        "S7_ego_merge_from_ramp",
+        "R7_merge_core"
+      ],
+      [
+        "S8_ego_exit_to_ramp",
+        "R6_exit_to_ramp"
+      ],
+      [
+        "S9_narrow_channel_negotiation",
+        "R8_narrow_channel"
+      ]
+    ],
+    "sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34"
+  },
+  "scope": {
+    "accepted": [
+      "S5-S9 expert/data contract",
+      "BEV-only Stage 1 A/B training chain",
+      "proxy-simulator reward calibration chain",
+      "A/B joint GRPO training chain",
+      "four-model evaluator and S9 execution feasibility",
+      "semantic BEV P95 below 100ms"
+    ],
+    "not_claimed": [
+      "diagnostic checkpoint policy superiority",
+      "formal paper conclusions",
+      "full planning-tick P95 below 100ms"
+    ],
+    "waived": [
+      "bit-exact repeated closed-loop physics for the same seed"
+    ]
+  },
+  "status": "infrastructure_accepted"
+}
