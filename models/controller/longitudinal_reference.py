@@ -285,16 +285,30 @@ class LongitudinalTrackingReference:
         if not source:
             raise LongitudinalReferenceError("source must be non-empty")
         if bool(self.stop_requested):
-            stopped = np.flatnonzero(speed <= 1.0e-6)
-            if stopped.size:
-                first = int(stopped[0])
-                if not (
-                    np.all(speed[first:] <= 1.0e-6)
-                    and np.allclose(arc[first:], arc[first], atol=1.0e-8)
-                ):
-                    raise LongitudinalReferenceError(
-                        "STOP profile must remain stationary after stopping"
-                    )
+            # A vehicle may be stationary at the current sample and then
+            # execute a valid accelerate--decelerate profile.  That initial
+            # zero is not a terminal stop.  Once motion has occurred, however,
+            # the first subsequent zero-speed sample starts the terminal hold
+            # and must never be followed by renewed motion.
+            moving_seen = bool(speed[0] > 1.0e-6)
+            terminal_stop: int | None = None
+            for index in range(1, speed.size):
+                if speed[index] > 1.0e-6:
+                    if terminal_stop is not None:
+                        raise LongitudinalReferenceError(
+                            "STOP profile must remain stationary after stopping"
+                        )
+                    moving_seen = True
+                elif moving_seen and terminal_stop is None:
+                    terminal_stop = index
+            if terminal_stop is None:
+                terminal_stop = 0
+            if not np.allclose(
+                arc[terminal_stop:], arc[terminal_stop], atol=1.0e-8
+            ):
+                raise LongitudinalReferenceError(
+                    "STOP profile must remain stationary after stopping"
+                )
         object.__setattr__(self, "sample_times_s", times)
         object.__setattr__(self, "arc_position_m", arc)
         object.__setattr__(self, "speed_mps", speed)

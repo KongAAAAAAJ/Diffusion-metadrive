@@ -155,6 +155,24 @@ def test_terminal_stop_does_not_request_zero_speed_before_stop_time() -> None:
     assert throttle > -1.0
 
 
+def test_terminal_stop_allows_initial_rest_before_motion() -> None:
+    trajectory = np.zeros((8, 3), dtype=np.float32)
+    trajectory[:, 0] = np.asarray(
+        [0.5, 1.5, 2.5, 3.0, 3.0, 3.0, 3.0, 3.0], dtype=np.float32
+    )
+    reference = trajectory_to_longitudinal_reference(
+        trajectory,
+        0.0,
+        source="start_then_stop",
+    )
+
+    assert reference.stop_requested
+    assert reference.speed_mps[0] == pytest.approx(0.0)
+    assert reference.speed_mps[1] > 0.0
+    np.testing.assert_allclose(reference.speed_mps[5:], 0.0)
+    np.testing.assert_allclose(reference.arc_position_m[4:], 3.0)
+
+
 def test_terminal_stop_holds_zero_only_after_reference_reaches_zero() -> None:
     reference = trajectory_to_longitudinal_reference(
         np.zeros((8, 3), dtype=np.float32),

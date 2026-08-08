@@ -1,0 +1,34 @@
+{
+  "format": "bev_four_model_manifest_v1",
+  "diagnostic_only": true,
+  "models": {
+    "A": {
+      "checkpoint": "/tmp/bev-stage1-round13-89/A/run_1/checkpoints/diagnostic.pt",
+      "checkpoint_sha256": "fae0ec230da33b32415a857c3e8e0bdeb9f87599d6a3a9eff4f5343b6370a539",
+      "kind": "stage1",
+      "variant": "A"
+    },
+    "A_GRPO": {
+      "checkpoint": "/tmp/bev-round13-92-final/A/run_2/checkpoints/best.pt",
+      "checkpoint_sha256": "29ee20d2beb547ea1af247bfeeabbabb4e15a85e641b499eefc2f0973c30a0af",
+      "kind": "grpo",
+      "source_checkpoint": "/tmp/bev-stage1-round13-89/A/run_1/checkpoints/diagnostic.pt",
+      "source_checkpoint_sha256": "fae0ec230da33b32415a857c3e8e0bdeb9f87599d6a3a9eff4f5343b6370a539",
+      "variant": "A"
+    },
+    "B": {
+      "checkpoint": "/tmp/bev-stage1-round13-89/B/run_1/checkpoints/diagnostic.pt",
+      "checkpoint_sha256": "64969a6deb0fb01265f778f367ea298473501a14dbd37b0449e585ccfcad4466",
+      "kind": "stage1",
+      "variant": "B"
+    },
+    "B_GRPO": {
+      "checkpoint": "/tmp/bev-round13-92-final/B/run_1/checkpoints/best.pt",
+      "checkpoint_sha256": "f1faa131e16228299a1f00d76a72638bb981a864c1b35ff71371e250866e5173",
+      "kind": "grpo",
+      "source_checkpoint": "/tmp/bev-stage1-round13-89/B/run_1/checkpoints/diagnostic.pt",
+      "source_checkpoint_sha256": "64969a6deb0fb01265f778f367ea298473501a14dbd37b0449e585ccfcad4466",
+      "variant": "B"
+    }
+  }
+}
