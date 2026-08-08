@@ -17,7 +17,7 @@ from typing import Any
 
 import numpy as np
 
-from expert_dataset.joint_risk_bundle_contract import PLATOON_AGENT_TO_ACTOR_ID
+from expert_dataset.joint_risk_identity import PLATOON_AGENT_TO_ACTOR_ID
 from metadrive.type import MetaDriveType
 
 

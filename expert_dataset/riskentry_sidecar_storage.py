@@ -36,7 +36,7 @@ from expert_dataset.riskentry_sidecar_adapter import (
     SidecarRawEvent,
     SidecarRawFrame,
 )
-from expert_dataset.joint_risk_bundle_contract import (
+from expert_dataset.joint_risk_identity import (
     EXTERNAL_ACTOR_ID_PATTERN,
     PLATOON_AGENT_TO_ACTOR_ID,
 )
@@ -225,6 +225,17 @@ class StoredSidecarEpisode:
 
     def manifest_entry(self) -> dict[str, object]:
         return asdict(self) | {"episode_index": self.episode_index}
+
+
+@dataclass(frozen=True)
+class PreparedSidecarEpisode:
+    episode_index: int
+    split: str
+    temporary_directory: Path
+    raw_steps: int
+    actor_count: int
+    base_samples: int
+    outcome: str
 
 
 def _derive_outcome(events: Sequence[SidecarRawEvent] | Sequence[Mapping[str, Any]]) -> str:
@@ -795,6 +806,39 @@ class SidecarSplitWriter:
             outcome=str(metadata["retention"]["outcome"]),
         )
 
+    def validate_prepared_directory(
+        self, path: Path, episode_index: int
+    ) -> PreparedSidecarEpisode:
+        expected_prefix = f".{self.episode_name(episode_index)}.tmp-"
+        if not path.is_dir() or not path.name.startswith(expected_prefix):
+            raise RiskEntrySidecarStorageError("invalid prepared sidecar directory")
+        metadata = _read_json(path / "episode.json")
+        if (
+            int(metadata.get("episode_index", -1)) != int(episode_index)
+            or metadata.get("split") != self.split
+            or metadata.get("base_dataset_fingerprint")
+            != self.base_dataset_fingerprint
+        ):
+            raise RiskEntrySidecarStorageError("prepared sidecar identity mismatch")
+        if {item.name for item in path.iterdir()} != EPISODE_FILE_NAMES:
+            raise RiskEntrySidecarStorageError("prepared sidecar file set mismatch")
+        arrays = {
+            name: np.load(path / f"{name}.npy", mmap_mode="r", allow_pickle=False)
+            for name in SIDECAR_ARRAY_DTYPES
+        }
+        if not all(isinstance(value, np.memmap) for value in arrays.values()):
+            raise RiskEntrySidecarStorageError("prepared sidecar arrays must be mmap-readable")
+        validate_sidecar_episode_payload(metadata, arrays)
+        return PreparedSidecarEpisode(
+            episode_index=int(episode_index),
+            split=self.split,
+            temporary_directory=path,
+            raw_steps=int(len(arrays["step_index"])),
+            actor_count=int(arrays["actor_state"].shape[1]),
+            base_samples=int(len(arrays["base_sample_step_index"])),
+            outcome=str(metadata["retention"]["outcome"]),
+        )
+
     def scan(self, *, rebuild_manifest: bool) -> dict[int, StoredSidecarEpisode]:
         allowed = {"episodes", "manifest.json"}
         unexpected = []
@@ -843,12 +887,12 @@ class SidecarSplitWriter:
     def write_manifest(self) -> None:
         _atomic_write_json(self.manifest_path, self.manifest_payload())
 
-    def commit(
+    def prepare(
         self,
         buffer: _SidecarEpisodeBuffer,
         *,
         base_sample_step_indices: Sequence[int],
-    ) -> StoredSidecarEpisode:
+    ) -> PreparedSidecarEpisode:
         episode_index = int(buffer.metadata.episode_index)
         if episode_index in self.episodes:
             raise RiskEntrySidecarStorageError(f"episode {episode_index} already exists")
@@ -905,12 +949,83 @@ class SidecarSplitWriter:
                 os.fsync(stream.fileno())
         _atomic_write_json(temporary / "episode.json", metadata)
         _fsync_directory(temporary)
-        os.replace(temporary, final_path)
+        _fsync_directory(self.episodes_root)
+        return self.validate_prepared_directory(temporary, episode_index)
+
+    def finalize_prepared(
+        self, prepared: PreparedSidecarEpisode
+    ) -> StoredSidecarEpisode:
+        if prepared.split != self.split:
+            raise RiskEntrySidecarStorageError("prepared sidecar split mismatch")
+        episode_index = int(prepared.episode_index)
+        if episode_index in self.episodes:
+            raise RiskEntrySidecarStorageError(f"episode {episode_index} already exists")
+        validated = self.validate_prepared_directory(
+            prepared.temporary_directory, episode_index
+        )
+        if validated != prepared:
+            raise RiskEntrySidecarStorageError("prepared sidecar payload changed")
+        final_path = self.episodes_root / self.episode_name(episode_index)
+        if final_path.exists():
+            raise RiskEntrySidecarStorageError(f"episode path already exists: {final_path}")
+        os.replace(prepared.temporary_directory, final_path)
         _fsync_directory(self.episodes_root)
         episode = self.validate_episode_directory(final_path)
         self.episodes[episode_index] = episode
         self.write_manifest()
         return episode
+
+    def recover_prepared(self, episode_index: int) -> PreparedSidecarEpisode | None:
+        prefix = f".{self.episode_name(episode_index)}.tmp-"
+        matches = [
+            path
+            for path in self.episodes_root.iterdir()
+            if path.is_dir() and path.name.startswith(prefix)
+        ]
+        if len(matches) > 1:
+            raise RiskEntrySidecarStorageError(
+                f"multiple prepared sidecars exist for episode {episode_index}"
+            )
+        if not matches:
+            return None
+        return self.validate_prepared_directory(matches[0], episode_index)
+
+    def downgrade_prepared_to_sidecar_only(
+        self, prepared: PreparedSidecarEpisode
+    ) -> PreparedSidecarEpisode:
+        """Clear a staged base mapping after an interrupted pre-base commit."""
+
+        validated = self.validate_prepared_directory(
+            prepared.temporary_directory, prepared.episode_index
+        )
+        if validated.base_samples == 0:
+            return validated
+        destination = prepared.temporary_directory / "base_sample_step_index.npy"
+        temporary = prepared.temporary_directory / (
+            f".base_sample_step_index.npy.tmp-{uuid.uuid4().hex}"
+        )
+        with temporary.open("wb") as stream:
+            np.save(stream, np.empty((0,), dtype=np.int64), allow_pickle=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(prepared.temporary_directory)
+        return self.validate_prepared_directory(
+            prepared.temporary_directory, prepared.episode_index
+        )
+
+    def commit(
+        self,
+        buffer: _SidecarEpisodeBuffer,
+        *,
+        base_sample_step_indices: Sequence[int],
+    ) -> StoredSidecarEpisode:
+        return self.finalize_prepared(
+            self.prepare(
+                buffer,
+                base_sample_step_indices=base_sample_step_indices,
+            )
+        )
 
 
 class RiskEntrySidecarDatasetStore:
@@ -955,6 +1070,7 @@ class RiskEntrySidecarDatasetStore:
             for split in SPLIT_NAMES
         }
         self._active: _SidecarEpisodeBuffer | None = None
+        self._prepared: PreparedSidecarEpisode | None = None
         self.last_rejection_reason: str | None = None
         try:
             if resume:
@@ -971,7 +1087,7 @@ class RiskEntrySidecarDatasetStore:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         del exc, traceback
-        has_unfinished_episode = self._active is not None
+        has_unfinished_episode = self._active is not None or self._prepared is not None
         self.close()
         if exc_type is None and has_unfinished_episode:
             raise RiskEntrySidecarStorageError(
@@ -980,6 +1096,7 @@ class RiskEntrySidecarDatasetStore:
 
     def close(self) -> None:
         self._active = None
+        self._prepared = None
         stream = getattr(self, "_lock_stream", None)
         if stream is None or stream.closed:
             return
@@ -1021,8 +1138,10 @@ class RiskEntrySidecarDatasetStore:
                 owner[episode_index] = split
 
     def begin_episode(self, metadata: SidecarEpisodeStart) -> None:
-        if self._active is not None:
-            raise RiskEntrySidecarStorageError("an episode is already active")
+        if self._active is not None or self._prepared is not None:
+            raise RiskEntrySidecarStorageError(
+                "an episode is already active or prepared"
+            )
         if metadata.base_dataset_fingerprint != self.base_dataset_fingerprint:
             raise RiskEntrySidecarStorageError("episode/base dataset fingerprint mismatch")
         if any(
@@ -1094,6 +1213,47 @@ class RiskEntrySidecarDatasetStore:
         self._active = None
         return episode
 
+    def prepare_episode(
+        self, *, base_sample_step_indices: Sequence[int]
+    ) -> PreparedSidecarEpisode:
+        if self._prepared is not None:
+            raise RiskEntrySidecarStorageError("a sidecar episode is already prepared")
+        buffer = self._require_active()
+        writer = self.writers[buffer.metadata.split]
+        prepared = writer.prepare(
+            buffer, base_sample_step_indices=base_sample_step_indices
+        )
+        self._active = None
+        self._prepared = prepared
+        return prepared
+
+    def commit_prepared_episode(self) -> StoredSidecarEpisode:
+        if self._prepared is None:
+            raise RiskEntrySidecarStorageError("no sidecar episode is prepared")
+        prepared = self._prepared
+        episode = self.writers[prepared.split].finalize_prepared(prepared)
+        self._prepared = None
+        return episode
+
+    def recover_prepared_episode(
+        self, episode_index: int, split: str
+    ) -> PreparedSidecarEpisode | None:
+        if split not in self.writers:
+            raise RiskEntrySidecarStorageError("invalid prepared sidecar split")
+        return self.writers[split].recover_prepared(int(episode_index))
+
+    def finalize_recovered_episode(
+        self, prepared: PreparedSidecarEpisode
+    ) -> StoredSidecarEpisode:
+        return self.writers[prepared.split].finalize_prepared(prepared)
+
+    def downgrade_recovered_episode_to_sidecar_only(
+        self, prepared: PreparedSidecarEpisode
+    ) -> PreparedSidecarEpisode:
+        return self.writers[prepared.split].downgrade_prepared_to_sidecar_only(
+            prepared
+        )
+
     def reject_episode(self, *, reason_code: str) -> None:
         self._require_active()
         reason = str(reason_code).strip()
@@ -1137,6 +1297,7 @@ __all__ = [
     "SIDECAR_FORMAT",
     "SIDECAR_SCHEMA_VERSION",
     "SidecarEpisodeStart",
+    "PreparedSidecarEpisode",
     "SidecarSplitWriter",
     "StoredSidecarEpisode",
     "sidecar_dataset_contract",

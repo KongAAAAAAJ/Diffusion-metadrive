@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Joint-first simulator-GT BEV expert collection.
 # Optional overrides:
-#   DATASET_ROOT=/tmp/joint_bev TARGET_JOINT_STEPS=10 MAX_EPISODES=2
+#   DATASET_ROOT=/tmp/bundle/platoon_joint_bev
+#   SIDECAR_ROOT=/tmp/bundle/riskentry_actor_sidecar TARGET_JOINT_STEPS=10 MAX_EPISODES=2
 #   MAX_EPISODE_STEPS=20 RESUME=0 bash scripts/run_multiData_collection.sh
 set -euo pipefail
 
@@ -17,6 +18,9 @@ ARGS=(
 
 if [[ -n "${DATASET_ROOT:-}" ]]; then
     ARGS+=(--dataset-root "${DATASET_ROOT}")
+fi
+if [[ -n "${SIDECAR_ROOT:-}" ]]; then
+    ARGS+=(--sidecar-root "${SIDECAR_ROOT}")
 fi
 if [[ -n "${TARGET_JOINT_STEPS:-}" ]]; then
     ARGS+=(--target-joint-steps "${TARGET_JOINT_STEPS}")

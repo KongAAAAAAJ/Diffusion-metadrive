@@ -50,6 +50,13 @@ from models.platoon_planner.platoon_normal_planner import (
     PlatoonNormalPlanner,
 )
 from models.platoon_planner.collision_geometry import world_trajectory_to_ego_local
+from expert_dataset.riskentry_sidecar_adapter import (
+    MetaDriveRiskEntrySidecarAdapter,
+    RiskEntrySidecarAdapterError,
+    SidecarActorRecord,
+    SidecarFrameCapture,
+    SidecarLaneRecord,
+)
 
 try:
     from metadrive.obs.observation_base import DummyObservation
@@ -222,6 +229,29 @@ class ExpertJointStep:
 
 
 @dataclass(frozen=True)
+class JointEpisodeSidecar:
+    """Complete raw RiskEntry payload captured during the same simulator run."""
+
+    captures: tuple[SidecarFrameCapture, ...]
+    actor_records: tuple[SidecarActorRecord, ...]
+    lane_records: tuple[SidecarLaneRecord, ...]
+    key_actor_ids: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if not self.captures:
+            raise JointCollectionError(
+                "sidecar timeline must contain raw state zero",
+                reason_code="sidecar_timeline_missing",
+            )
+        steps = tuple(item.frame.step_index for item in self.captures)
+        if steps != tuple(range(len(self.captures))):
+            raise JointCollectionError(
+                "sidecar timeline must be contiguous from raw step zero",
+                reason_code="sidecar_timeline_gap",
+            )
+
+
+@dataclass(frozen=True)
 class JointEpisodeRollout:
     samples: tuple[JointBEVSample, ...]
     simulator_steps: int
@@ -232,6 +262,7 @@ class JointEpisodeRollout:
     joint_step_rejection_counts: Mapping[str, int] = field(default_factory=dict)
     sample_step_indices: tuple[int, ...] = ()
     scenario_summary: Mapping[str, object] = field(default_factory=dict)
+    sidecar: JointEpisodeSidecar | None = None
 
 
 class SensorlessJointBEVPlatoonEnv(PlatoonEnv):
@@ -981,6 +1012,20 @@ def collect_joint_episode(
     sample_builder = builder or JointBEVSampleBuilder(agent_ids)
     sample_builder.reset()
     dt_s = simulator_decision_dt_s(env)
+    try:
+        sidecar_adapter = MetaDriveRiskEntrySidecarAdapter(decision_dt_s=dt_s)
+        sidecar_captures: list[SidecarFrameCapture] = [
+            sidecar_adapter.capture_frame(
+                env,
+                step_index=0,
+                timestamp_s=0.0,
+            )
+        ]
+    except RiskEntrySidecarAdapterError as exc:
+        raise JointCollectionError(
+            f"unable to capture RiskEntry raw state zero: {exc}",
+            reason_code="sidecar_data_integrity_invalid",
+        ) from exc
     samples: list[JointBEVSample] = []
     sample_step_indices: list[int] = []
     rejected_joint_steps = 0
@@ -991,13 +1036,17 @@ def collect_joint_episode(
     episode_truncated = False
 
     for joint_step in range(int(max_steps)):
-        sample_builder.capture_state(env, timestamp_s=joint_step * dt_s)
-        model_inputs = (
-            sample_builder.build_model_inputs(env)
-            if sample_builder.history_ready()
-            else None
-        )
-        expert_step = expert.plan(env, model_inputs=model_inputs)
+        try:
+            sample_builder.capture_state(env, timestamp_s=joint_step * dt_s)
+            model_inputs = (
+                sample_builder.build_model_inputs(env)
+                if sample_builder.history_ready()
+                else None
+            )
+            expert_step = expert.plan(env, model_inputs=model_inputs)
+        except JointCollectionError as exc:
+            failure_reason = str(exc.reason_code)
+            break
         if model_inputs is not None:
             try:
                 samples.append(
@@ -1013,6 +1062,22 @@ def collect_joint_episode(
                 joint_step_rejection_counts[exc.reason_code] += 1
         _, _, terminated, truncated, info = env.low_level_step(dict(expert_step.controls))
         simulator_steps += 1
+        try:
+            sidecar_captures.append(
+                sidecar_adapter.capture_frame(
+                    env,
+                    step_index=simulator_steps,
+                    timestamp_s=simulator_steps * dt_s,
+                    transition_info=info if isinstance(info, Mapping) else {},
+                    terminated=terminated,
+                    truncated=truncated,
+                )
+            )
+        except RiskEntrySidecarAdapterError as exc:
+            raise JointCollectionError(
+                f"unable to capture RiskEntry post-step state: {exc}",
+                reason_code="sidecar_data_integrity_invalid",
+            ) from exc
         for agent_id in agent_ids:
             agent_info = info.get(agent_id, {}) if isinstance(info, Mapping) else {}
             if not isinstance(agent_info, Mapping):
@@ -1046,13 +1111,13 @@ def collect_joint_episode(
             break
     scenario_summary: Mapping[str, object] = {}
     scenario_orchestrator = getattr(env, "_scenario_orchestrator", None)
-    if (
-        failure_reason is None
-        and scenario_orchestrator is not None
-        and hasattr(scenario_orchestrator, "get_episode_summary")
+    if scenario_orchestrator is not None and hasattr(
+        scenario_orchestrator, "get_episode_summary"
     ):
         scenario_summary = scenario_orchestrator.get_episode_summary()
-        if not bool(scenario_summary.get("scenario_realized", False)):
+        if failure_reason is None and not bool(
+            scenario_summary.get("scenario_realized", False)
+        ):
             failure_reason = "scenario_not_realized"
     if failure_reason is None and rejected_joint_steps:
         primary_reason = sorted(
@@ -1070,6 +1135,12 @@ def collect_joint_episode(
         joint_step_rejection_counts=dict(joint_step_rejection_counts),
         sample_step_indices=tuple(sample_step_indices),
         scenario_summary=dict(scenario_summary),
+        sidecar=JointEpisodeSidecar(
+            captures=tuple(sidecar_captures),
+            actor_records=sidecar_adapter.actor_records,
+            lane_records=sidecar_adapter.lane_records,
+            key_actor_ids=sidecar_adapter.key_actor_ids,
+        ),
     )
 
 
@@ -1082,6 +1153,7 @@ __all__ = [
     "JointBEVModelInputs",
     "JointCollectionError",
     "JointEpisodeRollout",
+    "JointEpisodeSidecar",
     "JointStepRejected",
     "JOINT_SAMPLE_DTYPES",
     "JOINT_SAMPLE_SHAPES",

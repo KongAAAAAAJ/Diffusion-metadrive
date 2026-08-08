@@ -19,10 +19,21 @@ from expert_dataset.collect_joint_bev import (
     collect_joint_episode,
     simulator_decision_dt_s,
 )
+from expert_dataset.joint_risk_bundle_storage import (
+    BundleEpisodeAttempt,
+    BundleEpisodeResult,
+    JointRiskBundleIndex,
+    JointRiskBundleStorageError,
+)
 from expert_dataset.joint_bev_storage import (
     EpisodeSplitConfig,
     JointBEVDatasetStore,
     fingerprint_payload,
+)
+from expert_dataset.riskentry_sidecar_storage import (
+    RiskEntrySidecarDatasetStore,
+    RiskEntrySidecarStorageError,
+    SidecarEpisodeStart,
 )
 from scenarios.definitions import SCENARIO_BY_ID, get_scenario_definition
 from scenarios.bev_round13_contract import (
@@ -40,7 +51,7 @@ TOP_LEVEL_KEYS = {
     "diagnostic_64",
 }
 SECTION_KEYS = {
-    "dataset": {"name", "output_root"},
+    "dataset": {"name", "sidecar_name", "output_root"},
     "split": {"train_ratio", "val_ratio", "test_ratio", "seed"},
     "collection": {
         "target_joint_steps",
@@ -64,7 +75,9 @@ SECTION_KEYS = {
 @dataclass(frozen=True)
 class JointCollectionRunConfig:
     config_path: Path
+    bundle_root: Path
     dataset_root: Path
+    sidecar_root: Path
     split_config: EpisodeSplitConfig
     target_joint_steps: int
     start_seed: int
@@ -80,6 +93,18 @@ class JointCollectionRunConfig:
     diagnostic_max_attempts_per_scenario: int = 0
 
     def __post_init__(self) -> None:
+        bundle_root = Path(self.bundle_root).expanduser().resolve()
+        dataset_root = Path(self.dataset_root).expanduser().resolve()
+        sidecar_root = Path(self.sidecar_root).expanduser().resolve()
+        if dataset_root == sidecar_root:
+            raise ValueError("base and sidecar dataset roots must differ")
+        if dataset_root.parent != bundle_root or sidecar_root.parent != bundle_root:
+            raise ValueError("base and sidecar roots must be direct children of bundle_root")
+        object.__setattr__(self, "bundle_root", bundle_root)
+        object.__setattr__(self, "dataset_root", dataset_root)
+        object.__setattr__(self, "sidecar_root", sidecar_root)
+        if int(self.split_config.seed) != 17:
+            raise ValueError("joint BEV/RiskEntry bundle split seed is frozen to 17")
         if self.target_joint_steps <= 0:
             raise ValueError("collection.target_joint_steps must be positive")
         if self.max_episodes < 0:
@@ -266,9 +291,14 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
     dataset_name = str(_required(dataset, "dataset", "name")).strip()
     if not dataset_name or Path(dataset_name).name != dataset_name:
         raise ValueError("dataset.name must be one non-empty directory name")
-    dataset_root = _resolve_path(
-        _required(dataset, "dataset", "output_root")
-    ) / dataset_name
+    sidecar_name = str(_required(dataset, "dataset", "sidecar_name")).strip()
+    if not sidecar_name or Path(sidecar_name).name != sidecar_name:
+        raise ValueError("dataset.sidecar_name must be one non-empty directory name")
+    if sidecar_name == dataset_name:
+        raise ValueError("dataset.name and dataset.sidecar_name must differ")
+    bundle_root = _resolve_path(_required(dataset, "dataset", "output_root"))
+    dataset_root = bundle_root / dataset_name
+    sidecar_root = bundle_root / sidecar_name
     scenario_weights = _required(
         collection, "collection", "scenario_weights"
     )
@@ -313,7 +343,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
 
     return JointCollectionRunConfig(
         config_path=config_path,
+        bundle_root=bundle_root,
         dataset_root=dataset_root,
+        sidecar_root=sidecar_root,
         split_config=EpisodeSplitConfig(
             train_ratio=float(_required(split, "split", "train_ratio")),
             val_ratio=float(_required(split, "split", "val_ratio")),
@@ -512,22 +544,201 @@ def _configure_episode(
         spawn_manager.set_episode_spawn_seed(spec.spawn_seed)
 
 
+def _stored_component_episode(store, episode_index: int):
+    matches = [
+        writer.episodes[episode_index]
+        for writer in store.writers.values()
+        if episode_index in writer.episodes
+    ]
+    if len(matches) > 1:
+        raise JointRiskBundleStorageError(
+            f"episode {episode_index} exists in multiple component splits"
+        )
+    return matches[0] if matches else None
+
+
+def _recover_pending_bundle_attempt(
+    bundle: JointRiskBundleIndex,
+    base_store: JointBEVDatasetStore,
+    sidecar_store: RiskEntrySidecarDatasetStore,
+) -> None:
+    """Conservatively finish an interrupted transaction without inventing base data."""
+
+    pending = bundle.pending_attempt
+    if pending is None:
+        return
+    episode_index = pending.episode_index
+    if episode_index != bundle.next_episode_index:
+        raise JointRiskBundleStorageError("pending bundle episode is out of sequence")
+    base_episode = _stored_component_episode(base_store, episode_index)
+    sidecar_episode = _stored_component_episode(sidecar_store, episode_index)
+    prepared = sidecar_store.recover_prepared_episode(
+        episode_index, pending.split
+    )
+    if sidecar_episode is not None and prepared is not None:
+        raise JointRiskBundleStorageError(
+            "episode has both committed and prepared sidecar payloads"
+        )
+    if sidecar_episode is None and prepared is not None:
+        if base_episode is None:
+            prepared = sidecar_store.downgrade_recovered_episode_to_sidecar_only(
+                prepared
+            )
+        sidecar_episode = sidecar_store.finalize_recovered_episode(prepared)
+    if (
+        base_episode is None
+        and sidecar_episode is not None
+        and sidecar_episode.base_samples != 0
+    ):
+        raise JointRiskBundleStorageError(
+            "orphan committed sidecar has a non-empty base mapping"
+        )
+    if base_episode is not None and sidecar_episode is None:
+        raise JointRiskBundleStorageError(
+            "interrupted transaction contains a forbidden base-only episode"
+        )
+    if base_episode is None and base_store.next_episode_index == episode_index:
+        base_store.record_rejected_episode(
+            episode_index, "interrupted_bundle_transaction"
+        )
+    elif base_episode is None and base_store.next_episode_index <= episode_index:
+        raise JointRiskBundleStorageError("base store is behind pending transaction")
+    bundle.finalize(
+        BundleEpisodeResult(
+            episode_index=episode_index,
+            split=pending.split,
+            scenario_id=pending.scenario_id,
+            local_route=pending.local_route,
+            spawn_seed=pending.spawn_seed,
+            base_status="committed" if base_episode is not None else "rejected",
+            base_rejection_reason=(
+                None if base_episode is not None else "interrupted_bundle_transaction"
+            ),
+            sidecar_status=(
+                "committed" if sidecar_episode is not None else "rejected"
+            ),
+            sidecar_rejection_reason=(
+                None if sidecar_episode is not None else "interrupted_bundle_transaction"
+            ),
+            raw_steps=(0 if sidecar_episode is None else sidecar_episode.raw_steps),
+            base_samples=(0 if base_episode is None else base_episode.joint_samples),
+            outcome=(
+                "interrupted"
+                if sidecar_episode is None
+                else sidecar_episode.outcome
+            ),
+        )
+    )
+
+
+def _validate_bundle_resume_state(
+    bundle: JointRiskBundleIndex,
+    base_store: JointBEVDatasetStore,
+    sidecar_store: RiskEntrySidecarDatasetStore,
+) -> None:
+    if bundle.next_episode_index != base_store.next_episode_index:
+        raise JointRiskBundleStorageError(
+            "bundle/base next_episode_index mismatch after recovery"
+        )
+    for row in bundle.rows:
+        base_episode = _stored_component_episode(base_store, row.episode_index)
+        sidecar_episode = _stored_component_episode(sidecar_store, row.episode_index)
+        if (base_episode is not None) != (row.base_status == "committed"):
+            raise JointRiskBundleStorageError("bundle/base episode status mismatch")
+        if (sidecar_episode is not None) != (row.sidecar_status == "committed"):
+            raise JointRiskBundleStorageError("bundle/sidecar episode status mismatch")
+        if base_episode is not None and sidecar_episode is None:
+            raise JointRiskBundleStorageError("base-only episode detected")
+
+
+def _sidecar_start(
+    *,
+    episode_index: int,
+    split: str,
+    spec: JointEpisodeSpec,
+    rollout,
+    base_dataset_fingerprint: str,
+    decision_dt_s: float,
+) -> SidecarEpisodeStart:
+    summary = dict(rollout.scenario_summary)
+    return SidecarEpisodeStart(
+        episode_index=episode_index,
+        split=split,
+        scenario_id=spec.scenario_id,
+        local_route=spec.local_route,
+        spawn_seed=spec.spawn_seed,
+        decision_dt_s=decision_dt_s,
+        base_dataset_fingerprint=base_dataset_fingerprint,
+        scenario_parameters={
+            "scenario_contract_sha256": primary_scenario_contract()["sha256"],
+            "traffic_density": spec.traffic_density,
+            "initial_speed_km_h": spec.initial_speed_km_h,
+            "scenario_trigger_step": summary.get("scenario_trigger_step"),
+            "scenario_realized_step": summary.get("scenario_realized_step"),
+        },
+    )
+
+
+def _prepare_rollout_sidecar(
+    store: RiskEntrySidecarDatasetStore,
+    *,
+    start: SidecarEpisodeStart,
+    rollout,
+    base_sample_step_indices: tuple[int, ...],
+):
+    if rollout.sidecar is None:
+        raise RiskEntrySidecarStorageError("rollout has no raw sidecar timeline")
+    store.begin_episode(start)
+    for capture in rollout.sidecar.captures:
+        store.append_capture(
+            frame=capture.frame,
+            events=capture.events,
+            actor_records=rollout.sidecar.actor_records,
+            lane_records=rollout.sidecar.lane_records,
+            key_actor_ids=rollout.sidecar.key_actor_ids,
+        )
+    return store.prepare_episode(
+        base_sample_step_indices=base_sample_step_indices
+    )
+
+
 def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
     wall_start = time.perf_counter()
+    base_fingerprint = config.immutable_fingerprint()
     with JointBEVDatasetStore(
         config.dataset_root,
         split_config=config.split_config,
-        dataset_fingerprint=config.immutable_fingerprint(),
+        dataset_fingerprint=base_fingerprint,
         resume=config.resume,
-    ) as store:
+    ) as store, RiskEntrySidecarDatasetStore(
+        config.sidecar_root,
+        base_dataset_fingerprint=base_fingerprint,
+        resume=config.resume,
+    ) as sidecar_store, JointRiskBundleIndex(
+        config.bundle_root,
+        base_directory=config.dataset_root.name,
+        sidecar_directory=config.sidecar_root.name,
+        base_dataset_fingerprint=base_fingerprint,
+        sidecar_dataset_fingerprint=sidecar_store.dataset_fingerprint,
+        scenario_contract_sha256=primary_scenario_contract()["sha256"],
+        split_seed=config.split_config.seed,
+        resume=config.resume,
+    ) as bundle:
+        _recover_pending_bundle_attempt(bundle, store, sidecar_store)
+        _validate_bundle_resume_state(bundle, store, sidecar_store)
         starting_joint_samples = store.total_joint_samples
         print(
-            f"[INFO] dataset={config.dataset_root} "
+            f"[INFO] base_dataset={config.dataset_root} "
+            f"sidecar_dataset={config.sidecar_root} "
             f"resume={config.resume} existing_joint_steps={store.total_joint_samples}",
             flush=True,
         )
         if store.total_joint_samples >= config.target_joint_steps:
-            summary = store.summary()
+            summary = {
+                "base": store.summary(),
+                "sidecar": sidecar_store.summary(),
+                "bundle_attempts": bundle.next_episode_index,
+            }
             print("[INFO] target already satisfied; no simulator started", flush=True)
             return summary
 
@@ -584,6 +795,16 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     spec = sample_episode_spec_for_scenario(
                         config, episode_index, scenario_id
                     )
+                split = store.assigner.split_for_episode(episode_index)
+                bundle.begin_attempt(
+                    BundleEpisodeAttempt(
+                        episode_index=episode_index,
+                        split=split,
+                        scenario_id=spec.scenario_id,
+                        local_route=spec.local_route,
+                        spawn_seed=spec.spawn_seed,
+                    )
+                )
                 # Managers such as traffic/scenario policies retain internal
                 # episode state beyond BaseEnv.reset().  Recreate the
                 # sensorless environment so a fixed episode spec is invariant
@@ -605,31 +826,26 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 except JointCollectionError as exc:
                     reason = getattr(exc, "reason_code", "collection_contract")
                     store.record_rejected_episode(episode_index, reason)
+                    bundle.finalize(
+                        BundleEpisodeResult(
+                            episode_index=episode_index,
+                            split=split,
+                            scenario_id=spec.scenario_id,
+                            local_route=spec.local_route,
+                            spawn_seed=spec.spawn_seed,
+                            base_status="rejected",
+                            base_rejection_reason=reason,
+                            sidecar_status="rejected",
+                            sidecar_rejection_reason=reason,
+                            raw_steps=0,
+                            base_samples=0,
+                            outcome="collection_failed_before_raw_state",
+                        )
+                    )
                     print(
                         f"[WARNING] episode={episode_index} split="
                         f"{store.assigner.split_for_episode(episode_index)} "
                         f"scenario={spec.scenario_id} rejected={reason}: {exc}",
-                        flush=True,
-                    )
-                    continue
-
-                if rollout.failure_reason is not None:
-                    store.record_rejected_episode(
-                        episode_index, rollout.failure_reason
-                    )
-                    print(
-                        f"[WARNING] episode={episode_index} scenario={spec.scenario_id} "
-                        f"rejected={rollout.failure_reason}",
-                        flush=True,
-                    )
-                    continue
-                if not rollout.samples:
-                    store.record_rejected_episode(
-                        episode_index, "no_joint_samples"
-                    )
-                    print(
-                        f"[WARNING] episode={episode_index} scenario={spec.scenario_id} "
-                        "rejected=no_joint_samples",
                         flush=True,
                     )
                     continue
@@ -641,7 +857,10 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 trigger_step = rollout.scenario_summary.get(
                     "scenario_trigger_step"
                 )
-                if diagnostic_quotas is not None:
+                base_rejection_reason = rollout.failure_reason
+                if base_rejection_reason is None and not rollout.samples:
+                    base_rejection_reason = "no_joint_samples"
+                if diagnostic_quotas is not None and base_rejection_reason is None:
                     remaining = (
                         diagnostic_quotas[spec.scenario_id]
                         - diagnostic_counts[spec.scenario_id]
@@ -658,49 +877,139 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             remaining=remaining,
                         )
                     except JointCollectionError as exc:
-                        store.record_rejected_episode(
-                            episode_index, exc.reason_code
+                        base_rejection_reason = exc.reason_code
+                base_eligible = base_rejection_reason is None
+                mapping = selected_steps if base_eligible else ()
+                decision_dt_s = simulator_decision_dt_s(env)
+                try:
+                    sidecar_prepared = _prepare_rollout_sidecar(
+                        sidecar_store,
+                        start=_sidecar_start(
+                            episode_index=episode_index,
+                            split=split,
+                            spec=spec,
+                            rollout=rollout,
+                            base_dataset_fingerprint=base_fingerprint,
+                            decision_dt_s=decision_dt_s,
+                        ),
+                        rollout=rollout,
+                        base_sample_step_indices=mapping,
+                    )
+                except RiskEntrySidecarStorageError as exc:
+                    # No base commit is allowed without a valid sidecar.  If an
+                    # episode directory appeared, leave the pending intent for
+                    # conservative resume recovery instead of guessing whether
+                    # the atomic commit completed.
+                    if (
+                        _stored_component_episode(sidecar_store, episode_index)
+                        is not None
+                        or sidecar_store.recover_prepared_episode(
+                            episode_index, split
                         )
-                        print(
-                            f"[WARNING] episode={episode_index} "
-                            f"scenario={spec.scenario_id} "
-                            f"rejected={exc.reason_code}: {exc}",
-                            flush=True,
+                        is not None
+                    ):
+                        raise
+                    try:
+                        sidecar_store.reject_episode(
+                            reason_code="sidecar_data_integrity_invalid"
                         )
-                        continue
-                stored = store.commit_episode(
-                    episode_index,
-                    samples_to_store,
-                    {
-                        "scenario_id": spec.scenario_id,
-                        "local_route": spec.local_route,
-                        "spawn_seed": spec.spawn_seed,
-                        "traffic_density": spec.traffic_density,
-                        "initial_speed_km_h": spec.initial_speed_km_h,
-                        "simulator_steps": rollout.simulator_steps,
-                        "rejected_joint_steps": rollout.rejected_joint_steps,
-                        "joint_step_rejection_counts": dict(
-                            rollout.joint_step_rejection_counts
+                    except RiskEntrySidecarStorageError:
+                        pass
+                    reason = "sidecar_data_integrity_invalid"
+                    store.record_rejected_episode(episode_index, reason)
+                    bundle.finalize(
+                        BundleEpisodeResult(
+                            episode_index=episode_index,
+                            split=split,
+                            scenario_id=spec.scenario_id,
+                            local_route=spec.local_route,
+                            spawn_seed=spec.spawn_seed,
+                            base_status="rejected",
+                            base_rejection_reason=reason,
+                            sidecar_status="rejected",
+                            sidecar_rejection_reason=reason,
+                            raw_steps=0,
+                            base_samples=0,
+                            outcome="sidecar_data_integrity_invalid",
+                        )
+                    )
+                    print(
+                        f"[WARNING] episode={episode_index} scenario={spec.scenario_id} "
+                        f"rejected={reason}: {exc}",
+                        flush=True,
+                    )
+                    continue
+
+                stored = None
+                if base_eligible:
+                    stored = store.commit_episode(
+                        episode_index,
+                        samples_to_store,
+                        {
+                            "scenario_id": spec.scenario_id,
+                            "local_route": spec.local_route,
+                            "spawn_seed": spec.spawn_seed,
+                            "traffic_density": spec.traffic_density,
+                            "initial_speed_km_h": spec.initial_speed_km_h,
+                            "simulator_steps": rollout.simulator_steps,
+                            "rejected_joint_steps": rollout.rejected_joint_steps,
+                            "joint_step_rejection_counts": dict(
+                                rollout.joint_step_rejection_counts
+                            ),
+                            "terminated": rollout.terminated,
+                            "truncated": rollout.truncated,
+                            "scenario_trigger_step": trigger_step,
+                            "scenario_realized_step": (
+                                rollout.scenario_summary.get(
+                                    "scenario_realized_step"
+                                )
+                            ),
+                            "selected_sample_steps": list(selected_steps),
+                            "decision_dt_s": decision_dt_s,
+                            "raw_timeline_length": sidecar_prepared.raw_steps,
+                            "sidecar_dataset_fingerprint": (
+                                sidecar_store.dataset_fingerprint
+                            ),
+                            "diagnostic_subsampled": (
+                                diagnostic_quotas is not None
+                            ),
+                            "scenario_contract_sha256": (
+                                primary_scenario_contract()["sha256"]
+                            ),
+                        },
+                    )
+                else:
+                    store.record_rejected_episode(
+                        episode_index, str(base_rejection_reason)
+                    )
+
+                sidecar_episode = sidecar_store.commit_prepared_episode()
+
+                bundle.finalize(
+                    BundleEpisodeResult(
+                        episode_index=episode_index,
+                        split=split,
+                        scenario_id=spec.scenario_id,
+                        local_route=spec.local_route,
+                        spawn_seed=spec.spawn_seed,
+                        base_status="committed" if stored is not None else "rejected",
+                        base_rejection_reason=(
+                            None if stored is not None else str(base_rejection_reason)
                         ),
-                        "terminated": rollout.terminated,
-                        "truncated": rollout.truncated,
-                        "scenario_trigger_step": trigger_step,
-                        "scenario_realized_step": (
-                            rollout.scenario_summary.get(
-                                "scenario_realized_step"
-                            )
-                        ),
-                        "selected_sample_steps": list(selected_steps),
-                        "diagnostic_subsampled": (
-                            diagnostic_quotas is not None
-                        ),
-                        "scenario_contract_sha256": (
-                            primary_scenario_contract()["sha256"]
-                            if diagnostic_quotas is not None
-                            else None
-                        ),
-                    },
+                        sidecar_status="committed",
+                        sidecar_rejection_reason=None,
+                        raw_steps=sidecar_episode.raw_steps,
+                        base_samples=0 if stored is None else stored.joint_samples,
+                        outcome=sidecar_episode.outcome,
+                    )
                 )
+                if stored is None:
+                    print(
+                        f"[WARNING] episode={episode_index} scenario={spec.scenario_id} "
+                        f"base_rejected={base_rejection_reason} sidecar=committed",
+                        flush=True,
+                    )
+                    continue
                 if diagnostic_counts is not None:
                     diagnostic_counts[spec.scenario_id] += stored.joint_samples
                 elapsed = max(time.perf_counter() - wall_start, 1e-6)
@@ -718,7 +1027,11 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
         finally:
             if env is not None:
                 env.close()
-        summary = store.summary()
+        summary = {
+            "base": store.summary(),
+            "sidecar": sidecar_store.summary(),
+            "bundle_attempts": bundle.next_episode_index,
+        }
         if diagnostic_quotas is not None:
             summary["diagnostic_64"] = {
                 "scenario_quotas": diagnostic_quotas,
@@ -746,6 +1059,7 @@ def parse_args(argv: list[str] | None = None) -> JointCollectionRunConfig:
         default=REPO_ROOT / "configs/dataset/data_collect.yaml",
     )
     parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--sidecar-root", type=Path)
     parser.add_argument("--target-joint-steps", type=int)
     parser.add_argument("--max-episodes", type=int)
     parser.add_argument("--max-episode-steps", type=int)
@@ -754,7 +1068,16 @@ def parse_args(argv: list[str] | None = None) -> JointCollectionRunConfig:
     config = load_run_config(args.config)
     overrides = {}
     if args.dataset_root is not None:
-        overrides["dataset_root"] = args.dataset_root.expanduser().resolve()
+        dataset_root = args.dataset_root.expanduser().resolve()
+        overrides["dataset_root"] = dataset_root
+        overrides["bundle_root"] = dataset_root.parent
+        if args.sidecar_root is None:
+            overrides["sidecar_root"] = dataset_root.parent / "riskentry_actor_sidecar"
+    if args.sidecar_root is not None:
+        sidecar_root = args.sidecar_root.expanduser().resolve()
+        overrides["sidecar_root"] = sidecar_root
+        if args.dataset_root is None:
+            overrides["bundle_root"] = sidecar_root.parent
     if args.target_joint_steps is not None:
         overrides["target_joint_steps"] = args.target_joint_steps
     if args.max_episodes is not None:

@@ -1,5 +1,6 @@
 dataset:
   name: platoon_joint_bev_diagnostic64_round13_71
+  sidecar_name: riskentry_actor_sidecar
   output_root: /tmp/bev-round13-71
 
 split:

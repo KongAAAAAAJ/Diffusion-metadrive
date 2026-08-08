@@ -1,5 +1,6 @@
 dataset:
   name: platoon_joint_bev
+  sidecar_name: riskentry_actor_sidecar
   output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets
 
 split:
@@ -17,6 +18,9 @@ collection:
   scenario_weights:
     S5_hard_brake_lead: 1.0
     S6_background_merge_in: 1.0
+    S7_ego_merge_from_ramp: 1.0
+    S8_ego_exit_to_ramp: 1.0
+    S9_narrow_channel_negotiation: 1.0
   traffic_density_min: 0.0
   traffic_density_max: 0.04
 

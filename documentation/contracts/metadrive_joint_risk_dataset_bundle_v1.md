@@ -222,8 +222,9 @@ The simulator runs once. Collection proceeds as follows:
 7. decide base eligibility and build `base_sample_step_index` from the exact
    accepted base sample steps;
 8. validate the complete sidecar first;
-9. if base is eligible, atomically commit base, then sidecar with the exact
-   mapping; otherwise commit the sidecar with an empty mapping;
+9. durably stage the validated sidecar; commit or reject the base, then
+   atomically publish the prepared sidecar with the exact mapping (empty for a
+   rejected base);
 10. append the bundle episode status only after component commit results are
     known.
 
@@ -286,9 +287,9 @@ The adapter guarantees:
 - a contiguous `k * decision_dt_s` capture contract that supports the terminal
   `K+1` state when the collector integration is added.
 
-This adapter does not write arrays and is not yet called by the production
-collector. Atomic persistence is Round 13.97c; one-pass base/sidecar collector
-integration and terminal capture are Round 13.97d.
+The adapter itself remains persistence-free. Round 13.97d calls it from the
+production collector and passes the completed in-memory timeline to the
+Round 13.97c writer.
 
 ## 13. Round 13.97c atomic sidecar storage
 
@@ -322,3 +323,40 @@ bundle status row.
 Round 13.97c does not call `env.step()`, does not commit a base episode, and
 does not write `bundle_episode_index.jsonl`; those transaction boundaries
 remain in Round 13.97d.
+
+## 14. Round 13.97d one-pass bundle transaction
+
+`collect_joint_episode()` captures RiskEntry raw state zero immediately after
+reset and one result state after every executed action. An episode with `K`
+actions therefore owns exactly `K+1` raw frames, including its terminal
+collision or road-departure state. The BEV builder and actor sidecar adapter
+observe the same simulator state boundaries.
+
+`run_joint_bev_collection.py` opens three independent durable components under
+one bundle root:
+
+```text
+platoon_joint_bev/              base model dataset
+riskentry_actor_sidecar/        raw RiskEntry facts
+dataset_bundle_manifest.json    immutable dataset-instance bindings
+bundle_episode_index.jsonl      one result row per attempted episode
+```
+
+The sidecar is fully validated and fsynced into a prepared directory before the
+base is changed. The base is then committed or rejected, after which the
+prepared sidecar directory is atomically published. A dangerous or
+expert-infeasible episode remains available to RiskEntry while the base row is
+rejected and `base_sample_step_index.npy` is empty. A sidecar integrity failure
+rejects the base as well. This enforces `base_without_sidecar_allowed=false`
+without rollback or deletion.
+
+Before simulator construction, the collector atomically writes one pending
+attempt. It appends the final bundle row only after both component statuses are
+known. Resume can publish a valid prepared sidecar after a committed base. If
+interruption occurred before the base commit, it clears the still-staged base
+mapping, retains the raw episode as sidecar-only, and conservatively rejects
+the base. A base with neither a committed nor prepared sidecar is corruption.
+
+`verify_joint_risk_bundle.py` verifies both component datasets and then checks
+episode status, identity, split, fingerprints, scenario hash, counts, outcome,
+and exact base-sample-to-raw-step alignment across the roots.

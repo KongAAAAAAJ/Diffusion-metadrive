@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -14,19 +13,17 @@ from scenarios.bev_round13_contract import (
     PRIMARY_S5_S9_SCENARIOS,
     primary_scenario_contract,
 )
+from expert_dataset.joint_risk_identity import (
+    EXTERNAL_ACTOR_ID_PATTERN,
+    PLATOON_ACTOR_IDS,
+    PLATOON_AGENT_TO_ACTOR_ID,
+)
 
 
 BUNDLE_FORMAT = "metadrive-joint-planning-risk-bundle"
 BUNDLE_SCHEMA_VERSION = "1.0.0"
 SIDECAR_FORMAT = "riskentry-metadrive-actor-sidecar"
 SIDECAR_SCHEMA_VERSION = "1.0.0"
-PLATOON_AGENT_TO_ACTOR_ID = {
-    "agent0": "P0",
-    "agent1": "P1",
-    "agent2": "P2",
-}
-PLATOON_ACTOR_IDS = tuple(PLATOON_AGENT_TO_ACTOR_ID.values())
-EXTERNAL_ACTOR_ID_PATTERN = re.compile(r"^V[0-9]{3,}$")
 PROTOCOL_PATH = (
     Path(__file__).resolve().parents[1]
     / "schemas"
