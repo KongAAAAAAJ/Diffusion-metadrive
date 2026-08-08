@@ -121,6 +121,32 @@ def test_formal_gate_is_physical_count_based(tmp_path: Path, monkeypatch) -> Non
     assert report["eligible_for_stage1_formal_training"] is False
 
 
+def test_formal_gate_rejects_uneven_scenario_counts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _fixture(tmp_path, monkeypatch, samples=15_000)
+    original = pilot.verify_joint_bev_dataset
+    monkeypatch.setattr(
+        pilot,
+        "verify_joint_bev_dataset",
+        lambda path, min_decode_samples_per_s: {
+            **original(path, min_decode_samples_per_s),
+            "scenario_joint_samples": {
+                **pilot.FORMAL_PILOT_SCENARIO_QUOTAS,
+                SCENARIOS[0]: 2_999,
+                SCENARIOS[1]: 3_001,
+            },
+        },
+    )
+    with pytest.raises(pilot.Round1397ePilotError, match="exactly 3,000"):
+        pilot.audit_shared_bundle_pilot(
+            root,
+            minimum_base_samples=15_000,
+            require_all_s5_s9=True,
+            require_formal_15000=True,
+        )
+
+
 def test_missing_scenario_or_metadata_shortcut_is_rejected(
     tmp_path: Path, monkeypatch
 ) -> None:

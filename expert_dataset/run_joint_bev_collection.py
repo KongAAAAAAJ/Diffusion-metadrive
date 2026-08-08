@@ -49,6 +49,7 @@ TOP_LEVEL_KEYS = {
     "collection",
     "env_config",
     "diagnostic_64",
+    "formal_pilot",
 }
 SECTION_KEYS = {
     "dataset": {"name", "sidecar_name", "output_root"},
@@ -67,6 +68,11 @@ SECTION_KEYS = {
         "enabled",
         "scenario_quotas",
         "sample_offsets_after_trigger_s",
+        "max_attempts_per_scenario",
+    },
+    "formal_pilot": {
+        "enabled",
+        "scenario_quotas",
         "max_attempts_per_scenario",
     },
 }
@@ -91,6 +97,8 @@ class JointCollectionRunConfig:
     diagnostic_scenario_quotas: Mapping[str, int] | None = None
     diagnostic_sample_offsets_s: tuple[float, ...] = ()
     diagnostic_max_attempts_per_scenario: int = 0
+    formal_scenario_quotas: Mapping[str, int] | None = None
+    formal_max_attempts_per_scenario: int = 0
 
     def __post_init__(self) -> None:
         bundle_root = Path(self.bundle_root).expanduser().resolve()
@@ -200,6 +208,40 @@ class JointCollectionRunConfig:
                 "diagnostic_max_attempts_per_scenario",
                 int(self.diagnostic_max_attempts_per_scenario),
             )
+        formal_quotas = self.formal_scenario_quotas
+        if quotas is not None and formal_quotas is not None:
+            raise ValueError("diagnostic_64 and formal_pilot are mutually exclusive")
+        if formal_quotas is not None:
+            expected = tuple(value[0] for value in PRIMARY_S5_S9_SCENARIOS)
+            if tuple(formal_quotas) != expected:
+                raise ValueError(
+                    "formal_pilot scenario_quotas must use ordered S5--S9"
+                )
+            normalized_formal_quotas = {}
+            for scenario_id, value in formal_quotas.items():
+                if isinstance(value, bool) or int(value) <= 0:
+                    raise ValueError(
+                        "formal_pilot scenario quotas must be positive integers"
+                    )
+                normalized_formal_quotas[str(scenario_id)] = int(value)
+            if sum(normalized_formal_quotas.values()) != self.target_joint_steps:
+                raise ValueError(
+                    "formal_pilot quotas must sum to target_joint_steps"
+                )
+            if int(self.formal_max_attempts_per_scenario) <= 0:
+                raise ValueError(
+                    "formal_pilot max_attempts_per_scenario must be positive"
+                )
+            if not self.resume:
+                raise ValueError("formal_pilot collection requires resume=true")
+            object.__setattr__(
+                self, "formal_scenario_quotas", normalized_formal_quotas
+            )
+            object.__setattr__(
+                self,
+                "formal_max_attempts_per_scenario",
+                int(self.formal_max_attempts_per_scenario),
+            )
 
     def immutable_fingerprint(self) -> str:
         return fingerprint_payload(
@@ -223,6 +265,17 @@ class JointCollectionRunConfig:
                         ),
                         "max_attempts_per_scenario": (
                             self.diagnostic_max_attempts_per_scenario
+                        ),
+                        "scenario_contract": primary_scenario_contract(),
+                    }
+                ),
+                "formal_pilot": (
+                    None
+                    if self.formal_scenario_quotas is None
+                    else {
+                        "scenario_quotas": dict(self.formal_scenario_quotas),
+                        "max_attempts_per_scenario": (
+                            self.formal_max_attempts_per_scenario
                         ),
                         "scenario_contract": primary_scenario_contract(),
                     }
@@ -287,6 +340,7 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
     diagnostic = _strict_section(
         payload, "diagnostic_64", required=False
     )
+    formal = _strict_section(payload, "formal_pilot", required=False)
 
     dataset_name = str(_required(dataset, "dataset", "name")).strip()
     if not dataset_name or Path(dataset_name).name != dataset_name:
@@ -341,6 +395,28 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
             )
         )
 
+    formal_enabled = formal.get("enabled", False)
+    if not isinstance(formal_enabled, bool):
+        raise ValueError("formal_pilot.enabled must be bool")
+    formal_quotas = None
+    formal_max_attempts = 0
+    if formal_enabled:
+        raw_formal_quotas = _required(
+            formal, "formal_pilot", "scenario_quotas"
+        )
+        if not isinstance(raw_formal_quotas, Mapping):
+            raise ValueError("formal_pilot.scenario_quotas must be a mapping")
+        formal_quotas = {
+            str(name): int(value) for name, value in raw_formal_quotas.items()
+        }
+        formal_max_attempts = int(
+            _required(
+                formal,
+                "formal_pilot",
+                "max_attempts_per_scenario",
+            )
+        )
+
     return JointCollectionRunConfig(
         config_path=config_path,
         bundle_root=bundle_root,
@@ -374,6 +450,8 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
         diagnostic_scenario_quotas=diagnostic_quotas,
         diagnostic_sample_offsets_s=diagnostic_offsets,
         diagnostic_max_attempts_per_scenario=diagnostic_max_attempts,
+        formal_scenario_quotas=formal_quotas,
+        formal_max_attempts_per_scenario=formal_max_attempts,
     )
 
 
@@ -519,6 +597,81 @@ def _select_diagnostic_samples(
     )
 
 
+def _select_formal_quota_samples(
+    rollout,
+    *,
+    remaining: int,
+) -> tuple[tuple[object, ...], tuple[int, ...]]:
+    """Keep a complete episode, clipping only its persisted sample view."""
+
+    if remaining <= 0:
+        raise JointCollectionError(
+            "formal scenario quota is already complete",
+            reason_code="formal_pilot_quota_complete",
+        )
+    sample_count = len(rollout.samples)
+    if sample_count != len(rollout.sample_step_indices):
+        raise JointCollectionError(
+            "sample/step metadata are misaligned",
+            reason_code="formal_pilot_sample_alignment",
+        )
+    if sample_count == 0:
+        raise JointCollectionError(
+            "formal episode selected no samples",
+            reason_code="formal_pilot_sample_missing",
+        )
+    selected_count = min(sample_count, int(remaining))
+    if selected_count == sample_count:
+        indices = tuple(range(sample_count))
+    else:
+        indices = tuple(
+            int(value)
+            for value in np.linspace(
+                0,
+                sample_count - 1,
+                num=selected_count,
+                dtype=np.int64,
+            )
+        )
+        if len(set(indices)) != selected_count:
+            raise JointCollectionError(
+                "formal sample clipping produced duplicate indices",
+                reason_code="formal_pilot_sample_alignment",
+            )
+    return (
+        tuple(rollout.samples[index] for index in indices),
+        tuple(int(rollout.sample_step_indices[index]) for index in indices),
+    )
+
+
+def _stored_scenario_counts(
+    store: JointBEVDatasetStore,
+    quotas: Mapping[str, int],
+) -> dict[str, int]:
+    counts = {name: 0 for name in quotas}
+    for writer in store.writers.values():
+        for episode in writer.episodes.values():
+            scenario_id = str(episode.attributes.get("scenario_id", ""))
+            if scenario_id not in counts:
+                raise JointCollectionError(
+                    f"formal pilot contains unexpected scenario {scenario_id!r}",
+                    reason_code="formal_pilot_resume_mismatch",
+                )
+            counts[scenario_id] += int(episode.joint_samples)
+    for scenario_id, count in counts.items():
+        if count > int(quotas[scenario_id]):
+            raise JointCollectionError(
+                f"formal pilot scenario {scenario_id} exceeds its quota",
+                reason_code="formal_pilot_resume_mismatch",
+            )
+    if sum(counts.values()) != store.total_joint_samples:
+        raise JointCollectionError(
+            "formal pilot scenario counts do not match stored sample count",
+            reason_code="formal_pilot_resume_mismatch",
+        )
+    return counts
+
+
 def _configure_episode(
     env: SensorlessJointBEVPlatoonEnv,
     spec: JointEpisodeSpec,
@@ -651,6 +804,29 @@ def _validate_bundle_resume_state(
             raise JointRiskBundleStorageError("base-only episode detected")
 
 
+def _effective_resume_mode(config: JointCollectionRunConfig) -> bool:
+    """Resolve first creation versus strict three-component resume."""
+
+    markers = {
+        "base": config.dataset_root / JointBEVDatasetStore.CONTRACT_FILE,
+        "sidecar": (
+            config.sidecar_root / RiskEntrySidecarDatasetStore.CONTRACT_FILE
+        ),
+        "bundle": config.bundle_root / JointRiskBundleIndex.MANIFEST_FILE,
+    }
+    present = {name: path.is_file() for name, path in markers.items()}
+    if not any(present.values()):
+        return False
+    if not config.resume:
+        return False
+    if not all(present.values()):
+        missing = sorted(name for name, exists in present.items() if not exists)
+        raise JointRiskBundleStorageError(
+            f"formal resume has a partial component initialization: missing={missing}"
+        )
+    return True
+
+
 def _sidecar_start(
     *,
     episode_index: int,
@@ -705,15 +881,16 @@ def _prepare_rollout_sidecar(
 def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
     wall_start = time.perf_counter()
     base_fingerprint = config.immutable_fingerprint()
+    effective_resume = _effective_resume_mode(config)
     with JointBEVDatasetStore(
         config.dataset_root,
         split_config=config.split_config,
         dataset_fingerprint=base_fingerprint,
-        resume=config.resume,
+        resume=effective_resume,
     ) as store, RiskEntrySidecarDatasetStore(
         config.sidecar_root,
         base_dataset_fingerprint=base_fingerprint,
-        resume=config.resume,
+        resume=effective_resume,
     ) as sidecar_store, JointRiskBundleIndex(
         config.bundle_root,
         base_directory=config.dataset_root.name,
@@ -722,7 +899,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
         sidecar_dataset_fingerprint=sidecar_store.dataset_fingerprint,
         scenario_contract_sha256=primary_scenario_contract()["sha256"],
         split_seed=config.split_config.seed,
-        resume=config.resume,
+        resume=effective_resume,
     ) as bundle:
         _recover_pending_bundle_attempt(bundle, store, sidecar_store)
         _validate_bundle_resume_state(bundle, store, sidecar_store)
@@ -730,7 +907,8 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
         print(
             f"[INFO] base_dataset={config.dataset_root} "
             f"sidecar_dataset={config.sidecar_root} "
-            f"resume={config.resume} existing_joint_steps={store.total_joint_samples}",
+            f"resume_requested={config.resume} resume_active={effective_resume} "
+            f"existing_joint_steps={store.total_joint_samples}",
             flush=True,
         )
         if store.total_joint_samples >= config.target_joint_steps:
@@ -739,6 +917,25 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 "sidecar": sidecar_store.summary(),
                 "bundle_attempts": bundle.next_episode_index,
             }
+            if config.formal_scenario_quotas is not None:
+                quotas = dict(config.formal_scenario_quotas)
+                counts = _stored_scenario_counts(store, quotas)
+                if counts != quotas:
+                    raise JointCollectionError(
+                        "formal pilot target is met but scenario quotas differ",
+                        reason_code="formal_pilot_resume_mismatch",
+                    )
+                summary["formal_pilot"] = {
+                    "scenario_quotas": quotas,
+                    "scenario_counts": counts,
+                    "attempts": {
+                        name: sum(row.scenario_id == name for row in bundle.rows)
+                        for name in quotas
+                    },
+                    "scenario_contract_sha256": primary_scenario_contract()[
+                        "sha256"
+                    ],
+                }
             print("[INFO] target already satisfied; no simulator started", flush=True)
             return summary
 
@@ -763,14 +960,33 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
             if diagnostic_quotas is None
             else tuple(diagnostic_quotas)
         )
+        formal_quotas = (
+            None
+            if config.formal_scenario_quotas is None
+            else dict(config.formal_scenario_quotas)
+        )
+        formal_counts = (
+            None
+            if formal_quotas is None
+            else _stored_scenario_counts(store, formal_quotas)
+        )
+        formal_attempts = (
+            None
+            if formal_quotas is None
+            else {
+                name: sum(row.scenario_id == name for row in bundle.rows)
+                for name in formal_quotas
+            }
+        )
+        formal_order = () if formal_quotas is None else tuple(formal_quotas)
         try:
             while store.total_joint_samples < config.target_joint_steps:
                 episode_index = store.next_episode_index
                 if config.max_episodes > 0 and episode_index >= config.max_episodes:
                     break
-                if diagnostic_quotas is None:
+                if diagnostic_quotas is None and formal_quotas is None:
                     spec = sample_episode_spec(config, episode_index)
-                else:
+                elif diagnostic_quotas is not None:
                     incomplete = [
                         scenario_id
                         for scenario_id in diagnostic_order
@@ -792,6 +1008,29 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             reason_code="diagnostic_attempt_limit",
                         )
                     diagnostic_attempts[scenario_id] += 1
+                    spec = sample_episode_spec_for_scenario(
+                        config, episode_index, scenario_id
+                    )
+                else:
+                    incomplete = [
+                        scenario_id
+                        for scenario_id in formal_order
+                        if formal_counts[scenario_id]
+                        < formal_quotas[scenario_id]
+                    ]
+                    if not incomplete:
+                        break
+                    scenario_id = incomplete[episode_index % len(incomplete)]
+                    if (
+                        formal_attempts[scenario_id]
+                        >= config.formal_max_attempts_per_scenario
+                    ):
+                        raise JointCollectionError(
+                            f"formal quota for {scenario_id} was not met within "
+                            f"{config.formal_max_attempts_per_scenario} attempts",
+                            reason_code="formal_pilot_attempt_limit",
+                        )
+                    formal_attempts[scenario_id] += 1
                     spec = sample_episode_spec_for_scenario(
                         config, episode_index, scenario_id
                     )
@@ -875,6 +1114,20 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             decision_dt_s=simulator_decision_dt_s(env),
                             offsets_s=config.diagnostic_sample_offsets_s,
                             remaining=remaining,
+                        )
+                    except JointCollectionError as exc:
+                        base_rejection_reason = exc.reason_code
+                if formal_quotas is not None and base_rejection_reason is None:
+                    remaining = (
+                        formal_quotas[spec.scenario_id]
+                        - formal_counts[spec.scenario_id]
+                    )
+                    try:
+                        samples_to_store, selected_steps = (
+                            _select_formal_quota_samples(
+                                rollout,
+                                remaining=remaining,
+                            )
                         )
                     except JointCollectionError as exc:
                         base_rejection_reason = exc.reason_code
@@ -973,6 +1226,11 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             "diagnostic_subsampled": (
                                 diagnostic_quotas is not None
                             ),
+                            "formal_pilot": formal_quotas is not None,
+                            "formal_quota_clipped": (
+                                formal_quotas is not None
+                                and len(samples_to_store) < len(rollout.samples)
+                            ),
                             "scenario_contract_sha256": (
                                 primary_scenario_contract()["sha256"]
                             ),
@@ -1012,6 +1270,8 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     continue
                 if diagnostic_counts is not None:
                     diagnostic_counts[spec.scenario_id] += stored.joint_samples
+                if formal_counts is not None:
+                    formal_counts[spec.scenario_id] += stored.joint_samples
                 elapsed = max(time.perf_counter() - wall_start, 1e-6)
                 rate = (
                     store.total_joint_samples - starting_joint_samples
@@ -1045,6 +1305,20 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 raise JointCollectionError(
                     "diagnostic collection ended before all quotas were met",
                     reason_code="diagnostic_quota_incomplete",
+                )
+        if formal_quotas is not None:
+            summary["formal_pilot"] = {
+                "scenario_quotas": formal_quotas,
+                "scenario_counts": formal_counts,
+                "attempts": formal_attempts,
+                "scenario_contract_sha256": primary_scenario_contract()[
+                    "sha256"
+                ],
+            }
+            if formal_counts != formal_quotas:
+                raise JointCollectionError(
+                    "formal pilot ended before all quotas were met",
+                    reason_code="formal_pilot_quota_incomplete",
                 )
 
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)

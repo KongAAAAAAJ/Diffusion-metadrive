@@ -384,3 +384,26 @@ This small protocol pilot is not the formal data pilot. The next gate remains
 the 15,000 joint-sample shared-bundle pilot, which must physically contain at
 least 15,000 base samples, cover S5--S9, and have non-empty train/val/test
 splits before it can authorize the formal 50k collection.
+
+## 16. Round 13.97f formal 15k pilot
+
+The formal pilot uses
+`configs/dataset/data_collect_shared_formal_pilot15k_round13_97f.yaml` and a
+separate `formal_pilot` collector contract. This contract is intentionally not
+an alias of `diagnostic_64`: it supports atomic resume and requires exactly
+3,000 physical joint samples from each of S5--S9. The five quotas must sum to
+the 15,000-sample target and are part of the immutable dataset fingerprint.
+
+On resume, scenario counts are reconstructed from committed base episode
+metadata and checked against the bundle index. A fresh empty destination is
+created even though `resume=true`; once any component is initialized, all
+three component manifests must exist or the collector rejects the partial
+initialization. The final successful episode for a scenario is executed and
+captured in full. If only part of its base sample view is needed, samples are
+selected deterministically across the complete episode while the RiskEntry
+sidecar retains every raw state boundary.
+
+Formal acceptance additionally requires non-empty train, validation, and test
+splits. The 15k dataset remains a pilot and is never eligible for Stage 1
+formal training; passing the gate only authorizes a separate formal 50k
+shared-bundle collection.

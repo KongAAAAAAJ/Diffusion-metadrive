@@ -23,6 +23,9 @@ from scenarios.bev_round13_contract import PRIMARY_S5_S9_SCENARIOS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FORMAL_PILOT_MINIMUM_JOINT_SAMPLES = 15_000
+FORMAL_PILOT_SCENARIO_QUOTAS = {
+    name: 3_000 for name, _ in PRIMARY_S5_S9_SCENARIOS
+}
 
 
 class Round1397ePilotError(RuntimeError):
@@ -140,6 +143,10 @@ def audit_shared_bundle_pilot(
         raise Round1397ePilotError(
             "formal 15k pilot requires non-empty train/val/test splits"
         )
+    if require_formal_15000 and scenario_samples != FORMAL_PILOT_SCENARIO_QUOTAS:
+        raise Round1397ePilotError(
+            "formal 15k pilot requires exactly 3,000 samples per S5--S9 scenario"
+        )
 
     attempted = int(bundle["attempted_episodes"])
     committed = int(bundle["committed_base_episodes"])
@@ -149,6 +156,7 @@ def audit_shared_bundle_pilot(
         >= FORMAL_PILOT_MINIMUM_JOINT_SAMPLES
         and not missing_scenarios
         and set(non_empty_splits) == {"train", "val", "test"}
+        and scenario_samples == FORMAL_PILOT_SCENARIO_QUOTAS
     )
     return {
         "format": "bev_risk_shared_bundle_pilot_report_v1",
@@ -223,6 +231,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "FORMAL_PILOT_MINIMUM_JOINT_SAMPLES",
+    "FORMAL_PILOT_SCENARIO_QUOTAS",
     "Round1397ePilotError",
     "audit_shared_bundle_pilot",
 ]

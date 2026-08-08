@@ -236,6 +236,64 @@ def test_diagnostic64_config_and_event_sampling_are_strict() -> None:
         )
 
 
+def test_formal_pilot_config_and_quota_clipping_are_strict() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_shared_formal_pilot15k_round13_97f.yaml")
+    )
+    assert config.resume is True
+    assert config.target_joint_steps == 15_000
+    assert tuple(config.formal_scenario_quotas.values()) == (3000,) * 5
+    assert config.diagnostic_scenario_quotas is None
+    with pytest.raises(ValueError, match="requires resume=true"):
+        runner.replace(config, resume=False)
+
+    rollout = JointEpisodeRollout(
+        samples=tuple(_sample() for _ in range(5)),
+        simulator_steps=8,
+        rejected_joint_steps=0,
+        failure_reason=None,
+        terminated=False,
+        truncated=True,
+        sample_step_indices=(1, 2, 3, 4, 5),
+    )
+    selected, steps = runner._select_formal_quota_samples(rollout, remaining=3)
+    assert len(selected) == 3
+    assert steps == (1, 3, 5)
+
+
+def test_resume_true_creates_fresh_bundle_but_rejects_partial_initialization(
+    tmp_path: Path,
+) -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_shared_formal_smoke_round13_97f.yaml")
+    )
+    config = runner.replace(
+        config,
+        bundle_root=tmp_path / "bundle",
+        dataset_root=tmp_path / "bundle/platoon_joint_bev",
+        sidecar_root=tmp_path / "bundle/riskentry_actor_sidecar",
+    )
+    assert runner._effective_resume_mode(config) is False
+
+    config.dataset_root.mkdir(parents=True)
+    (config.dataset_root / runner.JointBEVDatasetStore.CONTRACT_FILE).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    with pytest.raises(
+        runner.JointRiskBundleStorageError, match="partial component initialization"
+    ):
+        runner._effective_resume_mode(config)
+
+    config.sidecar_root.mkdir(parents=True)
+    (
+        config.sidecar_root / runner.RiskEntrySidecarDatasetStore.CONTRACT_FILE
+    ).write_text("{}\n", encoding="utf-8")
+    (config.bundle_root / runner.JointRiskBundleIndex.MANIFEST_FILE).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    assert runner._effective_resume_mode(config) is True
+
+
 def test_cli_overrides_only_operational_collection_limits(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     config = runner.parse_args(
