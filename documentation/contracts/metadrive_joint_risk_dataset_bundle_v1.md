@@ -4,6 +4,9 @@ Status: frozen for the Round 13.97 pilot implementation
 Bundle format: `metadrive-joint-planning-risk-bundle`  
 Bundle version: `1.0.0`
 
+The normative machine-readable copy shared byte-for-byte with RiskEntry is
+`schemas/metadrive_joint_risk_bundle_v1.json`.
+
 ## 1. Scope
 
 One simulator rollout produces two linked datasets with different retention
@@ -261,4 +264,3 @@ BEV packing, or the base data schema. Implementation work is limited to:
 - terminal post-step capture;
 - bundle episode status and cross-link verification;
 - RiskEntry consumption of P0/P1/P2 for new shared datasets.
-
