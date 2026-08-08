@@ -10,6 +10,7 @@ from models.bev_planner import (
     JointRewardError,
     JointTrajectoryProxyReward,
     calibrate_joint_rewards,
+    compose_joint_reward,
 )
 
 
@@ -86,17 +87,35 @@ def test_out_of_drivable_and_platoon_collision_are_hard_unsafe() -> None:
     assert np.all(result.rewards[1:] < -20.0)
 
 
-def test_platoon_clearance_deficit_cannot_cancel_background_deficit() -> None:
+def test_platoon_clearance_violation_is_hard_unsafe() -> None:
     safe = np.stack([_trajectory(4.0)] * 3)
     closing = safe.copy()
     closing[1] = _trajectory(5.5)
     result = _reward().score(
         _env(), _model_inputs(), np.stack((safe, closing))
     )
-    assert not result.unsafe.any()
+    assert result.unsafe.tolist() == [False, True]
+    assert result.clearance_violation.tolist() == [False, True]
     assert result.components["clearance"][0] == pytest.approx(0.0)
     assert result.components["clearance"][1] < 0.0
-    assert result.rewards[1] < result.rewards[0]
+    assert result.rewards[1] < -20.0
+
+
+def test_clearance_hard_gate_boundary_is_strict() -> None:
+    common = {
+        "progress": np.zeros(2),
+        "formation": np.zeros(2),
+        "clearance": np.zeros(2),
+        "comfort": np.zeros(2),
+        "collision": np.zeros(2, dtype=np.bool_),
+        "out_of_drivable": np.zeros(2, dtype=np.bool_),
+        "clearance_violation": np.asarray([False, True], dtype=np.bool_),
+        "config": JointRewardConfig(),
+    }
+    result = compose_joint_reward(**common)
+    assert result.unsafe.tolist() == [False, True]
+    assert result.rewards[0] == pytest.approx(0.0)
+    assert result.rewards[1] < -20.0
 
 
 def test_background_prediction_participates_in_collision() -> None:

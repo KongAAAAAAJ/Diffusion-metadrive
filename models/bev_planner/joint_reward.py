@@ -105,6 +105,7 @@ class JointRewardResult:
     unsafe: np.ndarray
     collision: np.ndarray
     out_of_drivable: np.ndarray
+    clearance_violation: np.ndarray
     components: Mapping[str, np.ndarray]
 
     def __post_init__(self) -> None:
@@ -114,7 +115,12 @@ class JointRewardResult:
         if not np.isfinite(rewards).all():
             raise JointRewardError("rewards must be finite")
         group_size = rewards.shape[0]
-        for name in ("unsafe", "collision", "out_of_drivable"):
+        for name in (
+            "unsafe",
+            "collision",
+            "out_of_drivable",
+            "clearance_violation",
+        ):
             value = np.asarray(getattr(self, name))
             if value.dtype != np.bool_ or value.shape != (group_size,):
                 raise JointRewardError(f"{name} must be bool [G]")
@@ -397,6 +403,7 @@ def compose_joint_reward(
     comfort: np.ndarray,
     collision: np.ndarray,
     out_of_drivable: np.ndarray,
+    clearance_violation: np.ndarray,
     config: JointRewardConfig,
 ) -> JointRewardResult:
     """Apply the shared local/team formula and the non-negotiable safety gate."""
@@ -415,11 +422,14 @@ def compose_joint_reward(
         raise JointRewardError("reward components must be finite vectors [G]")
     collision_values = np.asarray(collision)
     out_values = np.asarray(out_of_drivable)
+    clearance_values = np.asarray(clearance_violation)
     if (
         collision_values.dtype != np.bool_
         or out_values.dtype != np.bool_
+        or clearance_values.dtype != np.bool_
         or collision_values.shape != (group_size,)
         or out_values.shape != (group_size,)
+        or clearance_values.shape != (group_size,)
     ):
         raise JointRewardError("reward safety masks must be bool [G]")
 
@@ -439,8 +449,12 @@ def compose_joint_reward(
         -5.0,
         5.0,
     )
-    unsafe = collision_values | out_values
-    severity = collision_values.astype(np.float64) + out_values.astype(np.float64)
+    unsafe = collision_values | out_values | clearance_values
+    severity = (
+        collision_values.astype(np.float64)
+        + out_values.astype(np.float64)
+        + clearance_values.astype(np.float64)
+    )
     rewards = np.where(
         unsafe,
         config.unsafe_base_reward - severity,
@@ -451,6 +465,7 @@ def compose_joint_reward(
         unsafe=unsafe.astype(np.bool_),
         collision=collision_values,
         out_of_drivable=out_values,
+        clearance_violation=clearance_values,
         components={
             **{name: value.astype(np.float32) for name, value in arrays.items()},
             "local": local_reward.astype(np.float32),
@@ -510,6 +525,7 @@ class JointTrajectoryProxyReward:
         comfort = np.zeros(group_size, dtype=np.float64)
         collision = np.zeros(group_size, dtype=np.bool_)
         out_of_drivable = np.zeros(group_size, dtype=np.bool_)
+        clearance_violation = np.zeros(group_size, dtype=np.bool_)
 
         background = self._prediction_planner._predicted_obstacles(
             env,
@@ -598,6 +614,12 @@ class JointTrajectoryProxyReward:
                     )
                     / self.config.background_safe_gap_m
                 )
+                if (
+                    math.isfinite(minimum_background_gap)
+                    and minimum_background_gap
+                    < self.config.background_safe_gap_m
+                ):
+                    clearance_violation[group] = True
                 role_clearance_deficits.append(min(background_deficit, 1.0))
 
             pair_errors = []
@@ -613,6 +635,8 @@ class JointTrajectoryProxyReward:
                     first[:, :2] - second[:, :2], axis=1
                 )
                 bumper = center_distance - dimensions[0]
+                if float(bumper.min()) < self.config.platoon_safe_gap_m:
+                    clearance_violation[group] = True
                 if follower == leader + 1:
                     deficit = np.maximum(
                         self.config.platoon_safe_gap_m - bumper, 0.0
@@ -651,6 +675,7 @@ class JointTrajectoryProxyReward:
             comfort=comfort,
             collision=collision,
             out_of_drivable=out_of_drivable,
+            clearance_violation=clearance_violation,
             config=self.config,
         )
 

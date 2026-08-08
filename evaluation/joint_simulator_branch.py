@@ -1053,6 +1053,10 @@ class JointSimulatorBranchEvaluator:
         minimum_background[~np.isfinite(minimum_background)] = 1.0e6
         minimum_platoon[~np.isfinite(minimum_platoon)] = 1.0e6
         road_clearance[~np.isfinite(road_clearance)] = 1.0e6
+        clearance_violation = (
+            (minimum_background < self.config.background_safe_gap_m)
+            | (minimum_platoon < self.config.platoon_safe_gap_m)
+        )
         reward = compose_joint_reward(
             progress=progress,
             formation=formation,
@@ -1060,6 +1064,7 @@ class JointSimulatorBranchEvaluator:
             comfort=comfort,
             collision=collision,
             out_of_drivable=out,
+            clearance_violation=clearance_violation.astype(np.bool_),
             config=self.config,
         )
         return SimulatorBranchResult(
