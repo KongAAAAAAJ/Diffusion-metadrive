@@ -1,0 +1,74 @@
+{
+  "format": "bev_joint_risk_formal_collection_freeze_v1",
+  "round": "13.97k",
+  "status": "formal_50k_collection_authorized",
+  "implementation_git_commit": "ed51c596c117bc99c3386acfca5f0d139e2e9173",
+  "git_branch": "BEV",
+  "implementation_worktree_clean": true,
+  "protocol": {
+    "schema_path": "schemas/metadrive_joint_risk_bundle_v1.json",
+    "schema_sha256": "49e03276e6d8f2ee3bb5b16d6e53b7e55c555005615a139f3ee98b8f6a20c45d",
+    "schema_version": "1.0.0",
+    "base_storage_schema_version": 2,
+    "base_format": "joint-first-packed-semantic-bev-npy-episodes",
+    "sidecar_format": "riskentry-metadrive-actor-sidecar"
+  },
+  "scenario_contract": {
+    "path": "scenarios/bev_round13_contract.py",
+    "file_sha256": "532de48e5c8c226c9868259ab99d96b9c4184fae1429378b930fae22e003987d",
+    "contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+    "scenarios": [
+      ["S5_hard_brake_lead", "R1_entry_straight"],
+      ["S6_background_merge_in", "R6_mainline_merge_approach"],
+      ["S7_ego_merge_from_ramp", "R7_merge_core"],
+      ["S8_ego_exit_to_ramp", "R6_exit_to_ramp"],
+      ["S9_narrow_channel_negotiation", "R8_narrow_channel"]
+    ]
+  },
+  "implementation_file_sha256": {
+    "expert_dataset/run_joint_bev_collection.py": "44ab30904abdaf2ee6241d82574b689c694b1d61030622154c117bc32bf8bfab",
+    "expert_dataset/joint_bev_storage.py": "96a9505deefdbd70da7525f0aecf939a9ec43864c5cd1b26296da1221b02f2e3",
+    "expert_dataset/riskentry_sidecar_storage.py": "12843968c3a355174ecb15d016fbceef11712f3c85a9f1559e61fbb24ff5c597",
+    "evaluation/round13_97g_dataset_quality.py": "3f8be0a57305dfc65e1db88df42d3d8bbb8a8ed3ea3dfd898dc630ac5cd881f3"
+  },
+  "accepted_15k_pilot": {
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal_pilot15k_v2",
+    "base_dataset_fingerprint": "6d94b5d40506e16dab26c3f0f0937eed4a313306f0f908ddff8d3425df25931c",
+    "sidecar_dataset_fingerprint": "cdebf4ec2336b0b262ccfc9da568f7b7696187a3bb0786f37bdd481cb0d2c78c",
+    "infrastructure_report_sha256": "260bcdf949e46cb6b1d402a1b9a71e725e45005edf361bb8d092fde1076df76c",
+    "quality_report_sha256": "982ca99d8aaca334768a6cb22d23feb509f2d798cb72ca69a16400e06c0122e3",
+    "infrastructure_status": "formal_15000_pilot_accepted",
+    "quality_status": "statistical_quality_accepted"
+  },
+  "formal_50k": {
+    "config_path": "configs/dataset/data_collect_shared_formal50k_round13_97k.yaml",
+    "config_sha256": "4b0d18ea4e158224867bea599fa004951a6f74e172ddf4c71d4d6358571b7d85",
+    "immutable_config_fingerprint": "58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144",
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal50k_v1",
+    "target_joint_samples": 50000,
+    "scenario_quota": 10000,
+    "start_seed": 50017,
+    "resume": true,
+    "reuse_15k_samples": false
+  },
+  "frozen_constraints": {
+    "no_code_changes_during_collection": true,
+    "no_scenario_changes_during_collection": true,
+    "no_protocol_changes_during_collection": true,
+    "synchronous_base_sidecar_capture": true,
+    "strict_episode_rejection_for_base": true,
+    "retain_risk_sidecar_for_base_rejections": true
+  },
+  "post_collection_required_gates": [
+    "exactly_50000_joint_samples",
+    "exactly_10000_samples_per_scenario",
+    "all_s5_s9_present_in_each_split",
+    "base_sidecar_fingerprint_and_step_join",
+    "packed_bev_round_trip_and_6_4x_compression",
+    "expert_hard_valid_anchor_and_stop_kinematics_100_percent",
+    "gt_mode_is_hard_valid",
+    "s7_stop_low_speed_and_lateral_mode_gates",
+    "rare_mode_coverage_report",
+    "risk_event_actor_type_report"
+  ]
+}
