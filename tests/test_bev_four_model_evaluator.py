@@ -13,6 +13,7 @@ from evaluation.bev_four_model_evaluator import (
     FourModelEvaluationError,
     _file_sha256,
     _configure_deterministic_inference,
+    _behavior_sha256,
     _initial_state_signature,
     _load_manifest,
     _validate_checkpoint_hash,
@@ -144,3 +145,17 @@ def test_initial_state_signature_is_joint_first_and_strict() -> None:
     del env.agents["agent1"]
     with pytest.raises(FourModelEvaluationError, match="agent1"):
         _initial_state_signature(env)
+
+
+def test_behavior_hash_excludes_timing_but_not_policy_metrics() -> None:
+    report = {
+        "models": {
+            name: {"joint_safety": {"collision_rate": 0.0}, "timing": {"p95": 1.0}}
+            for name in ("A", "B", "A_GRPO", "B_GRPO")
+        }
+    }
+    baseline = _behavior_sha256(report)
+    report["models"]["A"]["timing"]["p95"] = 99.0
+    assert _behavior_sha256(report) == baseline
+    report["models"]["A"]["joint_safety"]["collision_rate"] = 1.0
+    assert _behavior_sha256(report) != baseline

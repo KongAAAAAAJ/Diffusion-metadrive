@@ -169,6 +169,23 @@ def test_straight_scene_populates_all_semantic_groups() -> None:
     assert bev[BEVChannel.BACKGROUND_T_MINUS_1_0][bg_old_px] == 255
 
 
+def test_far_static_geometry_is_culled_without_changing_pixels() -> None:
+    rasterizer = SemanticBEVRasterizer()
+    scene = _straight_scene()
+    baseline = rasterizer.rasterize(scene)
+    far_polygon = _rectangle(500.0, 520.0, 500.0, 520.0)
+    far_line = np.asarray([[500.0, 500.0], [520.0, 520.0]], dtype=np.float32)
+    augmented = replace(
+        scene,
+        drivable_polygons=scene.drivable_polygons + (far_polygon,),
+        lane_centerlines=scene.lane_centerlines + (far_line,),
+        lane_boundaries=scene.lane_boundaries + (far_line,),
+        navigation_route_polygons=scene.navigation_route_polygons + (far_polygon,),
+    )
+
+    assert np.array_equal(rasterizer.rasterize(augmented), baseline)
+
+
 @pytest.mark.parametrize(
     ("name", "scene"),
     (

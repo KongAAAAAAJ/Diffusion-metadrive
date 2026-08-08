@@ -201,6 +201,25 @@ class SemanticBEVRasterizer:
 
     def __init__(self, config: SemanticBEVConfig | None = None) -> None:
         self.config = config or SemanticBEVConfig()
+        self._view_radius_m = float(
+            np.hypot(
+                max(abs(self.config.x_min_m), abs(self.config.x_max_m)),
+                max(abs(self.config.y_min_m), abs(self.config.y_max_m)),
+            )
+            + self.config.line_width_m
+        )
+
+    def _could_intersect_view(
+        self, points_world: np.ndarray, ego_pose: np.ndarray
+    ) -> bool:
+        """Conservatively cull geometry whose world AABB misses the BEV disk."""
+
+        points = np.asarray(points_world, dtype=np.float32)
+        ego_xy = np.asarray(ego_pose, dtype=np.float32)[:2]
+        minimum = np.min(points[:, :2], axis=0)
+        maximum = np.max(points[:, :2], axis=0)
+        delta = np.maximum(np.maximum(minimum - ego_xy, ego_xy - maximum), 0.0)
+        return bool(np.dot(delta, delta) <= self._view_radius_m**2)
 
     def world_to_ego(self, points_world: np.ndarray, ego_pose: np.ndarray) -> np.ndarray:
         points = _xy_array(points_world, name="points_world")
@@ -228,13 +247,15 @@ class SemanticBEVRasterizer:
         return rounded.reshape((-1, 1, 2))
 
     def _fill_world_polygon(self, layer: np.ndarray, polygon: np.ndarray, ego_pose: np.ndarray, value: int) -> None:
-        if polygon.shape[0] < 3:
+        if polygon.shape[0] < 3 or not self._could_intersect_view(
+            polygon, ego_pose
+        ):
             return
         pixels = self.world_to_pixel(polygon, ego_pose)
         cv2.fillPoly(layer, [self._opencv_points(pixels)], color=int(value), lineType=cv2.LINE_8)
 
     def _draw_world_line(self, layer: np.ndarray, line: np.ndarray, ego_pose: np.ndarray, value: int) -> None:
-        if line.shape[0] < 2:
+        if line.shape[0] < 2 or not self._could_intersect_view(line, ego_pose):
             return
         pixels = self.world_to_pixel(line, ego_pose)
         thickness = max(1, int(round(self.config.line_width_m * self.config.pixels_per_meter)))
@@ -350,6 +371,7 @@ class MetaDriveSceneAdapter:
         self._cached_drivable: tuple[np.ndarray, ...] = ()
         self._cached_centers: tuple[np.ndarray, ...] = ()
         self._cached_boundaries: tuple[np.ndarray, ...] = ()
+        self._rasterizer = SemanticBEVRasterizer(self.config)
 
     @staticmethod
     def _road_network(env: object) -> object:
@@ -560,7 +582,7 @@ class MetaDriveSceneAdapter:
         snapshots: Sequence[SimulatorSnapshot],
     ) -> np.ndarray:
         scene = self.build_scene(env, ego_id, snapshots)
-        return SemanticBEVRasterizer(self.config).rasterize(scene)
+        return self._rasterizer.rasterize(scene)
 
 
 def semantic_bev_to_rgb(bev: np.ndarray) -> np.ndarray:

@@ -13,8 +13,10 @@ from train.train_bev_joint_grpo_online import (
     JointGRPOOnlineConfig,
     OnlineGRPOError,
     constant_velocity_actions,
+    execution_mode_valid_mask,
     episode_has_ended,
     joint_trajectory_action,
+    model_inputs_to_batch,
     optimize_selected_model_trajectories,
     run_joint_grpo_training,
     _joint_rewards_are_informative,
@@ -98,6 +100,44 @@ def test_calibration_scenario_routes_match_runtime_contract() -> None:
         assert route in SCENARIO_BY_ID[scenario_id].allowed_local_routes
         assert route in SCENARIO_BY_ID[scenario_id].trigger_by_local_route
     assert JointGRPOOnlineConfig(device="cpu").scenarios == PRIMARY_S5_S9_SCENARIOS
+
+
+def test_execution_mask_override_reaches_policy_batch_without_mutating_inputs() -> None:
+    coarse = np.zeros((3, 10, 8, 3), dtype=np.float32)
+    coarse[..., 0] = (
+        4.0 * np.arange(1, 9, dtype=np.float32)[None, None, :] * 0.5
+    )
+    coarse[:, 9, :, 0] = np.asarray(
+        [1.5, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float32
+    )
+    physical_mask = np.ones((3, 10), dtype=np.bool_)
+    fields = {
+        "bev": np.zeros((3, 8, 256, 256), dtype=np.uint8),
+        "ego_state": np.zeros((3, 8), dtype=np.float32),
+        "formation_relation_state": np.zeros((3, 12), dtype=np.float32),
+        "relation_valid_mask": np.ones((3, 2), dtype=np.bool_),
+        "agent_role": np.arange(3, dtype=np.int64),
+        "coarse_trajectories": coarse,
+        "mode_valid_mask": physical_mask,
+    }
+    fields["ego_state"][:, 0] = 4.0
+    values = SimpleNamespace(
+        **fields,
+        as_dict=lambda: fields,
+    )
+
+    execution_mask = execution_mode_valid_mask(values)
+    batch = model_inputs_to_batch(
+        values,
+        torch.device("cpu"),
+        mode_valid_mask=execution_mask,
+    )
+
+    assert np.array_equal(values.mode_valid_mask, physical_mask)
+    assert torch.equal(
+        batch["mode_valid_mask"][0], torch.from_numpy(execution_mask.copy())
+    )
+    assert bool(batch["mode_valid_mask"][0, :, 9].all())
 
 
 def test_primary_sampling_waits_for_every_scenario_recipe() -> None:

@@ -392,6 +392,71 @@ class KinematicTrajectoryOptimizer:
             for regularization in cfg.profile_jerk_regularizations
         )
 
+    def execution_mode_valid_mask(
+        self,
+        coarse_trajectories: np.ndarray,
+        current_speeds_mps: np.ndarray,
+        hard_mode_valid_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Return the hard-mask subset executable by the calibrated actuator.
+
+        The dataset hard mask represents physical vehicle limits.  Online
+        execution is intentionally stricter because the calibrated actuator
+        reserves positive authority for feedback.  Testing the unchanged
+        coarse anchor through the same projection used after policy sampling
+        closes that contract before categorical mode selection, without
+        changing diffusion candidates or policy probabilities after sampling.
+        """
+
+        coarse = np.asarray(coarse_trajectories)
+        speeds = np.asarray(current_speeds_mps)
+        hard_mask = np.asarray(hard_mode_valid_mask)
+        if (
+            coarse.shape
+            != (3, NUM_MODES, TRAJECTORY_STEPS, TRAJECTORY_DIM)
+            or coarse.dtype != np.float32
+            or not np.isfinite(coarse).all()
+        ):
+            raise TrajectoryOptimizationError(
+                "coarse trajectories must be finite float32 [3,10,8,3]"
+            )
+        if (
+            speeds.shape != (3,)
+            or not np.issubdtype(speeds.dtype, np.floating)
+            or not np.isfinite(speeds).all()
+            or np.any(speeds < 0.0)
+        ):
+            raise TrajectoryOptimizationError(
+                "current speeds must be finite non-negative floating [3]"
+            )
+        if hard_mask.shape != (3, NUM_MODES) or hard_mask.dtype != np.bool_:
+            raise TrajectoryOptimizationError(
+                "hard mode mask must be bool [3,10]"
+            )
+        if not bool(hard_mask[:, int(ModeIndex.STOP)].all()):
+            raise TrajectoryOptimizationError("hard mode mask must retain STOP")
+
+        executable = np.array(hard_mask, dtype=np.bool_, copy=True)
+        for role in range(3):
+            for mode in np.flatnonzero(hard_mask[role]):
+                mode_index = int(mode)
+                try:
+                    self._project_one(
+                        coarse[role, mode_index],
+                        coarse[role, mode_index],
+                        float(speeds[role]),
+                        mode_index,
+                    )
+                except TrajectoryOptimizationError:
+                    executable[role, mode_index] = False
+        if not bool(executable[:, int(ModeIndex.STOP)].all()):
+            raise TrajectoryOptimizationError(
+                "calibrated execution contract rejected STOP"
+            )
+        executable = np.ascontiguousarray(executable)
+        executable.setflags(write=False)
+        return executable
+
     def _feedback_executable_trajectory(
         self,
         candidate: np.ndarray,

@@ -75,6 +75,30 @@ def test_optimizer_rejects_contract_mismatch_without_fallback() -> None:
         )
 
 
+def test_execution_mode_mask_guarantees_every_retained_anchor_projects() -> None:
+    optimizer = KinematicTrajectoryOptimizer()
+    coarse = _coarse(speed=8.0)
+    hard_mask = np.ones((3, 10), dtype=np.bool_)
+    execution_mask = optimizer.execution_mode_valid_mask(
+        coarse,
+        np.full(3, 8.0, dtype=np.float32),
+        hard_mask,
+    )
+
+    assert execution_mask.shape == (3, 10)
+    assert execution_mask.dtype == np.bool_
+    assert not execution_mask.flags.writeable
+    assert execution_mask[:, int(ModeIndex.STOP)].all()
+    for role in range(3):
+        for mode in np.flatnonzero(execution_mask[role]):
+            optimizer._project_one(
+                coarse[role, mode],
+                coarse[role, mode],
+                8.0,
+                int(mode),
+            )
+
+
 def test_optimizer_uses_measured_drive_authority_and_strict_pose_alignment() -> None:
     optimizer = KinematicTrajectoryOptimizer()
     coarse = _coarse(speed=6.0)

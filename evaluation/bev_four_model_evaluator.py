@@ -38,6 +38,7 @@ from train.train_bev_diffusion_stage1 import planner_forward_from_batch
 from train.train_bev_joint_grpo_online import (
     AGENT_IDS,
     constant_velocity_actions,
+    execution_mode_valid_mask,
     episode_has_ended,
     joint_trajectory_action,
     model_inputs_to_batch,
@@ -292,6 +293,8 @@ def _empty_metrics() -> dict[str, object]:
         "trajectory_intervention_ade_m": [],
         "trajectory_intervention_fde_m": [],
         "trajectory_retained_raw_fraction": [],
+        "execution_modes_removed": 0,
+        "execution_mode_masks_built": 0,
     }
 
 
@@ -345,6 +348,10 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
             "rejection_rate": len(raw.get("execution_rejections", ()))
             / episode_count,
             "rejections": list(raw.get("execution_rejections", ())),
+            "mean_modes_removed_per_joint_state": (
+                raw.get("execution_modes_removed", 0)
+                / max(raw.get("execution_mode_masks_built", 0), 1)
+            ),
         },
         "trajectory_optimization": {
             "intervention_ade_mean_m": float(
@@ -507,7 +514,20 @@ def evaluate_four_models(
                             bev_start = tick_start
                             values = builder.build_model_inputs(env)
                             bev_ms = (time.perf_counter() - bev_start) * 1000.0
-                            batch = model_inputs_to_batch(values, device)
+                            execution_mask = execution_mode_valid_mask(
+                                values, optimizer=trajectory_optimizer
+                            )
+                            raw["execution_modes_removed"] += int(
+                                np.count_nonzero(
+                                    values.mode_valid_mask & ~execution_mask
+                                )
+                            )
+                            raw["execution_mode_masks_built"] += 1
+                            batch = model_inputs_to_batch(
+                                values,
+                                device,
+                                mode_valid_mask=execution_mask,
+                            )
                             noise = torch.randn(
                                 (1, 3, 10, 8, 2),
                                 dtype=torch.float32,
@@ -785,6 +805,68 @@ def evaluate_four_models(
     return report
 
 
+def _behavior_sha256(report: Mapping[str, object]) -> str:
+    models = report.get("models")
+    if not isinstance(models, Mapping):
+        raise FourModelEvaluationError("evaluation report has no model metrics")
+    behavior = {}
+    for name in MODEL_NAMES:
+        value = models.get(name)
+        if not isinstance(value, Mapping):
+            raise FourModelEvaluationError(f"evaluation report is missing {name}")
+        behavior[name] = {
+            key: item for key, item in value.items() if key != "timing"
+        }
+    encoded = json.dumps(
+        behavior, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def evaluate_four_models_repeated(
+    manifest_path: Path,
+    output_path: Path,
+    config: FourModelEvaluationConfig,
+    *,
+    repeats: int,
+) -> dict[str, object]:
+    """Run complete evaluations sequentially inside one fixed process."""
+
+    if isinstance(repeats, bool) or repeats < 2:
+        raise FourModelEvaluationError("fixed-process repeats must be at least two")
+    output = Path(output_path)
+    reports = []
+    hashes = []
+    for repeat_index in range(repeats):
+        repeat_output = output.with_name(
+            f"{output.stem}.repeat_{repeat_index + 1}{output.suffix}"
+        )
+        report = evaluate_four_models(manifest_path, repeat_output, config)
+        reports.append(report)
+        hashes.append(_behavior_sha256(report))
+    exact_match = len(set(hashes)) == 1
+    combined = {
+        "format": "bev_four_model_fixed_process_repeat_v1",
+        "run_mode": config.run_mode,
+        "diagnostic_only": config.run_mode != "formal",
+        "eligible_for_formal_conclusions": config.run_mode == "formal",
+        "repeat_count": int(repeats),
+        "fixed_process_reproducibility": {
+            "exact_behavior_match": exact_match,
+            "behavior_sha256": hashes,
+            "timing_excluded_from_hash": True,
+        },
+        "models": reports[0]["models"],
+        "repeat_reports": reports,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(combined, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return combined
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
@@ -792,25 +874,36 @@ def main() -> int:
     parser.add_argument("--run-mode", choices=("diagnostic", "formal"), default="diagnostic")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--max-steps", type=int, default=100)
+    parser.add_argument("--repeats", type=int, default=1)
     arguments = parser.parse_args()
-    report = evaluate_four_models(
-        arguments.manifest,
-        arguments.output,
-        FourModelEvaluationConfig(
-            run_mode=arguments.run_mode,
-            device=arguments.device,
-            seeds=(
-                FORMAL_EVAL_SEEDS
-                if arguments.run_mode == "formal"
-                else HOLDOUT_SEEDS
-            ),
-            scenarios=(
-                FORMAL_EVAL_SCENARIOS
-                if arguments.run_mode == "formal"
-                else DIAGNOSTIC_EVAL_SCENARIOS
-            ),
-            max_steps=arguments.max_steps,
+    config = FourModelEvaluationConfig(
+        run_mode=arguments.run_mode,
+        device=arguments.device,
+        seeds=(
+            FORMAL_EVAL_SEEDS
+            if arguments.run_mode == "formal"
+            else HOLDOUT_SEEDS
         ),
+        scenarios=(
+            FORMAL_EVAL_SCENARIOS
+            if arguments.run_mode == "formal"
+            else DIAGNOSTIC_EVAL_SCENARIOS
+        ),
+        max_steps=arguments.max_steps,
+    )
+    report = (
+        evaluate_four_models(
+            arguments.manifest,
+            arguments.output,
+            config,
+        )
+        if arguments.repeats == 1
+        else evaluate_four_models_repeated(
+            arguments.manifest,
+            arguments.output,
+            config,
+            repeats=arguments.repeats,
+        )
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

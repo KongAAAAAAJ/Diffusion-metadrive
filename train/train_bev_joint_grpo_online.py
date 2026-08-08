@@ -131,17 +131,48 @@ def _device(name: str) -> torch.device:
 
 
 def model_inputs_to_batch(
-    values: object, device: torch.device
+    values: object,
+    device: torch.device,
+    *,
+    mode_valid_mask: np.ndarray | None = None,
 ) -> dict[str, torch.Tensor]:
     if not hasattr(values, "as_dict"):
         raise OnlineGRPOError("online model inputs must expose as_dict()")
     result = {}
     for name, value in values.as_dict().items():
-        array = np.asarray(value)
+        array = np.asarray(
+            mode_valid_mask
+            if name == "mode_valid_mask" and mode_valid_mask is not None
+            else value
+        )
+        if name == "mode_valid_mask" and (
+            array.shape != (3, 10) or array.dtype != np.bool_
+        ):
+            raise OnlineGRPOError(
+                "execution mode_valid_mask must be bool [3,10]"
+            )
         result[name] = torch.from_numpy(np.array(array, copy=True)).unsqueeze(0).to(
             device
         )
     return result
+
+
+def execution_mode_valid_mask(
+    model_inputs: object,
+    *,
+    optimizer: KinematicTrajectoryOptimizer | None = None,
+) -> np.ndarray:
+    """Build the calibrated execution subset of the physical hard mask."""
+
+    for name in ("coarse_trajectories", "ego_state", "mode_valid_mask"):
+        if not hasattr(model_inputs, name):
+            raise OnlineGRPOError(f"online model inputs are missing {name}")
+    transform = optimizer or KinematicTrajectoryOptimizer()
+    return transform.execution_mode_valid_mask(
+        np.asarray(model_inputs.coarse_trajectories),
+        np.asarray(model_inputs.ego_state)[:, 0],
+        np.asarray(model_inputs.mode_valid_mask),
+    )
 
 
 def constant_velocity_actions(env: object) -> dict[str, np.ndarray]:
@@ -649,7 +680,14 @@ def run_joint_reward_calibration(
                         action = route_following_warmup_actions(env, builder)
                     else:
                         values = builder.build_model_inputs(env)
-                        batch = model_inputs_to_batch(values, torch_device)
+                        execution_mask = execution_mode_valid_mask(
+                            values, optimizer=trajectory_optimizer
+                        )
+                        batch = model_inputs_to_batch(
+                            values,
+                            torch_device,
+                            mode_valid_mask=execution_mask,
+                        )
                         with torch.no_grad():
                             rollout = trainer.sample_groups(
                                 batch, generator=generator
@@ -1363,7 +1401,14 @@ def _fixed_simulator_validation(
                         "fixed validation never reached a realized S5--S9 state"
                     )
                 values = builder.build_model_inputs(env)
-                batch = model_inputs_to_batch(values, device)
+                execution_mask = execution_mode_valid_mask(
+                    values, optimizer=trajectory_optimizer
+                )
+                batch = model_inputs_to_batch(
+                    values,
+                    device,
+                    mode_valid_mask=execution_mask,
+                )
                 generator = torch.Generator(device=device)
                 generator.manual_seed(int(seed))
                 noise = torch.randn(
@@ -1586,7 +1631,14 @@ def run_joint_grpo_training(
                         action = route_following_warmup_actions(env, builder)
                     else:
                         values = builder.build_model_inputs(env)
-                        batch = model_inputs_to_batch(values, torch_device)
+                        execution_mask = execution_mode_valid_mask(
+                            values, optimizer=trajectory_optimizer
+                        )
+                        batch = model_inputs_to_batch(
+                            values,
+                            torch_device,
+                            mode_valid_mask=execution_mask,
+                        )
                         rollout = trainer.sample_groups(
                             batch, generator=generator
                         )
