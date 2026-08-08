@@ -289,3 +289,36 @@ The adapter guarantees:
 This adapter does not write arrays and is not yet called by the production
 collector. Atomic persistence is Round 13.97c; one-pass base/sidecar collector
 integration and terminal capture are Round 13.97d.
+
+## 13. Round 13.97c atomic sidecar storage
+
+`expert_dataset/riskentry_sidecar_storage.py` implements the producer sink and
+atomic split-local writer. `expert_dataset/verify_riskentry_sidecar.py` performs
+a complete mmap-based verification pass.
+
+The persisted contract is intentionally the unchanged RiskEntry v1 schema:
+
+- `dataset_contract.json` is canonical and its SHA256 is the sidecar dataset
+  fingerprint used by the bundle layer;
+- split is supplied by the base collector and is never reassigned by the
+  sidecar;
+- one committed episode contains exactly `episode.json` and the nine frozen
+  `.npy` arrays;
+- all arrays are written and fsynced in a temporary episode directory, and the
+  directory rename is the sole commit marker;
+- split manifests are sorted by global episode index and can be rebuilt from
+  committed directories after interruption;
+- collision, out-of-road, out-of-route, termination and truncation outcomes
+  are derived from raw events and remain valid sidecar episodes, including an
+  empty `base_sample_step_index`;
+- invalid/missing values use zero plus masks, and actor appearance or
+  reappearance never fabricates valid acceleration/yaw-rate values.
+
+Because the frozen RiskEntry episode schema has no additional provenance key,
+the required `scenario_contract_sha256` is stored in `scenario_parameters`.
+Round 13.97d must pass the same value that is stored in the base episode and
+bundle status row.
+
+Round 13.97c does not call `env.step()`, does not commit a base episode, and
+does not write `bundle_episode_index.jsonl`; those transaction boundaries
+remain in Round 13.97d.
