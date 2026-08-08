@@ -1,0 +1,239 @@
+{
+  "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal_pilot15k_v2",
+  "eligible_for_formal_50k_collection": true,
+  "format": "bev_shared_bundle_statistical_quality_v1",
+  "gates": {
+    "infrastructure_accepted": true,
+    "required_scenarios_present": true,
+    "required_splits_non_empty": true,
+    "s7_lateral_mode_fraction": true,
+    "s7_low_speed_fraction": true,
+    "s7_stop_fraction": true
+  },
+  "global_gt_mode_counts": {
+    "KEEP_HIGH": 9691,
+    "KEEP_LOW": 5773,
+    "KEEP_MEDIUM": 25621,
+    "LEFT_HIGH": 1349,
+    "LEFT_MEDIUM": 258,
+    "RIGHT_HIGH": 713,
+    "RIGHT_LOW": 663,
+    "RIGHT_MEDIUM": 64,
+    "STOP": 868
+  },
+  "infrastructure_report_status": "formal_15000_pilot_accepted",
+  "mode_valid_rate": {
+    "KEEP_HIGH": 0.954,
+    "KEEP_LOW": 0.9947111111111111,
+    "KEEP_MEDIUM": 0.9936222222222222,
+    "LEFT_HIGH": 0.3380666666666667,
+    "LEFT_LOW": 0.2555777777777778,
+    "LEFT_MEDIUM": 0.33164444444444446,
+    "RIGHT_HIGH": 0.8607333333333334,
+    "RIGHT_LOW": 0.4978444444444444,
+    "RIGHT_MEDIUM": 0.7526,
+    "STOP": 1.0
+  },
+  "role_gt_mode_counts": {
+    "leader": {
+      "KEEP_HIGH": 2486,
+      "KEEP_LOW": 1880,
+      "KEEP_MEDIUM": 9434,
+      "LEFT_HIGH": 270,
+      "RIGHT_HIGH": 269,
+      "RIGHT_LOW": 253,
+      "STOP": 408
+    },
+    "middle": {
+      "KEEP_HIGH": 3480,
+      "KEEP_LOW": 1440,
+      "KEEP_MEDIUM": 8826,
+      "LEFT_HIGH": 512,
+      "LEFT_MEDIUM": 35,
+      "RIGHT_HIGH": 222,
+      "RIGHT_LOW": 205,
+      "RIGHT_MEDIUM": 64,
+      "STOP": 216
+    },
+    "rear": {
+      "KEEP_HIGH": 3725,
+      "KEEP_LOW": 2453,
+      "KEEP_MEDIUM": 7361,
+      "LEFT_HIGH": 567,
+      "LEFT_MEDIUM": 223,
+      "RIGHT_HIGH": 222,
+      "RIGHT_LOW": 205,
+      "STOP": 244
+    }
+  },
+  "round": "13.97g",
+  "scenario_statistics": {
+    "S5_hard_brake_lead": {
+      "episodes": 16,
+      "expert_terminal_displacement_m": {
+        "p05": 0.00350189208984375,
+        "p50": 3.9866256713867188,
+        "p95": 19.23343515396117
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 545,
+        "KEEP_LOW": 1916,
+        "KEEP_MEDIUM": 6220,
+        "STOP": 319
+      },
+      "joint_samples": 3000,
+      "lateral_mode_fraction": 0.0,
+      "role_labels": 9000,
+      "speed_below_0_3_fraction": 0.2501111111111111,
+      "speed_mps": {
+        "p05": 0.002375395968556404,
+        "p50": 0.7912591099739075,
+        "p95": 4.562703609466553
+      },
+      "stop_fraction": 0.035444444444444445
+    },
+    "S6_background_merge_in": {
+      "episodes": 16,
+      "expert_terminal_displacement_m": {
+        "p05": 12.156620216369628,
+        "p50": 28.026646614074707,
+        "p95": 34.88243026733398
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 3368,
+        "KEEP_LOW": 1612,
+        "KEEP_MEDIUM": 3998,
+        "STOP": 22
+      },
+      "joint_samples": 3000,
+      "lateral_mode_fraction": 0.0,
+      "role_labels": 9000,
+      "speed_below_0_3_fraction": 0.0,
+      "speed_mps": {
+        "p05": 1.3593258321285249,
+        "p50": 6.730896711349487,
+        "p95": 8.75057692527771
+      },
+      "stop_fraction": 0.0024444444444444444
+    },
+    "S7_ego_merge_from_ramp": {
+      "episodes": 16,
+      "expert_terminal_displacement_m": {
+        "p05": 13.391491794586182,
+        "p50": 32.15035057067871,
+        "p95": 54.259536170959464
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 1382,
+        "KEEP_LOW": 436,
+        "KEEP_MEDIUM": 5055,
+        "LEFT_HIGH": 1349,
+        "LEFT_MEDIUM": 258,
+        "STOP": 520
+      },
+      "joint_samples": 3000,
+      "lateral_mode_fraction": 0.17855555555555555,
+      "role_labels": 9000,
+      "speed_below_0_3_fraction": 0.0,
+      "speed_mps": {
+        "p05": 4.174833750724793,
+        "p50": 7.271624326705933,
+        "p95": 11.852142667770385
+      },
+      "stop_fraction": 0.057777777777777775
+    },
+    "S8_ego_exit_to_ramp": {
+      "episodes": 16,
+      "expert_terminal_displacement_m": {
+        "p05": 6.000004768371582,
+        "p50": 15.82628059387207,
+        "p95": 46.4709587097168
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 1847,
+        "KEEP_LOW": 376,
+        "KEEP_MEDIUM": 5337,
+        "RIGHT_HIGH": 713,
+        "RIGHT_LOW": 663,
+        "RIGHT_MEDIUM": 64
+      },
+      "joint_samples": 3000,
+      "lateral_mode_fraction": 0.16,
+      "role_labels": 9000,
+      "speed_below_0_3_fraction": 0.16077777777777777,
+      "speed_mps": {
+        "p05": 0.0027864067698828874,
+        "p50": 2.5692076683044434,
+        "p95": 9.549483299255371
+      },
+      "stop_fraction": 0.0
+    },
+    "S9_narrow_channel_negotiation": {
+      "episodes": 16,
+      "expert_terminal_displacement_m": {
+        "p05": 6.45867919921875,
+        "p50": 24.653593063354492,
+        "p95": 35.2005615234375
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 2549,
+        "KEEP_LOW": 1433,
+        "KEEP_MEDIUM": 5011,
+        "STOP": 7
+      },
+      "joint_samples": 3000,
+      "lateral_mode_fraction": 0.0,
+      "role_labels": 9000,
+      "speed_below_0_3_fraction": 0.0,
+      "speed_mps": {
+        "p05": 1.1861062049865723,
+        "p50": 5.833600044250488,
+        "p95": 7.905255317687988
+      },
+      "stop_fraction": 0.0007777777777777777
+    }
+  },
+  "sidecar_event_actor_types": {
+    "actor_despawn": {
+      "platoon": 240
+    },
+    "collision_sidewalk": {
+      "external": 61
+    },
+    "collision_vehicle": {
+      "external": 2
+    },
+    "out_of_road": {
+      "external": 41
+    },
+    "out_of_route": {
+      "external": 32,
+      "platoon": 52
+    },
+    "terminated": {
+      "platoon": 240
+    },
+    "truncated": {
+      "platoon": 240
+    }
+  },
+  "split_joint_samples": {
+    "test": 1210,
+    "train": 11890,
+    "val": 1900
+  },
+  "status": "statistical_quality_accepted",
+  "thresholds": {
+    "require_all_splits": true,
+    "required_scenarios": [
+      "S5_hard_brake_lead",
+      "S6_background_merge_in",
+      "S7_ego_merge_from_ramp",
+      "S8_ego_exit_to_ramp",
+      "S9_narrow_channel_negotiation"
+    ],
+    "s7_max_low_speed_fraction": 0.4,
+    "s7_max_stop_fraction": 0.4,
+    "s7_min_lateral_mode_fraction": 0.1
+  }
+}
