@@ -310,12 +310,23 @@ def _scenario_ready_for_primary_sampling(env: object) -> bool:
     summary = _scenario_summary(env)
     if not bool(summary.get("scenario_realized", False)):
         return False
+    scenario_id = str(summary.get("scenario_id", ""))
+    if scenario_id == "S5_hard_brake_lead":
+        # The adjacent-lane support recipe is realized at reset, before the
+        # actual three-second hard-brake event.  It must not make S5 eligible
+        # for calibration on its own: require the non-support trigger and the
+        # concrete brake profile installed by the hard-brake handler.
+        notes = summary.get("scenario_notes", ())
+        return bool(summary.get("scenario_triggered", False)) and (
+            isinstance(notes, (list, tuple))
+            and "lead_brake_profile" in notes
+        )
     # S6/S8 background traffic is itself the evaluated hazard.  Sampling an
     # intermediate recipe state would let a new actor appear inside a 4-second
     # simulator branch although the proxy snapshot cannot contain it.  Other
     # primary scenarios contain optional/background coverage recipes whose
     # completion is not part of their hazard realization contract.
-    if str(summary.get("scenario_id", "")) in {
+    if scenario_id in {
         "S6_background_merge_in",
         "S8_ego_exit_to_ramp",
     }:

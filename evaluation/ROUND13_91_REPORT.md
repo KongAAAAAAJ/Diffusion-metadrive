@@ -2,70 +2,90 @@
 
 ## Result
 
-Round 13.91 is **blocked at the development calibration gate**.  Rounds
-13.92 (A/B online GRPO), 13.93 (four-model evaluation), and Round 14 cleanup
-were intentionally not started.
+Round 13.91 is **accepted**.  The frozen S5–S9 preflight, both development
+calibrations, and both independent holdout calibrations pass without changing
+the 5 m/7 m safety distances, the 0.1 rad tracking envelope, or calibration
+metadata.
 
-The reward contract now treats the already-frozen safety distances as hard
-constraints:
+The accepted execution boundary is:
 
-- background bumper gap below 5 m is unsafe;
-- platoon bumper gap below 7 m is unsafe;
-- collision, out-of-drivable, and clearance violations remain separately
-  observable in `JointRewardResult`.
+```text
+raw Stage 1 / GRPO trajectory
+  -> deterministic kinematic trajectory optimizer
+  -> actuator-lag/jerk-aware temporal profile when brake release is abrupt
+  -> proxy reward and independent simulator branch
+```
 
-This change reduced development false-safe counts, but did not eliminate them.
+Raw GRPO rollouts remain immutable.  The optimizer configuration SHA256 used
+by all four calibration reports is
+`08dac4861f34443ece55b0f8468ab93aef93103e24e10bbdfd56b76d42aa69bd`.
+
+## Preflight
+
+- scenarios: complete ordered S5–S9 contract;
+- seeds: `[17, 23]`;
+- three history-ready states per episode;
+- all ten episodes passed;
+- S5 seeds 17/23 both report the actual hard-brake trigger, realization, and
+  `2/2` completed recipes before sampling;
+- maximum prefix replay position and heading errors were both zero.
+
+Artifact: `/tmp/bev-round13-91-final-preflight.json`.
 
 ## Development calibration
 
-Inputs:
-
-- scenarios: the complete ordered S5–S9 contract;
-- seeds: 17 and 23;
-- three history-ready states per episode;
-- four joint candidates per state;
-- deterministic kinematic trajectory optimizer before proxy/simulator scoring.
+Each variant used 30 joint groups (`5 scenarios x 2 seeds x 3 states`) and
+four trajectories per group.
 
 | Metric | Variant A | Variant B | Gate |
 |---|---:|---:|---:|
-| informative groups | 22 | 22 | >= 15 |
-| mean group Spearman | 0.6642 | 0.6642 | >= 0.50 |
-| pairwise agreement | 90.67% | 90.67% | >= 70% |
-| false-safe count | 6 | 7 | **0** |
-| lateral tracking P95 | 0.2772 m | 0.2772 m | <= 0.5 m |
-| heading tracking P95 | 0.0745 rad | 0.0746 rad | <= 0.1 rad |
+| informative groups | 21 | 18 | >= 15 |
+| mean group Spearman | 0.7352 | 0.7950 | >= 0.50 |
+| pairwise agreement | 91.67% | 95.95% | >= 70% |
+| false-safe count | 0 | 0 | **0** |
+| lateral tracking P95 | 0.1102 m | 0.1187 m | <= 0.5 m |
+| heading tracking P95 | 0.0248 rad | 0.0300 rad | <= 0.1 rad |
+| maximum state longitudinal P95 | 0.2254 m | 0.2365 m | <= 1.0 m |
+| maximum state longitudinal P99 | 0.4935 m | 0.4993 m | <= 1.5 m |
+| maximum continuous saturation | 0 s | 0 s | <= 1.0 s |
+| optimized trajectory validity | 360/360 | 360/360 | 100% |
 
-The ordinary P95 tracking gate passes, but the conservative-envelope
-construction is not admissible:
+Artifacts:
 
-| Tracking P99 | Variant A | Variant B | permitted envelope cap |
+- `/tmp/bev-round13-91-final-A-development.json`
+- `/tmp/bev-round13-91-final-B-development.json`
+
+## Independent holdout calibration
+
+Holdout uses seeds `[31, 47]`, which were not used for temporal-profile
+development.  Each variant uses only its own frozen development envelope.
+
+| Metric | Variant A | Variant B | Gate |
 |---|---:|---:|---:|
-| longitudinal | 3.0436 m | 3.0436 m | 1.5 m |
-| lateral | 0.4571 m | 0.4571 m | 1.0 m |
-| heading | 0.1794 rad | 0.1794 rad | 0.15 rad |
+| `passed` | true | true | true |
+| informative groups | 19 | 15 | >= 15 |
+| mean group Spearman | 0.7131 | 0.8434 | >= 0.50 |
+| pairwise agreement | 90.14% | 96.77% | >= 70% |
+| false-safe count | 0 | 0 | **0** |
+| lateral tracking P95 | 0.1088 m | 0.1225 m | <= 0.5 m |
+| heading tracking P95 | 0.0264 rad | 0.0332 rad | <= 0.1 rad |
+| maximum state longitudinal P95 | 0.2254 m | 0.2365 m | <= 1.0 m |
+| maximum state longitudinal P99 | 0.4935 m | 0.4993 m | <= 1.5 m |
+| maximum STOP terminal speed | 0.2152 m/s | 0.1484 m/s | <= 0.3 m/s |
+| maximum continuous saturation | 0 s | 0 s | <= 1.0 s |
 
-Therefore the holdout CLI correctly refuses to derive an envelope from this
-development report.
+Artifacts:
 
-## Remaining false-safe distribution
+- `/tmp/bev-round13-91-final-A-holdout.json`
+- `/tmp/bev-round13-91-final-B-holdout.json`
 
-- Variant A: four controller-tracking cases and two termination-semantics
-  cases.
-- Variant B: four controller-tracking cases and three termination-semantics
-  cases.
-- Common controller cases are concentrated in S6 and S8.
-- Common termination cases have real branch road clearance below zero or a
-  real background gap below 5 m, while the open-loop proxy remains safe.
+## Scope and next dependency
 
-The full evidence is stored in:
+These are diagnostic checkpoints, so this acceptance validates infrastructure
+and calibration semantics rather than paper-level performance.  Some states
+still contain no closed-loop-safe candidate (A holdout: 20/30, B holdout:
+19/30); these groups are correctly classified unsafe and create no false-safe,
+but expose limited candidate coverage in the diagnostic Stage 1 policies.
 
-- `/tmp/bev-round13-91-calibration-A-development.json`
-- `/tmp/bev-round13-91-calibration-B-development.json`
-
-## Stop decision
-
-The next admissible task is a separate evidence-driven correction of the S6
-and S8 proxy-versus-tracking discrepancy and the remaining road-termination
-semantics.  It must then rerun development calibration from scratch.  It is
-not valid to cap the measured envelope silently, edit report metadata, proceed
-to holdout, or launch GRPO with these reports.
+Round 13.92 may now start A/B online GRPO using the accepted holdout reports.
+Round 13.93 and Round 14 remain pending.

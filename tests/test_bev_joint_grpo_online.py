@@ -115,6 +115,32 @@ def test_primary_sampling_waits_for_every_scenario_recipe() -> None:
     assert _scenario_ready_for_primary_sampling(env)
 
 
+def test_s5_primary_sampling_waits_for_actual_hard_brake() -> None:
+    class Orchestrator:
+        def __init__(self) -> None:
+            self.triggered = False
+            self.notes = ["adjacent_spawned:left_side"]
+
+        def get_episode_summary(self):
+            return {
+                "scenario_id": "S5_hard_brake_lead",
+                "scenario_realized": True,
+                "scenario_triggered": self.triggered,
+                "scenario_notes": list(self.notes),
+                "scenario_recipes_complete": False,
+            }
+
+    orchestrator = Orchestrator()
+    env = SimpleNamespace(_scenario_orchestrator=orchestrator)
+    assert not _scenario_ready_for_primary_sampling(env)
+
+    orchestrator.triggered = True
+    assert not _scenario_ready_for_primary_sampling(env)
+
+    orchestrator.notes.append("lead_brake_profile")
+    assert _scenario_ready_for_primary_sampling(env)
+
+
 def test_calibration_variant_is_checked_before_source_load(tmp_path: Path) -> None:
     report = _calibration(tmp_path / "wrong.json", variant="B", passed=True)
     config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
