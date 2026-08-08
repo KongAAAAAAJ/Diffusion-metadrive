@@ -39,6 +39,9 @@ from expert_dataset.collect_joint_bev import (
 from models.bev_planner import (
     JointRewardConfig,
     JointTrajectoryProxyReward,
+    KinematicTrajectoryOptimizer,
+    KinematicTrajectoryOptimizerConfig,
+    TrajectoryOptimizationResult,
     calibrate_joint_rewards,
 )
 from models.bev_planner.mode_contract import ModeIndex
@@ -187,6 +190,31 @@ def joint_trajectory_action(trajectories: np.ndarray) -> dict[str, np.ndarray]:
         agent_id: np.array(value[role], dtype=np.float32, copy=True, order="C")
         for role, agent_id in enumerate(AGENT_IDS)
     }
+
+
+def optimize_selected_model_trajectories(
+    model_inputs: object,
+    raw_trajectories: np.ndarray,
+    selected_modes: np.ndarray,
+    *,
+    optimizer: KinematicTrajectoryOptimizer | None = None,
+) -> TrajectoryOptimizationResult:
+    """Apply the execution transform after policy sampling.
+
+    The caller retains ``raw_trajectories`` in the GRPO rollout, so DDIM
+    replay/log-prob remains defined on the unmodified diffusion action.
+    """
+
+    for name in ("coarse_trajectories", "ego_state"):
+        if not hasattr(model_inputs, name):
+            raise OnlineGRPOError(f"online model inputs are missing {name}")
+    transform = optimizer or KinematicTrajectoryOptimizer()
+    return transform.optimize(
+        raw_trajectories,
+        np.asarray(model_inputs.coarse_trajectories),
+        np.asarray(model_inputs.ego_state)[:, 0],
+        selected_modes,
+    )
 
 
 def episode_has_ended(
@@ -486,6 +514,7 @@ def run_joint_reward_calibration(
     reward_cfg = reward_config or JointRewardConfig()
     proxy_backend = JointTrajectoryProxyReward(reward_cfg)
     simulator_backend = JointSimulatorBranchEvaluator(reward_cfg)
+    trajectory_optimizer = KinematicTrajectoryOptimizer()
     generator = torch.Generator(device=torch_device)
     generator.manual_seed(17)
     proxy_rows = []
@@ -535,13 +564,27 @@ def run_joint_reward_calibration(
                             rollout = trainer.sample_groups(
                                 batch, generator=generator
                             )
-                        candidates = (
+                        raw_candidates = (
                             rollout.selected_trajectories[0]
                             .detach()
                             .cpu()
                             .numpy()
                             .astype(np.float32, copy=False)
                         )
+                        sampled_modes = (
+                            rollout.sampled_modes[0]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.int64, copy=False)
+                        )
+                        optimization = optimize_selected_model_trajectories(
+                            values,
+                            raw_candidates,
+                            sampled_modes,
+                            optimizer=trajectory_optimizer,
+                        )
+                        candidates = optimization.optimized_trajectories
                         proxy = proxy_backend.score(env, values, candidates)
                         spec = JointEpisodeSpec(
                             scenario_id=str(scenario[0]),
@@ -562,13 +605,6 @@ def run_joint_reward_calibration(
                         simulator_rows.append(simulator.reward.rewards.copy())
                         proxy_bad_rows.append(proxy.unsafe.copy())
                         simulator_bad_rows.append(simulator.reward.unsafe.copy())
-                        sampled_modes = (
-                            rollout.sampled_modes[0]
-                            .detach()
-                            .cpu()
-                            .numpy()
-                            .astype(np.int64, copy=False)
-                        )
                         dynamic_anchor_violations = []
                         for role in range(3):
                             valid_modes = np.flatnonzero(
@@ -602,13 +638,26 @@ def run_joint_reward_calibration(
                         for group in range(candidates.shape[0]):
                             group_audits = []
                             for role in range(3):
+                                raw_audit = audit_longitudinal_trajectory(
+                                    raw_candidates[group, role],
+                                    float(values.ego_state[role, 0]),
+                                )
+                                longitudinal_audit_rows.append(
+                                    {
+                                        "source": f"diffusion_{variant}_raw",
+                                        "scenario": scenario[0],
+                                        "role": role,
+                                        "mode": int(sampled_modes[group, role]),
+                                        "audit": raw_audit,
+                                    }
+                                )
                                 audit = audit_longitudinal_trajectory(
                                     candidates[group, role],
                                     float(values.ego_state[role, 0]),
                                 )
                                 longitudinal_audit_rows.append(
                                     {
-                                        "source": f"diffusion_{variant}",
+                                        "source": f"diffusion_{variant}_optimized",
                                         "scenario": scenario[0],
                                         "role": role,
                                         "mode": int(
@@ -617,7 +666,12 @@ def run_joint_reward_calibration(
                                         "audit": audit,
                                     }
                                 )
-                                group_audits.append(audit.as_dict())
+                                group_audits.append(
+                                    {
+                                        "raw": raw_audit.as_dict(),
+                                        "optimized": audit.as_dict(),
+                                    }
+                                )
                             state_longitudinal_audits.append(group_audits)
                         state_longitudinal_report = (
                             build_longitudinal_tracking_report(
@@ -799,6 +853,19 @@ def run_joint_reward_calibration(
                                 "longitudinal_trajectory_audits": (
                                     state_longitudinal_audits
                                 ),
+                                "trajectory_optimization": {
+                                    "config_sha256": optimization.config_sha256,
+                                    "elapsed_ms": optimization.elapsed_ms,
+                                    "raw_valid": optimization.raw_valid.tolist(),
+                                    "optimized_valid": optimization.optimized_valid.tolist(),
+                                    "intervention_ade_m": optimization.intervention_ade_m.tolist(),
+                                    "intervention_fde_m": optimization.intervention_fde_m.tolist(),
+                                    "retained_raw_fraction": optimization.retained_raw_fraction.tolist(),
+                                    "raw_violations": [
+                                        list(value)
+                                        for value in optimization.raw_violations
+                                    ],
+                                },
                                 "dynamic_anchor_violations": (
                                     dynamic_anchor_violations
                                 ),
@@ -923,6 +990,10 @@ def run_joint_reward_calibration(
         "source_stage1_sha256": source_sha,
         "source_dataset_fingerprint": source_payload["dataset_fingerprint"],
         "reward_config": dataclasses.asdict(reward_cfg),
+        "trajectory_optimizer_config": dataclasses.asdict(
+            trajectory_optimizer.config
+        ),
+        "trajectory_optimizer_sha256": trajectory_optimizer.config.sha256(),
         "scenario_contract": contract,
         "scenario_contract_sha256": contract["sha256"],
         "scenarios": [list(value) for value in scenarios],
@@ -1051,6 +1122,12 @@ def _checkpoint_payload(
             "scenario_contract_sha256": scenario_contract_sha,
             "scenario_seeds": [int(value) for value in scenario_seeds],
             "environment_steps": int(environment_steps),
+            "trajectory_optimizer_config": dataclasses.asdict(
+                KinematicTrajectoryOptimizerConfig()
+            ),
+            "trajectory_optimizer_sha256": (
+                KinematicTrajectoryOptimizerConfig().sha256()
+            ),
         }
     )
     return payload
@@ -1071,6 +1148,12 @@ def _validate_online_checkpoint_metadata(
         "calibration_report_sha256": calibration_sha,
         "scenario_contract_sha256": scenario_contract_sha,
         "scenario_seeds": [int(value) for value in scenario_seeds],
+        "trajectory_optimizer_config": dataclasses.asdict(
+            KinematicTrajectoryOptimizerConfig()
+        ),
+        "trajectory_optimizer_sha256": (
+            KinematicTrajectoryOptimizerConfig().sha256()
+        ),
     }
     for name, value in expected.items():
         if payload.get(name) != value:
@@ -1096,6 +1179,7 @@ def _fixed_simulator_validation(
     seeds: Sequence[int],
 ) -> dict[str, float]:
     evaluator = JointSimulatorBranchEvaluator(reward_config)
+    trajectory_optimizer = KinematicTrajectoryOptimizer()
     rewards = []
     unsafe_count = 0
     collision_count = 0
@@ -1144,12 +1228,24 @@ def _fixed_simulator_validation(
                 output = planner_forward_from_batch(
                     planner, batch, diffusion_noise=noise
                 )
-                candidate = (
+                raw_candidate = (
                     output["selected_trajectory"][0]
                     .detach()
                     .cpu()
                     .numpy()[None]
                 )
+                selected_modes = (
+                    output["selected_mode"][0]
+                    .detach()
+                    .cpu()
+                    .numpy()[None]
+                )
+                candidate = optimize_selected_model_trajectories(
+                    values,
+                    raw_candidate,
+                    selected_modes,
+                    optimizer=trajectory_optimizer,
+                ).optimized_trajectories
                 spec = JointEpisodeSpec(
                     scenario_id=str(scenario[0]),
                     local_route=str(scenario[1]),
@@ -1225,6 +1321,16 @@ def run_joint_grpo_training(
         raise OnlineGRPOError("calibration does not cover the complete S5--S9 set")
     if tuple(calibration.get("seeds", ())) != HOLDOUT_SEEDS:
         raise OnlineGRPOError("calibration does not use holdout seeds [31,47]")
+    optimizer_config = KinematicTrajectoryOptimizerConfig()
+    if (
+        calibration.get("trajectory_optimizer_config")
+        != dataclasses.asdict(optimizer_config)
+        or calibration.get("trajectory_optimizer_sha256")
+        != optimizer_config.sha256()
+    ):
+        raise OnlineGRPOError(
+            "calibration trajectory optimizer contract mismatch"
+        )
     reward_config = JointRewardConfig(**dict(calibration["reward_config"]))
     torch_device = _device(config.device)
     trainer, source_payload, source_sha = _load_trainer(
@@ -1286,6 +1392,12 @@ def run_joint_grpo_training(
             ),
         },
         "reward_config": dataclasses.asdict(reward_config),
+        "trajectory_optimizer_config": dataclasses.asdict(
+            KinematicTrajectoryOptimizerConfig()
+        ),
+        "trajectory_optimizer_sha256": (
+            KinematicTrajectoryOptimizerConfig().sha256()
+        ),
         "calibration_report_sha256": calibration_sha,
         "scenario_contract": primary_scenario_contract(config.scenarios),
         "scenario_contract_sha256": scenario_contract_sha,
@@ -1296,6 +1408,7 @@ def run_joint_grpo_training(
     metrics_path = run_dir / "metrics.jsonl"
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
     proxy_backend = JointTrajectoryProxyReward(reward_config)
+    trajectory_optimizer = KinematicTrajectoryOptimizer()
     generator = torch.Generator(device=torch_device)
     generator.manual_seed(config.seed)
     scenario_index = 0
@@ -1333,13 +1446,27 @@ def run_joint_grpo_training(
                         rollout = trainer.sample_groups(
                             batch, generator=generator
                         )
-                        candidates = (
+                        raw_candidates = (
                             rollout.selected_trajectories[0]
                             .detach()
                             .cpu()
                             .numpy()
                             .astype(np.float32, copy=False)
                         )
+                        sampled_modes = (
+                            rollout.sampled_modes[0]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.int64, copy=False)
+                        )
+                        optimization = optimize_selected_model_trajectories(
+                            values,
+                            raw_candidates,
+                            sampled_modes,
+                            optimizer=trajectory_optimizer,
+                        )
+                        candidates = optimization.optimized_trajectories
                         proxy = proxy_backend.score(env, values, candidates)
                         rewards = torch.from_numpy(
                             proxy.rewards.reshape(1, -1)
@@ -1357,6 +1484,24 @@ def run_joint_grpo_training(
                                 "proxy_unsafe_rate": float(proxy.unsafe.mean()),
                                 "gradient_total": float(
                                     update.total_gradient_norm
+                                ),
+                                "trajectory_optimizer_ms": float(
+                                    optimization.elapsed_ms
+                                ),
+                                "trajectory_intervention_ade_m": float(
+                                    optimization.intervention_ade_m.mean()
+                                ),
+                                "trajectory_intervention_fde_m": float(
+                                    optimization.intervention_fde_m.mean()
+                                ),
+                                "raw_trajectory_valid_rate": float(
+                                    optimization.raw_valid.mean()
+                                ),
+                                "trajectory_retained_raw_fraction": float(
+                                    optimization.retained_raw_fraction.mean()
+                                ),
+                                "optimized_trajectory_valid_rate": float(
+                                    optimization.optimized_valid.mean()
                                 ),
                             }
                         )
@@ -1572,6 +1717,7 @@ __all__ = [
     "episode_has_ended",
     "joint_trajectory_action",
     "model_inputs_to_batch",
+    "optimize_selected_model_trajectories",
     "run_joint_grpo_training",
     "run_joint_reward_calibration",
     "run_s5_s9_preflight",

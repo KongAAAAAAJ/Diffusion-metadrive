@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import time
@@ -32,6 +33,11 @@ from train.train_bev_joint_grpo_online import (
     episode_has_ended,
     joint_trajectory_action,
     model_inputs_to_batch,
+    optimize_selected_model_trajectories,
+)
+from models.bev_planner.trajectory_optimizer import (
+    KinematicTrajectoryOptimizer,
+    KinematicTrajectoryOptimizerConfig,
 )
 from scenarios.bev_round13_contract import (
     BEVScenarioContractError,
@@ -158,11 +164,23 @@ def _load_policy(
             "scenario_seeds",
             "environment_steps",
             "scenario_contract_sha256",
+            "trajectory_optimizer_config",
+            "trajectory_optimizer_sha256",
         ):
             if field not in grpo_payload:
                 raise FourModelEvaluationError(
                     f"{name} is not an online-calibrated GRPO checkpoint"
                 )
+        optimizer_config = KinematicTrajectoryOptimizerConfig()
+        if (
+            grpo_payload.get("trajectory_optimizer_config")
+            != dataclasses.asdict(optimizer_config)
+            or grpo_payload.get("trajectory_optimizer_sha256")
+            != optimizer_config.sha256()
+        ):
+            raise FourModelEvaluationError(
+                f"{name} trajectory optimizer contract mismatch"
+            )
         if formal and grpo_payload.get("eligible_for_formal_training") is not True:
             raise FourModelEvaluationError(
                 f"{name} checkpoint is diagnostic-only"
@@ -211,7 +229,11 @@ def _empty_metrics() -> dict[str, object]:
             "model_inference_ms": [],
             "control_mapping_ms": [],
             "planning_tick_ms": [],
+            "trajectory_optimizer_ms": [],
         },
+        "trajectory_intervention_ade_m": [],
+        "trajectory_intervention_fde_m": [],
+        "trajectory_retained_raw_fraction": [],
     }
 
 
@@ -259,6 +281,23 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
         "efficiency": {
             "completion_rate": raw["episode_completed"] / episode_count,
             "joint_reward_mean": float(np.mean(raw["joint_reward"])) if raw["joint_reward"] else 0.0,
+        },
+        "trajectory_optimization": {
+            "intervention_ade_mean_m": float(
+                np.mean(raw.get("trajectory_intervention_ade_m", ()))
+            )
+            if raw.get("trajectory_intervention_ade_m")
+            else 0.0,
+            "intervention_fde_mean_m": float(
+                np.mean(raw.get("trajectory_intervention_fde_m", ()))
+            )
+            if raw.get("trajectory_intervention_fde_m")
+            else 0.0,
+            "retained_raw_fraction_mean": float(
+                np.mean(raw.get("trajectory_retained_raw_fraction", ()))
+            )
+            if raw.get("trajectory_retained_raw_fraction")
+            else 0.0,
         },
         "timing": timing,
     }
@@ -310,6 +349,7 @@ def evaluate_four_models(
 
     for name, planner in models.items():
         raw = _empty_metrics()
+        trajectory_optimizer = KinematicTrajectoryOptimizer()
         for scenario in cfg.scenarios:
             for seed in cfg.seeds:
                 env = SensorlessJointBEVPlatoonEnv(
@@ -377,15 +417,26 @@ def evaluate_four_models(
                             inference_ms = (
                                 time.perf_counter() - inference_start
                             ) * 1000.0
-                            trajectories = (
+                            raw_trajectories = (
                                 output["selected_trajectory"][0]
                                 .detach()
                                 .cpu()
                                 .numpy()
                             )
-                            selected_modes = (
-                                output["selected_mode"][0].detach().cpu().tolist()
+                            selected_mode_array = (
+                                output["selected_mode"][0]
+                                .detach()
+                                .cpu()
+                                .numpy()
                             )
+                            optimization = optimize_selected_model_trajectories(
+                                values,
+                                raw_trajectories,
+                                selected_mode_array,
+                                optimizer=trajectory_optimizer,
+                            )
+                            trajectories = optimization.optimized_trajectories
+                            selected_modes = selected_mode_array.tolist()
                             action = joint_trajectory_action(trajectories)
                             control_start = time.perf_counter()
                             for agent_id in AGENT_IDS:
@@ -408,6 +459,18 @@ def evaluate_four_models(
                             )
                             raw["timing"]["planning_tick_ms"].append(
                                 (time.perf_counter() - tick_start) * 1000.0
+                            )
+                            raw["timing"]["trajectory_optimizer_ms"].append(
+                                optimization.elapsed_ms
+                            )
+                            raw["trajectory_intervention_ade_m"].extend(
+                                optimization.intervention_ade_m.tolist()
+                            )
+                            raw["trajectory_intervention_fde_m"].extend(
+                                optimization.intervention_fde_m.tolist()
+                            )
+                            raw["trajectory_retained_raw_fraction"].extend(
+                                optimization.retained_raw_fraction.tolist()
                             )
 
                         _, reward, terminated, truncated, info = env.step(action)

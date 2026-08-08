@@ -35,6 +35,7 @@ from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
     BEVOnlyDiffusionPlannerConfig,
     JointStage1Loss,
+    KinematicTrajectoryOptimizer,
     Stage1LossConfig,
 )
 from train.train_bev_diffusion_stage1 import (
@@ -232,7 +233,17 @@ def validate_closed_loop(
         inputs = builder.build_model_inputs(env)
         batch = _model_batch(inputs, device)
         output = planner_forward_from_batch(planner, batch)
-        trajectories = output["selected_trajectory"].squeeze(0).detach().cpu().numpy()
+        raw_trajectories = (
+            output["selected_trajectory"].squeeze(0).detach().cpu().numpy()
+        )
+        selected_modes = output["selected_mode"].squeeze(0).detach().cpu().numpy()
+        optimization = KinematicTrajectoryOptimizer().optimize(
+            raw_trajectories,
+            inputs.coarse_trajectories,
+            inputs.ego_state[:, 0],
+            selected_modes,
+        )
+        trajectories = optimization.optimized_trajectories
         if trajectories.shape != (3, 8, 3) or not np.isfinite(trajectories).all():
             raise Stage1TrainingError("closed-loop planner produced invalid trajectories")
         actions = {
@@ -276,6 +287,15 @@ def validate_closed_loop(
             "environment_step_ms": elapsed_ms,
             "terminated": bool(terminated.get("__all__", False)),
             "truncated": bool(truncated.get("__all__", False)),
+            "trajectory_optimizer": {
+                "config_sha256": optimization.config_sha256,
+                "elapsed_ms": optimization.elapsed_ms,
+                "raw_valid": optimization.raw_valid.tolist(),
+                "optimized_valid": optimization.optimized_valid.tolist(),
+                "intervention_ade_m": optimization.intervention_ade_m.tolist(),
+                "intervention_fde_m": optimization.intervention_fde_m.tolist(),
+                "retained_raw_fraction": optimization.retained_raw_fraction.tolist(),
+            },
         }
     finally:
         env.close()

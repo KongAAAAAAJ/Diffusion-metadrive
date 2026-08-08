@@ -15,13 +15,18 @@ from train.train_bev_joint_grpo_online import (
     constant_velocity_actions,
     episode_has_ended,
     joint_trajectory_action,
+    optimize_selected_model_trajectories,
     run_joint_grpo_training,
+)
+from models.bev_planner.trajectory_optimizer import (
+    KinematicTrajectoryOptimizerConfig,
 )
 from scenarios.definitions import SCENARIO_BY_ID
 from scenarios.bev_round13_contract import HOLDOUT_SEEDS, primary_scenario_contract
 
 
 def _calibration(path: Path, *, variant: str = "A", passed: bool = False) -> Path:
+    optimizer_config = KinematicTrajectoryOptimizerConfig()
     path.write_text(
         json.dumps(
             {
@@ -34,6 +39,8 @@ def _calibration(path: Path, *, variant: str = "A", passed: bool = False) -> Pat
                 "scenario_contract_sha256": primary_scenario_contract()["sha256"],
                 "scenarios": [list(value) for value in PRIMARY_S5_S9_SCENARIOS],
                 "seeds": list(HOLDOUT_SEEDS),
+                "trajectory_optimizer_config": optimizer_config.__dict__,
+                "trajectory_optimizer_sha256": optimizer_config.sha256(),
             }
         ),
         encoding="utf-8",
@@ -129,3 +136,25 @@ def test_online_action_helpers_are_label_free_and_strict() -> None:
         flags,
         {"agent1": {"out_of_road": True}},
     )
+
+
+def test_execution_optimizer_keeps_raw_policy_action_immutable() -> None:
+    coarse = np.zeros((3, 10, 8, 3), dtype=np.float32)
+    coarse[..., 0] = 4.0 * np.arange(1, 9, dtype=np.float32)
+    raw = np.broadcast_to(coarse[:, 0], (4, 3, 8, 3)).copy()
+    raw[..., 0] *= -1.0
+    original = raw.copy()
+    values = SimpleNamespace(
+        coarse_trajectories=coarse,
+        ego_state=np.pad(
+            np.full((3, 1), 8.0, dtype=np.float32), ((0, 0), (0, 7))
+        ),
+    )
+    modes = np.zeros((4, 3), dtype=np.int64)
+
+    result = optimize_selected_model_trajectories(values, raw, modes)
+
+    assert np.array_equal(raw, original)
+    assert np.array_equal(result.raw_trajectories, original)
+    assert result.optimized_valid.all()
+    assert not np.array_equal(result.optimized_trajectories, original)

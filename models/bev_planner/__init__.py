@@ -48,6 +48,12 @@ from .stage1_joint_loss import (
     trajectory_speed_acceleration,
     wrapped_heading_error,
 )
+from .trajectory_optimizer import (
+    KinematicTrajectoryOptimizer,
+    KinematicTrajectoryOptimizerConfig,
+    TrajectoryOptimizationError,
+    TrajectoryOptimizationResult,
+)
 from .joint_grpo import (
     FrozenGRPOReference,
     FrozenVariantAReference,
@@ -92,6 +98,8 @@ __all__ = [
     "HardModeMaskConfig",
     "HardModeMaskResult",
     "TrajectoryKinematicResult",
+    "TrajectoryOptimizationError",
+    "TrajectoryOptimizationResult",
     "JointStage1Loss",
     "JointGRPOConfig",
     "JointGRPOError",
@@ -105,6 +113,8 @@ __all__ = [
     "JointRewardError",
     "JointRewardResult",
     "JointTrajectoryProxyReward",
+    "KinematicTrajectoryOptimizer",
+    "KinematicTrajectoryOptimizerConfig",
     "RewardCalibrationResult",
     "FrozenGRPOReference",
     "FrozenVariantAReference",
