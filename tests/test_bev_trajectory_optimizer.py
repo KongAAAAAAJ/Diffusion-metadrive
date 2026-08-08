@@ -102,6 +102,33 @@ def test_optimizer_uses_measured_drive_authority_and_strict_pose_alignment() -> 
         assert audit.acceleration_mps2.max() <= EXECUTABLE_MAX_ACCEL_MPS2 + 1e-6
 
 
+def test_optimizer_repairs_heading_only_anchor_without_changing_xy_or_mode() -> None:
+    optimizer = KinematicTrajectoryOptimizer()
+    coarse = _coarse(speed=4.0)
+    x = np.arange(1, 9, dtype=np.float32) * 2.0
+    y = 0.015 * x**2
+    curved = np.column_stack((x, y, np.zeros(8, dtype=np.float32)))
+    coarse[:, int(ModeIndex.RIGHT_LOW)] = curved
+    raw = coarse[:, int(ModeIndex.RIGHT_LOW)].copy()
+    modes = np.full(3, int(ModeIndex.RIGHT_LOW), dtype=np.int64)
+
+    generic = validate_trajectory_kinematics(curved, 4.0, np.zeros(3))
+    strict = validate_trajectory_kinematics(
+        curved, 4.0, np.zeros(3), optimizer._audit_config
+    )
+    assert generic.valid
+    assert strict.violations == ("heading_alignment",)
+
+    result = optimizer.optimize(raw, coarse, np.full(3, 4.0), modes)
+
+    assert np.array_equal(result.selected_modes, modes)
+    assert np.allclose(result.optimized_trajectories[..., :2], raw[..., :2])
+    for trajectory in result.optimized_trajectories:
+        assert validate_trajectory_kinematics(
+            trajectory, 4.0, np.zeros(3), optimizer._audit_config
+        ).valid
+
+
 def test_brake_recovery_profile_is_actuator_lag_and_jerk_aware() -> None:
     """Regression for the B/S5 seed17 state2 rear-role blocker."""
 

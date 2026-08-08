@@ -17,6 +17,9 @@ from train.train_bev_joint_grpo_online import (
     joint_trajectory_action,
     optimize_selected_model_trajectories,
     run_joint_grpo_training,
+    _joint_rewards_are_informative,
+    _round_robin_training_buckets,
+    _validate_calibration_trajectory_optimizer_contract,
     _scenario_ready_for_primary_sampling,
 )
 from models.bev_planner.trajectory_optimizer import (
@@ -153,6 +156,46 @@ def test_calibration_variant_is_checked_before_source_load(tmp_path: Path) -> No
             output_root=tmp_path / "output",
             max_optimizer_steps=1,
         )
+
+
+def test_json_optimizer_contract_is_canonicalized_without_relaxing_hash() -> None:
+    config = KinematicTrajectoryOptimizerConfig()
+    serialized = json.loads(
+        json.dumps(
+            {
+                "trajectory_optimizer_config": config.__dict__,
+                "trajectory_optimizer_sha256": config.sha256(),
+            }
+        )
+    )
+    assert _validate_calibration_trajectory_optimizer_contract(serialized) == config
+
+    serialized["trajectory_optimizer_sha256"] = "0" * 64
+    with pytest.raises(OnlineGRPOError, match="optimizer contract mismatch"):
+        _validate_calibration_trajectory_optimizer_contract(serialized)
+
+
+def test_constant_joint_rewards_are_skipped_instead_of_faking_an_update() -> None:
+    assert not _joint_rewards_are_informative(
+        np.asarray([-21.0, -21.0, -21.0, -21.0], dtype=np.float32)
+    )
+    assert _joint_rewards_are_informative(
+        np.asarray([-21.0, -20.0, -21.0, -21.0], dtype=np.float32)
+    )
+    with pytest.raises(OnlineGRPOError, match=r"float \[4\]"):
+        _joint_rewards_are_informative(np.zeros(3, dtype=np.float32))
+
+
+def test_online_training_buckets_cover_every_scenario_seed_pair() -> None:
+    buckets = _round_robin_training_buckets(
+        PRIMARY_S5_S9_SCENARIOS, (17, 23)
+    )
+    assert len(buckets) == 10
+    assert len(set(buckets)) == 10
+    counts = [0 for _ in buckets]
+    for optimizer_step in range(20):
+        counts[optimizer_step % len(buckets)] += 1
+    assert counts == [2] * 10
 
 
 def test_online_action_helpers_are_label_free_and_strict() -> None:

@@ -249,6 +249,39 @@ def _wrap(angle: float) -> float:
     return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
 
 
+def _headings_aligned_to_local_path(
+    trajectory: np.ndarray, *, movement_epsilon_m: float
+) -> np.ndarray:
+    """Align waypoint headings with the unchanged ego-local XY path.
+
+    A centered spatial derivative supplies a smooth path tangent without the
+    alternating yaw produced by enforcing every chord midpoint independently.
+    It never changes XY and freezes heading on stationary segments; the normal
+    yaw/curvature/lateral-acceleration audits remain authoritative.
+    """
+
+    result = np.ascontiguousarray(trajectory, dtype=np.float32).copy()
+    points = np.concatenate(
+        (np.zeros((1, 2), dtype=np.float64), result[:, :2].astype(np.float64)),
+        axis=0,
+    )
+    derivatives = np.gradient(points, axis=0)
+    tangent_headings = np.unwrap(
+        np.arctan2(derivatives[:, 1], derivatives[:, 0])
+    )
+    segments = np.diff(points, axis=0)
+    previous_heading = 0.0
+    for index, segment in enumerate(segments):
+        if float(np.linalg.norm(segment)) <= float(movement_epsilon_m):
+            heading = previous_heading
+        else:
+            tangent = float(tangent_headings[index + 1])
+            heading = previous_heading + _wrap(tangent - previous_heading)
+        result[index, 2] = np.float32(_wrap(heading))
+        previous_heading = heading
+    return result
+
+
 @dataclass(frozen=True)
 class _ActuatorProfileDiagnostics:
     regularization: float
@@ -691,6 +724,19 @@ class KinematicTrajectoryOptimizer:
         )
         if direct_audit.valid:
             return candidate32
+        if set(direct_audit.violations) == {"heading_alignment"}:
+            aligned = _headings_aligned_to_local_path(
+                candidate32,
+                movement_epsilon_m=self.config.movement_epsilon_m,
+            )
+            aligned_audit = validate_trajectory_kinematics(
+                aligned,
+                current_speed_mps,
+                np.zeros(3, dtype=np.float64),
+                self._audit_config,
+            )
+            if aligned_audit.valid:
+                return aligned
         path = np.concatenate(
             (np.zeros((1, 3), dtype=np.float64), candidate32.astype(np.float64)),
             axis=0,
@@ -732,7 +778,19 @@ class KinematicTrajectoryOptimizer:
             raise TrajectoryOptimizationError(
                 f"feedback-executable trajectory construction failed: {exc}"
             ) from exc
-        return np.ascontiguousarray(sampled, dtype=np.float32)
+        sampled32 = np.ascontiguousarray(sampled, dtype=np.float32)
+        sampled_audit = validate_trajectory_kinematics(
+            sampled32,
+            current_speed_mps,
+            np.zeros(3, dtype=np.float64),
+            self._audit_config,
+        )
+        if "heading_alignment" in sampled_audit.violations:
+            sampled32 = _headings_aligned_to_local_path(
+                sampled32,
+                movement_epsilon_m=self.config.movement_epsilon_m,
+            )
+        return sampled32
 
     @staticmethod
     def _validate_inputs(
@@ -845,6 +903,7 @@ class KinematicTrajectoryOptimizer:
         )
         coarse_lateral_sign = float(np.sign(coarse[-1, 1]))
         lane_change = int(mode) in (3, 4, 5, 6, 7, 8)
+        rejection_reasons: list[str] = []
         for fraction in fractions:
             candidate = np.asarray(coarse, dtype=np.float64).copy()
             candidate[:, :2] += float(fraction) * xy_residual
@@ -865,7 +924,8 @@ class KinematicTrajectoryOptimizer:
                 candidate32, profile = self._feedback_executable_trajectory(
                     candidate32, current_speed_mps, mode
                 )
-            except TrajectoryOptimizationError:
+            except TrajectoryOptimizationError as exc:
+                rejection_reasons.append(f"fraction={fraction:g}:{exc}")
                 continue
             if (
                 lane_change
@@ -880,8 +940,12 @@ class KinematicTrajectoryOptimizer:
             )
             if audit.valid:
                 return candidate32, float(fraction), profile
+            rejection_reasons.append(
+                f"fraction={fraction:g}:final_audit=" + ",".join(audit.violations)
+            )
         raise TrajectoryOptimizationError(
-            "line search failed even at the selected hard-valid coarse anchor"
+            "line search failed even at the selected hard-valid coarse anchor; "
+            + " | ".join(rejection_reasons)
         )
 
     def optimize(

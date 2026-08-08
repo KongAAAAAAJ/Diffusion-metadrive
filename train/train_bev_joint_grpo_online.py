@@ -41,6 +41,7 @@ from models.bev_planner import (
     JointTrajectoryProxyReward,
     KinematicTrajectoryOptimizer,
     KinematicTrajectoryOptimizerConfig,
+    TrajectoryOptimizationError,
     TrajectoryOptimizationResult,
     calibrate_joint_rewards,
 )
@@ -293,6 +294,62 @@ def _json_sha256(path: Path) -> tuple[dict[str, object], str]:
     if not isinstance(payload, dict):
         raise OnlineGRPOError("calibration report must be a JSON object")
     return payload, hashlib.sha256(raw).hexdigest()
+
+
+def _validate_calibration_trajectory_optimizer_contract(
+    calibration: Mapping[str, object],
+) -> KinematicTrajectoryOptimizerConfig:
+    raw_config = calibration.get("trajectory_optimizer_config")
+    if not isinstance(raw_config, Mapping):
+        raise OnlineGRPOError(
+            "calibration trajectory optimizer contract mismatch"
+        )
+    try:
+        parsed = KinematicTrajectoryOptimizerConfig(**dict(raw_config))
+    except (TypeError, ValueError, TrajectoryOptimizationError) as exc:
+        raise OnlineGRPOError(
+            "calibration trajectory optimizer contract mismatch"
+        ) from exc
+    expected = KinematicTrajectoryOptimizerConfig()
+    if (
+        parsed != expected
+        or calibration.get("trajectory_optimizer_sha256")
+        != expected.sha256()
+    ):
+        raise OnlineGRPOError(
+            "calibration trajectory optimizer contract mismatch"
+        )
+    return parsed
+
+
+def _joint_rewards_are_informative(
+    rewards: np.ndarray, *, minimum_span: float = 1e-6
+) -> bool:
+    """Whether a sampled group can carry non-zero signed GRPO credit."""
+
+    values = np.asarray(rewards)
+    if values.shape != (4,) or values.dtype not in (np.float32, np.float64):
+        raise OnlineGRPOError("joint proxy rewards must be float [4]")
+    if not np.isfinite(values).all():
+        raise OnlineGRPOError("joint proxy rewards must be finite")
+    if not math.isfinite(minimum_span) or minimum_span < 0.0:
+        raise OnlineGRPOError(
+            "minimum reward span must be finite and non-negative"
+        )
+    return float(np.ptp(values.astype(np.float64, copy=False))) > minimum_span
+
+
+def _round_robin_training_buckets(
+    scenarios: Sequence[tuple[str, str]], seeds: Sequence[int]
+) -> tuple[tuple[tuple[str, str], int], ...]:
+    buckets = tuple(
+        ((str(scenario[0]), str(scenario[1])), int(seed))
+        for scenario in scenarios
+        for seed in seeds
+    )
+    if not buckets:
+        raise OnlineGRPOError("online GRPO training schedule is empty")
+    return buckets
 
 
 def _scenario_summary(env: object) -> dict[str, object]:
@@ -1411,16 +1468,7 @@ def run_joint_grpo_training(
         raise OnlineGRPOError("calibration does not cover the complete S5--S9 set")
     if tuple(calibration.get("seeds", ())) != HOLDOUT_SEEDS:
         raise OnlineGRPOError("calibration does not use holdout seeds [31,47]")
-    optimizer_config = KinematicTrajectoryOptimizerConfig()
-    if (
-        calibration.get("trajectory_optimizer_config")
-        != dataclasses.asdict(optimizer_config)
-        or calibration.get("trajectory_optimizer_sha256")
-        != optimizer_config.sha256()
-    ):
-        raise OnlineGRPOError(
-            "calibration trajectory optimizer contract mismatch"
-        )
+    _validate_calibration_trajectory_optimizer_contract(calibration)
     reward_config = JointRewardConfig(**dict(calibration["reward_config"]))
     torch_device = _device(config.device)
     trainer, source_payload, source_sha = _load_trainer(
@@ -1440,6 +1488,8 @@ def run_joint_grpo_training(
         load_grpo_checkpoint if variant == "A" else load_grpo_b_checkpoint
     )
     environment_steps = 0
+    sampled_rollouts = 0
+    uninformative_rollouts = 0
     last_metrics: dict[str, float] = {}
     if config.resume_checkpoint is not None:
         resume_payload = checkpoint_loader(
@@ -1501,7 +1551,12 @@ def run_joint_grpo_training(
     trajectory_optimizer = KinematicTrajectoryOptimizer()
     generator = torch.Generator(device=torch_device)
     generator.manual_seed(config.seed)
-    scenario_index = 0
+    training_buckets = _round_robin_training_buckets(
+        config.scenarios, config.scenario_seeds
+    )
+    bucket_sample_counts = [0 for _ in training_buckets]
+    bucket_update_counts = [0 for _ in training_buckets]
+    consecutive_empty_episodes = 0
     best_key: tuple[float, float] | None = None
     best_path = run_dir / "checkpoints" / "best.pt"
     last_path = run_dir / "checkpoints" / "last.pt"
@@ -1509,11 +1564,9 @@ def run_joint_grpo_training(
 
     try:
         while trainer.optimizer_step < target_steps:
-            scenario = config.scenarios[scenario_index % len(config.scenarios)]
-            seed = config.scenario_seeds[
-                scenario_index % len(config.scenario_seeds)
-            ]
-            scenario_index += 1
+            bucket_index = sampled_rollouts % len(training_buckets)
+            scenario, seed = training_buckets[bucket_index]
+            samples_at_episode_start = sampled_rollouts
             env = _new_env(scenario, seed)
             builder = JointBEVSampleBuilder(AGENT_IDS)
             builder.reset()
@@ -1522,6 +1575,7 @@ def run_joint_grpo_training(
             try:
                 while (
                     trainer.optimizer_step < target_steps
+                    and sampled_rollouts == samples_at_episode_start
                     and episode_step < config.environment_steps_per_episode
                 ):
                     builder.capture_state(env, episode_step * dt_s)
@@ -1550,62 +1604,108 @@ def run_joint_grpo_training(
                             .numpy()
                             .astype(np.int64, copy=False)
                         )
-                        optimization = optimize_selected_model_trajectories(
-                            values,
-                            raw_candidates,
-                            sampled_modes,
-                            optimizer=trajectory_optimizer,
-                        )
+                        try:
+                            optimization = optimize_selected_model_trajectories(
+                                values,
+                                raw_candidates,
+                                sampled_modes,
+                                optimizer=trajectory_optimizer,
+                            )
+                        except TrajectoryOptimizationError:
+                            np.savez_compressed(
+                                run_dir / "trajectory_optimizer_failure.npz",
+                                raw_trajectories=raw_candidates,
+                                sampled_modes=sampled_modes,
+                                coarse_trajectories=values.coarse_trajectories,
+                                current_speeds_mps=values.ego_state[:, 0],
+                                mode_valid_mask=values.mode_valid_mask,
+                                environment_steps=np.asarray(
+                                    [environment_steps], dtype=np.int64
+                                ),
+                                episode_steps=np.asarray(
+                                    [episode_step], dtype=np.int64
+                                ),
+                            )
+                            raise
                         candidates = optimization.optimized_trajectories
                         proxy = proxy_backend.score(env, values, candidates)
-                        rewards = torch.from_numpy(
-                            proxy.rewards.reshape(1, -1)
-                        ).to(torch_device)
-                        update = trainer.update(rollout, rewards)
-                        last_metrics = update.loss.scalar_metrics()
-                        last_metrics.update(
-                            {
-                                "optimizer_step": float(trainer.optimizer_step),
-                                "environment_steps": float(environment_steps),
-                                "proxy_reward_mean": float(
-                                    proxy.rewards.mean()
-                                ),
-                                "proxy_reward_max": float(proxy.rewards.max()),
-                                "proxy_unsafe_rate": float(proxy.unsafe.mean()),
-                                "gradient_total": float(
-                                    update.total_gradient_norm
-                                ),
-                                "trajectory_optimizer_ms": float(
-                                    optimization.elapsed_ms
-                                ),
-                                "trajectory_intervention_ade_m": float(
-                                    optimization.intervention_ade_m.mean()
-                                ),
-                                "trajectory_intervention_fde_m": float(
-                                    optimization.intervention_fde_m.mean()
-                                ),
-                                "raw_trajectory_valid_rate": float(
-                                    optimization.raw_valid.mean()
-                                ),
-                                "trajectory_retained_raw_fraction": float(
-                                    optimization.retained_raw_fraction.mean()
-                                ),
-                                "optimized_trajectory_valid_rate": float(
-                                    optimization.optimized_valid.mean()
-                                ),
-                            }
+                        sampled_rollouts += 1
+                        bucket_sample_counts[bucket_index] += 1
+                        informative = _joint_rewards_are_informative(
+                            proxy.rewards
                         )
-                        for metric_name, metric_value in last_metrics.items():
-                            writer.add_scalar(
-                                metric_name,
-                                metric_value,
-                                trainer.optimizer_step,
+                        if informative:
+                            rewards = torch.from_numpy(
+                                proxy.rewards.reshape(1, -1)
+                            ).to(torch_device)
+                            update = trainer.update(rollout, rewards)
+                            last_metrics = update.loss.scalar_metrics()
+                            last_metrics.update(
+                                {
+                                    "optimizer_step": float(
+                                        trainer.optimizer_step
+                                    ),
+                                    "environment_steps": float(
+                                        environment_steps
+                                    ),
+                                    "sampled_rollouts": float(sampled_rollouts),
+                                    "uninformative_rollouts": float(
+                                        uninformative_rollouts
+                                    ),
+                                    "training_bucket_index": float(bucket_index),
+                                    "proxy_reward_mean": float(
+                                        proxy.rewards.mean()
+                                    ),
+                                    "proxy_reward_max": float(
+                                        proxy.rewards.max()
+                                    ),
+                                    "proxy_unsafe_rate": float(
+                                        proxy.unsafe.mean()
+                                    ),
+                                    "gradient_total": float(
+                                        update.total_gradient_norm
+                                    ),
+                                    "trajectory_optimizer_ms": float(
+                                        optimization.elapsed_ms
+                                    ),
+                                    "trajectory_intervention_ade_m": float(
+                                        optimization.intervention_ade_m.mean()
+                                    ),
+                                    "trajectory_intervention_fde_m": float(
+                                        optimization.intervention_fde_m.mean()
+                                    ),
+                                    "raw_trajectory_valid_rate": float(
+                                        optimization.raw_valid.mean()
+                                    ),
+                                    "trajectory_retained_raw_fraction": float(
+                                        optimization.retained_raw_fraction.mean()
+                                    ),
+                                    "optimized_trajectory_valid_rate": float(
+                                        optimization.optimized_valid.mean()
+                                    ),
+                                }
                             )
-                        with metrics_path.open(
-                            "a", encoding="utf-8"
-                        ) as stream:
-                            stream.write(
-                                json.dumps(last_metrics, sort_keys=True) + "\n"
+                            for name, value in update.gradient_norms.items():
+                                last_metrics[f"gradient/{name}"] = float(value)
+                            bucket_update_counts[bucket_index] += 1
+                            for metric_name, metric_value in last_metrics.items():
+                                writer.add_scalar(
+                                    metric_name,
+                                    metric_value,
+                                    trainer.optimizer_step,
+                                )
+                            with metrics_path.open(
+                                "a", encoding="utf-8"
+                            ) as stream:
+                                stream.write(
+                                    json.dumps(last_metrics, sort_keys=True) + "\n"
+                                )
+                        else:
+                            uninformative_rollouts += 1
+                            writer.add_scalar(
+                                "diagnostic/uninformative_rollouts",
+                                float(uninformative_rollouts),
+                                environment_steps,
                             )
                         action = joint_trajectory_action(
                             candidates[int(np.argmax(proxy.rewards))]
@@ -1618,6 +1718,16 @@ def run_joint_grpo_training(
                         break
             finally:
                 env.close()
+            if sampled_rollouts == samples_at_episode_start:
+                consecutive_empty_episodes += 1
+                if consecutive_empty_episodes >= 3:
+                    raise OnlineGRPOError(
+                        "three consecutive episodes produced no online state "
+                        f"rollout for training bucket {bucket_index}: "
+                        f"{scenario[0]}/{scenario[1]} seed={seed}"
+                    )
+            else:
+                consecutive_empty_episodes = 0
             if trainer.optimizer_step != last_validated_step and (
                 trainer.optimizer_step == target_steps
                 or (
@@ -1711,10 +1821,22 @@ def run_joint_grpo_training(
         "eligible_for_formal_training": run_mode == "formal",
         "optimizer_steps": trainer.optimizer_step,
         "environment_steps": environment_steps,
+        "sampled_rollouts": sampled_rollouts,
+        "uninformative_rollouts": uninformative_rollouts,
         "calibration_report_sha256": calibration_sha,
         "scenario_contract_sha256": scenario_contract_sha,
         "training_scenarios": [list(value) for value in config.scenarios],
         "training_seeds": [int(value) for value in config.scenario_seeds],
+        "training_bucket_updates": [
+            {
+                "scenario": scenario[0],
+                "route": scenario[1],
+                "seed": seed,
+                "sampled_rollouts": bucket_sample_counts[index],
+                "optimizer_updates": bucket_update_counts[index],
+            }
+            for index, (scenario, seed) in enumerate(training_buckets)
+        ],
         "validation_seeds": list(HOLDOUT_SEEDS),
         "last_checkpoint": str(last_path.resolve()),
         "best_checkpoint": str(best_path.resolve()),
