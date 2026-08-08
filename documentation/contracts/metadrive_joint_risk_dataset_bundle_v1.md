@@ -264,3 +264,28 @@ BEV packing, or the base data schema. Implementation work is limited to:
 - terminal post-step capture;
 - bundle episode status and cross-link verification;
 - RiskEntry consumption of P0/P1/P2 for new shared datasets.
+
+## 12. Round 13.97b live-state adapter
+
+`expert_dataset/riskentry_sidecar_adapter.py` is the frozen read-only producer
+adapter for the later sidecar writer. It reads `engine.get_objects()` directly;
+the anonymous background boxes in the semantic-BEV snapshot are not used.
+
+The adapter guarantees:
+
+- fixed `agent0/1/2 -> P0/P1/P2` identity and deterministic external
+  `V000/V001/...` allocation by `(first_seen_step, source_object_id)`;
+- retention of the original MetaDrive registry key and stable identity after
+  despawn/reappearance;
+- world velocity from vehicle physics, with acceleration and yaw rate derived
+  only from contiguous state boundaries and explicitly invalid on first sight;
+- stable lane records plus masked `s/d/heading_error/width` observations;
+- scenario trigger/realization, collision, road/route departure,
+  termination/truncation, and actor-despawn events attached to the result
+  state boundary;
+- a contiguous `k * decision_dt_s` capture contract that supports the terminal
+  `K+1` state when the collector integration is added.
+
+This adapter does not write arrays and is not yet called by the production
+collector. Atomic persistence is Round 13.97c; one-pass base/sidecar collector
+integration and terminal capture are Round 13.97d.
