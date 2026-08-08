@@ -921,6 +921,13 @@ def run_joint_reward_calibration(
                                     "intervention_ade_m": optimization.intervention_ade_m.tolist(),
                                     "intervention_fde_m": optimization.intervention_fde_m.tolist(),
                                     "retained_raw_fraction": optimization.retained_raw_fraction.tolist(),
+                                    "profile_regularization": optimization.profile_regularization.tolist(),
+                                    "predicted_max_positive_jerk_mps3": optimization.predicted_max_positive_jerk_mps3.tolist(),
+                                    "predicted_max_brake_jerk_mps3": optimization.predicted_max_brake_jerk_mps3.tolist(),
+                                    "predicted_command_acceleration_min_mps2": optimization.predicted_command_acceleration_min_mps2.tolist(),
+                                    "predicted_command_acceleration_max_mps2": optimization.predicted_command_acceleration_max_mps2.tolist(),
+                                    "terminal_arc_error_m": optimization.terminal_arc_error_m.tolist(),
+                                    "brake_to_drive_transition_s": optimization.brake_to_drive_transition_s.tolist(),
                                     "raw_violations": [
                                         list(value)
                                         for value in optimization.raw_violations

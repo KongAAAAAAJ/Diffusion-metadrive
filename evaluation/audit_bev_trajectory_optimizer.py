@@ -63,6 +63,13 @@ def run_audit(
     intervention_fde = []
     elapsed_ms = []
     retained_fraction = []
+    profile_regularization = []
+    maximum_positive_jerk = []
+    maximum_brake_jerk = []
+    command_minimum = []
+    command_maximum = []
+    terminal_arc_error = []
+    transition_duration = []
     coarse_ade = []
     coarse_fde = []
     lane_direction_matches = []
@@ -113,6 +120,25 @@ def run_audit(
         coarse_fde.extend(coarse_delta[..., -1].reshape(-1).tolist())
         elapsed_ms.append(float(result.elapsed_ms))
         retained_fraction.extend(result.retained_raw_fraction.reshape(-1).tolist())
+        profile_regularization.extend(
+            result.profile_regularization.reshape(-1).tolist()
+        )
+        maximum_positive_jerk.extend(
+            result.predicted_max_positive_jerk_mps3.reshape(-1).tolist()
+        )
+        maximum_brake_jerk.extend(
+            result.predicted_max_brake_jerk_mps3.reshape(-1).tolist()
+        )
+        command_minimum.extend(
+            result.predicted_command_acceleration_min_mps2.reshape(-1).tolist()
+        )
+        command_maximum.extend(
+            result.predicted_command_acceleration_max_mps2.reshape(-1).tolist()
+        )
+        terminal_arc_error.extend(result.terminal_arc_error_m.reshape(-1).tolist())
+        transition_duration.extend(
+            result.brake_to_drive_transition_s.reshape(-1).tolist()
+        )
         for violations in result.raw_violations:
             for reason in violations:
                 raw_violations[reason] = raw_violations.get(reason, 0) + 1
@@ -132,18 +158,33 @@ def run_audit(
         "intervention_fde_mean_m": float(np.mean(intervention_fde)),
         "selected_coarse_ade_mean_m": float(np.mean(coarse_ade)),
         "selected_coarse_fde_mean_m": float(np.mean(coarse_fde)),
-        "lane_change_direction_match_rate": float(np.mean(lane_direction_matches))
-        if lane_direction_matches
-        else 1.0,
+        "lane_change_direction_match_rate": (
+            float(np.mean(lane_direction_matches)) if lane_direction_matches else 1.0
+        ),
         "optimizer_latency_p50_ms": float(np.percentile(elapsed_ms, 50)),
         "optimizer_latency_p95_ms": float(np.percentile(elapsed_ms, 95)),
         "retained_raw_fraction_mean": float(np.mean(retained_fraction)),
+        "profile_regularization_p95": float(np.percentile(profile_regularization, 95)),
+        "predicted_max_positive_jerk_p95_mps3": float(
+            np.percentile(maximum_positive_jerk, 95)
+        ),
+        "predicted_max_brake_jerk_p95_mps3": float(
+            np.percentile(maximum_brake_jerk, 95)
+        ),
+        "predicted_command_acceleration_min_mps2": float(np.min(command_minimum)),
+        "predicted_command_acceleration_max_mps2": float(np.max(command_maximum)),
+        "terminal_arc_error_abs_max_m": float(np.max(np.abs(terminal_arc_error))),
+        "brake_to_drive_transition_p95_s": float(
+            np.percentile(transition_duration, 95)
+        ),
         "raw_violations": dict(sorted(raw_violations.items())),
         "raw_grpo_rollout_unchanged": True,
         "optimizer_config_sha256": optimizer.config.sha256(),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return report
 
 
