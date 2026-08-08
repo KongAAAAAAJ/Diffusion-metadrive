@@ -13,6 +13,7 @@ from scenarios.bev_round13_contract import (
     primary_scenario_contract,
     validate_primary_scenario_contract,
 )
+from scenarios.definitions import SCENARIO_BY_ID
 
 
 def test_primary_contract_is_complete_stable_and_separate_from_smoke() -> None:
@@ -31,6 +32,10 @@ def test_primary_contract_is_complete_stable_and_separate_from_smoke() -> None:
     assert first == second
     assert len(first["sha256"]) == 64
     assert validate_primary_scenario_contract(first) == first["sha256"]
+    assert all(
+        SCENARIO_BY_ID[scenario_id].independent_trajectory_control_after_realization
+        for scenario_id, _ in PRIMARY_S5_S9_SCENARIOS
+    )
 
 
 def test_contract_rejects_partial_or_tampered_scenario_sets() -> None:

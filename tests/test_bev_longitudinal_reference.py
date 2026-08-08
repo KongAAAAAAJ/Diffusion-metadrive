@@ -48,9 +48,32 @@ def test_fixed_reference_does_not_turn_two_metre_lag_into_speed() -> None:
     current = np.asarray([2.0, 0.0, 0.0], dtype=np.float64)
     local = _world_reference_to_current_local(world, current, elapsed_s=1.0)
     assert np.linalg.norm(local[1, :2]) == pytest.approx(6.0)
-    reference = _fixed_world_longitudinal_reference(world, current, 1.0)
+    reference = _fixed_world_longitudinal_reference(
+        world, current, 1.0, initial_speed_mps=4.0
+    )
     assert reference.target_speed_mps == pytest.approx(4.0)
     assert reference.original_arc_error_m == pytest.approx(2.0)
+
+
+def test_fixed_reference_uses_current_speed_for_initial_deceleration() -> None:
+    segment_speeds = np.asarray(
+        [4.7, 4.9, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0], dtype=np.float64
+    )
+    arc = np.concatenate(([0.0], np.cumsum(0.5 * segment_speeds)))
+    world = np.column_stack((arc, np.zeros_like(arc), np.zeros_like(arc)))
+
+    reference = _fixed_world_longitudinal_reference(
+        world,
+        np.asarray([0.0, 0.0, 0.0], dtype=np.float64),
+        0.0,
+        initial_speed_mps=5.2,
+    )
+
+    assert reference.speed_mps[0] == pytest.approx(5.2)
+    assert reference.speed_mps[1] == pytest.approx(4.7)
+    assert reference.feedforward_acceleration_mps2 == pytest.approx(-1.0)
+    _, preview_acceleration = reference.sample_speed_acceleration_at_time(0.3)
+    assert preview_acceleration < 0.0
 
 
 def test_online_reference_uses_current_origin_and_fixed_timestamps() -> None:
@@ -146,6 +169,23 @@ def test_terminal_stop_holds_zero_only_after_reference_reaches_zero() -> None:
     expected_speed, _ = reference.sample_speed_acceleration_at_time(0.3)
     assert debug["reference_speed_mps"] == pytest.approx(expected_speed)
     assert throttle == pytest.approx(0.0)
+
+
+def test_terminal_stop_cannot_be_restarted_by_positive_gap_feedback() -> None:
+    reference = trajectory_to_longitudinal_reference(
+        np.zeros((8, 3), dtype=np.float32),
+        1.0,
+        source="stationary_stop",
+    )
+    throttle, debug = LongitudinalCascadeController().compute(
+        "agent1",
+        1.0,
+        reference,
+        gap_acceleration_mps2=1.0,
+    )
+    assert throttle <= 0.0
+    assert debug["desired_acceleration_mps2"] <= 0.0
+    assert debug["gap_feedback_mps2"] == pytest.approx(0.0)
 
 
 def test_signed_longitudinal_speed_preserves_reverse_direction() -> None:

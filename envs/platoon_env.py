@@ -1787,6 +1787,14 @@ class PlatoonEnv(BaseMultiEnv):
         query = min(lookahead_m, float(arc[-1]))
         if query <= 1.0e-6:
             return 0.0
+        terminal_hold = bool(
+            np.max(
+                np.linalg.norm(
+                    trajectory[:, :2] - trajectory[0, :2], axis=1
+                )
+            )
+            <= 1.0e-3
+        )
         x = float(np.interp(query, arc, path_xy[:, 0]))
         y = float(np.interp(query, arc, path_xy[:, 1]))
         headings = np.concatenate(
@@ -1796,12 +1804,20 @@ class PlatoonEnv(BaseMultiEnv):
         if not np.isfinite([x, y, heading]).all():
             raise ValueError("Preview point is not finite")
 
-        bearing_error = math.atan2(y, max(x, 1.0e-3))
         heading_error = _wrap_to_pi(heading)
-        error = _wrap_to_pi(
-            bearing_error
-            + self._cfg_float("preview_heading_weight", 0.5) * heading_error
-        )
+        if terminal_hold and x <= 0.0:
+            # A fixed four-second reference can be marginally behind the
+            # vehicle after terminal overshoot. Pure-pursuit is undefined for
+            # a behind-only target and used to command a spurious full turn.
+            # Hold terminal orientation instead; longitudinal control remains
+            # solely responsible for stopping at the terminal arc position.
+            error = heading_error
+        else:
+            bearing_error = math.atan2(y, max(x, 1.0e-3))
+            error = _wrap_to_pi(
+                bearing_error
+                + self._cfg_float("preview_heading_weight", 0.5) * heading_error
+            )
         dt_s = self._cfg_float("physics_world_step_size", 0.02) * self._cfg_int(
             "decision_repeat", 5
         )
@@ -1929,6 +1945,8 @@ class PlatoonEnv(BaseMultiEnv):
         agent_id: str,
         trajectory: np.ndarray,
         longitudinal_reference: LongitudinalTrackingReference,
+        *,
+        formation_constraint_enabled: bool = True,
     ) -> np.ndarray:
         trajectory = np.asarray(trajectory)
         if trajectory.shape != (8, 3) or not np.issubdtype(
@@ -1939,7 +1957,7 @@ class PlatoonEnv(BaseMultiEnv):
         ego_idx = self._agent_ids.index(agent_id)
         current_speed = self._agent_longitudinal_speed_mps(agent_id)
         gap_acceleration = 0.0
-        if ego_idx > 0:
+        if ego_idx > 0 and bool(formation_constraint_enabled):
             front_id = self._agent_ids[ego_idx - 1]
             ego_pose = self._agent_pose(agent_id)
             front_pose = self._agent_pose(front_id)
@@ -1986,6 +2004,27 @@ class PlatoonEnv(BaseMultiEnv):
         )
         return np.asarray([steering, throttle], dtype=np.float32)
 
+    def trajectory_formation_constraint_enabled(self) -> bool:
+        """Return the production low-level regime for learned trajectories."""
+
+        scenario_id = getattr(self.config, "scenario_id", None)
+        definition = SCENARIO_BY_ID.get(str(scenario_id))
+        if (
+            definition is None
+            or not definition.independent_trajectory_control_after_realization
+        ):
+            return True
+        orchestrator = getattr(self, "_scenario_orchestrator", None)
+        getter = getattr(orchestrator, "get_episode_summary", None)
+        if not callable(getter):
+            raise RuntimeError(
+                "hazard trajectory control requires scenario realization state"
+            )
+        summary = getter()
+        if not isinstance(summary, Mapping):
+            raise RuntimeError("scenario realization summary is invalid")
+        return not bool(summary.get("scenario_realized", False))
+
     def trajectory_to_control(self, agent_id: str, trajectory: np.ndarray) -> np.ndarray:
         trajectory = np.asarray(trajectory)
         current_speed = self._agent_longitudinal_speed_mps(agent_id)
@@ -1995,7 +2034,12 @@ class PlatoonEnv(BaseMultiEnv):
             source="online_trajectory",
         )
         return self.trajectory_reference_to_control(
-            agent_id, trajectory, reference
+            agent_id,
+            trajectory,
+            reference,
+            formation_constraint_enabled=(
+                self.trajectory_formation_constraint_enabled()
+            ),
         )
 
     def get_platoon_metrics(self) -> dict:

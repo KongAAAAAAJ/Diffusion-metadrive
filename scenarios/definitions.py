@@ -34,6 +34,10 @@ class ScenarioDefinition:
     ego_spawn_lane_probabilities: Dict[str, float] | None
     expert_recipe: str
     description: str
+    # Learned joint trajectories already encode the three-role formation.
+    # Once a hazardous event is realized, these scenarios execute each role's
+    # own trajectory instead of overwriting it with follower gap feedback.
+    independent_trajectory_control_after_realization: bool = False
     # 若 True，数据采集时将 episode 帧裁剪到换道事件附近（换道前 window_before 帧 + 换道后 window_after 帧）
     trim_to_lane_change: bool = False
     trim_window_before: int = 60   # frames before lane-index change
@@ -176,6 +180,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         override_traffic_density=0.0,
         expert_recipe="提高安全时距",
         description="前车急减速",
+        independent_trajectory_control_after_realization=True,
     ),
     ScenarioDefinition(
         code="S6",
@@ -199,6 +204,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         },
         expert_recipe="保守让行",
         description="背景车并入 ego 所在主线",
+        independent_trajectory_control_after_realization=True,
     ),
     ScenarioDefinition(
         code="S7", 
@@ -215,6 +221,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_initial_speed_km_h=(22, 23),
         expert_recipe="汇入博弈",
         description="ego 从匝道汇入主线",
+        independent_trajectory_control_after_realization=True,
     ),
     ScenarioDefinition(
         code="S8",
@@ -261,6 +268,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         override_traffic_density=0.0,
         expert_recipe="提前换道驶离",
         description="ego 从主线驶出",
+        independent_trajectory_control_after_realization=True,
     ),
     ScenarioDefinition(
         code="S9",
@@ -305,6 +313,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_initial_speed_km_h=18.0,
         expert_recipe="保守通过",
         description="合流-分流窄通道博弈",
+        independent_trajectory_control_after_realization=True,
     ),
     ScenarioDefinition(
         code="S10",

@@ -133,6 +133,11 @@ class LongitudinalCascadeController:
         target_speed, preview_acceleration = reference.sample_speed_acceleration_at_time(
             self.actuator_delay_s
         )
+        # A terminal STOP is an individual motion contract.  Formation-gap
+        # recovery must never cancel its braking profile or restart a vehicle
+        # after it has nearly stopped.
+        if reference.stop_requested:
+            gap = 0.0
         speed_error = float(target_speed - speed)
         feedforward = float(preview_acceleration)
         regime = "braking" if feedforward < -1.0e-6 or speed_error < 0.0 else "acceleration"
@@ -173,6 +178,8 @@ class LongitudinalCascadeController:
                 EXECUTABLE_MAX_ACCEL_MPS2,
             )
         )
+        if reference.stop_requested:
+            desired_acceleration = min(desired_acceleration, 0.0)
         saturated = not np.isclose(raw_acceleration, desired_acceleration, atol=1.0e-9)
         if not saturated:
             self._integral[key] = proposed_integral

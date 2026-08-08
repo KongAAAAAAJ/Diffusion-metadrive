@@ -108,6 +108,8 @@ def _trace(
     contaminated: tuple[bool, ...] = (False, False),
     saturation_s: float = 0.5,
     terminal_speed: float = 2.0,
+    formation_enabled: bool = False,
+    gap_error: float = 0.0,
 ) -> dict[str, object]:
     return {
         "longitudinal_errors_m": list(errors),
@@ -117,6 +119,8 @@ def _trace(
         "formation_control_increment": [0.0] * len(errors),
         "control_saturated": [False] * len(errors),
         "actual_speed_mps": [terminal_speed] * len(errors),
+        "formation_constraint_enabled": [formation_enabled] * len(errors),
+        "formation_gap_error_m": [gap_error] * len(errors),
         "maximum_continuous_saturation_s": saturation_s,
     }
 
@@ -136,7 +140,10 @@ def test_tracking_report_excludes_lateral_heading_contamination() -> None:
     trace = _trace(errors=(0.1, 9.0), contaminated=(False, True))
     candidates = np.stack([np.stack([_constant(2.0)] * 3)])
     report = build_longitudinal_tracking_report(
-        _branch_result(trace), candidates
+        _branch_result(trace),
+        candidates,
+        stop_requested=np.zeros((1, 3), dtype=np.bool_),
+        tracking_group_mask=np.ones(1, dtype=np.bool_),
     )
     assert report.clean_sample_count == 3
     assert report.contaminated_sample_count == 3
@@ -154,7 +161,10 @@ def test_tracking_report_detects_stop_and_saturation_blockers() -> None:
     trace = _trace(saturation_s=1.1, terminal_speed=0.5)
     candidates = np.zeros((1, 3, 8, 3), dtype=np.float32)
     report = build_longitudinal_tracking_report(
-        _branch_result(trace, speed_mps=0.0), candidates
+        _branch_result(trace, speed_mps=0.0),
+        candidates,
+        stop_requested=np.ones((1, 3), dtype=np.bool_),
+        tracking_group_mask=np.ones(1, dtype=np.bool_),
     )
     assert not report.passed
     assert "continuous_control_saturation" in report.blockers
@@ -169,10 +179,51 @@ def test_public_benchmark_uses_supplied_evaluator_without_mutation() -> None:
         evaluate=lambda spec, prefix, trajectories: result
     )
     report = run_longitudinal_tracking_benchmark(
-        object(), (), candidates, evaluator=evaluator
+        object(),
+        (),
+        candidates,
+        stop_requested=np.zeros((1, 3), dtype=np.bool_),
+        evaluator=evaluator,
     )
     assert report.passed
     np.testing.assert_array_equal(candidates, before)
+
+
+def test_locked_followers_use_gap_error_not_trajectory_error() -> None:
+    trace = _trace(
+        errors=(4.0, 4.0), formation_enabled=True, gap_error=0.2
+    )
+    candidates = np.stack([np.stack([_constant(2.0)] * 3)])
+    report = build_longitudinal_tracking_report(
+        _branch_result(trace),
+        candidates,
+        stop_requested=np.zeros((1, 3), dtype=np.bool_),
+        tracking_group_mask=np.ones(1, dtype=np.bool_),
+    )
+    assert report.clean_sample_count == 2
+    assert report.locked_follower_sample_count == 4
+    assert report.locked_follower_gap_error_p95_m == pytest.approx(0.2)
+    assert "longitudinal_p95" in report.blockers
+
+
+def test_locked_follower_gap_error_is_a_separate_blocker() -> None:
+    leader = _trace(errors=(0.1, 0.1), formation_enabled=False)
+    follower = _trace(
+        errors=(4.0, 4.0), formation_enabled=True, gap_error=1.6
+    )
+    result = SimpleNamespace(
+        initial_speed_mps=np.full((1, 3), 2.0, dtype=np.float32),
+        tracking_traces=((leader, follower, follower.copy()),),
+    )
+    candidates = np.stack([np.stack([_constant(2.0)] * 3)])
+    report = build_longitudinal_tracking_report(
+        result,
+        candidates,
+        stop_requested=np.zeros((1, 3), dtype=np.bool_),
+        tracking_group_mask=np.ones(1, dtype=np.bool_),
+    )
+    assert report.longitudinal_error_p95_m == pytest.approx(0.1)
+    assert "locked_follower_gap_error_p95" in report.blockers
 
 
 def test_audit_summary_preserves_source_role_mode_breakdown() -> None:

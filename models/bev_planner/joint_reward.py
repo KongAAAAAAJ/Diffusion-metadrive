@@ -405,6 +405,7 @@ def compose_joint_reward(
     out_of_drivable: np.ndarray,
     clearance_violation: np.ndarray,
     config: JointRewardConfig,
+    diagnostic_components: Mapping[str, np.ndarray] | None = None,
 ) -> JointRewardResult:
     """Apply the shared local/team formula and the non-negotiable safety gate."""
 
@@ -460,6 +461,10 @@ def compose_joint_reward(
         config.unsafe_base_reward - severity,
         safe_reward,
     ).astype(np.float32)
+    diagnostics = {
+        str(name): np.asarray(value, dtype=np.float32)
+        for name, value in (diagnostic_components or {}).items()
+    }
     return JointRewardResult(
         rewards=rewards,
         unsafe=unsafe.astype(np.bool_),
@@ -470,6 +475,7 @@ def compose_joint_reward(
             **{name: value.astype(np.float32) for name, value in arrays.items()},
             "local": local_reward.astype(np.float32),
             "team": team_reward.astype(np.float32),
+            **diagnostics,
         },
     )
 
@@ -526,12 +532,19 @@ class JointTrajectoryProxyReward:
         collision = np.zeros(group_size, dtype=np.bool_)
         out_of_drivable = np.zeros(group_size, dtype=np.bool_)
         clearance_violation = np.zeros(group_size, dtype=np.bool_)
+        minimum_background_by_group = np.full(
+            group_size, np.inf, dtype=np.float64
+        )
+        minimum_platoon_by_group = np.full(
+            group_size, np.inf, dtype=np.float64
+        )
 
         background = self._prediction_planner._predicted_obstacles(
             env,
             (getattr(env, "agents", {}) or {})[AGENT_IDS[0]],
             times,
             include_platoon=False,
+            include_policy_branches=True,
         )
         half_length, half_width = _tracking_aware_half_extents(self.config)
         dimensions = (2.0 * half_length, 2.0 * half_width)
@@ -620,6 +633,9 @@ class JointTrajectoryProxyReward:
                     < self.config.background_safe_gap_m
                 ):
                     clearance_violation[group] = True
+                minimum_background_by_group[group] = min(
+                    minimum_background_by_group[group], minimum_background_gap
+                )
                 role_clearance_deficits.append(min(background_deficit, 1.0))
 
             pair_errors = []
@@ -635,6 +651,9 @@ class JointTrajectoryProxyReward:
                     first[:, :2] - second[:, :2], axis=1
                 )
                 bumper = center_distance - dimensions[0]
+                minimum_platoon_by_group[group] = min(
+                    minimum_platoon_by_group[group], float(bumper.min())
+                )
                 if float(bumper.min()) < self.config.platoon_safe_gap_m:
                     clearance_violation[group] = True
                 if follower == leader + 1:
@@ -668,6 +687,12 @@ class JointTrajectoryProxyReward:
             )
             comfort[group] = float(np.mean(role_comfort))
 
+        minimum_background_by_group[
+            ~np.isfinite(minimum_background_by_group)
+        ] = 1.0e6
+        minimum_platoon_by_group[
+            ~np.isfinite(minimum_platoon_by_group)
+        ] = 1.0e6
         return compose_joint_reward(
             progress=progress,
             formation=formation,
@@ -677,6 +702,10 @@ class JointTrajectoryProxyReward:
             out_of_drivable=out_of_drivable,
             clearance_violation=clearance_violation,
             config=self.config,
+            diagnostic_components={
+                "minimum_background_gap_m": minimum_background_by_group,
+                "minimum_platoon_gap_m": minimum_platoon_by_group,
+            },
         )
 
 

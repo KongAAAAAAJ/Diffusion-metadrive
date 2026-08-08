@@ -132,12 +132,19 @@ class ScenarioOrchestrator:
         self._execute_recipe(env, ego_vehicle, step_count)
 
     def get_episode_summary(self) -> Dict[str, object]:
+        recipe_count = len(self.definition.traffic_recipes)
+        completed_recipe_count = len(self._completed_recipe_keys)
         return {
             "scenario_id": self.summary.scenario_id,
             "scenario_triggered": bool(self.summary.scenario_triggered),
             "scenario_realized": bool(self.summary.scenario_realized),
             "scenario_trigger_step": self.summary.trigger_step,
             "scenario_realized_step": self.summary.realized_step,
+            "scenario_recipe_count": int(recipe_count),
+            "scenario_completed_recipe_count": int(completed_recipe_count),
+            "scenario_recipes_complete": bool(
+                completed_recipe_count == recipe_count
+            ),
             "scenario_notes": list(self.summary.notes),
             "scenario_random_seed": self._scenario_random_seed,
             "resolved_recipe_parameters": {

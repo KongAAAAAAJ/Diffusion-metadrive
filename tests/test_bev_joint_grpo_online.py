@@ -17,6 +17,7 @@ from train.train_bev_joint_grpo_online import (
     joint_trajectory_action,
     optimize_selected_model_trajectories,
     run_joint_grpo_training,
+    _scenario_ready_for_primary_sampling,
 )
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizerConfig,
@@ -94,6 +95,24 @@ def test_calibration_scenario_routes_match_runtime_contract() -> None:
         assert route in SCENARIO_BY_ID[scenario_id].allowed_local_routes
         assert route in SCENARIO_BY_ID[scenario_id].trigger_by_local_route
     assert JointGRPOOnlineConfig(device="cpu").scenarios == PRIMARY_S5_S9_SCENARIOS
+
+
+def test_primary_sampling_waits_for_every_scenario_recipe() -> None:
+    class Orchestrator:
+        def __init__(self, complete: bool) -> None:
+            self.complete = complete
+
+        def get_episode_summary(self):
+            return {
+                "scenario_id": "S8_ego_exit_to_ramp",
+                "scenario_realized": True,
+                "scenario_recipes_complete": self.complete,
+            }
+
+    env = SimpleNamespace(_scenario_orchestrator=Orchestrator(False))
+    assert not _scenario_ready_for_primary_sampling(env)
+    env._scenario_orchestrator.complete = True
+    assert _scenario_ready_for_primary_sampling(env)
 
 
 def test_calibration_variant_is_checked_before_source_load(tmp_path: Path) -> None:

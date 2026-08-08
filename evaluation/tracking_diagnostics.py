@@ -110,10 +110,12 @@ def classify_false_safe(
         return "controller_tracking"
     if simulator_out_of_drivable:
         return "road_footprint"
-    if simulator_collision and minimum_background_gap_m <= 0.0:
+    if minimum_background_gap_m < 5.0:
         return "background_prediction"
-    if simulator_collision and minimum_platoon_gap_m <= 0.0:
+    if minimum_platoon_gap_m < 7.0:
         return "platoon_interaction"
+    if simulator_collision:
+        return "unclassified_collision_geometry"
     return "termination_semantics"
 
 

@@ -42,6 +42,7 @@ def _trace(
         "control_regime": ["acceleration"] * count,
         "formation_control_increment": [0.0] * count,
         "formation_gap_error_m": [gap_error] * count,
+        "formation_constraint_enabled": [False] * count,
         "control_saturated": [False] * count,
         "lateral_heading_contaminated": [False] * count,
         "actual_speed_mps": [speed] * count,

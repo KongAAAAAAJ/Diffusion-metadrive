@@ -1563,7 +1563,13 @@ class PlatoonNormalPlanner:
         return self._append_unique_execution_successors(env, lanes)
 
     @staticmethod
-    def _append_unique_execution_successors(env, lanes: list, *, max_hops: int = 8) -> list:
+    def _append_unique_execution_successors(
+        env,
+        lanes: list,
+        *,
+        max_hops: int = 8,
+        navigation=None,
+    ) -> list:
         """Extend a committed route through unambiguous downstream lanes.
 
         Navigation decisions stop at the semantic exit connector.  A 4-second
@@ -1584,7 +1590,95 @@ class PlatoonNormalPlanner:
             tuple(getattr(lane, "index", ()) or ())
             for lane in result
         }
-        for _ in range(max(int(max_hops), 0)):
+        remaining_hops = max(int(max_hops), 0)
+
+        # Background traffic owns a concrete navigation route.  In particular,
+        # S8's exit actor crosses several junction edges after ``next_ref_lanes``.
+        # Stopping at the first ambiguous node makes the proxy hold the actor at
+        # an artificial road end while the closed-loop policy continues along
+        # its checkpoints.  Follow those immutable route edges first; this is
+        # prediction of the actor's route, not a planner branch decision.
+        checkpoints = tuple(getattr(navigation, "checkpoints", ()) or ())
+        while remaining_hops > 0 and len(checkpoints) >= 2:
+            last_index = tuple(getattr(result[-1], "index", ()) or ())
+            if len(last_index) < 2:
+                break
+            try:
+                checkpoint_index = checkpoints.index(last_index[1])
+            except ValueError:
+                break
+            if checkpoint_index + 1 >= len(checkpoints):
+                break
+            next_node = checkpoints[checkpoint_index + 1]
+            candidates = list(
+                (graph.get(last_index[1], {}) or {}).get(next_node, ()) or ()
+            )
+            candidates = [
+                lane
+                for lane in candidates
+                if tuple(getattr(lane, "index", ()) or ()) not in seen
+            ]
+            if not candidates:
+                break
+            same_role = [
+                lane
+                for lane in candidates
+                if len(tuple(getattr(lane, "index", ()) or ())) >= 3
+                and tuple(getattr(lane, "index", ()) or ())[2] == last_index[2]
+            ]
+            pool = same_role or candidates
+            previous = result[-1]
+
+            def seam_score(lane) -> tuple[float, float, tuple]:
+                try:
+                    previous_length = float(getattr(previous, "length", 0.0))
+                    previous_end = np.asarray(
+                        previous.position(previous_length, 0.0), dtype=np.float64
+                    )[:2]
+                    candidate_start = np.asarray(
+                        lane.position(0.0, 0.0), dtype=np.float64
+                    )[:2]
+                    distance = float(np.linalg.norm(candidate_start - previous_end))
+                    previous_heading_fn = getattr(
+                        previous,
+                        "heading_at",
+                        getattr(previous, "heading_theta_at", None),
+                    )
+                    candidate_heading_fn = getattr(
+                        lane,
+                        "heading_at",
+                        getattr(lane, "heading_theta_at", None),
+                    )
+                    if not callable(previous_heading_fn) or not callable(
+                        candidate_heading_fn
+                    ):
+                        raise AttributeError("lane heading function is unavailable")
+                    previous_heading = float(previous_heading_fn(previous_length))
+                    candidate_heading = float(candidate_heading_fn(0.0))
+                    heading_error = abs(
+                        float(
+                            np.arctan2(
+                                np.sin(candidate_heading - previous_heading),
+                                np.cos(candidate_heading - previous_heading),
+                            )
+                        )
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    distance = float("inf")
+                    heading_error = float("inf")
+                return (
+                    distance,
+                    heading_error,
+                    tuple(getattr(lane, "index", ()) or ()),
+                )
+
+            successor = min(pool, key=seam_score)
+            successor_index = tuple(getattr(successor, "index", ()) or ())
+            result.append(successor)
+            seen.add(successor_index)
+            remaining_hops -= 1
+
+        for _ in range(remaining_hops):
             last_index = tuple(getattr(result[-1], "index", ()) or ())
             if len(last_index) < 2:
                 break
@@ -3862,6 +3956,7 @@ class PlatoonNormalPlanner:
         times: np.ndarray,
         *,
         include_platoon: bool,
+        include_policy_branches: bool = False,
     ) -> list[tuple[str, np.ndarray, tuple[float, float]]]:
         platoon_ids = {
             id(value) for value in (getattr(env, "agents", {}) or {}).values()
@@ -3872,15 +3967,293 @@ class PlatoonNormalPlanner:
                 continue
             if not include_platoon and id(other) in platoon_ids:
                 continue
+            name = str(getattr(other, "name", other_id))
+            dimensions = self._vehicle_dimensions(other)
             predicted = self._predict_vehicle_trajectory(env, other, times)
-            predictions.append(
+            predictions.append((name, predicted, dimensions))
+            if include_policy_branches:
+                for branch_index, branch in enumerate(
+                    self._predict_policy_route_branches(env, other, times)
+                ):
+                    if np.allclose(branch, predicted, rtol=0.0, atol=1.0e-6):
+                        continue
+                    predictions.append(
+                        (f"{name}:policy_branch_{branch_index}", branch, dimensions)
+                    )
+        return predictions
+
+    def _predict_policy_route_branches(
+        self,
+        env,
+        vehicle,
+        times: np.ndarray,
+    ) -> tuple[np.ndarray, ...]:
+        """Return reachable policy-specific route branches for proxy safety.
+
+        A merge policy's target lane is candidate-dependent: its closed-loop
+        gap decision can differ for every joint rollout.  Treating the actor as
+        a single constant-speed centre-line trajectory is therefore optimistic.
+        The proxy keeps both the nominal route and deterministic smooth merge
+        hypotheses.  These are occupancy hypotheses, not simultaneous actors.
+        """
+
+        policy = getattr(getattr(env, "engine", None), "get_policy", lambda *_: None)(
+            getattr(vehicle, "name", None)
+        )
+        if policy is None:
+            return ()
+        policy_name = type(policy).__name__
+        if policy_name != "IDMMergePolicy":
+            if policy_name in {"GroundTruthIDMPolicy", "IDMPolicy"}:
+                braking = list(
+                    self._predict_idm_braking_branches(env, vehicle, times)
+                )
+                braking.extend(
+                    self._predict_idm_required_lane_change_branches(
+                        env, vehicle, times
+                    )
+                )
+                return tuple(braking)
+            return ()
+        navigation = getattr(vehicle, "navigation", None)
+        target_lane = getattr(navigation, "merge_target_lane", None)
+        if target_lane is None:
+            return ()
+        nominal = self._predict_vehicle_trajectory(env, vehicle, times)
+        target = self._predict_vehicle_trajectory_on_lane_chain(
+            env,
+            vehicle,
+            times,
+            first_lane=target_lane,
+            start_from_projection=True,
+        )
+        if target is None or target.shape != nominal.shape:
+            return ()
+        branches: list[np.ndarray] = []
+        for duration_s in (2.0, 3.0, 4.0):
+            phase = np.clip(np.asarray(times, dtype=np.float64) / duration_s, 0.0, 1.0)
+            blend = phase * phase * (3.0 - 2.0 * phase)
+            xy = (1.0 - blend[:, None]) * nominal[:, :2] + blend[:, None] * target[:, :2]
+            delta = np.diff(
+                np.vstack((np.asarray(vehicle.position, dtype=np.float64)[:2], xy)),
+                axis=0,
+            )
+            heading = np.arctan2(delta[:, 1], delta[:, 0])
+            stationary = np.linalg.norm(delta, axis=1) <= 1.0e-8
+            if np.any(stationary):
+                heading[stationary] = np.asarray(nominal[:, 2])[stationary]
+            branches.append(np.column_stack((xy, heading)))
+        return tuple(np.ascontiguousarray(value, dtype=np.float64) for value in branches)
+
+    def _predict_idm_braking_branches(
+        self,
+        env,
+        vehicle,
+        times: np.ndarray,
+    ) -> tuple[np.ndarray, ...]:
+        """Conservative same-route occupancies for candidate-reactive IDM.
+
+        GroundTruthIDMPolicy can brake in response to a rollout vehicle, so a
+        constant-speed trace is not a candidate-independent prediction.  Keep
+        the route geometry fixed and add normal/service-braking reachable
+        profiles.  These are alternative occupancies, not extra actors.
+        """
+
+        values = np.asarray(times, dtype=np.float64)
+        nominal = self._predict_vehicle_trajectory(env, vehicle, values)
+        if values.ndim != 1 or nominal.shape != (len(values), 3):
+            return ()
+        speed = max(
+            float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
+            0.0,
+        )
+        if speed <= 1.0e-6:
+            return ()
+        source_distance = np.concatenate(([0.0], speed * values))
+        source_xy = np.vstack(
+            (
+                np.asarray(vehicle.position, dtype=np.float64)[:2],
+                nominal[:, :2],
+            )
+        )
+        source_heading = np.unwrap(
+            np.concatenate(
+                ([float(getattr(vehicle, "heading_theta", 0.0))], nominal[:, 2])
+            )
+        )
+        branches = []
+        for deceleration_mps2 in (1.5, 3.0):
+            brake_time = np.minimum(values, speed / deceleration_mps2)
+            distance = (
+                speed * brake_time
+                - 0.5 * deceleration_mps2 * brake_time * brake_time
+            )
+            xy = np.column_stack(
                 (
-                    str(getattr(other, "name", other_id)),
-                    predicted,
-                    self._vehicle_dimensions(other),
+                    np.interp(distance, source_distance, source_xy[:, 0]),
+                    np.interp(distance, source_distance, source_xy[:, 1]),
                 )
             )
-        return predictions
+            heading = np.interp(distance, source_distance, source_heading)
+            branches.append(
+                np.column_stack(
+                    (xy, np.arctan2(np.sin(heading), np.cos(heading)))
+                )
+            )
+        return tuple(
+            np.ascontiguousarray(value, dtype=np.float64)
+            for value in branches
+        )
+
+    def _predict_idm_required_lane_change_branches(
+        self,
+        env,
+        vehicle,
+        times: np.ndarray,
+    ) -> tuple[np.ndarray, ...]:
+        """Predict route-required IDM lane-change occupancy.
+
+        MetaDrive's IDM policy performs a mandatory adjacent-lane change when
+        the next navigation road has fewer lanes.  S8 deliberately places its
+        controlled traffic actor in lane 2 before a one-lane exit, so a
+        centre-line-only prediction misses the exact branch exercised by the
+        closed loop.  Return deterministic reachable occupancies for that
+        policy transition, including its candidate-reactive braking profiles.
+        """
+
+        navigation = getattr(vehicle, "navigation", None)
+        current_lanes = list(
+            getattr(navigation, "current_ref_lanes", ()) or ()
+        )
+        next_lanes = list(getattr(navigation, "next_ref_lanes", ()) or ())
+        if not current_lanes or not next_lanes or len(current_lanes) <= len(next_lanes):
+            return ()
+        current_lane = getattr(vehicle, "lane", None)
+        try:
+            current_index = next(
+                index
+                for index, lane in enumerate(current_lanes)
+                if lane is current_lane
+                or tuple(getattr(lane, "index", ()) or ())
+                == tuple(getattr(current_lane, "index", ()) or ())
+            )
+        except StopIteration:
+            return ()
+        lane_num_diff = len(current_lanes) - len(next_lanes)
+        first_connects = False
+        try:
+            first_connects = bool(current_lanes[0].is_previous_lane_of(next_lanes[0]))
+        except (AttributeError, TypeError, ValueError):
+            first_connects = tuple(getattr(current_lanes[0], "index", ()) or ())[1] == tuple(
+                getattr(next_lanes[0], "index", ()) or ()
+            )[0]
+        if first_connects:
+            allowed = range(0, len(next_lanes))
+        else:
+            allowed = range(lane_num_diff, len(current_lanes))
+        allowed_indices = tuple(int(value) for value in allowed)
+        if current_index in allowed_indices:
+            return ()
+        target_index = (
+            current_index - 1
+            if current_index > max(allowed_indices)
+            else current_index + 1
+        )
+        if target_index < 0 or target_index >= len(current_lanes):
+            return ()
+        target_lane = current_lanes[target_index]
+        values = np.asarray(times, dtype=np.float64)
+        nominal = self._predict_vehicle_trajectory(env, vehicle, values)
+        target = self._predict_vehicle_trajectory_on_lane_chain(
+            env,
+            vehicle,
+            values,
+            first_lane=target_lane,
+            start_from_projection=True,
+        )
+        if target is None or target.shape != nominal.shape:
+            return ()
+
+        speed = max(
+            float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6,
+            0.0,
+        )
+        profiles = [(values, "cruise")]
+        if speed > 1.0e-6:
+            for deceleration_mps2 in (1.5, 3.0):
+                brake_time = np.minimum(values, speed / deceleration_mps2)
+                distance = (
+                    speed * brake_time
+                    - 0.5 * deceleration_mps2 * brake_time * brake_time
+                )
+                profiles.append((distance / speed, f"brake_{deceleration_mps2:g}"))
+
+        branches: list[np.ndarray] = []
+        for profile_times, _ in profiles:
+            nominal_profile = self._sample_timed_prediction(
+                values, nominal, profile_times, vehicle
+            )
+            target_profile = self._sample_timed_prediction(
+                values, target, profile_times, vehicle
+            )
+            for duration_s in (1.5, 2.5, 3.5, 4.0):
+                phase = np.clip(values / duration_s, 0.0, 1.0)
+                blend = phase * phase * (3.0 - 2.0 * phase)
+                xy = (
+                    (1.0 - blend[:, None]) * nominal_profile[:, :2]
+                    + blend[:, None] * target_profile[:, :2]
+                )
+                delta = np.diff(
+                    np.vstack(
+                        (
+                            np.asarray(vehicle.position, dtype=np.float64)[:2],
+                            xy,
+                        )
+                    ),
+                    axis=0,
+                )
+                heading = np.arctan2(delta[:, 1], delta[:, 0])
+                stationary = np.linalg.norm(delta, axis=1) <= 1.0e-8
+                if np.any(stationary):
+                    heading[stationary] = nominal_profile[:, 2][stationary]
+                branches.append(np.column_stack((xy, heading)))
+        return tuple(
+            np.ascontiguousarray(value, dtype=np.float64)
+            for value in branches
+        )
+
+    @staticmethod
+    def _sample_timed_prediction(
+        source_times: np.ndarray,
+        prediction: np.ndarray,
+        query_times: np.ndarray,
+        vehicle,
+    ) -> np.ndarray:
+        source = np.asarray(source_times, dtype=np.float64)
+        values = np.asarray(prediction, dtype=np.float64)
+        query = np.asarray(query_times, dtype=np.float64)
+        initial_xy = np.asarray(vehicle.position, dtype=np.float64)[:2]
+        initial_heading = float(getattr(vehicle, "heading_theta", 0.0))
+        if source.size and abs(float(source[0])) <= 1.0e-12:
+            timeline = source
+            xy = values[:, :2]
+            heading = np.unwrap(values[:, 2])
+        else:
+            timeline = np.concatenate(([0.0], source))
+            xy = np.vstack((initial_xy, values[:, :2]))
+            heading = np.unwrap(
+                np.concatenate(([initial_heading], values[:, 2]))
+            )
+        return np.column_stack(
+            (
+                np.interp(query, timeline, xy[:, 0]),
+                np.interp(query, timeline, xy[:, 1]),
+                np.arctan2(
+                    np.sin(np.interp(query, timeline, heading)),
+                    np.cos(np.interp(query, timeline, heading)),
+                ),
+            )
+        )
 
     def _collision_names_against_predictions(
         self,
@@ -3992,61 +4365,95 @@ class PlatoonNormalPlanner:
         vehicle,
         times: np.ndarray,
     ) -> np.ndarray:
-        lane = getattr(vehicle, "lane", None)
         position = np.asarray(getattr(vehicle, "position", (0.0, 0.0))[:2], dtype=np.float64)
         heading = float(getattr(vehicle, "heading_theta", 0.0))
-        speed = max(float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6, 0.0)
-        if lane is not None:
-            try:
-                start_s, start_d = lane.local_coordinates(position)
-                continuation_lane = self._get_continuation_lane(env, vehicle, lane)
-                continuation = self._continuation_context(lane, continuation_lane)
-                source_length = float(getattr(lane, "length", 0.0) or 0.0)
-                total_length = source_length + float(continuation["remaining_length"])
-                rows = []
-                for time_s in times:
-                    longitudinal = float(
-                        np.clip(float(start_s) + speed * float(time_s), 0.0, total_length)
-                    )
-                    if longitudinal <= source_length or continuation_lane is None:
-                        point = lane.position(longitudinal, float(start_d))
-                        yaw = (
-                            float(lane.heading_theta_at(longitudinal))
-                            if hasattr(lane, "heading_theta_at")
-                            else heading
-                        )
-                    else:
-                        continuation_s = float(continuation["s_base"]) + (
-                            longitudinal - source_length
-                        )
-                        point = continuation_lane.position(
-                            float(
-                                np.clip(
-                                    continuation_s,
-                                    0.0,
-                                    float(
-                                        getattr(continuation_lane, "length", 0.0)
-                                        or 0.0
-                                    ),
-                                )
-                            ),
-                            float(start_d) + float(continuation["d_offset"]),
-                        )
-                        yaw = (
-                            float(continuation_lane.heading_theta_at(continuation_s))
-                            if hasattr(continuation_lane, "heading_theta_at")
-                            else heading
-                        )
-                    rows.append([float(point[0]), float(point[1]), yaw])
-                predicted = np.asarray(rows, dtype=np.float64)
-                if np.isfinite(predicted).all():
-                    return predicted
-            except Exception:
-                pass
+        predicted = self._predict_vehicle_trajectory_on_lane_chain(
+            env, vehicle, times
+        )
+        if predicted is not None:
+            return predicted
         velocity = self._vehicle_velocity_xy(vehicle)
         xy = position[None, :] + np.asarray(times)[:, None] * velocity[None, :]
         headings = np.full((len(times), 1), heading, dtype=np.float64)
         return np.concatenate([xy, headings], axis=1)
+
+    def _predict_vehicle_trajectory_on_lane_chain(
+        self,
+        env,
+        vehicle,
+        times: np.ndarray,
+        *,
+        first_lane=None,
+        start_from_projection: bool = False,
+    ) -> np.ndarray | None:
+        lane = first_lane if first_lane is not None else getattr(vehicle, "lane", None)
+        if lane is None:
+            return None
+        position = np.asarray(getattr(vehicle, "position", (0.0, 0.0))[:2], dtype=np.float64)
+        try:
+            start_s, start_d = lane.local_coordinates(position)
+            lane_length = float(getattr(lane, "length", 0.0) or 0.0)
+            start_s = float(np.clip(start_s, 0.0, lane_length))
+            if start_from_projection:
+                start_d = 0.0
+            lanes = [lane]
+            if first_lane is None:
+                continuation_lane = self._get_continuation_lane(env, vehicle, lane)
+                if continuation_lane is not None:
+                    lanes.append(continuation_lane)
+            lanes = self._append_unique_execution_successors(
+                env,
+                lanes,
+                navigation=getattr(vehicle, "navigation", None),
+            )
+            path = build_continuous_lane_chain_path(
+                lanes,
+                start_s=start_s,
+                start_lateral_m=float(start_d),
+                step_m=0.25,
+                seam_transition_m=float(getattr(lane, "route_seam_transition_m", 8.0)),
+            )
+            arc = np.concatenate(
+                ([0.0], np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1)))
+            )
+            distance = self._predicted_vehicle_distance_profile(vehicle, times)
+            # A finite navigation route is a hard terminal, not a signal to
+            # fall back to unconstrained world-frame constant velocity.  The
+            # real vehicle cannot continue through the road end; hold its
+            # terminal pose for every remaining prediction sample.
+            return sample_path_at_arc(
+                path,
+                arc,
+                np.clip(distance, 0.0, float(arc[-1])),
+            )
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            LongitudinalReferenceError,
+            RouteChainGeometryError,
+        ):
+            return None
+
+    @staticmethod
+    def _predicted_vehicle_distance_profile(vehicle, times: np.ndarray) -> np.ndarray:
+        values = np.asarray(times, dtype=np.float64)
+        speed = max(float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6, 0.0)
+        target_kmh = getattr(vehicle, "scenario_brake_target_speed_kmh", None)
+        deceleration = getattr(vehicle, "scenario_brake_deceleration_mps2", None)
+        if target_kmh is None or deceleration is None:
+            return speed * values
+        target = max(float(target_kmh) / 3.6, 0.0)
+        deceleration = max(float(deceleration), 0.0)
+        if deceleration <= 1.0e-9 or speed <= target:
+            return target * values
+        brake_time = (speed - target) / deceleration
+        braking = np.minimum(values, brake_time)
+        return (
+            speed * braking
+            - 0.5 * deceleration * braking * braking
+            + target * np.maximum(values - brake_time, 0.0)
+        )
 
     def _trajectory_pair_collides(
         self,

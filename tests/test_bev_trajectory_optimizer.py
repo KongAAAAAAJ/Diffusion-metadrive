@@ -9,8 +9,10 @@ from models.bev_planner.mode_contract import (
 )
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizer,
+    KinematicTrajectoryOptimizerConfig,
     TrajectoryOptimizationError,
 )
+from models.controller.longitudinal_reference import EXECUTABLE_MAX_ACCEL_MPS2
 
 
 def _coarse(speed: float = 8.0) -> np.ndarray:
@@ -75,3 +77,31 @@ def test_optimizer_rejects_contract_mismatch_without_fallback() -> None:
             np.zeros(3, dtype=np.float32),
             np.zeros((1, 3), dtype=np.int64),
         )
+
+
+def test_optimizer_uses_measured_drive_authority_and_strict_pose_alignment() -> None:
+    optimizer = KinematicTrajectoryOptimizer()
+    coarse = _coarse(speed=6.0)
+    raw = coarse[:, 0].copy()
+    # The generic hard mask permits this initial path/heading disagreement,
+    # but it is not stable for the preview controller.
+    raw[:, 0, 1] = -1.0
+    modes = np.zeros(3, dtype=np.int64)
+
+    result = optimizer.optimize(raw, coarse, np.full(3, 5.0), modes)
+
+    assert KinematicTrajectoryOptimizerConfig().max_accel_mps2 == pytest.approx(1.0)
+    assert (
+        KinematicTrajectoryOptimizerConfig().max_accel_mps2
+        < EXECUTABLE_MAX_ACCEL_MPS2
+    )
+    assert np.all(result.retained_raw_fraction < 1.0)
+    for trajectory in result.optimized_trajectories:
+        audit = validate_trajectory_kinematics(
+            trajectory,
+            5.0,
+            np.zeros(3),
+            optimizer._audit_config,
+        )
+        assert audit.valid
+        assert audit.acceleration_mps2.max() <= EXECUTABLE_MAX_ACCEL_MPS2 + 1e-6

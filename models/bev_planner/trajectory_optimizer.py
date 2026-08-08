@@ -17,6 +17,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from models.controller.longitudinal_reference import (
+    EXECUTABLE_MAX_ACCEL_MPS2,
+    EXECUTABLE_MIN_ACCEL_MPS2,
+    sample_path_at_arc,
+)
+
 from .mode_contract import (
     HardModeMaskConfig,
     ModeIndex,
@@ -35,11 +41,16 @@ class TrajectoryOptimizationError(RuntimeError):
 class KinematicTrajectoryOptimizerConfig:
     dt_s: float = 0.5
     min_accel_mps2: float = -8.0
-    max_accel_mps2: float = 5.0
+    # Reserve one third of the calibrated positive actuator authority for
+    # speed/position feedback.  A trajectory exactly at the 1.5 m/s2 actuator
+    # ceiling is kinematically reachable but cannot reject delay or drag, and
+    # was observed to remain at full throttle for entire four-second branches.
+    max_accel_mps2: float = min(EXECUTABLE_MAX_ACCEL_MPS2, 1.0)
     max_speed_mps: float = 100.0 / 3.6
     max_yaw_rate_rad_s: float = 1.0
     max_curvature_per_m: float = 0.25
     max_lateral_accel_mps2: float = 6.0
+    max_heading_alignment_error_rad: float = 0.15
     raw_residual_limit_m: float = 2.0
     heading_residual_limit_rad: float = 0.2
     line_search_fractions: tuple[float, ...] = (
@@ -62,6 +73,7 @@ class KinematicTrajectoryOptimizerConfig:
             "max_yaw_rate_rad_s",
             "max_curvature_per_m",
             "max_lateral_accel_mps2",
+            "max_heading_alignment_error_rad",
             "raw_residual_limit_m",
             "heading_residual_limit_rad",
             "movement_epsilon_m",
@@ -160,6 +172,16 @@ class KinematicTrajectoryOptimizer:
 
     def __init__(self, config: KinematicTrajectoryOptimizerConfig | None = None) -> None:
         self.config = config or KinematicTrajectoryOptimizerConfig()
+        self._source_audit_config = HardModeMaskConfig(
+            dt_s=self.config.dt_s,
+            max_speed_mps=self.config.max_speed_mps,
+            min_accel_mps2=-8.0,
+            max_accel_mps2=5.0,
+            max_yaw_rate_rad_s=self.config.max_yaw_rate_rad_s,
+            max_curvature_per_m=self.config.max_curvature_per_m,
+            max_lateral_accel_mps2=self.config.max_lateral_accel_mps2,
+            movement_epsilon_m=self.config.movement_epsilon_m,
+        )
         self._audit_config = HardModeMaskConfig(
             dt_s=self.config.dt_s,
             max_speed_mps=self.config.max_speed_mps,
@@ -168,8 +190,76 @@ class KinematicTrajectoryOptimizer:
             max_yaw_rate_rad_s=self.config.max_yaw_rate_rad_s,
             max_curvature_per_m=self.config.max_curvature_per_m,
             max_lateral_accel_mps2=self.config.max_lateral_accel_mps2,
+            max_heading_alignment_error_rad=(
+                self.config.max_heading_alignment_error_rad
+            ),
             movement_epsilon_m=self.config.movement_epsilon_m,
         )
+
+    def _feedback_executable_trajectory(
+        self,
+        candidate: np.ndarray,
+        current_speed_mps: float,
+    ) -> np.ndarray:
+        """Retain the spatial path while respecting measured actuator authority."""
+
+        candidate32 = np.ascontiguousarray(candidate, dtype=np.float32)
+        direct_audit = validate_trajectory_kinematics(
+            candidate32,
+            current_speed_mps,
+            np.zeros(3, dtype=np.float64),
+            self._audit_config,
+        )
+        if direct_audit.valid:
+            return candidate32
+        path = np.concatenate(
+            (np.zeros((1, 3), dtype=np.float64), candidate32.astype(np.float64)),
+            axis=0,
+        )
+        path_arc = np.concatenate(
+            ([0.0], np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1)))
+        )
+        if path_arc[-1] <= self.config.movement_epsilon_m:
+            return np.asarray(candidate, dtype=np.float32)
+        desired_segment_speed = np.diff(path_arc) / self.config.dt_s
+        executable_speed = np.empty_like(desired_segment_speed)
+        previous_speed = float(current_speed_mps)
+        for index, desired_speed in enumerate(desired_segment_speed):
+            # Segment speed is an average over the fixed interval.  The first
+            # interval starts from an instantaneous measured speed, so its
+            # reachable average changes by 0.5*a*dt; subsequent average-speed
+            # differences use the full a*dt contract.
+            acceleration_time = self.config.dt_s * (0.5 if index == 0 else 1.0)
+            lower = max(
+                0.0,
+                previous_speed
+                + self.config.min_accel_mps2
+                * self.config.limit_safety_factor
+                * acceleration_time,
+            )
+            upper = min(
+                self.config.max_speed_mps,
+                previous_speed
+                + self.config.max_accel_mps2
+                * self.config.limit_safety_factor
+                * acceleration_time,
+            )
+            executable_speed[index] = np.clip(desired_speed, lower, upper)
+            previous_speed = float(executable_speed[index])
+        executable_arc = np.cumsum(
+            executable_speed * self.config.dt_s
+        )
+        if executable_arc[-1] > path_arc[-1] + 1.0e-8:
+            raise TrajectoryOptimizationError(
+                "feedback-executable arc exceeds the selected spatial path"
+            )
+        try:
+            sampled = sample_path_at_arc(path, path_arc, executable_arc)
+        except ValueError as exc:
+            raise TrajectoryOptimizationError(
+                f"feedback-executable trajectory construction failed: {exc}"
+            ) from exc
+        return np.ascontiguousarray(sampled, dtype=np.float32)
 
     @staticmethod
     def _validate_inputs(
@@ -255,7 +345,7 @@ class KinematicTrajectoryOptimizer:
             coarse,
             current_speed_mps,
             np.zeros(3, dtype=np.float64),
-            self._audit_config,
+            self._source_audit_config,
         )
         if not coarse_audit.valid:
             raise TrajectoryOptimizationError(
@@ -288,6 +378,12 @@ class KinematicTrajectoryOptimizer:
             )
             candidate32 = np.asarray(candidate, dtype=np.float32)
             if lane_change and float(np.sign(candidate32[-1, 1])) != coarse_lateral_sign:
+                continue
+            try:
+                candidate32 = self._feedback_executable_trajectory(
+                    candidate32, current_speed_mps
+                )
+            except TrajectoryOptimizationError:
                 continue
             audit = validate_trajectory_kinematics(
                 candidate32,
@@ -332,16 +428,21 @@ class KinematicTrajectoryOptimizer:
                     flat_raw[group, role],
                     float(flat_speeds[group, role]),
                     np.zeros(3, dtype=np.float64),
-                    self._audit_config,
+                    self._source_audit_config,
                 )
                 raw_valid[group, role] = raw_audit.valid
                 raw_violations.append(raw_audit.violations)
-                value, retained = self._project_one(
-                    flat_raw[group, role],
-                    flat_coarse[group, role, mode],
-                    float(flat_speeds[group, role]),
-                    mode,
-                )
+                try:
+                    value, retained = self._project_one(
+                        flat_raw[group, role],
+                        flat_coarse[group, role, mode],
+                        float(flat_speeds[group, role]),
+                        mode,
+                    )
+                except TrajectoryOptimizationError as exc:
+                    raise TrajectoryOptimizationError(
+                        f"trajectory group={group} role={role} mode={mode}: {exc}"
+                    ) from exc
                 audit = validate_trajectory_kinematics(
                     value,
                     float(flat_speeds[group, role]),

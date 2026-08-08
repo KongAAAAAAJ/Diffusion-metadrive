@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 
 from envs.platoon_env import PlatoonEnv
+from models.controller.longitudinal_reference import (
+    trajectory_to_longitudinal_reference,
+)
 
 
 class _ControlHarness:
@@ -17,6 +20,9 @@ class _ControlHarness:
     _solve_lqr_gain = PlatoonEnv._solve_lqr_gain
     trajectory_to_control = PlatoonEnv.trajectory_to_control
     trajectory_reference_to_control = PlatoonEnv.trajectory_reference_to_control
+    trajectory_formation_constraint_enabled = (
+        PlatoonEnv.trajectory_formation_constraint_enabled
+    )
     _agent_speed_km_h = PlatoonEnv._agent_speed_km_h
     _agent_longitudinal_speed_mps = (
         PlatoonEnv._agent_longitudinal_speed_mps
@@ -125,6 +131,30 @@ def test_follower_combines_gap_and_trajectory_speed() -> None:
     assert close_reference[1] < fast_reference[1]
 
 
+def test_independent_follower_disables_gap_feedback() -> None:
+    locked = _ControlHarness(speed_kmh=18.0, follower_x=-9.0)
+    independent = _ControlHarness(speed_kmh=18.0, follower_x=-9.0)
+    trajectory = _trajectory(5.0)
+    reference = trajectory_to_longitudinal_reference(
+        trajectory,
+        5.0,
+        source="test_independent",
+    )
+    locked_control = locked.trajectory_reference_to_control(
+        "agent1", trajectory, reference
+    )
+    independent_control = independent.trajectory_reference_to_control(
+        "agent1",
+        trajectory,
+        reference,
+        formation_constraint_enabled=False,
+    )
+    assert independent_control[1] > locked_control[1]
+    assert independent._last_longitudinal_control_debug["agent1"][
+        "gap_feedback_mps2"
+    ] == pytest.approx(0.0)
+
+
 def test_preview_pid_turn_sign_and_straight_zero() -> None:
     straight = _trajectory(6.0)
     left = straight.copy()
@@ -166,6 +196,16 @@ def test_preview_pid_integral_is_bounded_and_resettable() -> None:
     assert abs(integral) <= 1.0
     env._lateral_preview_pid_state = {}
     assert env._lateral_preview_pid_state == {}
+
+
+def test_terminal_target_behind_vehicle_holds_heading_without_full_turn() -> None:
+    env = _ControlHarness(speed_kmh=3.6)
+    terminal = np.tile(
+        np.asarray([-0.1, 0.2, -0.2], dtype=np.float32), (8, 1)
+    )
+    command = env._lateral_preview_pid("agent0", terminal)
+    assert command < 0.0
+    assert abs(command) < 1.0
 
 
 def test_curve_preview_caps_speed_by_lateral_acceleration() -> None:

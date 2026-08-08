@@ -14,6 +14,7 @@ from evaluation.joint_simulator_branch import (
     _trajectory_target_speed_mps,
     _world_reference_to_current_local,
 )
+from evaluation.joint_simulator_branch import _has_failure
 from models.bev_planner import JointRewardError
 
 
@@ -62,7 +63,18 @@ class _BranchEnv:
             "branch diagnostics must not invoke the stateful controller outside step()"
         )
 
-    def trajectory_reference_to_control(self, agent_id, trajectory, reference):
+    def trajectory_formation_constraint_enabled(self) -> bool:
+        return True
+
+    def trajectory_reference_to_control(
+        self,
+        agent_id,
+        trajectory,
+        reference,
+        *,
+        formation_constraint_enabled=True,
+    ):
+        assert isinstance(formation_constraint_enabled, bool)
         assert reference.source == "simulator_branch"
         self._branch_trajectories[agent_id] = np.asarray(trajectory).copy()
         return np.asarray([0.1, 0.2], dtype=np.float32)
@@ -215,3 +227,13 @@ def test_branch_rejects_replay_drift_and_invalid_prefix() -> None:
         _evaluator().evaluate(wrong, (), candidates)
     with pytest.raises(JointRewardError, match="exactly"):
         _evaluator().evaluate(_spec(), ({"agent0": _trajectory(3.0)},), candidates)
+def test_sidewalk_contact_is_a_road_termination_not_a_silent_safe_step():
+    collision, out = _has_failure(
+        {
+            "agent0": {"crash_sidewalk": True},
+            "agent1": {},
+            "agent2": {},
+        }
+    )
+    assert collision is False
+    assert out is True

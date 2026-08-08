@@ -339,6 +339,8 @@ class LongitudinalTrackingReport:
     target_reference_speed_delta_p95_mps: float
     maximum_continuous_saturation_s: float
     maximum_stop_terminal_speed_mps: float
+    locked_follower_sample_count: int
+    locked_follower_gap_error_p95_m: float
     control_decomposition: Mapping[str, object]
     passed: bool
     blockers: tuple[str, ...]
@@ -358,6 +360,10 @@ class LongitudinalTrackingReport:
             ),
             "maximum_stop_terminal_speed_mps": (
                 self.maximum_stop_terminal_speed_mps
+            ),
+            "locked_follower_sample_count": self.locked_follower_sample_count,
+            "locked_follower_gap_error_p95_m": (
+                self.locked_follower_gap_error_p95_m
             ),
             "control_decomposition": dict(self.control_decomposition),
             "passed": self.passed,
@@ -469,6 +475,9 @@ def summarize_longitudinal_control(
 def build_longitudinal_tracking_report(
     branch_result: object,
     trajectories: np.ndarray,
+    *,
+    stop_requested: np.ndarray,
+    tracking_group_mask: np.ndarray,
 ) -> LongitudinalTrackingReport:
     candidates = np.asarray(trajectories)
     initial_speed = np.asarray(getattr(branch_result, "initial_speed_mps", ()))
@@ -480,12 +489,27 @@ def build_longitudinal_tracking_report(
         raise LongitudinalDiagnosticError(
             "branch trajectories and initial speeds do not match [G,3,8,3]"
         )
+    stop_mask = np.asarray(stop_requested)
+    group_mask = np.asarray(tracking_group_mask)
+    if stop_mask.dtype != np.bool_ or stop_mask.shape != candidates.shape[:2]:
+        raise LongitudinalDiagnosticError(
+            "stop_requested must be bool [G,3]"
+        )
+    if group_mask.dtype != np.bool_ or group_mask.shape != candidates.shape[:1]:
+        raise LongitudinalDiagnosticError(
+            "tracking_group_mask must be bool [G]"
+        )
+    if not bool(group_mask.any()):
+        raise LongitudinalDiagnosticError(
+            "tracking diagnostics require at least one closed-loop safe group"
+        )
     rows = []
     clean_errors = []
     contaminated = 0
     target_delta = []
     saturation = []
     stop_terminal_speed = []
+    locked_gap_errors = []
     role_control = [
         {
             "target_delta": [],
@@ -518,15 +542,36 @@ def build_longitudinal_tracking_report(
             errors = np.abs(
                 np.asarray(trace["longitudinal_errors_m"], dtype=np.float64)
             )
-            mask = ~np.asarray(
+            lateral_clean = ~np.asarray(
                 trace["lateral_heading_contaminated"], dtype=bool
             )
-            if errors.shape != mask.shape:
+            formation_enabled = np.asarray(
+                trace["formation_constraint_enabled"], dtype=bool
+            )
+            gap_errors = np.abs(
+                np.asarray(trace["formation_gap_error_m"], dtype=np.float64)
+            )
+            if (
+                errors.shape != lateral_clean.shape
+                or formation_enabled.shape != errors.shape
+                or gap_errors.shape != errors.shape
+            ):
                 raise LongitudinalDiagnosticError(
-                    "branch contamination mask does not match tracking errors"
+                    "branch control-regime trace does not match tracking errors"
                 )
-            clean_errors.extend(errors[mask].tolist())
-            contaminated += int((~mask).sum())
+            trajectory_controlled = (
+                np.ones(errors.shape, dtype=bool)
+                if role == 0
+                else ~formation_enabled
+            )
+            eligible_group = bool(group_mask[group])
+            clean_mask = lateral_clean & trajectory_controlled & eligible_group
+            excluded_mask = ~clean_mask
+            clean_errors.extend(errors[clean_mask].tolist())
+            contaminated += int(excluded_mask.sum())
+            if role > 0 and eligible_group:
+                locked_mask = lateral_clean & formation_enabled
+                locked_gap_errors.extend(gap_errors[locked_mask].tolist())
             target_delta.extend(
                 np.asarray(
                     trace["position_error_speed_increment_mps"],
@@ -553,13 +598,13 @@ def build_longitudinal_tracking_report(
                 np.asarray(trace["control_saturated"], dtype=bool).tolist()
             )
             role_control[role]["clean_longitudinal_error"].extend(
-                errors[mask].tolist()
+                errors[clean_mask].tolist()
             )
-            role_control[role]["contamination"].extend((~mask).tolist())
+            role_control[role]["contamination"].extend(excluded_mask.tolist())
             saturation.append(
                 float(trace["maximum_continuous_saturation_s"])
             )
-            if float(audit.speed_mps[-1]) <= 0.3:
+            if bool(stop_mask[group, role]) and eligible_group:
                 actual = np.asarray(
                     trace["actual_speed_mps"], dtype=np.float64
                 )
@@ -579,6 +624,10 @@ def build_longitudinal_tracking_report(
     )
     maximum_saturation = max(saturation, default=float("inf"))
     maximum_stop_speed = max(stop_terminal_speed, default=0.0)
+    locked_gap = np.asarray(locked_gap_errors, dtype=np.float64)
+    locked_gap_p95 = (
+        float(np.percentile(locked_gap, 95)) if locked_gap.size else 0.0
+    )
     blockers = []
     if summary["invalid"]:
         blockers.append("invalid_trajectory")
@@ -592,6 +641,8 @@ def build_longitudinal_tracking_report(
         blockers.append("continuous_control_saturation")
     if maximum_stop_speed > 0.3:
         blockers.append("stop_terminal_speed")
+    if locked_gap_p95 > 1.5:
+        blockers.append("locked_follower_gap_error_p95")
 
     control_decomposition = summarize_longitudinal_control(role_control)
     return LongitudinalTrackingReport(
@@ -603,6 +654,8 @@ def build_longitudinal_tracking_report(
         target_reference_speed_delta_p95_mps=speed_delta_p95,
         maximum_continuous_saturation_s=maximum_saturation,
         maximum_stop_terminal_speed_mps=maximum_stop_speed,
+        locked_follower_sample_count=int(locked_gap.size),
+        locked_follower_gap_error_p95_m=locked_gap_p95,
         control_decomposition=control_decomposition,
         passed=not blockers,
         blockers=tuple(blockers),
@@ -747,6 +800,7 @@ def run_longitudinal_tracking_benchmark(
     prefix_actions: Sequence[Mapping[str, np.ndarray]],
     trajectories: np.ndarray,
     *,
+    stop_requested: np.ndarray,
     evaluator: object | None = None,
 ) -> LongitudinalTrackingReport:
     """Run the existing branch controller and diagnose its longitudinal trace."""
@@ -763,7 +817,14 @@ def run_longitudinal_tracking_benchmark(
             "evaluator must provide evaluate(spec, prefix, trajectories)"
         )
     result = evaluate(episode_spec, prefix_actions, trajectories)
-    return build_longitudinal_tracking_report(result, trajectories)
+    return build_longitudinal_tracking_report(
+        result,
+        trajectories,
+        stop_requested=stop_requested,
+        tracking_group_mask=np.ones(
+            np.asarray(trajectories).shape[0], dtype=np.bool_
+        ),
+    )
 
 
 def audit_joint_dataset(dataset_root: Path | str) -> dict[str, object]:

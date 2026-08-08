@@ -308,7 +308,19 @@ def _scenario_summary(env: object) -> dict[str, object]:
 
 def _scenario_ready_for_primary_sampling(env: object) -> bool:
     summary = _scenario_summary(env)
-    return bool(summary.get("scenario_realized", False))
+    if not bool(summary.get("scenario_realized", False)):
+        return False
+    # S6/S8 background traffic is itself the evaluated hazard.  Sampling an
+    # intermediate recipe state would let a new actor appear inside a 4-second
+    # simulator branch although the proxy snapshot cannot contain it.  Other
+    # primary scenarios contain optional/background coverage recipes whose
+    # completion is not part of their hazard realization contract.
+    if str(summary.get("scenario_id", "")) in {
+        "S6_background_merge_in",
+        "S8_ego_exit_to_ramp",
+    }:
+        return bool(summary.get("scenario_recipes_complete", False))
+    return True
 
 
 def _replay_pose_error(
@@ -372,7 +384,7 @@ def run_s5_s9_preflight(
                     last_summary = _scenario_summary(env)
                     if (
                         builder.history_ready()
-                        and bool(last_summary.get("scenario_realized", False))
+                        and _scenario_ready_for_primary_sampling(env)
                     ):
                         values = builder.build_model_inputs(env)
                         fields = values.as_dict()
@@ -444,6 +456,15 @@ def run_s5_s9_preflight(
                     ),
                     "scenario_realized": bool(
                         last_summary.get("scenario_realized", False)
+                    ),
+                    "scenario_recipes_complete": bool(
+                        last_summary.get("scenario_recipes_complete", False)
+                    ),
+                    "scenario_completed_recipe_count": int(
+                        last_summary.get("scenario_completed_recipe_count", 0)
+                    ),
+                    "scenario_recipe_count": int(
+                        last_summary.get("scenario_recipe_count", 0)
                     ),
                     "maximum_replay_position_error_m": max_position_error,
                     "maximum_replay_heading_error_rad": max_heading_error,
@@ -525,6 +546,7 @@ def run_joint_reward_calibration(
     tracking_rows = []
     longitudinal_audit_rows = []
     longitudinal_state_reports = []
+    longitudinal_states_without_safe_group = 0
     longitudinal_clean_errors = []
     longitudinal_target_speed_delta = []
     longitudinal_control_by_role = [
@@ -673,53 +695,86 @@ def run_joint_reward_calibration(
                                     }
                                 )
                             state_longitudinal_audits.append(group_audits)
-                        state_longitudinal_report = (
-                            build_longitudinal_tracking_report(
-                                simulator, candidates
+                        closed_loop_safe_groups = ~simulator.reward.unsafe
+                        if bool(closed_loop_safe_groups.any()):
+                            state_longitudinal_report = build_longitudinal_tracking_report(
+                                simulator,
+                                candidates,
+                                stop_requested=(sampled_modes == 9),
+                                tracking_group_mask=closed_loop_safe_groups,
                             )
-                        )
-                        longitudinal_state_reports.append(
-                            state_longitudinal_report
-                        )
+                            longitudinal_state_reports.append(
+                                state_longitudinal_report
+                            )
+                        else:
+                            # Unsafe groups remain in calibration and
+                            # false-safe attribution, but cannot establish a
+                            # controller tracking envelope.
+                            state_longitudinal_report = None
+                            longitudinal_states_without_safe_group += 1
                         for group in range(candidates.shape[0]):
                             for role in range(3):
                                 trace = simulator.tracking_traces[group][role]
                                 if not trace["longitudinal_errors_m"]:
                                     continue
-                                tracking_rows.append(
-                                    {
-                                        "scenario": scenario[0],
-                                        "route": scenario[1],
-                                        "seed": int(seed),
-                                        "state_index": collected,
-                                        "group": group,
-                                        "role": role,
-                                        "mode": int(sampled_modes[group, role]),
-                                        "longitudinal_errors_m": trace[
-                                            "longitudinal_errors_m"
-                                        ],
-                                        "lateral_errors_m": trace[
-                                            "lateral_errors_m"
-                                        ],
-                                        "heading_errors_rad": trace[
-                                            "heading_errors_rad"
-                                        ],
-                                    }
+                                closed_loop_safe = not bool(
+                                    simulator.reward.unsafe[group]
                                 )
+                                formation_enabled = np.asarray(
+                                    trace["formation_constraint_enabled"],
+                                    dtype=np.bool_,
+                                )
+                                trajectory_controlled = (
+                                    np.ones(
+                                        formation_enabled.shape, dtype=np.bool_
+                                    )
+                                    if role == 0
+                                    else ~formation_enabled
+                                )
+                                lateral_clean = ~np.asarray(
+                                    trace["lateral_heading_contaminated"],
+                                    dtype=np.bool_,
+                                )
+                                longitudinal_mask = (
+                                    trajectory_controlled
+                                    & lateral_clean
+                                    & closed_loop_safe
+                                )
+                                if closed_loop_safe:
+                                    tracking_rows.append(
+                                        {
+                                            "scenario": scenario[0],
+                                            "route": scenario[1],
+                                            "seed": int(seed),
+                                            "state_index": collected,
+                                            "group": group,
+                                            "role": role,
+                                            "mode": int(sampled_modes[group, role]),
+                                            # The safety envelope must retain
+                                            # every real displacement of a
+                                            # closed-loop-safe vehicle,
+                                            # including bounded formation
+                                            # correction.  Regime filtering is
+                                            # only for controller-quality gates.
+                                            "longitudinal_errors_m": trace[
+                                                "longitudinal_errors_m"
+                                            ],
+                                            "lateral_errors_m": trace[
+                                                "lateral_errors_m"
+                                            ],
+                                            "heading_errors_rad": trace[
+                                                "heading_errors_rad"
+                                            ],
+                                        }
+                                    )
                                 longitudinal = np.abs(
                                     np.asarray(
                                         trace["longitudinal_errors_m"],
                                         dtype=np.float64,
                                     )
                                 )
-                                uncontaminated = ~np.asarray(
-                                    trace[
-                                        "lateral_heading_contaminated"
-                                    ],
-                                    dtype=bool,
-                                )
                                 longitudinal_clean_errors.extend(
-                                    longitudinal[uncontaminated].tolist()
+                                    longitudinal[longitudinal_mask].tolist()
                                 )
                                 longitudinal_target_speed_delta.extend(
                                     np.asarray(
@@ -765,12 +820,10 @@ def run_joint_reward_calibration(
                                 role_control[
                                     "clean_longitudinal_error"
                                 ].extend(
-                                    longitudinal[
-                                        uncontaminated
-                                    ].tolist()
+                                    longitudinal[longitudinal_mask].tolist()
                                 )
                                 role_control["contamination"].extend(
-                                    (~uncontaminated).tolist()
+                                    (~longitudinal_mask).tolist()
                                 )
                         false_safe_indices = np.flatnonzero(
                             simulator.reward.unsafe & ~proxy.unsafe
@@ -828,6 +881,12 @@ def run_joint_reward_calibration(
                                 "executed_steps": simulator.executed_steps.tolist(),
                                 "minimum_platoon_gap_m": simulator.minimum_platoon_gap_m.tolist(),
                                 "minimum_background_gap_m": simulator.minimum_background_gap_m.tolist(),
+                                "proxy_minimum_platoon_gap_m": proxy.components[
+                                    "minimum_platoon_gap_m"
+                                ].tolist(),
+                                "proxy_minimum_background_gap_m": proxy.components[
+                                    "minimum_background_gap_m"
+                                ].tolist(),
                                 "failure_reasons": [
                                     list(value)
                                     for value in simulator.failure_reasons
@@ -838,6 +897,7 @@ def run_joint_reward_calibration(
                                         - simulator.reward.components[name]
                                     ).tolist()
                                     for name in proxy.components
+                                    if name in simulator.reward.components
                                 },
                                 "replay_position_error_m": simulator.replay_position_error_m.tolist(),
                                 "replay_heading_error_rad": simulator.replay_heading_error_rad.tolist(),
@@ -871,6 +931,12 @@ def run_joint_reward_calibration(
                                 ),
                                 "longitudinal_tracking_report": (
                                     state_longitudinal_report.as_dict()
+                                    if state_longitudinal_report is not None
+                                    else {
+                                        "excluded_reason": (
+                                            "no_closed_loop_safe_group"
+                                        )
+                                    }
                                 ),
                             }
                         )
@@ -978,7 +1044,10 @@ def run_joint_reward_calibration(
         longitudinal_control_by_role
     )
     passed = bool(
-        calibration_phase == "holdout" and result.passed and tracking_passed
+        calibration_phase == "holdout"
+        and result.passed
+        and tracking_passed
+        and not longitudinal_blockers
     )
     report: dict[str, object] = {
         "format": "bev_joint_reward_calibration_v2",
@@ -1016,6 +1085,9 @@ def run_joint_reward_calibration(
             "clean_sample_count": longitudinal_clean_samples,
             "contaminated_sample_count": (
                 longitudinal_contaminated_samples
+            ),
+            "states_without_closed_loop_safe_group": (
+                longitudinal_states_without_safe_group
             ),
             "maximum_state_longitudinal_p95_m": max(
                 report.longitudinal_error_p95_m

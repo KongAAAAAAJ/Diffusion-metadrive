@@ -270,29 +270,44 @@ def _fixed_world_longitudinal_reference(
     world_reference: np.ndarray,
     current_pose: np.ndarray,
     elapsed_s: float,
+    initial_speed_mps: float,
 ) -> LongitudinalTrackingReference:
     """Preserve fixed-world timing without turning position lag into speed."""
 
     offsets = np.arange(9, dtype=np.float64) * 0.5
     absolute = np.clip(float(elapsed_s) + offsets, 0.0, 4.0)
-    kinematics = np.asarray(
-        [_reference_arc_kinematics(world_reference, value) for value in absolute],
-        dtype=np.float64,
+    points = np.asarray(world_reference[:, :2], dtype=np.float64)
+    cumulative = np.concatenate(
+        ([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+    )
+    source_times = np.arange(9, dtype=np.float64) * 0.5
+    segment_speed = np.diff(cumulative) / 0.5
+    initial_speed = float(initial_speed_mps)
+    if not np.isfinite(initial_speed) or initial_speed < 0.0:
+        raise JointRewardError("initial branch speed must be finite and non-negative")
+    speed_profile = np.concatenate(([initial_speed], segment_speed))
+    acceleration_profile = np.empty((9,), dtype=np.float64)
+    acceleration_profile[:-1] = np.diff(speed_profile) / 0.5
+    acceleration_profile[-1] = acceleration_profile[-2]
+    arc_profile = np.interp(absolute, source_times, cumulative)
+    speed_profile = np.interp(absolute, source_times, speed_profile)
+    acceleration_profile = np.interp(
+        absolute, source_times, acceleration_profile
     )
     longitudinal, _, _, _ = _tracking_error_against_reference(
         np.asarray(current_pose, dtype=np.float64),
         world_reference,
         float(elapsed_s),
     )
-    speed = kinematics[:, 1]
-    acceleration = np.clip(kinematics[:, 2], -8.0, 5.0)
+    speed = speed_profile
+    acceleration = np.clip(acceleration_profile, -8.0, 5.0)
     stop_requested = bool(
-        np.allclose(kinematics[-2:, 0], kinematics[-1, 0], atol=1.0e-8)
+        np.allclose(arc_profile[-2:], arc_profile[-1], atol=1.0e-8)
         and speed[-1] <= 1.0e-6
     )
     return LongitudinalTrackingReference(
         sample_times_s=offsets,
-        arc_position_m=kinematics[:, 0],
+        arc_position_m=arc_profile,
         speed_mps=np.clip(speed, 0.0, 100.0 / 3.6),
         acceleration_mps2=acceleration,
         original_arc_error_m=float(-longitudinal),
@@ -405,7 +420,7 @@ def _has_failure(info: Mapping[str, object]) -> tuple[bool, bool]:
         )
         out |= bool(value.get("out_of_road", False)) or bool(
             value.get("out_of_route", False)
-        )
+        ) or bool(value.get("crash_sidewalk", False))
     return collision, out
 
 
@@ -579,6 +594,7 @@ class JointSimulatorBranchEvaluator:
                     "reference_feedforward_acceleration_mps2": [],
                     "position_error_speed_increment_mps": [],
                     "formation_gap_error_m": [],
+                    "formation_constraint_enabled": [],
                     "formation_control_increment": [],
                     "actual_speed_mps": [],
                     "actual_acceleration_mps2": [],
@@ -630,6 +646,15 @@ class JointSimulatorBranchEvaluator:
                         "branch prefix replay did not reproduce the calibration state"
                     )
 
+                regime_getter = getattr(
+                    env, "trajectory_formation_constraint_enabled", None
+                )
+                if not callable(regime_getter):
+                    raise JointRewardError(
+                        "branch environment has no trajectory control regime"
+                    )
+                formation_constraint_enabled = bool(regime_getter())
+
                 initial = replay_pose.copy()
                 for role, agent_id in enumerate(AGENT_IDS):
                     initial_speed[group, role] = signed_longitudinal_speed_mps(
@@ -664,7 +689,10 @@ class JointSimulatorBranchEvaluator:
                     }
                     explicit_references = {
                         agent_id: _fixed_world_longitudinal_reference(
-                            references[role], current[role], elapsed
+                            references[role],
+                            current[role],
+                            elapsed,
+                            float(initial_speed[group, role]),
                         )
                         for role, agent_id in enumerate(AGENT_IDS)
                     }
@@ -725,6 +753,9 @@ class JointSimulatorBranchEvaluator:
                             agent_id,
                             action[agent_id],
                             explicit_references[agent_id],
+                            formation_constraint_enabled=(
+                                formation_constraint_enabled
+                            ),
                         )
                         for agent_id in AGENT_IDS
                     }
@@ -763,6 +794,7 @@ class JointSimulatorBranchEvaluator:
                             "crash_object",
                             "crash_building",
                             "crash_human",
+                            "crash_sidewalk",
                             "out_of_road",
                             "out_of_route",
                         ):
@@ -847,6 +879,9 @@ class JointSimulatorBranchEvaluator:
                         )
                         trace["formation_gap_error_m"].append(
                             diagnostic["formation_gap_error"]
+                        )
+                        trace["formation_constraint_enabled"].append(
+                            bool(formation_constraint_enabled)
                         )
                         trace["formation_control_increment"].append(
                             float(controls[agent_id][1])

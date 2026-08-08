@@ -353,6 +353,10 @@ def summarize_control_result(
     longitudinal = build_longitudinal_tracking_report(
         result,
         np.stack([[case.trajectory] * 3]).astype(np.float32),
+        stop_requested=np.full(
+            (1, 3), case.category == "stop", dtype=np.bool_
+        ),
+        tracking_group_mask=np.ones(1, dtype=np.bool_),
     )
     role_rows = []
     lateral_all: list[float] = []

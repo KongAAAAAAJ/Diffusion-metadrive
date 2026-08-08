@@ -1914,3 +1914,219 @@ def test_background_continuation_prefers_navigation_route_at_junction():
     )
 
     assert selected is intended
+
+
+def test_background_prediction_extends_across_full_navigation_route_chain():
+    source = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=10.0)
+    successor = AngledLane(("B", "C", 0), (10.0, 0.0), 0.0, length=10.0)
+    tail = AngledLane(("C", "D", 0), (20.0, 0.0), 0.0, length=20.0)
+    road_network = SimpleNamespace(
+        graph={"B": {"C": [successor]}, "C": {"D": [tail]}}
+    )
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=road_network)
+        )
+    )
+    vehicle = SimpleNamespace(
+        name="background",
+        lane=source,
+        navigation=SimpleNamespace(next_ref_lanes=[successor]),
+        position=np.asarray([8.0, 0.0]),
+        heading_theta=0.0,
+        speed_km_h=18.0,
+    )
+
+    predicted = PlatoonNormalPlanner()._predict_vehicle_trajectory(
+        env, vehicle, np.asarray([0.0, 4.0])
+    )
+
+    assert predicted[:, 0] == pytest.approx([8.0, 28.0], abs=0.3)
+
+
+def test_background_prediction_uses_scenario_brake_speed_profile():
+    lane = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=100.0)
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=SimpleNamespace(graph={}))
+        )
+    )
+    vehicle = SimpleNamespace(
+        name="braking_lead",
+        lane=lane,
+        navigation=SimpleNamespace(next_ref_lanes=[]),
+        position=np.asarray([0.0, 0.0]),
+        heading_theta=0.0,
+        speed_km_h=36.0,
+        scenario_brake_target_speed_kmh=7.2,
+        scenario_brake_deceleration_mps2=2.0,
+    )
+
+    predicted = PlatoonNormalPlanner()._predict_vehicle_trajectory(
+        env, vehicle, np.asarray([1.0, 4.0])
+    )
+
+    assert predicted[:, 0] == pytest.approx([9.0, 24.0], abs=0.3)
+
+
+def test_background_prediction_holds_at_finite_route_terminal():
+    lane = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=10.0)
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(
+                road_network=SimpleNamespace(graph={})
+            )
+        )
+    )
+    vehicle = SimpleNamespace(
+        name="terminal_background",
+        lane=lane,
+        navigation=SimpleNamespace(next_ref_lanes=[]),
+        position=np.asarray([8.0, 0.0]),
+        heading_theta=0.0,
+        speed_km_h=18.0,
+    )
+
+    predicted = PlatoonNormalPlanner()._predict_vehicle_trajectory(
+        env, vehicle, np.asarray([0.0, 1.0, 4.0])
+    )
+
+    assert predicted[:, 0] == pytest.approx([8.0, 10.0, 10.0], abs=0.3)
+    assert predicted[:, 1] == pytest.approx([0.0, 0.0, 0.0], abs=1.0e-6)
+
+
+def test_background_prediction_follows_navigation_checkpoints_past_ambiguous_fork():
+    current = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=10.0)
+    first = AngledLane(("B", "C", 0), (10.0, 0.0), 0.0, length=10.0)
+    routed = AngledLane(("C", "E", 0), (20.0, 0.0), 0.0, length=20.0)
+    fork = AngledLane(("C", "F", 0), (20.0, 0.0), np.pi / 2.0, length=20.0)
+    road_network = SimpleNamespace(
+        graph={
+            "A": {"B": [current]},
+            "B": {"C": [first]},
+            "C": {"E": [routed], "F": [fork]},
+        }
+    )
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=road_network)
+        )
+    )
+    vehicle = SimpleNamespace(
+        name="routed_background",
+        lane=current,
+        navigation=SimpleNamespace(
+            checkpoints=["A", "B", "C", "E"],
+            next_ref_lanes=[first],
+        ),
+        position=np.asarray([8.0, 0.0]),
+        heading_theta=0.0,
+        speed_km_h=18.0,
+    )
+
+    predicted = PlatoonNormalPlanner()._predict_vehicle_trajectory(
+        env, vehicle, np.asarray([0.0, 2.0, 4.0])
+    )
+
+    assert predicted[:, 0] == pytest.approx([8.0, 18.0, 28.0], abs=0.3)
+    assert predicted[:, 1] == pytest.approx([0.0, 0.0, 0.0], abs=0.3)
+
+
+def test_merge_policy_prediction_includes_target_lane_occupancy_branches():
+    source = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=100.0)
+    target = AngledLane(("A", "B", 1), (0.0, 3.5), 0.0, length=100.0)
+    policy = type("IDMMergePolicy", (), {})()
+    road_network = SimpleNamespace(graph={})
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=road_network),
+            get_policy=lambda *_: policy,
+        )
+    )
+    vehicle = SimpleNamespace(
+        name="merge_vehicle",
+        lane=source,
+        navigation=SimpleNamespace(
+            next_ref_lanes=[], merge_target_lane=target
+        ),
+        position=np.asarray([0.0, 0.0]),
+        heading_theta=0.0,
+        speed_km_h=18.0,
+    )
+
+    branches = PlatoonNormalPlanner()._predict_policy_route_branches(
+        env, vehicle, np.asarray([0.0, 2.0, 4.0])
+    )
+
+    assert len(branches) == 3
+    assert all(branch.shape == (3, 3) for branch in branches)
+    assert max(float(branch[-1, 1]) for branch in branches) == pytest.approx(3.5)
+
+
+def test_ground_truth_idm_prediction_includes_braking_occupancies():
+    lane = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=100.0)
+    policy = type("GroundTruthIDMPolicy", (), {})()
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(
+                road_network=SimpleNamespace(graph={})
+            ),
+            get_policy=lambda *_: policy,
+        )
+    )
+    vehicle = SimpleNamespace(
+        name="idm_vehicle",
+        lane=lane,
+        navigation=SimpleNamespace(next_ref_lanes=[]),
+        position=np.asarray([0.0, 0.0]),
+        heading_theta=0.0,
+        speed_km_h=18.0,
+    )
+
+    branches = PlatoonNormalPlanner()._predict_policy_route_branches(
+        env, vehicle, np.asarray([0.0, 2.0, 4.0])
+    )
+
+    assert len(branches) == 2
+    assert all(branch.shape == (3, 3) for branch in branches)
+    assert branches[0][-1, 0] < 20.0
+    assert branches[1][-1, 0] < branches[0][-1, 0]
+    assert np.all(np.diff(branches[1][:, 0]) >= -1.0e-9)
+
+
+def test_ground_truth_idm_prediction_includes_route_required_lane_change():
+    current_lanes = [
+        AngledLane(("A", "B", index), (0.0, 3.5 * index), 0.0, length=100.0)
+        for index in range(3)
+    ]
+    connector = AngledLane(("B", "C", 0), (100.0, 0.0), 0.0, length=100.0)
+    policy = type("GroundTruthIDMPolicy", (), {})()
+    road_network = SimpleNamespace(
+        graph={"A": {"B": current_lanes}, "B": {"C": [connector]}}
+    )
+    env = SimpleNamespace(
+        engine=SimpleNamespace(
+            current_map=SimpleNamespace(road_network=road_network),
+            get_policy=lambda *_: policy,
+        )
+    )
+    vehicle = SimpleNamespace(
+        name="mandatory_exit_vehicle",
+        lane=current_lanes[2],
+        navigation=SimpleNamespace(
+            checkpoints=["A", "B", "C"],
+            current_ref_lanes=current_lanes,
+            next_ref_lanes=[connector],
+        ),
+        position=np.asarray([0.0, 7.0]),
+        heading_theta=0.0,
+        speed_km_h=18.0,
+    )
+
+    branches = PlatoonNormalPlanner()._predict_policy_route_branches(
+        env, vehicle, np.asarray([0.0, 2.0, 4.0])
+    )
+
+    assert len(branches) == 14
+    assert any(float(branch[-1, 1]) < 4.0 for branch in branches[2:])
+    assert all(branch.shape == (3, 3) for branch in branches)

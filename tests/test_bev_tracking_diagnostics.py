@@ -61,18 +61,17 @@ def test_tracking_report_is_grouped_by_scenario_and_role() -> None:
         ({"simulator_out_of_drivable": True}, "road_footprint"),
         (
             {
-                "simulator_collision": True,
-                "minimum_background_gap_m": -0.1,
+                "minimum_background_gap_m": 4.99,
             },
             "background_prediction",
         ),
         (
             {
-                "simulator_collision": True,
-                "minimum_platoon_gap_m": -0.1,
+                "minimum_platoon_gap_m": 6.99,
             },
             "platoon_interaction",
         ),
+        ({"simulator_collision": True}, "unclassified_collision_geometry"),
     ],
 )
 def test_false_safe_attribution(kwargs, expected: str) -> None:
