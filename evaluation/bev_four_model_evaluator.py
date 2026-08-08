@@ -11,7 +11,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Literal, Mapping, Sequence
 
 import numpy as np
 
@@ -104,6 +104,31 @@ class FourModelEvaluationConfig:
             raise FourModelEvaluationError(
                 "inference_p95_limit_ms must be positive and finite"
             )
+
+
+@dataclass(frozen=True)
+class ReproducibilityToleranceConfig:
+    """Engineering tolerances for closed-loop repeat comparisons.
+
+    These tolerances do not relax collision, out-of-road or execution-rejection
+    outcomes.  They only distinguish harmless floating-point/physics drift from
+    a changed experimental conclusion.
+    """
+
+    distance_m: float = 0.10
+    speed_km_h: float = 0.25
+    rate: float = 0.10
+    reward: float = 0.10
+    comfort: float = 0.10
+    fraction: float = 0.02
+
+    def __post_init__(self) -> None:
+        for field in dataclasses.fields(self):
+            value = getattr(self, field.name)
+            if not math.isfinite(value) or value < 0.0:
+                raise FourModelEvaluationError(
+                    f"reproducibility tolerance {field.name} must be finite and non-negative"
+                )
 
 
 def _sync(device: torch.device) -> None:
@@ -295,6 +320,7 @@ def _empty_metrics() -> dict[str, object]:
         "trajectory_retained_raw_fraction": [],
         "execution_modes_removed": 0,
         "execution_mode_masks_built": 0,
+        "episode_outcomes": [],
     }
 
 
@@ -370,6 +396,7 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
             if raw.get("trajectory_retained_raw_fraction")
             else 0.0,
         },
+        "episode_outcomes": list(raw.get("episode_outcomes", ())),
         "timing": timing,
     }
 
@@ -420,6 +447,93 @@ def _initial_state_signature(env: object) -> np.ndarray:
     return signature
 
 
+def _initial_states_sha256(
+    values: Mapping[tuple[str, str, int], np.ndarray],
+) -> str:
+    digest = hashlib.sha256()
+    for key in sorted(values):
+        digest.update(json.dumps(key, separators=(",", ":")).encode("utf-8"))
+        signature = np.ascontiguousarray(values[key], dtype=np.float64)
+        digest.update(signature.tobytes())
+    return digest.hexdigest()
+
+
+def _initial_scene_sha256(env: object) -> str:
+    """Hash platoon and background actors without unstable object UUIDs."""
+
+    helper = PlatoonNormalPlanner()
+    agent_objects = {
+        id(vehicle): agent_id
+        for agent_id, vehicle in (getattr(env, "agents", {}) or {}).items()
+    }
+    rows = []
+    engine = getattr(env, "engine", None)
+    get_policy = getattr(engine, "get_policy", None)
+    for _, vehicle in helper._surrounding_vehicles(env):
+        position = np.asarray(getattr(vehicle, "position", ()), dtype=np.float64)
+        if position.shape[0] < 2 or not np.isfinite(position[:2]).all():
+            raise FourModelEvaluationError("initial scene vehicle position is invalid")
+        lane = getattr(vehicle, "lane", None)
+        lane_index = getattr(lane, "index", getattr(vehicle, "lane_index", None))
+        policy = None
+        if callable(get_policy):
+            try:
+                policy = get_policy(getattr(vehicle, "name", ""))
+            except Exception:
+                policy = None
+        rows.append(
+            {
+                "role": agent_objects.get(id(vehicle), "background"),
+                "vehicle_class": type(vehicle).__name__,
+                "position": [float(position[0]), float(position[1])],
+                "heading": float(getattr(vehicle, "heading_theta", 0.0)),
+                "speed_km_h": float(getattr(vehicle, "speed_km_h", 0.0)),
+                "lane_index": repr(lane_index),
+                "policy_class": type(policy).__name__ if policy is not None else None,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            row["role"],
+            row["vehicle_class"],
+            row["position"][0],
+            row["position"][1],
+            row["lane_index"],
+        )
+    )
+    encoded = json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _tensor_mapping_sha256(values: Mapping[str, torch.Tensor]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(values):
+        value = values[name]
+        if not isinstance(value, torch.Tensor):
+            continue
+        array = value.detach().cpu().contiguous().numpy()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(json.dumps(array.shape).encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def _tensor_mapping_exact(
+    first: Mapping[str, torch.Tensor], second: Mapping[str, torch.Tensor]
+) -> bool:
+    tensor_keys = {
+        name for name, value in first.items() if isinstance(value, torch.Tensor)
+    }
+    if tensor_keys != {
+        name for name, value in second.items() if isinstance(value, torch.Tensor)
+    }:
+        return False
+    return all(torch.equal(first[name], second[name]) for name in tensor_keys)
+
+
 @torch.no_grad()
 def evaluate_four_models(
     manifest_path: Path,
@@ -444,10 +558,12 @@ def evaluate_four_models(
     model_reports = {}
     episode_count = len(cfg.scenarios) * len(cfg.seeds)
     reference_initial_states: dict[tuple[str, str, int], np.ndarray] = {}
+    reference_initial_scenes: dict[tuple[str, str, int], str] = {}
 
     for name, planner in models.items():
         raw = _empty_metrics()
         trajectory_optimizer = KinematicTrajectoryOptimizer()
+        deterministic_probe: dict[str, object] | None = None
         for scenario in cfg.scenarios:
             for seed in cfg.seeds:
                 env = SensorlessJointBEVPlatoonEnv(
@@ -486,6 +602,15 @@ def evaluate_four_models(
                         "models did not receive identical reset state for "
                         f"scenario={scenario[0]} seed={seed}"
                     )
+                initial_scene = _initial_scene_sha256(env)
+                reference_initial_scene = reference_initial_scenes.setdefault(
+                    initial_key, initial_scene
+                )
+                if initial_scene != reference_initial_scene:
+                    raise FourModelEvaluationError(
+                        "models did not receive identical initial scene for "
+                        f"scenario={scenario[0]} seed={seed}"
+                    )
                 builder = JointBEVSampleBuilder(AGENT_IDS)
                 builder.reset()
                 dt_s = simulator_decision_dt_s(env)
@@ -495,6 +620,10 @@ def evaluate_four_models(
                 episode_out = False
                 episode_gap5 = False
                 episode_gap7 = False
+                episode_completed = False
+                episode_execution_rejected = False
+                episode_min_background_gap = float("inf")
+                episode_min_platoon_gap = float("inf")
                 role_collision = {agent_id: False for agent_id in AGENT_IDS}
                 role_out = {agent_id: False for agent_id in AGENT_IDS}
                 recovered_at = None
@@ -543,6 +672,23 @@ def evaluate_four_models(
                             inference_ms = (
                                 time.perf_counter() - inference_start
                             ) * 1000.0
+                            if deterministic_probe is None:
+                                repeated_output = planner_forward_from_batch(
+                                    planner, batch, diffusion_noise=noise
+                                )
+                                deterministic_probe = {
+                                    "input_and_noise_sha256": _tensor_mapping_sha256(
+                                        {**batch, "diffusion_noise": noise}
+                                    ),
+                                    "output_sha256": _tensor_mapping_sha256(output),
+                                    "identical_replay": _tensor_mapping_exact(
+                                        output, repeated_output
+                                    ),
+                                }
+                                if not deterministic_probe["identical_replay"]:
+                                    raise FourModelEvaluationError(
+                                        f"{name} is not exact for identical input and noise"
+                                    )
                             raw_trajectories = (
                                 output["selected_trajectory"][0]
                                 .detach()
@@ -577,6 +723,7 @@ def evaluate_four_models(
                                         "reason": str(exc),
                                     }
                                 )
+                                episode_execution_rejected = True
                                 break
                             trajectories = optimization.optimized_trajectories
                             selected_modes = selected_mode_array.tolist()
@@ -649,6 +796,12 @@ def evaluate_four_models(
                                 # MetaDrive has deleted an agent object.
                                 adjacent_gaps.append(float("inf"))
                         background_gap = _minimum_background_gap(env)
+                        episode_min_background_gap = min(
+                            episode_min_background_gap, background_gap
+                        )
+                        episode_min_platoon_gap = min(
+                            episode_min_platoon_gap, min(adjacent_gaps)
+                        )
                         episode_gap5 |= background_gap < 5.0
                         episode_gap7 |= min(adjacent_gaps) < 7.0
                         formation_values = []
@@ -740,6 +893,7 @@ def evaluate_four_models(
                                 for agent_id in AGENT_IDS
                             ):
                                 raw["episode_completed"] += 1
+                                episode_completed = True
                             break
                     raw["recovery_time_s"].append(
                         float(recovered_at if recovered_at is not None else cfg.max_steps * dt_s)
@@ -755,6 +909,31 @@ def evaluate_four_models(
                         raw["roles"][agent_id]["out_of_road"] += int(
                             role_out[agent_id]
                         )
+                    raw["episode_outcomes"].append(
+                        {
+                            "scenario": scenario[0],
+                            "route": scenario[1],
+                            "seed": int(seed),
+                            "collision": bool(episode_collision),
+                            "out_of_road": bool(episode_out),
+                            "completed": bool(episode_completed),
+                            "execution_rejected": bool(
+                                episode_execution_rejected
+                            ),
+                            "gap_5m_violation": bool(episode_gap5),
+                            "gap_7m_violation": bool(episode_gap7),
+                            "minimum_background_gap_m": (
+                                float(episode_min_background_gap)
+                                if math.isfinite(episode_min_background_gap)
+                                else None
+                            ),
+                            "minimum_platoon_gap_m": (
+                                float(episode_min_platoon_gap)
+                                if math.isfinite(episode_min_platoon_gap)
+                                else None
+                            ),
+                        }
+                    )
                 finally:
                     env.close()
         summary = _summarize(raw, episode_count)
@@ -764,6 +943,11 @@ def evaluate_four_models(
                 f"{name} three-role inference P95 {inference_p95:.2f}ms exceeds "
                 f"{cfg.inference_p95_limit_ms:.2f}ms"
             )
+        if deterministic_probe is None:
+            raise FourModelEvaluationError(
+                f"{name} evaluation never reached a model-ready state"
+            )
+        summary["deterministic_probe"] = deterministic_probe
         model_reports[name] = summary
 
     report = {
@@ -775,6 +959,15 @@ def evaluate_four_models(
         "common_seeds": list(cfg.seeds),
         "common_noise_seed_by_episode": True,
         "common_initial_state_verified": True,
+        "initial_state_sha256": _initial_states_sha256(
+            reference_initial_states
+        ),
+        "initial_scene_sha256": hashlib.sha256(
+            json.dumps(
+                sorted(reference_initial_scenes.items()),
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
         "deterministic_inference": {
             "torch_deterministic_algorithms": True,
             "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
@@ -823,12 +1016,334 @@ def _behavior_sha256(report: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _nested_float(value: Mapping[str, object], path: Sequence[str]) -> float:
+    current: object = value
+    for key in path:
+        if not isinstance(current, Mapping) or key not in current:
+            raise FourModelEvaluationError(
+                f"repeat report is missing metric {'.'.join(path)}"
+            )
+        current = current[key]
+    if isinstance(current, bool) or not isinstance(current, (int, float)):
+        raise FourModelEvaluationError(
+            f"repeat metric {'.'.join(path)} is not numeric"
+        )
+    result = float(current)
+    if not math.isfinite(result):
+        raise FourModelEvaluationError(
+            f"repeat metric {'.'.join(path)} is non-finite"
+        )
+    return result
+
+
+def _normalized_mode_distribution(
+    model: Mapping[str, object], agent_id: str
+) -> dict[str, float]:
+    roles = model.get("roles")
+    if not isinstance(roles, Mapping) or not isinstance(roles.get(agent_id), Mapping):
+        raise FourModelEvaluationError(f"repeat report is missing role {agent_id}")
+    distribution = roles[agent_id].get("mode_distribution")
+    if not isinstance(distribution, Mapping):
+        raise FourModelEvaluationError("mode_distribution is missing")
+    counts = {str(key): int(value) for key, value in distribution.items()}
+    total = sum(counts.values())
+    return {
+        key: value / max(total, 1)
+        for key, value in counts.items()
+    }
+
+
+def _episode_outcome_index(
+    model: Mapping[str, object],
+) -> dict[tuple[str, str, int], Mapping[str, object]]:
+    outcomes = model.get("episode_outcomes")
+    if not isinstance(outcomes, list):
+        raise FourModelEvaluationError("repeat report has no episode outcomes")
+    indexed = {}
+    for item in outcomes:
+        if not isinstance(item, Mapping):
+            raise FourModelEvaluationError("episode outcome must be an object")
+        key = (
+            str(item.get("scenario")),
+            str(item.get("route")),
+            int(item.get("seed")),
+        )
+        if key in indexed:
+            raise FourModelEvaluationError(f"duplicate episode outcome {key}")
+        indexed[key] = item
+    return indexed
+
+
+def _conclusion_label(delta: float, tolerance: float) -> str:
+    epsilon = 1.0e-12 * max(1.0, abs(delta), abs(tolerance))
+    if delta > tolerance + epsilon:
+        return "better"
+    if delta < -tolerance - epsilon:
+        return "worse"
+    return "equivalent"
+
+
+def _exceeds_tolerance(delta: float, tolerance: float) -> bool:
+    epsilon = 1.0e-12 * max(1.0, abs(delta), abs(tolerance))
+    return delta > tolerance + epsilon
+
+
+def _report_conclusions(
+    report: Mapping[str, object], cfg: ReproducibilityToleranceConfig
+) -> dict[str, str]:
+    models = report.get("models")
+    if not isinstance(models, Mapping):
+        raise FourModelEvaluationError("repeat report has no models")
+    comparisons = (
+        ("A_GRPO_vs_A", "A_GRPO", "A"),
+        ("B_GRPO_vs_B", "B_GRPO", "B"),
+        ("B_vs_A", "B", "A"),
+        ("B_GRPO_vs_A_GRPO", "B_GRPO", "A_GRPO"),
+    )
+    # Direction is +1 when larger is better and -1 when smaller is better.
+    metrics = (
+        (("joint_safety", "collision_rate"), -1.0, 0.0),
+        (("joint_safety", "out_of_road_rate"), -1.0, 0.0),
+        (("joint_safety", "gap_5m_violation_rate"), -1.0, cfg.rate),
+        (("joint_safety", "gap_7m_violation_rate"), -1.0, cfg.rate),
+        (("formation", "mean_error_m"), -1.0, cfg.distance_m),
+        (("efficiency", "completion_rate"), 1.0, cfg.rate),
+        (("efficiency", "joint_reward_mean"), 1.0, cfg.reward),
+    )
+    conclusions = {}
+    for prefix, candidate_name, baseline_name in comparisons:
+        candidate = models.get(candidate_name)
+        baseline = models.get(baseline_name)
+        if not isinstance(candidate, Mapping) or not isinstance(baseline, Mapping):
+            raise FourModelEvaluationError("repeat report model set is incomplete")
+        for path, direction, tolerance in metrics:
+            raw_delta = _nested_float(candidate, path) - _nested_float(
+                baseline, path
+            )
+            conclusions[f"{prefix}/{'.'.join(path)}"] = _conclusion_label(
+                direction * raw_delta, tolerance
+            )
+    return conclusions
+
+
+def compare_repeated_reports(
+    reports: Sequence[Mapping[str, object]],
+    tolerance: ReproducibilityToleranceConfig | None = None,
+) -> dict[str, object]:
+    """Compare closed-loop repeats without requiring bit-exact physics."""
+
+    if len(reports) < 2:
+        raise FourModelEvaluationError("repeat comparison requires at least two reports")
+    cfg = tolerance or ReproducibilityToleranceConfig()
+    baseline = reports[0]
+    baseline_models = baseline.get("models")
+    if not isinstance(baseline_models, Mapping):
+        raise FourModelEvaluationError("repeat report has no models")
+
+    initial_hashes = [str(report.get("initial_state_sha256", "")) for report in reports]
+    initial_scene_hashes = [
+        str(report.get("initial_scene_sha256", "")) for report in reports
+    ]
+    initial_state_exact = (
+        bool(initial_hashes[0])
+        and len(set(initial_hashes)) == 1
+        and bool(initial_scene_hashes[0])
+        and len(set(initial_scene_hashes)) == 1
+    )
+    critical_mismatches = []
+    boundary_disagreements = []
+    continuous_violations = []
+    probe_evidence = {}
+
+    scalar_metrics = (
+        (("joint_safety", "gap_5m_violation_rate"), cfg.rate),
+        (("joint_safety", "gap_7m_violation_rate"), cfg.rate),
+        (("formation", "mean_error_m"), cfg.distance_m),
+        (("formation", "p95_error_m"), cfg.distance_m),
+        (("formation", "maximum_spread_m"), cfg.distance_m),
+        (("formation", "recovery_time_mean_s"), cfg.comfort),
+        (("efficiency", "joint_reward_mean"), cfg.reward),
+        (("execution", "mean_modes_removed_per_joint_state"), cfg.fraction),
+        (("trajectory_optimization", "intervention_ade_mean_m"), cfg.distance_m),
+        (("trajectory_optimization", "intervention_fde_mean_m"), cfg.distance_m),
+        (("trajectory_optimization", "retained_raw_fraction_mean"), cfg.fraction),
+    )
+    role_metrics = (
+        ("progress_mean_m", cfg.distance_m),
+        ("speed_mean_km_h", cfg.speed_km_h),
+        ("minimum_gap_m", cfg.distance_m),
+        ("stop_rate", cfg.fraction),
+        ("acceleration_abs_mean_mps2", cfg.comfort),
+        ("jerk_abs_mean", cfg.comfort),
+        ("yaw_rate_abs_mean_rad_s", cfg.comfort),
+        ("steering_change_abs_mean", cfg.comfort),
+    )
+
+    for model_name in MODEL_NAMES:
+        baseline_model = baseline_models.get(model_name)
+        if not isinstance(baseline_model, Mapping):
+            raise FourModelEvaluationError(f"baseline is missing {model_name}")
+        baseline_outcomes = _episode_outcome_index(baseline_model)
+        baseline_probe = baseline_model.get("deterministic_probe")
+        if not isinstance(baseline_probe, Mapping):
+            raise FourModelEvaluationError("deterministic probe is missing")
+        probe_rows = [baseline_probe]
+        for repeat_index, report in enumerate(reports[1:], start=2):
+            models = report.get("models")
+            model = models.get(model_name) if isinstance(models, Mapping) else None
+            if not isinstance(model, Mapping):
+                raise FourModelEvaluationError(
+                    f"repeat {repeat_index} is missing {model_name}"
+                )
+            outcomes = _episode_outcome_index(model)
+            if outcomes.keys() != baseline_outcomes.keys():
+                critical_mismatches.append(
+                    f"{model_name}/repeat_{repeat_index}/episode_set"
+                )
+            for key in baseline_outcomes.keys() & outcomes.keys():
+                first = baseline_outcomes[key]
+                second = outcomes[key]
+                for field in (
+                    "collision",
+                    "out_of_road",
+                    "completed",
+                    "execution_rejected",
+                ):
+                    if bool(first.get(field)) != bool(second.get(field)):
+                        critical_mismatches.append(
+                            f"{model_name}/repeat_{repeat_index}/{key}/{field}"
+                        )
+                for field, threshold in (
+                    ("gap_5m_violation", 5.0),
+                    ("gap_7m_violation", 7.0),
+                ):
+                    if bool(first.get(field)) != bool(second.get(field)):
+                        distance_field = (
+                            "minimum_background_gap_m"
+                            if field == "gap_5m_violation"
+                            else "minimum_platoon_gap_m"
+                        )
+                        values = (first.get(distance_field), second.get(distance_field))
+                        near_boundary = all(
+                            isinstance(value, (int, float))
+                            and abs(float(value) - threshold) <= cfg.distance_m
+                            for value in values
+                        )
+                        target = boundary_disagreements if near_boundary else critical_mismatches
+                        target.append(
+                            f"{model_name}/repeat_{repeat_index}/{key}/{field}"
+                        )
+                for distance_field in (
+                    "minimum_background_gap_m",
+                    "minimum_platoon_gap_m",
+                ):
+                    first_value = first.get(distance_field)
+                    second_value = second.get(distance_field)
+                    if first_value is None and second_value is None:
+                        continue
+                    if (
+                        first_value is None
+                        or second_value is None
+                        or _exceeds_tolerance(
+                            abs(float(first_value) - float(second_value)),
+                            cfg.distance_m,
+                        )
+                    ):
+                        continuous_violations.append(
+                            f"{model_name}/repeat_{repeat_index}/{key}/{distance_field}"
+                        )
+            for path, allowed in scalar_metrics:
+                delta = abs(
+                    _nested_float(model, path)
+                    - _nested_float(baseline_model, path)
+                )
+                if _exceeds_tolerance(delta, allowed):
+                    continuous_violations.append(
+                        f"{model_name}/repeat_{repeat_index}/{'.'.join(path)}={delta:.6g}>{allowed:.6g}"
+                    )
+            for agent_id in AGENT_IDS:
+                for metric, allowed in role_metrics:
+                    path = ("roles", agent_id, metric)
+                    delta = abs(
+                        _nested_float(model, path)
+                        - _nested_float(baseline_model, path)
+                    )
+                    if _exceeds_tolerance(delta, allowed):
+                        continuous_violations.append(
+                            f"{model_name}/repeat_{repeat_index}/{'.'.join(path)}={delta:.6g}>{allowed:.6g}"
+                        )
+                first_modes = _normalized_mode_distribution(
+                    baseline_model, agent_id
+                )
+                second_modes = _normalized_mode_distribution(model, agent_id)
+                total_variation = 0.5 * sum(
+                    abs(first_modes.get(mode, 0.0) - second_modes.get(mode, 0.0))
+                    for mode in first_modes.keys() | second_modes.keys()
+                )
+                if _exceeds_tolerance(total_variation, cfg.fraction):
+                    continuous_violations.append(
+                        f"{model_name}/repeat_{repeat_index}/{agent_id}/mode_total_variation="
+                        f"{total_variation:.6g}>{cfg.fraction:.6g}"
+                    )
+            probe = model.get("deterministic_probe")
+            if not isinstance(probe, Mapping):
+                raise FourModelEvaluationError("deterministic probe is missing")
+            probe_rows.append(probe)
+        input_hashes = [str(value.get("input_and_noise_sha256", "")) for value in probe_rows]
+        output_hashes = [str(value.get("output_sha256", "")) for value in probe_rows]
+        probe_evidence[model_name] = {
+            "identical_replay_in_every_run": all(
+                value.get("identical_replay") is True for value in probe_rows
+            ),
+            "cross_repeat_input_exact": bool(input_hashes[0])
+            and len(set(input_hashes)) == 1,
+            "cross_repeat_output_exact": bool(output_hashes[0])
+            and len(set(output_hashes)) == 1,
+            "input_and_noise_sha256": input_hashes,
+            "output_sha256": output_hashes,
+        }
+
+    conclusions = [_report_conclusions(report, cfg) for report in reports]
+    conclusion_changes = {
+        name: [value[name] for value in conclusions]
+        for name in conclusions[0]
+        if len({value[name] for value in conclusions}) != 1
+    }
+    deterministic_model_replay = all(
+        value["identical_replay_in_every_run"] for value in probe_evidence.values()
+    )
+    return {
+        "contract": dataclasses.asdict(cfg),
+        "initial_state_exact": initial_state_exact,
+        "initial_state_sha256": initial_hashes,
+        "initial_scene_sha256": initial_scene_hashes,
+        "deterministic_model_replay": deterministic_model_replay,
+        "model_probe_evidence": probe_evidence,
+        "critical_discrete_outcomes_exact": not critical_mismatches,
+        "critical_mismatches": critical_mismatches,
+        "threshold_boundary_disagreements": boundary_disagreements,
+        "continuous_metrics_within_tolerance": not continuous_violations,
+        "continuous_tolerance_violations": continuous_violations,
+        "statistical_conclusions_stable": not conclusion_changes,
+        "conclusion_changes": conclusion_changes,
+        "conclusions_by_repeat": conclusions,
+        "tolerance_gate_passed": (
+            initial_state_exact
+            and deterministic_model_replay
+            and not critical_mismatches
+            and not continuous_violations
+            and not conclusion_changes
+        ),
+    }
+
+
 def evaluate_four_models_repeated(
     manifest_path: Path,
     output_path: Path,
     config: FourModelEvaluationConfig,
     *,
     repeats: int,
+    tolerance: ReproducibilityToleranceConfig | None = None,
 ) -> dict[str, object]:
     """Run complete evaluations sequentially inside one fixed process."""
 
@@ -845,8 +1360,9 @@ def evaluate_four_models_repeated(
         reports.append(report)
         hashes.append(_behavior_sha256(report))
     exact_match = len(set(hashes)) == 1
+    tolerance_comparison = compare_repeated_reports(reports, tolerance)
     combined = {
-        "format": "bev_four_model_fixed_process_repeat_v1",
+        "format": "bev_four_model_fixed_process_repeat_v2",
         "run_mode": config.run_mode,
         "diagnostic_only": config.run_mode != "formal",
         "eligible_for_formal_conclusions": config.run_mode == "formal",
@@ -855,6 +1371,7 @@ def evaluate_four_models_repeated(
             "exact_behavior_match": exact_match,
             "behavior_sha256": hashes,
             "timing_excluded_from_hash": True,
+            "tolerance_comparison": tolerance_comparison,
         },
         "models": reports[0]["models"],
         "repeat_reports": reports,

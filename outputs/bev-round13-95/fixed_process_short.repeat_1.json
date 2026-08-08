@@ -1,0 +1,1496 @@
+{
+  "common_initial_state_verified": true,
+  "common_noise_seed_by_episode": true,
+  "common_scenarios": [
+    [
+      "S5_hard_brake_lead",
+      "R1_entry_straight"
+    ],
+    [
+      "S6_background_merge_in",
+      "R6_mainline_merge_approach"
+    ],
+    [
+      "S7_ego_merge_from_ramp",
+      "R7_merge_core"
+    ],
+    [
+      "S8_ego_exit_to_ramp",
+      "R6_exit_to_ramp"
+    ],
+    [
+      "S9_narrow_channel_negotiation",
+      "R8_narrow_channel"
+    ]
+  ],
+  "common_seeds": [
+    31,
+    47
+  ],
+  "deterministic_inference": {
+    "cublas_workspace_config": ":4096:8",
+    "python_hash_seed": "0",
+    "tf32": false,
+    "torch_deterministic_algorithms": true
+  },
+  "diagnostic_only": true,
+  "eligible_for_formal_conclusions": false,
+  "format": "bev_four_model_evaluation_v1",
+  "initial_state_sha256": "1128fb4b58f858cbcaf8234c85a3df1ff43f2685148cf1cade28b4331b201464",
+  "manifest": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive/evaluation/ROUND13_93_MANIFEST.json",
+  "manifest_sha256": "340c79aa4ee8cf637d410f5976868be6a2dcbdc6d2f39b37aedd83f78edeed78",
+  "model_checkpoints": {
+    "A": {
+      "checkpoint": "/tmp/bev-stage1-round13-89/A/run_1/checkpoints/diagnostic.pt",
+      "checkpoint_sha256": "fae0ec230da33b32415a857c3e8e0bdeb9f87599d6a3a9eff4f5343b6370a539"
+    },
+    "A_GRPO": {
+      "checkpoint": "/tmp/bev-round13-92-final/A/run_2/checkpoints/best.pt",
+      "checkpoint_sha256": "29ee20d2beb547ea1af247bfeeabbabb4e15a85e641b499eefc2f0973c30a0af"
+    },
+    "B": {
+      "checkpoint": "/tmp/bev-stage1-round13-89/B/run_1/checkpoints/diagnostic.pt",
+      "checkpoint_sha256": "64969a6deb0fb01265f778f367ea298473501a14dbd37b0449e585ccfcad4466"
+    },
+    "B_GRPO": {
+      "checkpoint": "/tmp/bev-round13-92-final/B/run_1/checkpoints/best.pt",
+      "checkpoint_sha256": "f1faa131e16228299a1f00d76a72638bb981a864c1b35ff71371e250866e5173"
+    }
+  },
+  "models": {
+    "A": {
+      "deterministic_probe": {
+        "identical_replay": true,
+        "input_and_noise_sha256": "3d9dc5ba6f78b7d1f4554cb8f2eb31a43b63497573256c6733f9ff807c87799d",
+        "output_sha256": "cfd33567b87ca628ada3832e9a3143115bb4af4164e6e1db3fdcf0b3d39bae35"
+      },
+      "efficiency": {
+        "completion_rate": 0.0,
+        "joint_reward_mean": 14.368094785101725
+      },
+      "episode_outcomes": [
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 9.045223163108494,
+          "minimum_platoon_gap_m": 9.999925384521484,
+          "out_of_road": false,
+          "route": "R1_entry_straight",
+          "scenario": "S5_hard_brake_lead",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 8.380835499278923,
+          "minimum_platoon_gap_m": 9.980636085411783,
+          "out_of_road": false,
+          "route": "R1_entry_straight",
+          "scenario": "S5_hard_brake_lead",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.233385185840845,
+          "minimum_platoon_gap_m": 9.999985200732313,
+          "out_of_road": false,
+          "route": "R6_mainline_merge_approach",
+          "scenario": "S6_background_merge_in",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.482466678541677,
+          "minimum_platoon_gap_m": 9.993725992094554,
+          "out_of_road": false,
+          "route": "R6_mainline_merge_approach",
+          "scenario": "S6_background_merge_in",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": true,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 4.974116489671228,
+          "minimum_platoon_gap_m": 9.988683330992615,
+          "out_of_road": false,
+          "route": "R7_merge_core",
+          "scenario": "S7_ego_merge_from_ramp",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": true,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 4.983406328880214,
+          "minimum_platoon_gap_m": 9.9762725108229,
+          "out_of_road": false,
+          "route": "R7_merge_core",
+          "scenario": "S7_ego_merge_from_ramp",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.146484970845808,
+          "minimum_platoon_gap_m": 9.999966401159936,
+          "out_of_road": false,
+          "route": "R6_exit_to_ramp",
+          "scenario": "S8_ego_exit_to_ramp",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.159081979549928,
+          "minimum_platoon_gap_m": 9.995521324490571,
+          "out_of_road": false,
+          "route": "R6_exit_to_ramp",
+          "scenario": "S8_ego_exit_to_ramp",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 68.71702394625756,
+          "minimum_platoon_gap_m": 9.999318907567616,
+          "out_of_road": false,
+          "route": "R8_narrow_channel",
+          "scenario": "S9_narrow_channel_negotiation",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 68.71702394625756,
+          "minimum_platoon_gap_m": 9.998342287552854,
+          "out_of_road": false,
+          "route": "R8_narrow_channel",
+          "scenario": "S9_narrow_channel_negotiation",
+          "seed": 47
+        }
+      ],
+      "episodes": 10,
+      "execution": {
+        "mean_modes_removed_per_joint_state": 0.0,
+        "rejection_count": 0,
+        "rejection_rate": 0.0,
+        "rejections": []
+      },
+      "formation": {
+        "maximum_spread_m": 0.025347480550408363,
+        "mean_error_m": 0.0011384537971714003,
+        "p95_error_m": 0.007065808307379502,
+        "recovery_time_mean_s": 0.0
+      },
+      "joint_safety": {
+        "collision_rate": 0.0,
+        "gap_5m_violation_rate": 0.2,
+        "gap_7m_violation_rate": 0.0,
+        "out_of_road_rate": 0.0
+      },
+      "roles": {
+        "agent0": {
+          "acceleration_abs_mean_mps2": 2.197393846784229,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.057790552004906945,
+          "minimum_gap_m": 4.974116489671228,
+          "mode_distribution": {
+            "0": 17,
+            "2": 2,
+            "9": 1
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.515143888419189,
+          "speed_mean_km_h": 18.48036695675702,
+          "steering_change_abs_mean": 0.004849773466897508,
+          "stop_rate": 0.05,
+          "yaw_rate_abs_mean_rad_s": 0.01927384608587832
+        },
+        "agent1": {
+          "acceleration_abs_mean_mps2": 2.204061917608639,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.039075056992563674,
+          "minimum_gap_m": 4.974116489671228,
+          "mode_distribution": {
+            "0": 11,
+            "1": 4,
+            "2": 2,
+            "9": 3
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5145022282226825,
+          "speed_mean_km_h": 18.426581811725477,
+          "steering_change_abs_mean": 0.007989133095058302,
+          "stop_rate": 0.15,
+          "yaw_rate_abs_mean_rad_s": 0.0186233800861306
+        },
+        "agent2": {
+          "acceleration_abs_mean_mps2": 2.1903359725249154,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.047447400049729596,
+          "minimum_gap_m": 4.974116489671228,
+          "mode_distribution": {
+            "0": 10,
+            "1": 4,
+            "2": 6
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5144448283989428,
+          "speed_mean_km_h": 18.42724284754433,
+          "steering_change_abs_mean": 0.0055327645524812395,
+          "stop_rate": 0.0,
+          "yaw_rate_abs_mean_rad_s": 0.017746955964395215
+        }
+      },
+      "timing": {
+        "bev_build_ms": {
+          "p50_ms": 110.7364825438708,
+          "p95_ms": 157.540240441449
+        },
+        "control_mapping_ms": {
+          "p50_ms": 0.7406855002045631,
+          "p95_ms": 0.7703933981247246
+        },
+        "model_inference_ms": {
+          "p50_ms": 9.297157870605588,
+          "p95_ms": 30.249359982554157
+        },
+        "planning_tick_ms": {
+          "p50_ms": 138.3663029409945,
+          "p95_ms": 208.62186946906178
+        },
+        "trajectory_optimizer_ms": {
+          "p50_ms": 8.130144909955561,
+          "p95_ms": 10.428099997807298
+        }
+      },
+      "trajectory_optimization": {
+        "intervention_ade_mean_m": 1.8761523862679799,
+        "intervention_fde_mean_m": 3.259994867444038,
+        "retained_raw_fraction_mean": 0.10625
+      }
+    },
+    "A_GRPO": {
+      "deterministic_probe": {
+        "identical_replay": true,
+        "input_and_noise_sha256": "3d9dc5ba6f78b7d1f4554cb8f2eb31a43b63497573256c6733f9ff807c87799d",
+        "output_sha256": "5b14d9fd513fee4cbcccc3792695efb0234834a043e9dd69b5917a703a6aee4c"
+      },
+      "efficiency": {
+        "completion_rate": 0.0,
+        "joint_reward_mean": 14.374758896161984
+      },
+      "episode_outcomes": [
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 9.045223163108494,
+          "minimum_platoon_gap_m": 9.999925384521484,
+          "out_of_road": false,
+          "route": "R1_entry_straight",
+          "scenario": "S5_hard_brake_lead",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 8.380835499278923,
+          "minimum_platoon_gap_m": 9.973920845892778,
+          "out_of_road": false,
+          "route": "R1_entry_straight",
+          "scenario": "S5_hard_brake_lead",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 6.074949073360203,
+          "minimum_platoon_gap_m": 9.999985200732313,
+          "out_of_road": false,
+          "route": "R6_mainline_merge_approach",
+          "scenario": "S6_background_merge_in",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 6.210806299921835,
+          "minimum_platoon_gap_m": 9.993475843065953,
+          "out_of_road": false,
+          "route": "R6_mainline_merge_approach",
+          "scenario": "S6_background_merge_in",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": true,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 4.974116489671228,
+          "minimum_platoon_gap_m": 9.988683330992615,
+          "out_of_road": false,
+          "route": "R7_merge_core",
+          "scenario": "S7_ego_merge_from_ramp",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.066906984393208,
+          "minimum_platoon_gap_m": 9.989888754357784,
+          "out_of_road": false,
+          "route": "R7_merge_core",
+          "scenario": "S7_ego_merge_from_ramp",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.147902049202125,
+          "minimum_platoon_gap_m": 9.999966401159936,
+          "out_of_road": false,
+          "route": "R6_exit_to_ramp",
+          "scenario": "S8_ego_exit_to_ramp",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.161544040239397,
+          "minimum_platoon_gap_m": 9.99815397306625,
+          "out_of_road": false,
+          "route": "R6_exit_to_ramp",
+          "scenario": "S8_ego_exit_to_ramp",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 68.71702394625756,
+          "minimum_platoon_gap_m": 9.992116711058511,
+          "out_of_road": false,
+          "route": "R8_narrow_channel",
+          "scenario": "S9_narrow_channel_negotiation",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 68.58202394625755,
+          "minimum_platoon_gap_m": 9.998189698715436,
+          "out_of_road": false,
+          "route": "R8_narrow_channel",
+          "scenario": "S9_narrow_channel_negotiation",
+          "seed": 47
+        }
+      ],
+      "episodes": 10,
+      "execution": {
+        "mean_modes_removed_per_joint_state": 0.0,
+        "rejection_count": 0,
+        "rejection_rate": 0.0,
+        "rejections": []
+      },
+      "formation": {
+        "maximum_spread_m": 0.026079406961798668,
+        "mean_error_m": 0.0011061301207146495,
+        "p95_error_m": 0.00710676554590464,
+        "recovery_time_mean_s": 0.0
+      },
+      "joint_safety": {
+        "collision_rate": 0.0,
+        "gap_5m_violation_rate": 0.1,
+        "gap_7m_violation_rate": 0.0,
+        "out_of_road_rate": 0.0
+      },
+      "roles": {
+        "agent0": {
+          "acceleration_abs_mean_mps2": 2.2001576085434253,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.058897594287726694,
+          "minimum_gap_m": 4.974116489671228,
+          "mode_distribution": {
+            "0": 16,
+            "2": 3,
+            "9": 1
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5150345932872572,
+          "speed_mean_km_h": 18.46931785869226,
+          "steering_change_abs_mean": 0.0050641316920518875,
+          "stop_rate": 0.05,
+          "yaw_rate_abs_mean_rad_s": 0.018991673071879853
+        },
+        "agent1": {
+          "acceleration_abs_mean_mps2": 2.1690781866454363,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.04278514336462376,
+          "minimum_gap_m": 4.974116489671228,
+          "mode_distribution": {
+            "0": 12,
+            "1": 5,
+            "2": 1,
+            "9": 2
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5146544728815843,
+          "speed_mean_km_h": 18.44335854845385,
+          "steering_change_abs_mean": 0.010798363736830652,
+          "stop_rate": 0.1,
+          "yaw_rate_abs_mean_rad_s": 0.01939197947323199
+        },
+        "agent2": {
+          "acceleration_abs_mean_mps2": 2.193882624356749,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.0480685270144179,
+          "minimum_gap_m": 4.974116489671228,
+          "mode_distribution": {
+            "0": 11,
+            "1": 3,
+            "2": 6
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5145042271827284,
+          "speed_mean_km_h": 18.436143498355143,
+          "steering_change_abs_mean": 0.0032163515330466907,
+          "stop_rate": 0.0,
+          "yaw_rate_abs_mean_rad_s": 0.017433052495658862
+        }
+      },
+      "timing": {
+        "bev_build_ms": {
+          "p50_ms": 111.46715958602726,
+          "p95_ms": 158.8318500900641
+        },
+        "control_mapping_ms": {
+          "p50_ms": 0.7386624347418547,
+          "p95_ms": 0.766595161985606
+        },
+        "model_inference_ms": {
+          "p50_ms": 9.337792522273958,
+          "p95_ms": 9.570878592785448
+        },
+        "planning_tick_ms": {
+          "p50_ms": 138.9198279939592,
+          "p95_ms": 188.34531093016267
+        },
+        "trajectory_optimizer_ms": {
+          "p50_ms": 8.204193436540663,
+          "p95_ms": 9.532704122830182
+        }
+      },
+      "trajectory_optimization": {
+        "intervention_ade_mean_m": 1.8717211067676545,
+        "intervention_fde_mean_m": 3.117581472794215,
+        "retained_raw_fraction_mean": 0.10729166666666666
+      }
+    },
+    "B": {
+      "deterministic_probe": {
+        "identical_replay": true,
+        "input_and_noise_sha256": "3d9dc5ba6f78b7d1f4554cb8f2eb31a43b63497573256c6733f9ff807c87799d",
+        "output_sha256": "f28e3d10974cee19f09e138f1aaa19f6f6104cfe30245c43079c3d053b42992d"
+      },
+      "efficiency": {
+        "completion_rate": 0.0,
+        "joint_reward_mean": 14.283802970942475
+      },
+      "episode_outcomes": [
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 9.045223163108494,
+          "minimum_platoon_gap_m": 9.999925384521484,
+          "out_of_road": false,
+          "route": "R1_entry_straight",
+          "scenario": "S5_hard_brake_lead",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 8.380835499278923,
+          "minimum_platoon_gap_m": 9.980355125770721,
+          "out_of_road": false,
+          "route": "R1_entry_straight",
+          "scenario": "S5_hard_brake_lead",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.23520982881603,
+          "minimum_platoon_gap_m": 9.999985200732313,
+          "out_of_road": false,
+          "route": "R6_mainline_merge_approach",
+          "scenario": "S6_background_merge_in",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": true,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 4.944693981098581,
+          "minimum_platoon_gap_m": 9.999985200732313,
+          "out_of_road": false,
+          "route": "R6_mainline_merge_approach",
+          "scenario": "S6_background_merge_in",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.270656241699079,
+          "minimum_platoon_gap_m": 9.993834205666243,
+          "out_of_road": false,
+          "route": "R7_merge_core",
+          "scenario": "S7_ego_merge_from_ramp",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": true,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 4.983414772410894,
+          "minimum_platoon_gap_m": 9.97613839899205,
+          "out_of_road": false,
+          "route": "R7_merge_core",
+          "scenario": "S7_ego_merge_from_ramp",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.140643529920689,
+          "minimum_platoon_gap_m": 9.999958771744607,
+          "out_of_road": false,
+          "route": "R6_exit_to_ramp",
+          "scenario": "S8_ego_exit_to_ramp",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.167066789306938,
+          "minimum_platoon_gap_m": 9.990526950610533,
+          "out_of_road": false,
+          "route": "R6_exit_to_ramp",
+          "scenario": "S8_ego_exit_to_ramp",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 68.71702394625756,
+          "minimum_platoon_gap_m": 9.999502018479404,
+          "out_of_road": false,
+          "route": "R8_narrow_channel",
+          "scenario": "S9_narrow_channel_negotiation",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 68.86702394625756,
+          "minimum_platoon_gap_m": 9.991539423782601,
+          "out_of_road": false,
+          "route": "R8_narrow_channel",
+          "scenario": "S9_narrow_channel_negotiation",
+          "seed": 47
+        }
+      ],
+      "episodes": 10,
+      "execution": {
+        "mean_modes_removed_per_joint_state": 0.0,
+        "rejection_count": 0,
+        "rejection_rate": 0.0,
+        "rejections": []
+      },
+      "formation": {
+        "maximum_spread_m": 0.03187919780611992,
+        "mean_error_m": 0.0013523214617717056,
+        "p95_error_m": 0.009412038791924714,
+        "recovery_time_mean_s": 0.0
+      },
+      "joint_safety": {
+        "collision_rate": 0.0,
+        "gap_5m_violation_rate": 0.2,
+        "gap_7m_violation_rate": 0.0,
+        "out_of_road_rate": 0.0
+      },
+      "roles": {
+        "agent0": {
+          "acceleration_abs_mean_mps2": 2.1608779880767988,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.061211691722009,
+          "minimum_gap_m": 4.944693981098581,
+          "mode_distribution": {
+            "0": 17,
+            "2": 1,
+            "3": 1,
+            "4": 1
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5154913900395225,
+          "speed_mean_km_h": 18.504931086177923,
+          "steering_change_abs_mean": 0.008967590463968615,
+          "stop_rate": 0.0,
+          "yaw_rate_abs_mean_rad_s": 0.02002274362916535
+        },
+        "agent1": {
+          "acceleration_abs_mean_mps2": 2.2214533107001917,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.038924099157035916,
+          "minimum_gap_m": 4.944693981098581,
+          "mode_distribution": {
+            "0": 9,
+            "1": 4,
+            "2": 4,
+            "9": 3
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5142435577236317,
+          "speed_mean_km_h": 18.406572053656348,
+          "steering_change_abs_mean": 0.007636961053746442,
+          "stop_rate": 0.15,
+          "yaw_rate_abs_mean_rad_s": 0.018789394890583632
+        },
+        "agent2": {
+          "acceleration_abs_mean_mps2": 2.2191341811257828,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.04205814529221599,
+          "minimum_gap_m": 4.944693981098581,
+          "mode_distribution": {
+            "0": 6,
+            "1": 4,
+            "2": 9,
+            "6": 1
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5143132903942808,
+          "speed_mean_km_h": 18.41160355780298,
+          "steering_change_abs_mean": 0.004579988432548514,
+          "stop_rate": 0.0,
+          "yaw_rate_abs_mean_rad_s": 0.017939263936360337
+        }
+      },
+      "timing": {
+        "bev_build_ms": {
+          "p50_ms": 111.23185744509101,
+          "p95_ms": 158.51201260229573
+        },
+        "control_mapping_ms": {
+          "p50_ms": 0.7421539630740881,
+          "p95_ms": 0.8307659532874823
+        },
+        "model_inference_ms": {
+          "p50_ms": 20.10730712208897,
+          "p95_ms": 21.05565289966762
+        },
+        "planning_tick_ms": {
+          "p50_ms": 149.61129345465451,
+          "p95_ms": 200.38188777398318
+        },
+        "trajectory_optimizer_ms": {
+          "p50_ms": 8.748476509936154,
+          "p95_ms": 10.630800458602609
+        }
+      },
+      "trajectory_optimization": {
+        "intervention_ade_mean_m": 1.9569684475660325,
+        "intervention_fde_mean_m": 3.7731259549657503,
+        "retained_raw_fraction_mean": 0.08229166666666667
+      }
+    },
+    "B_GRPO": {
+      "deterministic_probe": {
+        "identical_replay": true,
+        "input_and_noise_sha256": "3d9dc5ba6f78b7d1f4554cb8f2eb31a43b63497573256c6733f9ff807c87799d",
+        "output_sha256": "3814d39fd24bef21f10882a60ba33768586fce134dfe31e7ba309f896ecaf9b4"
+      },
+      "efficiency": {
+        "completion_rate": 0.0,
+        "joint_reward_mean": 14.287743330031539
+      },
+      "episode_outcomes": [
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 9.045223163108494,
+          "minimum_platoon_gap_m": 9.999925384521484,
+          "out_of_road": false,
+          "route": "R1_entry_straight",
+          "scenario": "S5_hard_brake_lead",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 8.380835499278923,
+          "minimum_platoon_gap_m": 9.980202845390373,
+          "out_of_road": false,
+          "route": "R1_entry_straight",
+          "scenario": "S5_hard_brake_lead",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.66815780994736,
+          "minimum_platoon_gap_m": 9.999985200732313,
+          "out_of_road": false,
+          "route": "R6_mainline_merge_approach",
+          "scenario": "S6_background_merge_in",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 6.021820795198813,
+          "minimum_platoon_gap_m": 9.999985200732313,
+          "out_of_road": false,
+          "route": "R6_mainline_merge_approach",
+          "scenario": "S6_background_merge_in",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.268509149858428,
+          "minimum_platoon_gap_m": 9.99382051364172,
+          "out_of_road": false,
+          "route": "R7_merge_core",
+          "scenario": "S7_ego_merge_from_ramp",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": true,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 4.983423216025166,
+          "minimum_platoon_gap_m": 9.975892169114687,
+          "out_of_road": false,
+          "route": "R7_merge_core",
+          "scenario": "S7_ego_merge_from_ramp",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.140643529920689,
+          "minimum_platoon_gap_m": 9.999958771744607,
+          "out_of_road": false,
+          "route": "R6_exit_to_ramp",
+          "scenario": "S8_ego_exit_to_ramp",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 5.167407932004279,
+          "minimum_platoon_gap_m": 9.989504798739828,
+          "out_of_road": false,
+          "route": "R6_exit_to_ramp",
+          "scenario": "S8_ego_exit_to_ramp",
+          "seed": 47
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 67.622092638643,
+          "minimum_platoon_gap_m": 9.99941046855605,
+          "out_of_road": false,
+          "route": "R8_narrow_channel",
+          "scenario": "S9_narrow_channel_negotiation",
+          "seed": 31
+        },
+        {
+          "collision": false,
+          "completed": false,
+          "execution_rejected": false,
+          "gap_5m_violation": false,
+          "gap_7m_violation": false,
+          "minimum_background_gap_m": 68.58202394625755,
+          "minimum_platoon_gap_m": 9.991600476363546,
+          "out_of_road": false,
+          "route": "R8_narrow_channel",
+          "scenario": "S9_narrow_channel_negotiation",
+          "seed": 47
+        }
+      ],
+      "episodes": 10,
+      "execution": {
+        "mean_modes_removed_per_joint_state": 0.0,
+        "rejection_count": 0,
+        "rejection_rate": 0.0,
+        "rejections": []
+      },
+      "formation": {
+        "maximum_spread_m": 0.02999759651720524,
+        "mean_error_m": 0.0013372851921891046,
+        "p95_error_m": 0.010191783681511881,
+        "recovery_time_mean_s": 0.0
+      },
+      "joint_safety": {
+        "collision_rate": 0.0,
+        "gap_5m_violation_rate": 0.1,
+        "gap_7m_violation_rate": 0.0,
+        "out_of_road_rate": 0.0
+      },
+      "roles": {
+        "agent0": {
+          "acceleration_abs_mean_mps2": 2.165599612820191,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.05650805873148979,
+          "minimum_gap_m": 4.983423216025166,
+          "mode_distribution": {
+            "0": 17,
+            "2": 1,
+            "3": 1,
+            "4": 1
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5154890239922384,
+          "speed_mean_km_h": 18.506117544725203,
+          "steering_change_abs_mean": 0.008766457027134796,
+          "stop_rate": 0.0,
+          "yaw_rate_abs_mean_rad_s": 0.01941302399409644
+        },
+        "agent1": {
+          "acceleration_abs_mean_mps2": 2.2177563592485723,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.037279200225384855,
+          "minimum_gap_m": 4.983423216025166,
+          "mode_distribution": {
+            "0": 9,
+            "1": 4,
+            "2": 4,
+            "9": 3
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5142350095456155,
+          "speed_mean_km_h": 18.405100288277588,
+          "steering_change_abs_mean": 0.008620612121497591,
+          "stop_rate": 0.15,
+          "yaw_rate_abs_mean_rad_s": 0.018917481842511717
+        },
+        "agent2": {
+          "acceleration_abs_mean_mps2": 2.2078258958714345,
+          "collision_rate": 0.0,
+          "jerk_abs_mean": 0.03819179973265872,
+          "minimum_gap_m": 4.983423216025166,
+          "mode_distribution": {
+            "0": 7,
+            "1": 4,
+            "2": 8,
+            "6": 1
+          },
+          "out_of_road_rate": 0.0,
+          "progress_mean_m": 0.5143615093609597,
+          "speed_mean_km_h": 18.41846219589847,
+          "steering_change_abs_mean": 0.004845114210669029,
+          "stop_rate": 0.0,
+          "yaw_rate_abs_mean_rad_s": 0.01795779509894551
+        }
+      },
+      "timing": {
+        "bev_build_ms": {
+          "p50_ms": 111.36978003196418,
+          "p95_ms": 158.09954482829198
+        },
+        "control_mapping_ms": {
+          "p50_ms": 0.7440585177391768,
+          "p95_ms": 0.7828420144505799
+        },
+        "model_inference_ms": {
+          "p50_ms": 19.926496548578143,
+          "p95_ms": 20.621061674319208
+        },
+        "planning_tick_ms": {
+          "p50_ms": 150.09565209038556,
+          "p95_ms": 200.42050773045048
+        },
+        "trajectory_optimizer_ms": {
+          "p50_ms": 8.861345937475562,
+          "p95_ms": 10.517755756154656
+        }
+      },
+      "trajectory_optimization": {
+        "intervention_ade_mean_m": 1.9472281694412232,
+        "intervention_fde_mean_m": 3.7487501581509908,
+        "retained_raw_fraction_mean": 0.08333333333333333
+      }
+    }
+  },
+  "run_mode": "diagnostic",
+  "scenario_contract": {
+    "definitions": [
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R1_entry_straight"
+          ],
+          "code": "S5",
+          "description": "\u524d\u8f66\u6025\u51cf\u901f",
+          "ego_initial_speed_km_h": 24.0,
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": null,
+          "ego_spawn_lane_id": null,
+          "ego_spawn_lane_preference": "middle",
+          "ego_spawn_lane_probabilities": null,
+          "ego_spawn_longitude_m": null,
+          "ego_spawn_reference_block_id": null,
+          "ego_spawn_reference_kind": null,
+          "env_overrides": null,
+          "expert_recipe": "\u63d0\u9ad8\u5b89\u5168\u65f6\u8ddd",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": 0.0,
+          "scenario_id": "S5_hard_brake_lead",
+          "traffic_recipes": [
+            {
+              "operation": "hard_brake_lead",
+              "params": {
+                "brake_deceleration_range_mps2": [
+                  5.0,
+                  7.0
+                ],
+                "brake_target_speed_kmh": 1.0,
+                "brake_target_speed_range_kmh": [
+                  0.5,
+                  2.0
+                ],
+                "lead_bumper_gap_range_m": [
+                  9.0,
+                  13.0
+                ],
+                "lead_target_speed_range_kmh": [
+                  22.0,
+                  26.0
+                ],
+                "trigger_after_s": 3.0
+              }
+            },
+            {
+              "operation": "inject_adjacent_lane_vehicles",
+              "params": {
+                "clearance_scope": "same_lane",
+                "trigger_on_start": true,
+                "vehicles": [
+                  {
+                    "lane_side": "left",
+                    "name": "left_side",
+                    "spawn_longitude_offset_range_m": [
+                      -15.0,
+                      -13.0
+                    ],
+                    "target_speed_kmh": 24.0
+                  },
+                  {
+                    "lane_side": "right",
+                    "name": "right_side",
+                    "spawn_longitude_offset_range_m": [
+                      13.0,
+                      15.0
+                    ],
+                    "target_speed_kmh": 24.0
+                  }
+                ]
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R1_entry_straight": {
+              "block_id": "s0",
+              "longitudinal_max": 220.0,
+              "longitudinal_min": 50.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R1_entry_straight",
+        "scenario": "S5_hard_brake_lead"
+      },
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R6_mainline_merge_approach"
+          ],
+          "code": "S6",
+          "description": "\u80cc\u666f\u8f66\u5e76\u5165 ego \u6240\u5728\u4e3b\u7ebf",
+          "ego_initial_speed_km_h": [
+            23.0,
+            25.0
+          ],
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": 1,
+          "ego_spawn_lane_id": null,
+          "ego_spawn_lane_preference": "rightmost",
+          "ego_spawn_lane_probabilities": null,
+          "ego_spawn_longitude_m": [
+            72.0,
+            78.0
+          ],
+          "ego_spawn_reference_block_id": "g1",
+          "ego_spawn_reference_kind": "block_internal_road",
+          "env_overrides": {
+            "traffic_spawn_exclusion_ahead_m": 100.0,
+            "traffic_spawn_exclusion_behind_m": 100.0
+          },
+          "expert_recipe": "\u4fdd\u5b88\u8ba9\u884c",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": 0.0,
+          "scenario_id": "S6_background_merge_in",
+          "traffic_recipes": [
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "merge_arrival_offset_s": 1.2,
+                "merge_creep_speed_kmh": 20.0,
+                "merge_front_gap_m": 10.0,
+                "merge_rear_gap_m": 10.0,
+                "policy": "idm_merge",
+                "reference_kind": "block_socket_road",
+                "socket_index": 1,
+                "target_speed_kmh": 24.0,
+                "trigger_on_start": true
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R6_mainline_merge_approach": {
+              "block_id": "g1",
+              "longitudinal_max": 95.0,
+              "longitudinal_min": 10.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R6_mainline_merge_approach",
+        "scenario": "S6_background_merge_in"
+      },
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R7_merge_core"
+          ],
+          "code": "S7",
+          "description": "ego \u4ece\u531d\u9053\u6c47\u5165\u4e3b\u7ebf",
+          "ego_initial_speed_km_h": [
+            22,
+            23
+          ],
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": null,
+          "ego_spawn_lane_id": null,
+          "ego_spawn_lane_preference": null,
+          "ego_spawn_lane_probabilities": null,
+          "ego_spawn_longitude_m": [
+            5.0,
+            6.0
+          ],
+          "ego_spawn_reference_block_id": "h_ramp0",
+          "ego_spawn_reference_kind": null,
+          "env_overrides": null,
+          "expert_recipe": "\u6c47\u5165\u535a\u5f08",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": null,
+          "scenario_id": "S7_ego_merge_from_ramp",
+          "traffic_recipes": [
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 0,
+                "name": "main_lane_0_vehicle_1",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 15.0,
+                "target_speed_kmh": 22.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 0,
+                "name": "main_lane_0_vehicle_2",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 45.0,
+                "target_speed_kmh": 25.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 0,
+                "name": "main_lane_0_vehicle_3",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 75.0,
+                "target_speed_kmh": 27.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 1,
+                "name": "main_lane_1_vehicle_1",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 10.0,
+                "target_speed_kmh": 22.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 1,
+                "name": "main_lane_1_vehicle_2",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 40.0,
+                "target_speed_kmh": 24.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 1,
+                "name": "main_lane_1_vehicle_3",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 70.0,
+                "target_speed_kmh": 26.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 1,
+                "name": "main_lane_1_vehicle_4",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 100.0,
+                "target_speed_kmh": 28.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 2,
+                "name": "main_lane_2_vehicle_1",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 20.0,
+                "target_speed_kmh": 23.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 2,
+                "name": "main_lane_2_vehicle_2",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 55.0,
+                "target_speed_kmh": 26.0,
+                "trigger_on_start": true
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g1",
+                "lane_id": 2,
+                "name": "main_lane_2_vehicle_3",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 90.0,
+                "target_speed_kmh": 29.0,
+                "trigger_on_start": true
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R7_merge_core": {
+              "block_id": "h_ramp0",
+              "longitudinal_max": 60.0,
+              "longitudinal_min": 5.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R7_merge_core",
+        "scenario": "S7_ego_merge_from_ramp"
+      },
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R6_exit_to_ramp"
+          ],
+          "code": "S8",
+          "description": "ego \u4ece\u4e3b\u7ebf\u9a76\u51fa",
+          "ego_initial_speed_km_h": 24.0,
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": null,
+          "ego_spawn_lane_id": 1,
+          "ego_spawn_lane_preference": null,
+          "ego_spawn_lane_probabilities": null,
+          "ego_spawn_longitude_m": 30,
+          "ego_spawn_reference_block_id": "g0",
+          "ego_spawn_reference_kind": null,
+          "env_overrides": null,
+          "expert_recipe": "\u63d0\u524d\u6362\u9053\u9a76\u79bb",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": 0.0,
+          "scenario_id": "S8_ego_exit_to_ramp",
+          "traffic_recipes": [
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g0",
+                "internal_road_index": 0,
+                "lane_index": 2,
+                "reference_kind": "block_internal_road",
+                "spawn_longitude": 5.0,
+                "target_speed_kmh": 18.0
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "g0",
+                "internal_road_index": 0,
+                "lane_index": 2,
+                "reference_kind": "block_internal_road",
+                "spawn_longitude": 80.0,
+                "target_speed_kmh": 18.0
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R6_exit_to_ramp": {
+              "block_id": "g0",
+              "longitudinal_max": 45.0,
+              "longitudinal_min": 5.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R6_exit_to_ramp",
+        "scenario": "S8_ego_exit_to_ramp"
+      },
+      {
+        "definition": {
+          "allowed_local_routes": [
+            "R8_narrow_channel"
+          ],
+          "code": "S9",
+          "description": "\u5408\u6d41-\u5206\u6d41\u7a84\u901a\u9053\u535a\u5f08",
+          "ego_initial_speed_km_h": 18.0,
+          "ego_spawn_distance_to_route_end_m": null,
+          "ego_spawn_internal_road_index": 1,
+          "ego_spawn_lane_id": null,
+          "ego_spawn_lane_preference": null,
+          "ego_spawn_lane_probabilities": {
+            "leftmost": 0.2,
+            "middle": 0.4,
+            "rightmost": 0.4
+          },
+          "ego_spawn_longitude_m": 10.0,
+          "ego_spawn_reference_block_id": "c3",
+          "ego_spawn_reference_kind": "block_internal_road",
+          "env_overrides": null,
+          "expert_recipe": "\u4fdd\u5b88\u901a\u8fc7",
+          "independent_trajectory_control_after_realization": true,
+          "override_traffic_density": null,
+          "scenario_id": "S9_narrow_channel_negotiation",
+          "traffic_recipes": [
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "merge0",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 12.0,
+                "target_speed_kmh": 14.0
+              }
+            },
+            {
+              "operation": "inject_background_vehicle",
+              "params": {
+                "block_id": "split0",
+                "reference_kind": "block_route_road",
+                "spawn_longitude": 18.0,
+                "target_speed_kmh": 16.0
+              }
+            }
+          ],
+          "trigger_by_local_route": {
+            "R8_narrow_channel": {
+              "block_id": "c3",
+              "longitudinal_max": 90.0,
+              "longitudinal_min": 35.0
+            }
+          },
+          "trim_to_lane_change": false,
+          "trim_window_after": 60,
+          "trim_window_before": 60
+        },
+        "route": "R8_narrow_channel",
+        "scenario": "S9_narrow_channel_negotiation"
+      }
+    ],
+    "format": "bev_primary_s5_s9_contract_v1",
+    "scenarios": [
+      [
+        "S5_hard_brake_lead",
+        "R1_entry_straight"
+      ],
+      [
+        "S6_background_merge_in",
+        "R6_mainline_merge_approach"
+      ],
+      [
+        "S7_ego_merge_from_ramp",
+        "R7_merge_core"
+      ],
+      [
+        "S8_ego_exit_to_ramp",
+        "R6_exit_to_ramp"
+      ],
+      [
+        "S9_narrow_channel_negotiation",
+        "R8_narrow_channel"
+      ]
+    ],
+    "sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34"
+  }
+}
