@@ -1,0 +1,56 @@
+{
+  "attempted_episodes": 5,
+  "base_dataset_fingerprint": "fa4f07295edfff92d041fa50705b3a7de7e1c6799556305d142da2d784442685",
+  "base_episode_acceptance_rate": 1.0,
+  "base_joint_samples": 10,
+  "bundle_index_sha256": "67b04bba114cffee8ceef6913dbeeeac7b1c91f9cd88c00db9015b94d227729c",
+  "bundle_root": "/tmp/bev-round13-97e-final-RJ5EJI",
+  "committed_base_episodes": 5,
+  "committed_sidecar_episodes": 5,
+  "decode_joint_samples_per_s": 805.3552983678464,
+  "diagnostic_only": true,
+  "eligible_for_formal_50k_collection": false,
+  "eligible_for_stage1_formal_training": false,
+  "events": {
+    "collision_sidewalk": 2,
+    "out_of_route": 1,
+    "scenario_realized": 5,
+    "scenario_trigger": 5
+  },
+  "format": "bev_risk_shared_bundle_pilot_report_v1",
+  "minimum_base_samples": 10,
+  "missing_scenarios": [],
+  "next_gate": "formal_joint_bev_15000_step_pilot",
+  "non_empty_splits": [
+    "train",
+    "val"
+  ],
+  "outcomes": {
+    "collision": 1,
+    "out_of_route": 1,
+    "success": 3
+  },
+  "protocol_schema_version": "1.0.0",
+  "round": "13.97e",
+  "round13_closeout_status": "infrastructure_accepted",
+  "scenario_attempts": {
+    "S5_hard_brake_lead": 1,
+    "S6_background_merge_in": 1,
+    "S7_ego_merge_from_ramp": 1,
+    "S8_ego_exit_to_ramp": 1,
+    "S9_narrow_channel_negotiation": 1
+  },
+  "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+  "scenario_joint_samples": {
+    "S5_hard_brake_lead": 2,
+    "S6_background_merge_in": 2,
+    "S7_ego_merge_from_ramp": 2,
+    "S8_ego_exit_to_ramp": 2,
+    "S9_narrow_channel_negotiation": 2
+  },
+  "sidecar_dataset_fingerprint": "96fed8a925496dc700b96873b07ab50923a7e73314e810cba1f7c5d55424e535",
+  "sidecar_episode_retention_rate": 1.0,
+  "sidecar_only_episodes": 0,
+  "sidecar_raw_steps": 405,
+  "status": "protocol_pilot_accepted"
+}

@@ -360,3 +360,27 @@ the base. A base with neither a committed nor prepared sidecar is corruption.
 `verify_joint_risk_bundle.py` verifies both component datasets and then checks
 episode status, identity, split, fingerprints, scenario hash, counts, outcome,
 and exact base-sample-to-raw-step alignment across the roots.
+
+## 15. Round 13.97e cross-project protocol pilot
+
+Round 13.97e adds a physical-count-based readiness audit in
+`evaluation/round13_97e_bundle_pilot.py`. It runs the frozen protocol, Round 13
+scenario freeze, base dataset, RiskEntry sidecar, and bundle cross-link
+verifiers as one gate. A diagnostic pilot can prove the interface but is
+always marked `diagnostic_only=true`; metadata cannot make it eligible for
+formal Stage 1 training or the 50k collection.
+
+The accepted protocol pilot is recorded in
+`evaluation/ROUND13_97E_REPORT.json`. It used one simulator pass for S5--S9,
+five episodes and ten joint BEV samples (two per scenario). Each episode
+executed 80 actions and persisted 81 sidecar state boundaries, for 405 raw
+states in total. All five sidecars also passed the validator from the
+RiskEntry project without translation. Generic injected background actors are
+kept as stable `Vxxx` actors but are not collapsed into the unique `intruder`
+key; only scenario roles with a unique semantic identity populate
+`key_actor_ids`.
+
+This small protocol pilot is not the formal data pilot. The next gate remains
+the 15,000 joint-sample shared-bundle pilot, which must physically contain at
+least 15,000 base samples, cover S5--S9, and have non-empty train/val/test
+splits before it can authorize the formal 50k collection.

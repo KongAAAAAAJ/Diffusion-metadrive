@@ -172,6 +172,34 @@ def test_world_acceleration_and_wrapped_yaw_rate_use_adjacent_frames():
     assert state.yaw_rate_radps == pytest.approx(0.5)
 
 
+def test_generic_injected_background_is_not_a_unique_key_actor():
+    lane = _Lane(("A", "B", 0))
+    first = _Vehicle(
+        "traffic-a",
+        position=(15.0, 3.5),
+        velocity=(5.0, 0.0),
+        lane=lane,
+        scenario_role="injected_background",
+    )
+    second = _Vehicle(
+        "traffic-b",
+        position=(25.0, 3.5),
+        velocity=(5.0, 0.0),
+        lane=lane,
+        scenario_role="injected_background",
+    )
+    adapter = MetaDriveRiskEntrySidecarAdapter()
+
+    adapter.capture_frame(
+        _env(externals=(("first", first), ("second", second))),
+        step_index=0,
+        timestamp_s=0.0,
+    )
+
+    assert adapter.key_actor_ids == {}
+    assert [item.actor_id for item in adapter.actor_records[3:]] == ["V000", "V001"]
+
+
 def test_lane_state_uses_explicit_mask_and_stable_lane_table():
     env = _env()
     env.agents["agent2"].lane = None

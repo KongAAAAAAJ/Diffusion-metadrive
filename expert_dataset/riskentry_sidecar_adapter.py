@@ -473,10 +473,14 @@ class MetaDriveRiskEntrySidecarAdapter:
         aliases = {
             "hard_brake_lead": "lead_braker",
             "s6_merge_vehicle": "intruder",
-            "injected_background": "intruder",
             "cut_in_adjacent_lead": "intruder",
         }
-        key = aliases.get(role_name, role_name)
+        key = aliases.get(role_name)
+        if key is None:
+            # Generic injected/background roles are not unique scenario key
+            # actors. Persist them in the actor table, but do not collapse
+            # several physical vehicles onto one key_actor_ids entry.
+            return
         actor_id = self._actor_records_by_source[source].actor_id
         previous = self._key_actor_ids.get(key)
         if previous is not None and previous != actor_id:
