@@ -8,6 +8,7 @@ semantic modes in the ego coordinate frame.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable
 
 import numpy as np
@@ -21,6 +22,10 @@ from models.bev_planner.mode_contract import (
     TRAJECTORY_STEPS,
     HardModeMaskConfig,
     validate_trajectory_kinematics,
+)
+from models.platoon_planner.route_chain_geometry import (
+    RouteChainGeometryError,
+    build_continuous_lane_chain_path,
 )
 
 
@@ -599,6 +604,116 @@ class SimulatorDynamicAnchorGenerator:
         heading = self._headings_from_xy(xy)
         return np.column_stack([xy, heading]).astype(np.float32)
 
+    def _route_transition_trajectory(
+        self,
+        source_lane: object,
+        target_lane: object,
+        source_s: float,
+        source_d: float,
+        ego_pose: np.ndarray,
+        speed_mps: float,
+        accel_mps2: float,
+    ) -> np.ndarray:
+        """Sample a downstream ramp merge as a semantic LEFT anchor."""
+
+        source_remaining = float(getattr(source_lane, "length", 0.0)) - float(source_s)
+        # Keep the lane-chain construction while enough ramp remains.  Inside
+        # the final four metres the vehicle footprint is already on the merge
+        # apron and a measured-pose transition avoids reintroducing the stale
+        # ramp centreline behind it.
+        if source_remaining >= 4.0:
+            try:
+                path = build_continuous_lane_chain_path(
+                    [source_lane, target_lane],
+                    start_s=float(source_s),
+                    start_lateral_m=float(source_d),
+                    step_m=0.25,
+                    seam_transition_m=float(
+                        getattr(source_lane, "route_seam_transition_m", 8.0)
+                    ),
+                )
+            except (RouteChainGeometryError, ValueError) as exc:
+                raise DynamicAnchorError("route transition anchor geometry is invalid") from exc
+        else:
+            path = self._route_transition_from_measured_pose(
+                target_lane, ego_pose
+            )
+        arc = np.concatenate(
+            ([0.0], np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1)))
+        )
+        distance = self._travel_distances(speed_mps, accel_mps2)
+        if float(distance[-1]) > float(arc[-1]) + 1.0e-6:
+            raise DynamicAnchorError("route transition anchor exceeds route horizon")
+        world = np.column_stack(
+            (
+                np.interp(distance, arc, path[:, 0]),
+                np.interp(distance, arc, path[:, 1]),
+            )
+        )
+        xy = self._world_to_ego(world, ego_pose)
+        contract = HardModeMaskConfig(dt_s=self.config.dt_s)
+        heading = self._contract_limited_headings(
+            self._headings_from_xy(xy), xy, contract
+        )
+        return np.column_stack((xy, heading)).astype(np.float32)
+
+    @staticmethod
+    def _route_transition_from_measured_pose(
+        target_lane: object, ego_pose: np.ndarray
+    ) -> np.ndarray:
+        # Build from the measured pose, including when the front axle is
+        # already inside the unstructured merge apron.  Rebuilding a lane
+        # chain from source_s at that point has less than one metre of ramp
+        # left and is intentionally rejected by the generic seam helper.
+        start = np.asarray(ego_pose[:2], dtype=np.float64)
+        target_end_s = min(
+            16.0, float(getattr(target_lane, "length", 0.0) or 0.0)
+        )
+        end = np.asarray(target_lane.position(target_end_s, 0.0), dtype=np.float64)[:2]
+        end_heading = float(target_lane.heading_theta_at(target_end_s))
+        chord = float(np.linalg.norm(end - start))
+        if chord <= 1.0e-6 or not np.isfinite([chord, end_heading]).all():
+            raise DynamicAnchorError("route transition anchor geometry is invalid")
+        tangent_length = max(0.75 * chord, 1.0)
+        tangent_start = tangent_length * np.asarray(
+            [math.cos(float(ego_pose[2])), math.sin(float(ego_pose[2]))]
+        )
+        tangent_end = tangent_length * np.asarray(
+            [math.cos(end_heading), math.sin(end_heading)]
+        )
+        u = np.linspace(0.0, 1.0, max(int(math.ceil(chord / 0.25)) * 2, 4) + 1)
+        h00 = 2.0 * u**3 - 3.0 * u**2 + 1.0
+        h10 = u**3 - 2.0 * u**2 + u
+        h01 = -2.0 * u**3 + 3.0 * u**2
+        h11 = u**3 - u**2
+        curve = (
+            h00[:, None] * start
+            + h10[:, None] * tangent_start
+            + h01[:, None] * end
+            + h11[:, None] * tangent_end
+        )
+        tail_s = np.arange(target_end_s + 0.25, float(target_lane.length) + 1.0e-6, 0.25)
+        tail = np.asarray([target_lane.position(float(s), 0.0)[:2] for s in tail_s])
+        xy_path = curve if tail.size == 0 else np.concatenate((curve, tail), axis=0)
+        delta = np.gradient(xy_path, axis=0)
+        path = np.column_stack((xy_path, np.arctan2(delta[:, 1], delta[:, 0])))
+        return np.ascontiguousarray(path, dtype=np.float64)
+
+    @staticmethod
+    def _s7_route_target(env: object, road_network: object, source_lane: object):
+        config = getattr(env, "config", {}) or {}
+        if (
+            config.get("scenario_id") != "S7_ego_merge_from_ramp"
+            or config.get("local_route") != "R7_merge_core"
+            or tuple(getattr(source_lane, "index", ()) or ())
+            != ("18c0_1_", "9g0_0_", 0)
+        ):
+            return None
+        try:
+            return road_network.get_lane(("9g0_0_", "9g0_1_", 2))
+        except Exception:
+            return None
+
     def _stop_trajectory(
         self,
         road_network: object,
@@ -685,6 +800,9 @@ class SimulatorDynamicAnchorGenerator:
         )
         left_lane = self._lateral_lane(road_network, source_lane, ego_pose, direction=1)
         right_lane = self._lateral_lane(road_network, source_lane, ego_pose, direction=-1)
+        s7_route_target = self._s7_route_target(env, road_network, source_lane)
+        if s7_route_target is not None:
+            left_lane = s7_route_target
         left_s = self._project(left_lane, position[:2])[0] if left_lane is not None else 0.0
         right_s = self._project(right_lane, position[:2])[0] if right_lane is not None else 0.0
 
@@ -712,16 +830,28 @@ class SimulatorDynamicAnchorGenerator:
             for slot, accel in zip(
                 (ModeIndex.LEFT_HIGH, ModeIndex.LEFT_MEDIUM, ModeIndex.LEFT_LOW), accelerations
             ):
-                trajectories[slot] = self._trajectory(
-                    road_network,
-                    source_lane,
-                    left_lane,
-                    source_s,
-                    source_d,
-                    left_s,
-                    ego_pose,
-                    speed_mps,
-                    accel,
+                trajectories[slot] = (
+                    self._route_transition_trajectory(
+                        source_lane,
+                        left_lane,
+                        source_s,
+                        source_d,
+                        ego_pose,
+                        speed_mps,
+                        accel,
+                    )
+                    if s7_route_target is not None
+                    else self._trajectory(
+                        road_network,
+                        source_lane,
+                        left_lane,
+                        source_s,
+                        source_d,
+                        left_s,
+                        ego_pose,
+                        speed_mps,
+                        accel,
+                    )
                 )
         if right_lane is not None:
             for slot, accel in zip(

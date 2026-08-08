@@ -50,7 +50,7 @@ def test_s7_g_block_has_non_routing_drivable_merge_surface() -> None:
         )
 
         assert len(overlays) == 1
-        assert overlays[0].width == 4.0
+        assert overlays[0].width == 5.0
         assert ramp_lane.route_seam_transition_m == 16.0
         assert overlays[0].need_lane_localization is False
         assert not any(overlays[0] is lane for lane in network.get_all_lanes())

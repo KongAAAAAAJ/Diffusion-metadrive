@@ -1,0 +1,62 @@
+{
+  "attempted_episodes": 82,
+  "base_dataset_fingerprint": "6d94b5d40506e16dab26c3f0f0937eed4a313306f0f908ddff8d3425df25931c",
+  "base_episode_acceptance_rate": 0.975609756097561,
+  "base_joint_samples": 15000,
+  "bundle_index_sha256": "e82b2ef51640133f8c141f82136d7a0d22eac1e4aad2ee55510facc4e8be2810",
+  "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal_pilot15k_v1",
+  "committed_base_episodes": 80,
+  "committed_sidecar_episodes": 82,
+  "decode_joint_samples_per_s": 858.831528988644,
+  "diagnostic_only": false,
+  "eligible_for_formal_50k_collection": true,
+  "eligible_for_stage1_formal_training": false,
+  "events": {
+    "actor_despawn": 240,
+    "collision_sidewalk": 40,
+    "out_of_road": 42,
+    "out_of_route": 32,
+    "scenario_realized": 82,
+    "scenario_trigger": 82,
+    "terminated": 80,
+    "truncated": 80
+  },
+  "format": "bev_risk_shared_bundle_pilot_report_v1",
+  "minimum_base_samples": 15000,
+  "missing_scenarios": [],
+  "next_gate": "formal_50k_joint_bundle_collection",
+  "non_empty_splits": [
+    "train",
+    "val",
+    "test"
+  ],
+  "outcomes": {
+    "collision": 24,
+    "out_of_road": 34,
+    "success": 2,
+    "truncated": 22
+  },
+  "protocol_schema_version": "1.0.0",
+  "round": "13.97e",
+  "round13_closeout_status": "infrastructure_accepted",
+  "scenario_attempts": {
+    "S5_hard_brake_lead": 16,
+    "S6_background_merge_in": 16,
+    "S7_ego_merge_from_ramp": 18,
+    "S8_ego_exit_to_ramp": 16,
+    "S9_narrow_channel_negotiation": 16
+  },
+  "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+  "scenario_joint_samples": {
+    "S5_hard_brake_lead": 3000,
+    "S6_background_merge_in": 3000,
+    "S7_ego_merge_from_ramp": 3000,
+    "S8_ego_exit_to_ramp": 3000,
+    "S9_narrow_channel_negotiation": 3000
+  },
+  "sidecar_dataset_fingerprint": "cdebf4ec2336b0b262ccfc9da568f7b7696187a3bb0786f37bdd481cb0d2c78c",
+  "sidecar_episode_retention_rate": 1.0,
+  "sidecar_only_episodes": 2,
+  "sidecar_raw_steps": 16094,
+  "status": "formal_15000_pilot_accepted"
+}

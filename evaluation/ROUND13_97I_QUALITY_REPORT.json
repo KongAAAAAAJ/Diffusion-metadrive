@@ -1,0 +1,118 @@
+{
+  "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_s7_corrective_pilot_round13_97i",
+  "eligible_for_formal_50k_collection": true,
+  "format": "bev_shared_bundle_statistical_quality_v1",
+  "gates": {
+    "required_scenarios_present": true,
+    "required_splits_non_empty": true,
+    "s7_lateral_mode_fraction": true,
+    "s7_low_speed_fraction": true,
+    "s7_stop_fraction": true
+  },
+  "global_gt_mode_counts": {
+    "KEEP_HIGH": 633,
+    "KEEP_LOW": 101,
+    "KEEP_MEDIUM": 1853,
+    "LEFT_HIGH": 463,
+    "LEFT_MEDIUM": 168,
+    "STOP": 202
+  },
+  "infrastructure_report_status": null,
+  "mode_valid_rate": {
+    "KEEP_HIGH": 0.847953216374269,
+    "KEEP_LOW": 0.997953216374269,
+    "KEEP_MEDIUM": 0.9862573099415205,
+    "LEFT_HIGH": 0.8470760233918129,
+    "LEFT_LOW": 0.6780701754385965,
+    "LEFT_MEDIUM": 0.9842105263157894,
+    "RIGHT_HIGH": 0.7301169590643275,
+    "RIGHT_LOW": 0.45146198830409356,
+    "RIGHT_MEDIUM": 0.8961988304093568,
+    "STOP": 1.0
+  },
+  "role_gt_mode_counts": {
+    "leader": {
+      "KEEP_HIGH": 128,
+      "KEEP_LOW": 44,
+      "KEEP_MEDIUM": 818,
+      "LEFT_HIGH": 113,
+      "STOP": 37
+    },
+    "middle": {
+      "KEEP_HIGH": 166,
+      "KEEP_LOW": 20,
+      "KEEP_MEDIUM": 664,
+      "LEFT_HIGH": 156,
+      "LEFT_MEDIUM": 56,
+      "STOP": 78
+    },
+    "rear": {
+      "KEEP_HIGH": 339,
+      "KEEP_LOW": 37,
+      "KEEP_MEDIUM": 371,
+      "LEFT_HIGH": 194,
+      "LEFT_MEDIUM": 112,
+      "STOP": 87
+    }
+  },
+  "round": "13.97g",
+  "scenario_statistics": {
+    "S7_ego_merge_from_ramp": {
+      "episodes": 6,
+      "expert_terminal_displacement_m": {
+        "p05": 13.076326894760133,
+        "p50": 31.96355152130127,
+        "p95": 54.49738731384277
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 633,
+        "KEEP_LOW": 101,
+        "KEEP_MEDIUM": 1853,
+        "LEFT_HIGH": 463,
+        "LEFT_MEDIUM": 168,
+        "STOP": 202
+      },
+      "joint_samples": 1140,
+      "lateral_mode_fraction": 0.1845029239766082,
+      "role_labels": 3420,
+      "speed_below_0_3_fraction": 0.0,
+      "speed_mps": {
+        "p05": 3.971209132671356,
+        "p50": 7.034014701843262,
+        "p95": 11.49740219116211
+      },
+      "stop_fraction": 0.05906432748538012
+    }
+  },
+  "sidecar_event_actor_types": {
+    "actor_despawn": {
+      "platoon": 18
+    },
+    "collision_sidewalk": {
+      "external": 18
+    },
+    "out_of_route": {
+      "platoon": 18
+    },
+    "terminated": {
+      "platoon": 18
+    },
+    "truncated": {
+      "platoon": 18
+    }
+  },
+  "split_joint_samples": {
+    "train": 760,
+    "val": 380
+  },
+  "status": "statistical_quality_accepted",
+  "thresholds": {
+    "require_all_splits": false,
+    "required_scenarios": [
+      "S7_ego_merge_from_ramp"
+    ],
+    "s7_max_low_speed_fraction": 0.4,
+    "s7_max_stop_fraction": 0.4,
+    "s7_min_lateral_mode_fraction": 0.1
+  }
+}

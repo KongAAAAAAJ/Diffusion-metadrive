@@ -123,6 +123,34 @@ def test_feedback_governor_keeps_float32_guard_inside_hard_brake_boundary() -> N
     )
 
 
+def test_feedback_governor_respects_joint_gap_acceleration_cap() -> None:
+    times = np.arange(101, dtype=np.float64) * 0.1
+    arc = 12.0 * times
+    reference = build_feedback_executable_profile(
+        path_times_s=times,
+        path_arc_m=arc,
+        elapsed_s=0.0,
+        actual_arc_m=-20.0,
+        actual_speed_mps=8.0,
+        maximum_acceleration_mps2=0.5,
+    )
+
+    assert np.max(reference.acceleration_mps2) <= 0.5 + 1.0e-8
+
+
+def test_feedback_governor_rejects_invalid_joint_gap_acceleration_cap() -> None:
+    times = np.arange(101, dtype=np.float64) * 0.1
+    with pytest.raises(LongitudinalReferenceError):
+        build_feedback_executable_profile(
+            path_times_s=times,
+            path_arc_m=4.0 * times,
+            elapsed_s=0.0,
+            actual_arc_m=0.0,
+            actual_speed_mps=4.0,
+            maximum_acceleration_mps2=6.0,
+        )
+
+
 def test_stop_reference_freezes_after_zero_speed() -> None:
     stop = trajectory_to_longitudinal_reference(
         np.zeros((8, 3), dtype=np.float32), 2.0, source="online_trajectory"

@@ -1,0 +1,38 @@
+{
+  "format": "bev_round13_97h_s7_expert_chain_report_v1",
+  "round": "13.97h",
+  "status": "s7_expert_chain_accepted",
+  "source_pilot_quality_report": "evaluation/ROUND13_97G_QUALITY_REPORT.json",
+  "root_causes": [
+    "S7 current hybrid ramp lane was absent from the forced route-action mapping",
+    "the route-merge surface was narrower than the physical junction apron required by the XL footprint",
+    "dynamic LEFT anchors used an adjacent-lane interpretation instead of the ramp-to-mainline route transition",
+    "independent committed-roll longitudinal re-anchoring could predict a platoon gap below 7 m",
+    "route-transition commitment completion was released before the full vehicle footprint converged to the target lane",
+    "generic MOBIL scoring could request a second LEFT after the single required merge"
+  ],
+  "safety_contract": {
+    "background_gap_m": 5.0,
+    "platoon_gap_m": 7.0,
+    "tracking_heading_envelope_rad": 0.1,
+    "safety_boundaries_relaxed": false
+  },
+  "smoke_results": [
+    {
+      "seed": 1949832489,
+      "steps": 80,
+      "failure_reason": null
+    },
+    {
+      "seed": 17,
+      "steps": 80,
+      "failure_reason": null
+    },
+    {
+      "seed": 23,
+      "steps": 80,
+      "failure_reason": null
+    }
+  ],
+  "next_gate": "round13_97i_s7_corrective_pilot"
+}

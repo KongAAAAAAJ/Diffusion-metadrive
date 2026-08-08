@@ -1,0 +1,31 @@
+dataset:
+  name: platoon_joint_bev
+  sidecar_name: riskentry_actor_sidecar
+  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_s7_corrective_pilot_round13_97i
+
+split:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  seed: 17
+
+collection:
+  target_joint_steps: 1000
+  start_seed: 19700
+  max_episodes: 10
+  max_episode_steps: 200
+  resume: true
+  scenario_weights:
+    S7_ego_merge_from_ramp: 1.0
+  traffic_density_min: 0.0
+  traffic_density_max: 0.0
+
+env_config:
+  num_agents: 3
+  horizon: 200
+  observation_mode: bev_gt
+  use_render: false
+  image_observation: false
+  image_on_cuda: false
+  sensors: {}
+  target_speed_km_h: 30.0

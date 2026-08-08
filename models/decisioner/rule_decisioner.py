@@ -754,6 +754,37 @@ class MultiAgentRuleMaker(RuleMaker):
                 "risk_required_for_lane_change": True,
                 "final_feasibility_authority": "normal_planner",
             }
+        elif (
+            self._formation_locked
+            and self._is_s7_merge_route(env)
+            and not bool(risk_info.get("triggered", False))
+        ):
+            # S7 contains exactly one route-required ramp-to-mainline merge.
+            # Once that forced proposal has completed, generic MOBIL scoring
+            # must not interpret the remaining mainline lanes as a second
+            # required LEFT maneuver.  KEEP is still only a RuleMaker
+            # proposal: the Normal planner remains the final hard-feasibility
+            # authority and may reject the episode.
+            keep_combo = tuple(
+                self._candidate_for_action(
+                    candidates_by_agent.get(agent_id, []), 0
+                )
+                for agent_id in ordered_agent_ids
+            )
+            if any(candidate is None for candidate in keep_combo):
+                best_combo = None
+                best_score = -float("inf")
+                ranked_combos = []
+            else:
+                best_combo = keep_combo
+                best_score = 0.0
+                ranked_combos = [(tuple(keep_combo), best_score)]
+            action_search_debug = {
+                "strategy": "s7_post_merge_keep",
+                "prefix_counts": [1 if best_combo is not None else 0],
+                "single_route_merge_only": True,
+                "final_feasibility_authority": "normal_planner",
+            }
         elif self._formation_locked:
             best_combo, best_score, action_search_debug, ranked_combos = self._best_locked_combo(
                 env=env,
@@ -1026,11 +1057,16 @@ class MultiAgentRuleMaker(RuleMaker):
             footprint_inside, footprint_margin_m = (
                 self._vehicle_footprint_inside_lane(vehicle, target_lane)
             )
+            downstream_route_transition = (
+                tuple(commitment.source_lane_index[:2])
+                != tuple(current_index[:2])
+            )
+            lateral_tolerance_m = self.LANE_CHANGE_COMPLETION_LATERAL_TOLERANCE_M
             if (
                 not np.isfinite(target_lateral_m)
                 or not np.isfinite(heading_error_rad)
                 or abs(float(target_lateral_m))
-                > self.LANE_CHANGE_COMPLETION_LATERAL_TOLERANCE_M
+                > lateral_tolerance_m
                 or abs(heading_error_rad)
                 > self.LANE_CHANGE_COMPLETION_HEADING_TOLERANCE_RAD
                 or not footprint_inside
@@ -1042,7 +1078,11 @@ class MultiAgentRuleMaker(RuleMaker):
                 "target_lane_index": commitment.target_lane_index,
                 "commit_step": int(commitment.commit_step),
                 "completion_step": int(self._decision_step + 1),
-                "completion_reason": "converged_to_target_lane_pose",
+                "completion_reason": (
+                    "entered_downstream_target_lane"
+                    if downstream_route_transition
+                    else "converged_to_target_lane_pose"
+                ),
                 "target_lateral_error_m": float(target_lateral_m),
                 "target_heading_error_rad": float(heading_error_rad),
                 "target_lane_footprint_margin_m": float(footprint_margin_m),
@@ -2020,7 +2060,16 @@ class MultiAgentRuleMaker(RuleMaker):
             return False
         target_lane_index = tuple(candidate.get("target_lane_index", ()) or ())
         source_lane_index = tuple(candidate.get("source_lane_index", ()) or ())
-        if source_lane_index == ('9g0_0_', '9g1_4_', 0) and target_lane_index == ('9g0_0_', '9g0_1_', 2):
+        if (
+            source_lane_index
+            in {
+                ('9g0_0_', '9g1_4_', 0),
+                # Current hybrid-map S7 route: the ramp is the final lane of
+                # the preceding C block and joins the right-most G mainline.
+                ('18c0_1_', '9g0_0_', 0),
+            }
+            and target_lane_index == ('9g0_0_', '9g0_1_', 2)
+        ):
             return True
         return False
 
@@ -2550,7 +2599,10 @@ class MultiAgentRuleMaker(RuleMaker):
                 )
 
         lane_index = tuple(getattr(source_lane, "index", ()) or ())
-        if lane_index == ('9g0_0_', '9g1_4_', 0):
+        if lane_index in {
+            ('9g0_0_', '9g1_4_', 0),
+            ('18c0_1_', '9g0_0_', 0),
+        }:
             road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
             if road_network is not None and hasattr(road_network, "get_lane"):
                 try:

@@ -1098,6 +1098,26 @@ class PlatoonNormalPlanner:
                         )
                         for agent_id in committed_agents
                     )
+                    # For a route-level ramp merge, ``lane_change_duration``
+                    # describes the geometric transition but the rear vehicle
+                    # must first travel from its staggered spawn position to
+                    # the common seam.  The atomic plan cannot expire on the
+                    # leader's four-second clock while the rear is still on
+                    # the valid ramp segment.
+                    for agent_id in committed_agents:
+                        params = selected_candidates[agent_id].execution_parameters
+                        source_index = tuple(params.get("source_lane_index", ()) or ())
+                        target_index = tuple(params.get("target_lane_index", ()) or ())
+                        if source_index[:2] == target_index[:2]:
+                            continue
+                        source_lane = self._lane_from_index(env, source_index)
+                        remaining = max(
+                            float(getattr(source_lane, "length", 0.0) or 0.0)
+                            - float(params.get("start_s", 0.0)),
+                            0.0,
+                        )
+                        speed = max(float(params.get("initial_speed_mps", 0.0)), 1.0)
+                        deadline = max(deadline, remaining / speed + 2.0)
                     deadline_key = round(float(deadline), 6)
                     specs: dict[str, TrajectoryExecutionSpec] = {}
                     candidate_audits: dict[str, _CandidateFullHorizonAudit] = {}
@@ -1428,6 +1448,16 @@ class PlatoonNormalPlanner:
         target_chain = self._resolve_execution_lane_chain(
             env, target_chain_indices, fallback_lane=target_lane
         )
+        target_lane_key = tuple(getattr(target_lane, "index", ()) or ())
+        route_transition_action = bool(
+            int(params.get("action", 0)) != 0
+            and target_lane_key
+            and target_lane_key
+            in {
+                tuple(getattr(lane, "index", ()) or ())
+                for lane in source_chain[1:]
+            }
+        )
         continuation = self._continuation_context(source_lane, continuation_lane)
         sample_times = np.arange(
             0.0,
@@ -1460,7 +1490,7 @@ class PlatoonNormalPlanner:
             times=sample_times,
             route_lane_chain=(
                 source_chain
-                if int(params.get("action", 0)) == 0
+                if int(params.get("action", 0)) == 0 or route_transition_action
                 else None
             ),
         )
@@ -1742,6 +1772,22 @@ class PlatoonNormalPlanner:
             source_path,
             start_heading=float(trajectory_world[0, 2]),
         )
+        source_index = tuple(getattr(source_chain[0], "index", ()) or ())
+        target_index = tuple(getattr(target_chain[0], "index", ()) or ())
+        if (
+            int(action) != 0
+            and (
+                len(source_index) < 3
+                or len(target_index) < 3
+                or source_index[:2] != target_index[:2]
+            )
+        ):
+            # A downstream route transition starts before target-lane local
+            # s=0, so projecting the current ramp pose onto the target lane
+            # yields a negative coordinate.  Its candidate was already built
+            # from the continuous frozen source route; retain that exact path
+            # instead of trying to rebuild it as an adjacent-lane blend.
+            return np.ascontiguousarray(source_path, dtype=np.float64)
         target_first = target_chain[0]
         target_s, _ = target_first.local_coordinates(current_xy)
         target_path = build_continuous_lane_chain_path(
@@ -1764,13 +1810,6 @@ class PlatoonNormalPlanner:
         if int(action) == 0:
             result = source_path
         else:
-            source_index = tuple(getattr(source_chain[0], "index", ()) or ())
-            target_index = tuple(getattr(target_chain[0], "index", ()) or ())
-            if len(source_index) < 3 or len(target_index) < 3 or source_index[:2] != target_index[:2]:
-                # Downstream merge maneuvers predate the route-chain contract.
-                # Preserve their selected native geometry; only adjacent-lane
-                # commitments use the new common-prefix route construction.
-                return np.ascontiguousarray(trajectory_world, dtype=np.float64)
             maximum_arc = float(target_arc[-1])
             progress = np.arange(0.0, maximum_arc, 0.25, dtype=np.float64)
             progress = np.append(progress, maximum_arc)
@@ -1984,6 +2023,16 @@ class PlatoonNormalPlanner:
         target_lane_chain = self._append_unique_execution_successors(
             env, target_lane_chain
         )
+        target_lane_key = tuple(getattr(target_lane, "index", ()) or ())
+        route_transition_action = bool(
+            int(action) != 0
+            and target_lane_key
+            and target_lane_key
+            in {
+                tuple(getattr(lane, "index", ()) or ())
+                for lane in source_lane_chain[1:]
+            }
+        )
         predecessor_lane = self._get_predecessor_lane(
             env, vehicle, source_lane
         )
@@ -2021,6 +2070,11 @@ class PlatoonNormalPlanner:
             ego_speed_mps=ego_speed,
             usable_source_progress_m=usable_source_progress,
         )
+        # A route-level ramp merge crosses the source road end into a lane
+        # already present in the frozen route chain.  It is not an adjacent
+        # lane change that must finish before that road end.
+        if route_transition_action:
+            lane_end_restricted = False
         durations = self._lane_change_durations(
             action=int(action),
             lane_end_restricted=lane_end_restricted,
@@ -2048,7 +2102,7 @@ class PlatoonNormalPlanner:
             # the expensive dense XL-footprint audit without adding a route
             # option; keep the longitudinal/delay lattice intact.
             lateral_targets = (round(float(desired_end_d), 4),)
-        if int(action) == 0 and len(source_lane_chain) > 1:
+        if (int(action) == 0 or route_transition_action) and len(source_lane_chain) > 1:
             # A KEEP route-chain trajectory samples one frozen spatial path;
             # _build_dense_candidate deliberately does not consume end_d in
             # this branch.  Repeating the same geometry for four nominal
@@ -2212,7 +2266,9 @@ class PlatoonNormalPlanner:
                                 getattr(vehicle, "heading_theta", 0.0)
                             ),
                             route_lane_chain=(
-                                source_lane_chain if int(action) == 0 else None
+                                source_lane_chain
+                                if int(action) == 0 or route_transition_action
+                                else None
                             ),
                         )
                         if candidate_dense is None:
@@ -2542,10 +2598,11 @@ class PlatoonNormalPlanner:
                             dense_dt_s=0.25,
                         )
                     )
-                except NormalPlannerKinematicError:
+                except NormalPlannerKinematicError as exc:
                     extended_footprint_valid = False
                     extended_detail = {
-                        "reason": "committed_path_parameterization_failed"
+                        "reason": "committed_path_parameterization_failed",
+                        "message": str(exc),
                     }
                 if extended_footprint_valid:
                     prediction_key = (
@@ -3206,7 +3263,10 @@ class PlatoonNormalPlanner:
         scenario_id: str,
         action: int,
     ) -> int:
-        if str(scenario_id) == "S8_ego_exit_to_ramp" and int(action) != 0:
+        if str(scenario_id) in {
+            "S7_ego_merge_from_ramp",
+            "S8_ego_exit_to_ramp",
+        } and int(action) != 0:
             return 24
         return 12 if int(action) == 0 else 6
 
@@ -3216,7 +3276,10 @@ class PlatoonNormalPlanner:
         scenario_id: str,
         action: int,
     ) -> int:
-        if str(scenario_id) == "S8_ego_exit_to_ramp" and int(action) != 0:
+        if str(scenario_id) in {
+            "S7_ego_merge_from_ramp",
+            "S8_ego_exit_to_ramp",
+        } and int(action) != 0:
             return max(int(self.candidate_pool_size), 24)
         return int(self.candidate_pool_size)
 
@@ -5046,6 +5109,13 @@ class PlatoonNormalPlanner:
 
 
 class JointTrajectoryExecutor:
+    # A committed execution is atomic across the three roles.  Feedback
+    # re-anchoring must therefore preserve the accepted pairwise contract as
+    # well as each vehicle's local kinematics.  The ordered caps below are a
+    # deterministic governor search, not a safety tolerance: every selected
+    # window still has to satisfy the unchanged 7 m hard gap.
+    JOINT_GAP_ACCELERATION_CAPS_MPS2 = (None, 3.0, 2.0, 1.0, 0.5, 0.0, -1.0, -2.0)
+
     """Roll an accepted three-agent native plan without restarting its maneuver."""
 
     TRACKING_LONGITUDINAL_LIMIT_M = 1.0
@@ -5591,28 +5661,90 @@ class JointTrajectoryExecutor:
                 ],
                 dtype=np.float64,
             )
-            try:
-                (
-                    longitudinal_reference,
-                    dense,
-                    output,
-                    local_output,
-                    dense_arc,
-                ) = self._build_feedback_executable_window(
-                    spec,
-                    current_pose=current_pose,
-                    current_speed_mps=speed,
-                    current_path_arc_m=actual_arc,
-                    elapsed_s=elapsed_s,
-                )
-            except LongitudinalReferenceError as exc:
+            selected_acceleration_cap = None
+            executable_window = None
+            last_reference_error = None
+            rejected_gap_caps: list[dict[str, object]] = []
+            for acceleration_cap in self.JOINT_GAP_ACCELERATION_CAPS_MPS2:
+                try:
+                    candidate_window = self._build_feedback_executable_window(
+                        spec,
+                        current_pose=current_pose,
+                        current_speed_mps=speed,
+                        current_path_arc_m=actual_arc,
+                        elapsed_s=elapsed_s,
+                        maximum_acceleration_mps2=acceleration_cap,
+                    )
+                except LongitudinalReferenceError as exc:
+                    last_reference_error = exc
+                    continue
+                candidate_dense = candidate_window[1]
+                conflicts: list[dict[str, object]] = []
+                for predecessor_id, predecessor_dense in dense_by_agent.items():
+                    collision = self.planner._trajectory_pair_collides(
+                        predecessor_dense,
+                        agents[predecessor_id],
+                        candidate_dense,
+                        vehicle,
+                    )
+                    pair_gap = self._minimum_pair_gap(
+                        predecessor_dense,
+                        self.planner._vehicle_dimensions(agents[predecessor_id]),
+                        candidate_dense,
+                        self.planner._vehicle_dimensions(vehicle),
+                    )
+                    if collision or pair_gap < self.planner.platoon_safe_gap_m - 1e-6:
+                        conflicts.append(
+                            {
+                                "predecessor_id": predecessor_id,
+                                "obb_collision": bool(collision),
+                                "minimum_gap_m": float(pair_gap),
+                            }
+                        )
+                if conflicts:
+                    rejected_gap_caps.append(
+                        {
+                            "maximum_acceleration_mps2": acceleration_cap,
+                            "conflicts": conflicts,
+                        }
+                    )
+                    continue
+                executable_window = candidate_window
+                selected_acceleration_cap = acceleration_cap
+                break
+            if executable_window is None:
+                if rejected_gap_caps:
+                    self._raise(
+                        plan,
+                        elapsed_s,
+                        "joint feedback governor cannot preserve the platoon safety gap",
+                        "committed_trajectory_pairwise_unsafe",
+                        {
+                            "agent_id": agent_id,
+                            "maximum_acceleration_caps_mps2": list(
+                                self.JOINT_GAP_ACCELERATION_CAPS_MPS2
+                            ),
+                            "rejected_gap_caps": rejected_gap_caps,
+                        },
+                    )
+                exc = last_reference_error
                 self._raise(
                     plan,
                     elapsed_s,
                     "committed longitudinal reference cannot be rolled",
                     "committed_trajectory_kinematic_infeasible",
-                    {"agent_id": agent_id, "longitudinal_reference_error": str(exc)},
+                    {
+                        "agent_id": agent_id,
+                        "longitudinal_reference_error": str(exc),
+                    },
                 )
+            (
+                longitudinal_reference,
+                dense,
+                output,
+                local_output,
+                dense_arc,
+            ) = executable_window
             world_audit = validate_trajectory_kinematics(
                 output, speed, current_pose, HardModeMaskConfig()
             )
@@ -5746,6 +5878,12 @@ class JointTrajectoryExecutor:
                 "reference_acceleration_mps2": float(
                     longitudinal_reference.feedforward_acceleration_mps2
                 ),
+                "joint_gap_maximum_acceleration_mps2": (
+                    None
+                    if selected_acceleration_cap is None
+                    else float(selected_acceleration_cap)
+                ),
+                "joint_gap_rejected_acceleration_caps": rejected_gap_caps,
                 "minimum_background_gap_m": minimum_background_gap,
                 "minimum_background_gap_detail": background_gap_detail,
                 "selected_lane_change_duration_s": float(
@@ -5944,6 +6082,7 @@ class JointTrajectoryExecutor:
         current_speed_mps: float,
         current_path_arc_m: float,
         elapsed_s: float,
+        maximum_acceleration_mps2: float | None = None,
     ) -> tuple[
         LongitudinalTrackingReference,
         np.ndarray,
@@ -5997,6 +6136,7 @@ class JointTrajectoryExecutor:
             actual_arc_m=actual_arc,
             actual_speed_mps=speed,
             path_speed_limit_mps=reference_speed_limit,
+            maximum_acceleration_mps2=maximum_acceleration_mps2,
             source="committed_roll",
         )
         output = self._sample_executable_path_by_travel(

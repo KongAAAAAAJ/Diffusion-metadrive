@@ -149,11 +149,19 @@ class MAHybridMap(PGMap):
                         if key in created_keys:
                             continue
                         seam_transition_m = 16.0
+                        # The offset ramp-to-mainline seam is an unstructured
+                        # merge apron, not a 4 m routing lane.  At the bend an
+                        # XL vehicle's corner sweeps about 2.25 m from the seam
+                        # centre even while its reference path is centred.
+                        # Represent the physical apron at its 5 m width so the
+                        # footprint audit does not turn a valid merge into a
+                        # permanent stop.  This changes only the map surface;
+                        # collision gaps and kinematic limits stay unchanged.
                         surface = build_lane_seam_drivable_surface(
                             lane,
                             successor,
                             transition_m=seam_transition_m,
-                            width_m=4.0,
+                            width_m=5.0,
                         )
                         surface.index = (
                             f"{lane_index[1]}-route-merge-junction",

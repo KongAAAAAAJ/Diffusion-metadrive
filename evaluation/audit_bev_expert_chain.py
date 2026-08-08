@@ -184,6 +184,9 @@ def _compact_planner_debug(debug: Mapping[str, object]) -> dict[str, object]:
                 "kinematic_rejection_count",
                 "corridor_rejection_count",
                 "road_rejection_count",
+                "road_rejections_by_reason",
+                "first_road_rejection",
+                "first_committed_road_rejection",
                 "background_collision_rejection_count",
                 "background_gap_rejection_count",
                 "best_rejected_background_gap_m",
@@ -398,8 +401,7 @@ def audit_episode(
             expert_step = expert.plan(env, model_inputs=model_inputs)
         except JointCollectionError as exc:
             failure_reason = exc.reason_code
-            rows.append(
-                {
+            failure_row = {
                     "step": step,
                     "failure_reason": failure_reason,
                     "error": str(exc),
@@ -415,7 +417,10 @@ def audit_episode(
                         if agent_id in env.agents
                     },
                 }
-            )
+            if model_inputs is not None:
+                failure_row["mode_valid_mask"] = model_inputs.mode_valid_mask.tolist()
+                failure_row["coarse_trajectories"] = model_inputs.coarse_trajectories.tolist()
+            rows.append(failure_row)
             break
 
         rule_debug = expert.rule_maker.get_last_debug() or {}

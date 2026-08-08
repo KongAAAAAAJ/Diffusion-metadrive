@@ -1498,6 +1498,28 @@ def test_s7_downstream_target_lane_uses_real_route_contract():
     assert tuple(target_lane.index) == ("9g0_0_", "9g0_1_", 2)
 
 
+def test_s7_current_hybrid_ramp_contract_is_forced_left() -> None:
+    vehicle = _vehicle("agent0", 25.0, 0.0, 0, speed_km_h=25.0)
+    target = ConnectedFakeLane(2, 0.0, 0.0, "9g0_0_", "9g0_1_", length=120.0)
+    source = ConnectedFakeLane(0, 0.0, 0.0, "18c0_1_", "9g0_0_", length=60.0)
+    network = SimpleNamespace(
+        graph={"18c0_1_": {"9g0_0_": [source]}, "9g0_0_": {"9g0_1_": [target, target, target]}},
+        get_lane=lambda index: target if tuple(index) == ("9g0_0_", "9g0_1_", 2) else source,
+    )
+    vehicle.lane = source
+    vehicle.navigation = SimpleNamespace(checkpoints=["18c0_1_", "9g0_0_", "9g0_1_"])
+    env = SimpleNamespace(
+        config={"scenario_id": "S7_ego_merge_from_ramp", "local_route": "R7_merge_core"},
+        agents={"agent0": vehicle},
+        engine=SimpleNamespace(current_map=SimpleNamespace(road_network=network), traffic_manager=SimpleNamespace(_traffic_vehicles=[])),
+    )
+    maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
+    candidate = maker._build_coarse_trajectory(env, vehicle, -1, [])
+    assert candidate is not None
+    assert candidate["forced_lane_change"] is True
+    assert tuple(candidate["target_lane_index"]) == ("9g0_0_", "9g0_1_", 2)
+
+
 def test_s7_forced_lane_change_bypasses_joint_score_and_selects_left_action(monkeypatch):
     vehicle = _vehicle("agent0", 25.0, 0.0, 0, speed_km_h=25.0)
     env = _env_s7_real_lane_contract(vehicle)

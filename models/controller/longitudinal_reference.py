@@ -500,6 +500,7 @@ def build_feedback_executable_profile(
     speed_gain: float = 1.2,
     internal_dt_s: float = 0.1,
     path_speed_limit_mps: np.ndarray | None = None,
+    maximum_acceleration_mps2: float | None = None,
     source: str = "committed_roll",
 ) -> LongitudinalTrackingReference:
     """Roll a path-relative profile from the actual state under bounded feedback."""
@@ -509,6 +510,11 @@ def build_feedback_executable_profile(
     elapsed = float(elapsed_s)
     actual_arc = float(actual_arc_m)
     actual_speed = float(actual_speed_mps)
+    maximum_acceleration = (
+        EXECUTABLE_MAX_ACCEL_MPS2 - PROFILE_ACCELERATION_GUARD_MPS2
+        if maximum_acceleration_mps2 is None
+        else float(maximum_acceleration_mps2)
+    )
     if (
         times.ndim != 1
         or arc.shape != times.shape
@@ -520,6 +526,11 @@ def build_feedback_executable_profile(
         or not np.isfinite([elapsed, actual_arc, actual_speed]).all()
         or actual_speed < 0.0
         or internal_dt_s <= 0.0
+        or not np.isfinite(maximum_acceleration)
+        or maximum_acceleration
+        < EXECUTABLE_MIN_ACCEL_MPS2 + PROFILE_ACCELERATION_GUARD_MPS2
+        or maximum_acceleration
+        > EXECUTABLE_MAX_ACCEL_MPS2 - PROFILE_ACCELERATION_GUARD_MPS2
     ):
         raise LongitudinalReferenceError("feedback profile inputs are invalid")
     if path_speed_limit_mps is None:
@@ -579,8 +590,7 @@ def build_feedback_executable_profile(
                 + float(speed_gain) * (target_speed - executed_speed[index]),
                 EXECUTABLE_MIN_ACCEL_MPS2
                 + PROFILE_ACCELERATION_GUARD_MPS2,
-                EXECUTABLE_MAX_ACCEL_MPS2
-                - PROFILE_ACCELERATION_GUARD_MPS2,
+                maximum_acceleration,
             )
         )
         dt = float(internal_dt_s)
