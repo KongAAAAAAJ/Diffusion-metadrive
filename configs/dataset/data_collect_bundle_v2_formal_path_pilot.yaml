@@ -1,0 +1,15 @@
+dataset:
+  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal_path_pilot_v2
+  dataset_instance_prefix: riskentry_formal_path_pilot_v2
+
+collection:
+  run_mode: formal_pilot
+  resume: true
+  split_seed: 3
+  max_episode_steps: 160
+  anchor_steps: [40, 45, 50, 55, 60, 65, 70]
+  max_attempts_per_cell: 3
+  target_windows:
+    id: 56
+    compositional_ood: 56
+    topology_ood: 56

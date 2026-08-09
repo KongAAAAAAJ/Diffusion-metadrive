@@ -1,0 +1,96 @@
+{
+  "format": "round13.99-formal-v2-path-pilot-report",
+  "schema_version": 1,
+  "status": "pass",
+  "purpose": "formal collector path, quota, resume, and cross-project protocol gate",
+  "pilot": {
+    "output_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal_path_pilot_v2",
+    "run_mode": "formal_pilot",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "total_eligible_anchor_windows": 168,
+    "total_episodes": 27,
+    "disk_size_mib_approx": 47,
+    "quota": {
+      "id": 56,
+      "compositional_ood": 56,
+      "topology_ood": 56
+    },
+    "per_cell_windows": 7,
+    "cells_per_partition": 8,
+    "resume_probe": {
+      "first_process_new_episodes": 12,
+      "second_process_new_episodes": 15,
+      "duplicate_episode_indices": 0,
+      "unfinished_transactions": 0,
+      "status": "pass"
+    }
+  },
+  "partitions": {
+    "id": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal_path_pilot_v2/riskentry_formal_path_pilot_v2_id_v2",
+      "episodes": 9,
+      "base_joint_samples": 56,
+      "sidecar_raw_steps": 1325,
+      "base_dataset_fingerprint": "623ddf76e29f9c53bee5ac79102cd5648d87df5d72d14a3c68c690ad0a4a6d9b",
+      "sidecar_dataset_fingerprint": "637e3bacefcd18c3c6390434a182bf4b78fa825b3a9df0be17f4863af77d2bef",
+      "bundle_index_sha256": "1ab9111f48d3a6e07078d56194f8ea2d56dd8345e5f545286912ad41512f73c0",
+      "riskentry_preflight_report_sha256": "3790fbdab1ed9f647d0d477dd240abcee19650970fea25990b2456c802dbcc53",
+      "outcomes": {"collision": 6, "out_of_road": 3}
+    },
+    "compositional_ood": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal_path_pilot_v2/riskentry_formal_path_pilot_v2_compositional_ood_v2",
+      "episodes": 9,
+      "base_joint_samples": 56,
+      "sidecar_raw_steps": 1323,
+      "base_dataset_fingerprint": "e9f246a62287d6cd6ea1316290f1f1c8dc7eb9089cfcb61d6c7251cf4f6accda",
+      "sidecar_dataset_fingerprint": "9d2ab8e1350ed8bbca3d781f134f72b5cbbe28bb3534918cc92cf3d48fe65788",
+      "bundle_index_sha256": "2ee4c4fa504d38e6c6cc59d8e9d33c2e305689a5c596c443f1327f62c03f37ad",
+      "riskentry_preflight_report_sha256": "852e88d746428f299e91d6f60c0a089372505710d23c29764443b521b324cf4d",
+      "outcomes": {"collision": 7, "out_of_road": 2}
+    },
+    "topology_ood": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal_path_pilot_v2/riskentry_formal_path_pilot_v2_topology_ood_v2",
+      "episodes": 9,
+      "base_joint_samples": 56,
+      "sidecar_raw_steps": 1319,
+      "base_dataset_fingerprint": "1aa8175259aee2ca838ee77b27f474a6cc6c9755206997cff9808f07647bbd7c",
+      "sidecar_dataset_fingerprint": "3b79a4e671788995399d5acde6f87c5392a1969e661d1a830f636db5c57648be",
+      "bundle_index_sha256": "f03d9ad8ace391ccd36cb23b2984e5605653528664be3985d63b0b44742112b4",
+      "riskentry_preflight_report_sha256": "8133eb2b4078691d21c2b815899809a653b13b8a398d2803e977b33abda3cfdd",
+      "outcomes": {"collision": 7, "out_of_road": 2}
+    }
+  },
+  "gates": {
+    "riskentry_v2_source_preflight": "3/3 pass with frozen expectations",
+    "riskentry_formal_episode_metadata": "27/27 pass",
+    "diffusion_id_dataset_verifier": {
+      "status": "pass",
+      "expert_trajectory": "168/168",
+      "hard_valid_anchor": "1050/1050",
+      "stop_anchor": "168/168",
+      "bev_compression_ratio": 6.4,
+      "decode_joint_samples_per_s": 807.5551495201155
+    },
+    "diffusion_regression": "100 passed",
+    "riskentry_regression": "20 passed",
+    "git_diff_check": "pass"
+  },
+  "configs": {
+    "pilot": {
+      "path": "configs/dataset/data_collect_bundle_v2_formal_path_pilot.yaml",
+      "sha256": "e52a55b4a1427a8fac86bac559c8e2f0d1949806b0a8df92e444b8ad8e9f432a"
+    },
+    "formal_70k": {
+      "path": "configs/dataset/data_collect_bundle_v2_formal70k.yaml",
+      "sha256": "f1d8ea8e091d92a8ac67e3ae1c85afb5232840e32ff4e8256951b73b1daf8929",
+      "started": false
+    }
+  },
+  "interpretation": {
+    "protocol_and_resume_ready": true,
+    "formal_collection_authorized": false,
+    "reason": "wait for independent RiskEntry validation of all three frozen handoff configs",
+    "quality_note": "This small pilot proves contracts and execution paths. Its terminal outcomes are deliberately hazard-heavy and are not a formal training-distribution quality conclusion."
+  }
+}

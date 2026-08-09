@@ -22,8 +22,10 @@ import numpy as np
 from expert_dataset.collect_joint_bev import (
     JointBEVSample,
     JointBEVSampleBuilder,
+    JointCollectionError,
     JointEpisodeRollout,
     JointEpisodeSidecar,
+    JointStepRejected,
     RulePlannerExpert,
     SensorlessJointBEVPlatoonEnv,
     simulator_decision_dt_s,
@@ -103,6 +105,7 @@ class RealV2EpisodeSpec:
     road_friction: float
     sensing_noise_std: float
     external_driver_aggressiveness: float
+    matched_pair_index: int = 0
 
     @property
     def scenario_id(self) -> str:
@@ -114,7 +117,10 @@ class RealV2EpisodeSpec:
 
     @property
     def matched_pair_id(self) -> str:
-        return f"{self.partition}_{self.scenario_family}_pair_000"
+        return (
+            f"{self.partition}_{self.scenario_family}_pair_"
+            f"{int(self.matched_pair_index):06d}"
+        )
 
     def parameters(self) -> dict[str, float]:
         return {
@@ -453,6 +459,26 @@ def _base_arrays(sample: JointBEVSample) -> dict[str, np.ndarray]:
     return arrays
 
 
+def base_arrays_from_samples(
+    samples: Sequence[JointBEVSample],
+) -> dict[str, np.ndarray]:
+    """Materialize one or more joint samples without changing base schema v2."""
+
+    if not samples:
+        raise RealBundleV2Error("at least one joint sample is required")
+    bev = np.stack([np.asarray(sample.bev) for sample in samples])
+    arrays: dict[str, np.ndarray] = {
+        PACKED_BEV_FIELD: pack_semantic_bev(np.ascontiguousarray(bev))
+    }
+    for name in samples[0].as_dict():
+        if name == "bev":
+            continue
+        arrays[name] = np.ascontiguousarray(
+            np.stack([np.asarray(sample.as_dict()[name]) for sample in samples])
+        )
+    return arrays
+
+
 def build_real_episode_payload(
     spec: RealV2EpisodeSpec,
     rollout: JointEpisodeRollout,
@@ -604,9 +630,36 @@ def collect_real_smoke_episode(
     The full production expert is invoked at the requested anchor to create a
     genuine RuleMaker/Normal-planner label, but its maneuver is not executed.
     This isolates the v2 data-interface smoke from long-horizon expert policy
-    quality; formal collection continues to use the production expert loop.
+    quality while exercising the same offline-label path as formal v2 runs.
     """
 
+    return collect_real_v2_episode(
+        env,
+        max_steps=max_steps,
+        reset_seed=reset_seed,
+        sample_steps=(int(sample_step),),
+    )
+
+
+def collect_real_v2_episode(
+    env: SensorlessJointBEVPlatoonEnv,
+    *,
+    max_steps: int,
+    reset_seed: int,
+    sample_steps: Sequence[int],
+) -> JointEpisodeRollout:
+    """Capture a live v2 timeline and label requested states independently.
+
+    The low-level visitation policy is deliberately independent of the label
+    planner.  A fresh production RulePlannerExpert is used for every requested
+    anchor, preventing unexecuted lane-change commitments from leaking between
+    offline labels.
+    """
+
+    requested_steps = tuple(sorted({int(step) for step in sample_steps}))
+    if not requested_steps or requested_steps[0] < 0:
+        raise RealBundleV2Error("sample_steps must contain non-negative steps")
+    requested = set(requested_steps)
     env.reset(seed=int(reset_seed))
     agent_ids = ("agent0", "agent1", "agent2")
     builder = JointBEVSampleBuilder(agent_ids)
@@ -619,17 +672,31 @@ def collect_real_smoke_episode(
     terminated_all = False
     truncated_all = False
     failure_reason: str | None = None
+    rejected_joint_steps = 0
+    rejection_counts: Counter[str] = Counter()
     simulator_steps = 0
     for step in range(int(max_steps)):
         builder.capture_state(env, timestamp_s=step * dt_s)
-        if step == int(sample_step):
+        if step in requested:
             if not builder.history_ready():
-                raise RealBundleV2Error("real smoke anchor has no BEV history")
-            model_inputs = builder.build_model_inputs(env)
-            expert = RulePlannerExpert(env, agent_ids)
-            expert_step = expert.plan(env, model_inputs=model_inputs)
-            samples.append(builder.build_sample(env, expert_step, model_inputs=model_inputs))
-            sample_steps.append(step)
+                continue
+            try:
+                model_inputs = builder.build_model_inputs(env)
+                expert = RulePlannerExpert(env, agent_ids)
+                expert_step = expert.plan(env, model_inputs=model_inputs)
+                samples.append(
+                    builder.build_sample(
+                        env, expert_step, model_inputs=model_inputs
+                    )
+                )
+                sample_steps.append(step)
+            except (JointCollectionError, JointStepRejected) as exc:
+                # Formal quota accounting only includes fully valid anchors.
+                # The raw timeline remains usable by RiskEntry even when an
+                # individual planner label is rejected.
+                rejected_joint_steps += 1
+                reason = getattr(exc, "reason_code", type(exc).__name__)
+                rejection_counts[str(reason)] += 1
 
         controls = {
             agent_id: env.trajectory_to_control(
@@ -663,11 +730,11 @@ def collect_real_smoke_episode(
     return JointEpisodeRollout(
         samples=tuple(samples),
         simulator_steps=simulator_steps,
-        rejected_joint_steps=0,
+        rejected_joint_steps=rejected_joint_steps,
         failure_reason=failure_reason,
         terminated=terminated_all,
         truncated=truncated_all,
-        joint_step_rejection_counts={},
+        joint_step_rejection_counts=dict(rejection_counts),
         sample_step_indices=tuple(sample_steps),
         scenario_summary=dict(summary),
         sidecar=JointEpisodeSidecar(
