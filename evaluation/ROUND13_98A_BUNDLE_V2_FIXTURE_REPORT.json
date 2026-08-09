@@ -1,0 +1,80 @@
+{
+  "format": "round13_98a_bundle_v2_fixture_acceptance",
+  "schema_version": 1,
+  "status": "accepted",
+  "diagnostic_fixture": true,
+  "eligible_for_formal_training": false,
+  "fixture_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_fixture_v1",
+  "fixture_size": "8.8 MiB",
+  "bundle_protocol": {
+    "local_path": "schemas/metadrive_joint_risk_bundle_v2.json",
+    "riskentry_path": "/home/kong/RiskModeCodes/schemas/metadrive_joint_risk_bundle_v2.json",
+    "byte_identical": true,
+    "sha256": "21f9a8a193e1c0ca9e85ac648a0a3f9663f979ad0b3ef9518cda6f5750a7b89c"
+  },
+  "fixture_contract": {
+    "partitions": [
+      "id",
+      "compositional_ood",
+      "topology_ood"
+    ],
+    "scenario_families_per_partition": 4,
+    "severities_per_scenario": 2,
+    "episodes_per_partition": 8,
+    "eligible_anchor_windows_per_partition": 8,
+    "history_seconds": 2.0,
+    "future_seconds": 5.0,
+    "sidecar_arrays_per_episode": 15,
+    "entry_source_observable_rate": 1.0
+  },
+  "local_verification": {
+    "status": "pass",
+    "report_sha256": "42b7584044407dd12e61aa8a1630f88b739407282f499fb086ac36b95e75ea6f",
+    "checks": [
+      "protocol_hash",
+      "physical_arrays",
+      "packed_bev_round_trip",
+      "base_sidecar_join",
+      "ground_truth_observation_separation",
+      "communication",
+      "eligible_windows",
+      "scenario_severity_balance",
+      "entry_events",
+      "topology_graph",
+      "partition_leakage"
+    ]
+  },
+  "riskentry_validation": {
+    "validated_episode_metadata": 24,
+    "metadata_validator_status": "pass",
+    "source_preflight": {
+      "id": {
+        "status": "pass",
+        "report_sha256": "92221295ebfacc7890017f567e1f9743da92681796d2bf177aadd8f24d90f6c5"
+      },
+      "compositional_ood": {
+        "status": "pass",
+        "report_sha256": "6022ba930d86e5588aeb414f5245d1e727a9a054e12b827e94be7cea8c42fca2"
+      },
+      "topology_ood": {
+        "status": "pass",
+        "report_sha256": "ca678cdb06398f151070f73a66f0136c46c8419e4915879c01b709b2c1e7c338"
+      }
+    }
+  },
+  "regression": {
+    "pytest": "22 passed",
+    "git_diff_check": "pass",
+    "existing_pilot15k_base_fingerprint": "6d94b5d40506e16dab26c3f0f0937eed4a313306f0f908ddff8d3425df25931c",
+    "existing_pilot15k_sidecar_fingerprint": "cdebf4ec2336b0b262ccfc9da568f7b7696187a3bb0786f37bdd481cb0d2c78c",
+    "existing_50k_base_fingerprint": "58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144",
+    "existing_50k_sidecar_fingerprint": "1f2b31adcb4019247d5ae9e9c1f2e7fa0dce1ed9252023f3b14d484f1635cee5"
+  },
+  "scope_boundary": {
+    "synthetic_protocol_fixture": true,
+    "simulator_formal_sample": false,
+    "formal_quota_satisfied": false,
+    "may_be_used_for_training": false,
+    "automatic_v1_to_v2_upgrade": false
+  }
+}

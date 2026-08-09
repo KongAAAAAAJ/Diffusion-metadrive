@@ -1,0 +1,211 @@
+{
+  "format": "metadrive-joint-planning-risk-bundle",
+  "schema_version": "2.0.0",
+  "status": "frozen",
+  "compatibility": {
+    "pilot_v1_readable_by_separate_adapter": true,
+    "automatic_v1_to_v2_upgrade_allowed": false,
+    "base_storage_schema_unchanged": true
+  },
+  "components": {
+    "base": {
+      "directory": "platoon_joint_bev",
+      "format": "joint-first-packed-semantic-bev-npy-episodes",
+      "schema_version": 2,
+      "platoon_size": 3
+    },
+    "sidecar": {
+      "directory": "riskentry_actor_sidecar",
+      "format": "riskentry-metadrive-actor-sidecar",
+      "schema_version": "2.0.0",
+      "array_layout_compatible_with_v1": true,
+      "required_additional_arrays": {
+        "actor_observation_mask": {"dtype": "bool", "shape": ["T", "N"]},
+        "observed_actor_state": {"dtype": "float32", "shape": ["T", "N", 8]},
+        "observed_actor_state_valid_mask": {"dtype": "bool", "shape": ["T", "N", 8]},
+        "platoon_comm_available": {"dtype": "bool", "shape": ["T", 2]},
+        "platoon_comm_delay_s": {"dtype": "float32", "shape": ["T", 2]},
+        "platoon_comm_valid_mask": {"dtype": "bool", "shape": ["T", 2]}
+      },
+      "communication_edge_order": ["P0->P1", "P1->P2"],
+      "required_episode_fields": [
+        "benchmark_partition",
+        "scenario_family",
+        "severity",
+        "topology_id",
+        "parameter_combination_id",
+        "matched_pair_id",
+        "scenario_realization_status",
+        "entry_event"
+      ],
+      "required_platoon_actor_fields": [
+        "mass_kg",
+        "max_brake_deceleration_mps2",
+        "actuation_delay_s",
+        "vehicle_parameter_set_id"
+      ],
+      "required_scenario_parameter_fields": [
+        "road_friction",
+        "sensing_noise_std",
+        "traffic_density",
+        "external_driver_aggressiveness"
+      ],
+      "required_topology_fields": [
+        "canonical_hash",
+        "lane_relations",
+        "time_varying_lane_states"
+      ]
+    }
+  },
+  "root_manifest": {
+    "required_fields": [
+      "dataset_instance_id",
+      "benchmark_partition",
+      "bundle_protocol_sha256",
+      "scenario_contract_sha256",
+      "base_dataset_fingerprint",
+      "sidecar_dataset_fingerprint",
+      "parameter_space_id",
+      "parameter_tuple_set_sha256",
+      "topology_set_id",
+      "topology_id_set_sha256",
+      "target_eligible_anchor_windows",
+      "eligible_anchor_window_count",
+      "scenario_catalog",
+      "episode_split_manifest"
+    ],
+    "counting_unit": "eligible_anchor_windows_with_2s_history_and_valid_5s_future",
+    "one_benchmark_partition_per_root": true
+  },
+  "episode_metadata": {
+    "scenario_realization_status_values": ["realized", "not_realized"],
+    "parameter_combination_id_required": true,
+    "matched_pair_id_required": true,
+    "not_realized_episode_counts_toward_quota": false
+  },
+  "benchmark": {
+    "fixed_platoon_actor_ids": ["P0", "P1", "P2"],
+    "decision_dt_s": 0.1,
+    "history_seconds": 2.0,
+    "prediction_horizons_seconds": [1.0, 3.0, 5.0],
+    "maximum_external_candidates": 12,
+    "scenario_families": [
+      "adjacent_lane_cut_in",
+      "on_ramp_external_merge",
+      "external_lead_hard_brake",
+      "construction_zone_forced_merge"
+    ],
+    "severity_values": ["control", "near_critical"],
+    "severity_semantics": "scenario-specific frozen control or near-critical parameter stratum; realized outcomes remain separate",
+    "severity_fraction_by_scenario": {
+      "control": 0.5,
+      "near_critical": 0.5
+    },
+    "near_critical_onset_seconds": [6.0, 12.0],
+    "traffic_density_strata": {
+      "empty_fraction": 0.5,
+      "nonzero_range": [0.01, 0.04]
+    }
+  },
+  "partitions": {
+    "id": {
+      "target_eligible_anchor_windows": 50000,
+      "split_ratios": [0.8, 0.1, 0.1],
+      "usage": "train_validation_test"
+    },
+    "compositional_ood": {
+      "target_eligible_anchor_windows": 10000,
+      "split_ratios": [0.0, 0.0, 1.0],
+      "usage": "test_only"
+    },
+    "topology_ood": {
+      "target_eligible_anchor_windows": 10000,
+      "split_ratios": [0.0, 0.0, 1.0],
+      "usage": "test_only"
+    }
+  },
+  "entry_event": {
+    "fields": [
+      "edge_id",
+      "source_actor_id",
+      "target_actor_id",
+      "onset_step",
+      "resolution_step",
+      "resolution_status"
+    ],
+    "control_value": {
+      "edge_id": "none",
+      "source_actor_id": null,
+      "target_actor_id": null,
+      "onset_step": null,
+      "resolution_step": null,
+      "resolution_status": "not_applicable"
+    },
+    "near_critical_constraints": {
+      "source_actor_pattern": "^V[0-9]{3,}$",
+      "target_actor_values": ["P0", "P1", "P2"],
+      "edge_id_format": "{source_actor_id}->{target_actor_id}",
+      "resolution_status_values": ["resolved", "right_censored"],
+      "resolved_requires_resolution_step": true,
+      "right_censored_requires_null_resolution_step": true,
+      "resolution_not_before_onset": true
+    }
+  },
+  "ood_policy": {
+    "id_and_compositional_parameter_tuples_disjoint": true,
+    "compositional_ood_marginals_within_id_support": true,
+    "id_and_topology_ids_disjoint": true,
+    "ood_used_for_model_selection_or_calibration": false,
+    "partition_membership_recorded_per_episode": true
+  },
+  "topology_contract": {
+    "lane_relation_types": ["successor", "left", "right", "merge", "diverge"],
+    "lane_relation_references_must_resolve": true,
+    "time_varying_lane_states": ["open", "closed", "work_zone"],
+    "canonical_hash_recomputable": true
+  },
+  "observation_contract": {
+    "actor_valid_mask_semantics": "ground_truth_actor_lifetime",
+    "actor_observation_mask_semantics": "online_observable_at_decision_boundary",
+    "teacher_candidate_builder_uses_ground_truth_state": false,
+    "student_candidate_builder_uses_ground_truth_state": false,
+    "unobserved_observed_actor_state_is_zero_and_masked": true
+  },
+  "retention": {
+    "eligible_safe_prefix_from_dangerous_episode_may_enter_base": true,
+    "dangerous_outcome_does_not_discard_valid_pre_event_windows": true,
+    "complete_sidecar_retained_for_dangerous_episode": true,
+    "scenario_realization_failure_is_recorded_not_silently_relabelled": true
+  },
+  "leakage_boundary": {
+    "offline_only_fields": [
+      "benchmark_partition",
+      "scenario_family",
+      "severity",
+      "topology_id",
+      "entry_event",
+      "future_actor_states",
+      "outcome_events",
+      "derived_risk_labels"
+    ],
+    "teacher_and_student_receive_offline_only_fields": false
+  },
+  "acceptance_gates": {
+    "all_four_scenario_families_present_in_every_partition": true,
+    "scenario_sample_quotas_equal_within_partition": true,
+    "severity_sample_quotas_equal_within_scenario": true,
+    "eligible_window_is_counting_unit": true,
+    "near_critical_entry_edges_complete": true,
+    "control_entry_edges_are_none": true,
+    "near_critical_scenario_realization_required": true,
+    "quota_counts_require_realized_scenario": true,
+    "ground_truth_and_online_observation_separated": true,
+    "lane_graph_references_complete": true,
+    "id_and_ood_parameter_topology_sets_disjoint": true,
+    "episode_pair_seed_and_config_leakage_absent": true,
+    "entry_source_candidate_observable_rate_minimum": 0.99,
+    "base_episode_without_sidecar_allowed": false,
+    "sidecar_only_dangerous_episode_allowed": true,
+    "non_finite_values_allowed": false
+  }
+}
