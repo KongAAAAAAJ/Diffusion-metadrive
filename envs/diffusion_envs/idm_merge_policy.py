@@ -88,12 +88,16 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         merge_rear_gap_m: float = 5.0,
         merge_creep_speed_kmh: float = 20.0,
         merge_cruise_speed_kmh: float = 24.0,
+        merge_activation_step: int = 2,
     ):
         super().__init__(control_object, random_seed)
         self.merge_front_gap_m = float(merge_front_gap_m)
         self.merge_rear_gap_m = float(merge_rear_gap_m)
         self.merge_creep_speed_kmh = float(merge_creep_speed_kmh)
         self.merge_cruise_speed_kmh = float(merge_cruise_speed_kmh)
+        self.merge_activation_step = int(merge_activation_step)
+        if self.merge_activation_step < 0:
+            raise ValueError("merge_activation_step must be non-negative")
         self.NORMAL_SPEED = self.merge_cruise_speed_kmh
         self.target_speed = self.merge_cruise_speed_kmh
         self.merge_completed = False
@@ -121,7 +125,7 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         if target_lane is None:
             return parent_result
 
-        force_active = current_step > 2  # !第几个step开启强制合流
+        force_active = current_step >= self.merge_activation_step
 
         search_distance = max(
             float(self.MAX_LONG_DIST),

@@ -372,8 +372,203 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
 )
 
 
+def _risk_v2_control_definition(
+    *, code: str, scenario_id: str, route: str, block_id: str, description: str
+) -> ScenarioDefinition:
+    return ScenarioDefinition(
+        code=code,
+        scenario_id=scenario_id,
+        allowed_local_routes=(route,),
+        trigger_by_local_route={route: TriggerSpec(block_id, 0.0, 1_000.0)},
+        traffic_recipes=tuple(),
+        ego_spawn_lane_preference="middle" if route == "R1_entry_straight" else None,
+        ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=24.0,
+        override_traffic_density=None,
+        expert_recipe="matched control",
+        description=description,
+        independent_trajectory_control_after_realization=True,
+    )
+
+
+RISK_V2_SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
+    _risk_v2_control_definition(
+        code="RV2_AC_C",
+        scenario_id="RV2_adjacent_lane_cut_in_control",
+        route="R1_entry_straight",
+        block_id="s0",
+        description="bundle-v2 adjacent cut-in matched control",
+    ),
+    ScenarioDefinition(
+        code="RV2_AC_N",
+        scenario_id="RV2_adjacent_lane_cut_in_near_critical",
+        allowed_local_routes=("R1_entry_straight",),
+        trigger_by_local_route={"R1_entry_straight": TriggerSpec("s0", 0.0, 1_000.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "inject_adjacent_lane_vehicles",
+                {
+                    "trigger_on_start": True,
+                    "clearance_scope": "same_lane",
+                    "vehicles": (
+                        {
+                            "name": "risk_v2_cut_in_source",
+                            "lane_side": "right",
+                            "spawn_longitude_offset_m": 15.0,
+                            "target_speed_kmh": 24.0,
+                            "policy": "forced_cut_in",
+                            "activation_step": 60,
+                            "target_lane_offset": -1,
+                            "front_gap_m": 5.0,
+                            "rear_gap_m": 5.0,
+                            "scenario_vehicle_role": "risk_v2_entry_source",
+                        },
+                    ),
+                },
+            ),
+        ),
+        ego_spawn_lane_preference="middle",
+        ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=24.0,
+        override_traffic_density=None,
+        expert_recipe="external adjacent vehicle cut-in",
+        description="bundle-v2 adjacent-lane external cut-in",
+        independent_trajectory_control_after_realization=True,
+    ),
+    _risk_v2_control_definition(
+        code="RV2_RM_C",
+        scenario_id="RV2_on_ramp_external_merge_control",
+        route="R6_mainline_merge_approach",
+        block_id="g1",
+        description="bundle-v2 on-ramp merge matched control",
+    ),
+    ScenarioDefinition(
+        code="RV2_RM_N",
+        scenario_id="RV2_on_ramp_external_merge_near_critical",
+        allowed_local_routes=("R6_mainline_merge_approach",),
+        trigger_by_local_route={"R6_mainline_merge_approach": TriggerSpec("g1", 0.0, 1_000.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "inject_background_vehicle",
+                {
+                    "reference_kind": "block_socket_road",
+                    "block_id": "g1",
+                    "socket_index": 1,
+                    "target_speed_kmh": 24.0,
+                    "policy": "idm_merge",
+                    "merge_front_gap_m": 10.0,
+                    "merge_rear_gap_m": 10.0,
+                    "merge_creep_speed_kmh": 20.0,
+                    "merge_arrival_offset_s": 1.2,
+                    "merge_activation_step": 2,
+                    "trigger_on_start": True,
+                    "scenario_vehicle_role": "risk_v2_entry_source",
+                },
+            ),
+        ),
+        ego_spawn_lane_preference="rightmost",
+        ego_spawn_lane_probabilities=None,
+        ego_spawn_reference_block_id="g1",
+        ego_spawn_reference_kind="block_internal_road",
+        ego_spawn_internal_road_index=1,
+        ego_spawn_longitude_m=(28.0, 32.0),
+        ego_initial_speed_km_h=(23.0, 25.0),
+        override_traffic_density=None,
+        env_overrides={
+            "traffic_spawn_exclusion_ahead_m": 100.0,
+            "traffic_spawn_exclusion_behind_m": 100.0,
+        },
+        expert_recipe="external on-ramp merge",
+        description="bundle-v2 external on-ramp merge",
+        independent_trajectory_control_after_realization=True,
+    ),
+    _risk_v2_control_definition(
+        code="RV2_HB_C",
+        scenario_id="RV2_external_lead_hard_brake_control",
+        route="R1_entry_straight",
+        block_id="s0",
+        description="bundle-v2 external lead-brake matched control",
+    ),
+    ScenarioDefinition(
+        code="RV2_HB_N",
+        scenario_id="RV2_external_lead_hard_brake_near_critical",
+        allowed_local_routes=("R1_entry_straight",),
+        trigger_by_local_route={"R1_entry_straight": TriggerSpec("s0", 0.0, 1_000.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "hard_brake_lead",
+                {
+                    "trigger_after_s": 6.0,
+                    "lead_bumper_gap_range_m": (28.0, 32.0),
+                    "lead_target_speed_range_kmh": (23.0, 25.0),
+                    "brake_target_speed_kmh": 10.0,
+                    "brake_target_speed_range_kmh": (9.0, 11.0),
+                    "brake_deceleration_range_mps2": (3.0, 4.0),
+                },
+            ),
+        ),
+        ego_spawn_lane_preference="middle",
+        ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=24.0,
+        override_traffic_density=None,
+        expert_recipe="external lead hard brake",
+        description="bundle-v2 external lead hard-brake entry",
+        independent_trajectory_control_after_realization=True,
+    ),
+    _risk_v2_control_definition(
+        code="RV2_CZ_C",
+        scenario_id="RV2_construction_zone_forced_merge_control",
+        route="R1_entry_straight",
+        block_id="s0",
+        description="bundle-v2 construction forced-merge matched control",
+    ),
+    ScenarioDefinition(
+        code="RV2_CZ_N",
+        scenario_id="RV2_construction_zone_forced_merge_near_critical",
+        allowed_local_routes=("R1_entry_straight",),
+        trigger_by_local_route={"R1_entry_straight": TriggerSpec("s0", 0.0, 1_000.0)},
+        traffic_recipes=(
+            RecipeSpec(
+                "inject_adjacent_lane_vehicles",
+                {
+                    "trigger_on_start": True,
+                    "clearance_scope": "same_lane",
+                    "vehicles": (
+                        {
+                            "name": "risk_v2_work_zone_source",
+                            "lane_side": "right",
+                            "spawn_longitude_offset_m": 15.0,
+                            "target_speed_kmh": 22.0,
+                            "policy": "forced_cut_in",
+                            "activation_step": 60,
+                            "target_lane_offset": -1,
+                            "front_gap_m": 5.0,
+                            "rear_gap_m": 5.0,
+                            "scenario_vehicle_role": "risk_v2_entry_source",
+                        },
+                    ),
+                },
+            ),
+        ),
+        ego_spawn_lane_preference="middle",
+        ego_spawn_lane_probabilities=None,
+        ego_initial_speed_km_h=24.0,
+        override_traffic_density=None,
+        expert_recipe="work-zone external forced merge",
+        description="bundle-v2 construction-zone external forced merge",
+        independent_trajectory_control_after_realization=True,
+    ),
+)
+
 SCENARIO_BY_ID: Dict[str, ScenarioDefinition] = {
     scenario.scenario_id: scenario for scenario in SCENARIO_DEFINITIONS
+}
+RISK_V2_SCENARIO_BY_ID: Dict[str, ScenarioDefinition] = {
+    scenario.scenario_id: scenario for scenario in RISK_V2_SCENARIO_DEFINITIONS
+}
+ALL_SCENARIO_BY_ID: Dict[str, ScenarioDefinition] = {
+    **SCENARIO_BY_ID,
+    **RISK_V2_SCENARIO_BY_ID,
 }
 DEFAULT_SCENARIO_WEIGHTS: Dict[str, float] = {
     scenario.scenario_id: 1.0 for scenario in SCENARIO_DEFINITIONS
@@ -441,4 +636,4 @@ for _scenario in SCENARIO_DEFINITIONS:
 
 
 def get_scenario_definition(scenario_id: str) -> ScenarioDefinition:
-    return SCENARIO_BY_ID[scenario_id]
+    return ALL_SCENARIO_BY_ID[scenario_id]

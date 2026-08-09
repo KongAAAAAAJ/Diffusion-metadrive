@@ -296,7 +296,10 @@ class ScenarioOrchestrator:
     def _handle_inject_background_vehicle(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         params = self._resolve_background_vehicle_params(env, params)
         merge_alignment = None
-        if self.definition.scenario_id == "S6_background_merge_in":
+        if (
+            str(params.get("policy", "")) == "idm_merge"
+            and "merge_arrival_offset_s" in params
+        ):
             merge_alignment = self._resolve_s6_merge_alignment(
                 env,
                 ego_vehicle,
@@ -334,9 +337,13 @@ class ScenarioOrchestrator:
             spawned,
             "scenario_vehicle_role",
             (
-                "s6_merge_vehicle"
-                if merge_alignment is not None
-                else "injected_background"
+                str(params.get("scenario_vehicle_role"))
+                if params.get("scenario_vehicle_role") is not None
+                else (
+                    "s6_merge_vehicle"
+                    if merge_alignment is not None
+                    else "injected_background"
+                )
             ),
         )
         if merge_alignment is not None:
@@ -350,22 +357,40 @@ class ScenarioOrchestrator:
         policy_name = params.get("policy")
         if policy_name is None:
             return None, None, None
-        if str(policy_name) != "idm_merge":
-            raise ValueError(f"Unknown injected background policy: {policy_name!r}")
-
-        from envs.diffusion_envs.idm_merge_policy import IDMMergePolicy, StartEdgeNodeNavigation
-
         cruise_speed = float(params.get("target_speed_kmh", 24.0))
-        return (
-            IDMMergePolicy,
-            {
+        if str(policy_name) == "idm_merge":
+            from envs.diffusion_envs.idm_merge_policy import IDMMergePolicy, StartEdgeNodeNavigation
+
+            policy_kwargs = {
                 "merge_front_gap_m": float(params.get("merge_front_gap_m", 25.0)),
                 "merge_rear_gap_m": float(params.get("merge_rear_gap_m", 15.0)),
                 "merge_creep_speed_kmh": float(params.get("merge_creep_speed_kmh", 5.0)),
                 "merge_cruise_speed_kmh": cruise_speed,
-            },
-            {"navigation_module": StartEdgeNodeNavigation},
-        )
+            }
+            if "merge_activation_step" in params:
+                policy_kwargs["merge_activation_step"] = int(
+                    params["merge_activation_step"]
+                )
+            return (
+                IDMMergePolicy,
+                policy_kwargs,
+                {"navigation_module": StartEdgeNodeNavigation},
+            )
+        if str(policy_name) == "forced_cut_in":
+            from envs.diffusion_envs.forced_cut_in_policy import ForcedCutInPolicy
+
+            return (
+                ForcedCutInPolicy,
+                {
+                    "activation_step": int(params.get("activation_step", 80)),
+                    "target_lane_offset": int(params.get("target_lane_offset", 1)),
+                    "front_gap_m": float(params.get("front_gap_m", 5.0)),
+                    "rear_gap_m": float(params.get("rear_gap_m", 5.0)),
+                    "cruise_speed_kmh": cruise_speed,
+                },
+                None,
+            )
+        raise ValueError(f"Unknown injected background policy: {policy_name!r}")
 
     def _handle_inject_adjacent_lane_vehicles(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         vehicles = params.get("vehicles", ())
@@ -388,6 +413,9 @@ class ScenarioOrchestrator:
                 self.summary.notes.append(f"adjacent_lane_missing:{vehicle_name}")
                 self._spawned_adjacent_vehicle_keys.add(spawn_key)
                 continue
+            policy_class, policy_kwargs, vehicle_config_overrides = (
+                self._resolve_injected_background_policy(vehicle_params)
+            )
             spawned = self._spawn_on_lane_tuple(
                 env,
                 ego_vehicle,
@@ -396,12 +424,21 @@ class ScenarioOrchestrator:
                 target_speed_kmh=float(vehicle_params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0))),
                 min_clearance_m=vehicle_params.get("min_agent_clearance_m"),
                 clearance_scope=str(vehicle_params.get("clearance_scope", params.get("clearance_scope", "all_agents"))),
+                policy_class=policy_class,
+                policy_kwargs=policy_kwargs,
+                vehicle_config_overrides=vehicle_config_overrides,
                 vehicle_type=self._scenario_vehicle_type(),
             )
             if spawned is None:
                 self.summary.notes.append(f"adjacent_spawn_failed:{vehicle_name}")
                 continue
-            if self.definition.scenario_id == "S5_hard_brake_lead":
+            if vehicle_params.get("scenario_vehicle_role") is not None:
+                setattr(
+                    spawned,
+                    "scenario_vehicle_role",
+                    str(vehicle_params["scenario_vehicle_role"]),
+                )
+            elif self.definition.scenario_id == "S5_hard_brake_lead":
                 setattr(
                     spawned,
                     "scenario_vehicle_role",

@@ -474,6 +474,7 @@ class MetaDriveRiskEntrySidecarAdapter:
             "hard_brake_lead": "lead_braker",
             "s6_merge_vehicle": "intruder",
             "cut_in_adjacent_lead": "intruder",
+            "risk_v2_entry_source": "entry_source",
         }
         key = aliases.get(role_name)
         if key is None:

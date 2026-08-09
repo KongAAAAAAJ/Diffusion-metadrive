@@ -40,7 +40,7 @@ from models.controller.longitudinal_reference import (
     trajectory_to_longitudinal_reference,
 )
 from routes.route_definitions import ROUTE_BY_NAME, get_required_preset, get_route_blocks
-from scenarios.definitions import SCENARIO_BY_ID
+from scenarios.definitions import ALL_SCENARIO_BY_ID
 
 
 def _wrap_to_pi(angle: float) -> float:
@@ -391,7 +391,7 @@ class PlatoonEnv(BaseMultiEnv):
         """Switch the scenario route before reset and invalidate stale destinations."""
         scenario_id = str(scenario_id)
         local_route = str(local_route)
-        scenario = SCENARIO_BY_ID.get(scenario_id)
+        scenario = ALL_SCENARIO_BY_ID.get(scenario_id)
         if scenario is None:
             raise ValueError(f"Unknown scenario_id: {scenario_id}")
         if local_route not in ROUTE_BY_NAME:
@@ -451,7 +451,7 @@ class PlatoonEnv(BaseMultiEnv):
         scenario_id = resolved.get("scenario_id")
         if not scenario_id:
             return resolved
-        scenario = SCENARIO_BY_ID.get(str(scenario_id))
+        scenario = ALL_SCENARIO_BY_ID.get(str(scenario_id))
         if scenario is None:
             return resolved
         scenario_initial_speed = getattr(scenario, "ego_initial_speed_km_h", None)
@@ -833,9 +833,9 @@ class PlatoonEnv(BaseMultiEnv):
         if not scenario_id or not local_route:
             return
         try:
-            from scenarios.definitions import get_scenario_definition, SCENARIO_BY_ID
+            from scenarios.definitions import ALL_SCENARIO_BY_ID, get_scenario_definition
             from scenarios.platoon_orchestrator import PlatoonScenarioOrchestrator
-            if scenario_id not in SCENARIO_BY_ID:
+            if scenario_id not in ALL_SCENARIO_BY_ID:
                 return
             
             defn = get_scenario_definition(scenario_id)
@@ -2008,7 +2008,7 @@ class PlatoonEnv(BaseMultiEnv):
         """Return the production low-level regime for learned trajectories."""
 
         scenario_id = getattr(self.config, "scenario_id", None)
-        definition = SCENARIO_BY_ID.get(str(scenario_id))
+        definition = ALL_SCENARIO_BY_ID.get(str(scenario_id))
         if (
             definition is None
             or not definition.independent_trajectory_control_after_realization

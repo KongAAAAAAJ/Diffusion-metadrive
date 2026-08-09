@@ -1,0 +1,68 @@
+{
+  "format": "round13.98b-bundle-v2-real-smoke-report",
+  "schema_version": 1,
+  "status": "pass",
+  "completed_at": "2026-08-09",
+  "bundle_protocol_sha256": "21f9a8a193e1c0ca9e85ac648a0a3f9663f979ad0b3ef9518cda6f5750a7b89c",
+  "output_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_real_smoke_v1",
+  "collector": {
+    "physical_source": "live_metadrive_object_registry",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "execution_policy": "stable_lane_follow_with_production_expert_label_at_anchor",
+    "anchor_step": 60,
+    "history_steps": 20,
+    "future_steps": 50
+  },
+  "partitions": {
+    "id": {
+      "episodes": 8,
+      "eligible_anchor_windows": 8,
+      "sidecar_raw_steps": 1206,
+      "entry_source_observable_rate": 1.0,
+      "outcomes": {
+        "collision": 5,
+        "out_of_road": 3
+      }
+    },
+    "compositional_ood": {
+      "episodes": 8,
+      "eligible_anchor_windows": 8,
+      "sidecar_raw_steps": 1204,
+      "entry_source_observable_rate": 1.0,
+      "outcomes": {
+        "collision": 6,
+        "out_of_road": 2
+      }
+    },
+    "topology_ood": {
+      "episodes": 8,
+      "eligible_anchor_windows": 8,
+      "sidecar_raw_steps": 1200,
+      "entry_source_observable_rate": 1.0,
+      "outcomes": {
+        "collision": 6,
+        "out_of_road": 2
+      }
+    }
+  },
+  "checks": {
+    "local_real_smoke_verifier": "pass",
+    "riskentry_episode_metadata_validator": "24/24 pass",
+    "riskentry_source_preflight": "3/3 roots pass",
+    "riskentry_contract_and_preflight_tests": "20 passed",
+    "diffusion_v2_and_v1_regression_tests": "96 passed",
+    "protocol_and_physical_arrays": "pass",
+    "timeline_and_sample_mapping": "pass",
+    "entry_events_and_observation": "pass",
+    "communication": "pass",
+    "topology": "pass",
+    "partition_leakage": "pass"
+  },
+  "gate": {
+    "real_v2_format_and_provenance_smoke": "pass",
+    "formal_70k_start_condition": "satisfied",
+    "formal_70k_started": false,
+    "scope": "This smoke validates the live collector, v2 storage contract, joins, and RiskEntry ingestion. It is not a formal model-quality result."
+  }
+}
