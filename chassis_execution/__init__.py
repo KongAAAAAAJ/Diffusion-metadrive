@@ -46,6 +46,12 @@ from .surrogate import (
     ChassisSurrogateError,
     command_to_dense,
 )
+from .grpo_adapter import (
+    ChassisExecutionContext,
+    ChassisFusionGRPOAdapter,
+    ChassisFusionGRPOError,
+    ChassisFusionGRPOStepResult,
+)
 
 __all__ = [
     "CHASSIS_STATE_FIELDS",
@@ -84,4 +90,8 @@ __all__ = [
     "ChassisSurrogateConfig",
     "ChassisSurrogateError",
     "command_to_dense",
+    "ChassisExecutionContext",
+    "ChassisFusionGRPOAdapter",
+    "ChassisFusionGRPOError",
+    "ChassisFusionGRPOStepResult",
 ]

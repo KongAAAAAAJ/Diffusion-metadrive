@@ -1,0 +1,49 @@
+{
+  "format": "chassis_fusion_grpo_adapter_v1",
+  "schema_version": 1,
+  "probability_action": {
+    "name": "tau_d",
+    "source": "JointGRPORollout.selected_trajectories",
+    "shape": [1, 4, 3, 8, 3],
+    "dtype": "float32",
+    "used_for_log_probability_replay": true,
+    "allowed_as_surrogate_input": false
+  },
+  "execution_action": {
+    "name": "tau_cmd",
+    "source": "KinematicTrajectoryOptimizer(tau_d)",
+    "shape": [1, 4, 3, 8, 3],
+    "dtype": "float32",
+    "used_for_log_probability_replay": false,
+    "surrogate_trajectory_input": true
+  },
+  "sequence": [
+    "sample G=4 raw tau_d from joint GRPO",
+    "detach and optimize each joint candidate to tau_cmd",
+    "run one frozen three-member surrogate inference",
+    "compute execution-aware rewards from predicted tau_a",
+    "update the original raw rollout exactly once",
+    "select argmax-reward tau_cmd",
+    "call MetaDrive env.step exactly once"
+  ],
+  "gradient_contract": {
+    "surrogate_requires_grad": false,
+    "trajectory_optimizer_differentiable": false,
+    "reward_requires_grad": false,
+    "grpo_gradient_source": "raw tau_d rollout log probabilities",
+    "reward_backpropagates_through_surrogate": false
+  },
+  "environment_contract": {
+    "candidate_metadrive_branches": 0,
+    "selected_action_env_steps": 1,
+    "geometric_proxy_fallback": false,
+    "surrogate_failure_fallback": false
+  },
+  "diagnostic_provenance": {
+    "allowed_data_origin": "synthetic_virtual",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "metadata_upgrade_to_formal_forbidden": true,
+    "pending_gate": "CF-2_real_windows_trucksim_smoke"
+  }
+}

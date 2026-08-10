@@ -1,0 +1,73 @@
+{
+  "format": "cf6_grpo_surrogate_adapter_acceptance_v1",
+  "status": "diagnostic_accepted",
+  "round": "CF-6",
+  "data_origin": "synthetic_virtual",
+  "diagnostic_only": true,
+  "eligible_for_formal_training": false,
+  "pending_hard_gate": "CF-2_real_windows_trucksim_smoke",
+  "machine_protocol": {
+    "path": "schemas/chassis_fusion_grpo_adapter_v1.json",
+    "sha256": "e90bc6b86056e3ef5ee517cfec5972d4b14d92ee9009f463db897be330016237"
+  },
+  "diagnostic_artifact": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/outputs/chassis_fusion_cf6/run_1/cf6_grpo_adapter_diagnostic.json",
+    "sha256": "e4f26edab95664bb2f18b89eaf1dbffe4f57cd3759d386c813012cd2a27b8bb2"
+  },
+  "invariants": {
+    "tau_d_is_raw_grpo_probability_action": true,
+    "tau_cmd_is_only_surrogate_trajectory_input": true,
+    "reward_is_computed_from_predicted_tau_a": true,
+    "surrogate_is_frozen": true,
+    "reward_requires_grad": false,
+    "candidate_metadrive_branches_per_variant": 0,
+    "selected_metadrive_env_steps_per_variant": 1,
+    "grpo_optimizer_steps_per_variant": 1,
+    "geometric_proxy_fallback": false
+  },
+  "variants": {
+    "A": {
+      "status": "passed",
+      "policy_parameters_changed": true,
+      "surrogate_parameters_changed": false,
+      "selected_group": 3,
+      "rewards": [-23.0, -22.0, -21.0, 0.175104558467865],
+      "unsafe": [true, true, true, false],
+      "intervention_ade_m": 2.2359321117401123,
+      "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/outputs/chassis_fusion_cf6/run_1/A/checkpoints/last.pt",
+      "checkpoint_sha256": "8c63fcffa2f3ac1d204971f1237d4fcc3b131102a551481d0b603c490c73f28f",
+      "strict_reload": true
+    },
+    "B": {
+      "status": "passed",
+      "policy_parameters_changed": true,
+      "surrogate_parameters_changed": false,
+      "selected_group": 0,
+      "rewards": [-21.0, -21.0, -22.0, -21.0],
+      "unsafe": [true, true, true, true],
+      "intervention_ade_m": 2.0982301235198975,
+      "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/outputs/chassis_fusion_cf6/run_1/B/checkpoints/last.pt",
+      "checkpoint_sha256": "092f8796c8c6f9ba0a16fb87c7a11ac1fc18a94e717a5a2ecd843dd237b94f0c",
+      "strict_reload": true
+    }
+  },
+  "selected_step_smoke": {
+    "environment": "SensorlessJointBEVPlatoonEnv",
+    "scenario": "S1_free_cruise_straight",
+    "route": "R3_mainline_straight",
+    "seed": 17,
+    "terminated": false,
+    "truncated": false,
+    "interface_crash_or_out_of_road": false
+  },
+  "tests": {
+    "focused_cf4_cf6": "20 passed",
+    "full_related_cf0_cf6_grpo_optimizer": "77 passed",
+    "git_diff_check": "passed"
+  },
+  "interpretation": {
+    "software_chain": "accepted",
+    "research_effect_claim": "forbidden",
+    "reason": "The surrogate and chassis dataset are synthetic diagnostic artifacts; Variant B also produced no safe candidate in this one-state smoke."
+  }
+}

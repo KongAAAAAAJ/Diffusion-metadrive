@@ -1,0 +1,12 @@
+format: chassis_fusion_grpo_adapter_v1
+group_size: 4
+trajectory_optimizer: kinematic_execution_boundary
+surrogate_ensemble_size: 3
+reward_trajectory_source: predicted_tau_a
+grpo_probability_action: raw_tau_d
+candidate_metadrive_branches: 0
+selected_action_env_steps: 1
+data_origin: synthetic_virtual
+diagnostic_only: true
+eligible_for_formal_training: false
+pending_gate: CF-2_real_windows_trucksim_smoke
