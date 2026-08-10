@@ -1,18 +1,18 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-10T23:45:00+08:00",
+  "updated_at": "2026-08-11T00:05:00+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "478fd714a22d30d6a21e4a88216247cd4a68d369",
-    "worktree_clean_before_this_update": false,
-    "project_state_update_committed": false
+    "git_commit": "df5f3391206480465987bc9ef42668c307d197f9",
+    "worktree_clean_before_this_update": true,
+    "project_state_update_committed": true
   },
   "current": {
-    "phase": "collection_performance",
-    "round": "13.99-performance",
-    "status": "performance_optimization_passed_formal_collection_paused",
-    "active_hard_gate": "review_and_freeze_performance_changes_before_resuming_formal_70k"
+    "phase": "formal_collection",
+    "round": "13.99-formal70k",
+    "status": "formal_collection_resume_authorized_and_code_frozen",
+    "active_hard_gate": "monitor_collection_without_code_or_contract_changes"
   },
   "authorization": {
     "riskentry_format_accepted_by_downstream": true,
@@ -109,13 +109,10 @@
     }
   },
   "blockers": [
-    "Formal 70k collection was stopped at the user's request and has not been resumed.",
-    "The performance optimization code is not yet committed/frozen; long collection must not start from a dirty implementation state."
+    "Formal 70k is incomplete and cannot be marked eligible until all 70,000 windows pass both project verifiers."
   ],
   "next_actions": [
-    "Review the collection performance optimization report and code diff.",
-    "Commit/freeze the accepted performance implementation before any long-running collection.",
-    "After explicit user authorization, resume the existing formal 70k root with parallel_workers=4 and resume enabled.",
+    "Resume the existing formal 70k root with parallel_workers=4 and resume enabled.",
     "Monitor per-family throughput and stop on integrity/retry anomalies; do not modify code during collection.",
     "Run the complete Diffusion and RiskEntry dataset verifiers and freeze dataset fingerprints.",
     "Train Stage 1 A and B with run_mode=formal only after dataset eligibility is proven.",
