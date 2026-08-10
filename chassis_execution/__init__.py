@@ -38,6 +38,14 @@ from .storage import (
     verify_chassis_execution_dataset,
     write_chassis_execution_dataset,
 )
+from .surrogate import (
+    ChassisExecutionEnsemble,
+    ChassisExecutionMember,
+    ChassisFeatureNormalizer,
+    ChassisSurrogateConfig,
+    ChassisSurrogateError,
+    command_to_dense,
+)
 
 __all__ = [
     "CHASSIS_STATE_FIELDS",
@@ -70,4 +78,10 @@ __all__ = [
     "ChassisExecutionStorageProvenance",
     "verify_chassis_execution_dataset",
     "write_chassis_execution_dataset",
+    "ChassisExecutionEnsemble",
+    "ChassisExecutionMember",
+    "ChassisFeatureNormalizer",
+    "ChassisSurrogateConfig",
+    "ChassisSurrogateError",
+    "command_to_dense",
 ]

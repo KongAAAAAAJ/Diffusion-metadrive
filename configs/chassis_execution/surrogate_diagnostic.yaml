@@ -1,0 +1,43 @@
+format: chassis_execution_surrogate_training_config_v1
+run_mode: diagnostic
+data_origin: synthetic_virtual
+diagnostic_only: true
+eligible_for_formal_training: false
+dataset_fingerprint: 20963f3323a0b5f43fbaf712efa887ff6d8577130da111780a720eb259410143
+
+model:
+  hidden_dim: 128
+  static_dim: 96
+  role_embedding_dim: 8
+  mode_embedding_dim: 8
+  num_gru_layers: 2
+  transformer_heads: 4
+  dropout: 0.05
+  log_variance_bounds: [-8.0, 4.0]
+
+training:
+  ensemble_size: 3
+  member_seeds: [17, 23, 31]
+  batch_size: 64
+  epochs: 80
+  patience: 15
+  optimizer: AdamW
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  max_grad_norm: 5.0
+
+loss:
+  trajectory_nll: 1.0
+  chassis_nll: 1.0
+  control_nll: 0.5
+  kinematic_consistency: 0.05
+
+acceptance:
+  trajectory_ade_m_max: 1.5
+  trajectory_fde_m_max: 2.5
+  speed_mae_mps_max: 1.0
+  yaw_rate_mae_rad_s_max: 0.10
+  roll_mae_rad_max: 0.03
+  rollover_index_mae_max: 0.10
+  throttle_mae_max: 0.15
+  brake_mae_max: 0.15

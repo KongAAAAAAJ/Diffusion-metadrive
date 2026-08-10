@@ -1,0 +1,40 @@
+{
+  "format": "chassis_execution_surrogate_checkpoint_protocol_v1",
+  "schema_version": 1,
+  "checkpoint_format": "chassis_execution_surrogate_ensemble_v1",
+  "ensemble_size": 3,
+  "required_fields": [
+    "format",
+    "schema_version",
+    "run_mode",
+    "data_origin",
+    "diagnostic_only",
+    "eligible_for_formal_training",
+    "dataset_fingerprint",
+    "dataset_metadata_fingerprint",
+    "surrogate_config",
+    "training_config",
+    "normalizer_state",
+    "ensemble_state",
+    "optimizer_steps",
+    "metrics"
+  ],
+  "diagnostic_contract": {
+    "data_origin": "synthetic_virtual",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "implicit_loading": "forbidden",
+    "metadata_upgrade_to_formal": "forbidden"
+  },
+  "model_outputs": {
+    "trajectory": [3, "B", 4, 3, 40, 3],
+    "chassis": [3, "B", 4, 3, 40, 8],
+    "control": [3, "B", 4, 3, 40, 3],
+    "distribution": "heteroscedastic diagonal Gaussian mean and log variance"
+  },
+  "strict_loading": {
+    "dataset_fingerprint_match": true,
+    "state_dict_strict": true,
+    "diagnostic_requires_explicit_allow": true
+  }
+}

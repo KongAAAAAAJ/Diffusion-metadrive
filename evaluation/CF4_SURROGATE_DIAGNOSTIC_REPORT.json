@@ -1,0 +1,132 @@
+{
+  "format": "cf4_surrogate_diagnostic_acceptance_report_v1",
+  "recorded_at": "2026-08-10T20:05:00+08:00",
+  "round": "CF-4",
+  "status": "diagnostic_accepted",
+  "formal_status": "blocked_by_cf2_real_windows_smoke",
+  "source": {
+    "branch": "chassis-fusion",
+    "base_head": "acb149e9b2925b257d85cc912ed179906b3b3a14",
+    "changes_committed": false
+  },
+  "dataset": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/synthetic_virtual_cf3_v1",
+    "dataset_fingerprint": "20963f3323a0b5f43fbaf712efa887ff6d8577130da111780a720eb259410143",
+    "data_origin": "synthetic_virtual",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false
+  },
+  "implementation": {
+    "model": "chassis_execution/surrogate.py",
+    "training": "chassis_execution/training.py",
+    "verifier": "chassis_execution/verify_surrogate.py",
+    "checkpoint_protocol": "schemas/chassis_execution_checkpoint_v1.json",
+    "checkpoint_protocol_sha256": "c9de922419925f6ffc9a2bcb4a9399313e2594d6c0c011fe205af732d479ca1a",
+    "config": "configs/chassis_execution/surrogate_diagnostic.yaml",
+    "config_sha256": "5127696baef1ae733a8265cac0db6834e182ef7194d153048854dfbeaf679b17"
+  },
+  "architecture": {
+    "ensemble_members": 3,
+    "member_seeds": [17, 23, 31],
+    "role_interaction": "one-layer four-head transformer",
+    "temporal_decoder": "two-layer GRU, hidden size 128",
+    "output_distribution": "heteroscedastic diagonal Gaussian",
+    "outputs": [
+      "executed trajectory mean/log-variance",
+      "chassis state mean/log-variance",
+      "applied control mean/log-variance"
+    ]
+  },
+  "training": {
+    "device": "NVIDIA GeForce RTX 4080",
+    "epochs_per_member": [80, 80, 80],
+    "optimizer_steps": 6480,
+    "batch_size": 64,
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "trajectory_ade_reduction": [
+      0.9784068951217253,
+      0.9798103791780224,
+      0.9803947496950677
+    ]
+  },
+  "checkpoint": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/outputs/surrogate_diagnostic_cf4/run_1/checkpoints/best.pt",
+    "sha256": "34c3b23baa6b3ca86c697d473471f414bb5ce70b1c772446e02d948a7fc0d765",
+    "size_bytes": 4493130,
+    "format": "chassis_execution_surrogate_ensemble_v1",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "strict_round_trip": "passed"
+  },
+  "member_test_metrics": [
+    {
+      "trajectory_ade_m": 0.22159696221351624,
+      "trajectory_fde_m": 0.41413038969039917,
+      "speed_mae_mps": 0.10343866199254989,
+      "yaw_rate_mae_rad_s": 0.010438581369817257,
+      "roll_mae_rad": 0.0006728323292918504,
+      "rollover_index_mae": 0.002919467119500041,
+      "throttle_mae": 0.06658256202936172,
+      "brake_mae": 0.047618071734905246
+    },
+    {
+      "trajectory_ade_m": 0.2056034356355667,
+      "trajectory_fde_m": 0.5802866578102112,
+      "speed_mae_mps": 0.13065967708826065,
+      "yaw_rate_mae_rad_s": 0.01167782098054886,
+      "roll_mae_rad": 0.0007244803127832711,
+      "rollover_index_mae": 0.003680527862161398,
+      "throttle_mae": 0.06516008079051971,
+      "brake_mae": 0.04791000634431839
+    },
+    {
+      "trajectory_ade_m": 0.2031577169895172,
+      "trajectory_fde_m": 0.397040855884552,
+      "speed_mae_mps": 0.12747569233179093,
+      "yaw_rate_mae_rad_s": 0.011197713203728199,
+      "roll_mae_rad": 0.0006519134505651892,
+      "rollover_index_mae": 0.0032445000018924476,
+      "throttle_mae": 0.06624169051647186,
+      "brake_mae": 0.04988558739423752
+    }
+  ],
+  "ensemble_test_metrics": {
+    "trajectory_ade_m": 0.14132435023784637,
+    "trajectory_fde_m": 0.35501026511192324,
+    "heading_mae_rad": 0.006220864783972502,
+    "speed_mae_mps": 0.10325978845357894,
+    "yaw_rate_mae_rad_s": 0.010706882551312446,
+    "roll_mae_rad": 0.0006728148902766407,
+    "rollover_index_mae": 0.0030261161737143993,
+    "steering_mae_rad": 0.020494145154953004,
+    "throttle_mae": 0.06512266993522645,
+    "brake_mae": 0.04748341366648674,
+    "trajectory_aleatoric_variance_mean": 0.044023463129997255,
+    "trajectory_epistemic_variance_mean": 0.013307864032685756
+  },
+  "inference_verification": {
+    "all_parameters_frozen": true,
+    "maximum_repeat_error": 0.0,
+    "batch": 1,
+    "groups": 4,
+    "device": "cuda",
+    "iterations": 100,
+    "p50_ms": 3.0344310216605663,
+    "p95_ms": 4.414181830361485
+  },
+  "verification": {
+    "focused": "26 passed",
+    "regression": "60 passed, 15 warnings",
+    "regression_duration_s": 10.06,
+    "checkpoint_verifier": "passed",
+    "git_diff_check": "passed"
+  },
+  "hard_gate": {
+    "diagnostic_cf4": "passed",
+    "formal_cf4": "blocked",
+    "failures": []
+  },
+  "limitation": "Metrics measure fit to deterministic virtual diagnostic dynamics only. They do not establish TruckSim or physical truck fidelity.",
+  "next_permitted_action": "CF-5 may integrate this frozen diagnostic surrogate into execution-aware reward evaluation, preserving raw tau_d log-probability and zero MetaDrive candidate branches."
+}
