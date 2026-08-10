@@ -1,0 +1,81 @@
+{
+  "format": "cf5_execution_aware_reward_acceptance_report_v1",
+  "recorded_at": "2026-08-10T20:42:00+08:00",
+  "round": "CF-5",
+  "status": "diagnostic_accepted",
+  "formal_status": "blocked_by_cf2_real_windows_smoke",
+  "source": {
+    "branch": "chassis-fusion",
+    "base_head": "f384931e8979c8f0edaa88daf17985d4a2959937",
+    "changes_committed": false
+  },
+  "protocol": {
+    "path": "schemas/chassis_execution_reward_v1.json",
+    "sha256": "2bf7809f15facdc928de3dba1f3d8859c5b0ecde435c6a0d4970146d9b91c6e2",
+    "config": "configs/chassis_execution/execution_reward.yaml",
+    "config_sha256": "e23e8a312e4bbe6087991f2aae0ae3d698b7be6888fb16eb030d704a7b9c9694"
+  },
+  "frozen_boundaries": {
+    "surrogate_input": "tau_cmd",
+    "geometric_reward_trajectory": "predicted_tau_a",
+    "grpo_probability_action": "raw_tau_d_reserved_for_CF-6",
+    "surrogate_inference_mode": true,
+    "surrogate_parameters_trainable": false,
+    "reward_gradient_through_surrogate": false,
+    "metadrive_candidate_branches": 0,
+    "geometric_fallback": false
+  },
+  "reward": {
+    "geometric_base": "existing JointTrajectoryProxyReward evaluated on predicted execution",
+    "soft_penalties": [
+      "lateral acceleration and yaw-rate comfort",
+      "roll and rollover-index stability",
+      "control effort",
+      "ensemble spatial uncertainty"
+    ],
+    "hard_gates": {
+      "lateral_acceleration_mps2": 6.0,
+      "yaw_rate_rad_s": 1.0,
+      "absolute_roll_rad": 0.25,
+      "absolute_rollover_index": 0.8,
+      "maximum_spatial_uncertainty_std_m": 2.0
+    },
+    "safe_range": [-5.0, 5.0],
+    "unsafe_strictly_below": -20.0
+  },
+  "diagnostic": {
+    "report": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/outputs/surrogate_diagnostic_cf4/run_1/cf5_reward_diagnostic.json",
+    "report_sha256": "57c68062c86b807759620146554aa3bffb08d474ab322d3111c888a451588778",
+    "surrogate_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/outputs/surrogate_diagnostic_cf4/run_1/checkpoints/best.pt",
+    "dataset_fingerprint": "20963f3323a0b5f43fbaf712efa887ff6d8577130da111780a720eb259410143",
+    "candidate_rewards": [0.13915285468101501, -21.0, -21.0, -22.0],
+    "reward_span": 22.13915252685547,
+    "unsafe": [false, true, true, true],
+    "surrogate_evaluations": 106,
+    "surrogate_parameters_changed": false,
+    "metadrive_candidate_branches": 0,
+    "env_step_calls": 0,
+    "latency_p50_ms": 6.925139459781349,
+    "latency_p95_ms": 7.852726150304079
+  },
+  "evidence_driven_correction": {
+    "initial_failure": "first diagnostic candidates all entered the same hard-unsafe class and produced an uninformative reward group",
+    "correction": "expanded only the diagnostic tau_cmd candidate span; retained all reward and safety gates",
+    "uncertainty_correction": "soft penalty uses RMS spatial standard deviation while the unchanged 2m hard gate uses maximum spatial standard deviation",
+    "gate_relaxed": false
+  },
+  "verification": {
+    "focused": "23 passed, 15 warnings",
+    "regression": "77 passed, 15 warnings",
+    "regression_duration_s": 8.08,
+    "actual_checkpoint_smoke": "passed",
+    "git_diff_check": "passed"
+  },
+  "hard_gate": {
+    "diagnostic_cf5": "passed",
+    "formal_cf5": "blocked",
+    "failures": []
+  },
+  "limitation": "The smoke uses a verified synthetic chassis dataset context and an empty-background geometric fixture. Real S5-S9 online integration belongs to CF-6 and physical fidelity still requires CF-2.",
+  "next_permitted_action": "CF-6 may connect raw GRPO rollout tau_d -> trajectory optimizer tau_cmd -> frozen surrogate reward -> one policy update, while preserving zero candidate MetaDrive branches."
+}

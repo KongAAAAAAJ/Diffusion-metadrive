@@ -1,0 +1,26 @@
+format: chassis_execution_reward_config_v1
+trajectory_source: tau_cmd
+geometric_trajectory_source: surrogate_tau_a
+surrogate_inference_mode: true
+surrogate_frozen: true
+reward_backpropagates_through_surrogate: false
+metadrive_candidate_branches: 0
+geometric_fallback: false
+
+hard_gates:
+  lateral_acceleration_limit_mps2: 6.0
+  yaw_rate_limit_rad_s: 1.0
+  roll_limit_rad: 0.25
+  rollover_index_limit: 0.8
+  uncertainty_hard_std_m: 2.0
+
+penalties:
+  chassis_comfort_weight: 0.35
+  stability_weight: 0.50
+  control_effort_weight: 0.10
+  uncertainty_weight: 0.25
+  uncertainty_soft_scale_m: 0.50
+
+reward_bounds:
+  safe: [-5.0, 5.0]
+  unsafe_strictly_below: -20.0
