@@ -1,0 +1,120 @@
+{
+  "format": "bev_project_state_v1",
+  "schema_version": 1,
+  "updated_at": "2026-08-10T22:46:01+08:00",
+  "repository": {
+    "branch": "BEV",
+    "git_commit": "13bd7c5d649f52264779a3107faed927848a1765",
+    "worktree_clean_before_this_update": false,
+    "project_state_update_committed": false
+  },
+  "current": {
+    "phase": "collection_performance",
+    "round": "13.99-performance",
+    "status": "performance_pilot_passed_formal_collection_paused",
+    "active_hard_gate": "wait_for_user_authorization_before_resuming_formal_70k"
+  },
+  "authorization": {
+    "riskentry_format_accepted_by_downstream": true,
+    "formal_collection_authorized_by_user": true,
+    "recorded_from_user_confirmation_on": "2026-08-10",
+    "note": "Authorization follows the corrected formal-path pilot reviewed by the downstream RiskEntry project."
+  },
+  "source_of_truth": {
+    "round13_infrastructure": {
+      "path": "evaluation/ROUND13_96_FREEZE.json",
+      "role": "BEV planner, execution, reward, scenario, and eligibility contracts"
+    },
+    "diffusion_model_architecture_memory": {
+      "path": "docs/project/diffusion_model_architecture.json",
+      "sha256": "199fe71aabb9c8c9675e571e4e0468a3a37feaba4ce3c0d738816fa5f1d1c091",
+      "source_git_commit": "13bd7c5d649f52264779a3107faed927848a1765"
+    },
+    "bundle_v2_schema": {
+      "path": "schemas/metadrive_joint_risk_bundle_v2.json",
+      "sha256": "21f9a8a193e1c0ca9e85ac648a0a3f9663f979ad0b3ef9518cda6f5750a7b89c"
+    },
+    "formal_collection_config": {
+      "path": "configs/dataset/data_collect_bundle_v2_formal70k.yaml",
+      "sha256": "61870ac794c02afb2e303026c80459730e63c35f2b037d87bb97dac3d1573cb3"
+    },
+    "pre_acceptance_pilot_report": {
+      "path": "evaluation/ROUND13_99_FORMAL_V2_PATH_PILOT_REPORT.json",
+      "role": "historical pilot evidence before downstream acceptance; its authorization field is superseded by the recorded downstream and user confirmation"
+    },
+    "collection_performance_pilot_report": {
+      "path": "evaluation/COLLECTION_PERFORMANCE_PILOT_REPORT.json",
+      "role": "four-worker matched-pair scheduler implementation, integrity gates, throughput evidence, and stop state"
+    }
+  },
+  "datasets": {
+    "formal_bundle_v2_70k": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal70k_v2",
+      "target_windows": {
+        "id": 50000,
+        "compositional_ood": 10000,
+        "topology_ood": 10000
+      },
+      "collection_complete": false,
+      "full_verifier_passed": false,
+      "eligible_for_formal_training": false,
+      "fingerprints": null,
+      "progress": {
+        "attempted_episodes": 1744,
+        "eligible_anchor_windows": 12208,
+        "target_eligible_anchor_windows": 70000,
+        "active_processes": 0,
+        "pending_transactions": 0
+      }
+    },
+    "collection_performance_pilot": {
+      "serial_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v1",
+      "parallel_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_parallel_v1",
+      "episodes_each": 8,
+      "eligible_windows_each": 56,
+      "measured_speedup": 3.5935908937254877,
+      "passed": true,
+      "eligible_for_formal_training": false
+    }
+  },
+  "checkpoints": {
+    "stage1_a_formal": {
+      "available": false,
+      "eligible": false
+    },
+    "stage1_b_formal": {
+      "available": false,
+      "eligible": false
+    },
+    "grpo_a_formal": {
+      "available": false,
+      "eligible": false
+    },
+    "grpo_b_formal": {
+      "available": false,
+      "eligible": false
+    }
+  },
+  "blockers": [
+    "Formal 70k collection was stopped at the user's request and has not been resumed.",
+    "The on_ramp_external_merge family is CPU-bound in Normal planner full-horizon route-chain/background auditing and needs per-family monitoring during the next collection run."
+  ],
+  "next_actions": [
+    "Review the independent collection performance report.",
+    "After explicit user authorization, resume the existing formal 70k root with parallel_workers=4 and resume enabled.",
+    "Monitor per-family throughput and stop on integrity/retry anomalies; do not modify code during collection.",
+    "Run the complete Diffusion and RiskEntry dataset verifiers and freeze dataset fingerprints.",
+    "Train Stage 1 A and B with run_mode=formal only after dataset eligibility is proven.",
+    "Recalibrate A and B rewards using eligible Stage 1 checkpoints.",
+    "Train formal A and B GRPO checkpoints.",
+    "Perform semantic-preserving Round 14 cleanup.",
+    "Run the final multi-seed S5-S9 four-model evaluation."
+  ],
+  "invariants": {
+    "metadata_override_forbidden": true,
+    "dataset_fingerprint_mixing_forbidden": true,
+    "code_or_contract_changes_during_collection_forbidden": true,
+    "long_running_collection_or_training_must_be_separate_from_code_changes": true,
+    "formal_results_require_eligible_artifacts": true
+  }
+}

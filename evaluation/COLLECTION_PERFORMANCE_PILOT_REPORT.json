@@ -1,0 +1,104 @@
+{
+  "format": "bev-bundle-v2-collection-performance-round-v1",
+  "generated_at": "2026-08-10T22:46:01+08:00",
+  "status": "pass",
+  "scope": {
+    "purpose": "Validate bounded matched-pair parallel collection without resuming formal 70k collection",
+    "scenario_family": "adjacent_lane_cut_in",
+    "episodes_per_variant": 8,
+    "eligible_windows_per_variant": 56,
+    "parallel_workers": 4,
+    "minimum_speedup": 2.5,
+    "formal_eligibility_claimed": false
+  },
+  "formal_collection_stop": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal70k_v2",
+    "active_processes_after_stop": 0,
+    "pending_transactions_after_stop": 0,
+    "attempted_episodes": 1744,
+    "eligible_anchor_windows": 12208,
+    "target_eligible_anchor_windows": 70000,
+    "note": "The interrupted episode was not committed; the formal writer state and index remain coherent."
+  },
+  "implementation": {
+    "episode_isolation": "one_spawn_subprocess_per_episode",
+    "parallel_unit": "matched_near_critical_control_pair",
+    "writer_model": "single_parent_ordered_commit",
+    "quota_allocation": "bounded_before_launch",
+    "runtime_only_parallelism": true,
+    "frozen_dataset_contract_changed": false
+  },
+  "pilot": {
+    "serial": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v1",
+      "workers": 1,
+      "elapsed_s": 213.5930917679798,
+      "episodes_per_hour": 134.83582152218966,
+      "eligible_windows_per_hour": 943.8507506553276,
+      "collection_report_sha256": "ba0607b9d519250155c358ba6e90eea624fd91315c38b27f0d03901d36220979"
+    },
+    "parallel": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_parallel_v1",
+      "workers": 4,
+      "elapsed_s": 59.437230915995315,
+      "episodes_per_hour": 484.54478037013587,
+      "eligible_windows_per_hour": 3391.813462590951,
+      "collection_report_sha256": "0f06b22a06c39d501ba7fd4751dba7fd839a2b2eb9123ce3500c11c7c81e2928"
+    },
+    "measured_speedup": 3.5935908937254877,
+    "performance_gate_passed": true
+  },
+  "integrity": {
+    "serial_parallel_episode_index_sha256": "efa185cc2e89bb78952c71e1c08e1bc65d3a6522d2848a828f803c933595d4c8",
+    "episode_index_and_discrete_outcomes_exact": true,
+    "matched_pair_split_seed_and_sample_count_exact": true,
+    "diffusion_base_verifier": {
+      "serial": "pass",
+      "parallel": "pass",
+      "episodes_each": 8,
+      "joint_samples_each": 56,
+      "expert_trajectories_valid_each": 168,
+      "hard_valid_anchors_valid_each": 1008
+    },
+    "riskentry_v2_preflight": {
+      "serial": "pass",
+      "parallel": "pass",
+      "sidecar_raw_steps_each": 968
+    },
+    "bit_exact_simulator_arrays_required": false,
+    "repeatability_policy": "Round 13.95 layered reproducibility contract"
+  },
+  "tests": {
+    "focused": "11 passed",
+    "bundle_v2_regression": "23 passed",
+    "git_diff_check": "pass"
+  },
+  "diagnostic_findings": [
+    {
+      "severity": "performance_risk",
+      "component": "Normal planner full-horizon audit",
+      "scenario_family": "on_ramp_external_merge",
+      "evidence": "A serial episode remained CPU-bound for more than four minutes in route-chain background prediction during audit_candidate_full_horizon.",
+      "decision": "The expanded pilot was stopped without committing its in-flight pair; planner behavior was not modified in this performance round."
+    },
+    {
+      "severity": "known_reproducibility_limit",
+      "component": "MetaDrive cross-run physics/actor realization",
+      "evidence": "Non-bitwise tensor differences also occur between independent serial runs; the performance scheduler did not uniquely introduce them.",
+      "decision": "Require exact schedule and discrete index outcomes, not byte-identical simulator arrays."
+    }
+  ],
+  "aborted_expanded_pilot": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v2",
+    "committed_episodes": 2,
+    "pending_transactions": 0,
+    "eligible_for_training": false,
+    "used_as_acceptance_evidence": false
+  },
+  "verdict": {
+    "parallel_collection_infrastructure": "accepted",
+    "formal_70k_collection": "paused",
+    "formal_collection_resume_authorized_by_this_round": false,
+    "next_action": "After user approval, resume the existing formal root with four workers and monitor per-family throughput; do not mix or promote performance pilot data."
+  }
+}

@@ -12,10 +12,12 @@ import json
 import multiprocessing as mp
 import os
 import shutil
+import time
 import traceback
 import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -847,13 +849,124 @@ def _collect_episode_for_quota(
     )
 
 
+def _pair_window_allocations(
+    *,
+    remaining_windows: int,
+    anchors_per_episode: int,
+    parallel_workers: int,
+    remaining_episode_budget: int | None,
+) -> tuple[int, ...]:
+    """Allocate one bounded window cap to each concurrently collected pair.
+
+    A matched pair consumes exactly two episode indices.  The allocations sum
+    to no more than the per-severity cell remainder, so concurrent results can
+    never overfill a frozen quota even when every requested anchor is valid.
+    """
+
+    if remaining_windows <= 0 or anchors_per_episode <= 0:
+        return ()
+    if parallel_workers <= 0:
+        raise FormalV2CollectionError("parallel_workers must be positive")
+    pair_limit = int(parallel_workers)
+    if remaining_episode_budget is not None:
+        if remaining_episode_budget < 0:
+            raise FormalV2CollectionError("remaining episode budget cannot be negative")
+        pair_limit = min(pair_limit, int(remaining_episode_budget) // 2)
+    allocations: list[int] = []
+    unallocated = int(remaining_windows)
+    while len(allocations) < pair_limit and unallocated > 0:
+        value = min(int(anchors_per_episode), unallocated)
+        allocations.append(value)
+        unallocated -= value
+    return tuple(allocations)
+
+
+def _collect_matched_pair_for_quota(
+    config: FormalV2Config,
+    writer: FormalV2PartitionWriter,
+    family: str,
+    *,
+    pair_index: int,
+    episode_index: int,
+    pair_windows: int,
+):
+    """Collect one isolated near-critical/control pair without writing it."""
+
+    near = _collect_episode_for_quota(
+        config,
+        writer,
+        family,
+        "near_critical",
+        int(pair_windows),
+        cell_episode_index=int(pair_index),
+        episode_index=int(episode_index),
+    )
+    control = _collect_episode_for_quota(
+        config,
+        writer,
+        family,
+        "control",
+        len(near[4]),
+        cell_episode_index=int(pair_index),
+        required_steps=near[4],
+        episode_index=int(episode_index) + 1,
+    )
+    return near, control
+
+
+def _collect_pair_batch(
+    config: FormalV2Config,
+    writer: FormalV2PartitionWriter,
+    family: str,
+    *,
+    pair_index_base: int,
+    episode_index_base: int,
+    allocations: Sequence[int],
+    parallel_workers: int,
+):
+    """Collect independent pairs concurrently and return them in index order.
+
+    Each underlying episode still executes in its own ``spawn`` subprocess.
+    Threads only coordinate several independent subprocess/Pipe lifecycles;
+    they never mutate dataset state.  The caller is the sole ordered writer.
+    """
+
+    caps = tuple(int(value) for value in allocations)
+    if not caps:
+        return ()
+    if any(value <= 0 for value in caps):
+        raise FormalV2CollectionError("pair allocations must be positive")
+    worker_count = min(int(parallel_workers), len(caps))
+    if worker_count <= 0:
+        raise FormalV2CollectionError("parallel_workers must be positive")
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _collect_matched_pair_for_quota,
+                config,
+                writer,
+                family,
+                pair_index=int(pair_index_base) + offset,
+                episode_index=int(episode_index_base) + 2 * offset,
+                pair_windows=cap,
+            )
+            for offset, cap in enumerate(caps)
+        ]
+        return tuple(future.result() for future in futures)
+
+
 def run_formal_v2_collection(
     config: FormalV2Config,
     *,
     max_new_episodes: int | None = None,
+    parallel_workers: int = 1,
 ) -> dict[str, object]:
     if max_new_episodes is not None and max_new_episodes <= 0:
         raise FormalV2CollectionError("max_new_episodes must be positive")
+    if isinstance(parallel_workers, bool) or int(parallel_workers) <= 0:
+        raise FormalV2CollectionError("parallel_workers must be a positive integer")
+    parallel_workers = int(parallel_workers)
+    started_at = time.perf_counter()
     config.output_root.mkdir(parents=True, exist_ok=True)
     run_contract_path = config.output_root / "formal_v2_run_contract.json"
     frozen_payload = config.frozen_payload()
@@ -869,6 +982,7 @@ def run_formal_v2_collection(
             )
         _atomic_json(run_contract_path, frozen_payload)
     new_episodes = 0
+    new_windows = 0
     summaries: dict[str, object] = {}
     for partition in PARTITIONS:
         with FormalV2PartitionWriter(config, partition) as writer:
@@ -933,9 +1047,8 @@ def run_formal_v2_collection(
                         sample_steps=sample_steps,
                     )
                     new_episodes += 1
+                    new_windows += len(samples)
                     continue
-                if remaining_budget is not None and remaining_budget < 2:
-                    break
                 remaining = min(
                     quota - counts[(family, severity)] for severity in SEVERITIES
                 )
@@ -943,37 +1056,35 @@ def run_formal_v2_collection(
                     raise FormalV2CollectionError(
                         f"matched-pair quota diverged for {partition}/{family}"
                     )
-                pair_index = len(pair_records)
-                pair_windows = min(remaining, len(config.anchor_steps))
-                near = _collect_episode_for_quota(
+                allocations = _pair_window_allocations(
+                    remaining_windows=remaining,
+                    anchors_per_episode=len(config.anchor_steps),
+                    parallel_workers=parallel_workers,
+                    remaining_episode_budget=remaining_budget,
+                )
+                if not allocations:
+                    break
+                batches = _collect_pair_batch(
                     config,
                     writer,
                     family,
-                    "near_critical",
-                    pair_windows,
-                    cell_episode_index=pair_index,
-                    episode_index=len(writer.rows),
+                    pair_index_base=len(pair_records),
+                    episode_index_base=len(writer.rows),
+                    allocations=allocations,
+                    parallel_workers=parallel_workers,
                 )
-                control = _collect_episode_for_quota(
-                    config,
-                    writer,
-                    family,
-                    "control",
-                    len(near[4]),
-                    cell_episode_index=pair_index,
-                    required_steps=near[4],
-                    episode_index=len(writer.rows) + 1,
-                )
-                for result in (near, control):
-                    spec, metadata, arrays, samples, sample_steps = result
-                    writer.commit(
-                        spec=spec,
-                        metadata=metadata,
-                        side_arrays=arrays,
-                        samples=samples,
-                        sample_steps=sample_steps,
-                    )
-                    new_episodes += 1
+                for near, control in batches:
+                    for result in (near, control):
+                        spec, metadata, arrays, samples, sample_steps = result
+                        writer.commit(
+                            spec=spec,
+                            metadata=metadata,
+                            side_arrays=arrays,
+                            samples=samples,
+                            sample_steps=sample_steps,
+                        )
+                        new_episodes += 1
+                        new_windows += len(samples)
             state = json.loads(writer.state_path.read_text(encoding="utf-8"))
             summaries[partition] = state
         if max_new_episodes is not None and new_episodes >= max_new_episodes:
@@ -983,12 +1094,26 @@ def run_formal_v2_collection(
         == int(config.target_windows[partition])
         for partition, summary in summaries.items()
     ) and set(summaries) == set(PARTITIONS)
+    elapsed_s = time.perf_counter() - started_at
     report = {
         "format": f"{COLLECTOR_FORMAT}-run-report",
         "schema_version": COLLECTOR_SCHEMA_VERSION,
         "run_mode": config.run_mode,
         "eligible_for_formal_training": config.eligible_for_formal_training,
         "new_episodes": new_episodes,
+        "new_eligible_anchor_windows": new_windows,
+        "execution": {
+            "parallel_workers": parallel_workers,
+            "elapsed_s": elapsed_s,
+            "episodes_per_hour": (
+                0.0 if elapsed_s <= 0.0 else new_episodes * 3600.0 / elapsed_s
+            ),
+            "eligible_anchor_windows_per_hour": (
+                0.0 if elapsed_s <= 0.0 else new_windows * 3600.0 / elapsed_s
+            ),
+            "episode_isolation": "one_spawn_subprocess_per_episode",
+            "commit_order": "episode_index_serial",
+        },
         "complete": complete,
         "partitions": summaries,
     }
@@ -1000,10 +1125,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--max-new-episodes", type=int)
+    parser.add_argument("--parallel-workers", type=int, default=1)
     args = parser.parse_args(argv)
     report = run_formal_v2_collection(
         load_formal_v2_config(args.config),
         max_new_episodes=args.max_new_episodes,
+        parallel_workers=args.parallel_workers,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

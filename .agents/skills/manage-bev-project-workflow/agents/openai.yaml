@@ -1,0 +1,4 @@
+interface:
+  display_name: "BEV Project Workflow"
+  short_description: "按项目状态、专项技能和硬门禁执行 BEV 研发任务"
+  default_prompt: "Use $manage-bev-project-workflow to execute the next project task from the current machine-readable state."

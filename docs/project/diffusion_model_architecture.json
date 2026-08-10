@@ -1,0 +1,393 @@
+{
+  "format": "bev_diffusion_model_architecture_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-10T13:33:44+08:00",
+  "repository": {
+    "branch": "BEV",
+    "git_commit": "13bd7c5d649f52264779a3107faed927848a1765"
+  },
+  "model": {
+    "name": "BEVOnlyDiffusionPlanner",
+    "implementation": "models/bev_planner/bev_only_diffusion_planner.py",
+    "framework": "PyTorch",
+    "scope": "one shared planner for leader, middle, and rear roles",
+    "legacy_models_excluded": [
+      "V2TransfuserModel",
+      "camera image encoder",
+      "LiDAR encoder",
+      "MAPPO selector"
+    ]
+  },
+  "source_snapshot": {
+    "models/bev_planner/bev_only_diffusion_planner.py": "b362d6c2e7c46d22fff7233ce769a903488f85bad76fb812c9ef21516e0ec95a",
+    "models/bev_planner/bev_resnet18_backbone.py": "3f0c6b184eff34f9fe648b5afd7037d21f0c9f60c8610a8cad8efe35afc391e7",
+    "models/bev_planner/mode_contract.py": "934c67d13f83cf35d0eebf6fd2f0acd2304f3971f065dc6eaff7658198d690d3",
+    "models/bev_planner/trajectory_optimizer.py": "6039f1de5142e4a4a6cd2515aab1c4e505143a0c09c9179f0d7323af107150ae",
+    "envs/observations/semantic_bev.py": "088fea064e65f55f091526acd22f1e42e0481222aefecdebf861e9db71155286",
+    "configs/train/bev_diffusion_stage1.yaml": "91dbf347a4ec43fd237ce710e845f527483d89f6db00f9072ea147c1bf0ce39a",
+    "configs/train/bev_joint_grpo.yaml": "5ec2f0f9a9130527c7c564c041bbdb90f0f371b467c2b2e5b1aeb9a4ac64720a"
+  },
+  "input_contract": {
+    "joint_first": true,
+    "roles": [
+      "leader",
+      "middle",
+      "rear"
+    ],
+    "tensors": {
+      "bev": {
+        "dtype": "torch.uint8",
+        "shape": [
+          "B",
+          3,
+          8,
+          256,
+          256
+        ]
+      },
+      "ego_state": {
+        "dtype": "torch.float32",
+        "shape": [
+          "B",
+          3,
+          8
+        ]
+      },
+      "formation_relation_state": {
+        "dtype": "torch.float32",
+        "shape": [
+          "B",
+          3,
+          12
+        ]
+      },
+      "relation_valid_mask": {
+        "dtype": "torch.bool",
+        "shape": [
+          "B",
+          3,
+          2
+        ]
+      },
+      "agent_role": {
+        "dtype": "torch.int64",
+        "shape": [
+          "B",
+          3
+        ],
+        "required_value_per_sample": [
+          0,
+          1,
+          2
+        ]
+      },
+      "coarse_trajectories": {
+        "dtype": "torch.float32",
+        "shape": [
+          "B",
+          3,
+          10,
+          8,
+          3
+        ],
+        "last_dimension": [
+          "ego_local_x_m",
+          "ego_local_y_m",
+          "heading_rad"
+        ]
+      },
+      "mode_valid_mask": {
+        "dtype": "torch.bool",
+        "shape": [
+          "B",
+          3,
+          10
+        ],
+        "stop_mode_must_be_valid": true
+      }
+    },
+    "not_model_inputs": [
+      "ego_pose_global",
+      "gt_mode",
+      "expert_trajectory",
+      "RuleMaker action"
+    ]
+  },
+  "semantic_bev": {
+    "channel_order": [
+      "drivable",
+      "lane_geometry",
+      "navigation_route",
+      "ego_history",
+      "platoon_vehicles",
+      "background_t0",
+      "background_t_minus_0_5",
+      "background_t_minus_1_0"
+    ],
+    "metric_extent_m": {
+      "x_forward": [
+        -12.0,
+        52.0
+      ],
+      "y_left": [
+        -32.0,
+        32.0
+      ]
+    },
+    "normalization": "uint8 to float32 divided by 255; no ImageNet RGB mean/std"
+  },
+  "architecture": {
+    "global_dimensions": {
+      "d_model": 128,
+      "attention_heads": 4,
+      "ffn_dim": 256,
+      "decoder_layers": 2,
+      "dropout": 0.0,
+      "modes": 10,
+      "trajectory_steps": 8,
+      "trajectory_dt_s": 0.5,
+      "trajectory_dimension": 3
+    },
+    "backbone": {
+      "type": "timm ResNet18 features_only",
+      "pretrained_variant": "resnet18.a1_in1k",
+      "weights_path": "/media/kong/Elements_SE/Diffusion_Data/ckpts/resnet18.a1_in1k/model.safetensors",
+      "weights_sha256": "80c49dee3da4822c009c5a7fe591e9223c5a2cfcf95a4067ca4dfb5a7b89c612",
+      "first_conv_adaptation": "mean RGB kernel, repeat to 8 channels, multiply by 3/8",
+      "batch_norm_running_stats": "reset after loading pretrained affine parameters",
+      "input_after_role_flatten": [
+        "B*3",
+        8,
+        256,
+        256
+      ],
+      "feature_pyramid": [
+        {
+          "shape": [
+            "B*3",
+            64,
+            64,
+            64
+          ],
+          "stride": 4
+        },
+        {
+          "shape": [
+            "B*3",
+            128,
+            32,
+            32
+          ],
+          "stride": 8
+        },
+        {
+          "shape": [
+            "B*3",
+            256,
+            16,
+            16
+          ],
+          "stride": 16
+        },
+        {
+          "shape": [
+            "B*3",
+            512,
+            8,
+            8
+          ],
+          "stride": 32
+        }
+      ]
+    },
+    "bev_fusion": {
+      "type": "top-down sum feature pyramid",
+      "lateral_projection": "four 1x1 convolutions to 128 channels",
+      "upsampling": "bilinear",
+      "output_block": "3x3 Conv2d + GroupNorm(8) + GELU",
+      "output_shape": [
+        "B",
+        3,
+        128,
+        64,
+        64
+      ]
+    },
+    "joint_context_encoder": {
+      "per_role_sources": [
+        "ego_state MLP 8->128->128",
+        "masked relation MLP 12->128->128",
+        "role embedding 3x128",
+        "global average pooled BEV linear 128->128"
+      ],
+      "fusion": "concatenate four 128-D vectors, Linear(512,128), LayerNorm, GELU",
+      "cross_role_exchange": "one 4-head self-attention layer over three role tokens followed by FFN 128->256->128",
+      "output_shape": [
+        "B",
+        3,
+        128
+      ]
+    },
+    "diffusion_decoder": {
+      "anchor_query": "flatten 8x(x,y,coarse_heading/pi)=24 values, MLP 24->128->128",
+      "query_additions": [
+        "10-mode embedding",
+        "role context token",
+        "sinusoidal timestep embedding with 128->512->128 MLP"
+      ],
+      "cross_bev_sampling": "bilinear sample the stride-4 fused BEV at all 8 noisy trajectory XY points",
+      "decoder_block": "query attends to 8 sampled BEV tokens, then to 3 joint-role tokens, then FFN 128->256->128",
+      "decoder_block_count": 2,
+      "trajectory_head": "Linear(128,128), GELU, Linear(128,24); final layer zero initialized",
+      "xy_output": "noisy metric XY + tanh(residual_xy) * 12 m",
+      "heading_output": "wrapped coarse heading + pi*tanh(residual_heading)",
+      "mode_head": "shared Linear(128,1) applied independently to each role and mode",
+      "hard_mask_application": "invalid mode logits are replaced with -inf before sampling or argmax"
+    }
+  },
+  "variants": {
+    "A": {
+      "joint_update": "joint_mean",
+      "predecessor_condition": "none",
+      "decode_order": "three roles vectorized in parallel",
+      "parameter_count": 12285465
+    },
+    "B": {
+      "joint_update": "joint_mean",
+      "predecessor_condition": "predicted_detached",
+      "decode_order": "leader then middle then rear at every denoise step",
+      "condition_chain": "leader selected hard-mask argmax trajectory conditions middle; middle selected hard-mask argmax trajectory conditions rear",
+      "condition_gradient": "predecessor trajectory is normalized and detached; decoder weights remain shared",
+      "action_encoder": "flatten normalized 8x3 trajectory, Linear(24,128), LayerNorm, GELU, Linear(128,128)",
+      "residual_gate": "shared scalar tanh gate initialized to zero",
+      "parameter_count": 12305434,
+      "additional_parameter_count": 19969
+    }
+  },
+  "parameter_counts": {
+    "shared_backbone": 11192192,
+    "bev_fusion": 271104,
+    "context_encoder": 251648,
+    "diffusion_decoder_A": 570392,
+    "diffusion_decoder_B": 590361,
+    "mode_head": 129
+  },
+  "diffusion_process": {
+    "scheduler": "DDIMScheduler",
+    "num_train_timesteps": 1000,
+    "beta_schedule": "scaled_linear",
+    "prediction_type": "sample",
+    "training": {
+      "sampled_timesteps": "integer [0,50)",
+      "noised_components": "normalized XY only",
+      "heading": "not diffused; predicted as a residual around the coarse heading"
+    },
+    "stage1_inference": {
+      "initial_noise_timestep": 8,
+      "denoise_steps": 2,
+      "roll_timesteps": [
+        10,
+        0
+      ],
+      "default_noise_seed": 0
+    },
+    "grpo_rollout": {
+      "group_size": 4,
+      "initial_noise_timestep": 8,
+      "denoise_steps": 4,
+      "roll_timesteps": [
+        15,
+        10,
+        5,
+        0
+      ],
+      "ddim_eta": 1.0,
+      "trainable_modules": [
+        "diffusion_decoder",
+        "mode_head"
+      ],
+      "frozen_modules": [
+        "backbone",
+        "bev_fusion",
+        "context_encoder",
+        "reference diffusion_decoder",
+        "reference mode_head"
+      ]
+    }
+  },
+  "mode_contract": {
+    "names": [
+      "KEEP_HIGH",
+      "KEEP_MEDIUM",
+      "KEEP_LOW",
+      "LEFT_HIGH",
+      "LEFT_MEDIUM",
+      "LEFT_LOW",
+      "RIGHT_HIGH",
+      "RIGHT_MEDIUM",
+      "RIGHT_LOW",
+      "STOP"
+    ],
+    "dynamic_coarse_anchors_are_external_inputs": true,
+    "hard_mask_components": [
+      "topology",
+      "road footprint",
+      "kinematics"
+    ]
+  },
+  "output_contract": {
+    "trajectory_candidates": {
+      "shape": [
+        "B",
+        3,
+        10,
+        8,
+        3
+      ]
+    },
+    "mode_logits": {
+      "shape": [
+        "B",
+        3,
+        10
+      ]
+    },
+    "selected_mode": {
+      "shape": [
+        "B",
+        3
+      ]
+    },
+    "selected_trajectory": {
+      "shape": [
+        "B",
+        3,
+        8,
+        3
+      ]
+    }
+  },
+  "training_contract": {
+    "stage1": {
+      "trainable": "all planner parameters including ResNet18",
+      "optimizer": "AdamW",
+      "planner_lr": 0.0001,
+      "backbone_lr": 0.00001,
+      "joint_update": "mean over batch and three roles with one optimizer step per accumulation window"
+    },
+    "grpo": {
+      "trainable": "diffusion_decoder and mode_head only",
+      "learning_rate": 0.00001,
+      "reference_policy": "frozen copy of diffusion_decoder and mode_head sharing frozen encoded context"
+    }
+  },
+  "execution_boundary": {
+    "raw_policy_trajectory": "Stage 1 and GRPO probabilities and losses operate on direct diffusion output",
+    "postprocessor": "KinematicTrajectoryOptimizer",
+    "postprocessor_is_neural_model": false,
+    "postprocessor_position": "after mode/trajectory selection and before environment control execution",
+    "postprocessor_behavior": "preserve selected mode and project only the three selected trajectories onto the strict executable kinematic contract",
+    "controller_consumes": "optimized selected trajectories",
+    "raw_output_retained_for_learning_and_diagnostics": true
+  }
+}

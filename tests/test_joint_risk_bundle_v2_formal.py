@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 import pytest
 import yaml
@@ -11,8 +12,11 @@ from expert_dataset.joint_risk_bundle_v2_formal import (
     FormalV2CollectionError,
     FormalV2Config,
     FormalV2PartitionWriter,
+    _collect_pair_batch,
     _episode_spec,
+    _pair_window_allocations,
     load_formal_v2_config,
+    run_formal_v2_collection,
 )
 
 
@@ -163,3 +167,86 @@ def test_episode_seed_split_and_pair_id_are_deterministic(tmp_path: Path) -> Non
         cell_episode_index=0,
         attempt=0,
     ).spawn_seed
+
+
+def test_pair_window_allocations_never_overfill_quota_or_episode_budget() -> None:
+    assert _pair_window_allocations(
+        remaining_windows=25,
+        anchors_per_episode=7,
+        parallel_workers=4,
+        remaining_episode_budget=None,
+    ) == (7, 7, 7, 4)
+    assert _pair_window_allocations(
+        remaining_windows=25,
+        anchors_per_episode=7,
+        parallel_workers=4,
+        remaining_episode_budget=5,
+    ) == (7, 7)
+    assert _pair_window_allocations(
+        remaining_windows=25,
+        anchors_per_episode=7,
+        parallel_workers=4,
+        remaining_episode_budget=1,
+    ) == ()
+
+
+def test_pair_batch_runs_concurrently_but_returns_episode_index_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = threading.Barrier(4, timeout=2.0)
+
+    def fake_collect(config, writer, family, **kwargs):
+        del config, writer, family
+        barrier.wait()
+        return (
+            int(kwargs["pair_index"]),
+            int(kwargs["episode_index"]),
+            int(kwargs["pair_windows"]),
+        )
+
+    monkeypatch.setattr(
+        "expert_dataset.joint_risk_bundle_v2_formal._collect_matched_pair_for_quota",
+        fake_collect,
+    )
+    results = _collect_pair_batch(
+        _config(Path("/tmp/unused-performance-config")),
+        object(),
+        "adjacent_lane_cut_in",
+        pair_index_base=10,
+        episode_index_base=20,
+        allocations=(7, 7, 7, 4),
+        parallel_workers=4,
+    )
+    assert results == (
+        (10, 20, 7),
+        (11, 22, 7),
+        (12, 24, 7),
+        (13, 26, 4),
+    )
+
+
+def test_parallel_workers_is_runtime_only_and_strictly_positive(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    assert "parallel_workers" not in config.frozen_payload()
+    with pytest.raises(FormalV2CollectionError, match="parallel_workers"):
+        run_formal_v2_collection(config, parallel_workers=0)
+
+
+def test_performance_pilot_configs_differ_only_in_output_identity() -> None:
+    serial = load_formal_v2_config(
+        REPO_ROOT
+        / "configs/dataset/data_collect_bundle_v2_performance_pilot_serial.yaml"
+    )
+    parallel = load_formal_v2_config(
+        REPO_ROOT
+        / "configs/dataset/data_collect_bundle_v2_performance_pilot_parallel.yaml"
+    )
+    assert serial.run_mode == parallel.run_mode == "formal_pilot"
+    assert serial.anchor_steps == parallel.anchor_steps == (35, 40, 45, 50, 55, 60, 65)
+    assert serial.max_episode_steps == parallel.max_episode_steps == 120
+    assert serial.target_windows == parallel.target_windows == {
+        "id": 224,
+        "compositional_ood": 224,
+        "topology_ood": 224,
+    }
+    assert serial.output_root != parallel.output_root
