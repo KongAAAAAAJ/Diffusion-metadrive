@@ -1,0 +1,39 @@
+{
+  "format": "chassis_fusion_research_memory_v1",
+  "schema_version": 1,
+  "title": "ChassisFusion: Planning-Chassis Dual-Domain Fusion for Execution-Aware Diffusion Planning of Emergency Truck Platoons",
+  "scientific_problem": "Desired planning trajectories and heavy-truck executed trajectories differ because of tracking dynamics, actuator limits, tire behavior, payload variation and chassis stability constraints.",
+  "frozen_pipeline": [
+    "BEV diffusion planner produces raw desired trajectory tau_d",
+    "KinematicTrajectoryOptimizer produces executable command tau_cmd",
+    "frozen uncertainty-aware chassis surrogate predicts actual trajectory tau_a and dynamic responses",
+    "execution-aware reward evaluates predicted execution",
+    "GRPO updates the diffusion decoder and mode head from raw rollout log probabilities",
+    "the selected tau_cmd advances MetaDrive exactly once"
+  ],
+  "gradient_boundary": {
+    "surrogate_is_differentiable": true,
+    "surrogate_parameters_frozen_in_grpo": true,
+    "reward_backpropagates_through_surrogate": false,
+    "coupling": "reward and signed group advantage only"
+  },
+  "ensemble": {
+    "members": 3,
+    "horizon_s": 4.0,
+    "output_dt_s": 0.1,
+    "uncertainty": ["aleatoric", "epistemic", "total"]
+  },
+  "preserved_existing_system": [
+    "BEVOnlyDiffusionPlanner architecture",
+    "DDIM probability model",
+    "Stage 1 A/B variants",
+    "KinematicTrajectoryOptimizer",
+    "one-step MetaDrive online state progression"
+  ],
+  "excluded_from_cf0_cf1": [
+    "surrogate neural architecture",
+    "surrogate loss and optimizer",
+    "TruckSim exporter",
+    "GRPO adapter and execution-aware reward"
+  ]
+}

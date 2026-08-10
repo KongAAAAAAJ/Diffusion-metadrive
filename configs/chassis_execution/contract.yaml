@@ -1,0 +1,31 @@
+protocol:
+  schema: schemas/chassis_execution_surrogate_v1.json
+  command_source: tau_cmd
+  roles: 3
+  grpo_groups: 4
+  command_steps: 8
+  command_dt_s: 0.5
+  execution_steps: 40
+  execution_dt_s: 0.1
+  horizon_s: 4.0
+  coordinate_frame: per_role_current_ego_local
+  units: SI
+
+ensemble:
+  size: 3
+  member_distribution: heteroscedastic_diagonal_gaussian
+  aggregate: law_of_total_variance
+
+dataset:
+  format: chassis_execution_dataset_v1
+  split_policy: atomic_run_group_sha256_80_10_10
+  split_salt: chassis_execution_v1
+  require_full_window: true
+  require_component_hashes: true
+
+integration:
+  metadrive_candidate_branches: 0
+  metadrive_steps_after_selection: 1
+  freeze_surrogate: true
+  reward_backpropagates_through_surrogate: false
+  geometric_proxy_fallback: false

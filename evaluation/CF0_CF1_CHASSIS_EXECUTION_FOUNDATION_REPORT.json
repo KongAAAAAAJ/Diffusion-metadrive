@@ -1,0 +1,59 @@
+{
+  "format": "chassis_execution_foundation_report_v1",
+  "recorded_at": "2026-08-10T17:30:19+08:00",
+  "source": {
+    "branch": "chassis-fusion",
+    "base_git_commit": "13bd7c5d649f52264779a3107faed927848a1765",
+    "isolated_from_branch": "BEV",
+    "formal_70k_baseline_modified": false
+  },
+  "rounds": {
+    "CF-0": {
+      "status": "accepted",
+      "machine_protocol": "schemas/chassis_execution_surrogate_v1.json",
+      "file_sha256": "3288f6a156d148c0065a7dd2b3f3e5eb01d21d79e5e34761bd5ce32bb05e2862",
+      "canonical_payload_sha256": "1e3f9b758aa8b74a469f158dc6aee95a80dff5ed212519ee91ff33feec7d495f",
+      "memory": "docs/project/chassis_fusion_memory.json",
+      "memory_sha256": "2e11d3603769b95a44ced430a4df6d32898cd61e6cfae200a86942242874d746"
+    },
+    "CF-1": {
+      "status": "accepted",
+      "package": "chassis_execution",
+      "contract_config": "configs/chassis_execution/contract.yaml",
+      "contract_config_sha256": "d83d3c01e4fff654dd8b9c09df6d4f66947887aa6e59f4b705940b264ebad2ac",
+      "tests": {
+        "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_chassis_execution_contract.py -q",
+        "result": "13 passed",
+        "duration_s": 0.70
+      },
+      "regression_tests": {
+        "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_chassis_execution_contract.py tests/test_bev_trajectory_optimizer.py tests/test_bev_joint_grpo_online.py -q",
+        "result": "33 passed, 15 warnings",
+        "duration_s": 3.38
+      },
+      "json_validation": "passed",
+      "python_compile": "passed",
+      "git_diff_check": "passed"
+    }
+  },
+  "frozen_decisions": {
+    "surrogate_trajectory_input": "tau_cmd",
+    "grpo_groups": 4,
+    "ensemble_members": 3,
+    "execution_horizon_s": 4.0,
+    "execution_dt_s": 0.1,
+    "metadrive_candidate_branches": 0,
+    "metadrive_steps_after_selection": 1,
+    "surrogate_frozen_during_grpo": true,
+    "reward_backpropagates_through_surrogate": false,
+    "geometric_proxy_fallback": false
+  },
+  "not_implemented": [
+    "TruckSim exporter",
+    "surrogate neural network",
+    "surrogate training loss and optimizer",
+    "GRPO integration adapter",
+    "execution-aware reward"
+  ],
+  "next_hard_gate": "CF-2 must prove that every required TruckSim and controller signal can be exported with the frozen units, timing, identity and component hashes"
+}

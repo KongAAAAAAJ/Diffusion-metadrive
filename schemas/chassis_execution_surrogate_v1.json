@@ -1,0 +1,108 @@
+{
+  "format": "chassis_execution_surrogate_protocol_v1",
+  "schema_version": 1,
+  "research_name": "ChassisFusion: Planning-Chassis Dual-Domain Fusion",
+  "coordinate_frame": "per_role_current_ego_local",
+  "units": "SI",
+  "roles": ["leader", "middle", "rear"],
+  "policy_boundary": {
+    "tau_d": {
+      "owner": "BEV diffusion policy and DDIM probability model",
+      "shape": ["B", 4, 3, 8, 3],
+      "use": "GRPO old/new log-prob replay only"
+    },
+    "tau_cmd": {
+      "owner": "KinematicTrajectoryOptimizer",
+      "shape": ["B", 4, 3, 8, 3],
+      "dtype": "float32",
+      "fields": ["ego_local_x_m", "ego_local_y_m", "relative_heading_rad"],
+      "times_s": [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
+      "surrogate_input": true
+    },
+    "tau_a": {
+      "owner": "frozen chassis execution surrogate",
+      "shape": ["B", 4, 3, 40, 3],
+      "dtype": "float32",
+      "fields": ["ego_local_x_m", "ego_local_y_m", "relative_heading_rad"],
+      "times_s": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 4.0]
+    }
+  },
+  "initial_state_fields": [
+    "longitudinal_speed_mps", "lateral_speed_mps",
+    "longitudinal_acceleration_mps2", "lateral_acceleration_mps2",
+    "yaw_rate_rad_s", "roll_rad", "roll_rate_rad_s",
+    "road_wheel_angle_rad", "signed_longitudinal_control",
+    "mean_wheel_speed_rad_s"
+  ],
+  "vehicle_condition_fields": [
+    "total_mass_kg", "payload_mass_kg", "cg_height_m", "wheelbase_m",
+    "front_track_m", "rear_track_m",
+    "front_cornering_stiffness_n_per_rad",
+    "rear_cornering_stiffness_n_per_rad", "roll_stiffness_nm_per_rad",
+    "roll_damping_nms_per_rad", "tire_friction_coefficient",
+    "road_friction_coefficient", "drive_actuator_delay_s",
+    "brake_actuator_delay_s"
+  ],
+  "controller_context_fields": [
+    "speed_integral_error", "previous_lateral_error_rad",
+    "lateral_integral_error_rad_s", "previous_heading_error_rad",
+    "longitudinal_arc_error_m", "actual_predecessor_gap_m",
+    "desired_predecessor_gap_m", "predecessor_relative_speed_mps"
+  ],
+  "controller_mode": {"independent": 0, "formation_locked": 1},
+  "chassis_state_fields": [
+    "longitudinal_speed_mps", "lateral_speed_mps",
+    "longitudinal_acceleration_mps2", "lateral_acceleration_mps2",
+    "yaw_rate_rad_s", "roll_rad", "roll_rate_rad_s", "rollover_index"
+  ],
+  "control_fields": [
+    "road_wheel_angle_rad", "throttle_normalized", "brake_normalized"
+  ],
+  "uncertainty": {
+    "ensemble_size": 3,
+    "member_outputs": ["mean", "log_variance"],
+    "aggregate_outputs": [
+      "mean", "aleatoric_variance", "epistemic_variance", "total_variance"
+    ],
+    "identity": "total_variance = aleatoric_variance + epistemic_variance"
+  },
+  "online_grpo": {
+    "candidate_count": 4,
+    "candidate_evaluator": "frozen_chassis_execution_surrogate",
+    "metadrive_candidate_branches": 0,
+    "metadrive_steps_after_selection": 1,
+    "policy_gradient_source": "raw_tau_d_rollout_log_probability",
+    "surrogate_gradient_enabled": false,
+    "reward_gradient_through_surrogate": false,
+    "geometric_proxy_fallback": false
+  },
+  "required_component_hashes": [
+    "controller_contract_sha256", "trajectory_optimizer_sha256",
+    "trucksim_project_sha256", "signal_mapping_sha256"
+  ],
+  "dataset_v1": {
+    "format": "chassis_execution_dataset_v1",
+    "sample_unit": "synchronized three-role four-second TruckSim window",
+    "arrays": {
+      "tau_cmd": ["N", 3, 8, 3],
+      "initial_state": ["N", 3, 10],
+      "vehicle_condition": ["N", 3, 14],
+      "controller_context": ["N", 3, 8],
+      "controller_mode": ["N", 3],
+      "agent_role": ["N", 3],
+      "executed_trajectory": ["N", 3, 40, 3],
+      "chassis_state": ["N", 3, 40, 8],
+      "applied_control": ["N", 3, 40, 3],
+      "state_valid_mask": ["N", 3, 40]
+    },
+    "split_policy": {
+      "atomic_key": "run_group_id",
+      "algorithm": "sha256(split_salt + ':' + run_group_id) modulo 10000",
+      "train": [0, 8000],
+      "val": [8000, 9000],
+      "test": [9000, 10000]
+    },
+    "full_window_required": true,
+    "adjacent_window_split_leakage_forbidden": true
+  }
+}

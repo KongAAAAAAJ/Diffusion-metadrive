@@ -1,0 +1,49 @@
+{
+  "format": "chassis_fusion_project_state_v1",
+  "schema_version": 1,
+  "updated_at": "2026-08-10T17:30:19+08:00",
+  "repository": {
+    "branch": "chassis-fusion",
+    "base_git_commit": "13bd7c5d649f52264779a3107faed927848a1765",
+    "implementation_commit": null,
+    "worktree_path": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion",
+    "changes_committed": false
+  },
+  "current": {
+    "completed_rounds": ["CF-0", "CF-1"],
+    "status": "foundation_accepted",
+    "active_hard_gate": "CF-2_trucksim_export_and_signal_mapping"
+  },
+  "source_of_truth": {
+    "machine_protocol": {
+      "path": "schemas/chassis_execution_surrogate_v1.json",
+      "file_sha256": "3288f6a156d148c0065a7dd2b3f3e5eb01d21d79e5e34761bd5ce32bb05e2862",
+      "canonical_payload_sha256": "1e3f9b758aa8b74a469f158dc6aee95a80dff5ed212519ee91ff33feec7d495f"
+    },
+    "research_memory": {
+      "path": "docs/project/chassis_fusion_memory.json",
+      "sha256": "2e11d3603769b95a44ced430a4df6d32898cd61e6cfae200a86942242874d746"
+    },
+    "acceptance_report": {
+      "path": "evaluation/CF0_CF1_CHASSIS_EXECUTION_FOUNDATION_REPORT.json"
+    }
+  },
+  "artifacts": {
+    "trucksim_dataset": null,
+    "surrogate_checkpoints": [],
+    "grpo_checkpoints": []
+  },
+  "next_actions": [
+    "Implement CF-2 TruckSim export and signal mapping against the frozen protocol.",
+    "Reject CF-2 if any mandatory chassis signal or component identity is unavailable.",
+    "Only after CF-2 passes, implement the mmap dataset writer and full verifier."
+  ],
+  "invariants": {
+    "tau_cmd_is_only_surrogate_trajectory_input": true,
+    "raw_tau_d_remains_grpo_probability_action": true,
+    "surrogate_is_frozen_in_grpo": true,
+    "candidate_metadrive_branching_forbidden": true,
+    "geometric_proxy_fallback_forbidden": true,
+    "bev_formal_collection_worktree_isolated": true
+  }
+}
