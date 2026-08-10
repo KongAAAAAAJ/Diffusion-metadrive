@@ -1,0 +1,16 @@
+{
+  "format": "trucksim_signal_mapping_v1",
+  "schema_version": 1,
+  "conversion_formula": "si = raw * scale * sign + offset",
+  "raw_export_fields": [
+    "REPLACE_WITH_ORDERED_TRUCKSIM_EXPORT_NAMES"
+  ],
+  "controller_log_fields": [
+    "REPLACE_WITH_ORDERED_CONTROLLER_LOG_NAMES"
+  ],
+  "world_pose": "COPY_AND_EDIT_FROM_THE_GENERATED_FIXTURE",
+  "initial_state": "COPY_AND_EDIT_FROM_THE_GENERATED_FIXTURE",
+  "chassis_state": "COPY_AND_EDIT_FROM_THE_GENERATED_FIXTURE; rollover_index must set native=true",
+  "applied_control": "COPY_AND_EDIT_FROM_THE_GENERATED_FIXTURE",
+  "vehicle_condition": "COPY_AND_EDIT_FROM_THE_GENERATED_FIXTURE"
+}

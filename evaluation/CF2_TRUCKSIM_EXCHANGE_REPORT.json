@@ -1,0 +1,68 @@
+{
+  "format": "cf2_trucksim_exchange_report_v1",
+  "recorded_at": "2026-08-10T18:42:02+08:00",
+  "source": {
+    "branch": "chassis-fusion",
+    "base_head": "2b48aeba6321744d873fce03345c3888346dc0a7",
+    "worktree": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion",
+    "bev_worktree_modified": false,
+    "changes_committed": false
+  },
+  "protocol": {
+    "path": "schemas/trucksim_execution_export_v1.json",
+    "file_sha256": "2401ddeaadd2f0b66f533eb032089c47d5ac4a95151937d1721cf1b31225b435",
+    "canonical_payload_sha256": "6053abdcb3c427e161f420a5f6d81bebec696ff52fe1ec78f09c21f54d7aa534",
+    "config": "configs/chassis_execution/trucksim_export.yaml",
+    "config_sha256": "9ee3dc993213044c5972957ee3c50b48f15912cbfa6b4dcbcbce1a132bb3816f",
+    "windows_handoff": "docs/contracts/trucksim_execution_handoff_v1.md",
+    "windows_handoff_sha256": "8dda10599213f5514c2eeb74c13d48c0e3275e468117c70b617ccd2e7128e4d1"
+  },
+  "implemented": [
+    "exact per-run file and SHA256 validation",
+    "four-component identity binding",
+    "strict signal mapping with SI conversion",
+    "native TruckSim rollover-index requirement",
+    "gap-free raw timeline validation",
+    "state and heading resampling",
+    "left-limit applied-control alignment",
+    "world-to-per-role-ego-local conversion",
+    "direct ChassisExecutionTarget construction",
+    "deterministic run-group split",
+    "fixture generator and verification CLI",
+    "real-smoke maneuver and excitation gate"
+  ],
+  "verification": {
+    "focused": {
+      "command": "python -m pytest -p no:cacheprovider tests/test_chassis_execution_trucksim_export.py tests/test_chassis_execution_contract.py -q",
+      "result": "27 passed",
+      "duration_s": 0.82
+    },
+    "regression": {
+      "command": "python -m pytest -p no:cacheprovider tests/test_chassis_execution_contract.py tests/test_chassis_execution_trucksim_export.py tests/test_bev_trajectory_optimizer.py tests/test_bev_joint_grpo_online.py -q",
+      "result": "47 passed, 15 warnings",
+      "duration_s": 3.36
+    },
+    "python_compile": "passed with PYTHONPYCACHEPREFIX=/tmp/cf2-pycache",
+    "synthetic_fixture": {
+      "raw_export_dt_s": 0.05,
+      "run_count": 1,
+      "conversion": "passed",
+      "target_shapes": {
+        "tau_cmd": [1, 3, 8, 3],
+        "executed_trajectory": [1, 3, 40, 3],
+        "chassis_state": [1, 3, 40, 8],
+        "applied_control": [1, 3, 40, 3]
+      },
+      "dataset_metadata_fingerprint": "f3394dec4fc8fd02ed0616500c84619faa428bba81d83f22695e4a3f9b761c43"
+    }
+  },
+  "hard_gates": {
+    "code_and_contract": "passed",
+    "real_windows_trucksim_smoke": "blocked_missing_artifact",
+    "native_rollover_signal_proven": false,
+    "all_mandatory_real_signals_proven": false,
+    "cf2_overall": "incomplete"
+  },
+  "blocker": "No real Windows controller plus TruckSim export root has been supplied. Synthetic fixtures validate protocol behavior but cannot prove signal availability or physical excitation.",
+  "next_permitted_action": "Produce the eight-maneuver Windows real-smoke export using the handoff contract, then run chassis_execution.verify_trucksim_export. CF-3 remains blocked until it passes."
+}

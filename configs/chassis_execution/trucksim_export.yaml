@@ -1,0 +1,48 @@
+protocol:
+  schema: schemas/trucksim_execution_export_v1.json
+  collection_format: trucksim_execution_export_collection_v1
+  run_format: trucksim_execution_run_v1
+  signal_mapping_format: trucksim_signal_mapping_v1
+  source: tau_cmd
+
+timing:
+  horizon_s: 4.0
+  target_dt_s: 0.1
+  initial_time_tolerance_s: 1.0e-9
+  uniform_time_relative_tolerance: 1.0e-5
+  state_resampling: linear
+  heading_resampling: unwrap_linear_wrap
+  control_resampling: left_zero_order_hold
+  allow_extrapolation: false
+
+validation:
+  initial_state_atol: 1.0e-4
+  initial_state_rtol: 1.0e-5
+  initial_world_pose_atol: 1.0e-6
+  require_exact_run_file_set: true
+  require_file_sha256: true
+  require_native_rollover_index: true
+  normalized_control_range: [0.0, 1.0]
+  normalized_rollover_range: [-1.0, 1.0]
+  require_full_window: true
+
+real_smoke:
+  required_maneuvers:
+    - constant_speed
+    - accelerate
+    - brake
+    - stop
+    - lane_change_left
+    - lane_change_right
+    - brake_and_steer
+    - formation_gap_recovery
+  require_independent_mode: true
+  require_formation_locked_mode: true
+  minimum_throttle_excitation: 0.05
+  minimum_brake_excitation: 0.05
+  minimum_lateral_dynamic_range:
+    road_wheel_angle_rad: 1.0e-4
+    yaw_rate_rad_s: 1.0e-4
+    lateral_acceleration_mps2: 1.0e-4
+    roll_rad: 1.0e-5
+    rollover_index: 1.0e-5

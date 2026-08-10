@@ -1,18 +1,19 @@
 {
   "format": "chassis_fusion_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-10T17:30:19+08:00",
+  "updated_at": "2026-08-10T18:42:02+08:00",
   "repository": {
     "branch": "chassis-fusion",
     "base_git_commit": "13bd7c5d649f52264779a3107faed927848a1765",
-    "implementation_commit": null,
+    "implementation_commit": "2b48aeba6321744d873fce03345c3888346dc0a7",
     "worktree_path": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion",
     "changes_committed": false
   },
   "current": {
     "completed_rounds": ["CF-0", "CF-1"],
-    "status": "foundation_accepted",
-    "active_hard_gate": "CF-2_trucksim_export_and_signal_mapping"
+    "implemented_rounds": ["CF-0", "CF-1", "CF-2-code"],
+    "status": "cf2_code_accepted_waiting_real_windows_smoke",
+    "active_hard_gate": "CF-2_real_windows_trucksim_smoke"
   },
   "source_of_truth": {
     "machine_protocol": {
@@ -26,17 +27,28 @@
     },
     "acceptance_report": {
       "path": "evaluation/CF0_CF1_CHASSIS_EXECUTION_FOUNDATION_REPORT.json"
+    },
+    "cf2_exchange_protocol": {
+      "path": "schemas/trucksim_execution_export_v1.json",
+      "file_sha256": "2401ddeaadd2f0b66f533eb032089c47d5ac4a95151937d1721cf1b31225b435",
+      "canonical_payload_sha256": "6053abdcb3c427e161f420a5f6d81bebec696ff52fe1ec78f09c21f54d7aa534"
+    },
+    "cf2_report": {
+      "path": "evaluation/CF2_TRUCKSIM_EXCHANGE_REPORT.json",
+      "status": "incomplete_waiting_real_windows_smoke"
     }
   },
   "artifacts": {
     "trucksim_dataset": null,
+    "trucksim_real_smoke": null,
     "surrogate_checkpoints": [],
     "grpo_checkpoints": []
   },
   "next_actions": [
-    "Implement CF-2 TruckSim export and signal mapping against the frozen protocol.",
-    "Reject CF-2 if any mandatory chassis signal or component identity is unavailable.",
-    "Only after CF-2 passes, implement the mmap dataset writer and full verifier."
+    "On Windows, export all eight required real-smoke maneuvers using docs/contracts/trucksim_execution_handoff_v1.md.",
+    "Run python -m chassis_execution.verify_trucksim_export --root <windows_export_smoke_root>.",
+    "Reject CF-2 if native rollover or any mandatory signal/component identity is unavailable.",
+    "Only after the real-smoke gate passes, implement the CF-3 mmap dataset writer and full verifier."
   ],
   "invariants": {
     "tau_cmd_is_only_surrogate_trajectory_input": true,
@@ -44,6 +56,14 @@
     "surrogate_is_frozen_in_grpo": true,
     "candidate_metadrive_branching_forbidden": true,
     "geometric_proxy_fallback_forbidden": true,
-    "bev_formal_collection_worktree_isolated": true
+    "bev_formal_collection_worktree_isolated": true,
+    "cf3_blocked_until_real_windows_smoke": true
+  },
+  "blockers": {
+    "cf2_real_windows_smoke": {
+      "status": "missing_artifact",
+      "required_report": "trucksim_export_verification_report_v1",
+      "required_purpose": "real_smoke"
+    }
   }
 }

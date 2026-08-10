@@ -23,6 +23,13 @@ from .dataset import (
     canonical_sha256,
     validate_atomic_run_group_splits,
 )
+from .trucksim_exchange import (
+    TruckSimExportError,
+    VerifiedTruckSimRun,
+    convert_verified_run,
+    load_trucksim_export,
+    verify_trucksim_export_root,
+)
 
 __all__ = [
     "CHASSIS_STATE_FIELDS",
@@ -44,4 +51,9 @@ __all__ = [
     "assign_run_group_split",
     "canonical_sha256",
     "validate_atomic_run_group_splits",
+    "TruckSimExportError",
+    "VerifiedTruckSimRun",
+    "convert_verified_run",
+    "load_trucksim_export",
+    "verify_trucksim_export_root",
 ]
