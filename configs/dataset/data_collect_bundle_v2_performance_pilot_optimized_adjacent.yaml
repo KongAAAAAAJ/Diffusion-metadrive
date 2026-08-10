@@ -1,0 +1,15 @@
+dataset:
+  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_optimized_adjacent_v1
+  dataset_instance_prefix: riskentry_performance_pilot_optimized_adjacent_v1
+
+collection:
+  run_mode: formal_pilot
+  resume: true
+  split_seed: 3
+  max_episode_steps: 120
+  anchor_steps: [35, 40, 45, 50, 55, 60, 65]
+  max_attempts_per_cell: 20
+  target_windows:
+    id: 224
+    compositional_ood: 224
+    topology_ood: 224

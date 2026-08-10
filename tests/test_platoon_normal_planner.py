@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import models.platoon_planner.platoon_normal_planner as planner_module
 
 from metadrive.component.lane.junction_lane import (
     build_lane_seam_drivable_surface,
@@ -1026,6 +1027,70 @@ def test_ranked_planner_caches_candidate_audits_and_pairwise_entries(
     assert ranked["pairwise_request_count"] == 5
     assert ranked["pairwise_cache_hit_count"] == 1
     assert len(pair_calls) == 4
+
+
+def test_executor_reuses_identical_background_prediction_time_grid(monkeypatch):
+    planner = PlatoonNormalPlanner()
+    executor = JointTrajectoryExecutor(planner)
+    calls = []
+
+    def fake_predictions(env, vehicle, times, *, include_platoon):
+        calls.append((env, vehicle, np.asarray(times).copy(), include_platoon))
+        return [
+            (
+                "background",
+                np.column_stack((times, np.zeros_like(times), np.zeros_like(times))),
+                (4.8, 1.9),
+            )
+        ]
+
+    monkeypatch.setattr(planner, "_predicted_obstacles", fake_predictions)
+    env = object()
+    times = np.arange(0.0, 4.1, 0.1, dtype=np.float64)
+    first = executor._predicted_background_cached(env, object(), times)
+    second = executor._predicted_background_cached(env, object(), times.copy())
+
+    assert first is second
+    assert len(calls) == 1
+    assert first[0][1].flags.writeable is False
+    assert executor.prediction_cache_debug() == {
+        "background_prediction_cache_entries": 1,
+        "background_prediction_requests": 2,
+        "background_prediction_cache_hits": 1,
+    }
+
+
+def test_lane_chain_geometry_cache_reuses_path_across_time_grids(monkeypatch):
+    env = _env(agent_lane_id=1)
+    vehicle = env.agents["agent0"]
+    planner = PlatoonNormalPlanner()
+    original = planner_module.build_continuous_lane_chain_path
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(planner_module, "build_continuous_lane_chain_path", counted)
+    first = planner._predict_vehicle_trajectory_on_lane_chain(
+        env, vehicle, np.asarray([0.0, 1.0], dtype=np.float64)
+    )
+    second = planner._predict_vehicle_trajectory_on_lane_chain(
+        env, vehicle, np.asarray([0.0, 2.0], dtype=np.float64)
+    )
+
+    assert first is not None and second is not None
+    assert len(calls) == 1
+    assert planner._route_geometry_cache_debug() == {
+        "route_geometry_cache_entries": 1,
+        "route_geometry_cache_requests": 2,
+        "route_geometry_cache_hits": 1,
+    }
+    planner._reset_planning_tick_caches()
+    planner._predict_vehicle_trajectory_on_lane_chain(
+        env, vehicle, np.asarray([0.0, 1.0], dtype=np.float64)
+    )
+    assert len(calls) == 2
 
 
 def test_planner_rejects_empty_hard_mode_action_metadata():

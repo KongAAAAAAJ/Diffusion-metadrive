@@ -1,18 +1,18 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-10T22:46:01+08:00",
+  "updated_at": "2026-08-10T23:45:00+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "13bd7c5d649f52264779a3107faed927848a1765",
+    "git_commit": "478fd714a22d30d6a21e4a88216247cd4a68d369",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false
   },
   "current": {
     "phase": "collection_performance",
     "round": "13.99-performance",
-    "status": "performance_pilot_passed_formal_collection_paused",
-    "active_hard_gate": "wait_for_user_authorization_before_resuming_formal_70k"
+    "status": "performance_optimization_passed_formal_collection_paused",
+    "active_hard_gate": "review_and_freeze_performance_changes_before_resuming_formal_70k"
   },
   "authorization": {
     "riskentry_format_accepted_by_downstream": true,
@@ -45,6 +45,10 @@
     "collection_performance_pilot_report": {
       "path": "evaluation/COLLECTION_PERFORMANCE_PILOT_REPORT.json",
       "role": "four-worker matched-pair scheduler implementation, integrity gates, throughput evidence, and stop state"
+    },
+    "collection_performance_optimization_report": {
+      "path": "evaluation/COLLECTION_PERFORMANCE_OPTIMIZATION_REPORT.json",
+      "role": "planning cache, batch writer, import-boundary implementation and adjacent/on-ramp throughput evidence"
     }
   },
   "datasets": {
@@ -75,6 +79,15 @@
       "measured_speedup": 3.5935908937254877,
       "passed": true,
       "eligible_for_formal_training": false
+    },
+    "collection_performance_optimized_pilot": {
+      "adjacent_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_optimized_adjacent_v1",
+      "on_ramp_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_optimized_on_ramp_v1",
+      "adjacent_eligible_windows_per_hour": 7221.820331675353,
+      "adjacent_speedup_over_old_parallel": 2.129191481585406,
+      "on_ramp_serial_pair_elapsed_s": 15.319050360936671,
+      "diffusion_and_riskentry_verifiers_passed": true,
+      "eligible_for_formal_training": false
     }
   },
   "checkpoints": {
@@ -97,10 +110,11 @@
   },
   "blockers": [
     "Formal 70k collection was stopped at the user's request and has not been resumed.",
-    "The on_ramp_external_merge family is CPU-bound in Normal planner full-horizon route-chain/background auditing and needs per-family monitoring during the next collection run."
+    "The performance optimization code is not yet committed/frozen; long collection must not start from a dirty implementation state."
   ],
   "next_actions": [
-    "Review the independent collection performance report.",
+    "Review the collection performance optimization report and code diff.",
+    "Commit/freeze the accepted performance implementation before any long-running collection.",
     "After explicit user authorization, resume the existing formal 70k root with parallel_workers=4 and resume enabled.",
     "Monitor per-family throughput and stop on integrity/retry anomalies; do not modify code during collection.",
     "Run the complete Diffusion and RiskEntry dataset verifiers and freeze dataset fingerprints.",

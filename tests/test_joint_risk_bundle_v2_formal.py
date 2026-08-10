@@ -232,6 +232,51 @@ def test_parallel_workers_is_runtime_only_and_strictly_positive(tmp_path: Path) 
         run_formal_v2_collection(config, parallel_workers=0)
 
 
+def test_performance_family_is_pilot_only_and_not_frozen(tmp_path: Path) -> None:
+    pilot = _config(tmp_path / "pilot")
+    assert "performance_family" not in pilot.frozen_payload()
+    with pytest.raises(FormalV2CollectionError, match="unknown performance_family"):
+        run_formal_v2_collection(
+            pilot,
+            performance_family="not_a_scenario",
+        )
+
+    formal = _config(tmp_path / "formal", mode="formal")
+    with pytest.raises(FormalV2CollectionError, match="restricted to formal_pilot"):
+        run_formal_v2_collection(
+            formal,
+            performance_family="adjacent_lane_cut_in",
+        )
+
+
+def test_commit_batch_refreshes_metadata_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = object.__new__(FormalV2PartitionWriter)
+    refresh_flags = []
+    refresh_count = 0
+
+    def fake_commit(**kwargs):
+        refresh_flags.append(bool(kwargs["refresh_metadata"]))
+        return {
+            "episode_commit_s": 0.25,
+            "metadata_refresh_s": 0.0,
+            "total_s": 0.25,
+        }
+
+    def fake_materialize():
+        nonlocal refresh_count
+        refresh_count += 1
+
+    monkeypatch.setattr(writer, "commit", fake_commit)
+    monkeypatch.setattr(writer, "_materialize_metadata", fake_materialize)
+    dummy = (object(), {}, {}, (), ())
+    timing = writer.commit_batch((dummy, dummy, dummy, dummy))
+
+    assert refresh_flags == [False, False, False, False]
+    assert refresh_count == 1
+    assert timing["episode_count"] == 4.0
+    assert timing["episode_commit_s"] == pytest.approx(1.0)
+
+
 def test_performance_pilot_configs_differ_only_in_output_identity() -> None:
     serial = load_formal_v2_config(
         REPO_ROOT

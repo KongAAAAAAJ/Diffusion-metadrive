@@ -1,0 +1,187 @@
+{
+  "format": "bev-bundle-v2-collection-performance-optimization-v1",
+  "generated_at": "2026-08-10T23:45:00+08:00",
+  "status": "pass",
+  "scope": {
+    "purpose": "Remove the measured collection bottlenecks with bounded pilots while keeping formal 70k paused",
+    "source_git_commit": "478fd714a22d30d6a21e4a88216247cd4a68d369",
+    "formal_dataset_modified": false,
+    "formal_collection_resumed": false,
+    "dataset_or_safety_contract_changed": false
+  },
+  "execution_plan": [
+    {
+      "order": 1,
+      "task": "Measure episode, writer, and import-stage timing",
+      "completion_gate": "Reports expose per-family/per-severity collection time, writer commit time, metadata refresh time, and throughput",
+      "status": "complete"
+    },
+    {
+      "order": 2,
+      "task": "Cache planning-tick route geometry and background predictions",
+      "completion_gate": "Exact lane-chain geometry and exact background prediction time grids are reused only within one unchanged planning state",
+      "status": "complete"
+    },
+    {
+      "order": 3,
+      "task": "Batch ordered writer metadata refresh",
+      "completion_gate": "Episodes remain atomic and ordered while manifests are materialized once per collected batch",
+      "status": "complete"
+    },
+    {
+      "order": 4,
+      "task": "Remove eager training-only package imports from collection startup",
+      "completion_gate": "Sensorless collector import does not load pytorch_lightning, torchmetrics, or TransfuserAgent",
+      "status": "complete"
+    },
+    {
+      "order": 5,
+      "task": "Run isolated adjacent-lane and on-ramp pilots",
+      "completion_gate": "Both pilots commit native data, pass Diffusion verification and RiskEntry v2 preflight, and preserve frozen semantics",
+      "status": "complete"
+    },
+    {
+      "order": 6,
+      "task": "Resume formal 70k with monitoring",
+      "completion_gate": "Separate user-authorized long-running operation after this code is reviewed and frozen",
+      "status": "not_started"
+    }
+  ],
+  "root_cause": {
+    "primary": "Normal planner full-horizon audit repeatedly rebuilt identical route-chain geometry and recomputed identical background predictions for roles, candidates, and ranked proposals in the same physical planning tick.",
+    "secondary": "The parent writer reread episode metadata and regenerated all manifests after every episode instead of once per ordered batch.",
+    "tertiary": "Every isolated spawn process eagerly imported training-only Lightning/TorchMetrics code through package __init__ modules.",
+    "not_bottlenecks": [
+      "semantic BEV bit-pack storage",
+      "disk I/O wait",
+      "MetaDrive sensor rendering"
+    ]
+  },
+  "implementation": {
+    "planner": {
+      "route_geometry_cache_scope": "one plan_ranked physical tick",
+      "background_prediction_cache_scope": "one plan_ranked audit executor",
+      "cache_keys": "exact lane objects/start s-d/seam geometry and exact float64 prediction time grid",
+      "hard_checks_preserved": [
+        "dense 0.1s rolling windows",
+        "completion_deadline plus 4s horizon",
+        "world and local kinematics",
+        "road footprint",
+        "5m background gap",
+        "7m platoon gap",
+        "pairwise OBB/SAT"
+      ]
+    },
+    "writer": {
+      "episode_commit": "atomic and ordered",
+      "metadata_refresh": "once per collected batch",
+      "resume_semantics_changed": false
+    },
+    "imports": {
+      "pytorch_lightning_loaded": false,
+      "torchmetrics_loaded": false,
+      "cold_import_elapsed_s": 3.23,
+      "cold_import_max_rss_kb": 709348
+    },
+    "diagnostic_family_filter": {
+      "runtime_only": true,
+      "formal_pilot_only": true,
+      "included_in_frozen_contract": false,
+      "formal_mode_rejected": true
+    }
+  },
+  "pilots": {
+    "adjacent_lane_cut_in": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_optimized_adjacent_v1",
+      "workers": 4,
+      "episodes": 8,
+      "eligible_windows": 56,
+      "elapsed_s": 27.915399544872344,
+      "eligible_windows_per_hour": 7221.820331675353,
+      "old_parallel_elapsed_s": 59.437230915995315,
+      "old_parallel_windows_per_hour": 3391.813462590951,
+      "speedup_over_old_parallel": 2.129191481585406,
+      "speedup_over_old_serial": 7.651443119223194,
+      "writer_total_s": 0.9569238701369613,
+      "writer_fraction": 0.03427942589891157,
+      "metadata_refresh_fraction": 0.0027996010143083653,
+      "collection_report_sha256": "186d48f28eddb0b9998e87553af85ae8181effdaf11917db569d8c4b1df03382",
+      "bundle_episode_index_sha256": "efa185cc2e89bb78952c71e1c08e1bc65d3a6522d2848a828f803c933595d4c8"
+    },
+    "on_ramp_external_merge": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_optimized_on_ramp_v1",
+      "workers": 1,
+      "episodes": 2,
+      "eligible_windows": 14,
+      "elapsed_s": 15.319050360936671,
+      "eligible_windows_per_hour": 3290.021170536731,
+      "near_critical_episode_s": 6.544668156187981,
+      "control_episode_s": 7.368687364971265,
+      "previous_observation": "one serial episode remained CPU-bound for more than 240 seconds",
+      "conservative_per_episode_speedup_lower_bound": 32.57025140473386,
+      "writer_total_s": 0.8095172310713679,
+      "collection_report_sha256": "7d09ad8287cf0cf83536017f4165fac8378244b062a8beec8d516b0cdf75fff4",
+      "bundle_episode_index_sha256": "bb70c22f6957bd06a1162f4bc795f35e12bccbe2f946bc9048318016cb8651b1"
+    }
+  },
+  "integrity": {
+    "adjacent_index_matches_old_parallel_baseline_exactly": true,
+    "diffusion_verifier": {
+      "adjacent": {
+        "status": "pass",
+        "episodes": 8,
+        "joint_samples": 56,
+        "expert_valid": "168/168",
+        "hard_valid_anchors_valid": "1008/1008",
+        "decode_joint_samples_per_s": 806.6512996925945
+      },
+      "on_ramp": {
+        "status": "pass",
+        "episodes": 2,
+        "joint_samples": 14,
+        "expert_valid": "42/42",
+        "hard_valid_anchors_valid": "252/252",
+        "decode_joint_samples_per_s": 647.7044352106274
+      }
+    },
+    "riskentry_v2_source_preflight": {
+      "adjacent": "pass",
+      "on_ramp": "pass"
+    },
+    "bit_exact_simulator_arrays_required": false,
+    "repeatability_policy": "Round 13.95 layered reproducibility contract"
+  },
+  "tests": {
+    "focused": "82 passed",
+    "bundle_collector_regression": "78 passed, 1 deselected",
+    "deselected": "known sandbox multi-worker DataLoader test; previously passed independently",
+    "python_compile": "pass",
+    "git_diff_check": "pass"
+  },
+  "residual_bottlenecks": [
+    {
+      "priority": 1,
+      "component": "isolated process cold start",
+      "evidence": "Cold collector import remains about 3.23s and 709MB because MetaDrive/torch are still required by the environment contract.",
+      "decision": "Keep spawn-per-episode determinism for this round; process pooling or forkserver preloading requires a separate reproducibility round."
+    },
+    {
+      "priority": 2,
+      "component": "single-threaded planning inside each episode",
+      "evidence": "Episode collection remains CPU-bound, but bounded four-pair concurrency now scales across cores.",
+      "decision": "Use four workers for the existing formal host; do not add nested candidate-level multiprocessing."
+    },
+    {
+      "priority": 3,
+      "component": "manifest growth at formal scale",
+      "evidence": "Batching reduces refresh frequency but each refresh still scans accumulated episode metadata.",
+      "decision": "Monitor writer_timing during resume and stop if its fraction grows materially; do not change storage schema during collection."
+    }
+  ],
+  "verdict": {
+    "performance_optimization": "accepted",
+    "formal_70k_collection": "paused",
+    "formal_collection_resume_authorized_by_this_report": false,
+    "next_action": "Review and freeze this code, then resume the existing formal root as a separate four-worker operation with per-family and writer timing monitoring."
+  }
+}

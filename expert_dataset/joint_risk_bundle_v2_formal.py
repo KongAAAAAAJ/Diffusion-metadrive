@@ -550,7 +550,9 @@ class FormalV2PartitionWriter:
         side_arrays: Mapping[str, np.ndarray],
         samples: Sequence[JointBEVSample],
         sample_steps: Sequence[int],
-    ) -> None:
+        refresh_metadata: bool = True,
+    ) -> dict[str, float]:
+        commit_started_at = time.perf_counter()
         if self.pending_root.exists():
             raise FormalV2CollectionError("another formal episode transaction is pending")
         if spec.episode_index != len(self.rows):
@@ -627,7 +629,56 @@ class FormalV2PartitionWriter:
         )
         shutil.rmtree(self.pending_root)
         self.rows = rows
+        episode_commit_s = time.perf_counter() - commit_started_at
+        metadata_refresh_s = 0.0
+        if refresh_metadata:
+            metadata_started_at = time.perf_counter()
+            self._materialize_metadata()
+            metadata_refresh_s = time.perf_counter() - metadata_started_at
+        return {
+            "episode_commit_s": float(episode_commit_s),
+            "metadata_refresh_s": float(metadata_refresh_s),
+            "total_s": float(time.perf_counter() - commit_started_at),
+        }
+
+    def commit_batch(
+        self,
+        episodes: Sequence[
+            tuple[
+                RealV2EpisodeSpec,
+                Mapping[str, object],
+                Mapping[str, np.ndarray],
+                Sequence[JointBEVSample],
+                Sequence[int],
+            ]
+        ],
+    ) -> dict[str, float]:
+        """Commit ordered episode transactions and refresh manifests once."""
+
+        values = tuple(episodes)
+        if not values:
+            raise FormalV2CollectionError("commit_batch requires at least one episode")
+        started_at = time.perf_counter()
+        episode_commit_s = 0.0
+        for spec, metadata, side_arrays, samples, sample_steps in values:
+            timing = self.commit(
+                spec=spec,
+                metadata=metadata,
+                side_arrays=side_arrays,
+                samples=samples,
+                sample_steps=sample_steps,
+                refresh_metadata=False,
+            )
+            episode_commit_s += float(timing["episode_commit_s"])
+        metadata_started_at = time.perf_counter()
         self._materialize_metadata()
+        metadata_refresh_s = time.perf_counter() - metadata_started_at
+        return {
+            "episode_count": float(len(values)),
+            "episode_commit_s": float(episode_commit_s),
+            "metadata_refresh_s": float(metadata_refresh_s),
+            "total_s": float(time.perf_counter() - started_at),
+        }
 
 
 def _split_for(config: FormalV2Config, partition: str, matched_pair_id: str) -> str:
@@ -787,6 +838,7 @@ def _collect_episode_for_quota(
         )
     last_error: Exception | None = None
     for attempt in range(config.max_attempts_per_cell):
+        attempt_started_at = time.perf_counter()
         spec = _episode_spec(
             config,
             writer.partition,
@@ -827,7 +879,8 @@ def _collect_episode_for_quota(
             print(
                 f"[INFO] formal-v2 partition={writer.partition} family={family} "
                 f"severity={severity} episode={spec.episode_index} seed={spec.spawn_seed} "
-                f"anchors={len(eligible_steps)} raw_steps={len(side_arrays['step_index'])}",
+                f"anchors={len(eligible_steps)} raw_steps={len(side_arrays['step_index'])} "
+                f"elapsed_s={time.perf_counter() - attempt_started_at:.3f}",
                 flush=True,
             )
             return spec, metadata, side_arrays, samples, eligible_steps
@@ -892,6 +945,8 @@ def _collect_matched_pair_for_quota(
 ):
     """Collect one isolated near-critical/control pair without writing it."""
 
+    pair_started_at = time.perf_counter()
+    near_started_at = time.perf_counter()
     near = _collect_episode_for_quota(
         config,
         writer,
@@ -901,6 +956,8 @@ def _collect_matched_pair_for_quota(
         cell_episode_index=int(pair_index),
         episode_index=int(episode_index),
     )
+    near_s = time.perf_counter() - near_started_at
+    control_started_at = time.perf_counter()
     control = _collect_episode_for_quota(
         config,
         writer,
@@ -911,7 +968,12 @@ def _collect_matched_pair_for_quota(
         required_steps=near[4],
         episode_index=int(episode_index) + 1,
     )
-    return near, control
+    control_s = time.perf_counter() - control_started_at
+    return near, control, {
+        "near_critical_s": float(near_s),
+        "control_s": float(control_s),
+        "pair_s": float(time.perf_counter() - pair_started_at),
+    }
 
 
 def _collect_pair_batch(
@@ -960,12 +1022,27 @@ def run_formal_v2_collection(
     *,
     max_new_episodes: int | None = None,
     parallel_workers: int = 1,
+    performance_family: str | None = None,
 ) -> dict[str, object]:
     if max_new_episodes is not None and max_new_episodes <= 0:
         raise FormalV2CollectionError("max_new_episodes must be positive")
     if isinstance(parallel_workers, bool) or int(parallel_workers) <= 0:
         raise FormalV2CollectionError("parallel_workers must be a positive integer")
     parallel_workers = int(parallel_workers)
+    if performance_family is not None:
+        if config.run_mode != "formal_pilot":
+            raise FormalV2CollectionError(
+                "performance_family is restricted to formal_pilot runs"
+            )
+        if performance_family not in SCENARIO_FAMILIES:
+            raise FormalV2CollectionError(
+                f"unknown performance_family: {performance_family}"
+            )
+    selected_families = (
+        tuple(SCENARIO_FAMILIES)
+        if performance_family is None
+        else (performance_family,)
+    )
     started_at = time.perf_counter()
     config.output_root.mkdir(parents=True, exist_ok=True)
     run_contract_path = config.output_root / "formal_v2_run_contract.json"
@@ -983,6 +1060,26 @@ def run_formal_v2_collection(
         _atomic_json(run_contract_path, frozen_payload)
     new_episodes = 0
     new_windows = 0
+    episode_timing_values: dict[str, list[float]] = {}
+    writer_timing = {
+        "batch_count": 0,
+        "episode_count": 0,
+        "episode_commit_s": 0.0,
+        "metadata_refresh_s": 0.0,
+        "total_s": 0.0,
+    }
+
+    def record_episode_timing(
+        partition: str, family: str, severity: str, elapsed_s: float
+    ) -> None:
+        key = f"{partition}/{family}/{severity}"
+        episode_timing_values.setdefault(key, []).append(float(elapsed_s))
+
+    def record_writer_timing(timing: Mapping[str, float]) -> None:
+        writer_timing["batch_count"] += 1
+        writer_timing["episode_count"] += int(timing.get("episode_count", 1.0))
+        for key in ("episode_commit_s", "metadata_refresh_s", "total_s"):
+            writer_timing[key] += float(timing[key])
     summaries: dict[str, object] = {}
     for partition in PARTITIONS:
         with FormalV2PartitionWriter(config, partition) as writer:
@@ -991,7 +1088,7 @@ def run_formal_v2_collection(
                 quota = config.quota_per_cell(partition)
                 pending_families = [
                     family
-                    for family in SCENARIO_FAMILIES
+                    for family in selected_families
                     if any(counts[(family, severity)] < quota for severity in SEVERITIES)
                 ]
                 if not pending_families:
@@ -1039,13 +1136,14 @@ def run_formal_v2_collection(
                         episode_index=len(writer.rows),
                     )
                     spec, metadata, arrays, samples, sample_steps = result
-                    writer.commit(
+                    commit_timing = writer.commit(
                         spec=spec,
                         metadata=metadata,
                         side_arrays=arrays,
                         samples=samples,
                         sample_steps=sample_steps,
                     )
+                    record_writer_timing(commit_timing)
                     new_episodes += 1
                     new_windows += len(samples)
                     continue
@@ -1073,18 +1171,26 @@ def run_formal_v2_collection(
                     allocations=allocations,
                     parallel_workers=parallel_workers,
                 )
-                for near, control in batches:
-                    for result in (near, control):
-                        spec, metadata, arrays, samples, sample_steps = result
-                        writer.commit(
-                            spec=spec,
-                            metadata=metadata,
-                            side_arrays=arrays,
-                            samples=samples,
-                            sample_steps=sample_steps,
-                        )
-                        new_episodes += 1
-                        new_windows += len(samples)
+                ordered_results = []
+                for near, control, pair_timing in batches:
+                    ordered_results.extend((near, control))
+                    record_episode_timing(
+                        partition,
+                        family,
+                        "near_critical",
+                        pair_timing["near_critical_s"],
+                    )
+                    record_episode_timing(
+                        partition,
+                        family,
+                        "control",
+                        pair_timing["control_s"],
+                    )
+                commit_timing = writer.commit_batch(ordered_results)
+                record_writer_timing(commit_timing)
+                for _, _, _, samples, _ in ordered_results:
+                    new_episodes += 1
+                    new_windows += len(samples)
             state = json.loads(writer.state_path.read_text(encoding="utf-8"))
             summaries[partition] = state
         if max_new_episodes is not None and new_episodes >= max_new_episodes:
@@ -1095,6 +1201,15 @@ def run_formal_v2_collection(
         for partition, summary in summaries.items()
     ) and set(summaries) == set(PARTITIONS)
     elapsed_s = time.perf_counter() - started_at
+    episode_timings = {
+        key: {
+            "episodes": len(values),
+            "total_s": float(sum(values)),
+            "mean_s": float(sum(values) / len(values)),
+            "max_s": float(max(values)),
+        }
+        for key, values in sorted(episode_timing_values.items())
+    }
     report = {
         "format": f"{COLLECTOR_FORMAT}-run-report",
         "schema_version": COLLECTOR_SCHEMA_VERSION,
@@ -1104,6 +1219,7 @@ def run_formal_v2_collection(
         "new_eligible_anchor_windows": new_windows,
         "execution": {
             "parallel_workers": parallel_workers,
+            "performance_family": performance_family,
             "elapsed_s": elapsed_s,
             "episodes_per_hour": (
                 0.0 if elapsed_s <= 0.0 else new_episodes * 3600.0 / elapsed_s
@@ -1113,6 +1229,8 @@ def run_formal_v2_collection(
             ),
             "episode_isolation": "one_spawn_subprocess_per_episode",
             "commit_order": "episode_index_serial",
+            "episode_collection_timings": episode_timings,
+            "writer_timing": writer_timing,
         },
         "complete": complete,
         "partitions": summaries,
@@ -1126,11 +1244,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--max-new-episodes", type=int)
     parser.add_argument("--parallel-workers", type=int, default=1)
+    parser.add_argument(
+        "--performance-family",
+        choices=SCENARIO_FAMILIES,
+        help="formal_pilot-only scenario isolation for collection performance diagnostics",
+    )
     args = parser.parse_args(argv)
     report = run_formal_v2_collection(
         load_formal_v2_config(args.config),
         max_new_episodes=args.max_new_episodes,
         parallel_workers=args.parallel_workers,
+        performance_family=args.performance_family,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

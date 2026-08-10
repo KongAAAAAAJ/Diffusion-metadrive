@@ -684,6 +684,23 @@ class PlatoonNormalPlanner:
         self._last_selected_candidates: dict[str, _TrajectoryCandidate] = {}
         self._last_candidate_pools: dict[str, list[_TrajectoryCandidate]] = {}
         self._last_joint_selection_order: tuple[tuple[int, ...], ...] = ()
+        self._route_geometry_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+        self._route_geometry_cache_requests = 0
+        self._route_geometry_cache_hits = 0
+
+    def _reset_planning_tick_caches(self) -> None:
+        """Discard geometry derived from the previous physical planning state."""
+
+        self._route_geometry_cache.clear()
+        self._route_geometry_cache_requests = 0
+        self._route_geometry_cache_hits = 0
+
+    def _route_geometry_cache_debug(self) -> dict[str, int]:
+        return {
+            "route_geometry_cache_entries": int(len(self._route_geometry_cache)),
+            "route_geometry_cache_requests": int(self._route_geometry_cache_requests),
+            "route_geometry_cache_hits": int(self._route_geometry_cache_hits),
+        }
 
     def plan(
         self,
@@ -944,6 +961,7 @@ class PlatoonNormalPlanner:
         """
 
         ranked_started_at = time.perf_counter()
+        self._reset_planning_tick_caches()
         ordered = sorted(
             tuple(proposals),
             key=lambda value: (int(value.rank), int(value.proposal_id)),
@@ -966,6 +984,7 @@ class PlatoonNormalPlanner:
         candidate_cache_request_count = 0
         pairwise_cache_hit_count = 0
         pairwise_cache_request_count = 0
+        audit_executor = JointTrajectoryExecutor(self)
         last_attempt_debug: dict = {}
         config = getattr(env, "config", {}) or {}
         decision_dt_s = float(config.get("physics_world_step_size", 0.02)) * float(
@@ -1081,7 +1100,6 @@ class PlatoonNormalPlanner:
                 execution_plan = None
                 selection = None
                 selected_full_debug = None
-                audit_executor = JointTrajectoryExecutor(self)
                 for selection_rank, candidate_indices in enumerate(selections):
                     selected_candidates = {
                         agent_id: pools[agent_id][candidate_index]
@@ -1341,6 +1359,8 @@ class PlatoonNormalPlanner:
                     time.perf_counter() - ranked_started_at
                 )
                 * 1000.0,
+                **self._route_geometry_cache_debug(),
+                **audit_executor.prediction_cache_debug(),
             }
             attempt_debug["_ranked"] = ranked_debug
             self._last_debug = attempt_debug
@@ -1385,6 +1405,8 @@ class PlatoonNormalPlanner:
             )
             * 1000.0,
             "reason_code": reason_code,
+            **self._route_geometry_cache_debug(),
+            **audit_executor.prediction_cache_debug(),
         }
         last_attempt_debug["_ranked"] = debug
         self._last_debug = last_attempt_debug
@@ -4469,16 +4491,44 @@ class PlatoonNormalPlanner:
                 lanes,
                 navigation=getattr(vehicle, "navigation", None),
             )
-            path = build_continuous_lane_chain_path(
-                lanes,
-                start_s=start_s,
-                start_lateral_m=float(start_d),
-                step_m=0.25,
-                seam_transition_m=float(getattr(lane, "route_seam_transition_m", 8.0)),
+            seam_transition_m = float(
+                getattr(lane, "route_seam_transition_m", 8.0)
             )
-            arc = np.concatenate(
-                ([0.0], np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1)))
+            geometry_key = (
+                id(env),
+                tuple(id(value) for value in lanes),
+                round(float(start_s), 9),
+                round(float(start_d), 9),
+                round(seam_transition_m, 9),
             )
+            self._route_geometry_cache_requests += 1
+            cached_geometry = self._route_geometry_cache.get(geometry_key)
+            if cached_geometry is None:
+                path = build_continuous_lane_chain_path(
+                    lanes,
+                    start_s=start_s,
+                    start_lateral_m=float(start_d),
+                    step_m=0.25,
+                    seam_transition_m=seam_transition_m,
+                )
+                arc = np.concatenate(
+                    (
+                        [0.0],
+                        np.cumsum(
+                            np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1)
+                        ),
+                    )
+                )
+                path = np.ascontiguousarray(path, dtype=np.float64)
+                arc = np.ascontiguousarray(arc, dtype=np.float64)
+                path.setflags(write=False)
+                arc.setflags(write=False)
+                if len(self._route_geometry_cache) >= 512:
+                    self._route_geometry_cache.clear()
+                self._route_geometry_cache[geometry_key] = (path, arc)
+            else:
+                self._route_geometry_cache_hits += 1
+                path, arc = cached_geometry
             distance = self._predicted_vehicle_distance_profile(vehicle, times)
             # A finite navigation route is a hard terminal, not a signal to
             # fall back to unconstrained world-frame constant velocity.  The
@@ -5127,6 +5177,54 @@ class JointTrajectoryExecutor:
         self._plan: JointTrajectoryExecutionPlan | None = None
         self._last_debug: dict | None = None
         self._expected_executable_pose: dict[str, np.ndarray] = {}
+        self._background_prediction_cache: dict[tuple, tuple] = {}
+        self._background_prediction_requests = 0
+        self._background_prediction_hits = 0
+
+    def prediction_cache_debug(self) -> dict[str, int]:
+        return {
+            "background_prediction_cache_entries": int(
+                len(self._background_prediction_cache)
+            ),
+            "background_prediction_requests": int(
+                self._background_prediction_requests
+            ),
+            "background_prediction_cache_hits": int(
+                self._background_prediction_hits
+            ),
+        }
+
+    def _predicted_background_cached(
+        self,
+        env,
+        vehicle,
+        absolute_times: np.ndarray,
+    ):
+        times = np.ascontiguousarray(absolute_times, dtype=np.float64)
+        key = (id(env), times.shape, times.tobytes())
+        self._background_prediction_requests += 1
+        cached = self._background_prediction_cache.get(key)
+        if cached is None:
+            values = self.planner._predicted_obstacles(
+                env,
+                vehicle,
+                times,
+                include_platoon=False,
+            )
+            cached = tuple(
+                (
+                    str(name),
+                    np.ascontiguousarray(prediction, dtype=np.float64),
+                    tuple(float(value) for value in dimensions),
+                )
+                for name, prediction, dimensions in values
+            )
+            for _, prediction, _ in cached:
+                prediction.setflags(write=False)
+            self._background_prediction_cache[key] = cached
+        else:
+            self._background_prediction_hits += 1
+        return cached
 
     @property
     def active(self) -> bool:
@@ -5140,6 +5238,9 @@ class JointTrajectoryExecutor:
         self._plan = None
         self._last_debug = None
         self._expected_executable_pose.clear()
+        self._background_prediction_cache.clear()
+        self._background_prediction_requests = 0
+        self._background_prediction_hits = 0
 
     def start(self, env, plan: JointTrajectoryExecutionPlan) -> None:
         if self._plan is not None:
@@ -5241,6 +5342,10 @@ class JointTrajectoryExecutor:
         completion_deadline_s: float,
     ) -> _CandidateFullHorizonAudit:
         """Build and audit one candidate's rolling windows exactly once."""
+
+        audit_started_at = time.perf_counter()
+        prediction_requests_before = self._background_prediction_requests
+        prediction_hits_before = self._background_prediction_hits
 
         config = getattr(env, "config", {}) or {}
         decision_dt_s = float(config.get("physics_world_step_size", 0.02)) * float(
@@ -5399,11 +5504,8 @@ class JointTrajectoryExecutor:
                         "road_audit": footprint_detail,
                     },
                 )
-            background = self.planner._predicted_obstacles(
-                env,
-                vehicle,
-                absolute_times,
-                include_platoon=False,
+            background = self._predicted_background_cached(
+                env, vehicle, absolute_times
             )
             collision_names = self.planner._collision_names_against_predictions(
                 dense,
@@ -5461,6 +5563,13 @@ class JointTrajectoryExecutor:
             + self.planner.HORIZON_S,
             "minimum_background_gap_m": float(minimum_background_gap),
             "minimum_background_gap_detail": minimum_background_detail,
+            "audit_time_ms": (time.perf_counter() - audit_started_at) * 1000.0,
+            "background_prediction_requests": int(
+                self._background_prediction_requests - prediction_requests_before
+            ),
+            "background_prediction_cache_hits": int(
+                self._background_prediction_hits - prediction_hits_before
+            ),
         }
         return _CandidateFullHorizonAudit(
             agent_id=str(agent_id),
