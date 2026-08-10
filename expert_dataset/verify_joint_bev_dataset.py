@@ -70,10 +70,15 @@ def _read_json(path: Path) -> dict[str, object]:
     return payload
 
 
-def _split_assigner(contract: Mapping[str, object]) -> EpisodeSplitAssigner:
+def _split_assigner(
+    contract: Mapping[str, object],
+) -> tuple[EpisodeSplitAssigner, str]:
     raw = contract.get("split_assignment")
     expected = {"train_ratio", "val_ratio", "test_ratio", "seed"}
-    if not isinstance(raw, Mapping) or set(raw) != expected:
+    if not isinstance(raw, Mapping) or set(raw) not in {
+        frozenset(expected),
+        frozenset({*expected, "unit"}),
+    }:
         raise JointBEVVerificationError("invalid split_assignment contract")
     try:
         config = EpisodeSplitConfig(
@@ -84,11 +89,32 @@ def _split_assigner(contract: Mapping[str, object]) -> EpisodeSplitAssigner:
         )
     except (TypeError, ValueError) as exc:
         raise JointBEVVerificationError("invalid split_assignment contract") from exc
-    return EpisodeSplitAssigner(config)
+    unit = str(raw.get("unit", "episode_index"))
+    if unit not in {"episode_index", "matched_pair_id"}:
+        raise JointBEVVerificationError("invalid split_assignment unit")
+    return EpisodeSplitAssigner(config), unit
 
 
-def _validate_root_entries(root: Path) -> dict[str, object]:
-    expected = {
+def _validate_root_entries(
+    root: Path, contract: Mapping[str, object]
+) -> dict[str, object]:
+    split_assignment = contract.get("split_assignment")
+    if not isinstance(split_assignment, Mapping):
+        raise JointBEVVerificationError("invalid split_assignment contract")
+    enabled_splits = {
+        split
+        for split, ratio_name in zip(
+            SPLIT_NAMES, ("train_ratio", "val_ratio", "test_ratio")
+        )
+        if float(split_assignment[ratio_name]) > 0.0
+    }
+    required = {
+        ".writer.lock",
+        "collection_state.json",
+        "dataset_contract.json",
+        *enabled_splits,
+    }
+    allowed = {
         ".writer.lock",
         "collection_state.json",
         "dataset_contract.json",
@@ -98,10 +124,10 @@ def _validate_root_entries(root: Path) -> dict[str, object]:
         actual = {path.name for path in root.iterdir()}
     except OSError as exc:
         raise JointBEVVerificationError(f"unable to inspect dataset root: {root}") from exc
-    if actual != expected:
+    if not required.issubset(actual) or not actual.issubset(allowed):
         raise JointBEVVerificationError(
-            f"dataset root file set mismatch: missing={sorted(expected - actual)}, "
-            f"unexpected={sorted(actual - expected)}"
+            f"dataset root file set mismatch: missing={sorted(required - actual)}, "
+            f"unexpected={sorted(actual - allowed)}"
         )
     state = _read_json(root / "collection_state.json")
     if int(state.get("schema_version", -1)) != STORAGE_SCHEMA_VERSION:
@@ -261,11 +287,13 @@ def verify_joint_bev_dataset(
         contract = validate_dataset_contract(root)
     except JointBEVDatasetError as exc:
         raise JointBEVVerificationError(str(exc)) from exc
-    state = _validate_root_entries(root)
-    assigner = _split_assigner(contract)
+    state = _validate_root_entries(root, contract)
+    assigner, split_unit = _split_assigner(contract)
 
     datasets: dict[str, JointBEVDataset] = {}
     episode_owner: dict[int, str] = {}
+    matched_pair_owner: dict[str, str] = {}
+    matched_pair_members: dict[str, set[str]] = {}
     try:
         for split in selected_splits:
             try:
@@ -284,13 +312,55 @@ def verify_joint_bev_dataset(
                         f"episode {record.episode_index} appears in both "
                         f"{previous} and {split}"
                     )
-                expected_split = assigner.split_for_episode(record.episode_index)
+                if split_unit == "matched_pair_id":
+                    matched_pair_id = str(
+                        record.attributes.get("matched_pair_id", "")
+                    ).strip()
+                    if not matched_pair_id:
+                        raise JointBEVVerificationError(
+                            f"episode {record.episode_index} lacks matched_pair_id"
+                        )
+                    expected_split = assigner.split_for_key(matched_pair_id)
+                    previous_pair_split = matched_pair_owner.setdefault(
+                        matched_pair_id, split
+                    )
+                    if previous_pair_split != split:
+                        raise JointBEVVerificationError(
+                            f"matched pair {matched_pair_id} crosses "
+                            f"{previous_pair_split} and {split}"
+                        )
+                    severity = str(record.attributes.get("severity", ""))
+                    if severity not in {"control", "near_critical"}:
+                        raise JointBEVVerificationError(
+                            f"matched pair {matched_pair_id} has invalid severity"
+                        )
+                    members = matched_pair_members.setdefault(
+                        matched_pair_id, set()
+                    )
+                    if severity in members:
+                        raise JointBEVVerificationError(
+                            f"matched pair {matched_pair_id} duplicates {severity}"
+                        )
+                    members.add(severity)
+                else:
+                    expected_split = assigner.split_for_episode(record.episode_index)
                 if expected_split != split:
                     raise JointBEVVerificationError(
                         f"episode {record.episode_index} is in {split}, "
                         f"expected {expected_split}"
                     )
                 episode_owner[record.episode_index] = split
+
+        if split_unit == "matched_pair_id":
+            incomplete = {
+                pair_id: sorted(members)
+                for pair_id, members in matched_pair_members.items()
+                if members != {"control", "near_critical"}
+            }
+            if incomplete:
+                raise JointBEVVerificationError(
+                    f"incomplete matched pairs: {incomplete}"
+                )
 
         report_splits: dict[str, object] = {}
         total_scanned = 0

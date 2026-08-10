@@ -63,13 +63,17 @@ from expert_dataset.riskentry_sidecar_storage import (
 )
 from expert_dataset.semantic_bev_codec import pack_semantic_bev
 from models.platoon_planner.collision_geometry import world_trajectory_to_ego_local
+from routes.route_definitions import get_route_definition
 
 
 REAL_SMOKE_FORMAT = "metadrive-joint-risk-bundle-v2-real-smoke"
 REAL_SMOKE_SCHEMA_VERSION = 1
 HISTORY_STEPS = 20
 FUTURE_STEPS = 50
+FUTURE_HORIZON_STEPS = (10, 30, 50)
+MAX_ONLINE_EXTERNAL_CANDIDATES = 12
 CONTROL_ANCHOR_STEP = 60
+ENTRY_ONSET_START_STEP = 30
 MAX_EPISODE_STEPS = 160
 SCENARIO_IDS = {
     ("adjacent_lane_cut_in", "control"): "RV2_adjacent_lane_cut_in_control",
@@ -86,6 +90,12 @@ ROUTES = {
     "on_ramp_external_merge": "R6_mainline_merge_approach",
     "external_lead_hard_brake": "R1_entry_straight",
     "construction_zone_forced_merge": "R1_entry_straight",
+}
+TOPOLOGY_OOD_ROUTES = {
+    "adjacent_lane_cut_in": "R2_entry_curve",
+    "on_ramp_external_merge": "R7_merge_core",
+    "external_lead_hard_brake": "R2_entry_curve",
+    "construction_zone_forced_merge": "R2_entry_curve",
 }
 
 
@@ -109,10 +119,13 @@ class RealV2EpisodeSpec:
 
     @property
     def scenario_id(self) -> str:
-        return SCENARIO_IDS[(self.scenario_family, self.severity)]
+        base = SCENARIO_IDS[(self.scenario_family, self.severity)]
+        return f"{base}_topology_ood" if self.partition == "topology_ood" else base
 
     @property
     def local_route(self) -> str:
+        if self.partition == "topology_ood":
+            return TOPOLOGY_OOD_ROUTES[self.scenario_family]
         return ROUTES[self.scenario_family]
 
     @property
@@ -200,7 +213,7 @@ def _scenario_contract(partition: str) -> dict[str, object]:
         "entry_detection": {
             "hard_brake": "measured_longitudinal_acceleration_below_-1mps2",
             "lateral_entry": "measured_lane_change_or_abs_lane_lateral_above_0.15m",
-            "onset_range_steps": [60, 120],
+            "onset_range_steps": [ENTRY_ONSET_START_STEP, 120],
         },
         "episode_specs": [
             {
@@ -243,22 +256,73 @@ def _env_config(spec: RealV2EpisodeSpec) -> dict[str, object]:
 
 
 def _select_source_actor(
-    rollout: JointEpisodeRollout, arrays: Mapping[str, np.ndarray]
+    spec: RealV2EpisodeSpec,
+    rollout: JointEpisodeRollout,
 ) -> tuple[str, int]:
     assert rollout.sidecar is not None
     records = {row.actor_id: row for row in rollout.sidecar.actor_records}
     key_ids = rollout.sidecar.key_actor_ids
-    for key in ("entry_source", "lead_braker", "intruder"):
-        actor_id = key_ids.get(key)
-        if actor_id in records:
-            return str(actor_id), int(records[str(actor_id)].actor_index)
-    external = [row for row in rollout.sidecar.actor_records if row.actor_type == "external"]
-    if not external:
-        raise RealBundleV2Error("near-critical episode has no external entry source")
-    # Deterministic fallback is only identity selection; onset still must be
-    # demonstrated by measured motion below.
-    external.sort(key=lambda row: (row.first_seen_step, row.actor_index))
-    return external[0].actor_id, external[0].actor_index
+    key = (
+        "lead_braker"
+        if spec.scenario_family == "external_lead_hard_brake"
+        else "entry_source"
+    )
+    actor_id = key_ids.get(key)
+    if actor_id not in records:
+        raise RealBundleV2Error(
+            f"near-critical episode lacks required key actor {key}"
+        )
+    record = records[str(actor_id)]
+    if record.actor_type != "external":
+        raise RealBundleV2Error(f"key actor {key} is not external")
+    return str(actor_id), int(record.actor_index)
+
+
+def eligible_anchor_violation(
+    spec: RealV2EpisodeSpec,
+    rollout: JointEpisodeRollout,
+    arrays: Mapping[str, np.ndarray],
+    anchor_step: int,
+) -> str | None:
+    """Return why an anchor is ineligible under the frozen 2s/5s contract."""
+
+    anchor = int(anchor_step)
+    timeline = len(np.asarray(arrays["step_index"]))
+    if anchor < HISTORY_STEPS:
+        return "insufficient_history"
+    future_steps = tuple(anchor + offset for offset in FUTURE_HORIZON_STEPS)
+    if future_steps[-1] >= timeline:
+        return "future_outside_timeline"
+    actor_valid = np.asarray(arrays["actor_valid_mask"], dtype=np.bool_)
+    state_valid = np.asarray(arrays["actor_state_valid_mask"], dtype=np.bool_)
+    for future_step in future_steps:
+        if not bool(actor_valid[future_step, :3].all()):
+            return f"platoon_truth_invalid_at_{future_step}"
+        if not bool(state_valid[future_step, :3, :].all()):
+            return f"platoon_state_invalid_at_{future_step}"
+
+    if spec.severity == "near_critical":
+        source_id, source_index = _select_source_actor(spec, rollout)
+        observed = np.asarray(arrays["actor_observation_mask"], dtype=np.bool_)
+        if not bool(observed[anchor, source_index]):
+            return f"entry_source_not_observable:{source_id}"
+        state = np.asarray(arrays["actor_state"], dtype=np.float64)
+        external_indices = [
+            row.actor_index
+            for row in rollout.sidecar.actor_records
+            if row.actor_type == "external" and observed[anchor, row.actor_index]
+        ]
+        anchor_center = state[anchor, :3, :2].mean(axis=0)
+        ranked = sorted(
+            external_indices,
+            key=lambda index: (
+                float(np.linalg.norm(state[anchor, index, :2] - anchor_center)),
+                int(index),
+            ),
+        )[:MAX_ONLINE_EXTERNAL_CANDIDATES]
+        if source_index not in ranked:
+            return f"entry_source_outside_top_{MAX_ONLINE_EXTERNAL_CANDIDATES}:{source_id}"
+    return None
 
 
 def _measured_entry_event(
@@ -275,7 +339,7 @@ def _measured_entry_event(
             "resolution_step": None,
             "resolution_status": "not_applicable",
         }, CONTROL_ANCHOR_STEP
-    source_id, source_index = _select_source_actor(rollout, arrays)
+    source_id, source_index = _select_source_actor(spec, rollout)
     actor_valid = np.asarray(arrays["actor_valid_mask"])
     state = np.asarray(arrays["actor_state"])
     state_valid = np.asarray(arrays["actor_state_valid_mask"])
@@ -283,8 +347,10 @@ def _measured_entry_event(
     lane_state = np.asarray(arrays["lane_state"])
     lane_valid = np.asarray(arrays["lane_valid_mask"])
     onset: int | None = None
-    for step in range(60, min(121, len(actor_valid))):
+    for step in range(ENTRY_ONSET_START_STEP, min(121, len(actor_valid))):
         if not actor_valid[step, source_index]:
+            continue
+        if not actor_valid[step, :3].all() or not state_valid[step, :3, :].all():
             continue
         if spec.scenario_family == "external_lead_hard_brake":
             if not state_valid[step, source_index, 5:7].all():
@@ -312,7 +378,8 @@ def _measured_entry_event(
             break
     if onset is None:
         raise RealBundleV2Error(
-            f"{spec.scenario_family} has no measured entry onset in [60,120]"
+            f"{spec.scenario_family} has no measured entry onset in "
+            f"[{ENTRY_ONSET_START_STEP},120]"
         )
 
     platoon_positions = state[onset, :3, :2].astype(np.float64)
@@ -417,16 +484,46 @@ def _topology(
             states.append({"lane_id": lane_id, "start_step": 0, "end_step": timeline_length - 1, "state": "work_zone"})
         else:
             states.append({"lane_id": lane_id, "start_step": 0, "end_step": timeline_length - 1, "state": "open"})
-    physical_signature = _sha256_payload(
-        {"lanes": [dict(row) for row in lane_rows], "relations": relation_rows, "states": states}
+    route = get_route_definition(spec.local_route)
+    physical_lanes = sorted(
+        source for source in parsed.values() if source is not None
     )
-    topology_id = f"{spec.partition}_{spec.local_route}_{physical_signature[:12]}"
+    physical_relations = sorted(
+        (
+            parsed[source],
+            parsed[target],
+            relation,
+        )
+        for source, target, relation in relations
+        if parsed[source] is not None and parsed[target] is not None
+    )
+    physical_states = sorted(
+        (
+            parsed.get(str(row["lane_id"])),
+            str(row["state"]),
+        )
+        for row in states
+        if parsed.get(str(row["lane_id"])) is not None
+    )
+    canonical_payload = {
+        "route": {
+            "blocks": list(route.blocks),
+            "family": route.family,
+            "required_preset": route.required_preset,
+        },
+        "lanes": physical_lanes,
+        "relations": physical_relations,
+        "states": physical_states,
+    }
+    physical_signature = _sha256_payload(canonical_payload)
+    topology_id = f"physical_{physical_signature[:16]}"
     graph = {
         "topology_id": topology_id,
         "lane_relations": relation_rows,
         "time_varying_lane_states": states,
+        "physical_route": canonical_payload["route"],
     }
-    return {**graph, "canonical_hash": _sha256_payload(graph)}
+    return {**graph, "canonical_hash": physical_signature}
 
 
 def _actor_rows(rollout: JointEpisodeRollout, env_config: Mapping[str, object]) -> list[dict[str, object]]:
@@ -506,15 +603,33 @@ def build_real_episode_payload(
         lane_records=rollout.sidecar.lane_records,
         base_sample_step_indices=(),
     )
-    entry, anchor_step = _measured_entry_event(spec, rollout, arrays)
-    if anchor_step < HISTORY_STEPS or anchor_step + FUTURE_STEPS >= len(arrays["step_index"]):
-        raise RealBundleV2Error("entry anchor lacks continuous 2s history and 5s future")
+    arrays.update(_online_observation_arrays(arrays, spec))
+    entry, preferred_anchor_step = _measured_entry_event(spec, rollout, arrays)
     sample_by_step = dict(zip(rollout.sample_step_indices, rollout.samples))
+    ordered_anchor_steps = sorted(
+        sample_by_step,
+        key=lambda step: (abs(int(step) - int(preferred_anchor_step)), int(step)),
+    )
+    anchor_step = next(
+        (
+            int(step)
+            for step in ordered_anchor_steps
+            if eligible_anchor_violation(spec, rollout, arrays, int(step)) is None
+        ),
+        None,
+    )
+    if anchor_step is None:
+        violations = {
+            int(step): eligible_anchor_violation(spec, rollout, arrays, int(step))
+            for step in ordered_anchor_steps
+        }
+        raise RealBundleV2Error(
+            f"episode has no eligible entry anchor: {violations}"
+        )
     sample = sample_by_step.get(anchor_step)
     if sample is None:
         raise RealBundleV2Error(f"eligible anchor step {anchor_step} has no valid joint BEV sample")
     arrays["base_sample_step_index"] = np.asarray([anchor_step], dtype=np.int64)
-    arrays.update(_online_observation_arrays(arrays, spec))
     lane_rows = [asdict(row) for row in rollout.sidecar.lane_records]
     topology_onset = (
         anchor_step

@@ -125,6 +125,31 @@ def test_verifier_cli_prints_json_report(
     assert report["complete_scan"] is False
 
 
+def test_verifier_accepts_contractual_test_only_root(tmp_path: Path) -> None:
+    root = tmp_path / "dataset"
+    with JointBEVDatasetStore(
+        root,
+        split_config=EpisodeSplitConfig(0.0, 0.0, 1.0, seed=3),
+        dataset_fingerprint=fingerprint_payload({"test": "test-only-verifier"}),
+        resume=False,
+    ) as store:
+        store.commit_episode(
+            0,
+            [_sample(0)],
+            {
+                "scenario_id": "S8_exit_blocked",
+                "local_route": "R6_exit_to_ramp",
+            },
+        )
+    shutil.rmtree(root / "train")
+    shutil.rmtree(root / "val")
+
+    report = verify_joint_bev_dataset(root, splits=("test",))
+
+    assert report["verified_splits"] == ["test"]
+    assert report["joint_samples"] == 1
+
+
 def test_verifier_rejects_reserved_lane_code(tmp_path: Path) -> None:
     root = tmp_path / "dataset"
     _create(root, episode_count=1, samples_per_episode=1)

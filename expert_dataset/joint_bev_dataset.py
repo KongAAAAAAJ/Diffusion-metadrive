@@ -99,14 +99,19 @@ def validate_dataset_contract(dataset_root: Path | str) -> dict[str, object]:
     if contract.get("packed_semantic_bev") != packed_bev_contract():
         raise JointBEVDatasetError("packed semantic BEV contract mismatch")
     split_assignment = contract.get("split_assignment")
-    if (
-        not isinstance(split_assignment, Mapping)
-        or set(split_assignment)
-        != {"train_ratio", "val_ratio", "test_ratio", "seed"}
-    ):
+    base_split_fields = {"train_ratio", "val_ratio", "test_ratio", "seed"}
+    if not isinstance(split_assignment, Mapping) or set(split_assignment) not in {
+        frozenset(base_split_fields),
+        frozenset({*base_split_fields, "unit"}),
+    }:
         raise JointBEVDatasetError(
             "split_assignment must match the frozen train/val/test fields"
         )
+    if split_assignment.get("unit", "episode_index") not in {
+        "episode_index",
+        "matched_pair_id",
+    }:
+        raise JointBEVDatasetError("unsupported split_assignment unit")
     fingerprint = contract.get("dataset_fingerprint")
     if (
         not isinstance(fingerprint, str)

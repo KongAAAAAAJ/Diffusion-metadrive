@@ -5,7 +5,11 @@ from typing import List, Optional
 import numpy as np
 
 from metadrive.manager.spawn_manager import SpawnManager
-from scenarios.definitions import SCENARIO_BY_ID
+from scenarios.definitions import ALL_SCENARIO_BY_ID
+
+# Local mutable registry name retained for spawn-manager unit fixtures.  It is
+# intentionally the complete registry, including bundle-v2 scenarios.
+SCENARIO_BY_ID = ALL_SCENARIO_BY_ID
 
 
 class _RouteRoadRef:

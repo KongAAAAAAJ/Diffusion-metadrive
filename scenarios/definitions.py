@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Tuple
 
 from routes.route_definitions import get_required_preset
@@ -375,12 +375,54 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
 def _risk_v2_control_definition(
     *, code: str, scenario_id: str, route: str, block_id: str, description: str
 ) -> ScenarioDefinition:
+    if "external_lead_hard_brake" in scenario_id:
+        recipes = (
+            RecipeSpec(
+                "hard_brake_lead",
+                {
+                    "trigger_after_s": 1_000.0,
+                    "lead_bumper_gap_range_m": (28.0, 32.0),
+                    "lead_target_speed_range_kmh": (23.0, 25.0),
+                    "brake_target_speed_range_kmh": (23.0, 25.0),
+                    "brake_deceleration_range_mps2": (3.0, 4.0),
+                },
+            ),
+        )
+    elif (
+        "adjacent_lane_cut_in" in scenario_id
+        or "construction_zone_forced_merge" in scenario_id
+    ):
+        recipes = (
+            RecipeSpec(
+                "inject_adjacent_lane_vehicles",
+                {
+                    "trigger_on_start": True,
+                    "clearance_scope": "same_lane",
+                    "vehicles": (
+                        {
+                            "name": "risk_v2_control_source",
+                            "lane_side": "right",
+                            "spawn_longitude_offset_m": 15.0,
+                            "target_speed_kmh": 24.0,
+                            "policy": "forced_cut_in",
+                            "activation_step": 1_000,
+                            "target_lane_offset": -1,
+                            "front_gap_m": 5.0,
+                            "rear_gap_m": 5.0,
+                            "scenario_vehicle_role": "risk_v2_control_source",
+                        },
+                    ),
+                },
+            ),
+        )
+    else:
+        recipes = tuple()
     return ScenarioDefinition(
         code=code,
         scenario_id=scenario_id,
         allowed_local_routes=(route,),
         trigger_by_local_route={route: TriggerSpec(block_id, 0.0, 1_000.0)},
-        traffic_recipes=tuple(),
+        traffic_recipes=recipes,
         ego_spawn_lane_preference="middle" if route == "R1_entry_straight" else None,
         ego_spawn_lane_probabilities=None,
         ego_initial_speed_km_h=24.0,
@@ -435,12 +477,45 @@ RISK_V2_SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         description="bundle-v2 adjacent-lane external cut-in",
         independent_trajectory_control_after_realization=True,
     ),
-    _risk_v2_control_definition(
+    ScenarioDefinition(
         code="RV2_RM_C",
         scenario_id="RV2_on_ramp_external_merge_control",
-        route="R6_mainline_merge_approach",
-        block_id="g1",
+        allowed_local_routes=("R6_mainline_merge_approach",),
+        trigger_by_local_route={
+            "R6_mainline_merge_approach": TriggerSpec("g1", 0.0, 1_000.0)
+        },
+        traffic_recipes=(
+            RecipeSpec(
+                "inject_background_vehicle",
+                {
+                    "reference_kind": "block_socket_road",
+                    "block_id": "g1",
+                    "socket_index": 1,
+                    "target_speed_kmh": 30.0,
+                    "policy": "idm_merge",
+                    "merge_front_gap_m": 10.0,
+                    "merge_rear_gap_m": 10.0,
+                    "merge_creep_speed_kmh": 30.0,
+                    "merge_arrival_offset_s": 1.2,
+                    # Matched control preserves the same actor and geometry,
+                    # but keeps the entry outside the episode horizon.
+                    "merge_activation_step": 1_000,
+                    "trigger_on_start": True,
+                    "scenario_vehicle_role": "risk_v2_control_source",
+                },
+            ),
+        ),
+        ego_spawn_lane_preference="rightmost",
+        ego_spawn_lane_probabilities=None,
+        ego_spawn_reference_block_id="g1",
+        ego_spawn_reference_kind="block_internal_road",
+        ego_spawn_internal_road_index=1,
+        ego_spawn_longitude_m=(112.0, 116.0),
+        ego_initial_speed_km_h=(23.0, 25.0),
+        override_traffic_density=None,
+        expert_recipe="matched control",
         description="bundle-v2 on-ramp merge matched control",
+        independent_trajectory_control_after_realization=True,
     ),
     ScenarioDefinition(
         code="RV2_RM_N",
@@ -454,13 +529,17 @@ RISK_V2_SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "reference_kind": "block_socket_road",
                     "block_id": "g1",
                     "socket_index": 1,
-                    "target_speed_kmh": 24.0,
+                    "target_speed_kmh": 30.0,
                     "policy": "idm_merge",
                     "merge_front_gap_m": 10.0,
                     "merge_rear_gap_m": 10.0,
-                    "merge_creep_speed_kmh": 20.0,
+                    "merge_creep_speed_kmh": 30.0,
                     "merge_arrival_offset_s": 1.2,
-                    "merge_activation_step": 2,
+                    # Keep the source inside the online candidate set before
+                    # it enters the platoon corridor; the entry itself must
+                    # occur within the valid supervision horizon, not at reset
+                    # or at the terminal boundary.
+                    "merge_activation_step": 30,
                     "trigger_on_start": True,
                     "scenario_vehicle_role": "risk_v2_entry_source",
                 },
@@ -471,7 +550,10 @@ RISK_V2_SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_reference_block_id="g1",
         ego_spawn_reference_kind="block_internal_road",
         ego_spawn_internal_road_index=1,
-        ego_spawn_longitude_m=(28.0, 32.0),
+        # Place the platoon close enough to the g1 conflict point that the
+        # external source is observable before the 5 s supervision horizon,
+        # while leaving enough approach distance for the merge policy.
+        ego_spawn_longitude_m=(112.0, 116.0),
         ego_initial_speed_km_h=(23.0, 25.0),
         override_traffic_density=None,
         env_overrides={
@@ -559,6 +641,97 @@ RISK_V2_SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         independent_trajectory_control_after_realization=True,
     ),
 )
+
+
+_RISK_V2_TOPOLOGY_ROUTES: Dict[str, tuple[str, str]] = {
+    "adjacent_lane_cut_in": ("R2_entry_curve", "c0"),
+    "external_lead_hard_brake": ("R2_entry_curve", "c0"),
+    "construction_zone_forced_merge": ("R2_entry_curve", "c0"),
+    "on_ramp_external_merge": ("R7_merge_core", "g1"),
+}
+_RISK_V2_FAMILY_PREFIX: Dict[str, str] = {
+    "adjacent_lane_cut_in": "RV2_adjacent_lane_cut_in",
+    "on_ramp_external_merge": "RV2_on_ramp_external_merge",
+    "external_lead_hard_brake": "RV2_external_lead_hard_brake",
+    "construction_zone_forced_merge": "RV2_construction_zone_forced_merge",
+}
+
+
+def _risk_v2_topology_recipes(
+    family: str,
+    severity: str,
+    base: ScenarioDefinition,
+) -> Tuple[RecipeSpec, ...]:
+    """Return route-compatible recipes for physical topology-OOD variants.
+
+    Keep the matched actor present from reset on both severities, then apply
+    the brake profile only to the near-critical member.  This also guarantees
+    that the source is observable before onset on the topology-OOD curve.
+    """
+
+    if family != "external_lead_hard_brake":
+        return base.traffic_recipes
+    source_role = (
+        "risk_v2_entry_source"
+        if severity == "near_critical"
+        else "risk_v2_control_source"
+    )
+    actor = RecipeSpec(
+        "inject_background_vehicle",
+        {
+            "trigger_on_start": True,
+            "reference_kind": "ego_lane",
+            "spawn_longitude": 22.0,
+            "target_speed_kmh": 24.0,
+            "scenario_vehicle_role": source_role,
+        },
+    )
+    if severity == "control":
+        return (actor,)
+    brake = RecipeSpec(
+        "hard_brake_lead",
+        {
+            # RiskEntry bundle-v2 requires every near-critical event to start
+            # inside the frozen 6--12 s onset interval.  R2 is long enough to
+            # retain the injected lead actor and a valid 5 s supervision
+            # window with the canonical 6 s trigger.
+            "trigger_after_s": 6.0,
+            "lead_bumper_gap_range_m": (10.0, 30.0),
+            "lead_target_speed_range_kmh": (23.0, 25.0),
+            "brake_target_speed_kmh": 10.0,
+            "brake_target_speed_range_kmh": (9.0, 11.0),
+            "brake_deceleration_range_mps2": (3.0, 4.0),
+        },
+    )
+    return actor, brake
+
+
+def _risk_v2_topology_variants() -> Tuple[ScenarioDefinition, ...]:
+    by_id = {row.scenario_id: row for row in RISK_V2_SCENARIO_DEFINITIONS}
+    variants: list[ScenarioDefinition] = []
+    for family, prefix in _RISK_V2_FAMILY_PREFIX.items():
+        route, block_id = _RISK_V2_TOPOLOGY_ROUTES[family]
+        for severity in ("control", "near_critical"):
+            base = by_id[f"{prefix}_{severity}"]
+            variants.append(
+                replace(
+                    base,
+                    code=f"{base.code}_T",
+                    scenario_id=f"{prefix}_{severity}_topology_ood",
+                    allowed_local_routes=(route,),
+                    trigger_by_local_route={
+                        route: TriggerSpec(block_id, 0.0, 1_000.0)
+                    },
+                    traffic_recipes=_risk_v2_topology_recipes(
+                        family, severity, base
+                    ),
+                    description=f"{base.description}; topology-OOD route {route}",
+                )
+            )
+    return tuple(variants)
+
+
+RISK_V2_SCENARIO_DEFINITIONS += _risk_v2_topology_variants()
 
 SCENARIO_BY_ID: Dict[str, ScenarioDefinition] = {
     scenario.scenario_id: scenario for scenario in SCENARIO_DEFINITIONS

@@ -48,7 +48,7 @@ def test_pilot_and_70k_configs_share_the_same_collector_contract() -> None:
     assert pilot.run_mode == "formal_pilot"
     assert formal.run_mode == "formal"
     assert pilot.anchor_steps == formal.anchor_steps
-    assert pilot.max_episode_steps == formal.max_episode_steps == 160
+    assert pilot.max_episode_steps == formal.max_episode_steps == 120
     assert formal.target_windows == FORMAL_TARGETS
     assert len(CELL_ORDER) == 8
 
@@ -74,6 +74,10 @@ def test_partition_writer_resume_is_strict_and_non_destructive(tmp_path: Path) -
         assert writer.rows == []
         assert writer.cell_counts() == {}
         assert writer._base_contract_payload()["split_assignment"]["seed"] == 3
+        assert (
+            writer._base_contract_payload()["split_assignment"]["unit"]
+            == "matched_pair_id"
+        )
         assert (writer.base_root / ".writer.lock").is_file()
         assert (writer.base_root / "collection_state.json").is_file()
     with FormalV2PartitionWriter(config, "id") as resumed:
@@ -137,8 +141,19 @@ def test_episode_seed_split_and_pair_id_are_deterministic(tmp_path: Path) -> Non
         attempt=0,
     )
     assert first == repeat
-    assert first.split == "test"
+    assert first.split == "train"
     assert first.matched_pair_id.endswith("pair_000000")
+    paired = _episode_spec(
+        config,
+        "id",
+        "adjacent_lane_cut_in",
+        "near_critical",
+        episode_index=1,
+        cell_episode_index=0,
+        attempt=0,
+    )
+    assert paired.split == first.split
+    assert paired.spawn_seed == first.spawn_seed
     assert first.spawn_seed != _episode_spec(
         config,
         "compositional_ood",

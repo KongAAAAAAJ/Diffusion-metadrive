@@ -178,8 +178,18 @@ class EpisodeSplitAssigner:
             or int(episode_index) < 0
         ):
             raise JointStorageError("episode_index must be a non-negative integer")
+        return self._split_for_token(str(int(episode_index)))
+
+    def split_for_key(self, group_key: str) -> str:
+        """Assign all episodes in one immutable group to the same split."""
+
+        if not isinstance(group_key, str) or not group_key.strip():
+            raise JointStorageError("split group key must be a non-empty string")
+        return self._split_for_token(group_key)
+
+    def _split_for_token(self, token: str) -> str:
         digest = hashlib.sha256(
-            f"{self.config.seed}:{int(episode_index)}".encode("ascii")
+            f"{self.config.seed}:{token}".encode("utf-8")
         ).digest()
         unit = int.from_bytes(digest[:8], "big") / float(1 << 64)
         if unit < self._train_boundary:

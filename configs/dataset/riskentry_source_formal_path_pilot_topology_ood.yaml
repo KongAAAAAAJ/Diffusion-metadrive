@@ -1,19 +1,19 @@
 source:
   project_root: /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive
-  bundle_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal_path_pilot_v2/riskentry_formal_path_pilot_v2_topology_ood_v2
+  bundle_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal_path_pilot_v7/riskentry_formal_path_pilot_v7_topology_ood_v2
   format: metadrive-joint-planning-risk-bundle
   schema_version: "2.0.0"
   read_only: true
   expected:
-    bundle_sha256: f03d9ad8ace391ccd36cb23b2984e5605653528664be3985d63b0b44742112b4
-    base_dataset_fingerprint: 1aa8175259aee2ca838ee77b27f474a6cc6c9755206997cff9808f07647bbd7c
-    sidecar_dataset_fingerprint: 3b79a4e671788995399d5acde6f87c5392a1969e661d1a830f636db5c57648be
-    attempted_episodes: 9
-    committed_base_episodes: 9
-    committed_sidecar_episodes: 9
+    bundle_sha256: aea6fd89557b1b0fecb88a72428a30610fe9e6898f210d635817506f19f9ebee
+    base_dataset_fingerprint: d3a62e153cf14571e6dab1654c99a5ecce89708e90e2428c0d3bf608275b7e0e
+    sidecar_dataset_fingerprint: 6fd61ddec6d02e5203ce31bc570603b6985daff3b6841bbaaf833f9818c8e083
+    attempted_episodes: 8
+    committed_base_episodes: 8
+    committed_sidecar_episodes: 8
     sidecar_only_episodes: 0
     base_joint_samples: 56
-    sidecar_raw_steps: 1319
+    sidecar_raw_steps: 968
 
 window:
   sample_hz: 10
@@ -24,7 +24,7 @@ window:
   maximum_external_candidates: 12
 
 audit:
-  output_dir: outputs/data_audit/formal_path_pilot_topology_ood
+  output_dir: outputs/data_audit/formal_path_pilot_v7_topology_ood
   sample_visualizations: 8
   fail_on_fingerprint_mismatch: true
   fail_on_split_leakage: true

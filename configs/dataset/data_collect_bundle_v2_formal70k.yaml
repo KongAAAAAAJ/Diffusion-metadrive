@@ -1,13 +1,13 @@
 dataset:
-  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal70k_v1
-  dataset_instance_prefix: riskentry_formal70k
+  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal70k_v2
+  dataset_instance_prefix: riskentry_formal70k_v2
 
 collection:
   run_mode: formal
   resume: true
   split_seed: 3
-  max_episode_steps: 160
-  anchor_steps: [40, 45, 50, 55, 60, 65, 70]
+  max_episode_steps: 120
+  anchor_steps: [35, 40, 45, 50, 55, 60, 65]
   max_attempts_per_cell: 20
   target_windows:
     id: 50000

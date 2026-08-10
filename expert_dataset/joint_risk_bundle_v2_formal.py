@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import multiprocessing as mp
 import os
 import shutil
+import traceback
 import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -50,7 +52,9 @@ from expert_dataset.joint_risk_bundle_v2_real import (
     base_arrays_from_samples,
     build_real_episode_payload,
     collect_real_v2_episode,
+    eligible_anchor_violation,
 )
+from scenarios.definitions import get_scenario_definition
 
 
 FORMAL_TARGETS = {
@@ -291,6 +295,18 @@ class FormalV2PartitionWriter:
         self.close()
 
     def _scenario_contract(self) -> dict[str, object]:
+        scenario_definitions = []
+        for spec in _episode_specs(self.partition):
+            definition = get_scenario_definition(spec.scenario_id)
+            scenario_definitions.append(
+                {
+                    "scenario_family": spec.scenario_family,
+                    "severity": spec.severity,
+                    "scenario_id": spec.scenario_id,
+                    "local_route": spec.local_route,
+                    "definition_sha256": _sha256_payload(asdict(definition)),
+                }
+            )
         return {
             "format": "metadrive-riskentry-formal-v2-scenario-contract",
             "schema_version": 1,
@@ -309,12 +325,14 @@ class FormalV2PartitionWriter:
             "label_policy": "fresh_rulemaker_normal_planner_per_anchor",
             "online_observation_policy": "ideal_current_state_range_80m_v1",
             "communication_policy": "always_available_50ms_v1",
+            "scenario_definitions": scenario_definitions,
         }
 
     def _base_contract_payload(self) -> dict[str, object]:
         payload = _base_contract(self.partition, self.base_fingerprint)
         split_assignment = dict(payload["split_assignment"])
         split_assignment["seed"] = self.config.split_seed
+        split_assignment["unit"] = "matched_pair_id"
         payload["split_assignment"] = split_assignment
         return payload
 
@@ -378,6 +396,32 @@ class FormalV2PartitionWriter:
                 metadata["joint_samples"]
             )
         return counts
+
+    def matched_pair_records(
+        self, family: str
+    ) -> dict[str, dict[str, dict[str, object]]]:
+        pairs: dict[str, dict[str, dict[str, object]]] = {}
+        for row in self.rows:
+            path = (
+                self.base_root
+                / str(row["split"])
+                / "episodes"
+                / f"episode_{int(row['episode_index']):08d}"
+                / "episode.json"
+            )
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+            attributes = dict(metadata["attributes"])
+            if attributes.get("scenario_family") != family:
+                continue
+            pair_id = str(attributes.get("matched_pair_id", ""))
+            severity = str(attributes.get("severity", ""))
+            if not pair_id or severity not in SEVERITIES:
+                raise FormalV2CollectionError("invalid matched-pair episode metadata")
+            pairs.setdefault(pair_id, {})[severity] = {
+                "row": row,
+                "attributes": attributes,
+            }
+        return pairs
 
     def _materialize_metadata(self) -> None:
         self.rows = _read_index(self.index_path)
@@ -523,6 +567,7 @@ class FormalV2PartitionWriter:
             "benchmark_partition": self.partition,
             "scenario_family": spec.scenario_family,
             "severity": spec.severity,
+            "matched_pair_id": spec.matched_pair_id,
             "run_mode": self.config.run_mode,
             "diagnostic_only": not self.config.eligible_for_formal_training,
             "eligible_for_formal_training": self.config.eligible_for_formal_training,
@@ -548,6 +593,7 @@ class FormalV2PartitionWriter:
             "episode_index": spec.episode_index,
             "split": spec.split,
             "scenario_id": spec.scenario_id,
+            "matched_pair_id": spec.matched_pair_id,
             "local_route": spec.local_route,
             "spawn_seed": spec.spawn_seed,
             "base_status": "committed",
@@ -582,12 +628,12 @@ class FormalV2PartitionWriter:
         self._materialize_metadata()
 
 
-def _split_for(config: FormalV2Config, partition: str, episode_index: int) -> str:
+def _split_for(config: FormalV2Config, partition: str, matched_pair_id: str) -> str:
     if partition != "id":
         return "test"
     return EpisodeSplitAssigner(
         EpisodeSplitConfig(0.8, 0.1, 0.1, config.split_seed)
-    ).split_for_episode(episode_index)
+    ).split_for_key(matched_pair_id)
 
 
 def _episode_spec(
@@ -607,24 +653,111 @@ def _episode_spec(
     )
     partition_offset = PARTITIONS.index(partition) * 10_000_000
     family_offset = SCENARIO_FAMILIES.index(family) * 1_000_000
-    severity_offset = SEVERITIES.index(severity) * 500_000
     seed = (
         1_000_000
         + partition_offset
         + family_offset
-        + severity_offset
         + cell_episode_index * config.max_attempts_per_cell
         + attempt
+    )
+    matched_pair_id = (
+        f"{partition}_{family}_pair_{int(cell_episode_index):06d}"
     )
     return RealV2EpisodeSpec(
         **{
             **asdict(template),
             "episode_index": int(episode_index),
-            "split": _split_for(config, partition, episode_index),
+            "split": _split_for(config, partition, matched_pair_id),
             "spawn_seed": int(seed),
             "matched_pair_index": int(cell_episode_index),
         }
     )
+
+
+def _collect_episode_attempt(
+    config: FormalV2Config,
+    spec: RealV2EpisodeSpec,
+    base_fingerprint: str,
+    scenario_sha: str,
+    remaining: int,
+    *,
+    required_steps: Sequence[int] | None = None,
+) -> tuple[RealV2EpisodeSpec, dict[str, object], dict[str, np.ndarray], tuple[JointBEVSample, ...], tuple[int, ...]]:
+    env_config = _env_config(spec)
+    env = SensorlessJointBEVPlatoonEnv(env_config)
+    try:
+        rollout = collect_real_v2_episode(
+            env,
+            max_steps=config.max_episode_steps,
+            reset_seed=spec.spawn_seed,
+            sample_steps=config.anchor_steps,
+        )
+        metadata, side_arrays, _, _ = build_real_episode_payload(
+            spec,
+            rollout,
+            base_fingerprint=base_fingerprint,
+            scenario_contract_sha256=scenario_sha,
+            env_config=env_config,
+        )
+        sample_by_step = dict(zip(rollout.sample_step_indices, rollout.samples))
+        eligible_steps = tuple(
+            step
+            for step in (
+                tuple(int(value) for value in required_steps)
+                if required_steps is not None
+                else config.anchor_steps
+            )
+            if step in sample_by_step
+            and eligible_anchor_violation(spec, rollout, side_arrays, step) is None
+        )[: int(remaining)]
+        if required_steps is not None and eligible_steps != tuple(required_steps):
+            raise FormalV2CollectionError(
+                "matched control does not provide the near-critical anchor set"
+            )
+        if not eligible_steps:
+            raise FormalV2CollectionError("episode produced no eligible formal anchors")
+        samples = tuple(sample_by_step[step] for step in eligible_steps)
+        side_arrays["base_sample_step_index"] = np.asarray(
+            eligible_steps, dtype=np.int64
+        )
+        metadata["diagnostic_only"] = not config.eligible_for_formal_training
+        metadata["eligible_for_formal_training"] = config.eligible_for_formal_training
+        metadata["run_mode"] = config.run_mode
+        metadata["eligible_anchor_steps"] = list(eligible_steps)
+        metadata["communication_policy_id"] = "always_available_50ms_v1"
+        return spec, metadata, side_arrays, samples, eligible_steps
+    finally:
+        env.close()
+
+
+def _isolated_collect_worker(
+    sender: object,
+    config: FormalV2Config,
+    spec: RealV2EpisodeSpec,
+    base_fingerprint: str,
+    scenario_sha: str,
+    remaining: int,
+    required_steps: tuple[int, ...] | None,
+) -> None:
+    try:
+        payload = _collect_episode_attempt(
+            config,
+            spec,
+            base_fingerprint,
+            scenario_sha,
+            remaining,
+            required_steps=required_steps,
+        )
+        sender.send(("ok", payload))
+    except BaseException as exc:
+        sender.send(
+            (
+                "error",
+                f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            )
+        )
+    finally:
+        sender.close()
 
 
 def _collect_episode_for_quota(
@@ -633,17 +766,23 @@ def _collect_episode_for_quota(
     family: str,
     severity: str,
     remaining: int,
+    *,
+    cell_episode_index: int | None = None,
+    required_steps: Sequence[int] | None = None,
+    episode_index: int | None = None,
 ) -> tuple[RealV2EpisodeSpec, dict[str, object], dict[str, np.ndarray], tuple[JointBEVSample, ...], tuple[int, ...]]:
-    cell_episode_index = sum(
-        1
-        for row in writer.rows
-        if row["scenario_id"]
-        == next(
-            template.scenario_id
-            for template in _episode_specs(writer.partition)
-            if template.scenario_family == family and template.severity == severity
+    if cell_episode_index is None:
+        cell_episode_index = sum(
+            1
+            for row in writer.rows
+            if row["scenario_id"]
+            == next(
+                template.scenario_id
+                for template in _episode_specs(writer.partition)
+                if template.scenario_family == family
+                and template.severity == severity
+            )
         )
-    )
     last_error: Exception | None = None
     for attempt in range(config.max_attempts_per_cell):
         spec = _episode_spec(
@@ -651,45 +790,38 @@ def _collect_episode_for_quota(
             writer.partition,
             family,
             severity,
-            episode_index=len(writer.rows),
+            episode_index=(
+                len(writer.rows) if episode_index is None else int(episode_index)
+            ),
             cell_episode_index=cell_episode_index,
             attempt=attempt,
         )
-        env_config = _env_config(spec)
-        env = SensorlessJointBEVPlatoonEnv(env_config)
-        try:
-            rollout = collect_real_v2_episode(
-                env,
-                max_steps=config.max_episode_steps,
-                reset_seed=spec.spawn_seed,
-                sample_steps=config.anchor_steps,
-            )
-            metadata, side_arrays, _, _ = build_real_episode_payload(
+        context = mp.get_context("spawn")
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_isolated_collect_worker,
+            args=(
+                sender,
+                config,
                 spec,
-                rollout,
-                base_fingerprint=writer.base_fingerprint,
-                scenario_contract_sha256=writer.scenario_sha,
-                env_config=env_config,
-            )
-            sample_by_step = dict(zip(rollout.sample_step_indices, rollout.samples))
-            eligible_steps = tuple(
-                step
-                for step in config.anchor_steps
-                if step in sample_by_step
-                and step >= HISTORY_STEPS
-                and step + FUTURE_STEPS < len(side_arrays["step_index"])
-            )[: int(remaining)]
-            if not eligible_steps:
-                raise FormalV2CollectionError("episode produced no eligible formal anchors")
-            samples = tuple(sample_by_step[step] for step in eligible_steps)
-            side_arrays["base_sample_step_index"] = np.asarray(
-                eligible_steps, dtype=np.int64
-            )
-            metadata["diagnostic_only"] = not config.eligible_for_formal_training
-            metadata["eligible_for_formal_training"] = config.eligible_for_formal_training
-            metadata["run_mode"] = config.run_mode
-            metadata["eligible_anchor_steps"] = list(eligible_steps)
-            metadata["communication_policy_id"] = "always_available_50ms_v1"
+                writer.base_fingerprint,
+                writer.scenario_sha,
+                int(remaining),
+                (
+                    tuple(int(value) for value in required_steps)
+                    if required_steps is not None
+                    else None
+                ),
+            ),
+        )
+        try:
+            process.start()
+            sender.close()
+            status, payload = receiver.recv()
+            process.join()
+            if status != "ok" or process.exitcode != 0:
+                raise FormalV2CollectionError(str(payload))
+            spec, metadata, side_arrays, samples, eligible_steps = payload
             print(
                 f"[INFO] formal-v2 partition={writer.partition} family={family} "
                 f"severity={severity} episode={spec.episode_index} seed={spec.spawn_seed} "
@@ -705,7 +837,10 @@ def _collect_episode_for_quota(
                 flush=True,
             )
         finally:
-            env.close()
+            receiver.close()
+            if process.is_alive():
+                process.terminate()
+                process.join()
     raise FormalV2CollectionError(
         f"cell {writer.partition}/{family}/{severity} failed after "
         f"{config.max_attempts_per_cell} attempts: {last_error}"
@@ -740,24 +875,105 @@ def run_formal_v2_collection(
             while True:
                 counts = writer.cell_counts()
                 quota = config.quota_per_cell(partition)
-                pending = [cell for cell in CELL_ORDER if counts[cell] < quota]
-                if not pending:
+                pending_families = [
+                    family
+                    for family in SCENARIO_FAMILIES
+                    if any(counts[(family, severity)] < quota for severity in SEVERITIES)
+                ]
+                if not pending_families:
                     break
-                if max_new_episodes is not None and new_episodes >= max_new_episodes:
+                remaining_budget = (
+                    None
+                    if max_new_episodes is None
+                    else max_new_episodes - new_episodes
+                )
+                family = pending_families[0]
+                pair_records = writer.matched_pair_records(family)
+                unmatched = [
+                    (pair_id, records)
+                    for pair_id, records in pair_records.items()
+                    if set(records) != set(SEVERITIES)
+                ]
+                if unmatched:
+                    if len(unmatched) != 1:
+                        raise FormalV2CollectionError(
+                            f"multiple unmatched pairs for {partition}/{family}"
+                        )
+                    if remaining_budget is not None and remaining_budget < 1:
+                        break
+                    pair_id, records = unmatched[0]
+                    if len(records) != 1:
+                        raise FormalV2CollectionError(f"invalid pair {pair_id}")
+                    existing_severity = next(iter(records))
+                    missing_severity = next(
+                        severity for severity in SEVERITIES if severity not in records
+                    )
+                    existing = records[existing_severity]
+                    required_steps = tuple(
+                        int(step)
+                        for step in existing["attributes"]["selected_sample_steps"]
+                    )
+                    pair_index = int(pair_id.rsplit("_", 1)[1])
+                    result = _collect_episode_for_quota(
+                        config,
+                        writer,
+                        family,
+                        missing_severity,
+                        len(required_steps),
+                        cell_episode_index=pair_index,
+                        required_steps=required_steps,
+                        episode_index=len(writer.rows),
+                    )
+                    spec, metadata, arrays, samples, sample_steps = result
+                    writer.commit(
+                        spec=spec,
+                        metadata=metadata,
+                        side_arrays=arrays,
+                        samples=samples,
+                        sample_steps=sample_steps,
+                    )
+                    new_episodes += 1
+                    continue
+                if remaining_budget is not None and remaining_budget < 2:
                     break
-                family, severity = pending[0]
-                remaining = quota - counts[(family, severity)]
-                spec, metadata, arrays, samples, sample_steps = _collect_episode_for_quota(
-                    config, writer, family, severity, remaining
+                remaining = min(
+                    quota - counts[(family, severity)] for severity in SEVERITIES
                 )
-                writer.commit(
-                    spec=spec,
-                    metadata=metadata,
-                    side_arrays=arrays,
-                    samples=samples,
-                    sample_steps=sample_steps,
+                if remaining <= 0:
+                    raise FormalV2CollectionError(
+                        f"matched-pair quota diverged for {partition}/{family}"
+                    )
+                pair_index = len(pair_records)
+                pair_windows = min(remaining, len(config.anchor_steps))
+                near = _collect_episode_for_quota(
+                    config,
+                    writer,
+                    family,
+                    "near_critical",
+                    pair_windows,
+                    cell_episode_index=pair_index,
+                    episode_index=len(writer.rows),
                 )
-                new_episodes += 1
+                control = _collect_episode_for_quota(
+                    config,
+                    writer,
+                    family,
+                    "control",
+                    len(near[4]),
+                    cell_episode_index=pair_index,
+                    required_steps=near[4],
+                    episode_index=len(writer.rows) + 1,
+                )
+                for result in (near, control):
+                    spec, metadata, arrays, samples, sample_steps = result
+                    writer.commit(
+                        spec=spec,
+                        metadata=metadata,
+                        side_arrays=arrays,
+                        samples=samples,
+                        sample_steps=sample_steps,
+                    )
+                    new_episodes += 1
             state = json.loads(writer.state_path.read_text(encoding="utf-8"))
             summaries[partition] = state
         if max_new_episodes is not None and new_episodes >= max_new_episodes:
