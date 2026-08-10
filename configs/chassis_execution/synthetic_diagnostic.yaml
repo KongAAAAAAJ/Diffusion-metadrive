@@ -1,0 +1,31 @@
+format: chassis_execution_synthetic_diagnostic_config_v1
+data_origin: synthetic_virtual
+diagnostic_only: true
+eligible_for_formal_training: false
+cf2_real_windows_smoke_passed: false
+diagnostic_override_id: cf2_real_smoke_diagnostic_override_v1
+
+generation:
+  sample_count: 2048
+  group_size: 4
+  seed: 17
+  maneuvers:
+    - constant_speed
+    - accelerate
+    - brake
+    - stop
+    - lane_change_left
+    - lane_change_right
+    - brake_and_steer
+    - formation_gap_recovery
+
+timing:
+  horizon_s: 4.0
+  command_dt_s: 0.5
+  execution_dt_s: 0.1
+
+virtual_dynamics:
+  longitudinal_time_constant_s: 0.55
+  heading_time_constant_s: 0.35
+  roll_time_constant_s: 0.45
+  note: diagnostic software bring-up only; not a TruckSim approximation claim

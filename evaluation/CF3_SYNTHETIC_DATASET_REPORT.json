@@ -1,0 +1,88 @@
+{
+  "format": "cf3_synthetic_dataset_acceptance_report_v1",
+  "recorded_at": "2026-08-10T19:18:00+08:00",
+  "round": "CF-3",
+  "status": "diagnostic_accepted",
+  "formal_status": "blocked_by_cf2_real_windows_smoke",
+  "authorization": {
+    "override_id": "cf2_real_smoke_diagnostic_override_v1",
+    "authorized_by": "user",
+    "scope": "continue the original CF-3 through CF-7 sequence with virtual data",
+    "new_parallel_chain_created": false,
+    "metadata_upgrade_to_formal_forbidden": true
+  },
+  "source": {
+    "branch": "chassis-fusion",
+    "base_head": "cbbe92d",
+    "worktree": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion",
+    "changes_committed": false
+  },
+  "protocol": {
+    "path": "schemas/chassis_execution_storage_v1.json",
+    "file_sha256": "837347b9f7d7cc69ca0a8cdb8fe988b1f2623703431cee21c62352ebc37681bf",
+    "config": "configs/chassis_execution/synthetic_diagnostic.yaml",
+    "config_sha256": "9b1335c012082140e280c8d40e6a980ad43eb8b19394e6202ec85a1925d4f538",
+    "runbook": "docs/project/chassis_execution_cf3_diagnostic.md"
+  },
+  "artifact": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/synthetic_virtual_cf3_v1",
+    "external_verification_report": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/reports/CF3_SYNTHETIC_DATASET_REPORT.json",
+    "dataset_fingerprint": "20963f3323a0b5f43fbaf712efa887ff6d8577130da111780a720eb259410143",
+    "dataset_metadata_fingerprint": "c795bb5a34245c10e34483d4391e6d7acd7dd80717690d119d709cac8b779c43",
+    "size_bytes": 15781765,
+    "sample_count": 2048,
+    "split_counts": {
+      "train": 1672,
+      "val": 216,
+      "test": 160
+    },
+    "maneuver_count_each": 256,
+    "maneuvers": [
+      "constant_speed",
+      "accelerate",
+      "brake",
+      "stop",
+      "lane_change_left",
+      "lane_change_right",
+      "brake_and_steer",
+      "formation_gap_recovery"
+    ],
+    "data_origin": "synthetic_virtual",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "cf2_real_windows_smoke_passed": false
+  },
+  "quality": {
+    "full_verifier": "passed",
+    "all_arrays_mmap_readable": true,
+    "run_group_split_leakage": 0,
+    "trajectory_command_execution_mae_m": 0.850232203801473,
+    "maximum_abs_rollover_index": 0.16369640827178955,
+    "maximum_throttle": 0.7155417203903198,
+    "maximum_brake": 0.973921000957489,
+    "controller_mode_counts": {
+      "independent": 5376,
+      "formation_locked": 768
+    }
+  },
+  "verification": {
+    "focused_command": "python -m pytest tests/test_chassis_execution_storage.py tests/test_chassis_execution_contract.py tests/test_chassis_execution_trucksim_export.py -q",
+    "focused_result": "34 passed",
+    "focused_duration_s": 4.02,
+    "regression_command": "python -m pytest tests/test_chassis_execution_contract.py tests/test_chassis_execution_trucksim_export.py tests/test_chassis_execution_storage.py tests/test_bev_trajectory_optimizer.py tests/test_bev_joint_grpo_online.py -q",
+    "regression_result": "54 passed, 15 warnings",
+    "regression_duration_s": 11.03,
+    "dataset_cli": "passed",
+    "git_diff_check": "passed"
+  },
+  "implemented": [
+    "immutable atomic split-first numpy storage",
+    "full checksums and canonical dataset fingerprint",
+    "run-group atomic deterministic split",
+    "mmap PyTorch Dataset",
+    "full dataset verifier",
+    "eight-maneuver deterministic virtual dynamics generator",
+    "strict diagnostic provenance and formal-eligibility rejection"
+  ],
+  "next_permitted_action": "CF-4 surrogate model and training may start only in diagnostic mode using this exact dataset fingerprint."
+}

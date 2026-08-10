@@ -1,0 +1,64 @@
+{
+  "format": "chassis_execution_storage_protocol_v1",
+  "schema_version": 1,
+  "purpose": "Immutable split-first mmap storage for chassis execution surrogate training",
+  "root_files": [
+    "dataset_contract.json",
+    "checksums.json",
+    "train",
+    "val",
+    "test"
+  ],
+  "split_files": [
+    "manifest.jsonl",
+    "tau_cmd.npy",
+    "initial_state.npy",
+    "vehicle_condition.npy",
+    "controller_context.npy",
+    "controller_mode.npy",
+    "agent_role.npy",
+    "executed_trajectory.npy",
+    "chassis_state.npy",
+    "applied_control.npy",
+    "state_valid_mask.npy"
+  ],
+  "arrays": {
+    "tau_cmd": {"dtype": "float32", "sample_shape": [3, 8, 3]},
+    "initial_state": {"dtype": "float32", "sample_shape": [3, 10]},
+    "vehicle_condition": {"dtype": "float32", "sample_shape": [3, 14]},
+    "controller_context": {"dtype": "float32", "sample_shape": [3, 8]},
+    "controller_mode": {"dtype": "int64", "sample_shape": [3]},
+    "agent_role": {"dtype": "int64", "sample_shape": [3]},
+    "executed_trajectory": {"dtype": "float32", "sample_shape": [3, 40, 3]},
+    "chassis_state": {"dtype": "float32", "sample_shape": [3, 40, 8]},
+    "applied_control": {"dtype": "float32", "sample_shape": [3, 40, 3]},
+    "state_valid_mask": {"dtype": "bool", "sample_shape": [3, 40]}
+  },
+  "time_axis": {
+    "tau_cmd_s": [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
+    "executed_state_start_s": 0.1,
+    "executed_state_end_s": 4.0,
+    "executed_state_dt_s": 0.1
+  },
+  "split_contract": {
+    "unit": "run_group_id",
+    "assignment": "sha256(split_salt:run_group_id), 80/10/10",
+    "cross_split_group_leakage": "forbidden",
+    "all_splits_non_empty": true
+  },
+  "integrity": {
+    "physical_arrays": "numpy .npy, allow_pickle=false, mmap-readable",
+    "payload_checksums": "sha256 for every split payload",
+    "dataset_fingerprint": "sha256(canonical contract without fingerprint + payload checksums)",
+    "atomic_commit": true,
+    "overwrite": "forbidden"
+  },
+  "diagnostic_override": {
+    "allowed_data_origin": "synthetic_virtual",
+    "required_diagnostic_only": true,
+    "required_eligible_for_formal_training": false,
+    "required_cf2_real_windows_smoke_passed": false,
+    "metadata_upgrade_to_formal": "forbidden",
+    "formal_gate": "CF-2 real Windows TruckSim smoke"
+  }
+}

@@ -30,6 +30,14 @@ from .trucksim_exchange import (
     load_trucksim_export,
     verify_trucksim_export_root,
 )
+from .storage import (
+    ChassisExecutionDataset,
+    ChassisExecutionSampleIdentity,
+    ChassisExecutionStorageError,
+    ChassisExecutionStorageProvenance,
+    verify_chassis_execution_dataset,
+    write_chassis_execution_dataset,
+)
 
 __all__ = [
     "CHASSIS_STATE_FIELDS",
@@ -56,4 +64,10 @@ __all__ = [
     "convert_verified_run",
     "load_trucksim_export",
     "verify_trucksim_export_root",
+    "ChassisExecutionDataset",
+    "ChassisExecutionSampleIdentity",
+    "ChassisExecutionStorageError",
+    "ChassisExecutionStorageProvenance",
+    "verify_chassis_execution_dataset",
+    "write_chassis_execution_dataset",
 ]

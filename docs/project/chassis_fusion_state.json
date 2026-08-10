@@ -1,19 +1,20 @@
 {
   "format": "chassis_fusion_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-10T18:42:02+08:00",
+  "updated_at": "2026-08-10T19:18:00+08:00",
   "repository": {
     "branch": "chassis-fusion",
     "base_git_commit": "13bd7c5d649f52264779a3107faed927848a1765",
-    "implementation_commit": "2b48aeba6321744d873fce03345c3888346dc0a7",
+    "implementation_commit": "cbbe92de0d15c925d94a63a63a846b37f4e1f5d9",
     "worktree_path": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion",
     "changes_committed": false
   },
   "current": {
     "completed_rounds": ["CF-0", "CF-1"],
-    "implemented_rounds": ["CF-0", "CF-1", "CF-2-code"],
-    "status": "cf2_code_accepted_waiting_real_windows_smoke",
-    "active_hard_gate": "CF-2_real_windows_trucksim_smoke"
+    "implemented_rounds": ["CF-0", "CF-1", "CF-2-code", "CF-3-diagnostic"],
+    "diagnostic_accepted_rounds": ["CF-3"],
+    "status": "cf3_diagnostic_accepted_cf2_real_gate_pending",
+    "active_hard_gate": "CF-4_diagnostic_surrogate_training"
   },
   "source_of_truth": {
     "machine_protocol": {
@@ -36,19 +37,35 @@
     "cf2_report": {
       "path": "evaluation/CF2_TRUCKSIM_EXCHANGE_REPORT.json",
       "status": "incomplete_waiting_real_windows_smoke"
+    },
+    "cf3_storage_protocol": {
+      "path": "schemas/chassis_execution_storage_v1.json",
+      "file_sha256": "837347b9f7d7cc69ca0a8cdb8fe988b1f2623703431cee21c62352ebc37681bf"
+    },
+    "cf3_report": {
+      "path": "evaluation/CF3_SYNTHETIC_DATASET_REPORT.json",
+      "status": "diagnostic_accepted"
     }
   },
   "artifacts": {
     "trucksim_dataset": null,
     "trucksim_real_smoke": null,
+    "synthetic_chassis_dataset": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/synthetic_virtual_cf3_v1",
+      "dataset_fingerprint": "20963f3323a0b5f43fbaf712efa887ff6d8577130da111780a720eb259410143",
+      "sample_count": 2048,
+      "data_origin": "synthetic_virtual",
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false
+    },
     "surrogate_checkpoints": [],
     "grpo_checkpoints": []
   },
   "next_actions": [
-    "On Windows, export all eight required real-smoke maneuvers using docs/contracts/trucksim_execution_handoff_v1.md.",
-    "Run python -m chassis_execution.verify_trucksim_export --root <windows_export_smoke_root>.",
-    "Reject CF-2 if native rollover or any mandatory signal/component identity is unavailable.",
-    "Only after the real-smoke gate passes, implement the CF-3 mmap dataset writer and full verifier."
+    "Implement the original CF-4 surrogate model and training in diagnostic mode using the frozen CF-3 dataset fingerprint.",
+    "Propagate data_origin=synthetic_virtual, diagnostic_only=true and eligible_for_formal_training=false into every checkpoint and report.",
+    "Continue CF-5 through CF-7 only in diagnostic mode until the real Windows smoke passes.",
+    "In parallel, produce and verify the eight-maneuver Windows real-smoke export before any formal training."
   ],
   "invariants": {
     "tau_cmd_is_only_surrogate_trajectory_input": true,
@@ -57,7 +74,20 @@
     "candidate_metadrive_branching_forbidden": true,
     "geometric_proxy_fallback_forbidden": true,
     "bev_formal_collection_worktree_isolated": true,
-    "cf3_blocked_until_real_windows_smoke": true
+    "cf3_formal_blocked_until_real_windows_smoke": true,
+    "cf3_diagnostic_execution_authorized": true
+  },
+  "diagnostic_override": {
+    "format": "cf2_real_smoke_diagnostic_override_v1",
+    "authorized_at": "2026-08-10T18:51:32+08:00",
+    "authorized_by": "user",
+    "reason": "Windows TruckSim export is long-running; exercise the original CF-3 and downstream software chain first with protocol-shaped virtual data.",
+    "pending_gate": "CF-2_real_windows_trucksim_smoke",
+    "allowed_rounds": ["CF-3", "CF-4", "CF-5", "CF-6", "CF-7"],
+    "required_data_origin": "synthetic_virtual",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "metadata_upgrade_to_formal_forbidden": true
   },
   "blockers": {
     "cf2_real_windows_smoke": {
