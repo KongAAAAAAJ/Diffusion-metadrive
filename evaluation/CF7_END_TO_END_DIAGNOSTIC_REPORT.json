@@ -1,0 +1,119 @@
+{
+  "format": "cf7_end_to_end_acceptance_v1",
+  "round": "CF-7",
+  "status": "diagnostic_accepted",
+  "completed_at": "2026-08-10T21:00:41+08:00",
+  "data_origin": "synthetic_virtual",
+  "diagnostic_only": true,
+  "eligible_for_formal_training": false,
+  "pending_hard_gate": "CF-2_real_windows_trucksim_smoke",
+  "machine_protocol": {
+    "path": "schemas/chassis_fusion_evaluation_v1.json",
+    "sha256": "f0783e3b71e8ecad9e2059aaf64f41672c442890bb126d37125b6299aa5e6444"
+  },
+  "diagnostic_artifact": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/outputs/chassis_fusion_cf7/run_1/cf7_end_to_end_diagnostic.json",
+    "sha256": "82f8b2ee3bc3f412cf21b6eb56d96bc27583fa72aa84ab2fc6137b60be44609e"
+  },
+  "evaluation_contract": {
+    "models": ["A_stage1", "B_stage1", "A_cf6", "B_cf6"],
+    "scenarios": [
+      ["S1_free_cruise_straight", "R3_mainline_straight"],
+      ["S5_hard_brake_lead", "R1_entry_straight"]
+    ],
+    "seed": 17,
+    "online_model_steps_per_scenario": 3,
+    "candidate_count": 4,
+    "latency_warmup_candidate_evaluations_per_model": 1,
+    "candidate_metadrive_branches": 0,
+    "selected_tau_cmd_env_steps_per_decision": 1
+  },
+  "source_artifacts": {
+    "stage1_a_sha256": "284f56941b57069846069df977f451714e4fb3fb90d7f56972a3780d150dfeed",
+    "stage1_b_sha256": "9b149d397743d55ce1912aa25bc83d8f07d83ff8a06aa955908e184221c098e2",
+    "grpo_a_sha256": "8c63fcffa2f3ac1d204971f1237d4fcc3b131102a551481d0b603c490c73f28f",
+    "grpo_b_sha256": "092f8796c8c6f9ba0a16fb87c7a11ac1fc18a94e717a5a2ecd843dd237b94f0c",
+    "surrogate_sha256": "34c3b23baa6b3ca86c697d473471f414bb5ce70b1c772446e02d948a7fc0d765",
+    "chassis_dataset_fingerprint": "20963f3323a0b5f43fbaf712efa887ff6d8577130da111780a720eb259410143"
+  },
+  "hard_gates": {
+    "all_four_models_loaded_strictly": true,
+    "minimum_completed_steps_per_model_scenario": true,
+    "candidate_metadrive_branches_zero": true,
+    "selected_env_steps_equal_completed_steps": true,
+    "policy_and_surrogate_parameters_unchanged": true,
+    "all_metrics_finite": true
+  },
+  "results": {
+    "A_stage1": {
+      "completed_steps": 6,
+      "collision_steps": 0,
+      "out_of_road_steps": 0,
+      "no_safe_group_steps": 5,
+      "candidate_unsafe_rate_mean": 0.9583333333333334,
+      "selected_reward_mean": -17.674072692791622,
+      "optimizer_intervention_ade_m_mean": 2.130899508794149,
+      "sampling_p95_ms": 10.326960764359683,
+      "planning_tick_p50_ms": 182.19212256371975,
+      "planning_tick_p95_ms": 217.88944798754528
+    },
+    "B_stage1": {
+      "completed_steps": 6,
+      "collision_steps": 0,
+      "out_of_road_steps": 0,
+      "no_safe_group_steps": 5,
+      "candidate_unsafe_rate_mean": 0.9583333333333334,
+      "selected_reward_mean": -17.674072744945686,
+      "optimizer_intervention_ade_m_mean": 2.130892356236776,
+      "sampling_p95_ms": 19.420456315856427,
+      "planning_tick_p50_ms": 188.82873398251832,
+      "planning_tick_p95_ms": 224.02230271836743
+    },
+    "A_cf6": {
+      "completed_steps": 6,
+      "collision_steps": 0,
+      "out_of_road_steps": 0,
+      "no_safe_group_steps": 5,
+      "candidate_unsafe_rate_mean": 0.9583333333333334,
+      "selected_reward_mean": -17.67410498857498,
+      "optimizer_intervention_ade_m_mean": 2.1318684617678323,
+      "sampling_p95_ms": 10.227281658444554,
+      "planning_tick_p50_ms": 182.3257909854874,
+      "planning_tick_p95_ms": 213.70356483384967
+    },
+    "B_cf6": {
+      "completed_steps": 6,
+      "collision_steps": 0,
+      "out_of_road_steps": 0,
+      "no_safe_group_steps": 5,
+      "candidate_unsafe_rate_mean": 0.9583333333333334,
+      "selected_reward_mean": -17.674066593249638,
+      "optimizer_intervention_ade_m_mean": 2.1050272583961487,
+      "sampling_p95_ms": 19.420488737523556,
+      "planning_tick_p50_ms": 191.70755275990814,
+      "planning_tick_p95_ms": 231.6909465007484
+    }
+  },
+  "advisory_gates": {
+    "planning_tick_p95_le_100ms": false,
+    "all_candidate_groups_have_safe_option": false
+  },
+  "tests": {
+    "focused_cf7": "14 passed",
+    "full_related_cf0_cf7_grpo_optimizer": "84 passed",
+    "json_validation": "passed",
+    "git_diff_check": "passed"
+  },
+  "interpretation": {
+    "software_chain": "accepted",
+    "formal_or_research_effect_claim": "forbidden",
+    "performance_comparison": "inconclusive",
+    "remaining_risks": [
+      "The synthetic surrogate marks five of six online decisions per model as having no safe candidate group.",
+      "All four models exceed the 100 ms three-vehicle planning-tick target.",
+      "One diagnostic CF-6 update provides no measurable performance improvement over Stage 1.",
+      "Real Windows TruckSim smoke and real-data surrogate retraining remain mandatory before formal use.",
+      "No CF-7 specialist project Skill exists; this round used the frozen machine protocol through the repository workflow Skill."
+    ]
+  }
+}

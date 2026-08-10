@@ -9,6 +9,7 @@ gradient-free rewards update the original rollout exactly once.
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -198,6 +199,57 @@ class ChassisFusionGRPOStepResult:
             )
 
 
+@dataclass(frozen=True)
+class ChassisFusionCandidateResult:
+    """Gradient-free candidate evaluation used by CF-7 inference."""
+
+    rollout: JointGRPORollout
+    tau_d: Tensor
+    tau_cmd: Tensor
+    optimization: TrajectoryOptimizationResult
+    reward: ChassisExecutionRewardResult
+    selected_group: Tensor
+    selected_tau_cmd: Tensor
+    policy_sha256: str
+    surrogate_sha256: str
+    optimizer_config_sha256: str
+    metadrive_candidate_branches: int
+    sampling_ms: float
+    reward_ms: float
+    total_ms: float
+
+    def __post_init__(self) -> None:
+        expected = (1, NUM_GROUPS, NUM_ROLES, 8, 3)
+        if (
+            self.tau_d.dtype != torch.float32
+            or self.tau_cmd.dtype != torch.float32
+            or tuple(self.tau_d.shape) != expected
+            or tuple(self.tau_cmd.shape) != expected
+            or self.tau_d.requires_grad
+            or self.tau_cmd.requires_grad
+        ):
+            raise ChassisFusionGRPOError(
+                "candidate tau_d/tau_cmd must be detached float32 [1,4,3,8,3]"
+            )
+        if self.selected_group.dtype != torch.int64 or tuple(
+            self.selected_group.shape
+        ) != (1,):
+            raise ChassisFusionGRPOError("selected_group must be int64 [1]")
+        if self.selected_tau_cmd.dtype != torch.float32 or tuple(
+            self.selected_tau_cmd.shape
+        ) != (1, NUM_ROLES, 8, 3):
+            raise ChassisFusionGRPOError(
+                "selected_tau_cmd must be float32 [1,3,8,3]"
+            )
+        timings = (self.sampling_ms, self.reward_ms, self.total_ms)
+        if any(not np.isfinite(value) or value < 0.0 for value in timings):
+            raise ChassisFusionGRPOError("candidate timings must be finite and non-negative")
+        if self.metadrive_candidate_branches != 0:
+            raise ChassisFusionGRPOError(
+                "candidate MetaDrive branch execution is forbidden"
+            )
+
+
 class ChassisFusionGRPOAdapter:
     """Run one execution-aware GRPO update and expose one executable action."""
 
@@ -263,19 +315,77 @@ class ChassisFusionGRPOAdapter:
     ) -> ChassisFusionGRPOStepResult:
         """Sample raw actions, transform them, score execution, and update once."""
 
+        policy_before = _policy_sha256(self.trainer)
+        optimizer_step_before = int(getattr(self.trainer, "optimizer_step", -1))
+        candidate = self.evaluate_candidates(
+            env=env,
+            trainer_model_inputs=trainer_model_inputs,
+            reward_model_inputs=reward_model_inputs,
+            chassis_context=chassis_context,
+            generator=generator,
+        )
+        update = self.trainer.update(candidate.rollout, candidate.reward.rewards)
+        if int(update.optimizer_step) != optimizer_step_before + 1:
+            raise ChassisFusionGRPOError(
+                "CF-6 must execute exactly one GRPO optimizer step"
+            )
+        surrogate_after = _module_sha256(self.reward_evaluator.surrogate)
+        if surrogate_after != candidate.surrogate_sha256:
+            raise ChassisFusionGRPOError("frozen chassis surrogate changed during GRPO update")
+        if self.trajectory_optimizer.config.sha256() != candidate.optimizer_config_sha256:
+            raise ChassisFusionGRPOError(
+                "trajectory optimizer changed during GRPO update"
+            )
+        policy_after = _policy_sha256(self.trainer)
+        return ChassisFusionGRPOStepResult(
+            rollout=candidate.rollout,
+            tau_d=candidate.tau_d,
+            tau_cmd=candidate.tau_cmd,
+            optimization=candidate.optimization,
+            reward=candidate.reward,
+            update=update,
+            selected_group=candidate.selected_group,
+            selected_tau_cmd=candidate.selected_tau_cmd,
+            policy_sha256_before=policy_before,
+            policy_sha256_after=policy_after,
+            surrogate_sha256=surrogate_after,
+            optimizer_config_sha256=candidate.optimizer_config_sha256,
+            metadrive_candidate_branches=candidate.metadrive_candidate_branches,
+        )
+
+    @staticmethod
+    def _synchronize(tensor: Tensor) -> None:
+        if tensor.device.type == "cuda":
+            torch.cuda.synchronize(tensor.device)
+
+    def evaluate_candidates(
+        self,
+        *,
+        env: object,
+        trainer_model_inputs: Mapping[str, Tensor],
+        reward_model_inputs: object,
+        chassis_context: ChassisExecutionContext,
+        generator: torch.Generator,
+    ) -> ChassisFusionCandidateResult:
+        """Evaluate G raw candidates without updating policy or stepping MetaDrive."""
+
         self._validate_model_inputs(trainer_model_inputs)
         if not isinstance(generator, torch.Generator):
             raise ChassisFusionGRPOError("an explicit torch.Generator is required")
         policy_before = _policy_sha256(self.trainer)
         surrogate_before = _module_sha256(self.reward_evaluator.surrogate)
         optimizer_sha = self.trajectory_optimizer.config.sha256()
-        optimizer_step_before = int(getattr(self.trainer, "optimizer_step", -1))
         reward_count_before = self.reward_evaluator.evaluation_count
         branch_count_before = self.reward_evaluator.metadrive_candidate_branch_count
-
+        timing_tensor = trainer_model_inputs["ego_state"]
+        self._synchronize(timing_tensor)
+        total_start = time.perf_counter()
+        sampling_start = total_start
         rollout = self.trainer.sample_groups(
             trainer_model_inputs, generator=generator
         )
+        self._synchronize(timing_tensor)
+        sampling_ms = (time.perf_counter() - sampling_start) * 1000.0
         if not isinstance(rollout, JointGRPORollout):
             raise ChassisFusionGRPOError(
                 "trainer.sample_groups must return JointGRPORollout"
@@ -283,7 +393,7 @@ class ChassisFusionGRPOAdapter:
         tau_d = rollout.selected_trajectories.detach().to(torch.float32).clone()
         if tuple(tau_d.shape) != (1, NUM_GROUPS, NUM_ROLES, 8, 3):
             raise ChassisFusionGRPOError(
-                "online CF-6 rollout must contain one state and four joint candidates"
+                "online chassis-fusion rollout must contain one state and four joint candidates"
             )
         raw_snapshot = tau_d.clone()
         coarse = trainer_model_inputs["coarse_trajectories"].detach().cpu().numpy()
@@ -308,62 +418,57 @@ class ChassisFusionGRPOAdapter:
             np.array(optimization.optimized_trajectories, copy=True)
         ).to(device=tau_d.device, dtype=torch.float32)
         command = chassis_context.command(tau_cmd)
+        self._synchronize(timing_tensor)
+        reward_start = time.perf_counter()
         reward = self.reward_evaluator.score(env, reward_model_inputs, command)
+        self._synchronize(timing_tensor)
+        reward_ms = (time.perf_counter() - reward_start) * 1000.0
+        total_ms = (time.perf_counter() - total_start) * 1000.0
         if reward.rewards.requires_grad:
             raise ChassisFusionGRPOError("surrogate reward must be gradient-free")
         if not torch.equal(tau_d, raw_snapshot) or not torch.equal(
             rollout.selected_trajectories, raw_snapshot
         ):
-            raise ChassisFusionGRPOError("raw rollout tau_d changed before GRPO update")
-
-        update = self.trainer.update(rollout, reward.rewards)
-        if int(update.optimizer_step) != optimizer_step_before + 1:
-            raise ChassisFusionGRPOError(
-                "CF-6 must execute exactly one GRPO optimizer step"
-            )
+            raise ChassisFusionGRPOError("raw rollout tau_d changed during evaluation")
         if self.reward_evaluator.evaluation_count != reward_count_before + 1:
             raise ChassisFusionGRPOError(
-                "CF-6 must execute the frozen surrogate exactly once"
+                "candidate evaluation must execute the frozen surrogate exactly once"
             )
-        branches = (
-            self.reward_evaluator.metadrive_candidate_branch_count
-            - branch_count_before
-        )
+        branches = self.reward_evaluator.metadrive_candidate_branch_count - branch_count_before
         if branches != 0:
             raise ChassisFusionGRPOError(
-                "CF-6 attempted a candidate MetaDrive branch rollout"
+                "candidate evaluation attempted a MetaDrive branch rollout"
             )
         surrogate_after = _module_sha256(self.reward_evaluator.surrogate)
         if surrogate_after != surrogate_before:
-            raise ChassisFusionGRPOError(
-                "frozen chassis surrogate changed during GRPO update"
-            )
-        if self.trajectory_optimizer.config.sha256() != optimizer_sha:
-            raise ChassisFusionGRPOError(
-                "trajectory optimizer changed during GRPO update"
-            )
+            raise ChassisFusionGRPOError("frozen chassis surrogate changed during evaluation")
         policy_after = _policy_sha256(self.trainer)
+        if policy_after != policy_before:
+            raise ChassisFusionGRPOError("policy changed during inference-only evaluation")
         selected_group = reward.rewards.argmax(dim=1).to(torch.int64)
         row = torch.arange(1, device=tau_cmd.device)
         selected_tau_cmd = tau_cmd[row, selected_group].detach().clone()
-        return ChassisFusionGRPOStepResult(
+        return ChassisFusionCandidateResult(
             rollout=rollout,
             tau_d=tau_d,
             tau_cmd=tau_cmd.detach().clone(),
             optimization=optimization,
             reward=reward,
-            update=update,
             selected_group=selected_group.detach().clone(),
             selected_tau_cmd=selected_tau_cmd,
-            policy_sha256_before=policy_before,
-            policy_sha256_after=policy_after,
+            policy_sha256=policy_after,
             surrogate_sha256=surrogate_after,
             optimizer_config_sha256=optimizer_sha,
             metadrive_candidate_branches=branches,
+            sampling_ms=sampling_ms,
+            reward_ms=reward_ms,
+            total_ms=total_ms,
         )
 
     def execute_selected_once(
-        self, env: object, result: ChassisFusionGRPOStepResult
+        self,
+        env: object,
+        result: ChassisFusionGRPOStepResult | ChassisFusionCandidateResult,
     ) -> Any:
         """Execute only the best optimized joint command in MetaDrive once."""
 
@@ -390,6 +495,7 @@ class ChassisFusionGRPOAdapter:
 
 __all__ = [
     "ChassisExecutionContext",
+    "ChassisFusionCandidateResult",
     "ChassisFusionGRPOAdapter",
     "ChassisFusionGRPOError",
     "ChassisFusionGRPOStepResult",

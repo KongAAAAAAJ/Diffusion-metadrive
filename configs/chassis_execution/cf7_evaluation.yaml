@@ -1,0 +1,13 @@
+format: chassis_fusion_evaluation_v1
+models: [A_stage1, B_stage1, A_cf6, B_cf6]
+scenarios:
+  - [S1_free_cruise_straight, R3_mainline_straight]
+  - [S5_hard_brake_lead, R1_entry_straight]
+seed: 17
+online_model_steps_per_scenario: 3
+candidate_count: 4
+latency_warmup_candidate_evaluations_per_model: 1
+data_origin: synthetic_virtual
+diagnostic_only: true
+eligible_for_formal_training: false
+pending_gate: CF-2_real_windows_trucksim_smoke

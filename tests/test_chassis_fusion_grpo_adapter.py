@@ -277,6 +277,32 @@ def test_raw_rollout_is_updated_once_and_only_tau_cmd_enters_surrogate() -> None
     assert env.step_calls == 0
 
 
+def test_inference_only_candidate_evaluation_does_not_update_policy() -> None:
+    trainer, evaluator, adapter = _adapter()
+    env = _Environment()
+    before = {
+        name: value.detach().clone()
+        for name, value in trainer.planner.state_dict().items()
+    }
+    result = adapter.evaluate_candidates(
+        env=env,
+        trainer_model_inputs=_trainer_inputs(),
+        reward_model_inputs=_reward_inputs(),
+        chassis_context=_context(),
+        generator=torch.Generator().manual_seed(8),
+    )
+    assert trainer.update_calls == trainer.optimizer_step == 0
+    assert evaluator.evaluation_count == 1
+    assert result.metadrive_candidate_branches == 0
+    assert result.sampling_ms >= 0.0
+    assert result.reward_ms >= 0.0
+    assert result.total_ms >= result.reward_ms
+    for name, value in trainer.planner.state_dict().items():
+        torch.testing.assert_close(value, before[name], rtol=0.0, atol=0.0)
+    assert adapter.execute_selected_once(env, result) == "one-physical-transition"
+    assert env.step_calls == 1
+
+
 def test_only_selected_tau_cmd_is_executed_once() -> None:
     _, _, adapter = _adapter()
     env = _Environment()

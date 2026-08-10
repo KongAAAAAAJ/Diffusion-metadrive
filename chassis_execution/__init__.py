@@ -48,9 +48,15 @@ from .surrogate import (
 )
 from .grpo_adapter import (
     ChassisExecutionContext,
+    ChassisFusionCandidateResult,
     ChassisFusionGRPOAdapter,
     ChassisFusionGRPOError,
     ChassisFusionGRPOStepResult,
+)
+from .online_context import (
+    MetaDriveOnlineChassisContextBuilder,
+    OnlineChassisContextError,
+    OnlineContextDiagnostics,
 )
 
 __all__ = [
@@ -91,7 +97,11 @@ __all__ = [
     "ChassisSurrogateError",
     "command_to_dense",
     "ChassisExecutionContext",
+    "ChassisFusionCandidateResult",
     "ChassisFusionGRPOAdapter",
     "ChassisFusionGRPOError",
     "ChassisFusionGRPOStepResult",
+    "MetaDriveOnlineChassisContextBuilder",
+    "OnlineChassisContextError",
+    "OnlineContextDiagnostics",
 ]

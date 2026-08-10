@@ -1,20 +1,20 @@
 {
   "format": "chassis_fusion_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-10T20:45:00+08:00",
+  "updated_at": "2026-08-10T21:00:41+08:00",
   "repository": {
     "branch": "chassis-fusion",
     "base_git_commit": "13bd7c5d649f52264779a3107faed927848a1765",
-    "implementation_commit": "10f0c7d90bcec42ef821d9253dae0d509a17e124",
+    "implementation_commit": "1b4ab215f97389385c2a85a1076d86fabb897395",
     "worktree_path": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion",
     "changes_committed": false
   },
   "current": {
     "completed_rounds": ["CF-0", "CF-1"],
-    "implemented_rounds": ["CF-0", "CF-1", "CF-2-code", "CF-3-diagnostic", "CF-4-diagnostic", "CF-5-diagnostic", "CF-6-diagnostic"],
-    "diagnostic_accepted_rounds": ["CF-3", "CF-4", "CF-5", "CF-6"],
-    "status": "cf6_diagnostic_accepted_cf2_real_gate_pending",
-    "active_hard_gate": "CF-7_diagnostic_end_to_end_evaluation"
+    "implemented_rounds": ["CF-0", "CF-1", "CF-2-code", "CF-3-diagnostic", "CF-4-diagnostic", "CF-5-diagnostic", "CF-6-diagnostic", "CF-7-diagnostic"],
+    "diagnostic_accepted_rounds": ["CF-3", "CF-4", "CF-5", "CF-6", "CF-7"],
+    "status": "cf7_diagnostic_accepted_cf2_real_gate_pending",
+    "active_hard_gate": "CF-2_real_windows_trucksim_smoke"
   },
   "source_of_truth": {
     "machine_protocol": {
@@ -68,6 +68,14 @@
     },
     "cf6_report": {
       "path": "evaluation/CF6_GRPO_SURROGATE_ADAPTER_REPORT.json",
+      "status": "diagnostic_accepted"
+    },
+    "cf7_evaluation_protocol": {
+      "path": "schemas/chassis_fusion_evaluation_v1.json",
+      "file_sha256": "f0783e3b71e8ecad9e2059aaf64f41672c442890bb126d37125b6299aa5e6444"
+    },
+    "cf7_report": {
+      "path": "evaluation/CF7_END_TO_END_DIAGNOSTIC_REPORT.json",
       "status": "diagnostic_accepted"
     }
   },
@@ -131,13 +139,26 @@
         "eligible_for_formal_training": false,
         "status": "passed"
       }
+    ],
+    "end_to_end_diagnostics": [
+      {
+        "path": "/media/kong/Elements_SE/Diffusion_Data/chassis_execution/outputs/chassis_fusion_cf7/run_1/cf7_end_to_end_diagnostic.json",
+        "sha256": "82f8b2ee3bc3f412cf21b6eb56d96bc27583fa72aa84ab2fc6137b60be44609e",
+        "models": ["A_stage1", "B_stage1", "A_cf6", "B_cf6"],
+        "data_origin": "synthetic_virtual",
+        "diagnostic_only": true,
+        "eligible_for_formal_training": false,
+        "software_hard_gates": "passed",
+        "planning_tick_p95_le_100ms": false,
+        "all_candidate_groups_have_safe_option": false
+      }
     ]
   },
   "next_actions": [
-    "Implement CF-7 diagnostic end-to-end evaluation and comparative evidence without granting formal eligibility.",
-    "Retain the raw tau_d probability action and frozen surrogate boundary in every CF-7 evaluation path.",
-    "Continue CF-7 only in diagnostic mode until the real Windows smoke passes.",
-    "In parallel, produce and verify the eight-maneuver Windows real-smoke export before any formal training."
+    "Produce and verify the eight-maneuver Windows TruckSim real-smoke export; this is the active hard gate.",
+    "Rebuild the CF-3 dataset and CF-4 surrogate from verified real TruckSim data rather than upgrading synthetic metadata.",
+    "Repeat CF-5 through CF-7 with real-data artifacts and formally eligible Stage 1/GRPO checkpoints.",
+    "Before formal evaluation, reduce no-safe-group incidence and the three-vehicle planning tick P95 to at most 100 ms."
   ],
   "invariants": {
     "tau_cmd_is_only_surrogate_trajectory_input": true,
@@ -166,6 +187,18 @@
       "status": "missing_artifact",
       "required_report": "trucksim_export_verification_report_v1",
       "required_purpose": "real_smoke"
+    }
+  },
+  "diagnostic_risks": {
+    "cf7_candidate_safety": {
+      "status": "failed_advisory_gate",
+      "no_safe_group_steps_per_model": 5,
+      "total_online_steps_per_model": 6
+    },
+    "cf7_latency": {
+      "status": "failed_advisory_gate",
+      "target_planning_tick_p95_ms": 100.0,
+      "observed_range_ms": [213.70356483384967, 231.6909465007484]
     }
   }
 }

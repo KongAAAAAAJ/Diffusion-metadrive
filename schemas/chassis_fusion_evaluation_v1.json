@@ -1,0 +1,58 @@
+{
+  "format": "chassis_fusion_evaluation_v1",
+  "schema_version": 1,
+  "purpose": "diagnostic end-to-end software-chain comparison",
+  "models": ["A_stage1", "B_stage1", "A_cf6", "B_cf6"],
+  "scenarios": [
+    ["S1_free_cruise_straight", "R3_mainline_straight"],
+    ["S5_hard_brake_lead", "R1_entry_straight"]
+  ],
+  "seed": 17,
+  "online_model_steps_per_scenario": 3,
+  "fairness": {
+    "same_scenario_seed": true,
+    "same_model_noise_seed_per_scenario_step": true,
+    "fresh_environment_per_model": true,
+    "latency_warmup_candidate_evaluations_per_model": 1,
+    "candidate_count": 4
+  },
+  "online_context": {
+    "initial_state_source": "current MetaDrive state and finite differences",
+    "vehicle_condition_source": "CF-3 diagnostic dataset profile bound to CF-4 fingerprint",
+    "controller_context_source": "current PlatoonEnv controller state",
+    "planar_roll_and_roll_rate": 0.0,
+    "diagnostic_only": true
+  },
+  "execution": {
+    "candidate_metadrive_branches": 0,
+    "selected_tau_cmd_env_steps_per_decision": 1,
+    "surrogate_input": "tau_cmd",
+    "reward_trajectory": "predicted_tau_a",
+    "policy_update_during_evaluation": false,
+    "fallback": false
+  },
+  "metrics": [
+    "collision", "out_of_road", "completed_steps", "selected_reward",
+    "candidate_unsafe_rate", "no_safe_group_rate", "intervention_ade_m",
+    "sampling_ms", "optimizer_ms", "reward_ms", "planning_tick_ms"
+  ],
+  "hard_gates": {
+    "all_four_models_loaded_strictly": true,
+    "minimum_completed_steps_per_model_scenario": 1,
+    "candidate_metadrive_branches": 0,
+    "selected_env_steps_equal_completed_steps": true,
+    "policy_and_surrogate_parameters_unchanged": true,
+    "all_metrics_finite": true
+  },
+  "advisory_gates": {
+    "three_vehicle_planning_tick_p95_ms": 100.0,
+    "all_candidate_groups_have_safe_option": true
+  },
+  "provenance": {
+    "data_origin": "synthetic_virtual",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "research_effect_claim": false,
+    "pending_gate": "CF-2_real_windows_trucksim_smoke"
+  }
+}
