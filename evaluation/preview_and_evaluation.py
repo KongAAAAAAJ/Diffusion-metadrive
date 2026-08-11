@@ -80,7 +80,7 @@ from expert_dataset.collect_joint_bev import (
 )
 from scenarios.bev_round13_contract import (
     PRIMARY_S5_S9_SCENARIOS,
-    deterministic_initial_speed_km_h,
+    deterministic_candidate_initial_speed_km_h,
 )
 from tools.topdown_view import (
     capture_topdown_frame as _capture_topdown_frame,
@@ -1206,6 +1206,10 @@ def _run_single_episode(
     if failure_reason is None and scenario_summary:
         if not bool(scenario_summary.get("scenario_realized", False)):
             failure_reason = "scenario_not_realized"
+        elif str(scenario_summary.get("scenario_id")) in dict(PRIMARY_S5_S9_SCENARIOS) and not bool(
+            scenario_summary.get("functional_success", False)
+        ):
+            failure_reason = "scenario_functional_gate_failed"
     if failure_reason is None and rejection_counts:
         reason, _ = sorted(
             rejection_counts.items(), key=lambda item: (-item[1], item[0])
@@ -1334,6 +1338,7 @@ def run_scenario(
     save_semantic_bev_video: bool = True,
     save_trajectory_data: bool = True,
     target_speed_km_h: float = DEFAULT_TARGET_SPEED_KM_H,
+    rule_maker_profile: str | None = None,
 ) -> Path:
     if local_route is None:
         local_route = _pick_local_route(scenario_id)
@@ -1377,6 +1382,7 @@ def run_scenario(
         "out_of_road_done": False,
         "horizon": int(horizon),
         "target_speed_km_h": float(target_speed_km_h),
+        "rule_maker_profile_id": rule_maker_profile,
     }
     if env_factory is not None:
         env = env_factory(env_config)
@@ -1409,7 +1415,7 @@ def run_scenario(
             episode_unlock_record: dict | None = None
             for retry in range(max(1, int(max_episode_retries))):
                 episode_seed = used_seed + retry
-                initial_speed_km_h = deterministic_initial_speed_km_h(
+                initial_speed_km_h = deterministic_candidate_initial_speed_km_h(
                     scenario_id, episode_seed
                 )
                 runtime_updates = {
@@ -1730,6 +1736,12 @@ def main() -> None:
         help="Explicit unique episode seeds; count must equal --num-episodes",
     )
     parser.add_argument("--video-fps", type=int, default=DEFAULT_VIDEO_FPS)
+    parser.add_argument(
+        "--rule-maker-profile",
+        default=None,
+        choices=("brake_first", "balanced", "evasive"),
+        help="Optional S5 RuleMaker profile.",
+    )
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON,
                         help=f"Override environment horizon / max steps per agent (default: {DEFAULT_HORIZON})")
     parser.add_argument(
@@ -1769,6 +1781,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.all_scenarios and args.primary_s5_s9:
         parser.error("--all-scenarios and --primary-s5-s9 are mutually exclusive")
+    if (args.all_scenarios or args.primary_s5_s9) and args.rule_maker_profile:
+        parser.error("--rule-maker-profile is only valid for a single S5 run")
 
     heading_up = args.heading_up.lower() in ("true", "1", "yes")
     output_root = Path(args.output_root)
@@ -1830,6 +1844,7 @@ def main() -> None:
             save_semantic_bev_video=not args.no_semantic_bev_video,
             save_trajectory_data=not args.no_trajectory_data,
             target_speed_km_h=args.target_speed_km_h,
+            rule_maker_profile=args.rule_maker_profile,
         )
         print(f"\n=== Videos saved to: {video_dir} ===")
 

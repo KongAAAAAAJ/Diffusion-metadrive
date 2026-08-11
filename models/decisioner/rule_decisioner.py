@@ -64,6 +64,7 @@ class RuleMakerProposalBatch:
 def load_rule_maker_config(
     scenario_id: str | None = None,
     yaml_path: str | Path | None = None,
+    profile_id: str | None = None,
 ) -> dict:
     """Load rule-maker params from yaml, merging scenario override on top of default.
 
@@ -83,6 +84,13 @@ def load_rule_maker_config(
         override = (raw.get("scenario_overrides") or {}).get(scenario_id)
         if override:
             params.update(override)
+    if profile_id:
+        profiles = (raw.get("scenario_profiles") or {}).get(scenario_id or "", {})
+        if profile_id not in profiles:
+            raise ValueError(
+                f"Unknown RuleMaker profile {profile_id!r} for scenario {scenario_id!r}"
+            )
+        params.update(profiles[profile_id] or {})
     return params
 
 
@@ -1716,6 +1724,7 @@ class MultiAgentRuleMaker(RuleMaker):
             target_point = self._world_to_ego_local(vehicle, trajectory[-1])
 
             candidate = {
+                "agent_id": str(getattr(vehicle, "name", "")),
                 "action": int(action),
                 "valid": True,
                 "score": 0.0,
@@ -1745,6 +1754,7 @@ class MultiAgentRuleMaker(RuleMaker):
             if (
                 self._is_s8_exit_route(env)
                 and int(action) == 1
+                and self._s8_lane_change_window_open(env, source_lane)
                 and tuple(getattr(source_lane, "index", ())[:2])
                 == tuple(getattr(target_lane, "index", ())[:2])
             ):
@@ -1764,6 +1774,12 @@ class MultiAgentRuleMaker(RuleMaker):
                 candidate["forced_route_action"] = True
             if self._is_s7_forced_lane_candidate(env, candidate):
                 candidate["forced_lane_change"] = True
+                candidate["forced_route_action"] = True
+            if self._is_s7_initial_keep_candidate(env, candidate):
+                candidate["forced_route_action"] = True
+            if self._is_s9_forced_route_candidate(env, candidate):
+                # The blocker/TTC gate and verified topology make this the
+                # sole admissible route-level action for the pending vehicle.
                 candidate["forced_route_action"] = True
             return candidate
         except Exception:
@@ -1998,6 +2014,61 @@ class MultiAgentRuleMaker(RuleMaker):
         )
 
     @classmethod
+    def _s8_lane_change_window_open(cls, env, source_lane) -> bool:
+        try:
+            vehicle = (getattr(env, "agents", {}) or {})["agent0"]
+            remaining = float(source_lane.length) - float(
+                source_lane.local_coordinates(vehicle.position)[0]
+            )
+        except Exception:
+            return False
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        resolved = getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}
+        threshold = float(resolved.get("mandatory_lane_change_remaining_distance_m", 60.0))
+        return 0.0 <= remaining <= threshold
+
+    def _is_s9_forced_route_candidate(self, env, candidate: dict) -> bool:
+        config = getattr(env, "config", {}) or {}
+        if self._config_value(config, "scenario_id") != "S9_narrow_channel_negotiation":
+            return False
+        source = tuple(candidate.get("source_lane_index", ()) or ())
+        target = tuple(candidate.get("target_lane_index", ()) or ())
+        action = int(candidate.get("action", 0))
+        if int(self._decision_step) <= 5:
+            return action == 0
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        manifest = getattr(orchestrator, "_actor_manifest", {}) or {}
+        # Allow one KEEP step so the atomic blocker recipe exists before the
+        # topology/TTC gate constrains the joint action set.
+        if "blocking_actor" not in manifest:
+            return action == 0
+        agents = getattr(env, "agents", {}) or {}
+        pending = next(
+            (
+                agent_id
+                for agent_id in ("agent0", "agent1", "agent2")
+                if len(tuple(getattr(agents.get(agent_id), "lane_index", ()) or ())) >= 3
+                and int(tuple(getattr(agents.get(agent_id), "lane_index", ()) or ())[2]) == 1
+            ),
+            None,
+        )
+        candidate_agent = str(candidate.get("agent_id", ""))
+        pending_vehicle_name = (
+            str(getattr(agents.get(pending), "name", pending))
+            if pending is not None else None
+        )
+        if pending is not None and candidate_agent != pending_vehicle_name:
+            return action == 0
+        # c3 lane 1 must move LEFT into the only continuous narrowing route.
+        if len(source) >= 3 and len(target) >= 3 and source[:2] == target[:2]:
+            if int(source[2]) == 1:
+                return action == -1 and int(target[2]) == 0
+            if int(source[2]) == 0:
+                return action == 0
+        # Once downstream of c3 the route is single-lane: KEEP only.
+        return len(source) >= 3 and int(source[2]) == 0 and action == 0
+
+    @classmethod
     def _is_s6_background_merge_route(cls, env) -> bool:
         config = getattr(env, "config", {}) or {}
         return (
@@ -2052,11 +2123,28 @@ class MultiAgentRuleMaker(RuleMaker):
             and cls._config_value(config, "local_route") == "R7_merge_core"
         )
 
-    @classmethod
-    def _is_s7_forced_lane_candidate(cls, env, candidate: dict) -> bool:
-        if not cls._is_s7_merge_route(env):
+    def _is_s7_forced_lane_candidate(self, env, candidate: dict) -> bool:
+        if not self._is_s7_merge_route(env):
             return False
         if int(candidate.get("action", 0)) != -1:
+            return False
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        if orchestrator is not None:
+            manifest = getattr(orchestrator, "_actor_manifest", {}) or {}
+            if not {
+                "critical_gap_front", "critical_gap_rear", "next_gap_front", "next_gap_rear"
+            }.issubset(manifest):
+                return False
+            if int(self._decision_step) <= 10:
+                return False
+        front_gap = candidate.get("front_gap_m")
+        rear_gap = candidate.get("rear_gap_m")
+        # Topology requires LEFT, but the merge timing remains a longitudinal
+        # game: keep waiting while either side of the candidate corridor is
+        # too tight, allowing pass-first and yield-to-next-gap outcomes.
+        if front_gap is not None and float(front_gap) < 20.0:
+            return False
+        if rear_gap is not None and float(rear_gap) < 15.0:
             return False
         target_lane_index = tuple(candidate.get("target_lane_index", ()) or ())
         source_lane_index = tuple(candidate.get("source_lane_index", ()) or ())
@@ -2072,6 +2160,15 @@ class MultiAgentRuleMaker(RuleMaker):
         ):
             return True
         return False
+
+    @classmethod
+    def _is_s7_initial_keep_candidate(cls, env, candidate: dict) -> bool:
+        if not cls._is_s7_merge_route(env) or int(candidate.get("action", 0)) != 0:
+            return False
+        manifest = getattr(getattr(env, "_scenario_orchestrator", None), "_actor_manifest", {}) or {}
+        return not {
+            "critical_gap_front", "critical_gap_rear", "next_gap_front", "next_gap_rear"
+        }.issubset(manifest)
 
     def _S8_reference_lane_chain(self, env, vehicle, source_lane) -> list | None:
         lane_chain = [source_lane]
@@ -2683,7 +2780,7 @@ class MultiAgentRuleMaker(RuleMaker):
             return coarse_arr[0, -1, :2].copy()
         return None
 
-def make_rule_maker(config: dict) -> RuleMaker:
+def make_rule_maker(config: dict, profile_id: str | None = None) -> RuleMaker:
     """Factory: instantiate a RuleMaker from a config dict.
 
     Loads base params from configs/decision_model/rule_maker.yaml (default section),
@@ -2702,9 +2799,12 @@ def make_rule_maker(config: dict) -> RuleMaker:
     """
     rule_maker_type = str(config.get("rule_maker_type", "multi_agent"))
     scenario_id = config.get("scenario_id") or None
+    profile_id = profile_id or config.get("rule_maker_profile_id") or None
     yaml_path = config.get("rule_maker_yaml_path") or None
 
-    yaml_params = load_rule_maker_config(scenario_id=scenario_id, yaml_path=yaml_path)
+    yaml_params = load_rule_maker_config(
+        scenario_id=scenario_id, yaml_path=yaml_path, profile_id=profile_id
+    )
 
     # Apply explicit config overrides (rule_maker_* prefix or bare keys).
     _overrides = {
@@ -2727,7 +2827,7 @@ def make_rule_maker(config: dict) -> RuleMaker:
             yaml_params[k] = v
 
     if rule_maker_type == "multi_agent":
-        return MultiAgentRuleMaker(
+        rule_maker = MultiAgentRuleMaker(
             target_speed_km_h=float(yaml_params.get("target_speed_km_h", 30.0)),
             horizon_s=float(yaml_params.get("horizon_s", 4.0)),
             num_waypoints=int(yaml_params.get("num_waypoints", 8)),
@@ -2763,6 +2863,8 @@ def make_rule_maker(config: dict) -> RuleMaker:
             forced_lane_unlock_wait_steps=int(yaml_params.get("forced_lane_unlock_wait_steps", 10)),
             relock_stable_steps=int(yaml_params.get("relock_stable_steps", 20)),
         )
+        rule_maker.profile_id = profile_id
+        return rule_maker
     raise ValueError(
         f"Unknown rule_maker_type: {rule_maker_type!r}. "
         "Register a new subclass of RuleMaker and add it here."

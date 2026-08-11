@@ -255,25 +255,23 @@ def test_s6_spawns_one_arrival_aligned_merge_vehicle_only_once() -> None:
     assert len(traffic_manager.spawn_calls) == 1
     call = traffic_manager.spawn_calls[0]
     assert call[1]["spawn_lane_index"] == ("A", "B", 0)
-    assert call[1]["spawn_longitude"] == pytest.approx(67.0, abs=0.05)
-    assert call[1]["spawn_velocity"] == pytest.approx((24.0 / 3.6, 0.0))
+    resolved = orchestrator._resolved_scenario_parameters
+    assert 2.0 <= call[1]["spawn_longitude"] <= 98.0
+    assert call[1]["spawn_velocity"] == pytest.approx((resolved["merge_actor_speed_km_h"] / 3.6, 0.0))
     assert call[3] == {
-        "merge_front_gap_m": 10.0,
-        "merge_rear_gap_m": 10.0,
+        "merge_front_gap_m": resolved["target_front_bumper_gap_m"],
+        "merge_rear_gap_m": resolved["target_rear_bumper_gap_m"],
         "merge_creep_speed_kmh": 20.0,
-        "merge_cruise_speed_kmh": 24.0,
+        "merge_cruise_speed_kmh": resolved["merge_actor_speed_km_h"],
+        "merge_activation_step": resolved["merge_activation_step"],
     }
     vehicle = traffic_manager._traffic_vehicles[0]
-    assert vehicle.scenario_vehicle_role == "s6_merge_vehicle"
-    assert vehicle.scenario_merge_arrival_offset_s == pytest.approx(1.2)
+    assert vehicle.scenario_vehicle_role == "s6_gap_intruder"
+    assert vehicle.scenario_merge_arrival_offset_s == pytest.approx(resolved["conflict_arrival_time_delta_s"])
     assert (
-        vehicle.scenario_leader_ttc_s
+        vehicle.scenario_target_front_ttc_s
         < vehicle.scenario_merge_ttc_s
-        < vehicle.scenario_middle_ttc_s
-    )
-    assert (
-        vehicle.scenario_merge_ttc_s - vehicle.scenario_leader_ttc_s
-        == pytest.approx(1.2)
+        < vehicle.scenario_target_rear_ttc_s
     )
     branch_lane = env.engine.current_map.road_network.get_lane(
         call[1]["spawn_lane_index"]
@@ -293,7 +291,7 @@ def test_s6_spawns_one_arrival_aligned_merge_vehicle_only_once() -> None:
     )
 
 
-def test_s7_mainline_background_spawns_on_three_g1_lanes() -> None:
+def test_s7_atomic_mainline_background_spawns_all_declared_roles() -> None:
     env, _ego, traffic_manager = make_env_and_ego()
     env.engine.current_map.blocks[0].graph_block_id = "g1"
     orchestrator = ScenarioOrchestrator(
@@ -305,14 +303,10 @@ def test_s7_mainline_background_spawns_on_three_g1_lanes() -> None:
     orchestrator.before_step(env, "agent0", 1)
 
     calls = traffic_manager.spawn_calls
-    assert len(calls) == 10
+    assert len(calls) == orchestrator._resolved_scenario_parameters["actor_count"]
     spawned_lane_ids = [call[1]["spawn_lane_index"][-1] for call in calls]
-    assert {lane_id: spawned_lane_ids.count(lane_id) for lane_id in sorted(set(spawned_lane_ids))} == {
-        0: 3,
-        1: 4,
-        2: 3,
-    }
-    assert [call[1]["spawn_lane_index"][:2] for call in calls] == [("road_a", "road_b")] * 10
+    assert 2 in spawned_lane_ids
+    assert [call[1]["spawn_lane_index"][:2] for call in calls] == [("road_a", "road_b")] * len(calls)
     assert all(call[1]["spawn_velocity_car_frame"] is True for call in calls)
     assert orchestrator.summary.scenario_realized is True
 
@@ -345,17 +339,11 @@ def test_s5_hard_brake_recipe_uses_episode_local_scenario_rng(monkeypatch) -> No
 
     orchestrator.before_step(env, "agent0", 31)
 
-    expected_rng = np.random.RandomState(orchestrator._scenario_random_seed)
-    assert captured_params["lead_bumper_gap_m"] == float(
-        expected_rng.uniform(9.0, 13.0)
-    )
-    assert captured_params["lead_target_speed_kmh"] == float(
-        expected_rng.uniform(22.0, 26.0)
-    )
-    assert captured_params["brake_target_speed_kmh"] == float(expected_rng.uniform(0.5, 2.0))
-    assert captured_params["brake_deceleration_mps2"] == float(
-        expected_rng.uniform(5.0, 7.0)
-    )
+    resolved = orchestrator._resolved_scenario_parameters
+    assert captured_params["lead_bumper_gap_m"] == resolved["lead_trigger_bumper_gap_m"]
+    assert captured_params["lead_target_speed_kmh"] == resolved["lead_approach_speed_km_h"]
+    assert captured_params["brake_target_speed_kmh"] == resolved["lead_target_speed_km_h"]
+    assert captured_params["brake_deceleration_mps2"] == resolved["lead_brake_deceleration_mps2"]
     assert orchestrator._speed_profiles["spawned_lead"]["remaining_steps"] == float(
         "inf"
     )
@@ -374,9 +362,8 @@ def test_s5_adjacent_recipe_uses_episode_local_scenario_rng() -> None:
 
     orchestrator.before_step(env, "agent0", 1)
 
-    expected_rng = np.random.RandomState(orchestrator._scenario_random_seed)
-    left_offset = float(expected_rng.uniform(-15.0, -13.0))
-    right_offset = float(expected_rng.uniform(13.0, 15.0))
+    left_offset = orchestrator._resolved_scenario_parameters["left_offset_m"]
+    right_offset = orchestrator._resolved_scenario_parameters["right_offset_m"]
 
     assert [call[1]["spawn_lane_index"] for call in traffic_manager.spawn_calls] == [
         ("road_a", "road_b", 0),
@@ -386,10 +373,10 @@ def test_s5_adjacent_recipe_uses_episode_local_scenario_rng() -> None:
         20.0 + left_offset,
         20.0 + right_offset,
     ]
-    assert [traffic_manager.policies[vehicle.name].target_speed for vehicle in traffic_manager._traffic_vehicles] == [
-        24.0,
-        24.0,
-    ]
+    assert [traffic_manager.policies[vehicle.name].target_speed for vehicle in traffic_manager._traffic_vehicles] == pytest.approx([
+        orchestrator._resolved_scenario_parameters["left_speed_km_h"],
+        orchestrator._resolved_scenario_parameters["right_speed_km_h"],
+    ])
 
 
 def test_s5_scenario_parameters_ignore_unrelated_traffic_rng_consumption(

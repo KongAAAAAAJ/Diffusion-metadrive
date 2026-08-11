@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Dict, List, Tuple
 import numpy as np
 
 from scenarios.definitions import ScenarioDefinition, TriggerSpec
+from scenarios.s5_s9_sampling import resolve_s5_s9_parameters
 from metadrive.policy.idm_policy import IDMPolicy
 
 if TYPE_CHECKING:
@@ -107,6 +108,12 @@ class ScenarioOrchestrator:
         self._scenario_random_seed: int | None = None
         self._scenario_rng = None
         self._resolved_recipe_parameters: Dict[str, Dict[str, float]] = {}
+        self._resolved_scenario_parameters: Dict[str, object] = {}
+        self._actor_manifest: Dict[str, Dict[str, object]] = {}
+        self._conflict_evidence: Dict[str, object] = {}
+        self._route_completion: Dict[str, object] = {}
+        self._initial_agent_lanes: Dict[str, tuple] = {}
+        self._last_env = None
 
     def reset(self, env, agent_id: str) -> None:
         self.summary = ScenarioEpisodeSummary(scenario_id=self.definition.scenario_id)
@@ -118,8 +125,40 @@ class ScenarioOrchestrator:
         self._scenario_random_seed = self._derive_scenario_random_seed(env)
         self._scenario_rng = np.random.RandomState(self._scenario_random_seed)
         self._resolved_recipe_parameters = {}
+        self._last_env = env
+        agents = getattr(env, "agents", {}) or {}
+        self._initial_agent_lanes = {
+            str(name): tuple(getattr(vehicle, "lane_index", ()) or ())
+            for name, vehicle in agents.items()
+        }
+        lead = agents.get("agent0") or agents.get(agent_id)
+        ego_speed = float(getattr(lead, "speed_km_h", 0.0) or 0.0)
+        raw_seed = getattr(env, "current_seed", None)
+        if raw_seed is None:
+            raw_seed = getattr(getattr(env, "engine", None), "global_random_seed", 0)
+        self._resolved_scenario_parameters = resolve_s5_s9_parameters(
+            spawn_seed=int(raw_seed or 0),
+            scenario_id=self.definition.scenario_id,
+            local_route=self.local_route,
+            ego_initial_speed_km_h=ego_speed,
+            decision_dt_s=self._scenario_step_dt_s(env),
+        )
+        self._actor_manifest = {}
+        self._conflict_evidence = {
+            "minimum_actor_distance_m": None,
+            "minimum_actor_ttc_s": None,
+        }
+        self._route_completion = {
+            "agent_lane_transitions": {str(name): [] for name in agents},
+            "all_agents_changed_lane": False,
+            "all_agents_passed_blocker": False,
+            "all_agents_entered_exit_ramp": False,
+            "all_agents_entered_mainline": False,
+            "returned_to_original_lane": False,
+        }
 
     def before_step(self, env, agent_id: str, step_count: int) -> None:
+        self._last_env = env
         self._apply_speed_profiles(env)
         ego_vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
         if ego_vehicle is None:
@@ -130,10 +169,15 @@ class ScenarioOrchestrator:
                 self.summary.scenario_triggered = True
                 self.summary.trigger_step = int(step_count)
         self._execute_recipe(env, ego_vehicle, step_count)
+        self._update_functional_evidence(env, step_count)
 
     def get_episode_summary(self) -> Dict[str, object]:
+        if self._last_env is not None:
+            self._update_functional_evidence(self._last_env, -1)
         recipe_count = len(self.definition.traffic_recipes)
         completed_recipe_count = len(self._completed_recipe_keys)
+        recipes_complete = completed_recipe_count == recipe_count
+        functional_success = self._functional_success(recipes_complete)
         return {
             "scenario_id": self.summary.scenario_id,
             "scenario_triggered": bool(self.summary.scenario_triggered),
@@ -142,16 +186,35 @@ class ScenarioOrchestrator:
             "scenario_realized_step": self.summary.realized_step,
             "scenario_recipe_count": int(recipe_count),
             "scenario_completed_recipe_count": int(completed_recipe_count),
-            "scenario_recipes_complete": bool(
-                completed_recipe_count == recipe_count
-            ),
+            "scenario_recipes_complete": bool(recipes_complete),
             "scenario_notes": list(self.summary.notes),
             "scenario_random_seed": self._scenario_random_seed,
             "resolved_recipe_parameters": {
                 key: dict(value)
                 for key, value in self._resolved_recipe_parameters.items()
             },
+            "severity_bucket": self._resolved_scenario_parameters.get(
+                "severity_bucket"
+            ),
+            "resolved_scenario_parameters": dict(
+                self._resolved_scenario_parameters
+            ),
+            "actor_manifest": {
+                role: dict(row) for role, row in self._actor_manifest.items()
+            },
+            "conflict_evidence": dict(self._conflict_evidence),
+            "route_completion": {
+                key: (dict(value) if isinstance(value, dict) else value)
+                for key, value in self._route_completion.items()
+            },
+            "functional_success": bool(functional_success),
+            "expert_profile_id": self._expert_profile_id(),
         }
+
+    def _expert_profile_id(self) -> str | None:
+        config = getattr(self._last_env, "config", {}) if self._last_env is not None else {}
+        value = config.get("rule_maker_profile_id") if hasattr(config, "get") else None
+        return None if value in (None, "") else str(value)
 
     def _execute_recipe(self, env, ego_vehicle, step_count: int) -> None:
         if not self.definition.traffic_recipes:
@@ -284,6 +347,7 @@ class ScenarioOrchestrator:
         )
         if realized_gap is not None:
             setattr(lead_vehicle, "scenario_brake_trigger_bumper_gap_m", realized_gap)
+        self._register_actor("hard_brake_lead", lead_vehicle, step_count=step_count)
         self._mark_realized(step_count, "lead_brake_profile")
         return True
 
@@ -295,6 +359,18 @@ class ScenarioOrchestrator:
 
     def _handle_inject_background_vehicle(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         params = self._resolve_background_vehicle_params(env, params)
+        if self.definition.scenario_id == "S6_background_merge_in":
+            resolved = self._resolved_scenario_parameters
+            params.update(
+                target_speed_kmh=float(resolved["merge_actor_speed_km_h"]),
+                merge_front_gap_m=float(resolved["target_front_bumper_gap_m"]),
+                merge_rear_gap_m=float(resolved["target_rear_bumper_gap_m"]),
+                merge_arrival_offset_s=float(
+                    resolved["conflict_arrival_time_delta_s"]
+                ),
+                target_gap_id=str(resolved["target_gap_id"]),
+                merge_activation_step=int(resolved["merge_activation_step"]),
+            )
         merge_alignment = None
         if (
             str(params.get("policy", "")) == "idm_merge"
@@ -349,8 +425,203 @@ class ScenarioOrchestrator:
         if merge_alignment is not None:
             for key, value in merge_alignment.items():
                 setattr(spawned, f"scenario_{key}", value)
+        role = str(getattr(spawned, "scenario_vehicle_role", "injected_background"))
+        self._register_actor(role, spawned, step_count=step_count)
+        if merge_alignment is not None:
+            self._conflict_evidence.update(dict(merge_alignment))
         self._mark_realized(step_count, f"injected:{reference_kind}")
         return True
+
+    def _spawn_role_on_lane(
+        self, env, ego_vehicle, *, role: str, lane_tuple, longitudinal_m: float,
+        speed_kmh: float, step_count: int, min_clearance_m: float = 0.0,
+    ):
+        spawned = self._spawn_on_lane_tuple(
+            env,
+            ego_vehicle,
+            lane_tuple=lane_tuple,
+            spawn_longitude=float(longitudinal_m),
+            reference_kind="absolute_lane",
+            target_speed_kmh=float(speed_kmh),
+            min_clearance_m=float(min_clearance_m),
+            clearance_scope="same_lane",
+            vehicle_type=self._scenario_vehicle_type(),
+        )
+        if spawned is None:
+            return None
+        setattr(spawned, "scenario_vehicle_role", role)
+        setattr(spawned, "scenario_warning_marker", "!")
+        name = getattr(spawned, "name", None)
+        if name is not None:
+            self._speed_profiles[name] = {
+                "remaining_steps": float("inf"),
+                "target_speed_kmh": float(speed_kmh),
+            }
+        self._register_actor(role, spawned, step_count=step_count)
+        return spawned
+
+    def _handle_inject_s7_merge_traffic(self, env, ego_vehicle, params, step_count: int) -> bool:
+        resolved = self._resolved_scenario_parameters
+        lane_tuple = self._resolve_lane_index(
+            env, ego_vehicle, reference_kind="block_route_road",
+            block_id=params.get("block_id", "g1"), lane_index=int(params.get("lane_index", 2)),
+        )
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        if lane_tuple is None or current_map is None:
+            self.summary.notes.append("s7_mainline_lane_missing")
+            return False
+        lane = current_map.road_network.get_lane(lane_tuple)
+        speeds = list(resolved.get("mainline_actor_speeds_km_h", (24.0,) * 6))
+        actor_count = int(resolved.get("actor_count", 4))
+        usable_gap = float(resolved.get("usable_mainline_gap_m", 55.0))
+        ego_ttc = float(resolved.get("ego_distance_to_merge_point_m", 40.0)) / max(
+            float(getattr(ego_vehicle, "speed_km_h", 24.0)) / 3.6, 0.1
+        )
+        front_ttc = max(0.5, ego_ttc - 0.45)
+        front_s = float(lane.length) - speeds[0] / 3.6 * front_ttc
+        # Preserve the arrival-time solution where possible while reserving
+        # enough upstream lane for the four required distinct roles.
+        front_s = max(front_s, usable_gap + 32.0)
+        front_s = min(front_s, float(lane.length) - 3.0)
+        required = (
+            ("critical_gap_front", front_s, speeds[0]),
+            ("critical_gap_rear", front_s - usable_gap, speeds[1]),
+            ("next_gap_front", front_s, speeds[2]),
+            ("next_gap_rear", front_s - usable_gap, speeds[3]),
+        )
+        rows = list(required)
+        for index in range(actor_count - 4):
+            rows.append((
+                f"optional_adjacent_{index}",
+                max(3.0, front_s - 12.0 - 28.0 * index),
+                speeds[4 + index],
+            ))
+        self._conflict_evidence["s7_atomic_candidate_geometry"] = {
+            "lane_length_m": float(lane.length),
+            "rows": [
+                {"role": role, "longitudinal_m": float(s), "speed_km_h": float(speed)}
+                for role, s, speed in rows
+            ],
+        }
+        # Validate the full atomic recipe before spawning any actor.
+        if any(not 2.1 <= s <= float(lane.length) - 2.1 for _, s, _ in rows):
+            self.summary.notes.append("s7_atomic_geometry_out_of_range")
+            return False
+        for role, longitudinal, speed in rows:
+            target_lane = lane_tuple
+            if role.startswith("next_gap"):
+                target_lane = (lane_tuple[0], lane_tuple[1], max(0, lane_tuple[2] - 1))
+            elif role.startswith("optional_adjacent"):
+                target_lane = (lane_tuple[0], lane_tuple[1], max(0, lane_tuple[2] - 2))
+            if self._spawn_role_on_lane(
+                env, ego_vehicle, role=role, lane_tuple=target_lane,
+                longitudinal_m=longitudinal, speed_kmh=speed,
+                step_count=step_count, min_clearance_m=0.0,
+            ) is None:
+                self.summary.notes.append(f"s7_atomic_spawn_failed:{role}")
+                return False
+        self._conflict_evidence.update({
+            "usable_mainline_gap_m": usable_gap,
+            "expected_behavior": resolved.get("expected_behavior"),
+            "declared_actor_count": actor_count,
+        })
+        self._mark_realized(step_count, "s7_atomic_traffic_spawned")
+        return len([r for r in self._actor_manifest if r.startswith(("critical_", "next_", "optional_"))]) == actor_count
+
+    def _handle_inject_s8_exit_gap(self, env, ego_vehicle, params, step_count: int) -> bool:
+        resolved = self._resolved_scenario_parameters
+        lane_tuple = self._resolve_lane_index(
+            env, ego_vehicle, reference_kind="block_internal_road",
+            block_id=params.get("block_id", "g0"),
+            internal_road_index=params.get("internal_road_index", 0),
+            lane_index=int(params.get("lane_index", 2)),
+        )
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        if lane_tuple is None or current_map is None:
+            self.summary.notes.append("s8_exit_lane_missing")
+            return False
+        lane = current_map.road_network.get_lane(lane_tuple)
+        agent_s = []
+        for agent in (getattr(env, "agents", {}) or {}).values():
+            try:
+                agent_s.append(float(lane.local_coordinates(agent.position)[0]))
+            except Exception:
+                continue
+        if not agent_s:
+            return False
+        gap = float(resolved.get("usable_exit_lane_gap_m", 60.0))
+        rear_s = max(2.0, min(agent_s) - 10.0)
+        front_s = min(float(lane.length) - 2.0, rear_s + gap)
+        if front_s < max(agent_s) + 8.0:
+            front_s = min(float(lane.length) - 2.0, max(agent_s) + 8.0)
+            rear_s = front_s - gap
+        rows = (
+            ("exit_gap_front", front_s, resolved.get("exit_lane_front_actor_speed_km_h", 19.0)),
+            ("exit_gap_rear", rear_s, resolved.get("exit_lane_rear_actor_speed_km_h", 24.0)),
+        )
+        for role, longitudinal, speed in rows:
+            if not 2.0 <= float(longitudinal) <= float(lane.length) - 2.0:
+                self.summary.notes.append("s8_gap_geometry_out_of_range")
+                return False
+        for role, longitudinal, speed in rows:
+            if self._spawn_role_on_lane(
+                env, ego_vehicle, role=role, lane_tuple=lane_tuple,
+                longitudinal_m=longitudinal, speed_kmh=float(speed),
+                step_count=step_count, min_clearance_m=0.0,
+            ) is None:
+                self.summary.notes.append(f"s8_atomic_spawn_failed:{role}")
+                return False
+        self._conflict_evidence["usable_exit_lane_gap_m"] = gap
+        self._mark_realized(step_count, "s8_exit_gap_spawned")
+        return {"exit_gap_front", "exit_gap_rear"}.issubset(self._actor_manifest)
+
+    def _handle_inject_s9_bypass_actors(self, env, ego_vehicle, params, step_count: int) -> bool:
+        resolved = self._resolved_scenario_parameters
+        source_lane = self._resolve_lane_index(
+            env, ego_vehicle, reference_kind="block_internal_road",
+            block_id=params.get("block_id", "c3"),
+            internal_road_index=params.get("internal_road_index", 1),
+            lane_index=int(params.get("source_lane_id", 1)),
+        )
+        if source_lane is None:
+            self.summary.notes.append("s9_source_lane_missing")
+            return False
+        bypass_lane = (source_lane[0], source_lane[1], int(params.get("bypass_lane_id", 0)))
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        lane = current_map.road_network.get_lane(source_lane)
+        bypass = current_map.road_network.get_lane(bypass_lane)
+        try:
+            lead_s = float(lane.local_coordinates(ego_vehicle.position)[0])
+        except Exception:
+            return False
+        blocker_gap = float(resolved.get("agent0_to_blocker_bumper_gap_m", 20.0))
+        blocker_s = lead_s + blocker_gap + self._vehicle_length_m(ego_vehicle)
+        constraint_s = lead_s + float(
+            resolved.get("bypass_constraint_actor_relative_offset_m", 0.0)
+        )
+        if not 2.0 <= blocker_s <= float(lane.length) - 2.0:
+            self.summary.notes.append("s9_blocker_geometry_out_of_range")
+            return False
+        constraint_s = min(max(constraint_s, 2.0), float(bypass.length) - 2.0)
+        rows = (
+            ("blocking_actor", source_lane, blocker_s, resolved.get("blocker_speed_km_h", 4.0)),
+            ("bypass_constraint_actor", bypass_lane, constraint_s, resolved.get("bypass_constraint_actor_speed_km_h", 17.0)),
+        )
+        for role, lane_tuple, longitudinal, speed in rows:
+            if self._spawn_role_on_lane(
+                env, ego_vehicle, role=role, lane_tuple=lane_tuple,
+                longitudinal_m=longitudinal, speed_kmh=float(speed),
+                step_count=step_count, min_clearance_m=0.0,
+            ) is None:
+                self.summary.notes.append(f"s9_atomic_spawn_failed:{role}")
+                return False
+        self._conflict_evidence.update({
+            "blocker_initial_bumper_gap_m": blocker_gap,
+            "usable_bypass_gap_m": resolved.get("usable_bypass_gap_m"),
+            "required_lane_change": "LEFT",
+        })
+        self._mark_realized(step_count, "s9_bypass_actors_spawned")
+        return {"blocking_actor", "bypass_constraint_actor"}.issubset(self._actor_manifest)
 
     @staticmethod
     def _resolve_injected_background_policy(params: Dict[str, object]):
@@ -408,6 +679,14 @@ class ScenarioOrchestrator:
                 continue
             vehicle_params = self._resolve_adjacent_vehicle_params(env, vehicle_params)
             lane_side = str(vehicle_params.get("lane_side", "left"))
+            if self.definition.scenario_id == "S5_hard_brake_lead":
+                resolved = self._resolved_scenario_parameters
+                vehicle_params["spawn_longitude_offset_m"] = float(
+                    resolved[f"{lane_side}_offset_m"]
+                )
+                vehicle_params["target_speed_kmh"] = float(
+                    resolved[f"{lane_side}_speed_km_h"]
+                )
             lane_tuple = self._resolve_adjacent_lane_index(env, ego_vehicle, lane_side=lane_side)
             if lane_tuple is None:
                 self.summary.notes.append(f"adjacent_lane_missing:{vehicle_name}")
@@ -444,6 +723,10 @@ class ScenarioOrchestrator:
                     "scenario_vehicle_role",
                     f"s5_adjacent_{lane_side}",
                 )
+            role = str(
+                getattr(spawned, "scenario_vehicle_role", f"adjacent_{lane_side}")
+            )
+            self._register_actor(role, spawned, step_count=step_count)
             self._spawned_adjacent_vehicle_keys.add(spawn_key)
             spawned_name = getattr(spawned, "name", None)
             if spawned_name is not None:
@@ -453,23 +736,51 @@ class ScenarioOrchestrator:
                 }
             self._mark_realized(step_count, f"adjacent_spawned:{vehicle_name}")
             realized = True
-        return realized
+        expected = {
+            f"{self.local_route}:{str(row.get('name', f'vehicle_{index}'))}"
+            for index, row in enumerate(vehicles)
+            if isinstance(row, dict)
+        }
+        return bool(realized and expected.issubset(self._spawned_adjacent_vehicle_keys))
 
     def _resolve_hard_brake_params(self, env, params: Dict[str, object]) -> Dict[str, object]:
         resolved = dict(params)
         gap_range = params.get("lead_bumper_gap_range_m")
         if not self._is_float_range(gap_range):
             raise ValueError("hard_brake_lead requires lead_bumper_gap_range_m")
-        resolved["lead_bumper_gap_m"] = self._sample_float_range(env, gap_range)
-        if "lead_target_speed_range_kmh" in params:
-            resolved["lead_target_speed_kmh"] = self._sample_float_range(env, params["lead_target_speed_range_kmh"])
-        if "brake_target_speed_range_kmh" in params:
-            resolved["brake_target_speed_kmh"] = self._sample_float_range(env, params["brake_target_speed_range_kmh"])
+        sampled = self._resolved_scenario_parameters
+        resolved["lead_bumper_gap_m"] = float(
+            sampled["lead_trigger_bumper_gap_m"]
+            if "lead_trigger_bumper_gap_m" in sampled
+            else self._sample_float_range(env, gap_range)
+        )
+        resolved["lead_target_speed_kmh"] = float(
+            sampled.get(
+                "lead_approach_speed_km_h",
+                params.get(
+                    "lead_target_speed_kmh",
+                    self._sample_float_range(env, params["lead_target_speed_range_kmh"])
+                    if "lead_target_speed_range_kmh" in params
+                    else getattr((getattr(env, "agents", {}) or {}).get("agent0"), "speed_km_h", 24.0),
+                ),
+            )
+        )
+        resolved["brake_target_speed_kmh"] = float(
+            sampled["lead_target_speed_km_h"]
+            if "lead_target_speed_km_h" in sampled
+            else (
+                self._sample_float_range(env, params["brake_target_speed_range_kmh"])
+                if "brake_target_speed_range_kmh" in params
+                else params.get("brake_target_speed_kmh", 1.0)
+            )
+        )
         deceleration_range = params.get("brake_deceleration_range_mps2")
         if not self._is_float_range(deceleration_range):
             raise ValueError("hard_brake_lead requires brake_deceleration_range_mps2")
-        resolved["brake_deceleration_mps2"] = self._sample_float_range(
-            env, deceleration_range
+        resolved["brake_deceleration_mps2"] = float(
+            sampled["lead_brake_deceleration_mps2"]
+            if "lead_brake_deceleration_mps2" in sampled
+            else self._sample_float_range(env, deceleration_range)
         )
         return resolved
 
@@ -506,7 +817,7 @@ class ScenarioOrchestrator:
         except (KeyError, TypeError, ValueError):
             self.summary.notes.append("s6_merge_contract_invalid")
             return None
-        if arrival_offset_s <= 0.0 or merge_speed_mps <= 0.0:
+        if not -0.5 <= arrival_offset_s <= 0.5 or merge_speed_mps <= 0.0:
             self.summary.notes.append("s6_merge_contract_invalid")
             return None
 
@@ -522,7 +833,15 @@ class ScenarioOrchestrator:
         current_map = getattr(getattr(env, "engine", None), "current_map", None)
         road_network = getattr(current_map, "road_network", None)
         graph = getattr(road_network, "graph", None)
-        leader_lane = getattr(leader, "lane", None)
+        target_gap_id = str(params.get("target_gap_id", "agent0-agent1"))
+        try:
+            front_id, rear_id = target_gap_id.split("-", 1)
+            front = (getattr(env, "agents", {}) or {})[front_id]
+            rear = (getattr(env, "agents", {}) or {})[rear_id]
+        except (KeyError, ValueError):
+            self.summary.notes.append("s6_target_gap_invalid")
+            return None
+        leader_lane = getattr(front, "lane", None)
         leader_lane_index = getattr(leader_lane, "index", None)
         if (
             branch_lane_index is None
@@ -547,10 +866,10 @@ class ScenarioOrchestrator:
         connector_lane = connector_lanes[0]
         try:
             leader_longitudinal = float(
-                leader_lane.local_coordinates(leader.position)[0]
+                leader_lane.local_coordinates(front.position)[0]
             )
             leader_remaining_m = float(leader_lane.length) - leader_longitudinal
-            leader_speed_mps = float(getattr(leader, "speed_km_h", 0.0)) / 3.6
+            leader_speed_mps = float(getattr(front, "speed_km_h", 0.0)) / 3.6
         except (AttributeError, TypeError, ValueError):
             self.summary.notes.append("s6_merge_geometry_invalid")
             return None
@@ -559,7 +878,28 @@ class ScenarioOrchestrator:
             return None
 
         leader_ttc_s = leader_remaining_m / leader_speed_mps
-        merge_ttc_s = leader_ttc_s + arrival_offset_s
+        rear_lane = getattr(rear, "lane", None)
+        rear_lane_index = getattr(rear_lane, "index", None)
+        if tuple((rear_lane_index or ())[:2]) != (leader_start, merge_node):
+            self.summary.notes.append("s6_rear_lane_mismatch")
+            return None
+        try:
+            rear_remaining_m = float(rear_lane.length) - float(
+                rear_lane.local_coordinates(rear.position)[0]
+            )
+            rear_speed_mps = float(getattr(rear, "speed_km_h", 0.0)) / 3.6
+            rear_ttc_s = rear_remaining_m / rear_speed_mps
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+            self.summary.notes.append("s6_rear_geometry_invalid")
+            return None
+        if not leader_ttc_s < rear_ttc_s:
+            self.summary.notes.append("s6_target_gap_order_invalid")
+            return None
+        gap_center_ttc_s = 0.5 * (leader_ttc_s + rear_ttc_s)
+        merge_ttc_s = gap_center_ttc_s + arrival_offset_s
+        if not leader_ttc_s < merge_ttc_s < rear_ttc_s:
+            self.summary.notes.append("s6_merge_not_in_target_gap")
+            return None
         branch_route_length_m = float(branch_lane.length) + float(
             connector_lane.length
         )
@@ -568,32 +908,6 @@ class ScenarioOrchestrator:
         maximum_spawn_m = float(branch_lane.length) - 2.0
         if not minimum_spawn_m <= spawn_longitude_m <= maximum_spawn_m:
             self.summary.notes.append("s6_merge_spawn_out_of_range")
-            return None
-
-        middle = (getattr(env, "agents", {}) or {}).get("agent1")
-        middle_lane = getattr(middle, "lane", None)
-        middle_lane_index = getattr(middle_lane, "index", None)
-        if middle is None or tuple((middle_lane_index or ())[:2]) != (
-            leader_start,
-            merge_node,
-        ):
-            self.summary.notes.append("s6_middle_lane_mismatch")
-            return None
-        try:
-            middle_longitudinal = float(
-                middle_lane.local_coordinates(middle.position)[0]
-            )
-            middle_remaining_m = float(middle_lane.length) - middle_longitudinal
-            middle_speed_mps = float(getattr(middle, "speed_km_h", 0.0)) / 3.6
-        except (AttributeError, TypeError, ValueError):
-            self.summary.notes.append("s6_middle_geometry_invalid")
-            return None
-        if middle_speed_mps <= 0.0:
-            self.summary.notes.append("s6_middle_geometry_invalid")
-            return None
-        middle_ttc_s = middle_remaining_m / middle_speed_mps
-        if not leader_ttc_s < merge_ttc_s < middle_ttc_s:
-            self.summary.notes.append("s6_merge_not_between_leader_middle")
             return None
 
         conflict_point = leader_lane.position(float(leader_lane.length), 0.0)
@@ -623,10 +937,12 @@ class ScenarioOrchestrator:
         return {
             "spawn_longitude_m": float(spawn_longitude_m),
             "merge_arrival_offset_s": float(arrival_offset_s),
-            "leader_ttc_s": float(leader_ttc_s),
+            "target_gap_id": target_gap_id,
+            "target_front_ttc_s": float(leader_ttc_s),
             "merge_ttc_s": float(merge_ttc_s),
-            "middle_ttc_s": float(middle_ttc_s),
-            "leader_conflict_distance_m": float(leader_remaining_m),
+            "target_rear_ttc_s": float(rear_ttc_s),
+            "gap_center_ttc_s": float(gap_center_ttc_s),
+            "target_front_conflict_distance_m": float(leader_remaining_m),
             "merge_conflict_distance_m": float(
                 branch_route_length_m - spawn_longitude_m
             ),
@@ -1027,7 +1343,10 @@ class ScenarioOrchestrator:
 
         if self.definition.scenario_id not in {
             "S5_hard_brake_lead",
+            "S6_background_merge_in",
+            "S7_ego_merge_from_ramp",
             "S8_ego_exit_to_ramp",
+            "S9_narrow_channel_negotiation",
         }:
             return None
         from metadrive.component.vehicle.vehicle_type import TrafficDefaultVehicle
@@ -1089,6 +1408,8 @@ class ScenarioOrchestrator:
     def _find_traffic_vehicle(self, env, vehicle_name: str):
         traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
         vehicles = getattr(traffic_manager, "_traffic_vehicles", []) or []
+        if isinstance(vehicles, dict):
+            vehicles = vehicles.values()
         for vehicle in vehicles:
             if getattr(vehicle, "name", None) == vehicle_name:
                 return vehicle
@@ -1199,6 +1520,17 @@ class ScenarioOrchestrator:
         return self.trigger_spec.longitudinal_min <= longitudinal <= self.trigger_spec.longitudinal_max
 
     def _recipe_triggered(self, env, ego_vehicle, params: Dict[str, object], step_count: int | None = None) -> bool:
+        if "trigger_after_range_s" in params:
+            key = "recipe_trigger_after_s"
+            if key not in self._resolved_scenario_parameters:
+                if "brake_trigger_time_s" in self._resolved_scenario_parameters:
+                    value = self._resolved_scenario_parameters["brake_trigger_time_s"]
+                else:
+                    value = self._sample_float_range(env, params["trigger_after_range_s"])
+                self._resolved_scenario_parameters[key] = float(value)
+            return self._trigger_after_seconds_reached(
+                env, self._resolved_scenario_parameters[key], step_count
+            )
         if "trigger_after_s" in params:
             return self._trigger_after_seconds_reached(env, params["trigger_after_s"], step_count)
         if bool(params.get("trigger_on_start", False)):
@@ -1322,6 +1654,172 @@ class ScenarioOrchestrator:
         if not positive:
             return None
         return sorted(positive, key=lambda road: (road.start_node, road.end_node))[0]
+
+    def _register_actor(self, role: str, vehicle, *, step_count: int) -> None:
+        lane_index = tuple(getattr(vehicle, "lane_index", ()) or ())
+        if not lane_index:
+            lane = _select_reference_lane(vehicle)
+            lane_index = tuple(getattr(lane, "index", ()) or ())
+        position = getattr(vehicle, "position", (0.0, 0.0))
+        self._actor_manifest[str(role)] = {
+            "role": str(role),
+            "object_name": str(getattr(vehicle, "name", "")),
+            "spawn_step": int(step_count),
+            "spawn_lane_index": list(lane_index),
+            "spawn_position_xy": [float(position[0]), float(position[1])],
+            "active": True,
+        }
+
+    def _update_functional_evidence(self, env, step_count: int) -> None:
+        agents = getattr(env, "agents", {}) or {}
+        for agent_id, vehicle in agents.items():
+            lane_index = tuple(getattr(vehicle, "lane_index", ()) or ())
+            if not lane_index:
+                lane = _select_reference_lane(vehicle)
+                lane_index = tuple(getattr(lane, "index", ()) or ())
+            rows = self._route_completion.setdefault(
+                "agent_lane_transitions", {}
+            ).setdefault(str(agent_id), [])
+            previous = self._initial_agent_lanes.get(str(agent_id), ())
+            if lane_index and lane_index != previous:
+                encoded = list(lane_index)
+                if not rows or rows[-1].get("lane_index") != encoded:
+                    rows.append({"step": int(step_count), "lane_index": encoded})
+
+        raw_traffic = getattr(
+            getattr(getattr(env, "engine", None), "traffic_manager", None),
+            "_traffic_vehicles", (),
+        ) or ()
+        traffic = list(raw_traffic.values() if isinstance(raw_traffic, dict) else raw_traffic)
+        traffic_by_name = {str(getattr(v, "name", "")): v for v in traffic}
+        minimum_distance = self._conflict_evidence.get("minimum_actor_distance_m")
+        minimum_ttc = self._conflict_evidence.get("minimum_actor_ttc_s")
+        for role, row in self._actor_manifest.items():
+            actor = traffic_by_name.get(str(row.get("object_name", "")))
+            row["active"] = actor is not None
+            if actor is None:
+                continue
+            lane = _select_reference_lane(actor)
+            row["current_lane_index"] = list(
+                tuple(getattr(lane, "index", ()) or ())
+            )
+            for ego in agents.values():
+                try:
+                    delta = np.asarray(actor.position[:2], dtype=np.float64) - np.asarray(
+                        ego.position[:2], dtype=np.float64
+                    )
+                    distance = float(np.linalg.norm(delta))
+                except Exception:
+                    continue
+                if minimum_distance is None or distance < float(minimum_distance):
+                    minimum_distance = distance
+                relative_speed = (
+                    float(getattr(ego, "speed_km_h", 0.0) or 0.0)
+                    - float(getattr(actor, "speed_km_h", 0.0) or 0.0)
+                ) / 3.6
+                if relative_speed > 1e-6:
+                    ttc = distance / relative_speed
+                    if minimum_ttc is None or ttc < float(minimum_ttc):
+                        minimum_ttc = ttc
+            if role == "s6_gap_intruder":
+                spawn_lane = tuple(row.get("spawn_lane_index", ()))
+                current_lane = tuple(row.get("current_lane_index", ()))
+                if len(spawn_lane) >= 2 and len(current_lane) >= 2:
+                    self._conflict_evidence["merge_completed"] = bool(
+                        current_lane[:2] != spawn_lane[:2]
+                    )
+        self._conflict_evidence["minimum_actor_distance_m"] = minimum_distance
+        self._conflict_evidence["minimum_actor_ttc_s"] = minimum_ttc
+
+        current_lanes = {
+            str(name): tuple(getattr(vehicle, "lane_index", ()) or ())
+            for name, vehicle in agents.items()
+        }
+        if self.definition.scenario_id == "S9_narrow_channel_negotiation":
+            changed = {}
+            for name, rows in self._route_completion["agent_lane_transitions"].items():
+                initial = self._initial_agent_lanes.get(name, ())
+                changed[name] = any(
+                    len(initial) >= 3
+                    and row.get("lane_index", [None, None, None])[:2] == list(initial[:2])
+                    and row.get("lane_index", [None, None, None])[2] == 0
+                    for row in rows
+                )
+            self._route_completion["all_agents_changed_lane"] = bool(
+                changed and all(changed.values())
+            )
+        else:
+            self._route_completion["all_agents_changed_lane"] = bool(
+                current_lanes
+                and all(
+                    lane and lane != self._initial_agent_lanes.get(name, ())
+                    for name, lane in current_lanes.items()
+                )
+            )
+        blocks = {
+            name: self._road_to_block_id.get(tuple(lane[:2]))
+            for name, lane in current_lanes.items()
+            if len(lane) >= 2
+        }
+        self._route_completion["all_agents_entered_mainline"] = bool(
+            blocks and all(block in {"g1", "c3", "merge0", "s_main2", "split0"} for block in blocks.values())
+        )
+        self._route_completion["all_agents_entered_exit_ramp"] = bool(
+            blocks and all(block in {"s_ramp0", "c0_ramp0", "s_ramp1", "c1_ramp0"} for block in blocks.values())
+        )
+        if self.definition.scenario_id == "S9_narrow_channel_negotiation":
+            returned = False
+            for name, lane in current_lanes.items():
+                transitions = self._route_completion["agent_lane_transitions"].get(name, [])
+                if transitions and lane == self._initial_agent_lanes.get(name, ()):
+                    returned = True
+            self._route_completion["returned_to_original_lane"] = returned
+            blocker = self._actor_manifest.get("blocking_actor")
+            blocker_vehicle = (
+                traffic_by_name.get(str(blocker.get("object_name", "")))
+                if blocker
+                else None
+            )
+            if blocker_vehicle is not None:
+                source_lane = _select_reference_lane(blocker_vehicle)
+                try:
+                    blocker_s = float(source_lane.local_coordinates(blocker_vehicle.position)[0])
+                    self._route_completion["all_agents_passed_blocker"] = bool(
+                        agents
+                        and all(
+                            float(source_lane.local_coordinates(vehicle.position)[0])
+                            > blocker_s + 0.5 * self._vehicle_length_m(vehicle)
+                            for vehicle in agents.values()
+                        )
+                    )
+                except Exception:
+                    pass
+
+    def _functional_success(self, recipes_complete: bool) -> bool:
+        if not recipes_complete:
+            return False
+        if self._actor_manifest and not all(
+            bool(row.get("active", False)) for row in self._actor_manifest.values()
+        ):
+            return False
+        scenario_id = self.definition.scenario_id
+        if scenario_id == "S5_hard_brake_lead":
+            return {"hard_brake_lead", "s5_adjacent_left", "s5_adjacent_right"}.issubset(
+                self._actor_manifest
+            )
+        if scenario_id == "S6_background_merge_in":
+            return bool(self._conflict_evidence.get("merge_completed", False))
+        if scenario_id == "S7_ego_merge_from_ramp":
+            return bool(self._route_completion.get("all_agents_entered_mainline", False))
+        if scenario_id == "S8_ego_exit_to_ramp":
+            return bool(self._route_completion.get("all_agents_entered_exit_ramp", False))
+        if scenario_id == "S9_narrow_channel_negotiation":
+            return bool(
+                self._route_completion.get("all_agents_changed_lane", False)
+                and self._route_completion.get("all_agents_passed_blocker", False)
+                and not self._route_completion.get("returned_to_original_lane", False)
+            )
+        return bool(self.summary.scenario_realized)
 
     def _mark_realized(self, step_count: int, note: str) -> None:
         self.summary.scenario_realized = True

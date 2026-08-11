@@ -414,6 +414,12 @@ class PlatoonEnv(BaseMultiEnv):
             if traffic_density is not None:
                 updates["traffic_density"] = float(traffic_density)
         updates.update(dict(getattr(scenario, "env_overrides", None) or {}))
+        bumper_gap = getattr(scenario, "ego_initial_bumper_gap_m", None)
+        if bumper_gap is not None:
+            updates["platoon_spawn_gap_m"] = (
+                self._sample_scenario_float(bumper_gap)
+                + float(self.platoon_config.vehicle_length_m)
+            )
 
         self.platoon_config.scenario_id = scenario_id
         self.platoon_config.local_route = local_route
@@ -461,6 +467,12 @@ class PlatoonEnv(BaseMultiEnv):
         if scenario_traffic_density is not None and "traffic_density" not in explicit_config_keys:
             resolved["traffic_density"] = float(scenario_traffic_density)
         resolved.update(dict(getattr(scenario, "env_overrides", None) or {}))
+        bumper_gap = getattr(scenario, "ego_initial_bumper_gap_m", None)
+        if bumper_gap is not None:
+            resolved["platoon_spawn_gap_m"] = (
+                PlatoonEnv._float_or_range_midpoint(bumper_gap)
+                + float(resolved.get("vehicle_length_m", 5.74))
+            )
         return resolved
 
     def _sample_scenario_float(self, value) -> float:
@@ -1691,11 +1703,10 @@ class PlatoonEnv(BaseMultiEnv):
         return self._cfg_float("vehicle_length_m", 5.74)
 
     def _desired_center_spacing_m(self, ego_id: Optional[str] = None, other_id: Optional[str] = None) -> float:
-        speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
         ego_length = self._vehicle_length_m(ego_id)
         other_length = self._vehicle_length_m(other_id)
-        # return 0.5 * (ego_length + other_length) + speed_m_s * self._cfg_float("headway_time_s", 0.5)
-        return 0.5 * (ego_length + other_length) + 10  # !暂时设置成固定的
+        default = 0.5 * (ego_length + other_length) + 10.0
+        return self._cfg_float("platoon_spawn_gap_m", default)
 
     def get_formation_relation_state(self, agent_id: str) -> np.ndarray:
         ego_pose = self._agent_pose(agent_id)

@@ -16,7 +16,11 @@ from models.decisioner.rule_decisioner_helper import (
     save_s7_route_lanes_debug_plot,
     save_s8_route_lanes_debug_plot,
 )
-from models.decisioner.rule_decisioner import MultiAgentRuleMaker, make_rule_maker
+from models.decisioner.rule_decisioner import (
+    MultiAgentRuleMaker,
+    load_rule_maker_config,
+    make_rule_maker,
+)
 
 
 def test_rule_risk_detector_has_single_package_entrypoint():
@@ -35,6 +39,26 @@ def test_rule_maker_factory_uses_multi_agent_type_without_legacy_alias():
         assert "keep_lane_fallback" in str(exc)
     else:
         raise AssertionError("legacy keep_lane_fallback rule_maker_type should be rejected")
+
+
+def test_s5_profiles_share_safety_thresholds_and_change_preferences():
+    profiles = {
+        name: load_rule_maker_config("S5_hard_brake_lead", profile_id=name)
+        for name in ("brake_first", "balanced", "evasive")
+    }
+    assert {p["traffic_safety_distance_m"] for p in profiles.values()} == {10.0}
+    assert {p["agent_safety_distance_m"] for p in profiles.values()} == {9.0}
+    assert profiles["brake_first"]["idm_time_headway_s"] == 2.2
+    assert profiles["balanced"]["mobil_lane_change_threshold"] == 0.2
+    assert profiles["evasive"]["lane_change_preference"] == 0.6
+    assert make_rule_maker(
+        {"scenario_id": "S5_hard_brake_lead"}, profile_id="evasive"
+    ).profile_id == "evasive"
+
+
+def test_unknown_s5_profile_is_rejected():
+    with pytest.raises(ValueError, match="Unknown RuleMaker profile"):
+        load_rule_maker_config("S5_hard_brake_lead", profile_id="missing")
 
 
 def test_rule_maker_factory_configures_relock_ttc_threshold():
