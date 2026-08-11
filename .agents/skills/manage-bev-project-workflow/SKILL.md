@@ -11,15 +11,16 @@ Execute repository work through one state-driven, auditable workflow. Treat this
 
 1. Confirm the repository root and read `AGENTS.md` completely before acting.
 2. Read `docs/project/project_state.json` completely.
-3. Require the state file to identify at least:
+3. When the request concerns 项目计划, 后续计划, 训练/实验路线, Stage 1/Stage 2, or GRPO comparison design, read `docs/project/project_plan.json` completely and route through `$recall-bev-project-plan`.
+4. Require the state file to identify at least:
    - schema version and update time;
    - current phase, round, and status;
    - active hard gate and blockers;
    - source-of-truth contracts and reports;
    - datasets and checkpoints with fingerprints and eligibility;
    - ordered next actions.
-4. Treat `project_state.json` as an index, not a substitute for its referenced contracts. Read every referenced source required for the current task.
-5. If the state file is absent, malformed, stale against Git, or contradicts a frozen contract, stop implementation. Report the mismatch and repair the state index from authoritative evidence before continuing. Never guess eligibility or rewrite metadata to bypass a gate.
+5. Treat `project_state.json` as an index, not a substitute for its referenced contracts. Read every referenced source required for the current task.
+6. If the state file is absent, malformed, stale against Git, or contradicts a frozen contract, stop implementation. Report the mismatch and repair the state index from authoritative evidence before continuing. Never guess eligibility or rewrite metadata to bypass a gate.
 
 ## 2. Route the task
 

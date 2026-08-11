@@ -1,0 +1,7 @@
+interface:
+  display_name: "BEV 项目计划"
+  short_description: "读取最新双域融合研究计划、当前门禁与后续实验路线"
+  default_prompt: "Use $recall-bev-project-plan to summarize the current BEV project plan, active hard gate, and next experimental steps."
+
+policy:
+  allow_implicit_invocation: true

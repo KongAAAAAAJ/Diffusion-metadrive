@@ -1,0 +1,229 @@
+{
+  "format": "bev_chassis_fusion_project_plan_v1",
+  "schema_version": 1,
+  "updated_at": "2026-08-11T15:30:00+08:00",
+  "status": "frozen_revised_mainline",
+  "purpose": "Machine-readable memory for the current formal training and evaluation plan after removing Stage 1 A/B as a main comparison and moving the principal ablation to the Stage 2 reward domain.",
+  "trigger_phrases": [
+    "项目计划",
+    "最新计划",
+    "后续计划",
+    "实验计划",
+    "训练计划",
+    "项目路线图",
+    "当前主线",
+    "下一步是什么",
+    "Stage 1 计划",
+    "Stage 2 计划",
+    "双域融合计划",
+    "GRPO 对比",
+    "GRPO 消融"
+  ],
+  "research_objective": {
+    "primary_question": "Does execution-domain feedback from a frozen chassis execution surrogate improve GRPO refinement of a BEV-only platoon diffusion planner over command-trajectory open-loop GRPO?",
+    "paper_focus": "Dual-domain fusion between the planning command domain and the chassis execution domain.",
+    "formal_scenarios": [
+      "S5",
+      "S6",
+      "S7",
+      "S8",
+      "S9"
+    ],
+    "excluded_legacy_mainlines": [
+      "MAPPO selector",
+      "camera or LiDAR end-to-end input",
+      "Stage 1 Variant A versus Variant B as a main experiment",
+      "four-model A/B Stage 1 and A/B GRPO matrix"
+    ]
+  },
+  "frozen_artifacts": {
+    "formal_dataset": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal50k_v1",
+      "joint_samples": 50000,
+      "samples_per_scenario": 10000,
+      "base_dataset_fingerprint": "58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144",
+      "sidecar_dataset_fingerprint": "1f2b31adcb4019247d5ae9e9c1f2e7fa0dce1ed9252023f3b14d484f1635cee5",
+      "bundle_index_sha256": "a754561f95e1e40399dde22e5780472a64f127725aab228972441b7ac867306a",
+      "eligible_for_formal_training": true
+    },
+    "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+    "planner_architecture_memory": "docs/project/diffusion_model_architecture.json",
+    "chassis_fusion_branch": "chassis-fusion",
+    "chassis_fusion_worktree": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion"
+  },
+  "trajectory_domains": {
+    "tau_d": {
+      "name": "raw diffusion trajectory",
+      "role": "Policy sample used for DDIM transition log-probability and the GRPO policy update. It is never replaced by the optimized or executed trajectory in the probability ratio."
+    },
+    "tau_cmd": {
+      "name": "executable command trajectory",
+      "producer": "KinematicTrajectoryOptimizer(tau_d)",
+      "role": "The trajectory sent to the controller and the only trajectory input accepted by the chassis execution surrogate."
+    },
+    "tau_a": {
+      "name": "predicted actual executed trajectory",
+      "producer": "frozen chassis execution surrogate(tau_cmd, initial_state, vehicle_condition, controller_context)",
+      "role": "The execution-domain state trajectory used by GRPO-Exec reward evaluation."
+    }
+  },
+  "stage1": {
+    "name": "Formal BEV-only diffusion pretraining",
+    "formal_variant": "A",
+    "joint_update": "joint_mean",
+    "predecessor_condition": "none",
+    "dataset": "frozen_artifacts.formal_dataset",
+    "initialization": "ResNet18.a1 pretrained backbone plus newly initialized BEV planner modules",
+    "trainable_modules": "all planner parameters, with the existing separate backbone and planner learning rates",
+    "variant_b_policy": {
+      "formal_training_required": false,
+      "main_comparison_required": false,
+      "final_evaluation_required": false,
+      "status": "retained only as historical implementation evidence; not part of the revised paper mainline"
+    },
+    "hard_gate": [
+      "run_mode must be formal",
+      "checkpoint must bind the formal base dataset fingerprint",
+      "train, validation, and test splits must retain the frozen episode split",
+      "best checkpoint selection uses validation only",
+      "checkpoint must pass strict reload, finite-loss, finite-gradient, open-loop, and S5-S9 closed-loop smoke gates",
+      "checkpoint metadata must be eligible_for_formal_training=true"
+    ],
+    "output": "one eligible Stage1-A checkpoint shared by both Stage 2 branches"
+  },
+  "stage2_common_contract": {
+    "name": "Formal joint GRPO refinement",
+    "source_checkpoint": "the same frozen eligible Stage1-A checkpoint",
+    "group_size": 4,
+    "policy_sample": "tau_d",
+    "policy_probability": "raw diffusion/DDIM rollout and sampled-mode log-probability",
+    "command_optimization": "tau_cmd = KinematicTrajectoryOptimizer(tau_d)",
+    "trainable_modules": [
+      "diffusion_decoder",
+      "mode_head"
+    ],
+    "frozen_modules": [
+      "BEV backbone",
+      "BEV fusion",
+      "state/relation/context encoders",
+      "reference policy"
+    ],
+    "optimizer_semantics": "one optimizer step per joint group; no sequential-role optimizer and no PPO multi-epoch replay",
+    "environment_semantics": "The G candidates are never stepped as G MetaDrive branches. After scoring, select the best tau_cmd and call MetaDrive env.step() exactly once to obtain the next online scene state.",
+    "fairness_constants": [
+      "formal dataset and Stage1-A checkpoint",
+      "scenario set and seeds",
+      "G and diffusion timesteps",
+      "optimizer, learning rate, KL and BC weights",
+      "training update budget",
+      "trainable and frozen planner modules",
+      "trajectory optimizer",
+      "reward component definitions and safety gates",
+      "online action selection and single env.step semantics"
+    ],
+    "only_primary_experimental_variable": "reward evaluation domain"
+  },
+  "stage2_branches": {
+    "grpo_open": {
+      "display_name": "GRPO-Open",
+      "worktree": "current BEV worktree",
+      "reward_input": "tau_cmd",
+      "reward_definition": "R_open = R(tau_cmd) using the current command-trajectory geometric and safety proxy",
+      "surrogate_used": false,
+      "formal_checkpoint_name": "Stage1-A+GRPO-Open"
+    },
+    "grpo_exec": {
+      "display_name": "GRPO-Exec",
+      "worktree": "chassis-fusion sibling worktree",
+      "reward_input": "tau_a",
+      "reward_definition": "R_exec = R(tau_a) using the frozen chassis execution surrogate prediction and the same reward semantics evaluated in the execution domain",
+      "surrogate_used": true,
+      "surrogate_runtime_contract": [
+        "surrogate input is tau_cmd, never tau_d",
+        "surrogate parameters are frozen and inference-only during GRPO",
+        "reward does not backpropagate through the surrogate",
+        "GRPO gradients come from the raw tau_d rollout log-probability ratio",
+        "surrogate failure is a typed error; no fallback to GRPO-Open reward"
+      ],
+      "formal_checkpoint_name": "Stage1-A+GRPO-Exec"
+    }
+  },
+  "chassis_surrogate_formal_gate": {
+    "synthetic_data_policy": "Synthetic CF data may validate engineering interfaces, training convergence code, checkpointing, and visualization only. It cannot support formal GRPO-Exec training or paper conclusions.",
+    "required_before_formal_grpo_exec": [
+      "real Windows TruckSim run bundles pass the frozen CF-2 export validator without filled-zero or inferred mandatory signals",
+      "run-group atomic split has no train/validation/test leakage",
+      "three-member ensemble training converges with finite loss",
+      "trajectory and chassis-state errors pass frozen ID gates",
+      "uncertainty calibration and OOD detection pass frozen gates",
+      "the selected surrogate checkpoint is immutable and its data, controller, optimizer, TruckSim project, and signal-map hashes are recorded"
+    ],
+    "surrogate_update_during_grpo": false
+  },
+  "formal_evaluation": {
+    "main_model_matrix": [
+      "Stage1-A",
+      "Stage1-A+GRPO-Open",
+      "Stage1-A+GRPO-Exec"
+    ],
+    "main_comparisons": [
+      "Stage1-A versus GRPO-Open: benefit of Stage 2 open-loop refinement",
+      "GRPO-Open versus GRPO-Exec: benefit of execution-domain feedback",
+      "Stage1-A versus GRPO-Exec: end-to-end benefit of the complete dual-domain method"
+    ],
+    "scenario_scope": "multi-seed S5-S9 using identical episode manifests and model-noise seeds",
+    "metric_groups": [
+      "collision, out-of-road, and 5m/7m gap violations",
+      "formation error, maximum formation spread, and recovery time",
+      "progress, completion, and joint reward",
+      "acceleration, jerk, yaw rate, and steering change",
+      "trajectory optimizer intervention and final execution feasibility",
+      "BEV build, model inference, optimizer/surrogate, control mapping, and full planning tick P50/P95 latency"
+    ],
+    "latency_gate": "three-vehicle online planning remains within the frozen 100 ms P95 target unless a separately approved protocol revision records otherwise",
+    "optional_secondary_ablation": "Inside GRPO-Exec only, compare surrogate ensemble mean against mean plus uncertainty-aware reward after the three-model main matrix is complete. This is not a Stage1 A/B ablation."
+  },
+  "execution_order": [
+    {
+      "order": 1,
+      "action": "Train and qualify one formal Stage1-A checkpoint on the frozen 50k S5-S9 dataset."
+    },
+    {
+      "order": 2,
+      "action": "Freeze the common Stage 2 manifest, including source checkpoint hash, scenario seeds, rollout noise seeds, update budget, reward config, and optimizer config."
+    },
+    {
+      "order": 3,
+      "action": "Calibrate and formally train GRPO-Open from the frozen Stage1-A checkpoint."
+    },
+    {
+      "order": 4,
+      "action": "Complete the real TruckSim surrogate data, fit, ID/OOD, and probability-calibration gates."
+    },
+    {
+      "order": 5,
+      "action": "Calibrate and formally train GRPO-Exec from the same frozen Stage1-A checkpoint and Stage 2 manifest."
+    },
+    {
+      "order": 6,
+      "action": "Freeze both Stage 2 branches and run paired short smoke evaluation."
+    },
+    {
+      "order": 7,
+      "action": "Perform semantic-preserving Round 14 cleanup only after both branches are stable; rerun all strict checkpoint and smoke gates after cleanup."
+    },
+    {
+      "order": 8,
+      "action": "Run the final multi-seed S5-S9 three-model evaluation and produce the main comparison, optional surrogate ablation, latency, and failure-analysis reports."
+    }
+  ],
+  "stop_conditions": [
+    "Do not start formal GRPO before the Stage1-A checkpoint is eligible.",
+    "Do not start formal GRPO-Exec with a synthetic-only surrogate.",
+    "Do not compare branches whose source checkpoint, seeds, budget, reward semantics, or trajectory optimizer differ.",
+    "Do not convert diagnostic artifacts into formal artifacts by editing metadata.",
+    "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
+    "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision."
+  ],
+  "current_next_action": "Train and qualify the formal Stage1-A checkpoint on the frozen 50k S5-S9 dataset."
+}

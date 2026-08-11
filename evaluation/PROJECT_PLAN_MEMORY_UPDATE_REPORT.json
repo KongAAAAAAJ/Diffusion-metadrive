@@ -1,0 +1,48 @@
+{
+  "format": "bev_project_plan_memory_update_report_v1",
+  "recorded_at": "2026-08-11T15:30:00+08:00",
+  "repository_branch": "BEV",
+  "source_commit": "b17a725cca7e830904fe66716b7ed2325540d6d5",
+  "memory": {
+    "path": "docs/project/project_plan.json",
+    "sha256": "5fdc3ea83cc8aaff1647496f228c44aa965abde7ac974fc5590db6a5694a48de",
+    "format": "bev_chassis_fusion_project_plan_v1"
+  },
+  "skill": {
+    "path": ".agents/skills/recall-bev-project-plan",
+    "name": "recall-bev-project-plan",
+    "implicit_invocation": true,
+    "primary_trigger_phrases": [
+      "项目计划",
+      "最新计划",
+      "后续计划",
+      "实验计划",
+      "训练计划",
+      "双域融合计划",
+      "GRPO 对比",
+      "GRPO 消融"
+    ]
+  },
+  "frozen_revision": {
+    "stage1_formal_variant": "A",
+    "stage1_b_in_mainline": false,
+    "stage2_primary_ablation": [
+      "GRPO-Open: R(tau_cmd)",
+      "GRPO-Exec: R(tau_a)"
+    ],
+    "final_main_model_count": 3,
+    "final_main_models": [
+      "Stage1-A",
+      "Stage1-A+GRPO-Open",
+      "Stage1-A+GRPO-Exec"
+    ]
+  },
+  "validation": {
+    "skill_quick_validate": "passed",
+    "json_parse": "passed",
+    "plan_state_consistency": "passed",
+    "trigger_phrase_contract": "passed",
+    "obsolete_a_b_mainline_scan": "passed",
+    "git_diff_check": "passed"
+  }
+}
