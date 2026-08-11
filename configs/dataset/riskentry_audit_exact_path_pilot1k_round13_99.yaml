@@ -1,0 +1,42 @@
+source:
+  project_root: /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive
+  bundle_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_exact_path_pilot1k_round13_99_v1
+  format: metadrive-joint-planning-risk-bundle
+  schema_version: 1.0.0
+  read_only: true
+  expected:
+    bundle_sha256: e98228ee192f18a86222f5c8e607b252c55136a022d8a2c635986ed1de60c7fd
+    base_dataset_fingerprint: 21d2cd143f0571adab5db93b3762dabd85860589f5ae9402972b260e9b7ab0e9
+    sidecar_dataset_fingerprint: 4ae2b5ed7c8095da9011f010f085eb9de79889b3773b33aa5a52205ed1d5618e
+    attempted_episodes: 10
+    committed_base_episodes: 10
+    committed_sidecar_episodes: 10
+    sidecar_only_episodes: 0
+    base_joint_samples: 1000
+    sidecar_raw_steps: 2010
+
+window:
+  sample_hz: 10
+  history_seconds: 2.0
+  bev_keyframe_offsets_steps: [-20, -15, -10, -5, 0]
+  actor_history_steps: 21
+  horizons_seconds: [1.0, 3.0, 5.0]
+  maximum_external_candidates: 12
+
+audit:
+  output_dir: outputs/data_audit/exact_path_pilot1k_round13_99
+  sample_visualizations: 16
+  fail_on_fingerprint_mismatch: true
+  fail_on_split_leakage: true
+  verify_actor_identity: true
+  verify_no_future_leakage: true
+
+index:
+  output_dir: outputs/data_index/exact_path_pilot1k_round13_99
+  filename: windows.jsonl
+  expected_records: 600
+  expected_visible_key_actor_windows: 240
+
+usage:
+  development_only: true
+  formal_paper_results_allowed: false

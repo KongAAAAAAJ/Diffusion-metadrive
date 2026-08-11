@@ -1,18 +1,18 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-11T09:39:13+08:00",
+  "updated_at": "2026-08-11T10:09:19+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "a1b3bab92bef9defcd2da6295e127c3f05490500",
+    "git_commit": "c0ba268e777f50ad8ada501bf2245ec9e3a6e0d6",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false
   },
   "current": {
     "phase": "formal_collection",
-    "round": "13.99-riskentry-s5-s9-validator-alignment",
-    "status": "downstream_riskentry_validator_passed",
-    "active_hard_gate": "exact_path_s5_s9_pilot_then_formal_50k"
+    "round": "13.99-exact-path-s5-s9-pilot",
+    "status": "exact_path_pilot_and_both_verifiers_passed",
+    "active_hard_gate": "formal_s5_s9_50k_collection_then_full_verification"
   },
   "authorization": {
     "riskentry_format_accepted_by_downstream": true,
@@ -32,6 +32,10 @@
     "riskentry_s5_s9_validator_report": {
       "path": "evaluation/ROUND13_99_RISKENTRY_S5_S9_VALIDATOR_REPORT.json",
       "role": "Proves that the downstream RiskEntry validator accepts the frozen S5-S9 base plus actor-sidecar bundle without RV2 family, matched-pair, or fixed ID/OOD quota bindings"
+    },
+    "exact_path_s5_s9_pilot_report": {
+      "path": "evaluation/ROUND13_99_EXACT_PATH_S5_S9_PILOT_REPORT.json",
+      "role": "Records the new frozen-path 1k pilot, complete Diffusion and RiskEntry verifier results, fingerprints, resume gate, and authorization for the formal S5-S9 50k collection"
     },
     "shared_s5_s9_bundle_schema": {
       "path": "schemas/metadrive_joint_risk_bundle_v1.json",
@@ -68,6 +72,17 @@
     }
   },
   "datasets": {
+    "exact_path_s5_s9_pilot1k": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_exact_path_pilot1k_round13_99_v1",
+      "joint_samples": 1000,
+      "per_scenario_quota": 200,
+      "complete": true,
+      "diffusion_verifier_passed": true,
+      "riskentry_verifier_passed": true,
+      "eligible_for_formal_training": false,
+      "base_dataset_fingerprint": "21d2cd143f0571adab5db93b3762dabd85860589f5ae9402972b260e9b7ab0e9",
+      "sidecar_dataset_fingerprint": "4ae2b5ed7c8095da9011f010f085eb9de79889b3773b33aa5a52205ed1d5618e"
+    },
     "formal_bundle_v2_70k": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal70k_v2",
       "target_windows": {
@@ -94,11 +109,11 @@
       "target_joint_steps": 50000,
       "per_scenario_quota": 10000,
       "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
-      "collection_authorized": false,
+      "collection_authorized": true,
       "collection_complete": false,
       "full_verifier_passed": false,
       "eligible_for_formal_training": false,
-      "blocker": "The downstream RiskEntry validator is aligned; a new exact-path S5-S9 pilot must pass both project verifiers before formal collection starts."
+      "blocker": "Formal 50k collection and both post-collection full verifiers have not yet completed."
     },
     "collection_performance_pilot": {
       "serial_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v1",
@@ -139,12 +154,11 @@
   },
   "blockers": [
     "The stopped RV2 four-family dataset is not eligible for formal Diffusion training because the research scenarios are frozen to S5-S9.",
-    "A new exact-path S5-S9 pilot must pass both project verifiers before the formal S5-S9 collection can start."
+    "The authorized formal S5-S9 50k dataset must be collected and pass both complete verifiers before formal Stage 1 training."
   ],
   "next_actions": [
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
-    "Run an exact-path small S5-S9 pilot and require both Diffusion and updated RiskEntry verifiers to pass.",
-    "After the pilot passes, start a new balanced formal S5-S9 collection root using the frozen Round 13.96 scenario hash.",
+    "Start the new balanced formal S5-S9 50k collection root using the frozen Round 13.96 scenario hash and the authorized Round 13.97k config.",
     "Run the complete Diffusion and RiskEntry dataset verifiers and freeze dataset fingerprints.",
     "Train Stage 1 A and B with run_mode=formal only after dataset eligibility is proven.",
     "Recalibrate A and B rewards using eligible Stage 1 checkpoints.",

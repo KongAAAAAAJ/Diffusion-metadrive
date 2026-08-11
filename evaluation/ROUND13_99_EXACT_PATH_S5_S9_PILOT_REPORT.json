@@ -1,0 +1,100 @@
+{
+  "format": "round13_99_exact_path_s5_s9_pilot_report_v1",
+  "recorded_at": "2026-08-11T10:09:19+08:00",
+  "status": "passed",
+  "purpose": "Prove the frozen formal S5-S9 collector path against the complete Diffusion and updated RiskEntry verifiers before formal 50k collection.",
+  "repository": {
+    "branch": "BEV",
+    "git_commit": "c0ba268e777f50ad8ada501bf2245ec9e3a6e0d6",
+    "code_or_contract_changes_during_collection": false
+  },
+  "configuration": {
+    "pilot_path": "configs/dataset/data_collect_shared_exact_path_pilot1k_round13_99.yaml",
+    "pilot_sha256": "4704219e35720b97b40b929c306c07718f5b843a37c6e307b23150e11ba69fe5",
+    "formal_50k_path": "configs/dataset/data_collect_shared_formal50k_round13_97k.yaml",
+    "formal_50k_sha256": "4b0d18ea4e158224867bea599fa004951a6f74e172ddf4c71d4d6358571b7d85",
+    "riskentry_audit_path": "configs/dataset/riskentry_audit_exact_path_pilot1k_round13_99.yaml",
+    "riskentry_audit_sha256": "cd3060551643f5ed228a6080940eef38157bfaca7217c0b97a62fb232806c3af",
+    "shared_protocol_sha256": "49e03276e6d8f2ee3bb5b16d6e53b7e55c555005615a139f3ee98b8f6a20c45d",
+    "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+    "formal_path_equivalence": {
+      "same_start_seed": 50017,
+      "same_split_seed": 17,
+      "same_episode_horizon": 200,
+      "same_scenario_catalog": true,
+      "same_environment_contract": true,
+      "same_collector_and_storage": true,
+      "only_differences": ["isolated output root", "1000 total samples", "200 samples per scenario", "20 attempts per scenario"]
+    }
+  },
+  "commands": {
+    "collection": "python -m expert_dataset.run_joint_bev_collection --config configs/dataset/data_collect_shared_exact_path_pilot1k_round13_99.yaml",
+    "diffusion_bundle_verifier": "python -m expert_dataset.verify_joint_risk_bundle /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_exact_path_pilot1k_round13_99_v1",
+    "diffusion_base_verifier": "python -m expert_dataset.verify_joint_bev_dataset --dataset-root <bundle>/platoon_joint_bev --min-decode-samples-per-s 50",
+    "diffusion_sidecar_verifier": "python -m expert_dataset.verify_riskentry_sidecar --dataset-root <bundle>/riskentry_actor_sidecar",
+    "riskentry_preflight": "python -m riskentry.cli.audit_source --config /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive/configs/dataset/riskentry_audit_exact_path_pilot1k_round13_99.yaml --no-write",
+    "riskentry_window_index": "python -m riskentry.cli.build_index --config /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive/configs/dataset/riskentry_audit_exact_path_pilot1k_round13_99.yaml"
+  },
+  "artifacts": {
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_exact_path_pilot1k_round13_99_v1",
+    "disk_size": "240M",
+    "base_dataset_fingerprint": "21d2cd143f0571adab5db93b3762dabd85860589f5ae9402972b260e9b7ab0e9",
+    "sidecar_dataset_fingerprint": "4ae2b5ed7c8095da9011f010f085eb9de79889b3773b33aa5a52205ed1d5618e",
+    "bundle_index_sha256": "e98228ee192f18a86222f5c8e607b252c55136a022d8a2c635986ed1de60c7fd",
+    "unfinished_transactions": 0,
+    "eligible_for_formal_training": false
+  },
+  "collection": {
+    "attempted_episodes": 10,
+    "committed_base_episodes": 10,
+    "committed_sidecar_episodes": 10,
+    "rejected_episodes": 0,
+    "sidecar_only_episodes": 0,
+    "base_joint_samples": 1000,
+    "sidecar_raw_steps": 2010,
+    "scenario_joint_samples": {
+      "S5_hard_brake_lead": 200,
+      "S6_background_merge_in": 200,
+      "S7_ego_merge_from_ramp": 200,
+      "S8_ego_exit_to_ramp": 200,
+      "S9_narrow_channel_negotiation": 200
+    },
+    "resume_probe": "passed; target already satisfied and no simulator was started"
+  },
+  "diffusion_verifier": {
+    "status": "passed",
+    "complete_scan": true,
+    "scanned_joint_samples": 1000,
+    "bev_compression_ratio": 6.4,
+    "decode_joint_samples_per_s": 853.1491318725632,
+    "expert_kinematics": "3000/3000",
+    "hard_valid_anchor_kinematics": "20929/20929",
+    "stop_anchor_kinematics": "3000/3000",
+    "bundle_join": "passed",
+    "sidecar_verifier": "10/10 episodes and 2010/2010 raw steps passed"
+  },
+  "riskentry_verifier": {
+    "status": "passed",
+    "preflight_checks": "8/8",
+    "preflight_report_sha256": "6a6a901a3a0f493733b98e189f3e3fcf6d50ab315fc1adb67ee29f2fa6f5afe1",
+    "formal_profile": "s5_s9",
+    "eligible_windows": 600,
+    "eligible_windows_per_scenario": 120,
+    "visible_key_actor_windows": 240,
+    "window_index_sha256": "6a0796b39a446e552ea4266ba84c953204dfa7ba82d9aea2efe4643726044a7b",
+    "window_manifest_sha256": "c3afc07e28b3830415ad6d5790a4c34b071eb65cf8660684b41e1772e92bc3b6",
+    "window_semantics": "2 second history plus valid 1/3/5 second future truth/state masks"
+  },
+  "split_note": {
+    "train_samples": 800,
+    "val_samples": 200,
+    "test_samples": 0,
+    "interpretation": "The ten-episode pilot validates deterministic split assignment and empty-split handling but is not a training dataset. The formal 50k gate still requires all S5-S9 scenarios in every split."
+  },
+  "decision": {
+    "exact_path_pilot_gate_passed": true,
+    "formal_s5_s9_50k_collection_authorized": true,
+    "pilot_reuse_in_formal_dataset": false,
+    "next_hard_gate": "Collect the new balanced formal S5-S9 50k root, then run both complete verifiers and freeze final fingerprints before Stage 1 formal training."
+  }
+}
