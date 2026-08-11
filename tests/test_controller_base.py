@@ -146,6 +146,38 @@ def test_pid_cross_track_feedback_opposes_lateral_path_error() -> None:
     assert debug["cross_track_correction"] == pytest.approx(0.2)
 
 
+def test_pid_uses_s9_specific_cross_track_gain() -> None:
+    trajectory = np.asarray(
+        [[4.0 * (index + 1), 0.0, 0.0] for index in range(8)],
+        dtype=np.float32,
+    )
+    controller = PIDTrajectoryController(
+        {
+            "pid_dt": 0.1,
+            "pid_cross_track_kp": 0.4,
+            "s9_pid_cross_track_kp": 0.1,
+        }
+    )
+    env = _FakeEnv()
+    env.config = {"scenario_id": "S9_narrow_channel_negotiation"}
+
+    controller.compute_actions(
+        env,
+        {"agent0": trajectory},
+        lateral_tracking_errors_m={"agent0": 0.5},
+    )
+    debug = controller.get_last_debug()["agent0"]
+
+    assert debug["cross_track_kp"] == pytest.approx(0.1)
+    assert debug["cross_track_correction"] == pytest.approx(-0.05)
+
+
+@pytest.mark.parametrize("key", ["pid_cross_track_kp", "s9_pid_cross_track_kp"])
+def test_pid_rejects_invalid_cross_track_gain(key: str) -> None:
+    with pytest.raises(ValueError, match="cross-track gains"):
+        PIDTrajectoryController({key: -0.1})
+
+
 def test_pid_preview_does_not_skip_initial_opposite_curve_direction() -> None:
     trajectory = np.asarray(
         [

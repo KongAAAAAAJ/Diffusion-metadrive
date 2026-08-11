@@ -73,6 +73,14 @@ class PIDTrajectoryController(BaseController):
             cfg.get("preview_heading_weight", 0.5)
         )
         self.cross_track_kp = float(cfg.get("pid_cross_track_kp", 0.4))
+        self.s9_cross_track_kp = float(cfg.get("s9_pid_cross_track_kp", 0.0))
+        if (
+            not np.isfinite(self.cross_track_kp)
+            or self.cross_track_kp < 0.0
+            or not np.isfinite(self.s9_cross_track_kp)
+            or self.s9_cross_track_kp < 0.0
+        ):
+            raise ValueError("PID cross-track gains must be finite and non-negative")
         self._state: dict[str, dict[str, float]] = {}
         self._longitudinal = LongitudinalCascadeController(
             dt_s=decision_dt,
@@ -112,6 +120,12 @@ class PIDTrajectoryController(BaseController):
         actions: dict[str, np.ndarray] = {}
         debug: dict[str, dict[str, object]] = {}
         agents = getattr(env, "agents", {}) or {}
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        effective_cross_track_kp = (
+            self.s9_cross_track_kp
+            if scenario_id == "S9_narrow_channel_negotiation"
+            else self.cross_track_kp
+        )
         for agent_id, trajectory_world in (trajectories_world or {}).items():
             vehicle = agents.get(agent_id)
             if vehicle is None:
@@ -130,6 +144,7 @@ class PIDTrajectoryController(BaseController):
                 cross_track_error_m=float(
                     (lateral_tracking_errors_m or {}).get(agent_id, 0.0)
                 ),
+                cross_track_kp=effective_cross_track_kp,
             )
             actions[agent_id] = action
             debug[agent_id] = agent_debug
@@ -171,6 +186,7 @@ class PIDTrajectoryController(BaseController):
         *,
         gap_acceleration_mps2: float = 0.0,
         cross_track_error_m: float = 0.0,
+        cross_track_kp: float | None = None,
     ) -> tuple[np.ndarray, dict[str, object]]:
         trajectory_local = np.asarray(trajectory_local, dtype=np.float32)
         if trajectory_local.ndim != 2 or trajectory_local.shape[0] == 0:
@@ -258,7 +274,12 @@ class PIDTrajectoryController(BaseController):
         )
         if not np.isfinite(cross_track_error_m):
             raise ValueError("cross_track_error_m must be finite")
-        cross_track_correction = -self.cross_track_kp * float(
+        effective_cross_track_kp = (
+            self.cross_track_kp
+            if cross_track_kp is None
+            else float(cross_track_kp)
+        )
+        cross_track_correction = -effective_cross_track_kp * float(
             cross_track_error_m
         )
         steering += cross_track_correction
@@ -312,6 +333,7 @@ class PIDTrajectoryController(BaseController):
             ),
             "preview_lateral_error_rad": float(lateral_error),
             "cross_track_error_m": float(cross_track_error_m),
+            "cross_track_kp": float(effective_cross_track_kp),
             "cross_track_correction": float(cross_track_correction),
             "tracking_heading_error_rad": float(tracking_heading_error),
             "heading_correction": float(heading_correction),

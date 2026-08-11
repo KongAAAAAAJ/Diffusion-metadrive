@@ -2195,3 +2195,121 @@ def test_ground_truth_idm_prediction_includes_route_required_lane_change():
     assert len(branches) == 14
     assert any(float(branch[-1, 1]) < 4.0 for branch in branches[2:])
     assert all(branch.shape == (3, 3) for branch in branches)
+
+
+def test_s9_trackability_penalty_ranks_lower_yaw_rate_lane_change_first():
+    planner = PlatoonNormalPlanner(s9_yaw_rate_score_weight=2.0)
+
+    fast_penalty = planner._scenario_trackability_score_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=-1,
+        max_yaw_rate_rad_s=0.41,
+    )
+    smooth_penalty = planner._scenario_trackability_score_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=-1,
+        max_yaw_rate_rad_s=0.29,
+    )
+
+    assert fast_penalty == pytest.approx(0.82)
+    assert smooth_penalty == pytest.approx(0.58)
+    assert smooth_penalty < fast_penalty
+    assert planner._scenario_trackability_score_penalty(
+        scenario_id="S8_ego_exit_to_ramp",
+        action=-1,
+        max_yaw_rate_rad_s=0.41,
+    ) == pytest.approx(0.0)
+    assert planner._scenario_trackability_score_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=0,
+        max_yaw_rate_rad_s=0.41,
+    ) == pytest.approx(0.0)
+
+
+def test_s9_trackability_penalty_weight_must_be_non_negative():
+    with pytest.raises(ValueError, match="s9_yaw_rate_score_weight"):
+        PlatoonNormalPlanner(s9_yaw_rate_score_weight=-0.1)
+    with pytest.raises(ValueError, match="s9_minimum_speed_mps"):
+        PlatoonNormalPlanner(s9_minimum_speed_mps=-0.1)
+    with pytest.raises(ValueError, match="s9_minimum_speed_score_weight"):
+        PlatoonNormalPlanner(s9_minimum_speed_score_weight=-0.1)
+
+
+def test_s9_minimum_speed_penalty_prefers_rolling_profile():
+    planner = PlatoonNormalPlanner(
+        s9_minimum_speed_mps=1.0,
+        s9_minimum_speed_score_weight=20.0,
+    )
+
+    stopped = planner._scenario_minimum_speed_score_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        minimum_speed_mps=0.0,
+        s9_speed_floor_active=True,
+    )
+    rolling = planner._scenario_minimum_speed_score_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        minimum_speed_mps=2.0,
+        s9_speed_floor_active=True,
+    )
+
+    assert stopped == pytest.approx(20.0)
+    assert rolling == pytest.approx(0.0)
+    assert planner._scenario_minimum_speed_score_penalty(
+        scenario_id="S8_ego_exit_to_ramp",
+        minimum_speed_mps=0.0,
+        s9_speed_floor_active=True,
+    ) == pytest.approx(0.0)
+    assert planner._scenario_minimum_speed_score_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        minimum_speed_mps=0.0,
+        s9_speed_floor_active=False,
+    ) == pytest.approx(0.0)
+
+
+def test_s9_active_manoeuvre_rejects_stopped_keep_profile():
+    planner = PlatoonNormalPlanner(s9_minimum_speed_mps=1.0)
+
+    assert planner._scenario_minimum_speed_is_infeasible(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=0,
+        minimum_speed_mps=0.0,
+        s9_keep_speed_floor_required=True,
+    )
+    assert not planner._scenario_minimum_speed_is_infeasible(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=0,
+        minimum_speed_mps=0.0,
+        s9_keep_speed_floor_required=False,
+    )
+    assert planner._scenario_minimum_speed_is_infeasible(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=-1,
+        minimum_speed_mps=0.5,
+        s9_keep_speed_floor_required=False,
+    )
+    assert not planner._scenario_minimum_speed_is_infeasible(
+        scenario_id="S8_ego_exit_to_ramp",
+        action=-1,
+        minimum_speed_mps=0.0,
+        s9_keep_speed_floor_required=True,
+    )
+
+
+def test_s9_candidate_acceleration_grid_contains_rolling_brake_profiles():
+    planner = PlatoonNormalPlanner()
+
+    accelerations = planner._scenario_candidate_accelerations(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=-1,
+        accelerations=(-4.0, 0.0),
+    )
+
+    assert {-3.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0}.issubset(
+        accelerations
+    )
+    assert planner._scenario_longitudinal_profile_limit(
+        scenario_id="S9_narrow_channel_negotiation", action=-1
+    ) == 48
+    assert planner._scenario_candidate_pool_limit(
+        scenario_id="S9_narrow_channel_negotiation", action=-1
+    ) >= 24

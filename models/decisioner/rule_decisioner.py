@@ -687,12 +687,23 @@ class MultiAgentRuleMaker(RuleMaker):
             best_combo = forced_combo
             best_score = 0.0
             ranked_combos = [(tuple(best_combo), float(best_score))]
+            s9_serial_fallback = self._s9_serial_forced_fallback_combo(
+                env,
+                ordered_agent_ids,
+                candidates_by_agent,
+                forced_combo,
+            )
+            if s9_serial_fallback is not None:
+                ranked_combos.append((s9_serial_fallback, -1.0))
             action_search_debug = {
                 "strategy": "forced_route_combo_deferred_to_normal_planner",
                 "prefix_counts": [1],
                 "pairwise_conflict_counts": forced_conflicts,
                 "coarse_conflict_detected": bool(coarse_conflict),
                 "final_feasibility_authority": "normal_planner",
+                "s9_serial_fallback_available": bool(
+                    s9_serial_fallback is not None
+                ),
             }
         elif self._formation_locked and bool(
             risk_info.get("waiting_for_s5_hard_brake", False)
@@ -1244,6 +1255,41 @@ class MultiAgentRuleMaker(RuleMaker):
                 return None
             combo.append(forced[0])
         return tuple(combo)
+
+    @classmethod
+    def _s9_serial_forced_fallback_combo(
+        cls,
+        env,
+        ordered_agent_ids: list[str],
+        candidates_by_agent: dict[str, list[dict]],
+        forced_combo: tuple[dict, ...],
+    ) -> tuple[dict, ...] | None:
+        config = getattr(env, "config", {}) or {}
+        if cls._config_value(config, "scenario_id") != "S9_narrow_channel_negotiation":
+            return None
+        pending_index = next(
+            (
+                index
+                for index, candidate in enumerate(forced_combo)
+                if int(candidate.get("action", 0)) != 0
+            ),
+            None,
+        )
+        if pending_index is None:
+            return None
+        fallback = []
+        for index, agent_id in enumerate(ordered_agent_ids):
+            candidate = (
+                forced_combo[index]
+                if index == pending_index
+                else cls._candidate_for_action(
+                    candidates_by_agent.get(agent_id, []), 0
+                )
+            )
+            if candidate is None:
+                return None
+            fallback.append(candidate)
+        return tuple(fallback)
 
     @staticmethod
     def _forced_candidates_for_agent(candidates: list[dict]) -> list[dict]:
@@ -2042,24 +2088,8 @@ class MultiAgentRuleMaker(RuleMaker):
         # topology/TTC gate constrains the joint action set.
         if "blocking_actor" not in manifest:
             return action == 0
-        agents = getattr(env, "agents", {}) or {}
-        pending = next(
-            (
-                agent_id
-                for agent_id in ("agent0", "agent1", "agent2")
-                if len(tuple(getattr(agents.get(agent_id), "lane_index", ()) or ())) >= 3
-                and int(tuple(getattr(agents.get(agent_id), "lane_index", ()) or ())[2]) == 1
-            ),
-            None,
-        )
-        candidate_agent = str(candidate.get("agent_id", ""))
-        pending_vehicle_name = (
-            str(getattr(agents.get(pending), "name", pending))
-            if pending is not None else None
-        )
-        if pending is not None and candidate_agent != pending_vehicle_name:
-            return action == 0
-        # c3 lane 1 must move LEFT into the only continuous narrowing route.
+        # Every ego still on c3 lane 1 must move LEFT. The native joint
+        # planner remains the full-horizon OBB and 7 m spacing authority.
         if len(source) >= 3 and len(target) >= 3 and source[:2] == target[:2]:
             if int(source[2]) == 1:
                 return action == -1 and int(target[2]) == 0

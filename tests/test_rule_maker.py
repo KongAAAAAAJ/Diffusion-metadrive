@@ -2258,3 +2258,46 @@ def test_proposals_exclude_actions_without_hard_valid_modes():
     )
     debug = rule_maker.get_last_debug()
     assert debug["hard_mode_action_rejections"]
+
+
+def test_s9_forces_left_for_every_ego_remaining_on_source_lane():
+    env = SimpleNamespace(
+        config={"scenario_id": "S9_narrow_channel_negotiation"},
+        _scenario_orchestrator=SimpleNamespace(
+            _actor_manifest={"blocking_actor": {}}
+        ),
+    )
+    rule_maker = MultiAgentRuleMaker(locked_on_reset=False)
+    rule_maker._decision_step = 6
+
+    for agent_id in ("agent0", "agent1", "agent2"):
+        left = {
+            "agent_id": agent_id,
+            "action": -1,
+            "source_lane_index": ("10C0_0_", "10C0_1_", 1),
+            "target_lane_index": ("10C0_0_", "10C0_1_", 0),
+        }
+        keep = dict(left, action=0, target_lane_index=left["source_lane_index"])
+
+        assert rule_maker._is_s9_forced_route_candidate(env, left)
+        assert not rule_maker._is_s9_forced_route_candidate(env, keep)
+
+
+def test_s9_serial_fallback_moves_first_pending_ego_only():
+    env = SimpleNamespace(config={"scenario_id": "S9_narrow_channel_negotiation"})
+    agent_ids = ["agent0", "agent1", "agent2"]
+    candidates = {
+        agent_id: [
+            {"agent_id": agent_id, "action": -1},
+            {"agent_id": agent_id, "action": 0},
+        ]
+        for agent_id in agent_ids
+    }
+    forced = tuple(candidates[agent_id][0] for agent_id in agent_ids)
+
+    fallback = MultiAgentRuleMaker._s9_serial_forced_fallback_combo(
+        env, agent_ids, candidates, forced
+    )
+
+    assert fallback is not None
+    assert [int(candidate["action"]) for candidate in fallback] == [-1, 0, 0]

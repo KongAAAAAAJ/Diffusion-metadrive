@@ -632,6 +632,7 @@ class PlatoonNormalPlanner:
     MIN_ACCEL_MPS2 = -8.0
     MAX_ACCEL_MPS2 = 5.0
     LANE_CHANGE_DURATIONS_S = (2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
+    S9_LANE_CHANGE_DURATIONS_S = (5.0, 5.5, 6.0, 6.5)
     URGENT_LANE_CHANGE_DURATIONS_S = (1.0, 1.5, 2.0)
     LANE_END_CLEARANCE_M = 0.5
 
@@ -651,11 +652,31 @@ class PlatoonNormalPlanner:
         collision_margin_m: float = 0.2,
         candidate_pool_size: int = 12,
         joint_pair_weight: float = 0.25,
+        s9_yaw_rate_score_weight: float = 16.0,
+        s9_minimum_speed_mps: float = 1.0,
+        s9_minimum_speed_score_weight: float = 20.0,
     ) -> None:
         if int(num_output_points) != 8:
             raise ValueError("PlatoonNormalPlanner requires exactly eight future points")
         if int(candidate_pool_size) <= 0:
             raise ValueError("candidate_pool_size must be positive")
+        if (
+            not np.isfinite(float(s9_yaw_rate_score_weight))
+            or float(s9_yaw_rate_score_weight) < 0.0
+        ):
+            raise ValueError("s9_yaw_rate_score_weight must be finite and non-negative")
+        if not np.isfinite(float(s9_minimum_speed_mps)) or (
+            float(s9_minimum_speed_mps) < 0.0
+        ):
+            raise ValueError(
+                "s9_minimum_speed_mps must be finite and non-negative"
+            )
+        if not np.isfinite(float(s9_minimum_speed_score_weight)) or (
+            float(s9_minimum_speed_score_weight) < 0.0
+        ):
+            raise ValueError(
+                "s9_minimum_speed_score_weight must be finite and non-negative"
+            )
         self.num_output_points = 8
         self.lane_change_target_margin_m = float(lane_change_target_margin_m)
         self.keep_lateral_margin_m = float(keep_lateral_margin_m)
@@ -669,6 +690,13 @@ class PlatoonNormalPlanner:
         self.collision_margin_m = float(collision_margin_m)
         self.candidate_pool_size = int(candidate_pool_size)
         self.joint_pair_weight = float(joint_pair_weight)
+        self.s9_yaw_rate_score_weight = float(s9_yaw_rate_score_weight)
+        self.s9_minimum_speed_mps = float(
+            s9_minimum_speed_mps
+        )
+        self.s9_minimum_speed_score_weight = float(
+            s9_minimum_speed_score_weight
+        )
         self._dense_times = np.arange(
             0.0,
             self.HORIZON_S + 0.5 * self.DENSE_DT_S,
@@ -730,6 +758,23 @@ class PlatoonNormalPlanner:
                 "all joint decisions must agree on formation_constraint_enabled"
             )
         formation_constraint_enabled = formation_flags.pop()
+        joint_lane_change_active = any(
+            int((decision or {}).get("action", 0)) != 0
+            for decision in (agent_decisions or {}).values()
+        )
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        s9_bypass_started = scenario_id == "S9_narrow_channel_negotiation" and any(
+            len(tuple(getattr(vehicle, "lane_index", ()) or ())) >= 3
+            and int(tuple(getattr(vehicle, "lane_index", ()) or ())[2]) == 0
+            for vehicle in agents.values()
+        )
+        s9_speed_floor_active = bool(
+            joint_lane_change_active or s9_bypass_started
+        )
+        s9_keep_speed_floor_required = bool(
+            scenario_id == "S9_narrow_channel_negotiation"
+            and joint_lane_change_active
+        )
 
         for agent_id in ordered_ids:
             decision = (agent_decisions or {})[agent_id] or {}
@@ -775,6 +820,8 @@ class PlatoonNormalPlanner:
                 source_lane_chain_indices,
                 target_lane_chain_indices,
                 commitment_elapsed_s,
+                bool(s9_speed_floor_active),
+                bool(s9_keep_speed_floor_required),
                 np.ascontiguousarray(target_point).tobytes(),
             )
             cached = None if _pool_cache is None else _pool_cache.get(cache_key)
@@ -788,6 +835,10 @@ class PlatoonNormalPlanner:
                     source_lane_chain_indices=source_lane_chain_indices,
                     target_lane_chain_indices=target_lane_chain_indices,
                     commitment_elapsed_s=commitment_elapsed_s,
+                    s9_speed_floor_active=s9_speed_floor_active,
+                    s9_keep_speed_floor_required=(
+                        s9_keep_speed_floor_required
+                    ),
                 )
                 if _pool_cache is not None:
                     _pool_cache[cache_key] = (pool, copy.deepcopy(agent_debug))
@@ -1950,6 +2001,8 @@ class PlatoonNormalPlanner:
         source_lane_chain_indices: tuple[tuple, ...] = (),
         target_lane_chain_indices: tuple[tuple, ...] = (),
         commitment_elapsed_s: float | None = None,
+        s9_speed_floor_active: bool = False,
+        s9_keep_speed_floor_required: bool = False,
     ) -> tuple[list[_TrajectoryCandidate], dict]:
         stats = {
             "raw_candidate_count": 0,
@@ -1961,6 +2014,7 @@ class PlatoonNormalPlanner:
             "background_collision_rejection_count": 0,
             "background_gap_rejection_count": 0,
             "lane_end_rejection_count": 0,
+            "minimum_speed_rejection_count": 0,
         }
         collision_hits: Counter[str] = Counter()
         kinematic_hits: Counter[str] = Counter()
@@ -2104,6 +2158,8 @@ class PlatoonNormalPlanner:
         scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
         if scenario_id == "S8_ego_exit_to_ramp" and int(action) != 0:
             durations = tuple(value for value in durations if value >= 3.5)
+        if scenario_id == "S9_narrow_channel_negotiation" and int(action) != 0:
+            durations = tuple(self.S9_LANE_CHANGE_DURATIONS_S)
         commitment_deadline_remaining_s = None
         if int(action) != 0 and commitment_elapsed_s is not None:
             durations, commitment_deadline_remaining_s = (
@@ -2489,6 +2545,41 @@ class PlatoonNormalPlanner:
                         score += 0.02 * abs(float(recovery_acceleration))
                         score += 0.05 * abs(float(duration) - self.HORIZON_S)
                         score += 0.02 * float(start_delay)
+                        trackability_penalty = (
+                            self._scenario_trackability_score_penalty(
+                                scenario_id=scenario_id,
+                                action=int(action),
+                                max_yaw_rate_rad_s=float(
+                                    dense_dynamics.max_yaw_rate_rad_s
+                                ),
+                            )
+                        )
+                        score += trackability_penalty
+                        profile_speeds_mps = np.maximum(
+                            np.diff(progress) / self.DENSE_DT_S,
+                            0.0,
+                        )
+                        minimum_speed_mps = float(
+                            np.min(profile_speeds_mps)
+                        )
+                        if self._scenario_minimum_speed_is_infeasible(
+                            scenario_id=scenario_id,
+                            action=int(action),
+                            minimum_speed_mps=minimum_speed_mps,
+                            s9_keep_speed_floor_required=(
+                                s9_keep_speed_floor_required
+                            ),
+                        ):
+                            stats["minimum_speed_rejection_count"] += 1
+                            continue
+                        minimum_speed_penalty = (
+                            self._scenario_minimum_speed_score_penalty(
+                                scenario_id=scenario_id,
+                                minimum_speed_mps=minimum_speed_mps,
+                                s9_speed_floor_active=s9_speed_floor_active,
+                            )
+                        )
+                        score += minimum_speed_penalty
                         if lane_end_restricted and int(action) != 0:
                             deadline_margin = max(
                                 usable_source_progress - completion_progress,
@@ -2556,6 +2647,18 @@ class PlatoonNormalPlanner:
                                     ),
                                     "minimum_background_gap_detail": dict(
                                         background_gap_detail
+                                    ),
+                                    "trackability_max_yaw_rate_rad_s": float(
+                                        dense_dynamics.max_yaw_rate_rad_s
+                                    ),
+                                    "trackability_score_penalty": float(
+                                        trackability_penalty
+                                    ),
+                                    "minimum_speed_mps": float(
+                                        minimum_speed_mps
+                                    ),
+                                    "minimum_speed_score_penalty": float(
+                                        minimum_speed_penalty
                                     ),
                                 },
                             )
@@ -2976,6 +3079,32 @@ class PlatoonNormalPlanner:
                     )
                 )
             ),
+            "trackability_max_yaw_rate_rad_s": (
+                None
+                if candidate.execution_parameters is None
+                else candidate.execution_parameters.get(
+                    "trackability_max_yaw_rate_rad_s"
+                )
+            ),
+            "trackability_score_penalty": (
+                None
+                if candidate.execution_parameters is None
+                else candidate.execution_parameters.get(
+                    "trackability_score_penalty"
+                )
+            ),
+            "minimum_speed_mps": (
+                None
+                if candidate.execution_parameters is None
+                else candidate.execution_parameters.get("minimum_speed_mps")
+            ),
+            "minimum_speed_score_penalty": (
+                None
+                if candidate.execution_parameters is None
+                else candidate.execution_parameters.get(
+                    "minimum_speed_score_penalty"
+                )
+            ),
             "trajectory_world": candidate.output.astype(
                 np.float32, copy=False
             ).tolist(),
@@ -3235,6 +3364,22 @@ class PlatoonNormalPlanner:
         the shared production kinematic limits; no safety boundary changes.
         """
 
+        if str(scenario_id) == "S9_narrow_channel_negotiation":
+            return tuple(
+                sorted(
+                    {
+                        *(round(float(value), 3) for value in accelerations),
+                        -3.0,
+                        -2.0,
+                        -1.0,
+                        -0.5,
+                        0.0,
+                        0.5,
+                        1.0,
+                        2.0,
+                    }
+                )
+            )
         if str(scenario_id) != "S8_ego_exit_to_ramp" or int(action) == 0:
             return tuple(accelerations)
         return tuple(
@@ -3288,8 +3433,9 @@ class PlatoonNormalPlanner:
         if str(scenario_id) in {
             "S7_ego_merge_from_ramp",
             "S8_ego_exit_to_ramp",
+            "S9_narrow_channel_negotiation",
         } and int(action) != 0:
-            return 24
+            return 48 if str(scenario_id) == "S9_narrow_channel_negotiation" else 24
         return 12 if int(action) == 0 else 6
 
     def _scenario_candidate_pool_limit(
@@ -3301,9 +3447,89 @@ class PlatoonNormalPlanner:
         if str(scenario_id) in {
             "S7_ego_merge_from_ramp",
             "S8_ego_exit_to_ramp",
+            "S9_narrow_channel_negotiation",
         } and int(action) != 0:
-            return max(int(self.candidate_pool_size), 24)
+            minimum = 48 if str(scenario_id) == "S9_narrow_channel_negotiation" else 24
+            return max(int(self.candidate_pool_size), minimum)
         return int(self.candidate_pool_size)
+
+    def _scenario_trackability_score_penalty(
+        self,
+        *,
+        scenario_id: str,
+        action: int,
+        max_yaw_rate_rad_s: float,
+    ) -> float:
+        """Prefer S9 lane changes with lower speed-curvature demand.
+
+        Yaw rate directly couples longitudinal speed and spatial curvature.
+        The generic lattice score measures curvature per metre, so similar
+        4.0 s and 5.0 s lane changes receive nearly the same smoothness cost
+        even though the shorter manoeuvre is harder for the closed-loop
+        steering controller to track. Keep every hard-safe candidate in the
+        pool, but rank the lower-yaw-rate S9 LEFT trajectory first.
+        """
+
+        if str(scenario_id) != "S9_narrow_channel_negotiation" or int(action) == 0:
+            return 0.0
+        return float(
+            self.s9_yaw_rate_score_weight
+            * max(float(max_yaw_rate_rad_s), 0.0)
+        )
+
+    def _scenario_minimum_speed_score_penalty(
+        self,
+        *,
+        scenario_id: str,
+        minimum_speed_mps: float,
+        s9_speed_floor_active: bool,
+    ) -> float:
+        """Keep every S9 trajectory rolling during a joint lane change.
+
+        A stop-then-recover profile can be geometrically safe over four
+        seconds but becomes a degenerate reference during a longer atomic S9
+        commitment. Prefer an already available rolling profile without
+        changing any hard kinematic or spacing threshold.
+        """
+
+        if (
+            str(scenario_id) != "S9_narrow_channel_negotiation"
+            or not bool(s9_speed_floor_active)
+        ):
+            return 0.0
+        shortfall = max(
+            self.s9_minimum_speed_mps
+            - max(float(minimum_speed_mps), 0.0),
+            0.0,
+        )
+        return float(self.s9_minimum_speed_score_weight * shortfall)
+
+    def _scenario_minimum_speed_is_infeasible(
+        self,
+        *,
+        scenario_id: str,
+        action: int,
+        minimum_speed_mps: float,
+        s9_keep_speed_floor_required: bool,
+    ) -> bool:
+        """Reject stop profiles for every member of an active S9 manoeuvre.
+
+        Serial S9 fallback commits one ego to LEFT while the remaining egos
+        temporarily KEEP.  A stopped KEEP reference is still part of that
+        atomic manoeuvre: near zero speed, harmless centimetre-scale heading
+        noise becomes excessive spatial curvature and fails the committed
+        kinematic audit.  Apply the same rolling floor to those KEEP members,
+        while leaving ordinary KEEP planning outside an S9 manoeuvre intact.
+        """
+
+        if str(scenario_id) != "S9_narrow_channel_negotiation":
+            return False
+        if int(action) == 0 and not bool(s9_keep_speed_floor_required):
+            return False
+        return bool(
+            float(minimum_speed_mps)
+            < self.s9_minimum_speed_mps - 1.0e-6
+        )
 
     def _recovery_accelerations(
         self,
