@@ -33,10 +33,12 @@ from train.train_bev_diffusion_stage1 import (
     configure_stage1_variant,
     deterministic_overfit_noise,
     evaluate_overfit_fixed,
+    handle_amp_gradient_overflow,
     load_stage1_checkpoint,
     loss_from_batch,
     module_gradient_norms,
     planner_forward_from_batch,
+    planner_gradients_are_finite,
     role_gradient_diagnostics,
     save_stage1_checkpoint,
     train_one_epoch,
@@ -280,6 +282,70 @@ def test_gradient_accumulation_executes_one_joint_optimizer_step(
     assert np.isfinite(metrics["loss/total"])
     assert any("gradient/mode_head" in record for record in diagnostics)
     assert not torch.equal(before, planner.mode_head.weight)
+
+
+def test_amp_overflow_is_skipped_only_after_loss_scale_backoff(
+    planner: BEVOnlyDiffusionPlanner,
+) -> None:
+    class OverflowScaler:
+        def __init__(self) -> None:
+            self.scale = 4096.0
+            self.step_calls = 0
+
+        def is_enabled(self) -> bool:
+            return True
+
+        def get_scale(self) -> float:
+            return self.scale
+
+        def step(self, optimizer: torch.optim.Optimizer) -> None:
+            self.step_calls += 1
+
+        def update(self) -> None:
+            self.scale *= 0.5
+
+    parameter = next(planner.parameters())
+    planner.zero_grad(set_to_none=True)
+    parameter.grad = torch.full_like(parameter, float("inf"))
+    optimizer = torch.optim.SGD(planner.parameters(), lr=1e-3)
+    scaler = OverflowScaler()
+
+    assert planner_gradients_are_finite(planner) is False
+    consecutive, total, metrics = handle_amp_gradient_overflow(
+        planner=planner,
+        optimizer=optimizer,
+        scaler=scaler,  # type: ignore[arg-type]
+        consecutive_overflows=0,
+        total_overflows=0,
+    )
+
+    assert consecutive == 1
+    assert total == 1
+    assert scaler.step_calls == 1
+    assert scaler.scale == 2048.0
+    assert parameter.grad is None
+    assert metrics["amp/overflow_skipped"] == 1.0
+    assert metrics["amp/loss_scale_before"] == 4096.0
+    assert metrics["amp/loss_scale_after"] == 2048.0
+
+
+def test_non_amp_non_finite_gradient_remains_a_hard_failure(
+    planner: BEVOnlyDiffusionPlanner,
+) -> None:
+    parameter = next(planner.parameters())
+    planner.zero_grad(set_to_none=True)
+    parameter.grad = torch.full_like(parameter, float("nan"))
+    optimizer = torch.optim.SGD(planner.parameters(), lr=1e-3)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+
+    with pytest.raises(Stage1TrainingError, match="outside AMP"):
+        handle_amp_gradient_overflow(
+            planner=planner,
+            optimizer=optimizer,
+            scaler=scaler,
+            consecutive_overflows=0,
+            total_overflows=0,
+        )
 
 
 def test_fixed_overfit_evaluation_restores_batch_norm_statistics(

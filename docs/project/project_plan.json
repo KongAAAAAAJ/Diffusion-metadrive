@@ -36,6 +36,30 @@
       "four-model A/B Stage 1 and A/B GRPO matrix"
     ]
   },
+  "candidate_scenario_revision": {
+    "status": "user_confirmed_design_pending_implementation_and_validation",
+    "memory_path": "docs/project/s5_s9_functional_scenario_design.json",
+    "role": "Candidate next S5-S9 functional scenario and constrained-parameter definition; it is not the active frozen scenario contract.",
+    "implementation_order": [
+      "common conflict and route-completion evidence fields",
+      "S5",
+      "S6",
+      "S7",
+      "S8",
+      "S9",
+      "combined fixed-seed review"
+    ],
+    "confirmed_semantics": {
+      "S5": "One functional scene with constrained random adjacent-actor relations; no fixed left-rear/right-front mapping and no discrete lane-availability variants. RuleMaker profiles remain separate evaluations.",
+      "S6": "The merge actor target is generalized in a balanced way across both internal platoon gaps.",
+      "S7": "A smaller fully realized set of arrival-aligned critical mainline actors creates pass-first and yield-then-merge cases.",
+      "S8": "Success requires all three agents to enter the exit ramp and continue along it; destination arrival is not required.",
+      "S9": "All three agents must change lane, pass the blocker, and continue along the narrow road; returning to the original lane is not required."
+    },
+    "ongoing_training_policy": "Do not stop or mutate the ongoing Stage1-A run. It remains bound to the current frozen 50k dataset and scenario contract hash.",
+    "activation_policy": "Implement and validate sequentially outside the active training execution boundary, then freeze a new scenario contract and exact-path pilot before any new formal data claim.",
+    "non_retroactivity": "The candidate definitions do not relabel the current formal dataset or checkpoints."
+  },
   "frozen_artifacts": {
     "formal_dataset": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal50k_v1",
@@ -172,6 +196,7 @@
       "Stage1-A versus GRPO-Exec: end-to-end benefit of the complete dual-domain method"
     ],
     "scenario_scope": "multi-seed S5-S9 using identical episode manifests and model-noise seeds",
+    "scenario_contract_policy": "Use the current frozen contract for artifacts bound to the current formal 50k dataset. The candidate scenario revision becomes a formal evaluation scope only after its own implementation, acceptance, contract freeze, and artifact-compatibility decision.",
     "metric_groups": [
       "collision, out-of-road, and 5m/7m gap violations",
       "formation error, maximum formation spread, and recovery time",
@@ -225,5 +250,5 @@
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision."
   ],
-  "current_next_action": "Train and qualify the formal Stage1-A checkpoint on the frozen 50k S5-S9 dataset."
+  "current_next_action": "Continue and qualify the ongoing formal Stage1-A checkpoint on the frozen 50k S5-S9 dataset without interruption; retain the candidate S5-S9 revision as design memory only until it can be implemented outside the active training execution boundary."
 }

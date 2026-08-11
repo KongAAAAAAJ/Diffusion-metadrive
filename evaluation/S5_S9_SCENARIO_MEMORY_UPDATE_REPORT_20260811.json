@@ -1,0 +1,58 @@
+{
+  "format": "bev_s5_s9_scenario_memory_update_report_v1",
+  "recorded_at": "2026-08-11T13:40:35+08:00",
+  "repository_branch": "BEV",
+  "source_commit": "3aff408a1caa812913cd65d5403e727340ac7536",
+  "outcome": "passed",
+  "scope": "Project-administration-only memory update; no scenario code, collection config, training code, running process, dataset, or checkpoint was modified.",
+  "scenario_memory": {
+    "path": "docs/project/s5_s9_functional_scenario_design.json",
+    "sha256": "f13f74d2328577cad27aaeaaa33461f3400643eddf5b84b4974044d64d5e1439",
+    "format": "bev_s5_s9_candidate_functional_scenario_memory_v1",
+    "status": "user_confirmed_candidate_design_pending_implementation_and_validation"
+  },
+  "project_plan": {
+    "path": "docs/project/project_plan.json",
+    "sha256": "4e12b50234983e4088184db92264993dedce64213d5841deda8151a132dfe356",
+    "change": "Registered the candidate scenario memory, non-retroactivity boundary, implementation order, activation policy, and explicit instruction to continue the ongoing Stage1-A run without interruption."
+  },
+  "user_confirmed_semantics": {
+    "S5": "Keep one functional scene. Randomize adjacent-actor ahead/behind relations and speeds under constraints; do not fix left-rear/right-front and do not introduce discrete lane-availability variants.",
+    "S6": "Generalize the controlled merge target across both agent0-agent1 and agent1-agent2 gaps with balanced coverage and an explicit target_gap_id.",
+    "S7": "Use a smaller fully realized arrival-aligned critical mainline actor set to create meaningful pass-first and yield-then-merge cases.",
+    "S8": "All three agents must enter the exit ramp and continue along it; destination arrival is not required.",
+    "S9": "All three agents must change lane, pass the blocking actor, and continue along the narrow road; returning to the original lane is not required."
+  },
+  "training_boundary": {
+    "ongoing_training_stopped": false,
+    "ongoing_training_mutated": false,
+    "active_training_dataset_fingerprint": "58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144",
+    "active_training_scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+    "candidate_memory_formal_contract_activated": false,
+    "candidate_artifact_mixing_allowed": false
+  },
+  "validation": {
+    "memory_json_parse": "passed",
+    "project_plan_json_parse": "passed",
+    "scenario_count": 5,
+    "confirmed_implementation_order": [
+      "common evidence fields",
+      "S5",
+      "S6",
+      "S7",
+      "S8",
+      "S9",
+      "combined review"
+    ],
+    "formal_dataset_metadata_changed": false,
+    "checkpoint_metadata_changed": false
+  },
+  "remaining_gates": [
+    "verify the S5 route has two usable adjacent lanes",
+    "verify the S8 mainline-to-ramp lane-chain indices",
+    "verify the S9 topology-valid bypass direction and downstream continuation",
+    "implement each scenario sequentially outside the active training execution boundary",
+    "pass focused tests and five-seed top-down visual review for every scenario",
+    "freeze a new scenario contract and exact-path pilot before new formal collection"
+  ]
+}

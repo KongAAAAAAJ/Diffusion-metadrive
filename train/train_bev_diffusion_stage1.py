@@ -55,6 +55,8 @@ VARIANT_CONDITIONS: dict[str, str] = {
     "B": "predicted_detached",
 }
 RUN_MODES = ("formal", "smoke", "overfit_64")
+MAX_CONSECUTIVE_AMP_OVERFLOWS = 3
+MAX_AMP_OVERFLOWS_PER_EPOCH = 16
 
 
 class Stage1TrainingError(RuntimeError):
@@ -424,6 +426,62 @@ def module_gradient_norms(planner: BEVOnlyDiffusionPlanner) -> dict[str, float]:
     return metrics
 
 
+def planner_gradients_are_finite(planner: BEVOnlyDiffusionPlanner) -> bool:
+    """Return whether every materialized planner gradient is finite."""
+
+    return all(
+        bool(torch.isfinite(parameter.grad.detach()).all())
+        for parameter in planner.parameters()
+        if parameter.grad is not None
+    )
+
+
+def handle_amp_gradient_overflow(
+    *,
+    planner: BEVOnlyDiffusionPlanner,
+    optimizer: Optimizer,
+    scaler: torch.amp.GradScaler,
+    consecutive_overflows: int,
+    total_overflows: int,
+) -> tuple[int, int, dict[str, float]]:
+    """Skip one verified AMP overflow and back off the dynamic loss scale.
+
+    ``GradScaler.unscale_`` records the overflow internally. Calling
+    ``scaler.step`` therefore skips the optimizer update, while ``update``
+    lowers the scale. FP32 non-finite gradients and persistent AMP overflows
+    remain hard failures.
+    """
+
+    if planner_gradients_are_finite(planner):
+        raise Stage1TrainingError(
+            "AMP overflow handler requires a non-finite planner gradient"
+        )
+    if not scaler.is_enabled():
+        raise Stage1TrainingError("non-finite gradient detected outside AMP")
+    scale_before = float(scaler.get_scale())
+    scaler.step(optimizer)
+    scaler.update()
+    scale_after = float(scaler.get_scale())
+    optimizer.zero_grad(set_to_none=True)
+    if not math.isfinite(scale_after) or scale_after >= scale_before:
+        raise Stage1TrainingError(
+            "non-finite gradient was not handled by AMP scale backoff"
+        )
+    next_consecutive = int(consecutive_overflows) + 1
+    next_total = int(total_overflows) + 1
+    if next_consecutive > MAX_CONSECUTIVE_AMP_OVERFLOWS:
+        raise Stage1TrainingError("consecutive AMP gradient overflow limit exceeded")
+    if next_total > MAX_AMP_OVERFLOWS_PER_EPOCH:
+        raise Stage1TrainingError("per-epoch AMP gradient overflow limit exceeded")
+    return next_consecutive, next_total, {
+        "amp/overflow_skipped": 1.0,
+        "amp/loss_scale_before": scale_before,
+        "amp/loss_scale_after": scale_after,
+        "amp/consecutive_overflows": float(next_consecutive),
+        "amp/epoch_overflows": float(next_total),
+    }
+
+
 def move_joint_batch(
     batch: Mapping[str, Tensor], device: torch.device
 ) -> dict[str, Tensor]:
@@ -537,6 +595,8 @@ def train_one_epoch(
     optimizer.zero_grad(set_to_none=True)
     accumulator = MetricAccumulator()
     diagnostic_records: list[dict[str, float]] = []
+    consecutive_amp_overflows = 0
+    total_amp_overflows = 0
     dataloader_length = len(dataloader)  # type: ignore[arg-type]
     for batch_index, cpu_batch in enumerate(dataloader):
         batch = move_joint_batch(cpu_batch, device)
@@ -583,6 +643,23 @@ def train_one_epoch(
         if not step_boundary:
             continue
         scaler.unscale_(optimizer)
+        if not planner_gradients_are_finite(planner):
+            (
+                consecutive_amp_overflows,
+                total_amp_overflows,
+                overflow_metrics,
+            ) = handle_amp_gradient_overflow(
+                planner=planner,
+                optimizer=optimizer,
+                scaler=scaler,
+                consecutive_overflows=consecutive_amp_overflows,
+                total_overflows=total_amp_overflows,
+            )
+            diagnostic_records.append(
+                {"optimizer_step": float(next_step), **overflow_metrics}
+            )
+            continue
+        consecutive_amp_overflows = 0
         gradient_metrics = module_gradient_norms(planner)
         if not any(value > 0.0 for value in gradient_metrics.values()):
             raise Stage1TrainingError("all Stage 1 gradient norms are zero")
@@ -1263,11 +1340,13 @@ __all__ = [
     "create_numbered_run_dir",
     "deterministic_overfit_noise",
     "evaluate_overfit_fixed",
+    "handle_amp_gradient_overflow",
     "load_stage1_checkpoint",
     "load_stage1_config",
     "loss_from_batch",
     "module_gradient_norms",
     "planner_forward_from_batch",
+    "planner_gradients_are_finite",
     "resolve_device",
     "role_gradient_diagnostics",
     "run_stage1_training",
