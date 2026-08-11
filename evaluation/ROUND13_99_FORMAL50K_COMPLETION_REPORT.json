@@ -1,0 +1,114 @@
+{
+  "format": "round13_99_formal_s5_s9_50k_completion_report_v1",
+  "recorded_at": "2026-08-11T10:48:17+08:00",
+  "status": "passed_and_eligible_for_formal_training",
+  "repository": {
+    "branch": "BEV",
+    "git_commit": "4af4e954db31a06966507530a5d2912f193120e2",
+    "collection_code_changed_during_run": false
+  },
+  "launch": {
+    "command": "python -m expert_dataset.run_joint_bev_collection --config configs/dataset/data_collect_shared_formal50k_round13_97k.yaml",
+    "config_sha256": "4b0d18ea4e158224867bea599fa004951a6f74e172ddf4c71d4d6358571b7d85",
+    "resume_active": true,
+    "existing_joint_steps": 50000,
+    "result": "target already satisfied; no simulator started",
+    "concurrent_writer_guard": "passed; an overlapping status probe was rejected by the non-blocking writer lock"
+  },
+  "dataset": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal50k_v1",
+    "disk_size": "12G",
+    "protocol_sha256": "49e03276e6d8f2ee3bb5b16d6e53b7e55c555005615a139f3ee98b8f6a20c45d",
+    "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+    "bundle_index_sha256": "a754561f95e1e40399dde22e5780472a64f127725aab228972441b7ac867306a",
+    "base_dataset_fingerprint": "58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144",
+    "sidecar_dataset_fingerprint": "1f2b31adcb4019247d5ae9e9c1f2e7fa0dce1ed9252023f3b14d484f1635cee5",
+    "joint_samples": 50000,
+    "attempted_episodes": 275,
+    "committed_base_episodes": 265,
+    "committed_sidecar_episodes": 275,
+    "sidecar_only_episodes": 10,
+    "sidecar_raw_steps": 53581,
+    "unfinished_transactions": 0
+  },
+  "scenario_quotas": {
+    "S5_hard_brake_lead": 10000,
+    "S6_background_merge_in": 10000,
+    "S7_ego_merge_from_ramp": 10000,
+    "S8_ego_exit_to_ramp": 10000,
+    "S9_narrow_channel_negotiation": 10000
+  },
+  "split_scenario_samples": {
+    "train": {
+      "S5_hard_brake_lead": 7790,
+      "S6_background_merge_in": 7530,
+      "S7_ego_merge_from_ramp": 8100,
+      "S8_ego_exit_to_ramp": 8550,
+      "S9_narrow_channel_negotiation": 7720
+    },
+    "val": {
+      "S5_hard_brake_lead": 1070,
+      "S6_background_merge_in": 1710,
+      "S7_ego_merge_from_ramp": 950,
+      "S8_ego_exit_to_ramp": 880,
+      "S9_narrow_channel_negotiation": 1520
+    },
+    "test": {
+      "S5_hard_brake_lead": 1140,
+      "S6_background_merge_in": 760,
+      "S7_ego_merge_from_ramp": 950,
+      "S8_ego_exit_to_ramp": 570,
+      "S9_narrow_channel_negotiation": 760
+    }
+  },
+  "strict_rejections": {
+    "total": 10,
+    "committed_trajectory_background_unsafe": 9,
+    "committed_trajectory_tracking_deviation": 1,
+    "interpretation": "The corresponding raw actor sidecars were retained, while invalid base episodes were not admitted into planner training data."
+  },
+  "diffusion_verifier": {
+    "command": "python -m expert_dataset.verify_joint_risk_bundle /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal50k_v1",
+    "status": "passed",
+    "complete_base_scan": true,
+    "complete_sidecar_scan": true,
+    "base_sidecar_join": "passed",
+    "packed_bev_and_kinematic_contracts": "passed"
+  },
+  "riskentry_verifier": {
+    "audit_config_path": "configs/dataset/riskentry_audit_formal50k_round13_99.yaml",
+    "audit_config_sha256": "235abf310e2a617bdfda7e5ced93fa50db08736bad4be37084190fd8294ead43",
+    "preflight_status": "passed",
+    "preflight_checks": "8/8",
+    "preflight_report_sha256": "02656b8d6af3af776bc8c58f5fae55c21683749572efe9739195c3bcccaff56a",
+    "eligible_windows": 31225,
+    "eligible_windows_per_scenario": 6245,
+    "visible_key_actor_windows": 12490,
+    "window_index_sha256": "0c1ade7c9e9f8abf6f72ca1ba8c6b258ae4e718a4239b5868811e31816488bbd",
+    "window_manifest_sha256": "93292b44b4ca7b575dc984bb39a90f692b0bb9f70767864829daba5a78017c35",
+    "valid_future_horizons_s": [1.0, 3.0, 5.0]
+  },
+  "statistical_quality": {
+    "status": "statistical_quality_accepted",
+    "raw_report_sha256": "b823a2dfbe651cf0c011df9f9d4a45158b72b103035413007730ba24c9876a79",
+    "required_scenarios_present": true,
+    "required_splits_non_empty": true,
+    "all_s5_s9_present_in_each_split": true,
+    "s7_stop_fraction": 0.05733333333333333,
+    "s7_low_speed_fraction": 0.0,
+    "s7_lateral_mode_fraction": 0.1812,
+    "s7_thresholds_passed": true,
+    "sidecar_event_actor_type_report_present": true
+  },
+  "coverage_risk": {
+    "gt_mode_imbalance_present": true,
+    "unobserved_gt_modes": ["LEFT_LOW"],
+    "interpretation": "This is recorded for Stage 1 diagnostics and ablation reporting; it is not a failure of the frozen formal dataset gate."
+  },
+  "decision": {
+    "collection_complete": true,
+    "both_complete_verifiers_passed": true,
+    "eligible_for_formal_training": true,
+    "next_hard_gate": "Train Stage 1 A and B with run_mode=formal, strictly binding both checkpoints to the frozen base dataset fingerprint."
+  }
+}

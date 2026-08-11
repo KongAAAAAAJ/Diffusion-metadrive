@@ -1,0 +1,42 @@
+source:
+  project_root: /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive
+  bundle_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal50k_v1
+  format: metadrive-joint-planning-risk-bundle
+  schema_version: 1.0.0
+  read_only: true
+  expected:
+    bundle_sha256: a754561f95e1e40399dde22e5780472a64f127725aab228972441b7ac867306a
+    base_dataset_fingerprint: 58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144
+    sidecar_dataset_fingerprint: 1f2b31adcb4019247d5ae9e9c1f2e7fa0dce1ed9252023f3b14d484f1635cee5
+    attempted_episodes: 275
+    committed_base_episodes: 265
+    committed_sidecar_episodes: 275
+    sidecar_only_episodes: 10
+    base_joint_samples: 50000
+    sidecar_raw_steps: 53581
+
+window:
+  sample_hz: 10
+  history_seconds: 2.0
+  bev_keyframe_offsets_steps: [-20, -15, -10, -5, 0]
+  actor_history_steps: 21
+  horizons_seconds: [1.0, 3.0, 5.0]
+  maximum_external_candidates: 12
+
+audit:
+  output_dir: outputs/data_audit/formal50k_round13_99
+  sample_visualizations: 32
+  fail_on_fingerprint_mismatch: true
+  fail_on_split_leakage: true
+  verify_actor_identity: true
+  verify_no_future_leakage: true
+
+index:
+  output_dir: outputs/data_index/formal50k_round13_99
+  filename: windows.jsonl
+  expected_records: 31225
+  expected_visible_key_actor_windows: 12490
+
+usage:
+  development_only: false
+  formal_paper_results_allowed: true
