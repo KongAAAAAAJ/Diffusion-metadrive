@@ -1,0 +1,69 @@
+{
+  "format": "bev_formal_collection_scenario_ownership_correction_v1",
+  "recorded_at": "2026-08-11T09:11:35+08:00",
+  "decision": {
+    "formal_diffusion_training_scenarios": [
+      [
+        "S5_hard_brake_lead",
+        "R1_entry_straight"
+      ],
+      [
+        "S6_background_merge_in",
+        "R6_mainline_merge_approach"
+      ],
+      [
+        "S7_ego_merge_from_ramp",
+        "R7_merge_core"
+      ],
+      [
+        "S8_ego_exit_to_ramp",
+        "R6_exit_to_ramp"
+      ],
+      [
+        "S9_narrow_channel_negotiation",
+        "R8_narrow_channel"
+      ]
+    ],
+    "scenario_owner": "Diffusion-metadrive",
+    "riskentry_responsibility": "Adapt the downstream schema, validator, window builder, labels, and optional benchmark partitions to consume the frozen S5-S9 base plus actor-sidecar bundle without changing the upstream scenarios.",
+    "scenario_mutation_for_downstream_compatibility_allowed": false,
+    "rv2_four_family_catalog_allowed_for_formal_diffusion_training": false
+  },
+  "authoritative_sources": {
+    "round13_freeze": {
+      "path": "evaluation/ROUND13_96_FREEZE.json",
+      "sha256": "3fa01528da952acb5ea644b4169d09ec18fae60d27776b1b4845dc44b6884f01"
+    },
+    "shared_bundle_contract": {
+      "path": "schemas/metadrive_joint_risk_bundle_v1.json",
+      "sha256": "49e03276e6d8f2ee3bb5b16d6e53b7e55c555005615a139f3ee98b8f6a20c45d",
+      "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34"
+    },
+    "existing_formal_s5_s9_config": {
+      "path": "configs/dataset/data_collect_shared_formal50k_round13_97k.yaml",
+      "sha256": "4b0d18ea4e158224867bea599fa004951a6f74e172ddf4c71d4d6358571b7d85",
+      "target_joint_steps": 50000,
+      "per_scenario_quota": 10000
+    }
+  },
+  "stopped_incompatible_collection": {
+    "command_module": "expert_dataset.joint_risk_bundle_v2_formal",
+    "pid": 1244191,
+    "termination_signal": "SIGTERM",
+    "process_exit_verified": true,
+    "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_formal70k_v2",
+    "artifact_policy": "preserve_without_overwrite_or_relabel; never mix with the formal S5-S9 training dataset",
+    "eligible_anchor_windows_at_stop": 31636,
+    "attempted_episodes_at_stop": 6916,
+    "complete": false,
+    "eligible_for_formal_diffusion_training": false
+  },
+  "hard_gates_before_formal_s5_s9_collection": [
+    "RiskEntry updates and validates its downstream reader against the frozen S5-S9 shared bundle; the upstream S5-S9 scenario definitions remain unchanged.",
+    "An exact-path small S5-S9 pilot passes both the Diffusion dataset verifier and the updated downstream RiskEntry validator.",
+    "The pilot proves synchronized base and sidecar episode identity, split, timestamps, actor IDs, terminal post-step state, and sample-to-raw-step alignment.",
+    "The formal output root is new and cannot mix with the preserved RV2 artifact root.",
+    "The formal scenario quota is equal across S5-S9 and bound to the Round 13.96 scenario hash."
+  ],
+  "status": "rv2_collection_stopped_safely; waiting_for_downstream_riskentry_adapter_and_s5_s9_exact_path_pilot"
+}

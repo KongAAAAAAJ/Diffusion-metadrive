@@ -1,0 +1,77 @@
+{
+  "format": "round13_99_riskentry_s5_s9_validator_report_v1",
+  "recorded_at": "2026-08-11T09:39:13+08:00",
+  "status": "passed",
+  "scope": {
+    "riskentry_repository": "/home/kong/RiskModeCodes",
+    "riskentry_baseline_commit": "3943f926f0bb49943bd599ab84bae39c24360e01",
+    "upstream_scenario_owner": "Diffusion-metadrive",
+    "formal_profile": "s5_s9",
+    "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34"
+  },
+  "contract_change": {
+    "accepted_scenarios": [
+      ["S5_hard_brake_lead", "R1_entry_straight"],
+      ["S6_background_merge_in", "R6_mainline_merge_approach"],
+      ["S7_ego_merge_from_ramp", "R7_merge_core"],
+      ["S8_ego_exit_to_ramp", "R6_exit_to_ramp"],
+      ["S9_narrow_channel_negotiation", "R8_narrow_channel"]
+    ],
+    "accepted_storage": "joint-first packed semantic BEV base plus actor sidecar",
+    "removed_hard_bindings": [
+      "four RV2_* scenario families",
+      "control/near-critical matched pairs",
+      "fixed ID/compositional-OOD/topology-OOD quotas and partitions"
+    ],
+    "unchanged_consumer_semantics": [
+      "2 second history",
+      "1/3/5 second future horizons",
+      "up to 12 online external candidates",
+      "offline risk labels"
+    ]
+  },
+  "riskentry_artifacts": {
+    "schema": {
+      "path": "/home/kong/RiskModeCodes/schemas/metadrive_joint_risk_bundle_v2.json",
+      "sha256": "6d6f45365ed7ee0a2b86e9df5afbd3ac62b35294b3ea9dc3fd5242fd10500e39"
+    },
+    "contract_validator": {
+      "path": "/home/kong/RiskModeCodes/src/riskentry/contracts/metadrive_bundle_v2.py",
+      "sha256": "c1d687b13277ee44cada0d1627de418f25beb54a14dc5fec540b290097305284"
+    },
+    "source_preflight": {
+      "path": "/home/kong/RiskModeCodes/src/riskentry/data/preflight.py",
+      "sha256": "18faa72b780b1d06546903bd7cd05682c8da90c31f671258be56a69b37e07241"
+    },
+    "formal_config": {
+      "path": "/home/kong/RiskModeCodes/configs/experiment/formal_main.yaml",
+      "sha256": "aaee751546a388abed1038f10ec9d9f7b4c9cccba79b6dc7f8bb71935a0928ef"
+    }
+  },
+  "verification": {
+    "focused_tests": "27 passed",
+    "contracts_data_experiment_regression": "51 passed",
+    "ruff": "passed",
+    "json_schema_parse": "passed",
+    "riskentry_git_diff_check": "passed",
+    "real_pilot_preflight": {
+      "status": "passed",
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal_pilot15k_v2",
+      "report_sha256": "6c1ee2ae38aacf08a60d3f184c6d384ab801d790cf89c6b3707dfb5b557cf2f4",
+      "base_joint_samples": 15000,
+      "base_episodes": 80,
+      "sidecar_episodes": 83,
+      "sidecar_only_episodes": 3,
+      "sidecar_raw_steps": 16183,
+      "samples_per_scenario": 3000,
+      "checks": "8/8 passed"
+    }
+  },
+  "eligibility": {
+    "downstream_validator_accepts_s5_s9": true,
+    "existing_15k_pilot_development_only": true,
+    "existing_15k_pilot_eligible_for_formal_training": false,
+    "formal_50k_collection_authorized_by_this_report": false,
+    "next_hard_gate": "Run a new exact-path formal S5-S9 pilot with the frozen collector/config, then pass both Diffusion and RiskEntry full verifiers before starting the formal 50k collection."
+  }
+}
