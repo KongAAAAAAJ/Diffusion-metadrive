@@ -240,6 +240,11 @@ class LQRFollowerController(BaseController):
             s7_evidence.get("actor_conflict_crossing_steps", {}) or {}
         )
         s7_expected = str(s7_resolved.get("expected_behavior", "pass_first"))
+        s5_evidence = dict(getattr(orchestrator, "_conflict_evidence", {}) or {})
+        s5_split_realized = bool(
+            scenario_id == "S5_hard_brake_lead"
+            and s5_evidence.get("mixed_direction_lane_change_completed", False)
+        )
         if s7_expected == "pass_first":
             s7_manifest = dict(
                 getattr(orchestrator, "_actor_manifest", {}) or {}
@@ -290,6 +295,30 @@ class LQRFollowerController(BaseController):
                     if seam_gap_m >= 0.0:
                         front_veh = predecessor
                         gap_m = float(seam_gap_m)
+                        is_platoon = True
+            if s5_split_realized and role_index > 0:
+                # During S5's intentional LEFT/RIGHT split, lane-local front
+                # lookup cannot see the immediate platoon predecessor.  Keep
+                # longitudinal order coupled by the straight-road centre
+                # distance so the formation can compact before/while the
+                # vehicles return to the middle lane.  Lateral tracking stays
+                # independent and all planner gap/OBB gates are unchanged.
+                predecessor = agents.get(active_ids[role_index - 1])
+                if predecessor is not None:
+                    centre_distance_m = float(
+                        np.linalg.norm(
+                            np.asarray(predecessor.position[:2], dtype=float)
+                            - np.asarray(vehicle.position[:2], dtype=float)
+                        )
+                    )
+                    split_gap_m = centre_distance_m - 0.5 * float(
+                        getattr(predecessor, "LENGTH", 5.74) or 5.74
+                    ) - 0.5 * float(
+                        getattr(vehicle, "LENGTH", 5.74) or 5.74
+                    )
+                    if split_gap_m >= 0.0:
+                        front_veh = predecessor
+                        gap_m = float(split_gap_m)
                         is_platoon = True
             s6_physical_corridor_entered = bool(
                 (
@@ -380,17 +409,25 @@ class LQRFollowerController(BaseController):
                             and s6_target_gap_id == "agent0-agent1"
                             else 0.08
                             if is_s6_target_pair
+                            else 0.22
+                            if s5_split_realized and is_platoon
                             else 0.15
                         )
                         * (actual_gap - desired_gap)
                         + 0.20 * (front_speed - ego_speed),
-                        -0.5 if is_s6_target_pair else -1.0,
+                        -0.5
+                        if is_s6_target_pair
+                        else -2.0
+                        if s5_split_realized and is_platoon
+                        else -1.0,
                         (
                             1.2
                             if is_s6_target_pair
                             and s6_target_gap_id == "agent0-agent1"
                             else 0.5
                             if is_s6_target_pair
+                            else 1.5
+                            if s5_split_realized and is_platoon
                             else 1.0
                         ),
                     )
@@ -469,6 +506,16 @@ class LQRFollowerController(BaseController):
                                         * (rear_gap - self.desired_gap_m)
                                         + 0.10 * (rear_speed - ego_speed),
                                         -3.0,
+                                        0.0,
+                                    )
+                                )
+                            elif s5_split_realized:
+                                rear_gap_feedback = float(
+                                    np.clip(
+                                        -0.30
+                                        * (rear_gap - self.desired_gap_m)
+                                        + 0.15 * (rear_speed - ego_speed),
+                                        -2.5,
                                         0.0,
                                     )
                                 )

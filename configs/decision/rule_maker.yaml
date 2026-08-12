@@ -137,6 +137,11 @@ scenario_overrides:
     w_mobil: 0.4
     w_formation_consistent: 1.0
     lane_change_preference: -1.0
+    # Release the formation constraint 0.8 s before the sampled brake marker.
+    # Profile-specific ranking may then promote LEFT/RIGHT split proposals;
+    # NormalPlanner still owns all hard safety checks.
+    s5_early_unlock_s: 0.8
+    s5_reassembly_hold_steps: 30
 
   # S6: 背景车从匝道合流 — 强化侧方安全，允许适度换道躲避
   S6_background_merge_in:
@@ -205,6 +210,7 @@ scenario_profiles:
       lc_cost: 1.60
       w_mobil: 0.50
       lane_change_preference: -0.80
+      s5_mixed_direction_preference: 0.0
     balanced:
       idm_time_headway_s: 1.7
       idm_min_gap_m: 8.0
@@ -213,6 +219,7 @@ scenario_profiles:
       lc_cost: 0.70
       w_mobil: 1.10
       lane_change_preference: 0.00
+      s5_mixed_direction_preference: 1.0
     evasive:
       idm_time_headway_s: 1.3
       idm_min_gap_m: 6.0
@@ -221,3 +228,4 @@ scenario_profiles:
       lc_cost: 0.20
       w_mobil: 1.80
       lane_change_preference: 0.60
+      s5_mixed_direction_preference: 1.0

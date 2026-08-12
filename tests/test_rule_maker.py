@@ -427,7 +427,54 @@ def test_s5_stays_locked_and_keeps_lane_before_hard_brake_marker():
     assert debug["risk_info"]["waiting_for_s5_hard_brake"] is True
 
 
-def test_s5_active_hazard_only_proposes_cohesive_profile_actions():
+def test_s5_releases_lock_before_brake_but_keeps_pretrigger_action():
+    env = _env(
+        agents={"agent0": _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=30.0)},
+        traffic=[],
+    )
+    env.config = {
+        "scenario_id": "S5_hard_brake_lead",
+        "physics_world_step_size": 0.02,
+        "decision_repeat": 5,
+    }
+    env._scenario_step_count = 25
+    env._scenario_orchestrator = SimpleNamespace(
+        _actor_manifest={},
+        _resolved_scenario_parameters={"brake_trigger_time_s": 3.0},
+        get_episode_summary=lambda: {
+            "scenario_id": "S5_hard_brake_lead",
+            "scenario_triggered": False,
+            "scenario_trigger_step": None,
+        },
+    )
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=True,
+        s5_early_unlock_s=0.8,
+    )
+
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == 0
+    assert decisions["agent0"]["formation_constraint_enabled"] is False
+    assert debug["action_search"]["strategy"] == "s5_pre_brake_keep"
+    assert debug["action_search"]["early_release_window"] is True
+
+
+def test_make_rule_maker_wires_s5_split_and_reassembly_profile_parameters():
+    rule_maker = make_rule_maker(
+        {
+            "scenario_id": "S5_hard_brake_lead",
+            "rule_maker_profile_id": "evasive",
+        }
+    )
+
+    assert rule_maker.s5_early_unlock_s == pytest.approx(0.8)
+    assert rule_maker.s5_mixed_direction_preference == pytest.approx(1.0)
+    assert rule_maker.s5_reassembly_hold_steps == 30
+
+
+def test_s5_active_hazard_promotes_hard_safe_mixed_direction_actions():
     lead = _vehicle("hard_brake", 42.0, 0.0, 1, speed_km_h=2.0)
     lead.scenario_role = "hard_brake_lead"
     lead.scenario_brake_trigger_step = 30
@@ -445,31 +492,37 @@ def test_s5_active_hazard_only_proposes_cohesive_profile_actions():
     }
     env._scenario_orchestrator = SimpleNamespace(
         _actor_manifest={"hard_brake_lead": {}},
+        _conflict_evidence={},
+        _initial_agent_lanes={
+            name: ("A", "B", 1) for name in env.agents
+        },
         get_episode_summary=lambda: {
             "scenario_id": "S5_hard_brake_lead",
             "scenario_triggered": True,
             "scenario_trigger_step": 30,
         },
     )
-    rule_maker = MultiAgentRuleMaker(locked_on_reset=True)
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=True,
+        s5_mixed_direction_preference=1.0,
+    )
 
     batch = rule_maker.propose_joint_actions(
         env, ["agent0", "agent1", "agent2"], planner_batch={}
     )
 
     assert batch.proposals
-    for proposal in batch.proposals:
-        actions = {
-            int(row["action"]) for row in proposal.decisions.values()
-        }
-        assert len(actions) == 1
-        assert all(
-            bool(row["formation_constraint_enabled"])
-            for row in proposal.decisions.values()
-        )
+    first_actions = {
+        int(row["action"]) for row in batch.proposals[0].decisions.values()
+    }
+    assert {-1, 1}.issubset(first_actions)
+    assert all(
+        not bool(row["formation_constraint_enabled"])
+        for row in batch.proposals[0].decisions.values()
+    )
     assert (
         rule_maker.get_last_debug()["action_search"]["strategy"]
-        == "s5_profile_cohesive_action"
+        == "s5_profile_split_action"
     )
 
     accepted = batch.proposals[0]
@@ -478,13 +531,16 @@ def test_s5_active_hazard_only_proposes_cohesive_profile_actions():
         env, ["agent0", "agent1", "agent2"], planner_batch={}
     )
     assert followup.proposals
-    assert all(
-        int(decision["action"]) == 0
-        for decision in followup.proposals[0].decisions.values()
-    )
+    assert {
+        name: int(decision["action"])
+        for name, decision in followup.proposals[0].decisions.items()
+    } == {
+        name: int(decision["action"])
+        for name, decision in accepted.decisions.items()
+    }
     assert (
         rule_maker.get_last_debug()["action_search"]["strategy"]
-        == "s5_post_response_keep"
+        == "s5_committed_split_roll"
     )
 
 

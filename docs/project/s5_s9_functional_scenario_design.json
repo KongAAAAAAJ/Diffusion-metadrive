@@ -150,15 +150,56 @@
       "accepted_behaviors": [
         "KEEP with emergency braking",
         "coordinated lane change into a hard-safe adjacent gap",
-        "temporary formation release followed by formation recovery"
+        "temporary formation release with at least one realized LEFT and one realized RIGHT lane change, followed by return to the initial middle lane and longitudinal formation recovery"
       ],
       "acceptance_gates": [
         "lead actor realizes the sampled deceleration profile",
         "both adjacent actors realize their sampled roles",
         "at least two RuleMaker profiles select different safe behavior classes on part of the shared concrete test set",
         "the platoon avoids collision and road exit",
-        "formation recovery is measured after the hazard clears"
-      ]
+        "formation recovery is measured after the hazard clears",
+        "temporary formation release is credited only when physical lane IDs prove both LEFT and RIGHT transitions, all three vehicles later return to the initial lane, and formation gaps recover"
+      ],
+      "candidate_revision_evidence_20260812": {
+        "implementation_state": "implemented_and_single_seed_closed_loop_verified",
+        "formation_release_window_s_before_brake": 0.8,
+        "mixed_direction_profiles": [
+          "balanced",
+          "evasive"
+        ],
+        "verified_seed": 17,
+        "verified_profile": "evasive",
+        "realized_initial_actions": {
+          "agent0": "LEFT",
+          "agent1": "LEFT",
+          "agent2": "RIGHT"
+        },
+        "lane_change_completion_steps": {
+          "agent0": 54,
+          "agent1": 61,
+          "agent2": 64
+        },
+        "return_to_initial_lane_completion_steps": {
+          "agent0": 151,
+          "agent1": 149,
+          "agent2": 152
+        },
+        "formation_recovery_step": 160,
+        "closed_loop_result": {
+          "planner_success": "200/200",
+          "collision": false,
+          "out_of_road": false,
+          "functional_success": true
+        },
+        "artifact_root": "/tmp/s5_mixed_reassembly_smoke8/S5_hard_brake_lead",
+        "additional_probe": {
+          "seed": 23,
+          "status": "mixed_action_selected_but_closed_loop_not_accepted",
+          "failure_reason": "committed_trajectory_background_unsafe",
+          "note": "The first mixed proposal crossed the unchanged 5 m rolling background-gap gate; an outer-split probe instead crossed the unchanged tracking envelope. Neither hard gate was relaxed and this seed is not counted as accepted."
+        },
+        "five_seed_status": "not_run_in_this_increment"
+      }
     },
     "S6_background_merge_in": {
       "functional_name": "background actor merges into either platoon gap",

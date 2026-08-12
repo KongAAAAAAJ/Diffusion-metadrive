@@ -194,6 +194,26 @@ def test_pid_uses_s5_specific_cross_track_gain() -> None:
     assert debug["cross_track_correction"] == pytest.approx(0.0)
 
 
+def test_pid_s5_default_cross_track_gain_preserves_frozen_controller() -> None:
+    controller = PIDTrajectoryController({"pid_dt": 0.1})
+    env = _FakeEnv()
+    env.config = {"scenario_id": "S5_hard_brake_lead"}
+    trajectory = np.asarray(
+        [[4.0 * (index + 1), 0.0, 0.0] for index in range(8)],
+        dtype=np.float32,
+    )
+
+    controller.compute_actions(
+        env,
+        {"agent0": trajectory},
+        lateral_tracking_errors_m={"agent0": 0.5},
+    )
+    debug = controller.get_last_debug()["agent0"]
+
+    assert debug["cross_track_kp"] == pytest.approx(0.0)
+    assert debug["cross_track_correction"] == pytest.approx(0.0)
+
+
 def test_lqr_wrapper_preserves_s5_specific_cross_track_gain() -> None:
     lane = _FakeLane()
     env = _FakeEnv()
@@ -321,6 +341,51 @@ def test_lqr_follower_controller_records_lateral_debug_for_followers() -> None:
     assert abs(follower_debug["gap_feedback_mps2"]) <= 1.0
     assert follower_debug["longitudinal_reference_source"] == "online_trajectory"
     assert -1.0 <= follower_debug["clipped_steering"] <= 1.0
+
+
+def test_s5_realized_split_preserves_cross_lane_longitudinal_order() -> None:
+    left_lane = _FakeLane(("A", "B", 0))
+    right_lane = _FakeLane(("A", "B", 2))
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {"_conflict_evidence": {"mixed_direction_lane_change_completed": True}},
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S5_hard_brake_lead"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(
+                    x=30.0, y=3.5, speed_km_h=20.0, lane=left_lane
+                ),
+                "agent1": _FakeVehicle(
+                    x=0.0, y=-3.5, speed_km_h=20.0, lane=right_lane
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 4.0 * (index + 1), vehicle.position[1], 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent1"]
+
+    assert follower["mode"] == "follower_platoon"
+    assert follower["leader_id"] == "agent0"
+    assert follower["gap_feedback_mps2"] > 0.0
 
 
 def test_lqr_leader_slows_when_rear_platoon_gap_is_too_large() -> None:

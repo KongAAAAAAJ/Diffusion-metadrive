@@ -182,6 +182,8 @@ class ScenarioOrchestrator:
             "s6_arrival_steps": {},
             "s5_lane_candidate_steps": {},
             "s5_lane_completion_steps": {},
+            "s5_reassembly_candidate_steps": {},
+            "s5_reassembly_completion_steps": {},
         }
         # ``trigger_on_start`` means the actor must exist in the very first
         # expert planning snapshot.  Deferring this to env.before_step() lets
@@ -2421,6 +2423,44 @@ class ScenarioOrchestrator:
             and len(completion_steps) == 3
             and len(set(completion_lane_ids.values())) == 1
         )
+        direction_by_agent = {}
+        for name, lane_id in completion_lane_ids.items():
+            initial = self._initial_agent_lanes.get(str(name), ())
+            if len(initial) < 3:
+                continue
+            delta = int(lane_id) - int(initial[2])
+            direction_by_agent[str(name)] = (
+                "left" if delta < 0 else "right" if delta > 0 else "keep"
+            )
+        realized_directions = set(direction_by_agent.values())
+        mixed_direction_lane_change_completed = bool(
+            "left" in realized_directions and "right" in realized_directions
+        )
+
+        reassembly_candidates = self._functional_state.setdefault(
+            "s5_reassembly_candidate_steps", {}
+        )
+        reassembly_steps = self._functional_state.setdefault(
+            "s5_reassembly_completion_steps", {}
+        )
+        if mixed_direction_lane_change_completed:
+            for name, vehicle in agents.items():
+                initial = self._initial_agent_lanes.get(str(name), ())
+                current = tuple(getattr(vehicle, "lane_index", ()) or ())
+                returned = bool(
+                    len(initial) >= 3
+                    and len(current) >= 3
+                    and int(current[2]) == int(initial[2])
+                )
+                if not returned:
+                    reassembly_candidates.pop(str(name), None)
+                    continue
+                first_step = reassembly_candidates.setdefault(str(name), int(step_count))
+                if int(step_count) - int(first_step) + 1 >= stable_steps_required:
+                    reassembly_steps.setdefault(str(name), int(step_count))
+        reassembly_completed = bool(
+            mixed_direction_lane_change_completed and len(reassembly_steps) == 3
+        )
         lane_change_direction = None
         if coordinated_lane_change_completed:
             initial_lane_id = int(
@@ -2430,20 +2470,38 @@ class ScenarioOrchestrator:
             lane_change_direction = (
                 "left" if final_lane_id < initial_lane_id else "right"
             )
+        elif mixed_direction_lane_change_completed:
+            lane_change_direction = "mixed"
         self._conflict_evidence.update(
             {
-                "real_lane_change_completed": coordinated_lane_change_completed,
+                "real_lane_change_completed": bool(
+                    coordinated_lane_change_completed
+                    or mixed_direction_lane_change_completed
+                ),
                 "lane_change_direction": lane_change_direction,
+                "lane_change_direction_by_agent": dict(direction_by_agent),
+                "mixed_direction_lane_change_completed": bool(
+                    mixed_direction_lane_change_completed
+                ),
                 "lane_change_completion_steps": dict(completion_steps),
                 "lane_change_completion_lane_ids": dict(completion_lane_ids),
+                "reassembly_to_initial_lane_completed": bool(reassembly_completed),
+                "reassembly_completion_steps": dict(reassembly_steps),
                 "lane_change_stable_steps_required": stable_steps_required,
             }
         )
         self._route_completion["s5_real_lane_change_completed"] = bool(
-            coordinated_lane_change_completed
+            coordinated_lane_change_completed or mixed_direction_lane_change_completed
+        )
+        self._route_completion["s5_reassembled_to_initial_lane"] = bool(
+            reassembly_completed
         )
         behavior = None
-        if coordinated_lane_change_completed:
+        if reassembly_completed:
+            behavior = "temporary_formation_release_and_recovery"
+        elif mixed_direction_lane_change_completed:
+            behavior = "temporary_formation_release"
+        elif coordinated_lane_change_completed:
             behavior = "coordinated_lane_change"
         elif peak_ego_decel >= 1.5:
             behavior = "keep_emergency_braking"
@@ -2466,6 +2524,9 @@ class ScenarioOrchestrator:
                     + 0.5 * self._vehicle_length_m(agents[name])
                     for name, value in ego_s_values.items()
                 )
+                self._conflict_evidence[
+                    "all_agents_passed_hard_brake_lead"
+                ] = bool(all_passed)
                 lead_ego_s = ego_s_values.get("agent0")
                 controlled_gap = (
                     lead_s
@@ -2502,9 +2563,12 @@ class ScenarioOrchestrator:
                     "coordinated_avoidance_completed"
                 ] = coordinated_avoidance
                 lane_change_hazard_cleared = bool(
-                    coordinated_lane_change_completed
+                    (
+                        coordinated_lane_change_completed
+                        or mixed_direction_lane_change_completed
+                    )
                     and brake_realized
-                    and len(completion_steps) == 3
+                    and len(completion_steps) >= 2
                 )
                 hazard_cleared = bool(
                     brake_realized
@@ -3411,6 +3475,17 @@ class ScenarioOrchestrator:
                     )
                     and self._conflict_evidence.get("lane_change_direction")
                     in {"left", "right"}
+                )
+                or (
+                    behavior == "temporary_formation_release_and_recovery"
+                    and self._conflict_evidence.get(
+                        "mixed_direction_lane_change_completed", False
+                    )
+                    and self._conflict_evidence.get(
+                        "reassembly_to_initial_lane_completed", False
+                    )
+                    and self._conflict_evidence.get("lane_change_direction")
+                    == "mixed"
                 )
             )
             return bool(

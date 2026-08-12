@@ -187,6 +187,9 @@ class MultiAgentRuleMaker(RuleMaker):
         relock_gap_ratio: float = 1.5,
         forced_lane_unlock_wait_steps: int = 10,
         relock_stable_steps: int = 20,
+        s5_early_unlock_s: float = 0.8,
+        s5_mixed_direction_preference: float = 0.0,
+        s5_reassembly_hold_steps: int = 10,
     ) -> None:
         self.target_speed_km_h = float(target_speed_km_h)
         self.horizon_s = float(horizon_s)
@@ -222,6 +225,11 @@ class MultiAgentRuleMaker(RuleMaker):
         self.relock_gap_ratio = float(relock_gap_ratio)
         self.forced_lane_unlock_wait_steps = max(1, int(forced_lane_unlock_wait_steps))
         self.relock_stable_steps = max(1, int(relock_stable_steps))
+        self.s5_early_unlock_s = max(0.0, float(s5_early_unlock_s))
+        self.s5_mixed_direction_preference = max(
+            0.0, float(s5_mixed_direction_preference)
+        )
+        self.s5_reassembly_hold_steps = max(0, int(s5_reassembly_hold_steps))
         self._formation_locked = bool(self.locked_on_reset)
         self._risk_detector = SimpleRuleRiskDetector(
             ttc_trigger_s=self.risk_ttc_trigger_s,
@@ -246,7 +254,8 @@ class MultiAgentRuleMaker(RuleMaker):
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
         self._s7_route_lanes_debug_plot_counter = 0
-        self._s5_hazard_response_action: int | None = None
+        self._s5_hazard_response_actions: dict[str, int] | None = None
+        self._s5_reassembly_hold_count = 0
         self._s6_gap_response_action: int | None = None
 
     def reset(self, env, agent_ids: list[str]) -> None:  # noqa: ARG002
@@ -263,7 +272,8 @@ class MultiAgentRuleMaker(RuleMaker):
         self._outstanding_proposal_candidates.clear()
         self._last_ranked_combos.clear()
         self._active_execution_id = None
-        self._s5_hazard_response_action = None
+        self._s5_hazard_response_actions = None
+        self._s5_reassembly_hold_count = 0
         self._s6_gap_response_action = None
         reset_detector = getattr(self._risk_detector, "reset", None)
         if callable(reset_detector):
@@ -433,27 +443,21 @@ class MultiAgentRuleMaker(RuleMaker):
         )
         self._schedule_lane_change_commitments(agent_ids, combo)
         if (
-            self._s5_hazard_response_action is None
+            self._s5_hazard_response_actions is None
             and str(
                 ((self._last_debug or {}).get("action_search", {}) or {}).get(
                     "strategy", ""
                 )
             )
-            == "s5_profile_cohesive_action"
+            == "s5_profile_split_action"
             and accepted.decisions
-            and len(
-                {
-                    int(value.get("action", 0))
-                    for value in accepted.decisions.values()
-                }
-            )
-            == 1
         ):
-            accepted_action = int(
-                next(iter(accepted.decisions.values())).get("action", 0)
-            )
-            if accepted_action in self.ACTIONS:
-                self._s5_hazard_response_action = accepted_action
+            accepted_actions = {
+                str(agent_id): int(value.get("action", 0))
+                for agent_id, value in accepted.decisions.items()
+            }
+            if all(action in self.ACTIONS for action in accepted_actions.values()):
+                self._s5_hazard_response_actions = accepted_actions
         if (
             self._s6_gap_response_action is None
             and str(
@@ -597,6 +601,10 @@ class MultiAgentRuleMaker(RuleMaker):
             active_lane_change_commitments=bool(self._lane_change_commitments),
         )
         self._formation_locked = risk_info["next_state"] == "LOCKED"
+        if self._s5_release_window_open(env):
+            self._formation_locked = False
+            risk_info["next_state"] = "UNLOCKED"
+            risk_info["s5_early_release_window"] = True
         dynamic_roles = (
             self._locked_roles(list(agent_ids))
             if self._formation_locked
@@ -749,6 +757,10 @@ class MultiAgentRuleMaker(RuleMaker):
             active_lane_change_commitments=bool(self._lane_change_commitments),
         )
         self._formation_locked = risk_info["next_state"] == "LOCKED"
+        if self._s5_release_window_open(env):
+            self._formation_locked = False
+            risk_info["next_state"] = "UNLOCKED"
+            risk_info["s5_early_release_window"] = True
         if self._is_s6_background_merge_route(env):
             # S6 may assign different longitudinal accelerations to the two
             # sides of the target gap, but a lateral action is a platoon-level
@@ -837,8 +849,9 @@ class MultiAgentRuleMaker(RuleMaker):
                     s9_serial_fallback is not None
                 ),
             }
-        elif self._formation_locked and bool(
-            risk_info.get("waiting_for_s5_hard_brake", False)
+        elif (
+            self._is_s5_hard_brake_scenario(env)
+            and not self._is_s5_hard_brake_active(env)
         ):
             keep_combo = tuple(
                 self._candidate_for_action(
@@ -866,64 +879,61 @@ class MultiAgentRuleMaker(RuleMaker):
             )
             action_search_debug = {
                 "strategy": "s5_pre_brake_keep",
+                "early_release_window": bool(
+                    risk_info.get("s5_early_release_window", False)
+                ),
                 "prefix_counts": [1 if best_combo is not None else 0],
                 "pairwise_conflict_counts": pre_brake_conflicts,
             }
         elif self._is_s5_hard_brake_active(env):
-            # Once the sampled lead starts braking, S5 compares profile
-            # preferences over cohesive platoon actions.  Independent
-            # left/KEEP/right splits can strand the middle ego behind the
-            # braking actor for the full atomic commitment and are not one of
-            # the memory-approved coordinated behavior classes.
-            if self._s5_hazard_response_action is None:
+            # The hard-brake marker releases the formation constraint.  Rank
+            # every hard-safe per-agent combination and optionally promote a
+            # LEFT/RIGHT split.  NormalPlanner remains the final dense OBB and
+            # gap authority, so an unsafe split is rejected before commit.
+            self._formation_locked = False
+            formation_constraint_enabled = False
+            if self._s5_hazard_response_actions is None:
                 (
                     best_combo,
                     best_score,
                     action_search_debug,
                     ranked_combos,
-                ) = self._best_locked_combo(
+                ) = self._best_conditional_combo(
+                    env=env,
+                    ordered_agent_ids=ordered_agent_ids,
+                    candidate_sets=[
+                        candidates_by_agent[agent_id]
+                        for agent_id in ordered_agent_ids
+                    ],
+                    traffic_vehicles=traffic_vehicles,
+                    formation_constraint_enabled=False,
+                )
+                ranked_combos = self._rank_s5_split_combos(ranked_combos)
+                if ranked_combos:
+                    best_combo, best_score = ranked_combos[0]
+                action_search_debug["strategy"] = "s5_profile_split_action"
+                action_search_debug["mixed_direction_preference"] = float(
+                    self.s5_mixed_direction_preference
+                )
+                action_search_debug["mixed_direction_proposal_count"] = sum(
+                    self._is_mixed_direction_combo(combo)
+                    for combo, _score in ranked_combos
+                )
+            else:
+                (
+                    best_combo,
+                    best_score,
+                    action_search_debug,
+                    ranked_combos,
+                ) = self._s5_post_response_combo(
                     env=env,
                     ordered_agent_ids=ordered_agent_ids,
                     candidates_by_agent=candidates_by_agent,
-                    traffic_vehicles=traffic_vehicles,
-                    defer_coarse_conflicts=True,
                 )
-                action_search_debug["strategy"] = "s5_profile_cohesive_action"
-            else:
-                # One episode contains one causal brake event.  After the
-                # accepted response has completed, stay on the resulting lane
-                # and recover longitudinal formation instead of oscillating
-                # into another adjacent lane.
-                keep_combo = tuple(
-                    self._candidate_for_action(
-                        candidates_by_agent.get(agent_id, []), 0
-                    )
-                    for agent_id in ordered_agent_ids
-                )
-                best_combo = (
-                    None
-                    if any(candidate is None for candidate in keep_combo)
-                    else keep_combo
-                )
-                best_score = 0.0 if best_combo is not None else -float("inf")
-                ranked_combos = (
-                    [(tuple(best_combo), float(best_score))]
-                    if best_combo is not None
-                    else []
-                )
-                action_search_debug = {
-                    "strategy": "s5_post_response_keep",
-                    "accepted_response_action": int(
-                        self._s5_hazard_response_action
-                    ),
-                    "prefix_counts": [1 if best_combo is not None else 0],
-                    "pairwise_conflict_counts": {},
-                }
             action_search_debug["profile_id"] = self._config_value(
                 getattr(env, "config", {}) or {}, "rule_maker_profile_id"
             )
-            self._formation_locked = True
-            formation_constraint_enabled = True
+            formation_constraint_enabled = bool(self._formation_locked)
         elif (
             self._formation_locked
             and self._is_s6_background_merge_route(env)
@@ -2359,6 +2369,169 @@ class MultiAgentRuleMaker(RuleMaker):
         ) or {}
         return "hard_brake_lead" in manifest
 
+    def _s5_release_window_open(self, env) -> bool:
+        """Release formation shortly before S5's deterministic brake marker."""
+
+        if not self._is_s5_hard_brake_scenario(env):
+            return False
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        evidence = getattr(orchestrator, "_conflict_evidence", {}) or {}
+        if (
+            self._s5_hazard_response_actions is not None
+            and evidence.get("mixed_direction_lane_change_completed", False)
+        ):
+            return False
+        if self._is_s5_hard_brake_active(env):
+            return True
+        resolved = getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}
+        trigger_s = resolved.get("brake_trigger_time_s")
+        if trigger_s is None:
+            return False
+        step = int(getattr(env, "_scenario_step_count", self._decision_step) or 0)
+        config = getattr(env, "config", {}) or {}
+        physics_dt = float(self._config_value(config, "physics_world_step_size") or 0.02)
+        decision_repeat = float(self._config_value(config, "decision_repeat") or 5.0)
+        elapsed_s = float(step) * physics_dt * decision_repeat
+        return elapsed_s >= max(0.0, float(trigger_s) - self.s5_early_unlock_s)
+
+    @staticmethod
+    def _is_mixed_direction_combo(combo) -> bool:
+        actions = {int(candidate.get("action", 0)) for candidate in combo}
+        return -1 in actions and 1 in actions
+
+    def _rank_s5_split_combos(self, ranked_combos):
+        ranked = []
+        for combo, score in ranked_combos:
+            ranked.append((combo, float(score)))
+        ranked.sort(
+            key=lambda value: (
+                0
+                if self.s5_mixed_direction_preference > 0.0
+                and self._is_mixed_direction_combo(value[0])
+                else 1,
+                -float(value[1]),
+                tuple(int(candidate.get("action", 0)) for candidate in value[0]),
+            )
+        )
+        return ranked
+
+    def _s5_post_response_combo(
+        self,
+        *,
+        env,
+        ordered_agent_ids: list[str],
+        candidates_by_agent: dict[str, list[dict]],
+    ):
+        """Hold a realized split briefly, then return every ego to its start lane."""
+
+        actions = dict(self._s5_hazard_response_actions or {})
+        mixed = -1 in actions.values() and 1 in actions.values()
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        evidence = getattr(orchestrator, "_conflict_evidence", {}) or {}
+        split_realized = bool(evidence.get("mixed_direction_lane_change_completed", False))
+        bypass_complete = bool(
+            evidence.get("all_agents_passed_hard_brake_lead", False)
+        )
+        initial_lanes = getattr(orchestrator, "_initial_agent_lanes", {}) or {}
+        agents = getattr(env, "agents", {}) or {}
+
+        if self._lane_change_commitments:
+            committed_combo = tuple(
+                self._candidate_for_action(
+                    candidates_by_agent[agent_id],
+                    int(
+                        self._lane_change_commitments[agent_id].action
+                        if agent_id in self._lane_change_commitments
+                        else actions.get(agent_id, 0)
+                    ),
+                )
+                for agent_id in ordered_agent_ids
+            )
+            best_combo = (
+                None
+                if any(candidate is None for candidate in committed_combo)
+                else committed_combo
+            )
+            ranked = [] if best_combo is None else [(tuple(best_combo), 0.0)]
+            return best_combo, (0.0 if best_combo is not None else -float("inf")), {
+                "strategy": "s5_committed_split_roll",
+                "accepted_response_actions": actions,
+                "prefix_counts": [1 if best_combo is not None else 0],
+                "pairwise_conflict_counts": {},
+            }, ranked
+
+        requested: list[int] = []
+        all_on_initial = True
+        for agent_id in ordered_agent_ids:
+            initial = tuple(initial_lanes.get(agent_id, ()) or ())
+            current = tuple(getattr(agents.get(agent_id), "lane_index", ()) or ())
+            if len(initial) < 3 or len(current) < 3:
+                requested.append(0)
+                all_on_initial = False
+                continue
+            delta = int(initial[2]) - int(current[2])
+            requested.append(-1 if delta < 0 else (1 if delta > 0 else 0))
+            all_on_initial = all_on_initial and delta == 0
+
+        if mixed and split_realized and not all_on_initial:
+            self._s5_reassembly_hold_count += 1
+            self._formation_locked = True
+        if (
+            mixed
+            and split_realized
+            and not all_on_initial
+            and self._s5_reassembly_hold_count > self.s5_reassembly_hold_steps
+        ):
+            return_combo = tuple(
+                self._candidate_for_action(candidates_by_agent[agent_id], action)
+                for agent_id, action in zip(ordered_agent_ids, requested)
+            )
+            keep_combo = tuple(
+                self._candidate_for_action(candidates_by_agent[agent_id], 0)
+                for agent_id in ordered_agent_ids
+            )
+            ranked = []
+            if not any(candidate is None for candidate in return_combo):
+                ranked.append((tuple(return_combo), 1.0))
+            if not any(candidate is None for candidate in keep_combo):
+                ranked.append((tuple(keep_combo), 0.0))
+            best_combo, best_score = ranked[0] if ranked else (None, -float("inf"))
+            return best_combo, best_score, {
+                "strategy": "s5_reassemble_initial_lane",
+                "accepted_response_actions": actions,
+                "requested_return_actions": dict(zip(ordered_agent_ids, requested)),
+                "split_realized": True,
+                "bypass_complete": bool(bypass_complete),
+                "reassembly_hold_count": int(self._s5_reassembly_hold_count),
+                "prefix_counts": [len(ranked)],
+                "pairwise_conflict_counts": {},
+                "final_feasibility_authority": "normal_planner",
+            }, ranked
+
+        keep_combo = tuple(
+            self._candidate_for_action(candidates_by_agent[agent_id], 0)
+            for agent_id in ordered_agent_ids
+        )
+        best_combo = None if any(candidate is None for candidate in keep_combo) else keep_combo
+        ranked = [] if best_combo is None else [(tuple(best_combo), 0.0)]
+        if all_on_initial and split_realized:
+            self._formation_locked = True
+        return best_combo, (0.0 if best_combo is not None else -float("inf")), {
+            "strategy": (
+                "s5_reassembly_complete_keep"
+                if all_on_initial and split_realized
+                else "s5_split_stabilization_keep"
+                if mixed
+                else "s5_post_response_keep"
+            ),
+            "accepted_response_actions": actions,
+            "split_realized": bool(split_realized),
+            "bypass_complete": bool(bypass_complete),
+            "reassembly_hold_count": int(self._s5_reassembly_hold_count),
+            "prefix_counts": [1 if best_combo is not None else 0],
+            "pairwise_conflict_counts": {},
+        }, ranked
+
     @classmethod
     def _s8_lane_change_window_open(cls, env, source_lane) -> bool:
         try:
@@ -3307,6 +3480,13 @@ def make_rule_maker(config: dict, profile_id: str | None = None) -> RuleMaker:
             relock_gap_ratio=float(yaml_params.get("relock_gap_ratio", 1.5)),
             forced_lane_unlock_wait_steps=int(yaml_params.get("forced_lane_unlock_wait_steps", 10)),
             relock_stable_steps=int(yaml_params.get("relock_stable_steps", 20)),
+            s5_early_unlock_s=float(yaml_params.get("s5_early_unlock_s", 0.8)),
+            s5_mixed_direction_preference=float(
+                yaml_params.get("s5_mixed_direction_preference", 0.0)
+            ),
+            s5_reassembly_hold_steps=int(
+                yaml_params.get("s5_reassembly_hold_steps", 10)
+            ),
         )
         rule_maker.profile_id = profile_id
         return rule_maker
