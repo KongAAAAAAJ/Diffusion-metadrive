@@ -2416,7 +2416,10 @@ class ScenarioOrchestrator:
                 >= stable_steps_required
             ):
                 completion_steps.setdefault(str(name), int(step_count))
-                completion_lane_ids[str(name)] = int(current[2])
+                # Preserve the first physically completed departure lane.
+                # Reassembly on another common lane must not erase the
+                # historical LEFT/RIGHT split evidence.
+                completion_lane_ids.setdefault(str(name), int(current[2]))
 
         coordinated_lane_change_completed = bool(
             len(self._initial_agent_lanes) == 3
@@ -2443,23 +2446,56 @@ class ScenarioOrchestrator:
         reassembly_steps = self._functional_state.setdefault(
             "s5_reassembly_completion_steps", {}
         )
+        reassembly_lane_index = self._functional_state.get(
+            "s5_reassembly_lane_index"
+        )
         if mixed_direction_lane_change_completed:
-            for name, vehicle in agents.items():
-                initial = self._initial_agent_lanes.get(str(name), ())
-                current = tuple(getattr(vehicle, "lane_index", ()) or ())
-                returned = bool(
-                    len(initial) >= 3
-                    and len(current) >= 3
-                    and int(current[2]) == int(initial[2])
-                )
-                if not returned:
-                    reassembly_candidates.pop(str(name), None)
-                    continue
-                first_step = reassembly_candidates.setdefault(str(name), int(step_count))
-                if int(step_count) - int(first_step) + 1 >= stable_steps_required:
-                    reassembly_steps.setdefault(str(name), int(step_count))
+            current_by_agent = {
+                str(name): tuple(getattr(vehicle, "lane_index", ()) or ())
+                for name, vehicle in agents.items()
+            }
+            common_lane = (
+                next(iter(current_by_agent.values()))
+                if len(current_by_agent) == 3
+                and all(len(lane) >= 3 for lane in current_by_agent.values())
+                and len(set(current_by_agent.values())) == 1
+                else None
+            )
+            if common_lane is None:
+                reassembly_candidates.clear()
+                reassembly_steps.clear()
+                self._functional_state.pop("s5_reassembly_lane_index", None)
+            else:
+                encoded_common_lane = tuple(common_lane)
+                if tuple(reassembly_lane_index or ()) != encoded_common_lane:
+                    reassembly_candidates.clear()
+                    reassembly_steps.clear()
+                    self._functional_state["s5_reassembly_lane_index"] = (
+                        encoded_common_lane
+                    )
+                for name in agents:
+                    first_step = reassembly_candidates.setdefault(
+                        str(name), int(step_count)
+                    )
+                    if (
+                        int(step_count) - int(first_step) + 1
+                        >= stable_steps_required
+                    ):
+                        reassembly_steps.setdefault(str(name), int(step_count))
         reassembly_completed = bool(
             mixed_direction_lane_change_completed and len(reassembly_steps) == 3
+        )
+        completed_reassembly_lane = tuple(
+            self._functional_state.get("s5_reassembly_lane_index", ()) or ()
+        )
+        initial_lane_values = {
+            tuple(value)
+            for value in self._initial_agent_lanes.values()
+            if value
+        }
+        reassembled_to_initial_lane = bool(
+            reassembly_completed
+            and completed_reassembly_lane in initial_lane_values
         )
         lane_change_direction = None
         if coordinated_lane_change_completed:
@@ -2485,7 +2521,11 @@ class ScenarioOrchestrator:
                 ),
                 "lane_change_completion_steps": dict(completion_steps),
                 "lane_change_completion_lane_ids": dict(completion_lane_ids),
-                "reassembly_to_initial_lane_completed": bool(reassembly_completed),
+                "reassembly_completed": bool(reassembly_completed),
+                "reassembly_lane_index": list(completed_reassembly_lane),
+                "reassembly_to_initial_lane_completed": bool(
+                    reassembled_to_initial_lane
+                ),
                 "reassembly_completion_steps": dict(reassembly_steps),
                 "lane_change_stable_steps_required": stable_steps_required,
             }
@@ -2493,8 +2533,9 @@ class ScenarioOrchestrator:
         self._route_completion["s5_real_lane_change_completed"] = bool(
             coordinated_lane_change_completed or mixed_direction_lane_change_completed
         )
+        self._route_completion["s5_reassembled"] = bool(reassembly_completed)
         self._route_completion["s5_reassembled_to_initial_lane"] = bool(
-            reassembly_completed
+            reassembled_to_initial_lane
         )
         behavior = None
         if reassembly_completed:
@@ -3482,7 +3523,7 @@ class ScenarioOrchestrator:
                         "mixed_direction_lane_change_completed", False
                     )
                     and self._conflict_evidence.get(
-                        "reassembly_to_initial_lane_completed", False
+                        "reassembly_completed", False
                     )
                     and self._conflict_evidence.get("lane_change_direction")
                     == "mixed"

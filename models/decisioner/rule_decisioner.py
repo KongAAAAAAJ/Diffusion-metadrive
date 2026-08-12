@@ -908,7 +908,10 @@ class MultiAgentRuleMaker(RuleMaker):
                     traffic_vehicles=traffic_vehicles,
                     formation_constraint_enabled=False,
                 )
-                ranked_combos = self._rank_s5_split_combos(ranked_combos)
+                ranked_combos = self._rank_s5_split_combos(
+                    ranked_combos,
+                    env=env,
+                )
                 if ranked_combos:
                     best_combo, best_score = ranked_combos[0]
                 action_search_debug["strategy"] = "s5_profile_split_action"
@@ -2399,18 +2402,62 @@ class MultiAgentRuleMaker(RuleMaker):
         actions = {int(candidate.get("action", 0)) for candidate in combo}
         return -1 in actions and 1 in actions
 
-    def _rank_s5_split_combos(self, ranked_combos):
+    @staticmethod
+    def _s5_action_tuple(combo) -> tuple[int, ...]:
+        return tuple(int(candidate.get("action", 0)) for candidate in combo)
+
+    @classmethod
+    def _is_contiguous_s5_split_combo(cls, combo) -> bool:
+        """Return true for a two-vehicle subgroup plus one outer vehicle.
+
+        Alternating triples such as RIGHT/LEFT/RIGHT dissolve the longitudinal
+        ordering twice and put the middle ego into the adjacent actor's near
+        field.  LEFT/LEFT/RIGHT and RIGHT/RIGHT/LEFT preserve two contiguous
+        longitudinal subgroups while still providing the required physical
+        formation release.
+        """
+
+        return cls._s5_action_tuple(combo) in {(-1, -1, 1), (1, 1, -1)}
+
+    def _rank_s5_split_combos(self, ranked_combos, *, env=None):
         ranked = []
         for combo, score in ranked_combos:
             ranked.append((combo, float(score)))
+
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        resolved = getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}
+        left_relation = str(resolved.get("left_relation", ""))
+        right_relation = str(resolved.get("right_relation", ""))
+        pressure = str(resolved.get("lead_pressure_bucket", ""))
+        preferred_actions = None
+        if pressure == "high" and (left_relation, right_relation) == (
+            "ahead",
+            "behind",
+        ):
+            preferred_actions = (-1, -1, 1)
+        elif pressure == "high" and (left_relation, right_relation) == (
+            "behind",
+            "ahead",
+        ):
+            preferred_actions = (1, 1, -1)
+
         ranked.sort(
             key=lambda value: (
-                0
-                if self.s5_mixed_direction_preference > 0.0
-                and self._is_mixed_direction_combo(value[0])
-                else 1,
+                (
+                    0
+                    if preferred_actions is not None
+                    and self.s5_mixed_direction_preference > 0.0
+                    and self._s5_action_tuple(value[0]) == preferred_actions
+                    else 1
+                    if preferred_actions is not None
+                    and self.s5_mixed_direction_preference > 0.0
+                    and self._is_contiguous_s5_split_combo(value[0])
+                    else 2
+                    if self._s5_action_tuple(value[0]) == (0, 0, 0)
+                    else 3
+                ),
                 -float(value[1]),
-                tuple(int(candidate.get("action", 0)) for candidate in value[0]),
+                self._s5_action_tuple(value[0]),
             )
         )
         return ranked

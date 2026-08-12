@@ -53,6 +53,70 @@ def _artifact_row(path: Path) -> dict[str, object]:
     }
 
 
+def _s5_physical_behavior_gate(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Validate the latest S5 five-seed memory from physical evidence."""
+
+    behavior_classes = {
+        str((row.get("conflict_evidence") or {}).get("observed_behavior_class"))
+        for row in rows
+        if (row.get("conflict_evidence") or {}).get("observed_behavior_class")
+    }
+    lane_change_rows = [
+        row
+        for row in rows
+        if bool((row.get("conflict_evidence") or {}).get("real_lane_change_completed"))
+    ]
+    asynchronous_rows = []
+    synchronous_same_direction_rows = []
+    for row in lane_change_rows:
+        evidence = row.get("conflict_evidence") or {}
+        directions = tuple(
+            str(value)
+            for value in (evidence.get("lane_change_direction_by_agent") or {}).values()
+            if str(value) in {"left", "right"}
+        )
+        steps = tuple(
+            int(value)
+            for value in (evidence.get("lane_change_completion_steps") or {}).values()
+        )
+        if len(steps) >= 2 and len(set(steps)) >= 2:
+            asynchronous_rows.append(row)
+        if len(directions) == 3 and len(set(directions)) == 1:
+            synchronous_same_direction_rows.append(row)
+
+    all_keep = bool(rows) and all(
+        (row.get("conflict_evidence") or {}).get("observed_behavior_class")
+        == "keep_emergency_braking"
+        for row in rows
+    )
+    all_synchronous_same_direction = bool(rows) and len(
+        synchronous_same_direction_rows
+    ) == len(rows)
+    passed = bool(
+        len(rows) == len(SEEDS)
+        and len(behavior_classes) >= 2
+        and lane_change_rows
+        and asynchronous_rows
+        and not all_keep
+        and not all_synchronous_same_direction
+    )
+    return {
+        "passed": passed,
+        "episode_count": len(rows),
+        "behavior_classes": sorted(behavior_classes),
+        "physical_lane_change_seeds": sorted(
+            int(row["seed"]) for row in lane_change_rows
+        ),
+        "asynchronous_response_seeds": sorted(
+            int(row["seed"]) for row in asynchronous_rows
+        ),
+        "all_keep_lane": all_keep,
+        "all_synchronous_same_direction_lane_change": (
+            all_synchronous_same_direction
+        ),
+    }
+
+
 def _run_batch(root: Path, scenario_id: str, route: str, profile: str | None) -> Path:
     batch_root = root if profile is None else root / "S5_profiles" / profile
     run_scenario(
@@ -150,22 +214,33 @@ def main() -> None:
         for row in episodes if row["scenario_id"] == "S7_ego_merge_from_ramp"
     }
     s5_categories = {}
+    s5_physical_behavior_gates = {}
     for profile in S5_PROFILES:
         actions = set()
-        for row in episodes:
-            if row["profile_id"] == profile:
-                actions.update(
-                    key.rsplit(":", 1)[-1]
-                    for key, count in (row["rule_action_counts"] or {}).items()
-                    if count
-                )
+        profile_rows = [
+            row for row in episodes if row["profile_id"] == profile
+        ]
+        for row in profile_rows:
+            actions.update(
+                key.rsplit(":", 1)[-1]
+                for key, count in (row["rule_action_counts"] or {}).items()
+                if count
+            )
         s5_categories[profile] = sorted(actions)
+        s5_physical_behavior_gates[profile] = _s5_physical_behavior_gate(
+            profile_rows
+        )
     profile_diversity = len({tuple(value) for value in s5_categories.values()}) >= 2
+    s5_memory_gate = any(
+        bool(value["passed"])
+        for value in s5_physical_behavior_gates.values()
+    )
     hard_gates_passed = bool(
         base_ok and files_ok
         and s6_gaps == {"agent0-agent1", "agent1-agent2"}
         and s7_behaviors == {"pass_first", "yield_then_merge"}
         and profile_diversity
+        and s5_memory_gate
     )
     contract = candidate_scenario_contract_v2(frozen=hard_gates_passed)
     manifest = {
@@ -178,6 +253,8 @@ def main() -> None:
         "semantic_bev_video_count": sum(a["absolute_path"].endswith(".mp4") and "/semantic_bev_video/" in a["absolute_path"] for a in artifacts),
         "trajectory_npz_count": sum(a["absolute_path"].endswith(".npz") for a in artifacts),
         "s5_behavior_categories": s5_categories,
+        "s5_physical_behavior_gates": s5_physical_behavior_gates,
+        "s5_latest_memory_gate_passed": s5_memory_gate,
         "s6_target_gap_coverage": sorted(value for value in s6_gaps if value),
         "s7_behavior_coverage": sorted(
             value for value in s7_behaviors if value

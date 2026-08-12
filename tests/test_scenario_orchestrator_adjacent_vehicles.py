@@ -578,6 +578,7 @@ def test_s5_mixed_lane_changes_require_real_return_before_recovery_class() -> No
 
     evidence = orchestrator._conflict_evidence
     assert evidence["mixed_direction_lane_change_completed"] is True
+    assert evidence["reassembly_completed"] is False
     assert evidence["reassembly_to_initial_lane_completed"] is False
     assert evidence["observed_behavior_class"] == "temporary_formation_release"
 
@@ -587,7 +588,73 @@ def test_s5_mixed_lane_changes_require_real_return_before_recovery_class() -> No
     orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 34)
 
     evidence = orchestrator._conflict_evidence
+    assert evidence["reassembly_completed"] is True
     assert evidence["reassembly_to_initial_lane_completed"] is True
+    assert evidence["observed_behavior_class"] == (
+        "temporary_formation_release_and_recovery"
+    )
+
+
+def test_s5_mixed_lane_changes_can_reassemble_on_any_common_valid_lane() -> None:
+    env, ego, traffic_manager = make_env_and_ego()
+    agents = {
+        f"agent{index}": SimpleNamespace(
+            name=f"agent{index}",
+            lane=ego.lane,
+            lane_index=("road_a", "road_b", 1),
+            position=(90.0 - 15.0 * index, 4.0),
+            speed_km_h=22.0,
+            LENGTH=5.74,
+        )
+        for index in range(3)
+    }
+    env.agents = agents
+    lead = SimpleNamespace(
+        name="lead",
+        lane=ego.lane,
+        lane_index=("road_a", "road_b", 1),
+        position=(60.0, 4.0),
+        speed_km_h=0.0,
+        LENGTH=5.74,
+    )
+    traffic_manager._traffic_vehicles = [lead]
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"], "R1_entry_straight"
+    )
+    orchestrator._initial_agent_lanes = {
+        name: ("road_a", "road_b", 1) for name in agents
+    }
+    orchestrator.summary.scenario_triggered = True
+    orchestrator.summary.trigger_step = 30
+    orchestrator._actor_manifest = {
+        "hard_brake_lead": {"object_name": "lead", "active": True},
+    }
+    orchestrator._resolved_scenario_parameters = {
+        "lead_target_speed_km_h": 0.0,
+        "lead_brake_deceleration_mps2": 4.5,
+    }
+    orchestrator._route_completion = {}
+    orchestrator._functional_state = {
+        "last_step": None,
+        "actor_speeds_kmh": {"hard_brake_lead": 2.0},
+        "ego_speeds_kmh": {},
+        "formation_stable_steps": 0,
+    }
+
+    for name, lane_id in {"agent0": 0, "agent1": 0, "agent2": 2}.items():
+        agents[name].lane_index = ("road_a", "road_b", lane_id)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 31)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 32)
+
+    for vehicle in agents.values():
+        vehicle.lane_index = ("road_a", "road_b", 0)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 33)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 34)
+
+    evidence = orchestrator._conflict_evidence
+    assert evidence["reassembly_completed"] is True
+    assert evidence["reassembly_lane_index"] == ["road_a", "road_b", 0]
+    assert evidence["reassembly_to_initial_lane_completed"] is False
     assert evidence["observed_behavior_class"] == (
         "temporary_formation_release_and_recovery"
     )

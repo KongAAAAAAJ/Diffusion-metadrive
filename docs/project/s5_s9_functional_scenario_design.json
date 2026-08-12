@@ -1,9 +1,15 @@
 {
   "format": "bev_s5_s9_candidate_functional_scenario_memory_v1",
   "schema_version": 1,
-  "recorded_at": "2026-08-11T13:40:35+08:00",
-  "status": "user_confirmed_candidate_design_pending_implementation_and_validation",
+  "recorded_at": "2026-08-12T19:12:42+08:00",
+  "status": "user_confirmed_functional_definition_revision_pending_full_implementation_and_five_seed_validation",
   "purpose": "Store the user-confirmed functional semantics, constrained logical parameter ranges, and acceptance gates for the next S5-S9 scenario revision without retroactively changing the frozen scenario contract or the dataset used by the ongoing Stage1-A training run.",
+  "latest_revision": {
+    "date": "2026-08-12",
+    "summary": "Revise S5 so its fixed five-seed evaluation must contain physically realized maneuver diversity, including at least one lane-change episode and at least one non-synchronous platoon response; permit reassembly on any scenario-valid lane. Retain the strengthened S6-S9 interaction, asynchronous-maneuver, and reassembly definitions.",
+    "formal_v1_contract_changed": false,
+    "existing_dataset_or_training_metadata_changed": false
+  },
   "scope": {
     "scenario_ids": [
       "S5_hard_brake_lead",
@@ -13,7 +19,7 @@
       "S9_narrow_channel_negotiation"
     ],
     "definition_level": "functional_scenario_plus_candidate_logical_ranges",
-    "implementation_authorized": false,
+    "implementation_authorized": true,
     "formal_contract_activated": false
   },
   "compatibility": {
@@ -67,13 +73,19 @@
       "conflict-point arrival-time difference was inside the scenario range",
       "minimum TTC and gap were measured against the designated conflict actor",
       "the expected ego route transition or avoidance maneuver was completed"
+    ],
+    "formation_transition_evidence": [
+      "formation release must be physically observable through different ego lane or route-segment occupancy, a cut-in actor occupying an internal platoon gap, or a measured loss of the configured longitudinal formation gaps",
+      "asynchronous maneuver claims require recorded physical transition times and at least one state where the three ego vehicles have not all completed the same route transition",
+      "formation reassembly requires all three ego vehicles on one scenario-valid lane, preserved platoon order, recovered configured longitudinal gaps, and persistence for the configured validation window",
+      "behavior commands without matching lane, route, gap, and trajectory evidence do not satisfy functional acceptance"
     ]
   },
   "scenarios": {
     "S5_hard_brake_lead": {
       "functional_name": "hard-braking lead with randomized adjacent-lane constraints",
       "current_candidate_route": "R1_entry_straight",
-      "functional_intent": "A three-car platoon approaches a lead vehicle that brakes sharply. Adjacent-lane traffic creates constrained but not pre-scripted alternatives so separately evaluated RuleMaker parameter profiles can choose braking, coordinated avoidance, or temporary formation release when those actions are genuinely safe.",
+      "functional_intent": "A three-car platoon approaches a lead vehicle that brakes sharply. Randomized adjacent-lane constraints must produce diverse hard-safe responses across the fixed five-seed evaluation, including braking and physically realized lane-change or temporary formation-release behavior. After the hazard, the platoon may reassemble on any scenario-valid lane.",
       "fixed_semantics": [
         "one controllable lead actor brakes after a finite approach period",
         "one actor is placed on each existing adjacent lane when the map exposes both sides",
@@ -150,61 +162,133 @@
       "accepted_behaviors": [
         "KEEP with emergency braking",
         "coordinated lane change into a hard-safe adjacent gap",
-        "temporary formation release with at least one realized LEFT and one realized RIGHT lane change, followed by return to the initial middle lane and longitudinal formation recovery"
+        "asynchronous or mixed-direction lane changes that temporarily release formation",
+        "formation reassembly on any scenario-valid common lane with preserved platoon order and recovered longitudinal gaps"
       ],
+      "five_seed_behavior_diversity": {
+        "fixed_seed_set_required": true,
+        "seed_set": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "minimum_realized_behavior_classes": 2,
+        "minimum_episodes_with_physical_lane_change": 1,
+        "minimum_episodes_with_non_synchronous_platoon_response": 1,
+        "all_keep_lane_forbidden": true,
+        "all_synchronous_same_direction_lane_change_forbidden": true,
+        "behavior_classes": [
+          "KEEP emergency braking",
+          "synchronous same-direction lane change",
+          "asynchronous same-direction lane change",
+          "mixed-direction formation release"
+        ],
+        "evidence": "behavior classes and lane changes must be derived from physical lane IDs, lane-transition completion times, and trajectories rather than RuleMaker commands"
+      },
       "acceptance_gates": [
         "lead actor realizes the sampled deceleration profile",
         "both adjacent actors realize their sampled roles",
         "at least two RuleMaker profiles select different safe behavior classes on part of the shared concrete test set",
+        "the fixed five-seed result contains at least two physically realized behavior classes and at least one episode with a real lane change",
+        "at least one of the five seeds contains a non-synchronous platoon response; five all-KEEP episodes or five synchronous same-direction lane-change episodes fail acceptance",
         "the platoon avoids collision and road exit",
         "formation recovery is measured after the hazard clears",
-        "temporary formation release is credited only when physical lane IDs prove both LEFT and RIGHT transitions, all three vehicles later return to the initial lane, and formation gaps recover"
+        "temporary formation release is credited only when physical lane IDs and transition times prove the claimed split behavior",
+        "reassembly succeeds on any scenario-valid common lane when all three vehicles recover platoon order and longitudinal formation gaps; return to the initial middle lane is not required"
       ],
       "candidate_revision_evidence_20260812": {
-        "implementation_state": "implemented_and_single_seed_closed_loop_verified",
+        "implementation_state": "implemented_and_fixed_five_seed_closed_loop_verified_without_video",
         "formation_release_window_s_before_brake": 0.8,
-        "mixed_direction_profiles": [
-          "balanced",
-          "evasive"
-        ],
-        "verified_seed": 17,
         "verified_profile": "evasive",
-        "realized_initial_actions": {
-          "agent0": "LEFT",
-          "agent1": "LEFT",
-          "agent2": "RIGHT"
-        },
-        "lane_change_completion_steps": {
-          "agent0": 54,
-          "agent1": 61,
-          "agent2": 64
-        },
-        "return_to_initial_lane_completion_steps": {
-          "agent0": 151,
-          "agent1": 149,
-          "agent2": 152
-        },
-        "formation_recovery_step": 160,
-        "closed_loop_result": {
-          "planner_success": "200/200",
+        "verified_seeds": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "five_seed_result": {
+          "episodes_passed": "5/5",
+          "planner_success": "1000/1000",
           "collision": false,
           "out_of_road": false,
-          "functional_success": true
+          "planner_fallback": false,
+          "functional_success": "5/5",
+          "behavior_classes": [
+            "temporary_formation_release_and_recovery",
+            "keep_emergency_braking"
+          ],
+          "physical_lane_change_seeds": [
+            17,
+            23
+          ],
+          "asynchronous_response_seeds": [
+            17,
+            23
+          ],
+          "keep_emergency_braking_seeds": [
+            31,
+            47,
+            59
+          ]
         },
-        "artifact_root": "/tmp/s5_mixed_reassembly_smoke8/S5_hard_brake_lead",
-        "additional_probe": {
-          "seed": 23,
-          "status": "mixed_action_selected_but_closed_loop_not_accepted",
-          "failure_reason": "committed_trajectory_background_unsafe",
-          "note": "The first mixed proposal crossed the unchanged 5 m rolling background-gap gate; an outer-split probe instead crossed the unchanged tracking envelope. Neither hard gate was relaxed and this seed is not counted as accepted."
+        "per_seed_physical_evidence": {
+          "17": {
+            "behavior": "temporary_formation_release_and_recovery",
+            "realized_directions": {
+              "agent0": "LEFT",
+              "agent1": "LEFT",
+              "agent2": "RIGHT"
+            },
+            "lane_change_completion_steps": {
+              "agent0": 54,
+              "agent1": 61,
+              "agent2": 64
+            },
+            "reassembly_lane_id": 1
+          },
+          "23": {
+            "behavior": "temporary_formation_release_and_recovery",
+            "realized_directions": {
+              "agent0": "RIGHT",
+              "agent1": "RIGHT",
+              "agent2": "LEFT"
+            },
+            "lane_change_completion_steps": {
+              "agent0": 60,
+              "agent1": 66,
+              "agent2": 68
+            },
+            "reassembly_lane_id": 1
+          },
+          "31": {
+            "behavior": "keep_emergency_braking"
+          },
+          "47": {
+            "behavior": "keep_emergency_braking"
+          },
+          "59": {
+            "behavior": "keep_emergency_braking"
+          }
         },
-        "five_seed_status": "not_run_in_this_increment"
+        "artifact_root": "/tmp/s5_latest_memory_rank_fix_5seed/S5_hard_brake_lead",
+        "artifact_note": "Diagnostic closed-loop run intentionally disabled top-down video, semantic-BEV video, and trajectory NPZ; this path is evidence for machine gates only and is not a video-review deliverable.",
+        "episode_json_sha256": {
+          "17": "b17fc1a444450002b0b837934c98ef6b229c8351b2e509b6398783770d2cfdb3",
+          "23": "50b295f5d4b99f6ad5b33357ba1ccc9aed4e6c3697de27cba4324b4dd3c12f56",
+          "31": "8e0bf3890839e349cb8b5bb4a4c334674e38048b4dc1b5722f15b821a563bbd9",
+          "47": "79077a787b4d6090a09ab59d5f7519973eaa29d92888d9ba370c298c3a93e631",
+          "59": "a8254b86ad874ededfae9103c969fa82ec641a7dd2dcd7b7c7ae990ad381af97"
+        },
+        "five_seed_status": "machine_closed_loop_gate_passed_video_review_not_run"
       }
     },
     "S6_background_merge_in": {
       "functional_name": "background actor merges into either platoon gap",
       "current_candidate_route": "R6_mainline_merge_approach",
-      "functional_intent": "A controlled ramp actor reaches the mainline at nearly the same time as one of the two internal platoon gaps and attempts to merge into that gap, forcing an observable yield, pass-first, formation-expansion, or coordinated lane-change response.",
+      "functional_intent": "A controlled ramp actor cuts into either internal platoon gap. After the realized cut-in, the ego vehicles must respond with hard-safe KEEP, LEFT, or RIGHT behavior, temporarily release formation when required, and finally reassemble on one common lane without collision.",
       "target_gap_generalization": {
         "choices": [
           "agent0-agent1",
@@ -251,26 +335,29 @@
         "spawn longitude is solved from the sampled conflict-point arrival time instead of sampled independently",
         "both target gaps receive balanced coverage across an evaluation or collection manifest",
         "the merge actor must cross into the platoon mainline and occupy the designated target-gap corridor",
-        "a natural non-interacting pass outside the target gap is invalid"
+        "a natural non-interacting pass outside the target gap is invalid",
+        "the cut-in must causally trigger a measurable ego speed, gap, or lane response"
       ],
       "accepted_behaviors": [
-        "yield and expand the designated gap",
-        "pass the merge point before the actor",
-        "perform a hard-safe coordinated lane change",
-        "temporarily release and then recover formation"
+        "KEEP lane while yielding and expanding the designated gap",
+        "hard-safe LEFT lane change after the cut-in",
+        "hard-safe RIGHT lane change after the cut-in",
+        "temporary formation release followed by reassembly on one common lane"
       ],
       "acceptance_gates": [
         "merge actor completes its lane transition",
-        "designated target gap is realized and recorded",
+        "merge actor physically occupies the designated agent0-agent1 or agent1-agent2 corridor as a realized cut-in",
         "arrival-time delta and TTC are inside their sampled ranges",
-        "the platoon exhibits measurable speed, gap, formation, or lane response",
-        "the platoon recovers after the merge without collision, road exit, or planner fallback"
+        "physical lane IDs and trajectories prove any claimed LEFT or RIGHT lane change; a command alone is insufficient",
+        "the platoon exhibits a measurable KEEP, LEFT, or RIGHT response after the cut-in",
+        "all three ego vehicles later occupy one common lane in platoon order with recovered longitudinal gaps",
+        "the cut-in, response, and reassembly complete without collision, road exit, or planner fallback"
       ]
     },
     "S7_ego_merge_from_ramp": {
       "functional_name": "three-car platoon negotiates a timed mainline gap",
       "current_candidate_route": "R7_merge_core",
-      "functional_intent": "The complete three-car platoon enters from a ramp and must select and execute a shared mainline merge opportunity under a controlled stream of critical front and rear actors.",
+      "functional_intent": "The three-car platoon enters from a ramp under a controlled stream of critical front and rear actors. The platoon must temporarily dissolve and merge asynchronously rather than perform one synchronized lane change, then reassemble on one mainline lane.",
       "actor_structure": {
         "total_background_actor_range": [
           4,
@@ -330,20 +417,33 @@
         "all declared actors must spawn successfully before the episode is eligible",
         "critical actor positions are solved from conflict-point arrival times",
         "far actors that do not affect a merge opportunity do not count toward scenario density",
-        "at least one valid full-platoon merge opportunity must exist"
+        "at least one valid full-platoon merge opportunity must exist",
+        "the sampled traffic timing must create a safe asynchronous merge solution for the three ego vehicles"
       ],
       "acceptance_gates": [
         "all three ego vehicles leave the ramp and enter the mainline",
         "critical front and rear actors traverse the merge conflict region",
         "the test set covers both pass-first and yield-then-merge behavior",
+        "a physical split state is observed in which at least one ego vehicle is already on the mainline while at least one other ego vehicle remains on the ramp",
+        "the three lane-transition completion events are not all simultaneous",
         "no ego vehicle remains stranded on the ramp",
-        "the longitudinal platoon formation is recovered after the merge"
+        "after merging, all three ego vehicles occupy one common mainline lane in platoon order with recovered longitudinal gaps",
+        "the asynchronous merge and reassembly complete without collision, road exit, or planner fallback"
       ]
     },
     "S8_ego_exit_to_ramp": {
       "functional_name": "three-car platoon follows a continuous mainline-to-ramp route",
       "current_candidate_route": "R6_exit_to_ramp",
-      "functional_intent": "The platoon must leave the through mainline by moving to the exit-side lane, traversing the correct diverge connector, entering the exit ramp, and then continuing along the ramp.",
+      "functional_intent": "The platoon starts from the middle mainline lane and must interact with one to three actors on the right exit-side lane. The interaction temporarily dissolves the platoon and produces asynchronous moves into the rightmost lane before all three vehicles enter the exit ramp, continue with KEEP, and reassemble by longitudinal gap adjustment.",
+      "initial_and_trigger_traffic": {
+        "ego_initial_lane": "middle_mainline_lane",
+        "trigger_actor_lane": "right_exit_side_lane",
+        "trigger_actor_count_range": [
+          1,
+          3
+        ],
+        "minimum_interacting_actor_count": 1
+      },
       "required_route_chain": [
         "mainline_lane",
         "exit_side_lane",
@@ -359,7 +459,7 @@
       "development_stages": [
         "prove the complete route chain with zero background actors",
         "prove the expected KEEP-RIGHT-KEEP action transition for all three agents",
-        "only then add constrained exit-lane front and rear actors"
+        "then enable one to three constrained exit-lane actors and require the full interaction, asynchronous lane-change, and reassembly semantics"
       ],
       "logical_ranges_after_topology_gate": {
         "ego_initial_speed_km_h": [
@@ -389,29 +489,40 @@
       },
       "expected_action_sequence": [
         "KEEP while approaching",
-        "coordinated RIGHT into the exit-side lane",
+        "interact with at least one right-lane actor through measurable speed, gap, or lane-change timing adjustment",
+        "temporarily release formation and complete non-simultaneous RIGHT lane changes into the exit-side lane",
         "KEEP through the diverge connector",
-        "KEEP while continuing along the ramp"
+        "KEEP while continuing along the ramp",
+        "recover longitudinal platoon gaps on the ramp"
       ],
       "acceptance_gates": [
         "the road graph exposes every edge in the required route chain",
+        "one to three declared right-lane trigger actors spawn and remain addressable by role",
+        "at least one trigger actor has a causal interaction with the ego platoon; incidental coexistence is insufficient",
+        "a physical split state and distinct lane-transition completion times prove that the three ego vehicles did not change to the rightmost lane simultaneously",
         "all three agents traverse the diverge connector",
         "all three agents enter and continue along the exit ramp",
+        "all three ego vehicles reassemble in platoon order on the ramp through longitudinal gap recovery",
         "repeated RIGHT after entering the connector is forbidden",
-        "remaining on the through mainline at the horizon is failure even without a collision"
+        "remaining on the through mainline at the horizon is failure even without a collision",
+        "the interaction, exit, and reassembly complete without collision, road exit, or planner fallback"
       ]
     },
     "S9_narrow_channel_negotiation": {
       "functional_name": "mandatory coordinated bypass of a slow or stopped blocker",
       "current_candidate_route": "R8_narrow_channel",
-      "functional_intent": "A slow or stopped background actor blocks the platoon's current lane before the narrow section. The platoon must use the single topology-valid bypass lane, pass the blocker, and continue along the narrow road without returning to its original lane.",
+      "functional_intent": "The ego platoon starts in the middle lane behind a slow or stopped blocker, while one to three trigger actors constrain the left bypass lane. The platoon must temporarily dissolve, negotiate individual safe opportunities to move LEFT into the only topology-valid bypass lane, pass the blocker, continue along the narrow road, and reassemble without returning to the original lane.",
       "actors": {
         "blocking_actor": 1,
-        "bypass_lane_constraint_actor": 1
+        "left_bypass_lane_trigger_actor_range": [
+          1,
+          3
+        ]
       },
       "route_semantics": {
-        "initial_lane": "fixed_lane_with_topology_valid_bypass",
-        "bypass_side": "fixed_from_verified_map_topology",
+        "initial_lane": "c3_lane_1_middle",
+        "bypass_lane": "c3_lane_0_left",
+        "bypass_side": "LEFT",
         "lane_change_required": true,
         "return_to_original_lane_required": false,
         "continue_along_narrow_road_required": true
@@ -456,24 +567,28 @@
       },
       "sampling_constraints": [
         "the blocker must occupy the ego route lane and make KEEP-only progress invalid",
-        "the bypass lane must remain hard-safe but temporally constrained",
-        "the bypass direction is fixed by topology rather than randomized",
-        "the full three-car platoon must have a feasible coordinated bypass solution"
+        "one to three trigger actors on the left bypass lane must create a real but hard-safe temporal constraint",
+        "the bypass direction is fixed to LEFT by topology rather than randomized",
+        "the full three-car platoon must have a feasible asynchronous bypass solution",
+        "trigger actors must cause measurable ego speed, gap, or lane-change timing adjustment; incidental coexistence is insufficient"
       ],
       "expected_action_sequence": [
         "KEEP or controlled deceleration while approaching",
-        "coordinated lane change into the bypass lane",
+        "temporarily release formation and negotiate non-simultaneous LEFT lane changes into the bypass lane",
         "pass the blocker",
         "KEEP and continue along the narrow road in the bypass lane",
         "recover platoon formation without returning to the original lane"
       ],
       "acceptance_gates": [
-        "both background actors realize their roles",
+        "the middle-lane blocker and all one to three declared left-lane trigger actors realize their roles",
+        "at least one left-lane trigger actor has a causal interaction with the ego platoon",
         "all three ego vehicles complete a real lane transition before reaching the blocker",
+        "physical lane IDs prove LEFT transitions from c3 lane 1 to lane 0, and distinct completion times prove temporary formation dissolution",
         "all three ego vehicles pass the blocker longitudinally",
         "all three continue on the narrow road after the bypass",
         "all-KEEP, stop-until-horizon, or return-to-original-lane outcomes are not successful",
-        "formation recovery occurs without collision, road exit, or planner fallback"
+        "all three ego vehicles recover platoon order and longitudinal gaps on the narrow road without returning to lane 1",
+        "the bypass and reassembly complete without collision, road exit, or planner fallback"
       ]
     }
   },
@@ -486,9 +601,9 @@
     "S9_narrow_channel_negotiation",
     "combined fixed-seed visual and machine-contract review"
   ],
-  "unresolved_before_implementation": [
-    "verify that the selected S5 route exposes two real adjacent lanes for every supported spawn",
-    "verify the exact S8 mainline-to-exit connector lane indices",
-    "verify the single topology-valid S9 bypass direction and downstream narrow-road continuation"
+  "remaining_before_contract_freeze": [
+    "freeze quantitative thresholds and persistence windows for physical formation release and reassembly evidence",
+    "implement the revised S6-S9 trigger-actor, asynchronous-maneuver, and reassembly semantics",
+    "pass the fixed five-seed closed-loop functional acceptance for every scenario before assigning a new contract identifier"
   ]
 }

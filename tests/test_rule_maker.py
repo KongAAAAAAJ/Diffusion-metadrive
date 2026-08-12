@@ -493,6 +493,11 @@ def test_s5_active_hazard_promotes_hard_safe_mixed_direction_actions():
     env._scenario_orchestrator = SimpleNamespace(
         _actor_manifest={"hard_brake_lead": {}},
         _conflict_evidence={},
+        _resolved_scenario_parameters={
+            "lead_pressure_bucket": "high",
+            "left_relation": "ahead",
+            "right_relation": "behind",
+        },
         _initial_agent_lanes={
             name: ("A", "B", 1) for name in env.agents
         },
@@ -512,10 +517,11 @@ def test_s5_active_hazard_promotes_hard_safe_mixed_direction_actions():
     )
 
     assert batch.proposals
-    first_actions = {
-        int(row["action"]) for row in batch.proposals[0].decisions.values()
-    }
-    assert {-1, 1}.issubset(first_actions)
+    first_actions = tuple(
+        int(batch.proposals[0].decisions[name]["action"])
+        for name in ("agent0", "agent1", "agent2")
+    )
+    assert first_actions == (-1, -1, 1)
     assert all(
         not bool(row["formation_constraint_enabled"])
         for row in batch.proposals[0].decisions.values()
@@ -542,6 +548,31 @@ def test_s5_active_hazard_promotes_hard_safe_mixed_direction_actions():
         rule_maker.get_last_debug()["action_search"]["strategy"]
         == "s5_committed_split_roll"
     )
+
+
+def test_s5_symmetric_adjacent_relations_keep_braking_ahead_of_lane_changes():
+    rule_maker = MultiAgentRuleMaker(s5_mixed_direction_preference=1.0)
+    combos = []
+    for actions, score in (
+        ((-1, -1, 1), 100.0),
+        ((1, 1, -1), 90.0),
+        ((0, 0, 0), 0.0),
+    ):
+        combo = tuple({"action": action} for action in actions)
+        combos.append((combo, score))
+    env = SimpleNamespace(
+        _scenario_orchestrator=SimpleNamespace(
+            _resolved_scenario_parameters={
+                "lead_pressure_bucket": "moderate",
+                "left_relation": "behind",
+                "right_relation": "behind",
+            }
+        )
+    )
+
+    ranked = rule_maker._rank_s5_split_combos(combos, env=env)
+
+    assert tuple(row["action"] for row in ranked[0][0]) == (0, 0, 0)
 
 
 @pytest.mark.parametrize(
