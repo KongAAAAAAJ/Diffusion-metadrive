@@ -427,6 +427,67 @@ def test_s5_stays_locked_and_keeps_lane_before_hard_brake_marker():
     assert debug["risk_info"]["waiting_for_s5_hard_brake"] is True
 
 
+def test_s5_active_hazard_only_proposes_cohesive_profile_actions():
+    lead = _vehicle("hard_brake", 42.0, 0.0, 1, speed_km_h=2.0)
+    lead.scenario_role = "hard_brake_lead"
+    lead.scenario_brake_trigger_step = 30
+    env = _env(
+        agents={
+            "agent0": _vehicle("agent0", 25.0, 0.0, 1),
+            "agent1": _vehicle("agent1", 10.0, 0.0, 1),
+            "agent2": _vehicle("agent2", -5.0, 0.0, 1),
+        },
+        traffic=[lead],
+    )
+    env.config = {
+        "scenario_id": "S5_hard_brake_lead",
+        "rule_maker_profile_id": "balanced",
+    }
+    env._scenario_orchestrator = SimpleNamespace(
+        _actor_manifest={"hard_brake_lead": {}},
+        get_episode_summary=lambda: {
+            "scenario_id": "S5_hard_brake_lead",
+            "scenario_triggered": True,
+            "scenario_trigger_step": 30,
+        },
+    )
+    rule_maker = MultiAgentRuleMaker(locked_on_reset=True)
+
+    batch = rule_maker.propose_joint_actions(
+        env, ["agent0", "agent1", "agent2"], planner_batch={}
+    )
+
+    assert batch.proposals
+    for proposal in batch.proposals:
+        actions = {
+            int(row["action"]) for row in proposal.decisions.values()
+        }
+        assert len(actions) == 1
+        assert all(
+            bool(row["formation_constraint_enabled"])
+            for row in proposal.decisions.values()
+        )
+    assert (
+        rule_maker.get_last_debug()["action_search"]["strategy"]
+        == "s5_profile_cohesive_action"
+    )
+
+    accepted = batch.proposals[0]
+    rule_maker.accept_joint_action(batch.batch_id, accepted.proposal_id)
+    followup = rule_maker.propose_joint_actions(
+        env, ["agent0", "agent1", "agent2"], planner_batch={}
+    )
+    assert followup.proposals
+    assert all(
+        int(decision["action"]) == 0
+        for decision in followup.proposals[0].decisions.values()
+    )
+    assert (
+        rule_maker.get_last_debug()["action_search"]["strategy"]
+        == "s5_post_response_keep"
+    )
+
+
 @pytest.mark.parametrize(
     ("front_x", "front_speed_km_h"),
     [
@@ -1585,7 +1646,7 @@ def test_non_s7_left_lane_change_to_mainline_third_lane_is_not_marked_forced():
     assert "forced_lane_change" not in candidate
 
 
-def test_s6_locked_no_risk_keeps_lane_until_merge_conflict_is_detected(monkeypatch):
+def test_s6_locked_no_risk_preserves_competing_joint_actions(monkeypatch):
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s7_merge(
         vehicle,
@@ -1600,17 +1661,28 @@ def test_s6_locked_no_risk_keeps_lane_until_merge_conflict_is_detected(monkeypat
         locked_on_reset=True,
     )
 
-    def fail_if_generic_scored(*args, **kwargs):  # noqa: ARG001
-        raise AssertionError("no-risk S6 must not use generic MOBIL ranking")
+    called = {}
 
-    monkeypatch.setattr(rule_maker, "_best_locked_combo", fail_if_generic_scored)
+    def choose_keep(*, candidates_by_agent, ordered_agent_ids, **kwargs):
+        candidate_sets = [candidates_by_agent[agent_id] for agent_id in ordered_agent_ids]
+        called["candidate_actions"] = [
+            {int(candidate["action"]) for candidate in candidates}
+            for candidates in candidate_sets
+        ]
+        combo = tuple(
+            next(candidate for candidate in candidates if int(candidate["action"]) == 0)
+            for candidates in candidate_sets
+        )
+        return combo, 0.0, {"strategy": "locked_prefix_search"}, [(combo, 0.0)]
+
+    monkeypatch.setattr(rule_maker, "_best_locked_combo", choose_keep)
     decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
     debug = rule_maker.get_last_debug()
 
     assert decisions["agent0"]["action"] == 0
     assert debug["risk_triggered"] is False
-    assert debug["action_search"]["strategy"] == "s6_no_risk_keep"
-    assert debug["action_search"]["final_feasibility_authority"] == "normal_planner"
+    assert debug["action_search"]["strategy"] == "locked_prefix_search"
+    assert called["candidate_actions"][0] == {-1, 0, 1}
 
 
 def test_s6_detected_risk_preserves_joint_action_search(monkeypatch):

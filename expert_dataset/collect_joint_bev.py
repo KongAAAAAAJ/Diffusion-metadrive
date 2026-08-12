@@ -1034,6 +1034,7 @@ def collect_joint_episode(
     failure_reason = None
     episode_terminated = False
     episode_truncated = False
+    latest_scenario_summary: dict[str, object] = {}
 
     for joint_step in range(int(max_steps)):
         try:
@@ -1060,6 +1061,13 @@ def collect_joint_episode(
                 # conflict makes all three aligned training rows unusable.
                 rejected_joint_steps += 1
                 joint_step_rejection_counts[exc.reason_code] += 1
+        live_orchestrator = getattr(env, "_scenario_orchestrator", None)
+        if live_orchestrator is not None and hasattr(
+            live_orchestrator, "get_episode_summary"
+        ):
+            latest_scenario_summary = dict(
+                live_orchestrator.get_episode_summary() or {}
+            )
         _, _, terminated, truncated, info = env.low_level_step(dict(expert_step.controls))
         simulator_steps += 1
         try:
@@ -1115,6 +1123,8 @@ def collect_joint_episode(
         scenario_orchestrator, "get_episode_summary"
     ):
         scenario_summary = scenario_orchestrator.get_episode_summary()
+    if not scenario_summary:
+        scenario_summary = dict(latest_scenario_summary)
         if failure_reason is None and not bool(
             scenario_summary.get("scenario_realized", False)
         ):

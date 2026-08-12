@@ -456,8 +456,13 @@ def _expert_debug_snapshot(
         "local_kinematic_rejection_count",
         "corridor_rejection_count",
         "road_rejection_count",
+        "road_rejections_by_reason",
+        "first_road_rejection",
+        "first_committed_road_rejection",
+        "committed_first_rejection_by_duration",
         "background_collision_rejection_count",
         "lane_end_rejection_count",
+        "minimum_speed_rejection_count",
         "collision_rejections_by_object",
         "kinematic_rejections_by_reason",
         "lane_end_restricted",
@@ -888,6 +893,7 @@ def _run_single_episode(
     collision_agents: list[str] = []
     out_of_road_agents: list[str] = []
     simulator_steps = 0
+    latest_scenario_summary: dict[str, object] = {}
 
     if platoon_metrics is not None:
         platoon_metrics.start_episode()
@@ -1148,8 +1154,47 @@ def _run_single_episode(
         if frame is not None:
             frames.append(frame)
 
+        live_orchestrator = getattr(env, "_scenario_orchestrator", None)
+        if live_orchestrator is not None and hasattr(
+            live_orchestrator, "get_episode_summary"
+        ):
+            latest_scenario_summary = dict(
+                live_orchestrator.get_episode_summary() or {}
+            )
         obs, reward, terminated, truncated, info = env.low_level_step(actions)
         simulator_steps += 1
+        # The wrapper may expose the orchestrator only while building the
+        # low-level info dict.  Preserve that post-step snapshot as well as
+        # the direct pre-step snapshot, including on planner-triggered early
+        # exits where MetaDrive clears managers during auto-reset.
+        for agent_info in (info or {}).values():
+            if not isinstance(agent_info, Mapping) or "scenario_id" not in agent_info:
+                continue
+            latest_scenario_summary = {
+                key: agent_info[key]
+                for key in (
+                    "scenario_id",
+                    "scenario_triggered",
+                    "scenario_realized",
+                    "scenario_trigger_step",
+                    "scenario_realized_step",
+                    "scenario_recipe_count",
+                    "scenario_completed_recipe_count",
+                    "scenario_recipes_complete",
+                    "scenario_notes",
+                    "scenario_random_seed",
+                    "resolved_recipe_parameters",
+                    "severity_bucket",
+                    "resolved_scenario_parameters",
+                    "actor_manifest",
+                    "conflict_evidence",
+                    "route_completion",
+                    "functional_success",
+                    "expert_profile_id",
+                )
+                if key in agent_info
+            }
+            break
 
         if platoon_metrics is not None:
             platoon_metrics.update(info)
@@ -1203,6 +1248,11 @@ def _run_single_episode(
     orchestrator = getattr(env, "_scenario_orchestrator", None)
     if orchestrator is not None and hasattr(orchestrator, "get_episode_summary"):
         scenario_summary = dict(orchestrator.get_episode_summary() or {})
+    if not scenario_summary:
+        # MetaDrive can auto-reset its managers at the horizon boundary.  Keep
+        # the final pre-step snapshot so functional evidence is not lost on a
+        # technically successful truncated episode.
+        scenario_summary = dict(latest_scenario_summary)
     if failure_reason is None and scenario_summary:
         if not bool(scenario_summary.get("scenario_realized", False)):
             failure_reason = "scenario_not_realized"
@@ -1384,10 +1434,14 @@ def run_scenario(
         "target_speed_km_h": float(target_speed_km_h),
         "rule_maker_profile_id": rule_maker_profile,
     }
-    if env_factory is not None:
-        env = env_factory(env_config)
-    else:
-        env = SensorlessJointBEVPlatoonEnv(env_config)
+    def _new_episode_env(initial_speed_km_h: float):
+        episode_config = dict(env_config)
+        episode_config["initial_speed_km_h"] = float(initial_speed_km_h)
+        if env_factory is not None:
+            return env_factory(episode_config)
+        return SensorlessJointBEVPlatoonEnv(episode_config)
+
+    env = None
     agent_ids = [f"agent{i}" for i in range(num_agents)]
     lead_id = agent_ids[0]
     action_fn_factory = _build_pipeline_factory(decision_policy, planning_policy, control_policy)
@@ -1396,7 +1450,7 @@ def run_scenario(
     pdms_params: Optional[dict] = None
     if evaluate:
         pdms_params = build_platoon_metric_params(
-            {**dict(getattr(env, "config", {}) or {}), **(metric_params or {})}
+            {**env_config, **(metric_params or {})}
         )
     metrics_dir = output_root / scenario_id / "metrices"
     all_episode_step_records: list[list[dict]] = []
@@ -1418,6 +1472,12 @@ def run_scenario(
                 initial_speed_km_h = deterministic_candidate_initial_speed_km_h(
                     scenario_id, episode_seed
                 )
+                if env is not None:
+                    try:
+                        env.close()
+                    except Exception:
+                        pass
+                env = _new_episode_env(initial_speed_km_h)
                 runtime_updates = {
                     "traffic_density": float(traffic_density),
                     "initial_speed_km_h": float(initial_speed_km_h),
@@ -1451,7 +1511,15 @@ def run_scenario(
                     episode_diagnostics=episode_diagnostics,
                 )
                 episode_unlock_record = unlock_tracker.finalize(len(frames) - 1)
-                if not _episode_failed_immediately(frames, terminated, truncated, info):
+                failed_immediately = _episode_failed_immediately(
+                    frames, terminated, truncated, info
+                )
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                env = None
+                if not failed_immediately:
                     used_seed = episode_seed
                     break
                 print(f"  retry ep {ep_idx + 1} seed={episode_seed + 1} (frames={len(frames)})")
@@ -1537,10 +1605,11 @@ def run_scenario(
                 _plot_episode_pdms(episode_pdms_png, episode_steps)
                 _plot_episode_results(episode_results_dir, episode_steps, agent_ids)
     finally:
-        try:
-            env.close()
-        except Exception:
-            pass
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
 
     if evaluate:
         unlock_summary = summarize_formation_unlock_records(formation_unlock_records)

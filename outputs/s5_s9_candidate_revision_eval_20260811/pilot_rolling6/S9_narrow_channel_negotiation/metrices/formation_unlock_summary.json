@@ -1,0 +1,16 @@
+{
+  "formation_unlock_events": [
+    {
+      "episode": 0,
+      "unlocked_triggered": true,
+      "unlocked_ranges": [
+        {
+          "start_step": 1,
+          "end_step": 5
+        }
+      ]
+    }
+  ],
+  "formation_unlock_trigger_count": 1,
+  "formation_unlock_trigger_rate": 1.0
+}

@@ -163,6 +163,35 @@ def test_fixed_route_spawn_can_use_scenario_distance_on_first_route_road(monkeyp
     assert configs["agent2"]["spawn_longitude"] == pytest.approx(80.0)
 
 
+def test_fixed_route_spawn_samples_scenario_distance_range_from_road_end(monkeypatch):
+    lanes = [
+        _FakeLane(index=("A", "B", 0), length=200.0),
+        _FakeLane(index=("A", "B", 1), length=200.0),
+        _FakeLane(index=("A", "B", 2), length=200.0),
+    ]
+    scenario = SimpleNamespace(
+        ego_spawn_lane_preference="rightmost",
+        ego_spawn_lane_probabilities=None,
+        ego_spawn_longitude_m=None,
+        ego_spawn_distance_to_route_end_m=(25.0, 50.0),
+        ego_spawn_reference_block_id=None,
+    )
+    manager = _manager_with_fixed_spawn(
+        monkeypatch,
+        lanes=lanes,
+        scenario_id="test_distance_range_on_first_road",
+        scenario=scenario,
+    )
+    manager.np_random = _FixedUniformRng(37.5)
+
+    assert manager._apply_fixed_route_spawn_configs() is True
+
+    configs = manager.engine.global_config["agent_configs"]
+    assert configs["agent0"]["spawn_longitude"] == pytest.approx(162.5)
+    assert configs["agent1"]["spawn_longitude"] == pytest.approx(152.5)
+    assert configs["agent2"]["spawn_longitude"] == pytest.approx(142.5)
+
+
 def test_fixed_route_spawn_can_use_middle_lane_preference(monkeypatch):
     lanes = [
         _FakeLane(index=("A", "B", 0), length=200.0),

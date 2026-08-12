@@ -54,7 +54,7 @@ class ScenarioDefinition:
     ego_spawn_longitude_m: float | Tuple[float, float] | None = None
     ego_spawn_lane_id: int | None = None
     # Backward-compatible alternative: distance from selected road end.
-    ego_spawn_distance_to_route_end_m: float | None = None
+    ego_spawn_distance_to_route_end_m: float | Tuple[float, float] | None = None
     ego_initial_speed_km_h: float | Tuple[float, float] | None = None
     ego_initial_bumper_gap_m: float | Tuple[float, float] | None = None
 
@@ -195,19 +195,25 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
             "R6_mainline_merge_approach": TriggerSpec("g1", 10.0, 95.0),
         },
         traffic_recipes=build_s6_traffic_recipes(RecipeSpec),
-        ego_spawn_lane_preference="rightmost",
+        ego_spawn_lane_preference="middle",
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",
         ego_spawn_reference_kind="block_internal_road",
         ego_spawn_internal_road_index=1,
-        # The selected g1 internal road is 100 m long in the hybrid map.
-        ego_spawn_longitude_m=(50.0, 75.0),
+        # Sample relative to the actual selected road end.  Its runtime length
+        # is map-dependent (currently about 180 m), so an absolute longitude
+        # does not preserve the functional distance-to-conflict contract.
+        ego_spawn_distance_to_route_end_m=(25.0, 50.0),
         ego_initial_speed_km_h=(22.0, 27.0),
+        # Start above the unchanged 7 m platoon hard-gap contract.  The expert
+        # must create the sampled actor corridor dynamically; pre-opening the
+        # gap would remove the functional interaction.
+        ego_initial_bumper_gap_m=10.0,
         override_traffic_density=0.0,
         env_overrides={
             "traffic_spawn_exclusion_ahead_m": 100.0,
             "traffic_spawn_exclusion_behind_m": 100.0,
-            "platoon_route_spawn_lane_index": 2,
+            "platoon_route_spawn_lane_index": 1,
         },
         expert_recipe="保守让行",
         description="背景车并入 ego 所在主线",
@@ -253,6 +259,8 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g0",
+        # Start one lane left of the exit-side lane. MetaDrive lane ids grow
+        # toward the left on this road, so RIGHT maps lane 1 -> lane 0.
         ego_spawn_longitude_m=(40.0, 80.0),
         ego_spawn_lane_id=1,
         ego_initial_speed_km_h=(22.0, 28.0),

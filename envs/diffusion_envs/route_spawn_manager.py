@@ -315,13 +315,50 @@ class RouteAwareSpawnManager(SpawnManager):
         min_lead = gap_m * max(num_agents - 1, 0) + tail_buffer
         max_lead = max(float(lane_length) - front_buffer, 2.0)
         scenario = self._get_spawn_scenario()
+        # S6's ego-to-conflict distance is a correlated contract parameter,
+        # not a second independent spawn-manager draw.  Derive it from the
+        # same deterministic scenario sampler so the same seed has identical
+        # geometry whether it is the first episode of a process or follows a
+        # previous reset in the five-seed/unified runners.
+        fixed_seed = getattr(self, "_fixed_route_seed", None)
+        scenario_id = str(
+            self.engine.global_config.get("scenario_id", "") or ""
+        )
+        local_route = str(
+            self.engine.global_config.get("local_route", "") or ""
+        )
+        if fixed_seed is not None and scenario_id in {
+            "S6_background_merge_in",
+            "S7_ego_merge_from_ramp",
+        }:
+            from scenarios.s5_s9_sampling import resolve_s5_s9_parameters
+
+            resolved = resolve_s5_s9_parameters(
+                spawn_seed=int(fixed_seed),
+                scenario_id=scenario_id,
+                local_route=local_route,
+                ego_initial_speed_km_h=float(
+                    self.engine.global_config.get("initial_speed_km_h", 24.0)
+                ),
+            )
+            requested = float(lane_length) - float(
+                resolved["ego_distance_to_merge_point_m"]
+            )
+            if scenario_id == "S7_ego_merge_from_ramp":
+                # S7's complete platoon can extend onto the unique upstream
+                # ramp chain.  Do not push the leader to the seam merely to
+                # fit every follower on this short final connector.
+                return float(
+                    np.clip(requested, 2.0, max(float(lane_length) - 2.0, 2.0))
+                )
+            return float(np.clip(requested, min_lead, max_lead))
         longitude_from_start = getattr(scenario, "ego_spawn_longitude_m", None)
         if longitude_from_start is not None:
             requested = self._sample_float_if_range(longitude_from_start)
             return float(np.clip(requested, min_lead, max_lead))
         distance_to_route_end = getattr(scenario, "ego_spawn_distance_to_route_end_m", None)
         if distance_to_route_end is not None:
-            requested = float(lane_length) - float(distance_to_route_end)
+            requested = float(lane_length) - self._sample_float_if_range(distance_to_route_end)
             return float(np.clip(requested, min_lead, max_lead))
         return float(min(min_lead, max_lead))
 
@@ -333,6 +370,41 @@ class RouteAwareSpawnManager(SpawnManager):
                 return float(rng.uniform(float(low), float(high)))
             return float((float(low) + float(high)) * 0.5)
         return float(value)
+
+    @staticmethod
+    def _spawn_pose_behind_on_upstream_chain(
+        current_map, lane_index, lead_longitude: float, behind_m: float
+    ):
+        """Resolve a point behind the lead across a unique ramp chain."""
+
+        graph = current_map.road_network.graph
+        current_index = tuple(lane_index)
+        local_s = float(lead_longitude) - float(behind_m)
+        visited = set()
+        while local_s < 2.0:
+            if current_index in visited:
+                return None
+            visited.add(current_index)
+            start_node, _, lane_id = current_index
+            incoming = []
+            for upstream_start, outgoing in graph.items():
+                lanes = outgoing.get(start_node)
+                if (
+                    lanes
+                    and not str(upstream_start).startswith("-")
+                    and len(lanes) > int(lane_id)
+                ):
+                    incoming.append(lanes[int(lane_id)])
+            if len(incoming) != 1:
+                return None
+            upstream_lane = incoming[0]
+            local_s += float(upstream_lane.length)
+            current_index = tuple(upstream_lane.index)
+        lane = current_map.road_network.get_lane(current_index)
+        local_s = float(
+            np.clip(local_s, 2.0, max(float(lane.length) - 2.0, 2.0))
+        )
+        return current_index, local_s
 
     def _spawn_rng(self):
         fixed_rng = getattr(self, "_fixed_route_rng", None)
@@ -410,6 +482,30 @@ class RouteAwareSpawnManager(SpawnManager):
         lane_index = tuple(road.lane_index(lane_idx))
         num_agents = int(self.engine.global_config.get("num_agents", 1))
         gap_m = float(self.engine.global_config.get("platoon_spawn_gap_m", self.DEFAULT_TRAFFIC_GAP))
+        fixed_seed = getattr(self, "_fixed_route_seed", None)
+        scenario_id = str(
+            self.engine.global_config.get("scenario_id", "") or ""
+        )
+        if fixed_seed is not None and scenario_id == "S7_ego_merge_from_ramp":
+            from scenarios.s5_s9_sampling import resolve_s5_s9_parameters
+
+            resolved = resolve_s5_s9_parameters(
+                spawn_seed=int(fixed_seed),
+                scenario_id=scenario_id,
+                local_route=str(
+                    self.engine.global_config.get("local_route", "") or ""
+                ),
+                ego_initial_speed_km_h=float(
+                    self.engine.global_config.get(
+                        "initial_speed_km_h", 24.0
+                    )
+                ),
+            )
+            gap_m = float(
+                resolved["initial_platoon_bumper_gap_m"]
+            ) + float(
+                self.engine.global_config.get("vehicle_length_m", 5.74)
+            )
         lead_long = self._fixed_route_spawn_lead_longitude(float(getattr(lane, "length", 0.0)), gap_m)
         speed_m_s = float(self.engine.global_config.get("initial_speed_km_h", 25.0)) / 3.6
 
@@ -417,11 +513,22 @@ class RouteAwareSpawnManager(SpawnManager):
         agent_configs = {}
         for idx in range(num_agents):
             agent_id = f"agent{idx}"
+            spawn_lane_index = lane_index
             spawn_longitude = max(float(lead_long) - idx * gap_m, 2.0)
+            if scenario_id == "S7_ego_merge_from_ramp":
+                chained_pose = self._spawn_pose_behind_on_upstream_chain(
+                    current_map,
+                    lane_index,
+                    float(lead_long),
+                    float(idx) * gap_m,
+                )
+                if chained_pose is None:
+                    return False
+                spawn_lane_index, spawn_longitude = chained_pose
             config = dict(existing_configs.get(agent_id, {}))
             config.update(
                 {
-                    "spawn_lane_index": lane_index,
+                    "spawn_lane_index": spawn_lane_index,
                     "spawn_longitude": float(spawn_longitude),
                     "spawn_lateral": 0.0,
                     "spawn_velocity": (speed_m_s, 0.0),
@@ -439,10 +546,19 @@ class RouteAwareSpawnManager(SpawnManager):
     def reset(self):
         self._refresh_main_route_spawn_roads()
         episode_seed = getattr(self, "_episode_spawn_seed", None)
+        if episode_seed is None:
+            # Preview/evaluation constructs a fresh lazy MetaDrive env per
+            # episode, so no spawn manager exists yet when the caller tries
+            # ``set_episode_spawn_seed``.  ``start_seed`` is written into the
+            # env config before reset and is the authoritative fallback.
+            episode_seed = self.engine.global_config.get("start_seed")
         self._fixed_route_rng = (
             np.random.RandomState(int(episode_seed))
             if episode_seed is not None
             else self.np_random
+        )
+        self._fixed_route_seed = (
+            int(episode_seed) if episode_seed is not None else None
         )
         try:
             super().reset()
@@ -451,6 +567,7 @@ class RouteAwareSpawnManager(SpawnManager):
             self._cache_ego_spawn_zones()
         finally:
             self._fixed_route_rng = None
+            self._fixed_route_seed = None
 
     def _get_spawn_lane_preference(self) -> str | None:
         scenario = self._get_spawn_scenario()

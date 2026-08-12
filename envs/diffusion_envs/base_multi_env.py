@@ -142,6 +142,7 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 ego_spawn_buffer_scale=1.0,
                 platoon_fixed_route_spawn=False,
                 platoon_spawn_gap_m=10.0,
+                platoon_formation_gap_m=None,
                 platoon_spawn_tail_buffer_m=6.0,
                 platoon_spawn_front_buffer_m=8.0,
                 initial_speed_km_h=25.0,

@@ -553,6 +553,12 @@ class SimulatorDynamicAnchorGenerator:
                     / max(speed, 1.0e-9)
                 ),
             )
+            # Keep the generated heading strictly inside the hard contract.
+            # The stored anchor is float32, so a value constructed exactly on
+            # the curvature boundary can round a few ulps outside it when the
+            # validator recomputes arc length from the quantised poses.  This
+            # numerical margin does not relax any physical limit.
+            max_delta *= 1.0 - 1.0e-5
             delta = float(_wrap_to_pi(float(target) - previous))
             previous = float(
                 _wrap_to_pi(

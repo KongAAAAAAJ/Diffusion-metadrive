@@ -138,6 +138,24 @@ def test_feedback_governor_respects_joint_gap_acceleration_cap() -> None:
     assert np.max(reference.acceleration_mps2) <= 0.5 + 1.0e-8
 
 
+def test_feedback_governor_keeps_minimum_speed_during_lateral_commitment() -> None:
+    times = np.arange(81, dtype=np.float64) * 0.1
+    arc = np.minimum(times * 2.0, 1.0)
+    reference = build_feedback_executable_profile(
+        path_times_s=times,
+        path_arc_m=arc,
+        elapsed_s=0.0,
+        actual_arc_m=0.0,
+        actual_speed_mps=0.7,
+        minimum_speed_mps=1.0,
+    )
+
+    assert reference.stop_requested is False
+    assert reference.speed_mps[2] >= 0.9
+    assert reference.speed_mps[-1] >= 0.99
+    assert np.all(np.diff(reference.arc_position_m) > 0.0)
+
+
 def test_feedback_governor_rejects_invalid_joint_gap_acceleration_cap() -> None:
     times = np.arange(101, dtype=np.float64) * 0.1
     with pytest.raises(LongitudinalReferenceError):

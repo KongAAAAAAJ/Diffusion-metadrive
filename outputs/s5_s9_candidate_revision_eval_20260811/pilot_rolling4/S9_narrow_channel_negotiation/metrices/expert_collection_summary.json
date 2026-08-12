@@ -1,0 +1,34 @@
+{
+  "episode_count": 1,
+  "collision_rate": 0.0,
+  "out_of_road_rate": 0.0,
+  "persistable_episode_rate": 0.0,
+  "native_joint_planning_success_rate": 0.9545454545454546,
+  "collection_ready_step_success_rate": 1.0,
+  "planning_attempt_steps": 22,
+  "native_joint_success_steps": 21,
+  "collection_ready_attempt_steps": 11,
+  "collection_ready_success_steps": 11,
+  "rollout_wall_time_s": {
+    "mean": 16.257186971837655,
+    "p50": 16.257186971837655,
+    "p95": 16.257186971837655
+  },
+  "simulated_duration_s": {
+    "mean": 2.1,
+    "p50": 2.1,
+    "p95": 2.1
+  },
+  "failure_reasons": {
+    "committed_action_infeasible": 1
+  },
+  "scenario_id": "S9_narrow_channel_negotiation",
+  "local_route": "R8_narrow_channel",
+  "seeds": [
+    17
+  ],
+  "horizon": 200,
+  "decision_policy": "rule_maker",
+  "planning_policy": "lattice",
+  "control_policy": "adaptive"
+}

@@ -1,0 +1,393 @@
+{
+  "seed": 17,
+  "initial_speed_km_h": 18.514480163159927,
+  "simulator_steps": 52,
+  "simulated_duration_s": 5.2,
+  "rollout_wall_time_s": 12.264127479167655,
+  "planning_attempt_steps": 53,
+  "native_joint_success_steps": 52,
+  "native_joint_planning_success_rate": 0.9811320754716981,
+  "collection_ready_attempt_steps": 42,
+  "collection_ready_success_steps": 42,
+  "collection_ready_step_success_rate": 1.0,
+  "planning_time_ms": {
+    "mean": 138.9174108252913,
+    "p50": 66.49793894030154,
+    "p95": 409.561132453382
+  },
+  "native_plan_time_ms": {
+    "p50": 408.75804610550404,
+    "p95": 1474.3983264546832
+  },
+  "committed_roll_time_ms": {
+    "p50": 66.46332051604986,
+    "p95": 67.02125200536102
+  },
+  "collision": false,
+  "collision_agents": [],
+  "out_of_road": false,
+  "out_of_road_agents": [],
+  "failure_reason": "committed_trajectory_tracking_deviation",
+  "rejection_counts": {
+    "committed_trajectory_tracking_deviation": 1
+  },
+  "rejection_details": {
+    "vehicle tracking error left the committed trajectory envelope": 1
+  },
+  "rule_action_counts": {
+    "agent0:+0": 24,
+    "agent1:+0": 52,
+    "agent2:+0": 52,
+    "agent0:-1": 28
+  },
+  "scenario_summary": {
+    "scenario_id": "S9_narrow_channel_negotiation",
+    "scenario_triggered": true,
+    "scenario_realized": true,
+    "scenario_trigger_step": 1,
+    "scenario_realized_step": 1,
+    "scenario_recipe_count": 1,
+    "scenario_completed_recipe_count": 1,
+    "scenario_recipes_complete": true,
+    "scenario_notes": [
+      "s9_bypass_actors_spawned"
+    ],
+    "scenario_random_seed": 1503570547,
+    "resolved_recipe_parameters": {},
+    "severity_bucket": "high",
+    "resolved_scenario_parameters": {
+      "scenario_seed": 1503570547,
+      "severity_bucket": "high",
+      "ego_initial_speed_km_h": 18.514479446411134,
+      "bypass_side": "left",
+      "source_lane_id": 1,
+      "bypass_lane_id": 0,
+      "blocker_speed_km_h": 2.285448256383092,
+      "agent0_to_blocker_bumper_gap_m": 15.517762301603364,
+      "bypass_constraint_actor_speed_km_h": 21.415515906494495,
+      "bypass_constraint_actor_relative_offset_m": 19.43698845971834,
+      "usable_bypass_gap_m": 65.43881494712817,
+      "ego_distance_to_narrow_entry_m": 27.565967632463924,
+      "predicted_blocker_ttc_s": 3.442222991111004,
+      "latest_lane_change_completion_before_blocker_m": 10.348484588735852
+    },
+    "actor_manifest": {
+      "blocking_actor": {
+        "role": "blocking_actor",
+        "object_name": "b87fdbdd-0487-4033-9149-91ac3930b444",
+        "spawn_step": 1,
+        "spawn_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ],
+        "spawn_position_xy": [
+          425.18902587890625,
+          -373.6184997558594
+        ],
+        "active": true,
+        "current_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ]
+      },
+      "bypass_constraint_actor": {
+        "role": "bypass_constraint_actor",
+        "object_name": "25eb54d3-5da8-471c-badf-a0fcb73c9a22",
+        "spawn_step": 1,
+        "spawn_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          0
+        ],
+        "spawn_position_xy": [
+          427.0097961425781,
+          -377.1184997558594
+        ],
+        "active": true,
+        "current_lane_index": [
+          "10C0_1_",
+          "11y0_0_",
+          0
+        ]
+      }
+    },
+    "conflict_evidence": {
+      "minimum_actor_distance_m": 5.912598108947973,
+      "minimum_actor_ttc_s": 2.028219297623139,
+      "blocker_initial_bumper_gap_m": 15.517762301603364,
+      "usable_bypass_gap_m": 65.43881494712817,
+      "required_lane_change": "LEFT"
+    },
+    "route_completion": {
+      "agent_lane_transitions": {
+        "agent0": [
+          {
+            "step": -1,
+            "lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              0
+            ]
+          }
+        ],
+        "agent1": [],
+        "agent2": []
+      },
+      "all_agents_changed_lane": false,
+      "all_agents_passed_blocker": false,
+      "all_agents_entered_exit_ramp": false,
+      "all_agents_entered_mainline": true,
+      "returned_to_original_lane": false
+    },
+    "functional_success": false,
+    "expert_profile_id": null,
+    "platoon_agent_ids": [
+      "agent0",
+      "agent1",
+      "agent2"
+    ],
+    "platoon_lead_agent_id": "agent0"
+  },
+  "final_debug": {
+    "rule_maker": {
+      "formation_locked": false,
+      "formation_constraint_enabled": false,
+      "coordination_mode": "EMERGENCY_INDEPENDENT",
+      "risk_triggered": false,
+      "best_actions": {
+        "agent0": -1,
+        "agent1": 0,
+        "agent2": 0
+      },
+      "best_score": 0.0,
+      "dynamic_roles": {
+        "agent0": "leader",
+        "agent1": "leader",
+        "agent2": "leader"
+      },
+      "forced_lane_decision": false,
+      "forced_lane_wait_info": {
+        "decision_step": 7,
+        "threshold_steps": 10,
+        "forced_agents": [
+          "agent0",
+          "agent1",
+          "agent2"
+        ],
+        "all_forced_ready": true,
+        "partial_forced": false,
+        "partial_forced_wait_steps": 0,
+        "forced_wait_active": false,
+        "forced_wait_frozen": true,
+        "forced_lane_first_step": {},
+        "forced_lane_wait_steps_by_agent": {}
+      },
+      "risk_info": {
+        "triggered": false,
+        "transitioned": false,
+        "current_state": "UNLOCKED",
+        "next_state": "UNLOCKED",
+        "transition": null,
+        "reason": null,
+        "reasons": [],
+        "leader": {
+          "agent_id": "agent0",
+          "front_vehicle_id": "25eb54d3-5da8-471c-badf-a0fcb73c9a22",
+          "front_net_gap_m": 28.135164794921874,
+          "closing_speed_mps": -2.977396175839647,
+          "ttc_s": null
+        },
+        "follower_pairs": [
+          {
+            "front_agent_id": "agent0",
+            "follower_agent_id": "agent1",
+            "net_gap_m": null
+          },
+          {
+            "front_agent_id": "agent1",
+            "follower_agent_id": "agent2",
+            "net_gap_m": 10.000020751953123
+          }
+        ],
+        "min_follower_gap_m": 10.000020751953123,
+        "relock_threshold_m": 15.0,
+        "relock_ttc_threshold_s": 5.0,
+        "follower_gap_condition_met": true,
+        "leader_ttc_condition_met": true,
+        "forced_wait_clear": true,
+        "agents_safe": true,
+        "active_lane_change_commitments": true,
+        "relock_stable_count": 0,
+        "relock_stable_steps": 20,
+        "forced_lane_wait_info": {
+          "decision_step": 7,
+          "threshold_steps": 10,
+          "forced_agents": [
+            "agent0",
+            "agent1",
+            "agent2"
+          ],
+          "all_forced_ready": true,
+          "partial_forced": false,
+          "partial_forced_wait_steps": 0,
+          "forced_wait_active": false,
+          "forced_wait_frozen": true,
+          "forced_lane_first_step": {},
+          "forced_lane_wait_steps_by_agent": {}
+        }
+      },
+      "action_search": {
+        "strategy": "committed_joint_trajectory_roll",
+        "proposal_generation_skipped": true
+      },
+      "lane_change_commitments": {
+        "active": {
+          "agent0": {
+            "status": "committed",
+            "action": -1,
+            "source_lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              1
+            ],
+            "target_lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              0
+            ],
+            "target_lane_chain": [
+              [
+                "10C0_0_",
+                "10C0_1_",
+                0
+              ],
+              [
+                "10C0_1_",
+                "11y0_0_",
+                0
+              ],
+              [
+                "11y0_0_",
+                "11y0_1_",
+                0
+              ],
+              [
+                "11y0_1_",
+                "12S0_0_",
+                0
+              ],
+              [
+                "12S0_0_",
+                "13Y0_0_",
+                0
+              ],
+              [
+                "13Y0_0_",
+                "13Y0_1_",
+                0
+              ]
+            ],
+            "commit_step": 7,
+            "duration_steps": 46
+          }
+        },
+        "pending": {},
+        "completed": {}
+      },
+      "proposal_count": 0
+    },
+    "planner_joint": {
+      "fallback_used": false,
+      "fallback_reason": "committed_trajectory_tracking_deviation"
+    },
+    "planner_ranked": {},
+    "planner_execution": {
+      "trajectory_source": "committed_roll",
+      "execution_id": 1,
+      "source_proposal_id": 0,
+      "source_proposal_rank": 0,
+      "execution_start_step": 6,
+      "elapsed_s": 4.6000000000000005,
+      "remaining_s": 0.39999999999999947,
+      "committed_agents": [
+        "agent0"
+      ],
+      "completion_deadline_s": 5.0,
+      "rolling_hard_audit": "failed",
+      "failure_detail": {
+        "agent_id": "agent0",
+        "tracking_error": {
+          "longitudinal_m": 0.020737895898828237,
+          "lateral_m": -0.1687208612746899,
+          "heading_rad": 0.10333251858685566,
+          "time_aligned_lateral_m": -0.16867075492021932,
+          "path_projection_distance_m": 0.1687219574553394,
+          "instantaneous_heading_rad": 0.10222214413535768,
+          "preview_reference_heading_rad": -3.0996088551900933,
+          "preview_reference_arc_m": 14.61052779151958
+        },
+        "tracking_baseline": "previous_executable_reference",
+        "nominal_tracking_error": {
+          "longitudinal_m": 0.04481908648215967,
+          "lateral_m": -0.30494691868383966,
+          "heading_rad": 0.08507444598849245
+        }
+      }
+    },
+    "planner_agents": {
+      "agent0": {},
+      "agent1": {},
+      "agent2": {}
+    },
+    "agent_states": {
+      "agent0": {
+        "position": [
+          429.46063232421875,
+          -376.9244689941406
+        ],
+        "heading": -2.9962763366032377,
+        "speed_km_h": 10.696564845215114,
+        "lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          0
+        ]
+      },
+      "agent1": {
+        "position": [
+          448.132568359375,
+          -373.6195983886719
+        ],
+        "heading": 3.1414188823286655,
+        "speed_km_h": 9.43464147593972,
+        "lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ]
+      },
+      "agent2": {
+        "position": [
+          463.8725891113281,
+          -373.6195983886719
+        ],
+        "heading": 3.1414188823286655,
+        "speed_km_h": 9.434638042943204,
+        "lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ]
+      }
+    }
+  },
+  "persistable": false,
+  "episode": 0,
+  "scenario_id": "S9_narrow_channel_negotiation",
+  "local_route": "R8_narrow_channel",
+  "topdown_video_path": null,
+  "semantic_bev_video_path": null,
+  "trajectory_path": null
+}

@@ -123,7 +123,11 @@ class LongitudinalCascadeController:
         gap_acceleration_mps2: float = 0.0,
     ) -> tuple[float, dict[str, float | bool | str]]:
         speed = float(current_speed_mps)
-        gap = float(np.clip(gap_acceleration_mps2, -1.0, 1.0))
+        # Closing an over-expanded platoon gap may require the predecessor to
+        # brake while the follower accelerates. Preserve +1 m/s² catch-up
+        # authority and allow -2 m/s² recovery, still inside the hard brake
+        # and controller envelopes.
+        gap = float(np.clip(gap_acceleration_mps2, -2.0, 1.0))
         if not np.isfinite(speed) or not np.isfinite(gap):
             raise LongitudinalReferenceError("cascade inputs must be finite")
         # ``stop_requested`` describes the terminal state of the four-second
@@ -501,6 +505,7 @@ def build_feedback_executable_profile(
     internal_dt_s: float = 0.1,
     path_speed_limit_mps: np.ndarray | None = None,
     maximum_acceleration_mps2: float | None = None,
+    minimum_speed_mps: float = 0.0,
     source: str = "committed_roll",
 ) -> LongitudinalTrackingReference:
     """Roll a path-relative profile from the actual state under bounded feedback."""
@@ -515,6 +520,7 @@ def build_feedback_executable_profile(
         if maximum_acceleration_mps2 is None
         else float(maximum_acceleration_mps2)
     )
+    minimum_speed = float(minimum_speed_mps)
     if (
         times.ndim != 1
         or arc.shape != times.shape
@@ -525,6 +531,9 @@ def build_feedback_executable_profile(
         or np.any(np.diff(arc) < -1.0e-8)
         or not np.isfinite([elapsed, actual_arc, actual_speed]).all()
         or actual_speed < 0.0
+        or not np.isfinite(minimum_speed)
+        or minimum_speed < 0.0
+        or minimum_speed > MAX_SPEED_MPS
         or internal_dt_s <= 0.0
         or not np.isfinite(maximum_acceleration)
         or maximum_acceleration
@@ -582,7 +591,10 @@ def build_feedback_executable_profile(
             if np.any(preview_mask)
             else np.interp(executed_arc[index], arc, speed_limit)
         )
-        target_speed = min(float(original_speed[index]), curve_speed_limit)
+        target_speed = min(
+            max(float(original_speed[index]), minimum_speed),
+            curve_speed_limit,
+        )
         acceleration = float(
             np.clip(
                 original_acceleration[index]
@@ -594,6 +606,16 @@ def build_feedback_executable_profile(
             )
         )
         dt = float(internal_dt_s)
+        if minimum_speed > 0.0:
+            # A lateral commitment must not asymptotically stop on the bend.
+            # Reach the floor using only the already-authorized acceleration
+            # envelope, then prevent the next integration step crossing it.
+            floor_acceleration = (
+                minimum_speed - executed_speed[index]
+            ) / dt
+            acceleration = max(
+                acceleration, min(floor_acceleration, maximum_acceleration)
+            )
         if acceleration < 0.0 and executed_speed[index] + acceleration * dt < 0.0:
             stop_time = executed_speed[index] / -acceleration
             distance = executed_speed[index] * stop_time + 0.5 * acceleration * stop_time**2
@@ -612,7 +634,9 @@ def build_feedback_executable_profile(
     sparse_arc = executed_arc[sparse_indices]
     sparse_acceleration = executed_acceleration[sparse_indices]
     stop_requested = bool(
-        original_speed[-1] <= 1.0e-6 and sparse_speed[-1] <= 1.0e-6
+        minimum_speed <= 1.0e-6
+        and original_speed[-1] <= 1.0e-6
+        and sparse_speed[-1] <= 1.0e-6
     )
     if stop_requested:
         stopped = np.flatnonzero(sparse_speed <= 1.0e-6)

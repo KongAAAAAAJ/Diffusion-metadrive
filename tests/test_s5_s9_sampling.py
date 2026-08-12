@@ -49,6 +49,22 @@ def test_s5_has_two_real_neighbors_without_fixed_relations() -> None:
         assert 2.5 <= value["brake_trigger_time_s"] <= 4.0
 
 
+def test_s5_fixed_seeds_couple_lead_pressure_to_adjacent_windows() -> None:
+    values = {seed: _resolve("S5_hard_brake_lead", seed) for seed in SEEDS}
+    assert {value["lead_pressure_bucket"] for value in values.values()} == {
+        "moderate",
+        "high",
+    }
+    assert values[17]["lead_pressure_bucket"] == "high"
+    assert values[17]["left_relation"] == "ahead"
+    assert values[23]["lead_pressure_bucket"] == "high"
+    assert values[23]["right_relation"] == "ahead"
+    for value in values.values():
+        assert -3.0 <= value["lead_speed_delta_from_ego_km_h"] <= 3.0
+        assert 4.5 <= value["lead_brake_deceleration_mps2"] <= 7.0
+        assert 0.0 <= value["lead_target_speed_km_h"] <= 3.0
+
+
 def test_s6_fixed_seeds_cover_both_internal_platoon_gaps() -> None:
     gaps = {_resolve("S6_background_merge_in", seed)["target_gap_id"] for seed in SEEDS}
     assert gaps == {"agent0-agent1", "agent1-agent2"}

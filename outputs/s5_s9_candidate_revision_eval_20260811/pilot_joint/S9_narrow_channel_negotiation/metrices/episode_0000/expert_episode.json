@@ -1,0 +1,706 @@
+{
+  "seed": 17,
+  "initial_speed_km_h": 21.58172190165651,
+  "simulator_steps": 6,
+  "simulated_duration_s": 0.6000000000000001,
+  "rollout_wall_time_s": 9.810363977914676,
+  "planning_attempt_steps": 7,
+  "native_joint_success_steps": 6,
+  "native_joint_planning_success_rate": 0.8571428571428571,
+  "collection_ready_attempt_steps": 0,
+  "collection_ready_success_steps": 0,
+  "collection_ready_step_success_rate": 0.0,
+  "planning_time_ms": {
+    "mean": 1362.42781459753,
+    "p50": 1674.1000730544329,
+    "p95": 2012.6184756401924
+  },
+  "native_plan_time_ms": {
+    "p50": 1674.1000730544329,
+    "p95": 2012.6184756401924
+  },
+  "committed_roll_time_ms": {
+    "p50": 0.0,
+    "p95": 0.0
+  },
+  "collision": false,
+  "collision_agents": [],
+  "out_of_road": false,
+  "out_of_road_agents": [],
+  "failure_reason": "committed_action_infeasible",
+  "rejection_counts": {
+    "committed_action_infeasible": 1
+  },
+  "rejection_details": {
+    "no ranked RuleMaker proposal has a native joint trajectory": 1
+  },
+  "rule_action_counts": {
+    "agent0:+0": 2,
+    "agent1:+0": 2,
+    "agent2:+0": 2,
+    "agent0:-1": 4,
+    "agent1:-1": 4,
+    "agent2:-1": 4
+  },
+  "scenario_summary": {
+    "scenario_id": "S9_narrow_channel_negotiation",
+    "scenario_triggered": true,
+    "scenario_realized": true,
+    "scenario_trigger_step": 1,
+    "scenario_realized_step": 1,
+    "scenario_recipe_count": 1,
+    "scenario_completed_recipe_count": 1,
+    "scenario_recipes_complete": true,
+    "scenario_notes": [
+      "s9_bypass_actors_spawned"
+    ],
+    "scenario_random_seed": 1503570547,
+    "resolved_recipe_parameters": {},
+    "severity_bucket": "high",
+    "resolved_scenario_parameters": {
+      "scenario_seed": 1503570547,
+      "severity_bucket": "high",
+      "ego_initial_speed_km_h": 21.58172149658203,
+      "bypass_side": "left",
+      "source_lane_id": 1,
+      "bypass_lane_id": 0,
+      "blocker_speed_km_h": 0.17075146416272313,
+      "agent0_to_blocker_bumper_gap_m": 22.81892531391799,
+      "bypass_constraint_actor_speed_km_h": 21.415515906494495,
+      "bypass_constraint_actor_relative_offset_m": 19.43698845971834,
+      "usable_bypass_gap_m": 65.43881494712817,
+      "ego_distance_to_narrow_entry_m": 27.565967632463924,
+      "predicted_blocker_ttc_s": 3.8367309377258763,
+      "latest_lane_change_completion_before_blocker_m": 10.348484588735852
+    },
+    "actor_manifest": {
+      "blocking_actor": {
+        "role": "blocking_actor",
+        "object_name": "a2cf6b77-556e-41e1-8b4b-20288357dd30",
+        "spawn_step": 1,
+        "spawn_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ],
+        "spawn_position_xy": [
+          417.8878479003906,
+          -373.6184997558594
+        ],
+        "active": true,
+        "current_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ]
+      },
+      "bypass_constraint_actor": {
+        "role": "bypass_constraint_actor",
+        "object_name": "55aaebbf-656b-4357-8db0-3f752741b688",
+        "spawn_step": 1,
+        "spawn_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          0
+        ],
+        "spawn_position_xy": [
+          427.0097961425781,
+          -377.1184997558594
+        ],
+        "active": true,
+        "current_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          0
+        ]
+      }
+    },
+    "conflict_evidence": {
+      "minimum_actor_distance_m": 19.73228866185658,
+      "minimum_actor_ttc_s": 4.4893947502215985,
+      "blocker_initial_bumper_gap_m": 22.81892531391799,
+      "usable_bypass_gap_m": 65.43881494712817,
+      "required_lane_change": "LEFT"
+    },
+    "route_completion": {
+      "agent_lane_transitions": {
+        "agent0": [],
+        "agent1": [],
+        "agent2": []
+      },
+      "all_agents_changed_lane": false,
+      "all_agents_passed_blocker": false,
+      "all_agents_entered_exit_ramp": false,
+      "all_agents_entered_mainline": true,
+      "returned_to_original_lane": false
+    },
+    "functional_success": false,
+    "expert_profile_id": null,
+    "platoon_agent_ids": [
+      "agent0",
+      "agent1",
+      "agent2"
+    ],
+    "platoon_lead_agent_id": "agent0"
+  },
+  "final_debug": {
+    "rule_maker": {
+      "formation_locked": false,
+      "formation_constraint_enabled": false,
+      "coordination_mode": "EMERGENCY_INDEPENDENT",
+      "risk_triggered": false,
+      "best_actions": {
+        "agent0": -1,
+        "agent1": -1,
+        "agent2": -1
+      },
+      "best_score": 0.0,
+      "dynamic_roles": {
+        "agent0": "leader",
+        "agent1": "leader",
+        "agent2": "leader"
+      },
+      "forced_lane_decision": true,
+      "forced_lane_wait_info": {
+        "decision_step": 7,
+        "threshold_steps": 10,
+        "forced_agents": [
+          "agent0",
+          "agent1",
+          "agent2"
+        ],
+        "all_forced_ready": true,
+        "partial_forced": false,
+        "partial_forced_wait_steps": 0,
+        "forced_wait_active": false,
+        "forced_wait_frozen": true,
+        "forced_lane_first_step": {},
+        "forced_lane_wait_steps_by_agent": {}
+      },
+      "risk_info": {
+        "triggered": false,
+        "transitioned": false,
+        "current_state": "UNLOCKED",
+        "next_state": "UNLOCKED",
+        "transition": null,
+        "reason": null,
+        "reasons": [],
+        "leader": {
+          "agent_id": "agent0",
+          "front_vehicle_id": "a2cf6b77-556e-41e1-8b4b-20288357dd30",
+          "front_net_gap_m": 20.1547265625,
+          "closing_speed_mps": 4.368406761301814,
+          "ttc_s": 4.613747680514476
+        },
+        "follower_pairs": [
+          {
+            "front_agent_id": "agent0",
+            "follower_agent_id": "agent1",
+            "net_gap_m": 9.987935791015623
+          },
+          {
+            "front_agent_id": "agent1",
+            "follower_agent_id": "agent2",
+            "net_gap_m": 9.989888916015623
+          }
+        ],
+        "min_follower_gap_m": 9.987935791015623,
+        "relock_threshold_m": 15.0,
+        "relock_ttc_threshold_s": 5.0,
+        "follower_gap_condition_met": false,
+        "leader_ttc_condition_met": false,
+        "forced_wait_clear": true,
+        "agents_safe": true,
+        "active_lane_change_commitments": true,
+        "relock_stable_count": 0,
+        "relock_stable_steps": 20,
+        "forced_lane_wait_info": {
+          "decision_step": 7,
+          "threshold_steps": 10,
+          "forced_agents": [
+            "agent0",
+            "agent1",
+            "agent2"
+          ],
+          "all_forced_ready": true,
+          "partial_forced": false,
+          "partial_forced_wait_steps": 0,
+          "forced_wait_active": false,
+          "forced_wait_frozen": true,
+          "forced_lane_first_step": {},
+          "forced_lane_wait_steps_by_agent": {}
+        }
+      },
+      "action_search": {
+        "strategy": "forced_route_combo_deferred_to_normal_planner",
+        "prefix_counts": [
+          1
+        ],
+        "pairwise_conflict_counts": {
+          "agent0:agent1": 1
+        },
+        "coarse_conflict_detected": true,
+        "final_feasibility_authority": "normal_planner"
+      },
+      "lane_change_commitments": {
+        "active": {
+          "agent0": {
+            "status": "committed",
+            "action": -1,
+            "source_lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              1
+            ],
+            "target_lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              0
+            ],
+            "target_lane_chain": [
+              [
+                "10C0_0_",
+                "10C0_1_",
+                0
+              ],
+              [
+                "10C0_1_",
+                "11y0_0_",
+                0
+              ],
+              [
+                "11y0_0_",
+                "11y0_1_",
+                0
+              ],
+              [
+                "11y0_1_",
+                "12S0_0_",
+                0
+              ],
+              [
+                "12S0_0_",
+                "13Y0_0_",
+                0
+              ],
+              [
+                "13Y0_0_",
+                "13Y0_1_",
+                0
+              ]
+            ],
+            "commit_step": 3,
+            "duration_steps": 4
+          },
+          "agent1": {
+            "status": "committed",
+            "action": -1,
+            "source_lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              1
+            ],
+            "target_lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              0
+            ],
+            "target_lane_chain": [
+              [
+                "10C0_0_",
+                "10C0_1_",
+                0
+              ],
+              [
+                "10C0_1_",
+                "11y0_0_",
+                0
+              ],
+              [
+                "11y0_0_",
+                "11y0_1_",
+                0
+              ],
+              [
+                "11y0_1_",
+                "12S0_0_",
+                0
+              ],
+              [
+                "12S0_0_",
+                "13Y0_0_",
+                0
+              ],
+              [
+                "13Y0_0_",
+                "13Y0_1_",
+                0
+              ]
+            ],
+            "commit_step": 3,
+            "duration_steps": 4
+          },
+          "agent2": {
+            "status": "committed",
+            "action": -1,
+            "source_lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              1
+            ],
+            "target_lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              0
+            ],
+            "target_lane_chain": [
+              [
+                "10C0_0_",
+                "10C0_1_",
+                0
+              ],
+              [
+                "10C0_1_",
+                "11y0_0_",
+                0
+              ],
+              [
+                "11y0_0_",
+                "11y0_1_",
+                0
+              ],
+              [
+                "11y0_1_",
+                "12S0_0_",
+                0
+              ],
+              [
+                "12S0_0_",
+                "13Y0_0_",
+                0
+              ],
+              [
+                "13Y0_0_",
+                "13Y0_1_",
+                0
+              ]
+            ],
+            "commit_step": 3,
+            "duration_steps": 4
+          }
+        },
+        "pending": {},
+        "completed": {}
+      },
+      "proposal_batch_id": 7,
+      "proposal_count": 1,
+      "proposal_ranking": [
+        {
+          "proposal_id": 0,
+          "rank": 0,
+          "rule_score": 0.0,
+          "actions": {
+            "agent0": -1,
+            "agent1": -1,
+            "agent2": -1
+          }
+        }
+      ]
+    },
+    "planner_joint": {
+      "fallback_used": true,
+      "fallback_reason": "no_safe_joint_combination",
+      "combination_count": 0,
+      "pairwise_conflict_count": 216,
+      "pairwise_conflict_pair_count": 258,
+      "pairwise_conflict_counts_by_pair": {
+        "agent0:agent1": 96,
+        "agent0:agent2": 90,
+        "agent1:agent2": 72
+      },
+      "selected_indices": null,
+      "selected_score": null,
+      "planning_time_ms": 1731.6270631272346,
+      "prefix_counts": [
+        12,
+        12,
+        0
+      ],
+      "formation_constraint_enabled": false,
+      "formation_penalty_applied": false
+    },
+    "planner_ranked": {
+      "proposal_attempts": [
+        {
+          "proposal_id": 0,
+          "rank": 0,
+          "rule_score": 0.0,
+          "actions": {
+            "agent0": -1,
+            "agent1": -1,
+            "agent2": -1
+          },
+          "fallback_reason": "no_safe_joint_combination",
+          "missing_agents": [],
+          "native_feasible": false,
+          "short_horizon_combination_count": 0,
+          "joint_candidate_attempt_count": 0,
+          "joint_candidate_attempts": [],
+          "joint_candidate_rejections_by_reason": {},
+          "first_joint_candidate_rejection_by_reason": {},
+          "agent_diagnostics": {
+            "agent0": {
+              "fallback_reason": "no_safe_joint_combination",
+              "raw_candidate_count": 108,
+              "generated_valid_candidate_count": 24,
+              "candidate_count": 12,
+              "road_rejection_count": 12,
+              "background_gap_rejection_count": 0,
+              "kinematic_rejection_count": 0
+            },
+            "agent1": {
+              "fallback_reason": "no_safe_joint_combination",
+              "raw_candidate_count": 108,
+              "generated_valid_candidate_count": 35,
+              "candidate_count": 9,
+              "road_rejection_count": 1,
+              "background_gap_rejection_count": 3,
+              "kinematic_rejection_count": 1
+            },
+            "agent2": {
+              "fallback_reason": "no_safe_joint_combination",
+              "raw_candidate_count": 108,
+              "generated_valid_candidate_count": 33,
+              "candidate_count": 10,
+              "road_rejection_count": 0,
+              "background_gap_rejection_count": 2,
+              "kinematic_rejection_count": 1
+            }
+          }
+        }
+      ],
+      "selected_proposal_id": null,
+      "pool_cache_entry_count": 3,
+      "pool_request_count": 3,
+      "pool_cache_hit_count": 0,
+      "candidate_audit_cache_entry_count": 0,
+      "candidate_audit_request_count": 0,
+      "candidate_audit_cache_hit_count": 0,
+      "pairwise_cache_entry_count": 0,
+      "pairwise_request_count": 0,
+      "pairwise_cache_hit_count": 0,
+      "ranked_planning_time_ms": 1732.5617740862072,
+      "reason_code": "committed_action_infeasible",
+      "route_geometry_cache_entries": 2,
+      "route_geometry_cache_requests": 42,
+      "route_geometry_cache_hits": 40,
+      "background_prediction_cache_entries": 0,
+      "background_prediction_requests": 0,
+      "background_prediction_cache_hits": 0
+    },
+    "planner_execution": {},
+    "planner_agents": {
+      "agent0": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 24,
+        "raw_candidate_count": 108,
+        "kinematic_rejection_count": 0,
+        "local_kinematic_rejection_count": 0,
+        "corridor_rejection_count": 12,
+        "road_rejection_count": 12,
+        "background_collision_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {
+          "dense_curvature_limit": 72,
+          "dense_lateral_acceleration_limit": 33,
+          "dense_yaw_rate_limit": 36
+        },
+        "lane_end_restricted": false,
+        "commitment_elapsed_s": 0.4,
+        "commitment_deadline_remaining_s": 4.6,
+        "source_lane_remaining_m": 34.264074838627266,
+        "safe_corridor_by_duration_m": {
+          "2.5": [
+            null,
+            24.28829270365774
+          ],
+          "3.0": [
+            null,
+            27.262613353764287
+          ],
+          "3.5": [
+            null,
+            30.236934003870843
+          ],
+          "4.0": [
+            null,
+            33.21125465397739
+          ],
+          "4.5": [
+            null,
+            null
+          ],
+          "4.6": [
+            null,
+            null
+          ]
+        },
+        "fallback_used": true,
+        "fallback_reason": "no_safe_joint_combination"
+      },
+      "agent1": {
+        "candidate_count": 9,
+        "generated_valid_candidate_count": 35,
+        "raw_candidate_count": 108,
+        "kinematic_rejection_count": 1,
+        "local_kinematic_rejection_count": 0,
+        "corridor_rejection_count": 0,
+        "road_rejection_count": 1,
+        "background_collision_rejection_count": 3,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {
+          "55aaebbf-656b-4357-8db0-3f752741b688": 3
+        },
+        "kinematic_rejections_by_reason": {
+          "acceleration_above_max": 1,
+          "dense_curvature_limit": 68,
+          "dense_lateral_acceleration_limit": 23,
+          "dense_yaw_rate_limit": 31,
+          "outside_reachable_distance": 1
+        },
+        "lane_end_restricted": false,
+        "commitment_elapsed_s": 0.4,
+        "commitment_deadline_remaining_s": 4.6,
+        "source_lane_remaining_m": 49.99201062964289,
+        "safe_corridor_by_duration_m": {
+          "2.5": [
+            null,
+            40.01622849467336
+          ],
+          "3.0": [
+            null,
+            42.99054914477991
+          ],
+          "3.5": [
+            null,
+            45.96486979488647
+          ],
+          "4.0": [
+            null,
+            48.93919044499302
+          ],
+          "4.5": [
+            null,
+            null
+          ],
+          "4.6": [
+            null,
+            null
+          ]
+        },
+        "fallback_used": true,
+        "fallback_reason": "no_safe_joint_combination"
+      },
+      "agent2": {
+        "candidate_count": 10,
+        "generated_valid_candidate_count": 33,
+        "raw_candidate_count": 108,
+        "kinematic_rejection_count": 1,
+        "local_kinematic_rejection_count": 0,
+        "corridor_rejection_count": 0,
+        "road_rejection_count": 0,
+        "background_collision_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {
+          "acceleration_above_max": 1,
+          "dense_curvature_limit": 72,
+          "dense_lateral_acceleration_limit": 20,
+          "dense_yaw_rate_limit": 18,
+          "outside_reachable_distance": 1
+        },
+        "lane_end_restricted": false,
+        "commitment_elapsed_s": 0.4,
+        "commitment_deadline_remaining_s": 4.6,
+        "source_lane_remaining_m": 65.72189954565852,
+        "safe_corridor_by_duration_m": {
+          "2.5": [
+            null,
+            55.74611741068898
+          ],
+          "3.0": [
+            null,
+            58.720438060795544
+          ],
+          "3.5": [
+            null,
+            61.69475871090209
+          ],
+          "4.0": [
+            null,
+            64.66907936100864
+          ],
+          "4.5": [
+            null,
+            null
+          ],
+          "4.6": [
+            null,
+            null
+          ]
+        },
+        "fallback_used": true,
+        "fallback_reason": "no_safe_joint_combination"
+      }
+    },
+    "agent_states": {
+      "agent0": {
+        "position": [
+          443.10382080078125,
+          -373.7642822265625
+        ],
+        "heading": -3.0504418373821416,
+        "speed_km_h": 16.716263181974035,
+        "lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ]
+      },
+      "agent1": {
+        "position": [
+          458.8317565917969,
+          -373.775634765625
+        ],
+        "heading": -3.046400623586001,
+        "speed_km_h": 16.891062089680833,
+        "lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ]
+      },
+      "agent2": {
+        "position": [
+          474.5616455078125,
+          -373.7434997558594
+        ],
+        "heading": -3.064837288338456,
+        "speed_km_h": 17.68228153416354,
+        "lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ]
+      }
+    }
+  },
+  "persistable": false,
+  "episode": 0,
+  "scenario_id": "S9_narrow_channel_negotiation",
+  "local_route": "R8_narrow_channel",
+  "topdown_video_path": "outputs/s5_s9_candidate_revision_eval_20260811/pilot_joint/S9_narrow_channel_negotiation/video/episode_0000.mp4",
+  "semantic_bev_video_path": "outputs/s5_s9_candidate_revision_eval_20260811/pilot_joint/S9_narrow_channel_negotiation/semantic_bev_video/episode_0000.mp4",
+  "trajectory_path": "outputs/s5_s9_candidate_revision_eval_20260811/pilot_joint/S9_narrow_channel_negotiation/trajectories/episode_0000.npz"
+}

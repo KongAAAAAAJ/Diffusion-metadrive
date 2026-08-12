@@ -172,7 +172,58 @@ def test_pid_uses_s9_specific_cross_track_gain() -> None:
     assert debug["cross_track_correction"] == pytest.approx(-0.05)
 
 
-@pytest.mark.parametrize("key", ["pid_cross_track_kp", "s9_pid_cross_track_kp"])
+def test_pid_uses_s5_specific_cross_track_gain() -> None:
+    trajectory = np.asarray(
+        [[4.0 * (index + 1), 0.0, 0.0] for index in range(8)],
+        dtype=np.float32,
+    )
+    controller = PIDTrajectoryController(
+        {"pid_dt": 0.1, "pid_cross_track_kp": 0.4, "s5_pid_cross_track_kp": 0.0}
+    )
+    env = _FakeEnv()
+    env.config = {"scenario_id": "S5_hard_brake_lead"}
+
+    controller.compute_actions(
+        env,
+        {"agent0": trajectory},
+        lateral_tracking_errors_m={"agent0": 0.5},
+    )
+    debug = controller.get_last_debug()["agent0"]
+
+    assert debug["cross_track_kp"] == pytest.approx(0.0)
+    assert debug["cross_track_correction"] == pytest.approx(0.0)
+
+
+def test_lqr_wrapper_preserves_s5_specific_cross_track_gain() -> None:
+    lane = _FakeLane()
+    env = _FakeEnv()
+    env.agents["agent0"].lane = lane
+    env.agents["agent0"].speed_km_h = 25.0
+    env.config = {"scenario_id": "S5_hard_brake_lead"}
+    controller = LQRFollowerController(
+        {"pid_dt": 0.1, "pid_cross_track_kp": 0.4, "s5_pid_cross_track_kp": 0.0}
+    )
+    trajectory = np.asarray(
+        [[4.0 * (index + 1), 0.0, 0.0] for index in range(8)],
+        dtype=np.float32,
+    )
+
+    controller.compute_actions(
+        env,
+        {"agent0": trajectory},
+        lateral_tracking_errors_m={"agent0": 0.5},
+    )
+    debug = controller.get_last_debug()["agent0"]
+
+    assert debug["scenario_id"] == "S5_hard_brake_lead"
+    assert debug["cross_track_kp"] == pytest.approx(0.0)
+    assert debug["cross_track_correction"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["pid_cross_track_kp", "s5_pid_cross_track_kp", "s9_pid_cross_track_kp"],
+)
 def test_pid_rejects_invalid_cross_track_gain(key: str) -> None:
     with pytest.raises(ValueError, match="cross-track gains"):
         PIDTrajectoryController({key: -0.1})
@@ -270,6 +321,43 @@ def test_lqr_follower_controller_records_lateral_debug_for_followers() -> None:
     assert abs(follower_debug["gap_feedback_mps2"]) <= 1.0
     assert follower_debug["longitudinal_reference_source"] == "online_trajectory"
     assert -1.0 <= follower_debug["clipped_steering"] <= 1.0
+
+
+def test_lqr_leader_slows_when_rear_platoon_gap_is_too_large() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "agents": {
+                "agent0": _FakeVehicle(
+                    x=30.0, speed_km_h=30.0, lane=shared_lane
+                ),
+                "agent1": _FakeVehicle(
+                    x=0.0, speed_km_h=24.0, lane=shared_lane
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 4.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    controller.compute_actions(env, trajectories)
+    leader = controller.get_last_debug()["agent0"]
+
+    assert leader["rear_platoon_gap_m"] == pytest.approx(25.0)
+    assert leader["rear_gap_feedback_mps2"] == pytest.approx(-2.0)
+    assert leader["gap_feedback_mps2"] == pytest.approx(-2.0)
 
 
 def test_lqr_follower_controller_uses_bounded_gap_cascade_debug() -> None:

@@ -246,6 +246,8 @@ class MultiAgentRuleMaker(RuleMaker):
         self._candidate_debug_plot_counter = 0
         self._lane_pair_debug_plot_counter = 0
         self._s7_route_lanes_debug_plot_counter = 0
+        self._s5_hazard_response_action: int | None = None
+        self._s6_gap_response_action: int | None = None
 
     def reset(self, env, agent_ids: list[str]) -> None:  # noqa: ARG002
         self._formation_locked = bool(self.locked_on_reset)
@@ -261,6 +263,8 @@ class MultiAgentRuleMaker(RuleMaker):
         self._outstanding_proposal_candidates.clear()
         self._last_ranked_combos.clear()
         self._active_execution_id = None
+        self._s5_hazard_response_action = None
+        self._s6_gap_response_action = None
         reset_detector = getattr(self._risk_detector, "reset", None)
         if callable(reset_detector):
             reset_detector()
@@ -428,6 +432,50 @@ class MultiAgentRuleMaker(RuleMaker):
             if int(value.proposal_id) == int(proposal_id)
         )
         self._schedule_lane_change_commitments(agent_ids, combo)
+        if (
+            self._s5_hazard_response_action is None
+            and str(
+                ((self._last_debug or {}).get("action_search", {}) or {}).get(
+                    "strategy", ""
+                )
+            )
+            == "s5_profile_cohesive_action"
+            and accepted.decisions
+            and len(
+                {
+                    int(value.get("action", 0))
+                    for value in accepted.decisions.values()
+                }
+            )
+            == 1
+        ):
+            accepted_action = int(
+                next(iter(accepted.decisions.values())).get("action", 0)
+            )
+            if accepted_action in self.ACTIONS:
+                self._s5_hazard_response_action = accepted_action
+        if (
+            self._s6_gap_response_action is None
+            and str(
+                ((self._last_debug or {}).get("action_search", {}) or {}).get(
+                    "s6_strategy", ""
+                )
+            )
+            == "target_gap_competing_actions"
+            and accepted.decisions
+            and len(
+                {
+                    int(value.get("action", 0))
+                    for value in accepted.decisions.values()
+                }
+            )
+            == 1
+        ):
+            accepted_action = int(
+                next(iter(accepted.decisions.values())).get("action", 0)
+            )
+            if accepted_action != 0:
+                self._s6_gap_response_action = accepted_action
         if self._last_debug is not None:
             self._last_debug["accepted_proposal_id"] = int(proposal_id)
             self._last_debug["accepted_proposal_rank"] = int(accepted.rank)
@@ -481,13 +529,31 @@ class MultiAgentRuleMaker(RuleMaker):
             action = int(plan_action)
             commitment = commitments.get(str(agent_id))
             vehicle = agents.get(str(agent_id))
-            current_lane_index = tuple(
-                getattr(getattr(vehicle, "lane", None), "index", ()) or ()
+            current_lane_indices = {
+                tuple(getattr(vehicle, "lane_index", ()) or ()),
+                tuple(
+                    getattr(getattr(vehicle, "lane", None), "index", ()) or ()
+                ),
+            }
+            current_lane_indices.discard(())
+            entered_downstream_route = bool(
+                commitment is not None
+                and tuple(commitment.source_lane_index[:2])
+                != tuple(commitment.target_lane_index[:2])
+                and any(
+                    tuple(index[:2])
+                    != tuple(commitment.source_lane_index[:2])
+                    for index in current_lane_indices
+                )
             )
             if (
                 action == 0
                 or commitment is None
-                or current_lane_index in set(commitment.target_lane_chain)
+                or entered_downstream_route
+                or bool(
+                    current_lane_indices
+                    & set(commitment.target_lane_chain)
+                )
             ):
                 result[str(agent_id)] = 0
             else:
@@ -618,6 +684,24 @@ class MultiAgentRuleMaker(RuleMaker):
         self._promote_pending_lane_change_commitments()
         self._refresh_lane_change_commitments(env, agent_ids)
         traffic_vehicles = self._traffic_vehicles(env)
+        if (
+            self._s6_gap_response_action is None
+            and self._is_s6_background_merge_route(env)
+            and any(
+                bool(
+                    getattr(
+                        vehicle,
+                        "scenario_designated_gap_completed",
+                        False,
+                    )
+                )
+                for vehicle in traffic_vehicles
+            )
+        ):
+            # KEEP is itself a valid coordinated response (yield/pass-first).
+            # Latch it only after observed designated-gap completion, so an
+            # early no-conflict KEEP cannot prematurely close the episode.
+            self._s6_gap_response_action = 0
         candidates_by_agent: dict[str, list[dict]] = {}
         for agent_id in agent_ids:
             vehicle = agents.get(agent_id)
@@ -665,10 +749,58 @@ class MultiAgentRuleMaker(RuleMaker):
             active_lane_change_commitments=bool(self._lane_change_commitments),
         )
         self._formation_locked = risk_info["next_state"] == "LOCKED"
+        if self._is_s6_background_merge_route(env):
+            # S6 may assign different longitudinal accelerations to the two
+            # sides of the target gap, but a lateral action is a platoon-level
+            # cooperative choice.  Risk detection must not turn that into
+            # three unrelated lane decisions while the actor converges.
+            self._formation_locked = True
+            risk_info["next_state"] = "LOCKED"
+            risk_info["s6_lateral_coordination_preserved"] = True
+        if self._is_s7_merge_route(env):
+            # A full-platoon ramp merge is one atomic lateral manoeuvre.  The
+            # timed actor gate controls when it may start; risk-state changes
+            # must not split the three route-required actions afterwards.
+            self._formation_locked = True
+            risk_info["next_state"] = "LOCKED"
+            risk_info["s7_lateral_coordination_preserved"] = True
         formation_constraint_enabled = bool(self._formation_locked)
 
+        s7_release_ready = self._s7_gap_release_ready(env)
+        s7_hold_for_timed_gap = bool(self._is_s7_merge_route(env))
         forced_lane_decision = forced_combo is not None
-        if forced_lane_decision:
+        if s7_hold_for_timed_gap:
+            keep_combo = tuple(
+                self._candidate_for_action(
+                    candidates_by_agent.get(agent_id, []), 0
+                )
+                for agent_id in ordered_agent_ids
+            )
+            best_combo = (
+                None if any(candidate is None for candidate in keep_combo)
+                else keep_combo
+            )
+            best_score = 0.0 if best_combo is not None else -float("inf")
+            ranked_combos = (
+                [(tuple(best_combo), float(best_score))]
+                if best_combo is not None
+                else []
+            )
+            action_search_debug = {
+                "strategy": (
+                    "s7_route_chain_keep"
+                    if s7_release_ready
+                    else "s7_wait_for_sampled_merge_window"
+                ),
+                "prefix_counts": [1 if best_combo is not None else 0],
+                "pairwise_conflict_counts": {},
+                "expected_behavior": self._s7_expected_behavior(env),
+                "timed_gap_released": bool(s7_release_ready),
+                "atomic_forced_combo_ready": bool(forced_combo is not None),
+                "final_feasibility_authority": "normal_planner",
+            }
+            forced_lane_decision = False
+        elif forced_lane_decision:
             forced_conflicts: dict[str, int] = {}
             coarse_conflict = self._combo_has_hard_conflict(
                 env,
@@ -737,53 +869,103 @@ class MultiAgentRuleMaker(RuleMaker):
                 "prefix_counts": [1 if best_combo is not None else 0],
                 "pairwise_conflict_counts": pre_brake_conflicts,
             }
+        elif self._is_s5_hard_brake_active(env):
+            # Once the sampled lead starts braking, S5 compares profile
+            # preferences over cohesive platoon actions.  Independent
+            # left/KEEP/right splits can strand the middle ego behind the
+            # braking actor for the full atomic commitment and are not one of
+            # the memory-approved coordinated behavior classes.
+            if self._s5_hazard_response_action is None:
+                (
+                    best_combo,
+                    best_score,
+                    action_search_debug,
+                    ranked_combos,
+                ) = self._best_locked_combo(
+                    env=env,
+                    ordered_agent_ids=ordered_agent_ids,
+                    candidates_by_agent=candidates_by_agent,
+                    traffic_vehicles=traffic_vehicles,
+                    defer_coarse_conflicts=True,
+                )
+                action_search_debug["strategy"] = "s5_profile_cohesive_action"
+            else:
+                # One episode contains one causal brake event.  After the
+                # accepted response has completed, stay on the resulting lane
+                # and recover longitudinal formation instead of oscillating
+                # into another adjacent lane.
+                keep_combo = tuple(
+                    self._candidate_for_action(
+                        candidates_by_agent.get(agent_id, []), 0
+                    )
+                    for agent_id in ordered_agent_ids
+                )
+                best_combo = (
+                    None
+                    if any(candidate is None for candidate in keep_combo)
+                    else keep_combo
+                )
+                best_score = 0.0 if best_combo is not None else -float("inf")
+                ranked_combos = (
+                    [(tuple(best_combo), float(best_score))]
+                    if best_combo is not None
+                    else []
+                )
+                action_search_debug = {
+                    "strategy": "s5_post_response_keep",
+                    "accepted_response_action": int(
+                        self._s5_hazard_response_action
+                    ),
+                    "prefix_counts": [1 if best_combo is not None else 0],
+                    "pairwise_conflict_counts": {},
+                }
+            action_search_debug["profile_id"] = self._config_value(
+                getattr(env, "config", {}) or {}, "rule_maker_profile_id"
+            )
+            self._formation_locked = True
+            formation_constraint_enabled = True
         elif (
             self._formation_locked
             and self._is_s6_background_merge_route(env)
-            and not bool(risk_info.get("triggered", False))
+            and self._s6_gap_response_action is not None
         ):
-            # S6 is a controlled gap-creation scenario: the ramp actor is
-            # intended to enter the leader--middle gap while the platoon
-            # yields longitudinally.  A lane change is meaningful only after
-            # the risk detector has identified a real conflict.  Allowing the
-            # generic MOBIL score to select a late RIGHT maneuver while the
-            # detector reports no risk makes an otherwise identical episode
-            # depend on sub-centimetre traffic-state drift and sends the
-            # platoon through an unnecessary curved commitment.  KEEP remains
-            # a proposal, not a trajectory fallback; the Normal planner still
-            # applies every hard feasibility check and may reject it.
-            keep_combo = tuple(
+            post_response_action = 0
+            post_combo = tuple(
                 self._candidate_for_action(
-                    candidates_by_agent.get(agent_id, []), 0
+                    candidates_by_agent.get(agent_id, []),
+                    post_response_action,
                 )
                 for agent_id in ordered_agent_ids
             )
-            if any(candidate is None for candidate in keep_combo):
-                best_combo = None
-                best_score = -float("inf")
-                ranked_combos = []
-            else:
-                best_combo = keep_combo
-                best_score = 0.0
-                ranked_combos = [(tuple(keep_combo), best_score)]
-            best_score = float(best_score)
+            best_combo = (
+                None
+                if any(candidate is None for candidate in post_combo)
+                else post_combo
+            )
+            best_score = 0.0 if best_combo is not None else -float("inf")
+            ranked_combos = (
+                [(tuple(best_combo), float(best_score))]
+                if best_combo is not None
+                else []
+            )
             action_search_debug = {
-                "strategy": "s6_no_risk_keep",
+                "strategy": "s6_post_response_keep",
+                "accepted_response_action": int(self._s6_gap_response_action),
+                "post_response_action": int(post_response_action),
                 "prefix_counts": [1 if best_combo is not None else 0],
-                "risk_required_for_lane_change": True,
-                "final_feasibility_authority": "normal_planner",
+                "pairwise_conflict_counts": {},
             }
         elif (
             self._formation_locked
             and self._is_s7_merge_route(env)
-            and not bool(risk_info.get("triggered", False))
         ):
-            # S7 contains exactly one route-required ramp-to-mainline merge.
-            # Once that forced proposal has completed, generic MOBIL scoring
-            # must not interpret the remaining mainline lanes as a second
-            # required LEFT maneuver.  KEEP is still only a RuleMaker
-            # proposal: the Normal planner remains the final hard-feasibility
-            # authority and may reject the episode.
+            # R7's navigation chain itself owns the ramp-to-mainline branch;
+            # it is traversed under KEEP.  Treating the overlapping merge
+            # apron as an adjacent LEFT lane makes all three vehicles attempt
+            # a second, non-route lane change once their centres reach the
+            # connector.  Keep the topology action fixed while the native
+            # planner selects pass-first/yield longitudinal profiles under the
+            # unchanged full-horizon OBB and background-gap audits.
             keep_combo = tuple(
                 self._candidate_for_action(
                     candidates_by_agent.get(agent_id, []), 0
@@ -799,7 +981,7 @@ class MultiAgentRuleMaker(RuleMaker):
                 best_score = 0.0
                 ranked_combos = [(tuple(keep_combo), best_score)]
             action_search_debug = {
-                "strategy": "s7_post_merge_keep",
+                "strategy": "s7_route_chain_keep",
                 "prefix_counts": [1 if best_combo is not None else 0],
                 "single_route_merge_only": True,
                 "final_feasibility_authority": "normal_planner",
@@ -811,6 +993,76 @@ class MultiAgentRuleMaker(RuleMaker):
                 candidates_by_agent=candidates_by_agent,
                 traffic_vehicles=traffic_vehicles,
             )
+            if self._is_s6_background_merge_route(env):
+                target_gap_id = next(
+                    (
+                        str(getattr(vehicle, "scenario_target_gap_id", ""))
+                        for vehicle in traffic_vehicles
+                        if str(
+                            getattr(vehicle, "scenario_vehicle_role", "")
+                        )
+                        == "s6_gap_intruder"
+                    ),
+                    "",
+                )
+                if not target_gap_id:
+                    target_gap_id = str(
+                        (
+                            getattr(
+                                getattr(env, "_scenario_orchestrator", None),
+                                "_resolved_scenario_parameters",
+                                {},
+                            )
+                            or {}
+                        ).get("target_gap_id", "")
+                    )
+                action_search_debug["s6_strategy"] = (
+                    "target_gap_competing_actions"
+                )
+                action_search_debug["target_gap_id"] = target_gap_id
+                action_search_debug["keep_proposal_retained"] = any(
+                    row[0]
+                    and all(
+                        int(candidate.get("action", 0)) == 0
+                        for candidate in row[0]
+                    )
+                    for row in ranked_combos
+                )
+                # The declared S6 interaction is only realized while the
+                # platoon remains on the actor's merge destination lane.
+                # Put the route-aligned KEEP proposal first, but retain every
+                # hard-safe cooperative lane-change proposal as fallback for
+                # the Normal planner.  Longitudinal yielding, pass-first and
+                # gap expansion remain distinct KEEP trajectories, so this is
+                # a topology preference rather than a forced behaviour class.
+                ranked_combos = sorted(
+                    ranked_combos,
+                    key=lambda row: (
+                        0
+                        if row[0]
+                        and all(
+                            int(candidate.get("action", 0)) == 0
+                            for candidate in row[0]
+                        )
+                        else 1,
+                        -float(row[1]),
+                    ),
+                )
+                if ranked_combos:
+                    best_combo, best_score = ranked_combos[0]
+                action_search_debug["lookahead_priority"] = (
+                    "designated_gap_route_continuity"
+                )
+                action_search_debug["ranked_action_scores"] = [
+                    {
+                        "actions": [
+                            int(candidate.get("action", 0))
+                            for candidate in combo
+                        ],
+                        "score": float(score),
+                    }
+                    for combo, score in ranked_combos[:5]
+                ]
         else:
             candidate_sets = [
                 self._forced_candidates_for_agent(candidates_by_agent.get(agent_id, []))
@@ -1039,10 +1291,18 @@ class MultiAgentRuleMaker(RuleMaker):
                 continue
             commitment = self._lane_change_commitments[agent_id]
             vehicle = agents.get(agent_id)
-            current_index = tuple(
-                getattr(getattr(vehicle, "lane", None), "index", ()) or ()
+            observed_indices = [
+                tuple(getattr(vehicle, "lane_index", ()) or ()),
+                tuple(
+                    getattr(getattr(vehicle, "lane", None), "index", ()) or ()
+                ),
+            ]
+            target_chain = set(commitment.target_lane_chain)
+            current_index = next(
+                (index for index in observed_indices if index in target_chain),
+                (),
             )
-            if current_index not in set(commitment.target_lane_chain):
+            if not current_index:
                 continue
             # MetaDrive changes ``vehicle.lane`` as soon as the vehicle centre
             # crosses the Voronoi boundary between adjacent lanes.  At that
@@ -1081,13 +1341,27 @@ class MultiAgentRuleMaker(RuleMaker):
                 != tuple(current_index[:2])
             )
             lateral_tolerance_m = self.LANE_CHANGE_COMPLETION_LATERAL_TOLERANCE_M
+            heading_tolerance_rad = self.LANE_CHANGE_COMPLETION_HEADING_TOLERANCE_RAD
+            if self._is_s5_hard_brake_scenario(env):
+                # The S5 target is an adjacent lane on a straight, continuous
+                # road.  Once the complete footprint is inside that lane, a
+                # small residual centre error is safe and should hand control
+                # back to KEEP before the five-second atomic reference ends.
+                lateral_tolerance_m = 0.45
+                heading_tolerance_rad = 0.12
+            if self._is_s8_exit_route(env):
+                # The target exit-side lane immediately bends into the
+                # diverge, so its tangent rotates while the vehicle finishes
+                # centering. The same 0.15 rad envelope used by committed S8
+                # tracking is the correct completion tolerance here.
+                heading_tolerance_rad = 0.15
             if (
                 not np.isfinite(target_lateral_m)
                 or not np.isfinite(heading_error_rad)
                 or abs(float(target_lateral_m))
                 > lateral_tolerance_m
                 or abs(heading_error_rad)
-                > self.LANE_CHANGE_COMPLETION_HEADING_TOLERANCE_RAD
+                > heading_tolerance_rad
                 or not footprint_inside
             ):
                 continue
@@ -1376,6 +1650,7 @@ class MultiAgentRuleMaker(RuleMaker):
         ordered_agent_ids: list[str],
         candidates_by_agent: dict[str, list[dict]],
         traffic_vehicles: list,
+        defer_coarse_conflicts: bool = False,
     ):
         candidate_sets = []
         for action in self.ACTIONS:
@@ -1393,9 +1668,10 @@ class MultiAgentRuleMaker(RuleMaker):
         scored: list[tuple[tuple[dict, ...], float]] = []
         conflict_counts: dict[str, int] = {}
         for combo_tuple in candidate_sets:
-            if self._combo_has_hard_conflict(
+            coarse_conflict = self._combo_has_hard_conflict(
                 env, ordered_agent_ids, combo_tuple, conflict_counts
-            ):
+            )
+            if coarse_conflict and not defer_coarse_conflicts:
                 continue
             score = self._score_joint_combo(
                 env=env,
@@ -1404,6 +1680,13 @@ class MultiAgentRuleMaker(RuleMaker):
                 traffic_vehicles=traffic_vehicles,
                 formation_constraint_enabled=True,
             )
+            if coarse_conflict:
+                # S5's coarse rule trajectories are not the executed native
+                # trajectories.  Keep conflicted cohesive actions as lower
+                # ranked proposals so the Normal planner can still prove a
+                # hard-safe braking/lane-change realization.  It remains the
+                # sole final authority and rejected proposals never commit.
+                score -= 1_000_000.0
             scored.append((combo_tuple, float(score)))
         scored.sort(
             key=lambda value: (
@@ -1416,6 +1699,7 @@ class MultiAgentRuleMaker(RuleMaker):
             "strategy": "locked_shared_action",
             "prefix_counts": [len(candidate_sets)],
             "pairwise_conflict_counts": conflict_counts,
+            "coarse_conflicts_deferred": bool(defer_coarse_conflicts),
         }, scored
 
     def _best_conditional_combo(
@@ -2060,17 +2344,40 @@ class MultiAgentRuleMaker(RuleMaker):
         )
 
     @classmethod
+    def _is_s5_hard_brake_scenario(cls, env) -> bool:
+        config = getattr(env, "config", {}) or {}
+        return cls._config_value(config, "scenario_id") == "S5_hard_brake_lead"
+
+    @classmethod
+    def _is_s5_hard_brake_active(cls, env) -> bool:
+        if not cls._is_s5_hard_brake_scenario(env):
+            return False
+        manifest = getattr(
+            getattr(env, "_scenario_orchestrator", None),
+            "_actor_manifest",
+            {},
+        ) or {}
+        return "hard_brake_lead" in manifest
+
+    @classmethod
     def _s8_lane_change_window_open(cls, env, source_lane) -> bool:
         try:
-            vehicle = (getattr(env, "agents", {}) or {})["agent0"]
-            remaining = float(source_lane.length) - float(
-                source_lane.local_coordinates(vehicle.position)[0]
-            )
+            agents = getattr(env, "agents", {}) or {}
+            remaining_values = [
+                float(source_lane.length)
+                - float(source_lane.local_coordinates(vehicle.position)[0])
+                for vehicle in agents.values()
+            ]
         except Exception:
             return False
         orchestrator = getattr(env, "_scenario_orchestrator", None)
         resolved = getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}
         threshold = float(resolved.get("mandatory_lane_change_remaining_distance_m", 60.0))
+        # Open the coordinated RIGHT manoeuvre when the formation centroid,
+        # rather than only agent0, reaches the sampled 30--60 m route window.
+        # This gives the three vehicles enough shared road for a staggered
+        # hard-safe lane change while preserving the declared trigger range.
+        remaining = float(np.mean(remaining_values))
         return 0.0 <= remaining <= threshold
 
     def _is_s9_forced_route_candidate(self, env, candidate: dict) -> bool:
@@ -2122,6 +2429,14 @@ class MultiAgentRuleMaker(RuleMaker):
         source_index = tuple(getattr(source_lane, "index", ()) or ())
         if len(source_index) < 3 or len(source_lane_chain) < 2:
             return False
+        if source_index in {
+            ("3C0_1_", "4G0_0_", 0),
+            ("4G0_0_", "4G0_1_", 0),
+        }:
+            next_index = tuple(
+                getattr(source_lane_chain[1], "index", ()) or ()
+            )
+            return next_index == ("4G0_0_", "4G1_1_", 0)
         road_network = getattr(
             getattr(getattr(env, "engine", None), "current_map", None),
             "road_network",
@@ -2134,7 +2449,7 @@ class MultiAgentRuleMaker(RuleMaker):
         )
         if not siblings:
             return False
-        rightmost_slot = max(
+        rightmost_slot = min(
             int(tuple(getattr(lane, "index", ()) or (0, 0, -1))[2])
             for lane in siblings
         )
@@ -2167,15 +2482,11 @@ class MultiAgentRuleMaker(RuleMaker):
                 return False
             if int(self._decision_step) <= 10:
                 return False
-        front_gap = candidate.get("front_gap_m")
-        rear_gap = candidate.get("rear_gap_m")
-        # Topology requires LEFT, but the merge timing remains a longitudinal
-        # game: keep waiting while either side of the candidate corridor is
-        # too tight, allowing pass-first and yield-to-next-gap outcomes.
-        if front_gap is not None and float(front_gap) < 20.0:
-            return False
-        if rear_gap is not None and float(rear_gap) < 15.0:
-            return False
+            if not self._s7_gap_release_ready(env):
+                return False
+        # The actor crossing evidence above is the causal timing gate.  Once
+        # it opens, retain the route-valid proposal and let NormalPlanner's
+        # dense OBB/road audit decide its exact longitudinal profile.
         target_lane_index = tuple(candidate.get("target_lane_index", ()) or ())
         source_lane_index = tuple(candidate.get("source_lane_index", ()) or ())
         if (
@@ -2190,6 +2501,40 @@ class MultiAgentRuleMaker(RuleMaker):
         ):
             return True
         return False
+
+    @staticmethod
+    def _s7_expected_behavior(env) -> str:
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        resolved = getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}
+        return str(resolved.get("expected_behavior", "pass_first"))
+
+    @classmethod
+    def _s7_gap_release_ready(cls, env) -> bool:
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        evidence = getattr(orchestrator, "_conflict_evidence", {}) or {}
+        crossing_steps = evidence.get("actor_conflict_crossing_steps", {}) or {}
+        if cls._s7_expected_behavior(env) == "pass_first":
+            # ``release`` means that the platoon may roll toward the sampled
+            # window; it is not permission to overlap its front boundary.
+            # Requiring the front actor to have fully crossed kept the tail
+            # vehicle on the curved upstream connector too long.  Once the
+            # complete atomic recipe exists, NormalPlanner's unchanged dense
+            # background OBB/gap audit makes the actual behind-front timing
+            # decision for every candidate.
+            manifest = getattr(orchestrator, "_actor_manifest", {}) or {}
+            return {
+                "critical_gap_front",
+                "critical_gap_rear",
+                "next_gap_front",
+                "next_gap_rear",
+            }.issubset(manifest)
+        # In the yield case, crossing of the critical rear actor opens the
+        # preparation phase for the next gap.  The platoon may roll toward the
+        # seam while the next front boundary clears; NormalPlanner's unchanged
+        # full-horizon actor OBB/gap audit prevents an early entry.  Waiting
+        # until that boundary has already crossed strands the tail vehicle on
+        # the ramp within the 20 s functional horizon.
+        return "critical_gap_rear" in crossing_steps
 
     @classmethod
     def _is_s7_initial_keep_candidate(cls, env, candidate: dict) -> bool:
@@ -2208,6 +2553,41 @@ class MultiAgentRuleMaker(RuleMaker):
         road_network = getattr(getattr(getattr(env, "engine", None), "current_map", None), "road_network", None)
         if road_network is None:
             return None
+
+        # The verified S8 branch is not always retained verbatim in Panda3D's
+        # navigation checkpoints after localization on the G-block internal
+        # lane.  Anchor the exact graph chain explicitly so KEEP cannot follow
+        # the through continuation after the completed RIGHT manoeuvre.
+        if lane_index == ("3C0_1_", "4G0_0_", 0):
+            exact_indices = (
+                ("4G0_0_", "4G1_1_", 0),
+                ("4G1_1_", "4G1_2_", 0),
+                ("4G1_2_", "4G1_3_", 0),
+                ("4G1_3_", "4G1_4_", 0),
+                ("4G1_4_", "15s0_0_", 0),
+            )
+            try:
+                return [
+                    source_lane,
+                    *(road_network.get_lane(index) for index in exact_indices),
+                ]
+            except Exception:
+                return None
+        if lane_index == ("4G0_0_", "4G0_1_", 0):
+            exact_indices = (
+                ("4G0_0_", "4G1_1_", 0),
+                ("4G1_1_", "4G1_2_", 0),
+                ("4G1_2_", "4G1_3_", 0),
+                ("4G1_3_", "4G1_4_", 0),
+                ("4G1_4_", "15s0_0_", 0),
+            )
+            try:
+                return [
+                    source_lane,
+                    *(road_network.get_lane(index) for index in exact_indices),
+                ]
+            except Exception:
+                return None
 
         navigation = getattr(vehicle, "navigation", None)
         checkpoints = list(getattr(navigation, "checkpoints", []) or [])
@@ -2242,7 +2622,7 @@ class MultiAgentRuleMaker(RuleMaker):
             siblings = self._graph_lanes(
                 road_network, current_index[0], current_index[1]
             )
-            rightmost_slot = max(
+            rightmost_slot = min(
                 (
                     int(tuple(getattr(lane, "index", ()) or (0, 0, 0))[2])
                     for lane in siblings
@@ -2508,6 +2888,34 @@ class MultiAgentRuleMaker(RuleMaker):
                         )
                     )
                 )
+                s6_designated_keep = bool(
+                    self._is_s6_background_merge_route(env)
+                    and action == 0
+                    and str(
+                        getattr(
+                            traffic_vehicle,
+                            "scenario_vehicle_role",
+                            "",
+                        )
+                    )
+                    == "s6_gap_intruder"
+                )
+                if s6_designated_keep:
+                    # This actor is intentionally timed into a declared
+                    # internal gap.  Euclidean point clearance cannot
+                    # distinguish a safe front/rear corridor from overlap,
+                    # so it must not dominate the coarse RuleMaker rank.
+                    # The NormalPlanner still performs the unchanged dense
+                    # OBB and 5 m background-gap hard audits.
+                    # Neutralise this deliberately intersecting actor in the
+                    # coarse rank instead of silently giving KEEP a lower
+                    # score than a lane change.  The latter receives the
+                    # normal capped-clearance reward and previously won only
+                    # because KEEP's reward was omitted.  A capped neutral
+                    # value preserves all competing actions while allowing
+                    # progress/MOBIL/gap-response terms to decide.
+                    score += self.traffic_clearance_cap
+                    continue
                 if min_dist < self.traffic_safety_distance_m:
                     score -= 100.0 * (
                         self.traffic_safety_distance_m - min_dist + 1.0
@@ -2694,7 +3102,14 @@ class MultiAgentRuleMaker(RuleMaker):
         lane_index = tuple(getattr(source_lane, "index", ()) or ())
         if len(lane_index) < 3:
             return None
-        target_lane_id = int(lane_index[2]) + int(action)
+        lane_delta = int(action)
+        if self._is_s8_exit_route(env):
+            # On the S8 mainline MetaDrive lane ids grow leftward: the
+            # semantic RIGHT action must therefore decrement the lane id.
+            # Keep the public action definition unchanged and localize the
+            # map-index conversion to this verified route.
+            lane_delta = -lane_delta
+        target_lane_id = int(lane_index[2]) + lane_delta
         if target_lane_id < 0:
             return None
         target_index = tuple(list(lane_index[:2]) + [target_lane_id])

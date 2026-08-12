@@ -1,0 +1,37 @@
+{
+  "episode_count": 3,
+  "collision_rate": 0.0,
+  "out_of_road_rate": 0.0,
+  "persistable_episode_rate": 0.0,
+  "native_joint_planning_success_rate": 0.9975669099756691,
+  "collection_ready_step_success_rate": 1.0,
+  "planning_attempt_steps": 411,
+  "native_joint_success_steps": 410,
+  "collection_ready_attempt_steps": 380,
+  "collection_ready_success_steps": 380,
+  "rollout_wall_time_s": {
+    "mean": 154.20837361629432,
+    "p50": 186.98688625800423,
+    "p95": 200.83123810468243
+  },
+  "simulated_duration_s": {
+    "mean": 13.666666666666666,
+    "p50": 20.0,
+    "p95": 20.0
+  },
+  "failure_reasons": {
+    "scenario_functional_gate_failed": 2,
+    "committed_trajectory_kinematic_infeasible": 1
+  },
+  "scenario_id": "S9_narrow_channel_negotiation",
+  "local_route": "R8_narrow_channel",
+  "seeds": [
+    31,
+    47,
+    59
+  ],
+  "horizon": 200,
+  "decision_policy": "rule_maker",
+  "planning_policy": "lattice",
+  "control_policy": "adaptive"
+}

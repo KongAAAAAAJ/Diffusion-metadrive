@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from math import inf
+from math import inf, sqrt
+
+import numpy as np
 
 from metadrive.component.navigation_module.node_network_navigation import NodeNetworkNavigation
 from metadrive.component.road_network import Road
+from metadrive.component.vehicle.PID_controller import PIDController
 from metadrive.policy.idm_policy import FrontBackObjects, IDMPolicy
 
 from envs.diffusion_envs.ground_truth_idm_policy import GroundTruthIDMMixin
@@ -73,7 +76,21 @@ class StartEdgeNodeNavigation(NodeNetworkNavigation):
             if mainline_lanes:
                 self.merge_branch_roads = {(start, branch), (branch, merge)}
                 self.merge_force_road = (branch, merge)
-                self.merge_target_lane = mainline_lanes[-1]
+                downstream_lanes = (
+                    graph.get(merge, {}).get(checkpoints[3])
+                    if len(checkpoints) > 3
+                    else None
+                )
+                target_lanes = downstream_lanes or mainline_lanes
+                # S6 uses the continuous middle lane on the road after the
+                # conflict point.  The connector naturally lands on the
+                # outermost lane, so the merge policy must keep steering left
+                # until this downstream target is actually reached.
+                self.merge_target_lane = (
+                    target_lanes[-2]
+                    if len(target_lanes) >= 2
+                    else target_lanes[-1]
+                )
 
 
 class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
@@ -89,6 +106,7 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         merge_creep_speed_kmh: float = 20.0,
         merge_cruise_speed_kmh: float = 24.0,
         merge_activation_step: int = 2,
+        merge_rear_ttc_min_s: float = 4.0,
     ):
         super().__init__(control_object, random_seed)
         self.merge_front_gap_m = float(merge_front_gap_m)
@@ -96,12 +114,19 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         self.merge_creep_speed_kmh = float(merge_creep_speed_kmh)
         self.merge_cruise_speed_kmh = float(merge_cruise_speed_kmh)
         self.merge_activation_step = int(merge_activation_step)
+        self.merge_rear_ttc_min_s = float(merge_rear_ttc_min_s)
         if self.merge_activation_step < 0:
             raise ValueError("merge_activation_step must be non-negative")
         self.NORMAL_SPEED = self.merge_cruise_speed_kmh
         self.target_speed = self.merge_cruise_speed_kmh
         self.merge_completed = False
         self.merge_policy_step = 0
+        # The connector reaches the outside lane at a shallow angle, then S6
+        # must cross one additional lane width into the continuous middle
+        # mainline.  The stock 0.3 lateral gain cannot finish that move before
+        # the four-second hard-safety horizon collapses; use a still smooth
+        # but responsive merge-only lateral controller.
+        self.lateral_pid = PIDController(0.4, 0.002, 0.05)
 
     def reset(self):
         super().reset()
@@ -113,15 +138,49 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         self.merge_policy_step += 1
         parent_result = super().lane_change_policy(all_objects)
         self._update_merge_completed()
+        designated_gap_completed = bool(
+            getattr(
+                self.control_object,
+                "scenario_designated_gap_completed",
+                False,
+            )
+        )
+        if designated_gap_completed:
+            target_gap_id = str(
+                getattr(self.control_object, "scenario_target_gap_id", "")
+            )
+            post_merge_speed_kmh = (
+                20.0 if target_gap_id == "agent0-agent1" else 10.0
+            )
+            self.NORMAL_SPEED = post_merge_speed_kmh
+            self.target_speed = post_merge_speed_kmh
         self._record_merge_state(
             active=False,
             force_active=False,
             completed=self.merge_completed,
         )
         if self.merge_completed:
+            designated_front = getattr(
+                self.control_object, "scenario_target_front_vehicle", None
+            )
+            if designated_front is not None:
+                front_distance = float(
+                    np.linalg.norm(
+                        np.asarray(designated_front.position[:2], dtype=float)
+                        - np.asarray(self.control_object.position[:2], dtype=float)
+                    )
+                )
+                return designated_front, front_distance, self.control_object.lane
             return parent_result[0], parent_result[1], self.control_object.lane
 
         target_lane = self._find_merge_target_lane()
+        if designated_gap_completed and target_lane is not None:
+            # The OBB sweep can prove gap occupation one or two lane-label
+            # updates before the actor centre is on the continuous lane.
+            # Keep steering to the explicit target lane while applying the
+            # post-merge speed; do not let stock IDM select the terminating
+            # outside lane during this short label-transition interval.
+            return parent_result[0], parent_result[1], target_lane
         if target_lane is None:
             return parent_result
 
@@ -141,7 +200,11 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         front_gap = float(surrounding.front_min_distance()) if surrounding.has_front_object() else inf
         rear_gap = float(surrounding.back_min_distance()) if surrounding.has_back_object() else inf
         rear_ttc = self._rear_ttc_s(surrounding.back_object(), rear_gap)
-        gap_accepted = front_gap >= self.merge_front_gap_m and rear_gap >= self.merge_rear_gap_m and rear_ttc >= 4.0  # *前后间距 10m 10m, 后车TTC >= 2s
+        gap_accepted = (
+            front_gap >= self.merge_front_gap_m
+            and rear_gap >= self.merge_rear_gap_m
+            and rear_ttc >= self.merge_rear_ttc_min_s
+        )
 
         global_config = getattr(getattr(self.control_object, "engine", None), "global_config", {})
         if bool(global_config.get("merge_policy_debug", False)):
@@ -190,9 +253,20 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
             return None
         current_road = tuple(current_index[:2])
         branch_roads = set(getattr(navigation, "merge_branch_roads", ()) or ())
-        if current_road not in branch_roads:
-            return None
-        return getattr(navigation, "merge_target_lane", None)
+        target_lane = getattr(navigation, "merge_target_lane", None)
+        target_index = tuple(getattr(target_lane, "index", ()) or ())
+        if current_road in branch_roads:
+            return target_lane
+        # The physical connector first lands on the outer lane.  Continue the
+        # same route-required lateral move on the mainline until the actor is
+        # actually centred on the ego formation's middle lane.
+        if (
+            len(target_index) >= 3
+            and tuple(current_index[:2]) == tuple(target_index[:2])
+            and tuple(current_index) != target_index
+        ):
+            return target_lane
+        return None
 
     def _rear_ttc_s(self, rear_object, rear_gap: float) -> float:
         if rear_object is None or rear_gap == inf:
@@ -203,6 +277,40 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         if closing_speed <= 1e-6:
             return inf
         return float(rear_gap) / float(closing_speed)
+
+    def desired_gap(self, ego_vehicle, front_obj, projected: bool = True) -> float:
+        """Return an S6 merge-following gap in metres with consistent units.
+
+        MetaDrive 0.4.3's base implementation multiplies ``speed_km_h`` by a
+        time headway and consequently asks a 24 km/h merge actor for roughly
+        40 m.  That makes the actor stop at the conflict point after entering
+        a deliberately sampled 6--10 m gap.  Use the same IDM shape with
+        m/s quantities, a 7 m jam distance and 0.8 s merge headway; the
+        planner's unchanged 5 m dense background-vehicle gate remains the
+        final safety authority.
+        """
+        if not self.merge_completed:
+            return float(
+                super().desired_gap(
+                    ego_vehicle,
+                    front_obj,
+                    projected=projected,
+                )
+            )
+        del projected
+        ego_speed = self._vehicle_speed_mps(ego_vehicle)
+        front_speed = self._vehicle_speed_mps(front_obj)
+        closing_speed = max(ego_speed - front_speed, 0.0)
+        braking_scale = sqrt(max(self.ACC_FACTOR * -self.DEACC_FACTOR, 1.0e-6))
+        target_gap_id = str(
+            getattr(ego_vehicle, "scenario_target_gap_id", "")
+        )
+        jam_distance_m = 12.0 if target_gap_id == "agent0-agent1" else 7.0
+        return float(
+            jam_distance_m
+            + 0.8 * ego_speed
+            + ego_speed * closing_speed / (2.0 * braking_scale)
+        )
 
     @staticmethod
     def _vehicle_speed_mps(vehicle) -> float:
@@ -228,7 +336,20 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         current_index = getattr(current_lane, "index", None)
         if target_index is None or current_index is None:
             return
-        self.merge_completed = tuple(current_index[:2]) == tuple(target_index[:2])
+        self.merge_completed = tuple(current_index) == tuple(target_index)
+        if self.merge_completed:
+            # Clear the conflict corridor after the sampled 18--27 km/h
+            # merge instead of lingering directly in front of the designated
+            # rear ego.  This remains inside the declared actor-speed range
+            # and gives the platoon room to close its recovery gap.
+            target_gap_id = str(
+                getattr(self.control_object, "scenario_target_gap_id", "")
+            )
+            post_merge_speed_kmh = (
+                20.0 if target_gap_id == "agent0-agent1" else 10.0
+            )
+            self.NORMAL_SPEED = post_merge_speed_kmh
+            self.target_speed = post_merge_speed_kmh
 
     def _record_merge_state(
         self,

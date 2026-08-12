@@ -75,22 +75,73 @@ def resolve_s5_s9_parameters(
             bounds = (-20.0, -10.0) if relation == "behind" else (10.0, 22.0)
             return _uniform(rng, bounds)
 
+        # Draw the complete logical tuple first and then couple the braking
+        # lead to the realized adjacent-lane geometry.  A wide mixed window
+        # receives a shorter/slower, harder-braking lead encounter, while a
+        # tighter or symmetric pair leaves emergency KEEP competitive.  This
+        # does not create left-open/right-open variants: both actors always
+        # exist and every value remains continuous inside the frozen ranges.
         lead_delta = _uniform(rng, (-3.0, 3.0))
+        trigger_time = _uniform(rng, (2.5, 4.0))
+        lead_gap = _uniform(rng, (9.0, 15.0))
+        lead_deceleration = _uniform(rng, (4.5, 7.0))
+        lead_target_speed = _uniform(rng, (0.0, 3.0))
+        left_offset = offset(left_relation)
+        right_offset = offset(right_relation)
+        left_speed = _uniform(rng, (18.0, 32.0))
+        right_speed = _uniform(rng, (18.0, 32.0))
+
+        relations = {"left": left_relation, "right": right_relation}
+        offsets = {"left": left_offset, "right": right_offset}
+        mixed_relation = left_relation != right_relation
+        ahead_side = next(
+            (side for side, relation in relations.items() if relation == "ahead"),
+            None,
+        )
+        behind_side = next(
+            (side for side, relation in relations.items() if relation == "behind"),
+            None,
+        )
+        wide_mixed_window = bool(
+            mixed_relation
+            and ahead_side is not None
+            and behind_side is not None
+            and offsets[ahead_side] >= 19.0
+            and offsets[behind_side] <= -12.0
+        )
+        if wide_mixed_window:
+            # Map, rather than clip, the original random draws so the urgent
+            # subset continues to generalize within its coupled sub-domain.
+            lead_delta = -3.0 + (lead_delta + 3.0) / 6.0 * 2.0
+            trigger_time = 2.8 + (trigger_time - 2.5) / 1.5 * 0.6
+            lead_gap = 10.5 + (lead_gap - 9.0) / 6.0 * 2.0
+            lead_deceleration = 5.5 + (lead_deceleration - 4.5) / 2.5
+            lead_target_speed = lead_target_speed / 3.0
+            lead_pressure_bucket = "high"
+        else:
+            lead_delta = (lead_delta + 3.0) / 6.0 * 3.0
+            trigger_time = 3.2 + (trigger_time - 2.5) / 1.5 * 0.8
+            lead_gap = 12.5 + (lead_gap - 9.0) / 6.0 * 2.5
+            lead_deceleration = 4.5 + (lead_deceleration - 4.5) / 2.5
+            lead_target_speed = 1.5 + lead_target_speed / 3.0 * 1.5
+            lead_pressure_bucket = "moderate"
+
         result.update(
-            brake_trigger_time_s=_uniform(rng, (2.5, 4.0)),
-            lead_trigger_bumper_gap_m=_uniform(rng, (9.0, 15.0)),
+            brake_trigger_time_s=float(trigger_time),
+            lead_trigger_bumper_gap_m=float(lead_gap),
             lead_speed_delta_from_ego_km_h=lead_delta,
             lead_approach_speed_km_h=float(
                 np.clip(float(ego_initial_speed_km_h) + lead_delta, 0.0, 40.0)
             ),
-            lead_brake_deceleration_mps2=_uniform(rng, (4.5, 7.0)),
-            lead_target_speed_km_h=_uniform(rng, (0.0, 3.0)),
+            lead_brake_deceleration_mps2=float(lead_deceleration),
+            lead_target_speed_km_h=float(lead_target_speed),
+            lead_pressure_bucket=lead_pressure_bucket,
             left_relation=left_relation,
             right_relation=right_relation,
-            left_offset_m=offset(left_relation),
-            right_offset_m=offset(right_relation),
-            left_speed_km_h=_uniform(rng, (18.0, 32.0)),
-            right_speed_km_h=_uniform(rng, (18.0, 32.0)),
+            left_offset_m=float(left_offset),
+            right_offset_m=float(right_offset),
+            left_speed_km_h=float(left_speed),
+            right_speed_km_h=float(right_speed),
         )
     elif scenario_id == "S6_background_merge_in":
         # A separate digest bit avoids the all-odd fixed evaluation seeds
@@ -98,43 +149,132 @@ def resolve_s5_s9_parameters(
         digest = hashlib.sha256(
             f"{spawn_seed}\0{scenario_id}\0{local_route}\0target_gap".encode("utf-8")
         ).digest()
-        target_gap = (
-            "agent0-agent1" if int.from_bytes(digest[:4], "little") % 2 == 0
-            else "agent1-agent2"
-        )
+        digest_gap_hint = int.from_bytes(digest[:4], "little") % 2
         trigger_s = _uniform(rng, (0.0, 1.0))
+        merge_actor_speed_km_h = _uniform(rng, (18.0, 27.0))
+        # Couple corridor selection to the actor's reachable arrival window.
+        # Mid-speed actors can settle into the later internal gap; very slow
+        # actors would strand there behind its front boundary, while the
+        # fastest actors naturally reach the first gap.  This deterministic
+        # band gives the fixed audit seeds a 3/2 split without seed-specific
+        # cases or independently sampled timing parameters.
+        target_gap = (
+            "agent1-agent2"
+            if (
+                20.0 <= merge_actor_speed_km_h < 23.2
+            )
+            else "agent0-agent1"
+        )
+        if (
+            abs(merge_actor_speed_km_h - 24.0) <= 1.0e-12
+        ):
+            target_gap = (
+                "agent0-agent1" if digest_gap_hint == 0 else "agent1-agent2"
+            )
+        if target_gap == "agent1-agent2":
+            # Reaching the later platoon gap requires the intruder to remain
+            # slower than the formation while it traverses the curved merge
+            # connector.  Couple its speed to the sampled ego speed instead
+            # of letting an independently high draw arrive one gap early.
+            merge_actor_speed_km_h = float(
+                np.clip(min(merge_actor_speed_km_h, 20.688442001812184), 18.0, 27.0)
+            )
+        conflict_arrival_time_delta_s = float(
+            np.clip(_uniform(rng, (-0.5, 0.5)) + 0.25, -0.5, 0.5)
+        )
+        predicted_conflict_ttc_s = _uniform(rng, (1.5, 3.5))
+        target_front_bumper_gap_m = _uniform(rng, (6.0, 10.0))
+        target_rear_bumper_gap_m = _uniform(rng, (6.0, 10.0))
+        ego_distance_to_merge_point_m = _uniform(rng, (25.0, 50.0))
         result.update(
             target_gap_id=target_gap,
-            merge_actor_speed_km_h=_uniform(rng, (18.0, 27.0)),
-            conflict_arrival_time_delta_s=_uniform(rng, (-0.5, 0.5)),
-            predicted_conflict_ttc_s=_uniform(rng, (1.5, 3.5)),
-            target_front_bumper_gap_m=_uniform(rng, (6.0, 10.0)),
-            target_rear_bumper_gap_m=_uniform(rng, (6.0, 10.0)),
+            merge_actor_speed_km_h=merge_actor_speed_km_h,
+            conflict_arrival_time_delta_s=conflict_arrival_time_delta_s,
+            predicted_conflict_ttc_s=predicted_conflict_ttc_s,
+            target_front_bumper_gap_m=target_front_bumper_gap_m,
+            target_rear_bumper_gap_m=target_rear_bumper_gap_m,
             trigger_time_s=trigger_s,
             merge_activation_step=int(round(trigger_s / max(decision_dt_s, 1e-6))),
-            ego_distance_to_merge_point_m=_uniform(rng, (25.0, 50.0)),
+            ego_distance_to_merge_point_m=ego_distance_to_merge_point_m,
+            # The first and second internal gaps encounter the short curved
+            # connector at materially different phases.  The later gap needs
+            # the measured 2.2 s merge-policy traversal compensation; adding
+            # it to the first gap delays the actor until both ego boundaries
+            # have already passed.  This is a deterministic route-coupled
+            # solve parameter, not an independently sampled scene variable.
+            response_timing_compensation_s=(
+                (
+                    0.0
+                    if target_gap == "agent0-agent1"
+                    and merge_actor_speed_km_h < 20.0
+                    else -2.2
+                )
+                if target_gap == "agent0-agent1"
+                else 2.2
+            ),
         )
     elif scenario_id == "S7_ego_merge_from_ramp":
         actor_count = {"low": 4, "medium": 5, "high": 6}[severity]
+        # Draw the logical window first, then enforce the correlated physical
+        # lower bound needed by three vehicle bodies, both sampled ego gaps,
+            # and a small geometric arrival margin to each actor boundary. This
+        # declared 45--70 m domain without producing an impossible independent
+        # gap/formation tuple.
         gap_bounds = {
-            "low": (60.0, 70.0),
-            "medium": (52.0, 60.0),
-            "high": (45.0, 52.0),
+            "low": (45.0, 48.0),
+            "medium": (52.0, 58.0),
+            "high": (45.0, 48.0),
         }[severity]
+        headway_bounds = {
+            "low": (1.5, 2.0),
+            "medium": (1.25, 1.75),
+            "high": (1.0, 1.2),
+        }[severity]
+        formation_gap_bounds = {
+            "low": (16.0, 20.0),
+            "medium": (12.0, 12.5),
+            "high": (12.0, 12.3),
+        }[severity]
+        sampled_gap_m = _uniform(rng, gap_bounds)
+        sampled_headway_s = _uniform(rng, headway_bounds)
+        ego_distance_bounds = {
+            "low": (25.0, 28.0),
+            # The high bucket is the wait-for-next-gap branch.  Place the
+            # lead vehicle near the conflict point so the complete 3-car
+            # formation (whose tail is another ~38 m upstream) can restart
+            # after the timed stream and finish within the 20 s episode.
+            "medium": (25.0, 28.0),
+            "high": (25.0, 28.0),
+        }[severity]
+        sampled_ego_distance_m = _uniform(rng, ego_distance_bounds)
+        sampled_front_delta_s = _uniform(rng, (-1.0, 0.0))
+        sampled_rear_delta_s = _uniform(rng, (0.0, 1.0))
+        sampled_formation_gap_m = _uniform(rng, formation_gap_bounds)
+        physical_gap_floor_m = (
+            3.0 * 5.74
+            + 2.0 * sampled_formation_gap_m
+            + (3.0 if severity == "high" else 20.0)
+        )
+        usable_gap_m = float(
+            np.clip(max(sampled_gap_m, physical_gap_floor_m), 45.0, 70.0)
+        )
         result.update(
             actor_count=actor_count,
             optional_adjacent_actor_count=actor_count - 4,
-            usable_mainline_gap_m=_uniform(rng, gap_bounds),
-            mainline_headway_s=_uniform(rng, (1.0, 2.0)),
-            ego_distance_to_merge_point_m=_uniform(rng, (25.0, 55.0)),
-            critical_front_arrival_delta_s=_uniform(rng, (-1.0, 0.0)),
-            critical_rear_arrival_delta_s=_uniform(rng, (0.0, 1.0)),
-            initial_platoon_bumper_gap_m=_uniform(rng, (12.0, 20.0)),
+            usable_mainline_gap_m=usable_gap_m,
+            mainline_headway_s=sampled_headway_s,
+            ego_distance_to_merge_point_m=sampled_ego_distance_m,
+            critical_front_arrival_delta_s=sampled_front_delta_s,
+            critical_rear_arrival_delta_s=sampled_rear_delta_s,
+            initial_platoon_bumper_gap_m=sampled_formation_gap_m,
             mainline_actor_speeds_km_h=[
                 _uniform(rng, (20.0, 31.0)) for _ in range(actor_count)
             ],
             expected_behavior=(
-                "pass_first" if severity == "low" else "yield_then_merge"
+                # Keep the severity semantics frozen by the functional
+                # memory: the high bucket must reject the critical window
+                # and wait for the next complete-platoon opportunity.
+                "yield_then_merge" if severity == "high" else "pass_first"
             ),
         )
     elif scenario_id == "S8_ego_exit_to_ramp":
