@@ -205,10 +205,11 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         # does not preserve the functional distance-to-conflict contract.
         ego_spawn_distance_to_route_end_m=(25.0, 50.0),
         ego_initial_speed_km_h=(22.0, 27.0),
-        # Start above the unchanged 7 m platoon hard-gap contract.  The expert
-        # must create the sampled actor corridor dynamically; pre-opening the
-        # gap would remove the functional interaction.
-        ego_initial_bumper_gap_m=10.0,
+        # Start 1 m above the unchanged 7 m platoon hard-gap contract.  This keeps
+        # the rear ego body clear of the merge-gore sidewalk for the sampled
+        # 25--50 m agent0 conflict distance, while the expert still has to
+        # create the actor's sampled 6--10 m corridor dynamically.
+        ego_initial_bumper_gap_m=8.0,
         override_traffic_density=0.0,
         env_overrides={
             "traffic_spawn_exclusion_ahead_m": 100.0,

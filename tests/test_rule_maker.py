@@ -1692,7 +1692,7 @@ def test_s7_current_hybrid_ramp_contract_is_forced_left() -> None:
     assert tuple(candidate["target_lane_index"]) == ("9g0_0_", "9g0_1_", 2)
 
 
-def test_s7_forced_lane_change_bypasses_joint_score_and_selects_left_action(monkeypatch):
+def test_s7_route_merge_bypasses_joint_score_and_selects_keep_action(monkeypatch):
     vehicle = _vehicle("agent0", 25.0, 0.0, 0, speed_km_h=25.0)
     env = _env_s7_real_lane_contract(vehicle)
     rule_maker = MultiAgentRuleMaker(target_speed_km_h=30.0, horizon_s=2.0, num_waypoints=8)
@@ -1701,12 +1701,36 @@ def test_s7_forced_lane_change_bypasses_joint_score_and_selects_left_action(monk
         raise AssertionError("_score_joint_combo should not run for forced lane decisions")
 
     monkeypatch.setattr(rule_maker, "_score_joint_combo", fail_if_scored)
+    monkeypatch.setattr(
+        rule_maker,
+        "_build_agent_candidates",
+        lambda *args, **kwargs: [
+            {
+                "agent_id": "agent0",
+                "action": 0,
+                "target_point": np.asarray([15.0, 0.0], dtype=np.float32),
+                "source_lane_index": ("9g0_0_", "9g1_4_", 0),
+                "target_lane_index": ("9g0_0_", "9g1_4_", 0),
+            },
+            {
+                "agent_id": "agent0",
+                "action": -1,
+                "target_point": np.asarray([15.0, 3.5], dtype=np.float32),
+                "source_lane_index": ("9g0_0_", "9g1_4_", 0),
+                "target_lane_index": ("9g0_0_", "9g0_1_", 2),
+                "forced_lane_change": True,
+                "forced_route_action": True,
+            },
+        ],
+    )
     decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
     debug = rule_maker.get_last_debug()
 
-    assert decisions["agent0"]["action"] == -1
+    assert decisions["agent0"]["action"] == 0
     assert debug is not None
-    assert debug["forced_lane_decision"] is True
+    assert debug["forced_lane_decision"] is False
+    assert debug["action_search"]["strategy"] == "s7_wait_for_sampled_merge_window"
+    assert debug["action_search"]["timed_gap_released"] is False
 
 
 def test_s7_left_lane_change_to_other_lane_is_not_marked_forced():
@@ -1733,7 +1757,7 @@ def test_non_s7_left_lane_change_to_mainline_third_lane_is_not_marked_forced():
     assert "forced_lane_change" not in candidate
 
 
-def test_s6_locked_no_risk_preserves_competing_joint_actions(monkeypatch):
+def test_s6_locked_no_risk_keeps_until_physical_cut_in(monkeypatch):
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s7_merge(
         vehicle,
@@ -1748,31 +1772,78 @@ def test_s6_locked_no_risk_preserves_competing_joint_actions(monkeypatch):
         locked_on_reset=True,
     )
 
-    called = {}
-
-    def choose_keep(*, candidates_by_agent, ordered_agent_ids, **kwargs):
-        candidate_sets = [candidates_by_agent[agent_id] for agent_id in ordered_agent_ids]
-        called["candidate_actions"] = [
-            {int(candidate["action"]) for candidate in candidates}
-            for candidates in candidate_sets
-        ]
-        combo = tuple(
-            next(candidate for candidate in candidates if int(candidate["action"]) == 0)
-            for candidates in candidate_sets
-        )
-        return combo, 0.0, {"strategy": "locked_prefix_search"}, [(combo, 0.0)]
-
-    monkeypatch.setattr(rule_maker, "_best_locked_combo", choose_keep)
+    monkeypatch.setattr(
+        rule_maker,
+        "_best_locked_combo",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("pre-cut-in S6 must bypass lateral fallback search")
+        ),
+    )
     decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
     debug = rule_maker.get_last_debug()
 
     assert decisions["agent0"]["action"] == 0
     assert debug["risk_triggered"] is False
-    assert debug["action_search"]["strategy"] == "locked_prefix_search"
-    assert called["candidate_actions"][0] == {-1, 0, 1}
+    assert debug["action_search"]["strategy"] == "s6_pre_cut_in_keep_only"
 
 
-def test_s6_detected_risk_preserves_joint_action_search(monkeypatch):
+def test_s6_realized_cut_in_forces_physical_ego_lane_change():
+    vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
+    env = _env_s7_merge(
+        vehicle,
+        lane_id=1,
+        scenario_id="S6_background_merge_in",
+        local_route="R6_mainline_merge_approach",
+    )
+    env._scenario_orchestrator = SimpleNamespace(
+        _conflict_evidence={"physical_gap_corridor_entered": True},
+        _resolved_scenario_parameters={"target_gap_id": "agent0-agent1"},
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+        locked_on_reset=True,
+    )
+
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == -1
+    assert debug["action_search"]["strategy"] == (
+        "s6_forced_ego_lane_change_after_cut_in"
+    )
+    assert 0 not in debug["action_search"]["available_coordinated_actions"]
+
+
+def test_s6_latched_actor_sweep_waits_for_physical_cut_in():
+    vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
+    env = _env_s7_merge(
+        vehicle,
+        lane_id=1,
+        scenario_id="S6_background_merge_in",
+        local_route="R6_mainline_merge_approach",
+    )
+    env._scenario_orchestrator = SimpleNamespace(
+        _conflict_evidence={"merge_sweep_committed": True},
+        _resolved_scenario_parameters={"target_gap_id": "agent0-agent1"},
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+        locked_on_reset=True,
+    )
+
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+
+    assert decisions["agent0"]["action"] == 0
+    assert rule_maker.get_last_debug()["action_search"]["strategy"] == (
+        "s6_pre_cut_in_keep_only"
+    )
+
+
+def test_s6_detected_risk_stays_locked_before_physical_cut_in(monkeypatch):
     vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
     env = _env_s7_merge(
         vehicle,
@@ -1807,9 +1878,12 @@ def test_s6_detected_risk_preserves_joint_action_search(monkeypatch):
     decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
     debug = rule_maker.get_last_debug()
 
-    assert decisions["agent0"]["action"] == 1
+    # Risk detection alone must not let the ego leave before the intruder has
+    # physically occupied the designated gap. The realized cut-in evidence,
+    # tested above, is the lane-change release gate.
+    assert decisions["agent0"]["action"] == 0
     assert debug["risk_triggered"] is True
-    assert debug["action_search"]["strategy"] == "risk_joint_search"
+    assert debug["action_search"]["strategy"] != "risk_joint_search"
 
 
 def test_s8_candidates_mark_right_lane_change_as_forced():

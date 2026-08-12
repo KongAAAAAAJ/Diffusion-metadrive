@@ -214,6 +214,26 @@ def test_pid_s5_default_cross_track_gain_preserves_frozen_controller() -> None:
     assert debug["cross_track_correction"] == pytest.approx(0.0)
 
 
+def test_pid_s6_default_cross_track_gain_tracks_long_lane_change() -> None:
+    controller = PIDTrajectoryController({"pid_dt": 0.1})
+    env = _FakeEnv()
+    env.config = {"scenario_id": "S6_background_merge_in"}
+    trajectory = np.asarray(
+        [[float(index + 1), 0.0, 0.0] for index in range(8)],
+        dtype=np.float32,
+    )
+
+    controller.compute_actions(
+        env,
+        {"agent0": trajectory},
+        lateral_tracking_errors_m={"agent0": -0.5},
+    )
+    debug = controller.get_last_debug()["agent0"]
+
+    assert debug["cross_track_kp"] == pytest.approx(0.25)
+    assert debug["cross_track_correction"] == pytest.approx(0.125)
+
+
 def test_lqr_wrapper_preserves_s5_specific_cross_track_gain() -> None:
     lane = _FakeLane()
     env = _FakeEnv()
@@ -242,7 +262,12 @@ def test_lqr_wrapper_preserves_s5_specific_cross_track_gain() -> None:
 
 @pytest.mark.parametrize(
     "key",
-    ["pid_cross_track_kp", "s5_pid_cross_track_kp", "s9_pid_cross_track_kp"],
+    [
+        "pid_cross_track_kp",
+        "s5_pid_cross_track_kp",
+        "s6_pid_cross_track_kp",
+        "s9_pid_cross_track_kp",
+    ],
 )
 def test_pid_rejects_invalid_cross_track_gain(key: str) -> None:
     with pytest.raises(ValueError, match="cross-track gains"):

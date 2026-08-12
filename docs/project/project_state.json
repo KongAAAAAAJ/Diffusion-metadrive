@@ -1,11 +1,11 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-11T15:30:00+08:00",
+  "updated_at": "2026-08-13T01:38:21+08:00",
   "repository": {
-    "branch": "BEV",
-    "git_commit": "b17a725cca7e830904fe66716b7ed2325540d6d5",
-    "worktree_clean_before_this_update": true,
+    "branch": "s5-s9-scenario-revision",
+    "git_commit": "d50ac792a3c5b3b14e2e968bb447439b3884e90d",
+    "worktree_clean_before_this_update": false,
     "project_state_update_committed": false
   },
   "current": {
@@ -13,6 +13,64 @@
     "round": "revised-stage1-stage2-dual-domain-plan",
     "status": "formal_s5_s9_50k_eligible_and_stage1_a_ready",
     "active_hard_gate": "stage1_a_formal_training"
+  },
+  "active_workstreams": {
+    "candidate_s5_s9_scenario_revision": {
+      "branch": "s5-s9-scenario-revision",
+      "status": "s5_s6_and_s7_verified_s8_next_full_candidate_v2_unfrozen",
+      "execution_order": [
+        "S5_hard_brake_lead",
+        "S6_background_merge_in",
+        "S7_ego_merge_from_ramp",
+        "S8_ego_exit_to_ramp",
+        "S9_narrow_channel_negotiation"
+      ],
+      "active_task": "S8_ego_exit_to_ramp",
+      "active_hard_gate": "complete_s8_memory_gate_before_continuing_sequential_candidate_activation",
+      "formal_contract_activated": false,
+      "formal_v1_dataset_or_checkpoint_metadata_changed": false,
+      "evidence_status": "s6_and_s7_fixed_five_seed_memory_gates_passed_with_full_artifacts",
+      "completed_scenario_gates": {
+        "S6_background_merge_in": {
+          "passed": true,
+          "fixed_seeds": [
+            17,
+            23,
+            31,
+            47,
+            59
+          ],
+          "episodes_passed": "5/5",
+          "native_joint_planning_steps": "1300/1300",
+          "target_gap_coverage": [
+            "agent0-agent1",
+            "agent1-agent2"
+          ],
+          "all_episodes_three_ego_lane_change": true,
+          "all_episodes_ego_only_reassembly": true,
+          "report": "evaluation/S6_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+          "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s6_memory_compliance_eval_20260813_v2/S6_background_merge_in"
+        },
+        "S7_ego_merge_from_ramp": {
+          "passed": true,
+          "fixed_seeds": [
+            17,
+            23,
+            31,
+            47,
+            59
+          ],
+          "episodes_passed": "5/5",
+          "native_joint_planning_steps": "1000/1000",
+          "behavior_coverage": [
+            "pass_first",
+            "yield_then_merge"
+          ],
+          "report": "evaluation/S7_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+          "artifact_root": "/tmp/s7_candidate_revision_final_20260812/S7_ego_merge_from_ramp"
+        }
+      }
+    }
   },
   "authorization": {
     "riskentry_format_accepted_by_downstream": true,
@@ -25,6 +83,26 @@
       "path": "docs/project/project_plan.json",
       "sha256": "5fdc3ea83cc8aaff1647496f228c44aa965abde7ac974fc5590db6a5694a48de",
       "role": "Freezes the revised Stage1-A-only mainline, the GRPO-Open versus GRPO-Exec reward-domain ablation, the three-model final matrix, and the ordered formal gates"
+    },
+    "candidate_s5_s9_functional_scenario_memory": {
+      "path": "docs/project/s5_s9_functional_scenario_design.json",
+      "sha256": "fed15ff21f5d7721c45c13031f84e8dcc5ede707b2798399c91935dcc70650d7",
+      "role": "User-confirmed functional semantics, constrained logical ranges, sequential implementation order, and fixed five-seed acceptance gates for the non-retroactive candidate scenario revision"
+    },
+    "s6_candidate_memory_acceptance_report": {
+      "path": "evaluation/S6_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+      "sha256": "bf34efb7c7755dcaa7499980ccedcc13ab5f73db1f28e7811975c43d759f5dc2",
+      "role": "Proves S6 fixed five-seed physical cut-in, mandatory three-ego lane-change response, ego-only reassembly, safety, video, and artifact gates passed without activating the full candidate-v2 contract"
+    },
+    "s7_candidate_memory_acceptance_report": {
+      "path": "evaluation/S7_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+      "sha256": "9dca613a293c17441af83a3fd0144783460e949d5a9497ea5208f60c1a49abe3",
+      "role": "Proves S7 fixed five-seed functional, safety, behavior-coverage, video, and artifact gates passed without activating the full candidate-v2 contract"
+    },
+    "candidate_s5_s9_implementation_report": {
+      "path": "evaluation/S5_S9_CANDIDATE_REVISION_IMPLEMENTATION_REPORT.md",
+      "sha256": "7f64cdbfffabfc3eea493b8c8ba8a0f156d6ab6684e78cb229ec3d1a956cc358",
+      "role": "Historical pre-acceptance implementation report; its short-smoke-only S6/S7 status is superseded by the dedicated S6 and S7 candidate memory acceptance reports"
     },
     "project_plan_memory_update_report": {
       "path": "evaluation/PROJECT_PLAN_MEMORY_UPDATE_REPORT.json",
@@ -191,7 +269,8 @@
     "Complete the real TruckSim chassis-surrogate fit, ID/OOD, and calibration gates.",
     "Train GRPO-Exec from the same Stage1-A checkpoint with reward evaluated on surrogate-predicted tau_a.",
     "After both Stage 2 branches are stable, perform semantic-preserving Round 14 cleanup and rerun strict smoke gates.",
-    "Run the final paired multi-seed S5-S9 evaluation for Stage1-A, Stage1-A+GRPO-Open, and Stage1-A+GRPO-Exec."
+    "Run the final paired multi-seed S5-S9 evaluation for Stage1-A, Stage1-A+GRPO-Open, and Stage1-A+GRPO-Exec.",
+    "Candidate scenario workstream: S6 is accepted; complete the outstanding S8 memory gate before any full candidate-v2 contract activation or progression to S9."
   ],
   "invariants": {
     "metadata_override_forbidden": true,

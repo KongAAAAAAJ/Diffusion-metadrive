@@ -1,12 +1,12 @@
 {
   "format": "bev_s5_s9_candidate_functional_scenario_memory_v1",
   "schema_version": 1,
-  "recorded_at": "2026-08-12T19:12:42+08:00",
+  "recorded_at": "2026-08-13T01:38:21+08:00",
   "status": "user_confirmed_functional_definition_revision_pending_full_implementation_and_five_seed_validation",
   "purpose": "Store the user-confirmed functional semantics, constrained logical parameter ranges, and acceptance gates for the next S5-S9 scenario revision without retroactively changing the frozen scenario contract or the dataset used by the ongoing Stage1-A training run.",
   "latest_revision": {
-    "date": "2026-08-12",
-    "summary": "Revise S5 so its fixed five-seed evaluation must contain physically realized maneuver diversity, including at least one lane-change episode and at least one non-synchronous platoon response; permit reassembly on any scenario-valid lane. Retain the strengthened S6-S9 interaction, asynchronous-maneuver, and reassembly definitions.",
+    "date": "2026-08-13",
+    "summary": "Retain the revised S5 diversity definition and strengthened S6-S9 semantics. Confirm that S6 reassembly contains only the original three ego vehicles: the cut-in actor is never a platoon member, KEEP-only accommodation is invalid, and all three ego vehicles must physically change lane before ego-only reassembly. Record that S6 and S7 independently pass their fixed five-seed physical interaction, safety, reassembly, video, and artifact gates without activating or retroactively changing the full candidate-v2 contract.",
     "formal_v1_contract_changed": false,
     "existing_dataset_or_training_metadata_changed": false
   },
@@ -288,7 +288,9 @@
     "S6_background_merge_in": {
       "functional_name": "background actor merges into either platoon gap",
       "current_candidate_route": "R6_mainline_merge_approach",
-      "functional_intent": "A controlled ramp actor cuts into either internal platoon gap. After the realized cut-in, the ego vehicles must respond with hard-safe KEEP, LEFT, or RIGHT behavior, temporarily release formation when required, and finally reassemble on one common lane without collision.",
+      "evaluation_horizon_override_steps": 260,
+      "evaluation_horizon_rationale": "The realized cut-in, mandatory physical lane changes by all three ego vehicles, and persistent ego-only reassembly require a longer closed-loop observation window than the 200-step common default on this route. The override changes only evaluation duration and does not relax safety, target-gap, lane-change, or reassembly gates.",
+      "functional_intent": "A controlled ramp actor cuts into either internal platoon gap and forces a physical ego lane-change response. The original three ego vehicles must leave the cut-in actor behind, then reassemble as an ego-only three-vehicle platoon on one common lane without collision; the cut-in actor is never a platoon member.",
       "target_gap_generalization": {
         "choices": [
           "agent0-agent1",
@@ -336,23 +338,134 @@
         "both target gaps receive balanced coverage across an evaluation or collection manifest",
         "the merge actor must cross into the platoon mainline and occupy the designated target-gap corridor",
         "a natural non-interacting pass outside the target gap is invalid",
-        "the cut-in must causally trigger a measurable ego speed, gap, or lane response"
+        "the cut-in must causally trigger a physically realized ego lane-change response",
+        "KEEP-only accommodation, gap expansion without an ego lane change, or treating the cut-in actor as a fourth platoon member is invalid"
       ],
       "accepted_behaviors": [
-        "KEEP lane while yielding and expanding the designated gap",
-        "hard-safe LEFT lane change after the cut-in",
-        "hard-safe RIGHT lane change after the cut-in",
-        "temporary formation release followed by reassembly on one common lane"
+        "hard-safe LEFT lane change after the realized cut-in",
+        "hard-safe RIGHT lane change after the realized cut-in",
+        "temporary formation release followed by ego-only three-vehicle reassembly on one common lane"
       ],
       "acceptance_gates": [
         "merge actor completes its lane transition",
         "merge actor physically occupies the designated agent0-agent1 or agent1-agent2 corridor as a realized cut-in",
         "arrival-time delta and TTC are inside their sampled ranges",
-        "physical lane IDs and trajectories prove any claimed LEFT or RIGHT lane change; a command alone is insufficient",
-        "the platoon exhibits a measurable KEEP, LEFT, or RIGHT response after the cut-in",
-        "all three ego vehicles later occupy one common lane in platoon order with recovered longitudinal gaps",
+        "physical lane IDs and trajectories prove that all three ego vehicles leave the cut-in lane by LEFT or RIGHT lane change; commands alone are insufficient",
+        "KEEP-only episodes fail even if the designated gap expands safely",
+        "all three ego vehicles later occupy one common lane in platoon order with recovered ego-to-ego longitudinal gaps",
+        "the recovered platoon contains only agent0, agent1, and agent2; the cut-in actor is outside the recovered platoon lane/corridor and is not counted in any recovered gap",
         "the cut-in, response, and reassembly complete without collision, road exit, or planner fallback"
-      ]
+      ],
+      "candidate_revision_evidence_20260813": {
+        "implementation_state": "implemented_and_fixed_five_seed_closed_loop_accepted",
+        "verified_seeds": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "validation_horizon_steps": 260,
+        "five_seed_result": {
+          "episodes_passed": "5/5",
+          "planner_success": "1300/1300",
+          "collision": false,
+          "out_of_road": false,
+          "planner_fallback": false,
+          "functional_success": "5/5",
+          "declared_actor_realization": "5/5",
+          "target_gap_coverage": [
+            "agent0-agent1",
+            "agent1-agent2"
+          ],
+          "all_episodes_physical_target_gap_occupation": true,
+          "all_episodes_three_ego_lane_change": true,
+          "all_episodes_ego_only_reassembly": true,
+          "all_episodes_cut_in_actor_excluded": true
+        },
+        "per_seed_physical_evidence": {
+          "17": {
+            "target_gap_id": "agent0-agent1",
+            "observed_target_bumper_gaps_m": [
+              9.997115009387855,
+              7.108450944985198
+            ],
+            "observed_conflict_ttc_s": 2.4748903989513185,
+            "ego_lane_change_direction": "left",
+            "ego_lane_change_steps": [
+              134,
+              135,
+              129
+            ],
+            "formation_recovery_stable_steps": 19
+          },
+          "23": {
+            "target_gap_id": "agent1-agent2",
+            "observed_target_bumper_gaps_m": [
+              8.667148464933572,
+              7.405354708713699
+            ],
+            "observed_conflict_ttc_s": 2.0430794402454198,
+            "ego_lane_change_direction": "right",
+            "ego_lane_change_steps": [
+              103,
+              105,
+              102
+            ],
+            "formation_recovery_stable_steps": 106
+          },
+          "31": {
+            "target_gap_id": "agent0-agent1",
+            "observed_target_bumper_gaps_m": [
+              9.364170510381577,
+              6.453958804128697
+            ],
+            "observed_conflict_ttc_s": 3.3277031733923748,
+            "ego_lane_change_direction": "left",
+            "ego_lane_change_steps": [
+              153,
+              155,
+              150
+            ],
+            "formation_recovery_stable_steps": 11
+          },
+          "47": {
+            "target_gap_id": "agent0-agent1",
+            "observed_target_bumper_gaps_m": [
+              9.981642991225428,
+              6.253428031615365
+            ],
+            "observed_conflict_ttc_s": 2.5669195375875016,
+            "ego_lane_change_direction": "left",
+            "ego_lane_change_steps": [
+              105,
+              105,
+              101
+            ],
+            "formation_recovery_stable_steps": 90
+          },
+          "59": {
+            "target_gap_id": "agent0-agent1",
+            "observed_target_bumper_gaps_m": [
+              9.94498982076821,
+              8.653302035847322
+            ],
+            "observed_conflict_ttc_s": 2.557013736126425,
+            "ego_lane_change_direction": "left",
+            "ego_lane_change_steps": [
+              143,
+              150,
+              149
+            ],
+            "formation_recovery_stable_steps": 14
+          }
+        },
+        "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s6_memory_compliance_eval_20260813_v2/S6_background_merge_in",
+        "acceptance_report": "evaluation/S6_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+        "acceptance_report_sha256": "bf34efb7c7755dcaa7499980ccedcc13ab5f73db1f28e7811975c43d759f5dc2",
+        "video_review": "five top-down videos reviewed at four representative frames per seed; machine evidence remains authoritative for exact gates",
+        "five_seed_status": "memory_gate_passed_candidate_v2_not_globally_frozen"
+      }
     },
     "S7_ego_merge_from_ramp": {
       "functional_name": "three-car platoon negotiates a timed mainline gap",
@@ -429,7 +542,89 @@
         "no ego vehicle remains stranded on the ramp",
         "after merging, all three ego vehicles occupy one common mainline lane in platoon order with recovered longitudinal gaps",
         "the asynchronous merge and reassembly complete without collision, road exit, or planner fallback"
-      ]
+      ],
+      "candidate_revision_evidence_20260812": {
+        "implementation_state": "implemented_and_fixed_five_seed_closed_loop_accepted",
+        "verified_seeds": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "five_seed_result": {
+          "episodes_passed": "5/5",
+          "planner_success": "1000/1000",
+          "collision": false,
+          "out_of_road": false,
+          "planner_fallback": false,
+          "functional_success": "5/5",
+          "declared_actor_realization": "25/25",
+          "behavior_coverage": [
+            "pass_first",
+            "yield_then_merge"
+          ],
+          "all_episodes_physical_split": true,
+          "all_episodes_formation_recovered": true
+        },
+        "per_seed_physical_evidence": {
+          "17": {
+            "severity": "high",
+            "observed_behavior": "yield_then_merge",
+            "ego_mainline_entry_steps": [
+              108,
+              142,
+              191
+            ],
+            "formation_recovery_stable_steps": 50
+          },
+          "23": {
+            "severity": "low",
+            "observed_behavior": "pass_first",
+            "ego_mainline_entry_steps": [
+              42,
+              73,
+              112
+            ],
+            "formation_recovery_stable_steps": 5
+          },
+          "31": {
+            "severity": "low",
+            "observed_behavior": "pass_first",
+            "ego_mainline_entry_steps": [
+              44,
+              73,
+              112
+            ],
+            "formation_recovery_stable_steps": 10
+          },
+          "47": {
+            "severity": "medium",
+            "observed_behavior": "pass_first",
+            "ego_mainline_entry_steps": [
+              44,
+              73,
+              121
+            ],
+            "formation_recovery_stable_steps": 400
+          },
+          "59": {
+            "severity": "high",
+            "observed_behavior": "yield_then_merge",
+            "ego_mainline_entry_steps": [
+              111,
+              144,
+              192
+            ],
+            "formation_recovery_stable_steps": 45
+          }
+        },
+        "artifact_root": "/tmp/s7_candidate_revision_final_20260812/S7_ego_merge_from_ramp",
+        "acceptance_report": "evaluation/S7_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+        "acceptance_report_sha256": "9dca613a293c17441af83a3fd0144783460e949d5a9497ea5208f60c1a49abe3",
+        "video_review": "five top-down videos reviewed at four representative frames per seed; machine evidence remains authoritative for exact gates",
+        "five_seed_status": "memory_gate_passed_candidate_v2_not_globally_frozen"
+      }
     },
     "S8_ego_exit_to_ramp": {
       "functional_name": "three-car platoon follows a continuous mainline-to-ramp route",

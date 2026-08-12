@@ -61,6 +61,7 @@ def build_continuous_lane_chain_path(
     start_lateral_m: float = 0.0,
     step_m: float = 0.25,
     seam_transition_m: float = 8.0,
+    lateral_recovery_m: float | None = None,
 ) -> np.ndarray:
     """Build a dense center path, smoothing connected offset road seams.
 
@@ -78,17 +79,56 @@ def build_continuous_lane_chain_path(
         raise RouteChainGeometryError("route geometry inputs must be finite")
     if step_m <= 0.0 or step_m > 0.5 or seam_transition_m <= 0.0:
         raise RouteChainGeometryError("route sampling step/transition is invalid")
+    if lateral_recovery_m is not None and (
+        not np.isfinite(lateral_recovery_m) or float(lateral_recovery_m) <= 0.0
+    ):
+        raise RouteChainGeometryError("lateral recovery distance is invalid")
     first_length = float(getattr(lane_values[0], "length", 0.0) or 0.0)
     if start_s < -1.0e-6 or start_s > first_length + 1.0e-6:
         raise RouteChainGeometryError("route start_s is outside the first lane")
 
     pieces: list[np.ndarray] = []
     current_start = float(np.clip(start_s, 0.0, first_length))
+
+    def sample_lane_segment(lane, segment_start: float, segment_end: float, index: int):
+        if index != 0 or lateral_recovery_m is None:
+            lateral = float(start_lateral_m) if index == 0 else 0.0
+            return _lane_samples(
+                lane, segment_start, segment_end, step_m, lateral
+            )
+        distance = max(float(segment_end) - float(segment_start), 0.0)
+        count = max(int(math.ceil(distance / step_m)), 1)
+        longitudinal = np.linspace(
+            float(segment_start), float(segment_end), count + 1
+        )
+        ratio = np.clip(
+            (longitudinal - float(start_s)) / float(lateral_recovery_m),
+            0.0,
+            1.0,
+        )
+        weight = 6.0 * ratio**5 - 15.0 * ratio**4 + 10.0 * ratio**3
+        lateral = float(start_lateral_m) * (1.0 - weight)
+        rows = []
+        for value, offset in zip(longitudinal, lateral):
+            point = np.asarray(
+                lane.position(float(value), float(offset))[:2],
+                dtype=np.float64,
+            )
+            rows.append(
+                (
+                    float(point[0]),
+                    float(point[1]),
+                    float(lane.heading_theta_at(float(value))),
+                )
+            )
+        return np.asarray(rows, dtype=np.float64)
+
     for index, lane in enumerate(lane_values):
         lane_length = float(getattr(lane, "length", 0.0) or 0.0)
-        lateral = float(start_lateral_m) if index == 0 else 0.0
         if index == len(lane_values) - 1:
-            pieces.append(_lane_samples(lane, current_start, lane_length, step_m, lateral))
+            pieces.append(
+                sample_lane_segment(lane, current_start, lane_length, index)
+            )
             break
 
         successor = lane_values[index + 1]
@@ -104,7 +144,9 @@ def build_continuous_lane_chain_path(
                 f"connected route seam is too wide ({seam_gap:.3f}m)"
             )
         if seam_gap <= 0.5:
-            pieces.append(_lane_samples(lane, current_start, lane_length, step_m, lateral))
+            pieces.append(
+                sample_lane_segment(lane, current_start, lane_length, index)
+            )
             current_start = 0.0
             continue
 
@@ -114,7 +156,9 @@ def build_continuous_lane_chain_path(
             raise RouteChainGeometryError("offset route seam lacks transition length")
         join_start_s = lane_length - back
         join_end_s = ahead
-        pieces.append(_lane_samples(lane, current_start, join_start_s, step_m, lateral))
+        pieces.append(
+            sample_lane_segment(lane, current_start, join_start_s, index)
+        )
         pieces.append(
             build_lane_seam_transition_centerline(
                 lane,

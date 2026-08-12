@@ -241,6 +241,25 @@ def test_route_chain_geometry_smoothly_joins_offset_exit_connector():
     assert np.any((path[:, 1] < -0.1) & (path[:, 1] > -3.4))
 
 
+def test_route_chain_geometry_can_recover_initial_lateral_offset_before_seam():
+    source = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=20.0)
+    successor = AngledLane(("B", "C", 0), (20.0, 0.0), 0.0, length=20.0)
+
+    path = build_continuous_lane_chain_path(
+        [source, successor],
+        start_s=10.0,
+        start_lateral_m=-0.6,
+        step_m=0.1,
+        lateral_recovery_m=6.0,
+    )
+
+    np.testing.assert_allclose(path[0, :2], source.position(10.0, -0.6), atol=1e-8)
+    recovered = path[path[:, 0] >= 16.0 - 1e-6]
+    assert recovered.size
+    assert float(np.max(np.abs(recovered[:, 1]))) <= 1e-6
+    assert float(np.max(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1))) <= 0.5
+
+
 def test_dense_route_candidate_anchors_measured_heading_without_lane_marker():
     source = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=30.0)
     successor = AngledLane(("B", "C", 0), (30.0, 0.0), 0.0, length=30.0)

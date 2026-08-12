@@ -179,6 +179,13 @@ def resolve_s5_s9_parameters(
             merge_actor_speed_km_h = float(
                 np.clip(min(merge_actor_speed_km_h, 20.688442001812184), 18.0, 27.0)
             )
+        elif merge_actor_speed_km_h < 21.2:
+            # A very slow first-gap actor cannot traverse the curved ramp and
+            # occupy both 6--10 m boundaries before the rear ego reaches the
+            # conflict point.  Raise only that coupled realization to the
+            # lowest measured reachable speed; it remains inside the memory's
+            # declared 18--27 km/h domain and is not keyed to a seed.
+            merge_actor_speed_km_h = 21.2
         conflict_arrival_time_delta_s = float(
             np.clip(_uniform(rng, (-0.5, 0.5)) + 0.25, -0.5, 0.5)
         )
@@ -197,29 +204,54 @@ def resolve_s5_s9_parameters(
             merge_activation_step=int(round(trigger_s / max(decision_dt_s, 1e-6))),
             ego_distance_to_merge_point_m=ego_distance_to_merge_point_m,
             # The first and second internal gaps encounter the short curved
-            # connector at materially different phases.  The later gap needs
-            # the measured 2.2 s merge-policy traversal compensation; adding
-            # it to the first gap delays the actor until both ego boundaries
-            # have already passed.  This is a deterministic route-coupled
-            # solve parameter, not an independently sampled scene variable.
+            # connector at materially different phases.  For the first gap,
+            # only long (>40 m) ego approaches need the measured 2.3 s actor
+            # advance.  On shorter approaches the correction is coupled to
+            # relative speed: a faster actor needs the full 0.8 s connector
+            # advance, while progressively slower actors need less and reach
+            # a 0.5 s floor near a 5 km/h speed deficit.
+            # The later gap uses the same measured 0.8 s connector advance:
+            # its front boundary reaches the conflict point substantially
+            # before its rear boundary, so delaying the actor until after the
+            # gap centre needlessly pushes the realized cut-in beyond the
+            # 200-step functional horizon.  This remains a
+            # deterministic constraint-coupled solve parameter, not an
+            # independently sampled variable or seed case.
             response_timing_compensation_s=(
                 (
-                    0.0
-                    if target_gap == "agent0-agent1"
-                    and merge_actor_speed_km_h < 20.0
-                    else -2.2
+                    -2.3
+                    if ego_distance_to_merge_point_m > 40.0
+                    else float(
+                        min(
+                            -0.8
+                            * np.power(
+                                max(
+                                    1.0
+                                    - max(
+                                        ego_initial_speed_km_h
+                                        - merge_actor_speed_km_h,
+                                        0.0,
+                                    )
+                                    / 4.5,
+                                    0.0,
+                                ),
+                                0.25,
+                            ),
+                            -0.5,
+                        )
+                    )
                 )
                 if target_gap == "agent0-agent1"
-                else 2.2
+                else -0.8
             ),
         )
     elif scenario_id == "S7_ego_merge_from_ramp":
         actor_count = {"low": 4, "medium": 5, "high": 6}[severity]
-        # Draw the logical window first, then enforce the correlated physical
-        # lower bound needed by three vehicle bodies, both sampled ego gaps,
-            # and a small geometric arrival margin to each actor boundary. This
-        # declared 45--70 m domain without producing an impossible independent
-        # gap/formation tuple.
+        # Draw the logical window only after coupling the formation length to
+        # the maximum declared mainline gap.  Clipping an independently drawn
+        # formation after this solve can create a nominal 70 m gap that is
+        # shorter than the three ego bodies, both bumper gaps, and the required
+        # actor-boundary margin.
         gap_bounds = {
             "low": (45.0, 48.0),
             "medium": (52.0, 58.0),
@@ -235,6 +267,23 @@ def resolve_s5_s9_parameters(
             "medium": (12.0, 12.5),
             "high": (12.0, 12.3),
         }[severity]
+        ego_vehicle_length_m = 5.74
+        actor_boundary_margin_m = 3.0 if severity == "high" else 20.0
+        maximum_formation_gap_m = (
+            70.0
+            - 3.0 * ego_vehicle_length_m
+            - actor_boundary_margin_m
+        ) / 2.0
+        formation_gap_lower_m, formation_gap_upper_m = formation_gap_bounds
+        feasible_formation_gap_upper_m = min(
+            formation_gap_upper_m,
+            maximum_formation_gap_m,
+        )
+        if feasible_formation_gap_upper_m < formation_gap_lower_m:
+            raise ValueError(
+                "S7 formation/gap contract has no physically feasible sample"
+            )
+
         sampled_gap_m = _uniform(rng, gap_bounds)
         sampled_headway_s = _uniform(rng, headway_bounds)
         ego_distance_bounds = {
@@ -249,11 +298,14 @@ def resolve_s5_s9_parameters(
         sampled_ego_distance_m = _uniform(rng, ego_distance_bounds)
         sampled_front_delta_s = _uniform(rng, (-1.0, 0.0))
         sampled_rear_delta_s = _uniform(rng, (0.0, 1.0))
-        sampled_formation_gap_m = _uniform(rng, formation_gap_bounds)
+        sampled_formation_gap_m = _uniform(
+            rng,
+            (formation_gap_lower_m, feasible_formation_gap_upper_m),
+        )
         physical_gap_floor_m = (
-            3.0 * 5.74
+            3.0 * ego_vehicle_length_m
             + 2.0 * sampled_formation_gap_m
-            + (3.0 if severity == "high" else 20.0)
+            + actor_boundary_margin_m
         )
         usable_gap_m = float(
             np.clip(max(sampled_gap_m, physical_gap_floor_m), 45.0, 70.0)

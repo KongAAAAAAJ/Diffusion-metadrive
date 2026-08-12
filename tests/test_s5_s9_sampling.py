@@ -76,6 +76,15 @@ def test_s7_severity_controls_exact_actor_count() -> None:
         value = _resolve("S7_ego_merge_from_ramp", seed)
         assert value["actor_count"] == expected[value["severity_bucket"]]
         assert 45.0 <= value["usable_mainline_gap_m"] <= 70.0
+        actor_boundary_margin_m = (
+            3.0 if value["severity_bucket"] == "high" else 20.0
+        )
+        physical_gap_floor_m = (
+            3.0 * 5.74
+            + 2.0 * value["initial_platoon_bumper_gap_m"]
+            + actor_boundary_margin_m
+        )
+        assert physical_gap_floor_m <= value["usable_mainline_gap_m"]
 
 
 def test_s8_and_s9_ranges_match_functional_contract() -> None:

@@ -74,7 +74,7 @@ class PIDTrajectoryController(BaseController):
         )
         self.cross_track_kp = float(cfg.get("pid_cross_track_kp", 0.4))
         self.s5_cross_track_kp = float(cfg.get("s5_pid_cross_track_kp", 0.0))
-        self.s6_cross_track_kp = float(cfg.get("s6_pid_cross_track_kp", 0.0))
+        self.s6_cross_track_kp = float(cfg.get("s6_pid_cross_track_kp", 0.25))
         self.s9_cross_track_kp = float(cfg.get("s9_pid_cross_track_kp", 0.0))
         if (
             not np.isfinite(self.cross_track_kp)

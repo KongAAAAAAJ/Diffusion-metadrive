@@ -14,13 +14,13 @@ def test_s6_declares_ego_spawn_reference_block_and_distance_to_merge() -> None:
     assert scenario.ego_spawn_longitude_m is None
     assert scenario.ego_spawn_distance_to_route_end_m == (25.0, 50.0)
     assert scenario.ego_initial_speed_km_h == (22.0, 27.0)
-    # S6 starts above the unchanged 7 m hard gate but below the 17.74 m
-    # minimum actor-plus-two-clearances corridor it must create dynamically.
-    assert scenario.ego_initial_bumper_gap_m == pytest.approx(10.0)
+    # S6 starts just above the unchanged 7 m hard gate and creates the actor corridor
+    # dynamically before the ego-only platoon changes lane and reassembles.
+    assert scenario.ego_initial_bumper_gap_m == pytest.approx(8.0)
     assert scenario.override_traffic_density == pytest.approx(0.0)
     assert scenario.env_overrides["traffic_spawn_exclusion_ahead_m"] == 100.0
     assert scenario.env_overrides["traffic_spawn_exclusion_behind_m"] == 100.0
-    assert scenario.env_overrides["platoon_route_spawn_lane_index"] == 2
+    assert scenario.env_overrides["platoon_route_spawn_lane_index"] == 1
 
 
 def test_s6_declares_merge_aware_background_policy() -> None:

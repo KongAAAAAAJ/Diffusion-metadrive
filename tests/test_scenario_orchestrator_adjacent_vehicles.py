@@ -260,13 +260,29 @@ def test_s6_spawns_one_arrival_aligned_merge_vehicle_only_once() -> None:
     resolved = orchestrator._resolved_scenario_parameters
     assert 2.0 <= call[1]["spawn_longitude"] <= 78.0
     assert call[1]["spawn_velocity"] == pytest.approx((resolved["merge_actor_speed_km_h"] / 3.6, 0.0))
-    assert call[3] == {
-        "merge_front_gap_m": resolved["target_front_bumper_gap_m"],
-        "merge_rear_gap_m": resolved["target_rear_bumper_gap_m"],
-        "merge_creep_speed_kmh": 20.0,
+    assert call[3] == pytest.approx({
+        "merge_front_gap_m": (
+            5.75 if resolved["target_gap_id"] == "agent0-agent1" else 6.0
+        ) + 5.74,
+        "merge_rear_gap_m": (
+            5.75 if resolved["target_gap_id"] == "agent0-agent1" else 6.0
+        ) + 5.74,
+        "merge_creep_speed_kmh": min(
+            resolved["merge_actor_speed_km_h"],
+            max(18.0, resolved["ego_initial_speed_km_h"] - 2.83),
+        ),
         "merge_cruise_speed_kmh": resolved["merge_actor_speed_km_h"],
-        "merge_activation_step": resolved["merge_activation_step"],
-    }
+            "merge_rear_ttc_min_s": 0.5,
+            "merge_activation_step": resolved["merge_activation_step"],
+            "merge_lateral_kp": (
+                1.0
+                if resolved["target_gap_id"] == "agent0-agent1"
+                and resolved["merge_actor_speed_km_h"] <= 21.2
+                else 0.7
+                if resolved["target_gap_id"] == "agent1-agent2"
+                else 0.7
+            ),
+    })
     vehicle = traffic_manager._traffic_vehicles[0]
     assert vehicle.scenario_vehicle_role == "s6_gap_intruder"
     assert vehicle.scenario_merge_arrival_offset_s == pytest.approx(resolved["conflict_arrival_time_delta_s"])
@@ -296,6 +312,52 @@ def test_s6_spawns_one_arrival_aligned_merge_vehicle_only_once() -> None:
         )
         for agent in env.agents.values()
     )
+
+
+def test_s6_functional_success_requires_ego_only_lane_change_reassembly() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S6_background_merge_in"],
+        "R6_mainline_merge_approach",
+    )
+    orchestrator._actor_manifest = {
+        "s6_gap_intruder": {"active": True},
+    }
+    orchestrator._conflict_evidence = {
+        "designated_gap_observed": True,
+        "measurable_platoon_response": True,
+        # These were sufficient for the obsolete four-vehicle-chain gate.
+        "formation_recovered_after_merge": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is False
+
+    orchestrator._conflict_evidence.update(
+        {
+            "all_ego_changed_lane_after_cut_in": True,
+            "cut_in_actor_excluded_from_reassembly": True,
+            "ego_only_reassembly": True,
+        }
+    )
+    assert orchestrator._functional_success(recipes_complete=True) is True
+
+
+def test_s6_final_cleanup_does_not_erase_realized_gap_evidence() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S6_background_merge_in"],
+        "R6_mainline_merge_approach",
+    )
+    orchestrator._resolved_scenario_parameters = {
+        "target_gap_id": "agent0-agent1",
+    }
+    orchestrator._conflict_evidence = {"designated_gap_observed": True}
+    orchestrator._functional_state = {}
+
+    # MetaDrive clears active agents before the terminal summary refresh.
+    orchestrator._update_s6_functional_evidence(
+        SimpleNamespace(agents={}), {}, step_count=200
+    )
+
+    assert orchestrator._conflict_evidence["designated_gap_observed"] is True
 
 
 def test_s7_atomic_mainline_background_spawns_all_declared_roles() -> None:
@@ -1025,9 +1087,11 @@ def test_s6_injected_background_uses_merge_policy_and_start_edge_navigation() ->
     assert call[3] == {
         "merge_front_gap_m": 25.0,
         "merge_rear_gap_m": 15.0,
-        "merge_creep_speed_kmh": 5.0,
-        "merge_cruise_speed_kmh": 24.0,
-    }
+            "merge_creep_speed_kmh": 5.0,
+            "merge_cruise_speed_kmh": 24.0,
+            "merge_rear_ttc_min_s": 4.0,
+            "merge_lateral_kp": 0.7,
+        }
     assert call[4]["navigation_module"] is StartEdgeNodeNavigation
     assert call[1]["spawn_velocity"] == (24.0 / 3.6, 0.0)
     assert call[1]["spawn_velocity_car_frame"] is True

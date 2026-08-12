@@ -465,7 +465,10 @@ class MultiAgentRuleMaker(RuleMaker):
                     "s6_strategy", ""
                 )
             )
-            == "target_gap_competing_actions"
+            in {
+                "target_gap_competing_actions",
+                "forced_ego_lane_change_after_cut_in",
+            }
             and accepted.decisions
             and len(
                 {
@@ -692,24 +695,6 @@ class MultiAgentRuleMaker(RuleMaker):
         self._promote_pending_lane_change_commitments()
         self._refresh_lane_change_commitments(env, agent_ids)
         traffic_vehicles = self._traffic_vehicles(env)
-        if (
-            self._s6_gap_response_action is None
-            and self._is_s6_background_merge_route(env)
-            and any(
-                bool(
-                    getattr(
-                        vehicle,
-                        "scenario_designated_gap_completed",
-                        False,
-                    )
-                )
-                for vehicle in traffic_vehicles
-            )
-        ):
-            # KEEP is itself a valid coordinated response (yield/pass-first).
-            # Latch it only after observed designated-gap completion, so an
-            # early no-conflict KEEP cannot prematurely close the episode.
-            self._s6_gap_response_action = 0
         candidates_by_agent: dict[str, list[dict]] = {}
         for agent_id in agent_ids:
             vehicle = agents.get(agent_id)
@@ -940,6 +925,99 @@ class MultiAgentRuleMaker(RuleMaker):
         elif (
             self._formation_locked
             and self._is_s6_background_merge_route(env)
+            and self._s6_gap_response_action is None
+            and not self._s6_physical_response_ready(env)
+        ):
+            # Before the actor has physically occupied its designated
+            # 6--10 m cut-in corridor, S6 is still in the setup phase. A lateral
+            # fallback here can make the ego platoon leave before the cut-in
+            # exists (and, on the ramp-side lane, can intersect the actor's
+            # merge sweep).  Retain only the route-aligned KEEP proposal;
+            # longitudinal candidate diversity still provides yielding and
+            # gap expansion while NormalPlanner keeps full safety authority.
+            keep_combo = tuple(
+                self._candidate_for_action(
+                    candidates_by_agent.get(agent_id, []), 0
+                )
+                for agent_id in ordered_agent_ids
+            )
+            best_combo = (
+                None
+                if any(candidate is None for candidate in keep_combo)
+                else keep_combo
+            )
+            best_score = 0.0 if best_combo is not None else -float("inf")
+            ranked_combos = (
+                [(tuple(best_combo), float(best_score))]
+                if best_combo is not None
+                else []
+            )
+            action_search_debug = {
+                "strategy": "s6_pre_cut_in_keep_only",
+                "physical_gap_corridor_entered": False,
+                "prefix_counts": [1 if best_combo is not None else 0],
+                "pairwise_conflict_counts": {},
+                "final_feasibility_authority": "normal_planner",
+            }
+        elif (
+            self._formation_locked
+            and self._is_s6_background_merge_route(env)
+            and self._s6_gap_response_action is None
+            and self._s6_physical_response_ready(env)
+        ):
+            # Physical occupation of the measured 6--10 m designated gap is
+            # the response release gate.  A merely committed actor sweep is
+            # not sufficient evidence that the cut-in has occurred. The
+            # continuous-seam planner and controlled
+            # response speed below now preserve enough room for a trackable
+            # manoeuvre without releasing the ego vehicles prematurely.
+            # KEEP-only accommodation is no longer a valid functional
+            # response: all three ego vehicles must leave the intruder lane
+            # and later recover an ego-only formation.  Keep both coordinated
+            # directions available to the NormalPlanner, which remains the
+            # dense OBB / 7 m gap feasibility authority.
+            orchestrator = getattr(env, "_scenario_orchestrator", None)
+            resolved = getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}
+            target_gap_id = str(resolved.get("target_gap_id", ""))
+            # The ramp actor approaches from the outer/right lane and crosses
+            # into the middle mainline lane.  LEFT is therefore the robust
+            # ego-only escape lane for either internal target gap; RIGHT stays
+            # available only as a fully audited fallback after the physical
+            # cut-in has been observed.
+            preferred_action = -1
+            direction_order = (preferred_action, -preferred_action)
+            ranked_combos = []
+            for rank, action in enumerate(direction_order):
+                combo = tuple(
+                    self._candidate_for_action(
+                        candidates_by_agent.get(agent_id, []), action
+                    )
+                    for agent_id in ordered_agent_ids
+                )
+                if any(candidate is None for candidate in combo):
+                    continue
+                ranked_combos.append((tuple(combo), float(-rank)))
+            if ranked_combos:
+                best_combo, best_score = ranked_combos[0]
+            else:
+                best_combo, best_score = None, -float("inf")
+            action_search_debug = {
+                "strategy": "s6_forced_ego_lane_change_after_cut_in",
+                "s6_strategy": "forced_ego_lane_change_after_cut_in",
+                "target_gap_id": target_gap_id,
+                "preferred_action": int(preferred_action),
+                "available_coordinated_actions": [
+                    int(combo[0].get("action", 0))
+                    for combo, _score in ranked_combos
+                    if combo
+                ],
+                "prefix_counts": [len(ranked_combos)],
+                "pairwise_conflict_counts": {},
+                "final_feasibility_authority": "normal_planner",
+            }
+        elif (
+            self._formation_locked
+            and self._is_s6_background_merge_route(env)
             and self._s6_gap_response_action is not None
         ):
             post_response_action = 0
@@ -962,7 +1040,7 @@ class MultiAgentRuleMaker(RuleMaker):
                 else []
             )
             action_search_debug = {
-                "strategy": "s6_post_response_keep",
+                "strategy": "s6_post_lane_change_keep",
                 "accepted_response_action": int(self._s6_gap_response_action),
                 "post_response_action": int(post_response_action),
                 "prefix_counts": [1 if best_combo is not None else 0],
@@ -1362,6 +1440,13 @@ class MultiAgentRuleMaker(RuleMaker):
                 # back to KEEP before the five-second atomic reference ends.
                 lateral_tolerance_m = 0.45
                 heading_tolerance_rad = 0.12
+            if self._is_s6_background_merge_route(env):
+                # S6 completes the coordinated response on a curved mainline
+                # seam.  Keep the atomic target until both the footprint and
+                # heading are settled; otherwise KEEP can be released while
+                # the vehicle is still rotating across the downstream seam.
+                lateral_tolerance_m = 0.45
+                heading_tolerance_rad = 0.15
             if self._is_s8_exit_route(env):
                 # The target exit-side lane immediately bends into the
                 # diverge, so its tangent rotates while the vehicle finishes
@@ -2634,6 +2719,32 @@ class MultiAgentRuleMaker(RuleMaker):
             and cls._config_value(config, "local_route")
             == "R6_mainline_merge_approach"
         )
+
+    def _s6_physical_response_ready(self, env) -> bool:
+        orchestrator = getattr(env, "_scenario_orchestrator", None)
+        evidence = dict(
+            getattr(
+                orchestrator,
+                "_conflict_evidence",
+                {},
+            )
+            or {}
+        )
+        target_gap_id = str(
+            (getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}).get(
+                "target_gap_id", ""
+            )
+        )
+        if target_gap_id == "agent1-agent2":
+            return bool(evidence.get("merge_sweep_committed", False))
+        if not bool(evidence.get("physical_gap_corridor_entered", False)):
+            return False
+        cut_in_step = evidence.get("gap_corridor_observed_step")
+        if cut_in_step is None:
+            # Unit-level and legacy callers may provide only the sticky
+            # physical event. Preserve their immediate-release semantics.
+            return True
+        return int(self._decision_step) - int(cut_in_step) >= 10
 
     @classmethod
     def _is_s8_required_exit_keep(

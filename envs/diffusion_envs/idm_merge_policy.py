@@ -107,6 +107,7 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         merge_cruise_speed_kmh: float = 24.0,
         merge_activation_step: int = 2,
         merge_rear_ttc_min_s: float = 4.0,
+        merge_lateral_kp: float = 0.7,
     ):
         super().__init__(control_object, random_seed)
         self.merge_front_gap_m = float(merge_front_gap_m)
@@ -120,17 +121,22 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         self.NORMAL_SPEED = self.merge_cruise_speed_kmh
         self.target_speed = self.merge_cruise_speed_kmh
         self.merge_completed = False
+        self.merge_sweep_committed = False
         self.merge_policy_step = 0
         # The connector reaches the outside lane at a shallow angle, then S6
         # must cross one additional lane width into the continuous middle
-        # mainline.  The stock 0.3 lateral gain cannot finish that move before
-        # the four-second hard-safety horizon collapses; use a still smooth
-        # but responsive merge-only lateral controller.
-        self.lateral_pid = PIDController(0.4, 0.002, 0.05)
+        # mainline.  A 0.4 proportional gain starts the sweep but can remain
+        # on lane 2 until the sampled 6--10 m corridor has already closed for
+        # slower actors.  Use a responsive merge-only controller so an
+        # accepted sweep physically reaches lane 1 inside that corridor. A
+        # slow actor spends longer on the curved connector and needs a faster
+        # lateral convergence before its longitudinal 6--10 m window closes.
+        self.lateral_pid = PIDController(float(merge_lateral_kp), 0.002, 0.05)
 
     def reset(self):
         super().reset()
         self.merge_completed = False
+        self.merge_sweep_committed = False
         self.merge_policy_step = 0
 
     def lane_change_policy(self, all_objects):
@@ -149,9 +155,7 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
             target_gap_id = str(
                 getattr(self.control_object, "scenario_target_gap_id", "")
             )
-            post_merge_speed_kmh = (
-                20.0 if target_gap_id == "agent0-agent1" else 10.0
-            )
+            post_merge_speed_kmh = min(float(self.merge_cruise_speed_kmh), 20.0)
             self.NORMAL_SPEED = post_merge_speed_kmh
             self.target_speed = post_merge_speed_kmh
         self._record_merge_state(
@@ -163,7 +167,34 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
             designated_front = getattr(
                 self.control_object, "scenario_target_front_vehicle", None
             )
-            if designated_front is not None:
+            actor_index = tuple(
+                getattr(self.control_object, "lane_index", ()) or ()
+            )
+            front_index = tuple(
+                getattr(designated_front, "lane_index", ()) or ()
+            ) if designated_front is not None else ()
+            target_gap_id = str(
+                getattr(self.control_object, "scenario_target_gap_id", "")
+            )
+            escape_completed = bool(
+                getattr(
+                    self.control_object,
+                    "scenario_ego_escape_completed",
+                    False,
+                )
+            )
+            if (
+                designated_front is not None
+                and len(actor_index) >= 3
+                and len(front_index) >= 3
+                and (
+                    int(actor_index[2]) == int(front_index[2])
+                    or (
+                        target_gap_id == "agent0-agent1"
+                        and not escape_completed
+                    )
+                )
+            ):
                 front_distance = float(
                     np.linalg.norm(
                         np.asarray(designated_front.position[:2], dtype=float)
@@ -199,12 +230,57 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         )
         front_gap = float(surrounding.front_min_distance()) if surrounding.has_front_object() else inf
         rear_gap = float(surrounding.back_min_distance()) if surrounding.has_back_object() else inf
-        rear_ttc = self._rear_ttc_s(surrounding.back_object(), rear_gap)
+        front_object = surrounding.front_object()
+        rear_object = surrounding.back_object()
+        designated_front = getattr(
+            self.control_object, "scenario_target_front_vehicle", None
+        )
+        designated_rear = getattr(
+            self.control_object, "scenario_target_rear_vehicle", None
+        )
+        designated_gap_bound = bool(
+            designated_front is not None and designated_rear is not None
+        )
+        if designated_gap_bound:
+            # The connector overlaps several mainline lane families. Generic
+            # nearest-front lookup can consequently select a parallel-lane
+            # vehicle (or no rear vehicle) even though the recipe's declared
+            # front/actor/rear corridor is geometrically valid. Project the
+            # three bound roles onto the explicit destination lane instead.
+            front_gap = inf
+            rear_gap = inf
+            front_object = None
+            rear_object = None
+            try:
+                front_s = float(
+                    target_lane.local_coordinates(designated_front.position)[0]
+                )
+                actor_s = float(
+                    target_lane.local_coordinates(self.control_object.position)[0]
+                )
+                rear_s = float(
+                    target_lane.local_coordinates(designated_rear.position)[0]
+                )
+                if front_s > actor_s:
+                    front_gap = front_s - actor_s
+                    front_object = designated_front
+                if actor_s > rear_s:
+                    rear_gap = actor_s - rear_s
+                    rear_object = designated_rear
+            except (AttributeError, TypeError, ValueError):
+                pass
+        rear_ttc = self._rear_ttc_s(rear_object, rear_gap)
         gap_accepted = (
-            front_gap >= self.merge_front_gap_m
+            (
+                not designated_gap_bound
+                or (front_object is designated_front and rear_object is designated_rear)
+            )
+            and front_gap >= self.merge_front_gap_m
             and rear_gap >= self.merge_rear_gap_m
             and rear_ttc >= self.merge_rear_ttc_min_s
         )
+        if force_active and gap_accepted:
+            self.merge_sweep_committed = True
 
         global_config = getattr(getattr(self.control_object, "engine", None), "global_config", {})
         if bool(global_config.get("merge_policy_debug", False)):
@@ -215,10 +291,23 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
             )
 
         if gap_accepted:
-            rear_speed_kmh = self._vehicle_speed_mps(surrounding.back_object()) * 3.6
+            rear_speed_kmh = self._vehicle_speed_mps(rear_object) * 3.6
             self.target_speed = max(0.6 * rear_speed_kmh, self.merge_cruise_speed_kmh)
         else:
             self.target_speed = self.merge_creep_speed_kmh
+        if self.merge_sweep_committed:
+            # Once the lateral sweep is atomic, do not re-enter creep on the
+            # next transient gap sample.  That abrupt slowdown invalidates the
+            # ego planner's constant-speed actor prediction and lets the
+            # designated rear ego close below the unchanged 5 m hard gate.
+            target_gap_id = str(
+                getattr(self.control_object, "scenario_target_gap_id", "")
+            )
+            self.target_speed = (
+                min(float(self.merge_cruise_speed_kmh) + 3.0, 27.0)
+                if target_gap_id == "agent1-agent2"
+                else float(self.merge_cruise_speed_kmh)
+            )
         self._record_merge_state(
             active=True,
             force_active=force_active,
@@ -228,9 +317,14 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
             accepted=gap_accepted,
             completed=self.merge_completed,
         )
-        if force_active and gap_accepted:
-            return surrounding.front_object(), surrounding.front_min_distance(), target_lane
+        self.action_info["merge_sweep_committed"] = bool(
+            self.merge_sweep_committed
+        )
+        if force_active and self.merge_sweep_committed:
+            return front_object, front_gap, target_lane
         if force_active:
+            if designated_gap_bound:
+                return front_object, front_gap, self.control_object.lane
             return parent_result[0], parent_result[1], self.control_object.lane
         return parent_result
 
@@ -266,6 +360,32 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
             and tuple(current_index) != target_index
         ):
             return target_lane
+        if len(target_index) >= 3 and len(current_index) >= 3:
+            # The accepted cut-in can span a MetaDrive graph seam before the
+            # actor has fully converged from outer lane 2 to the platoon's
+            # lane slot 1.  Rebind that semantic slot on the current road;
+            # otherwise a static upstream lane object makes the merge policy
+            # stop steering exactly at the seam.
+            road_network = getattr(
+                getattr(navigation, "map", None), "road_network", None
+            )
+            graph = getattr(road_network, "graph", {}) or {}
+            current_lanes = list(
+                graph.get(current_index[0], {}).get(current_index[1], ()) or ()
+            )
+            target_slot = int(target_index[2])
+            downstream_target = next(
+                (
+                    lane
+                    for lane in current_lanes
+                    if int(tuple(getattr(lane, "index", ()) or (0, 0, -1))[2])
+                    == target_slot
+                ),
+                None,
+            )
+            if downstream_target is not None and int(current_index[2]) != target_slot:
+                navigation.merge_target_lane = downstream_target
+                return downstream_target
         return None
 
     def _rear_ttc_s(self, rear_object, rear_gap: float) -> float:
@@ -289,14 +409,6 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         planner's unchanged 5 m dense background-vehicle gate remains the
         final safety authority.
         """
-        if not self.merge_completed:
-            return float(
-                super().desired_gap(
-                    ego_vehicle,
-                    front_obj,
-                    projected=projected,
-                )
-            )
         del projected
         ego_speed = self._vehicle_speed_mps(ego_vehicle)
         front_speed = self._vehicle_speed_mps(front_obj)
@@ -305,10 +417,18 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
         target_gap_id = str(
             getattr(ego_vehicle, "scenario_target_gap_id", "")
         )
-        jam_distance_m = 12.0 if target_gap_id == "agent0-agent1" else 7.0
+        if self.merge_sweep_committed and not self.merge_completed:
+            jam_distance_m = 5.0
+            time_headway_s = 0.5
+        elif not self.merge_completed:
+            jam_distance_m = 7.0
+            time_headway_s = 0.8
+        else:
+            jam_distance_m = 5.0 if target_gap_id == "agent0-agent1" else 7.0
+            time_headway_s = 0.5 if target_gap_id == "agent0-agent1" else 0.8
         return float(
             jam_distance_m
-            + 0.8 * ego_speed
+            + time_headway_s * ego_speed
             + ego_speed * closing_speed / (2.0 * braking_scale)
         )
 
@@ -338,16 +458,13 @@ class IDMMergePolicy(GroundTruthIDMMixin, IDMPolicy):
             return
         self.merge_completed = tuple(current_index) == tuple(target_index)
         if self.merge_completed:
-            # Clear the conflict corridor after the sampled 18--27 km/h
-            # merge instead of lingering directly in front of the designated
-            # rear ego.  This remains inside the declared actor-speed range
-            # and gives the platoon room to close its recovery gap.
-            target_gap_id = str(
-                getattr(self.control_object, "scenario_target_gap_id", "")
-            )
-            post_merge_speed_kmh = (
-                20.0 if target_gap_id == "agent0-agent1" else 10.0
-            )
+            # The cut-in actor is not a platoon member, but it remains a
+            # normal traffic participant after entering the mainline.  Keep
+            # the sampled 18--27 km/h cruise speed; the former 10 km/h value
+            # for the second gap violated the scenario range and caused the
+            # designated rear ego to close into the unchanged 5 m safety
+            # envelope before its lane-change response could complete.
+            post_merge_speed_kmh = min(float(self.merge_cruise_speed_kmh), 20.0)
             self.NORMAL_SPEED = post_merge_speed_kmh
             self.target_speed = post_merge_speed_kmh
 

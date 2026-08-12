@@ -230,7 +230,7 @@ class LQRFollowerController(BaseController):
                 "target_rear_bumper_gap_m",
                 getattr(s6_actor, "scenario_target_rear_bumper_gap_m", 6.0),
             )
-        ) + (-2.0 if s6_target_gap_id == "agent0-agent1" else 2.0)
+        ) + (-2.0 if s6_target_gap_id == "agent0-agent1" else 0.0)
         orchestrator = getattr(env, "_scenario_orchestrator", None)
         s7_evidence = dict(getattr(orchestrator, "_conflict_evidence", {}) or {})
         s7_resolved = dict(
@@ -330,28 +330,62 @@ class LQRFollowerController(BaseController):
                     or {}
                 ).get("physical_gap_corridor_entered", False)
             )
+            s6_sweep_committed = bool(
+                (
+                    getattr(
+                        getattr(env, "_scenario_orchestrator", None),
+                        "_conflict_evidence",
+                        {},
+                    )
+                    or {}
+                ).get("merge_sweep_committed", False)
+            )
+            s6_all_ego_changed_lane = bool(
+                (
+                    getattr(
+                        getattr(env, "_scenario_orchestrator", None),
+                        "_conflict_evidence",
+                        {},
+                    )
+                    or {}
+                ).get("all_ego_changed_lane_after_cut_in", False)
+            )
             if (
                 scenario_id == "S6_background_merge_in"
-                and s6_physical_corridor_entered
-                and str(agent_id) == s6_target_rear_id
-                and s6_actor is not None
-                and front_veh is None
+                and role_index > 0
             ):
-                centre_distance = float(
-                    np.linalg.norm(
-                        np.asarray(s6_actor.position[:2], dtype=float)
-                        - np.asarray(vehicle.position[:2], dtype=float)
+                # The cut-in actor is a conflict participant, never a fourth
+                # platoon member.  Couple each follower to its original ego
+                # predecessor throughout S6, including the merge-setup phase;
+                # otherwise nearest-front lookup can bind agent1/agent2 to a
+                # waiting ramp actor and expand the declared ego gap without
+                # bound before the cut-in is realized.
+                predecessor = agents.get(active_ids[role_index - 1])
+                if predecessor is None:
+                    predecessor = None
+                centre_distance = (
+                    0.0
+                    if predecessor is None
+                    else float(
+                        np.linalg.norm(
+                            np.asarray(predecessor.position[:2], dtype=float)
+                            - np.asarray(vehicle.position[:2], dtype=float)
+                        )
                     )
                 )
                 connected_gap = (
                     centre_distance
-                    - 0.5 * float(getattr(s6_actor, "LENGTH", 5.74) or 5.74)
+                    - 0.5 * float(
+                        getattr(predecessor, "LENGTH", 5.74) or 5.74
+                    )
                     - 0.5 * float(getattr(vehicle, "LENGTH", 5.74) or 5.74)
+                    if predecessor is not None
+                    else -1.0
                 )
                 if connected_gap > 0.0:
-                    front_veh = s6_actor
+                    front_veh = predecessor
                     gap_m = connected_gap
-                    is_platoon = False
+                    is_platoon = True
             ego_speed = float(getattr(vehicle, "speed_km_h", 0.0) or 0.0) / 3.6
             reference = (longitudinal_references or {}).get(agent_id)
             if reference is None and traj_local.shape == (8, 3):
@@ -378,10 +412,7 @@ class LQRFollowerController(BaseController):
                 )
                 is_s6_actor_follow_pair = bool(
                     scenario_id == "S6_background_merge_in"
-                    and (
-                        s6_target_gap_id == "agent0-agent1"
-                        or s6_physical_corridor_entered
-                    )
+                    and s6_physical_corridor_entered
                     and s6_target_gap_id.endswith(f"-{agent_id}")
                     and str(
                         getattr(front_veh, "scenario_vehicle_role", "")
@@ -446,6 +477,8 @@ class LQRFollowerController(BaseController):
                 lateral_maneuver_active
                 or committed_roll_active
             )
+            if scenario_id == "S6_background_merge_in" and s6_physical_corridor_entered:
+                rear_feedback_suppressed = False
             if role_index + 1 < len(active_ids) and not rear_feedback_suppressed:
                 rear_vehicle = agents.get(active_ids[role_index + 1])
                 rear_lane = getattr(rear_vehicle, "lane", None)
@@ -650,28 +683,73 @@ class LQRFollowerController(BaseController):
                     agent_debug["s6_premerge_rear_gap_guard"] = True
                 else:
                     agent_debug["s6_premerge_rear_gap_guard"] = False
-                s6_guard_speed_km_h = (
-                    24.0
-                    if s6_target_gap_id.endswith(f"-{agent_id}")
-                    else 14.0
+                s6_guard_speed_km_h = {
+                    # Keep the ego leader at its pre-merge conflict speed.
+                    # Dropping it to 12 km/h when the intruder begins its
+                    # sweep lets agent1 close below the unchanged 7 m platoon
+                    # safety gate before the response lane change can start.
+                    "agent0": (
+                        12.0
+                        if s6_target_gap_id == "agent1-agent2"
+                        else 19.3
+                    ),
+                    "agent1": 22.0,
+                    "agent2": 27.0,
+                }.get(str(agent_id), 20.0)
+                try:
+                    s6_target_rear_role_index = active_ids.index(
+                        s6_target_rear_id
+                    )
+                except ValueError:
+                    s6_target_rear_role_index = len(active_ids)
+                s6_sweep_rear_yield = bool(
+                    s6_sweep_committed
+                    and not s6_all_ego_changed_lane
+                    and role_index >= s6_target_rear_role_index
+                    and s6_actor is not None
                 )
+                if s6_sweep_rear_yield:
+                    # Yield behind the intruder while its accepted lateral
+                    # sweep is in progress.  This is a transient safety speed
+                    # match, not a four-vehicle formation relationship.
+                    s6_guard_speed_km_h = max(
+                        float(getattr(s6_actor, "speed_km_h", 0.0) or 0.0)
+                        - (
+                            4.0
+                            if s6_target_gap_id == "agent0-agent1"
+                            else 2.0
+                        )
+                        - 2.0 * (role_index - s6_target_rear_role_index),
+                        8.0,
+                    )
                 s6_post_response_speed_guard = bool(
                     scenario_id == "S6_background_merge_in"
-                    and not s6_merge_pending
+                    and (s6_physical_corridor_entered or s6_sweep_committed)
                     and len(lane_index) >= 3
-                    and (
-                        int(lane_index[2]) != 2
-                        or tuple(lane_index[:2])
-                        != ("9g0_0_", "9g0_1_")
-                    )
-                    and not committed_roll_active
                     and ego_speed > s6_guard_speed_km_h / 3.6
                 )
                 if s6_post_response_speed_guard:
+                    guard_gain = (
+                        3.0
+                        if s6_sweep_rear_yield
+                        and s6_target_gap_id == "agent0-agent1"
+                        else 2.0
+                        if s6_sweep_rear_yield
+                        else 1.2
+                    )
+                    guard_deceleration_limit = (
+                        -5.0
+                        if s6_sweep_rear_yield
+                        and s6_target_gap_id == "agent0-agent1"
+                        else -4.0
+                        if s6_sweep_rear_yield
+                        else -2.0
+                    )
                     guard_acceleration = float(
                         np.clip(
-                            1.2 * (s6_guard_speed_km_h / 3.6 - ego_speed),
-                            -2.0,
+                            guard_gain
+                            * (s6_guard_speed_km_h / 3.6 - ego_speed),
+                            guard_deceleration_limit,
                             0.0,
                         )
                     )
@@ -686,6 +764,110 @@ class LQRFollowerController(BaseController):
                     )
                 else:
                     agent_debug["s6_post_response_speed_guard"] = False
+                s6_ego_only_recovery = bool(
+                    scenario_id == "S6_background_merge_in"
+                    and s6_physical_corridor_entered
+                    and s6_all_ego_changed_lane
+                    and role_index > 0
+                    and is_platoon
+                    and actual_gap is not None
+                    and front_speed is not None
+                )
+                s6_recovery_acceleration = 0.0
+                if s6_ego_only_recovery:
+                    recovery_acceleration = float(
+                        np.clip(
+                            0.45 * (float(actual_gap) - self.desired_gap_m)
+                            + 0.50 * (float(front_speed) - ego_speed),
+                            -2.0,
+                            2.5,
+                        )
+                    )
+                    s6_recovery_acceleration = recovery_acceleration
+                    recovery_throttle = float(
+                        recovery_acceleration
+                        / (
+                            DRIVE_ACCELERATION_SCALE_MPS2
+                            if recovery_acceleration >= 0.0
+                            else BRAKE_ACCELERATION_SCALE_MPS2
+                        )
+                    )
+                    action = np.asarray(action, dtype=np.float32).copy()
+                    action[1] = (
+                        max(float(action[1]), recovery_throttle)
+                        if recovery_acceleration >= 0.0
+                        else min(float(action[1]), recovery_throttle)
+                    )
+                    agent_debug["s6_ego_only_recovery"] = True
+                    agent_debug["s6_ego_only_recovery_acceleration_mps2"] = (
+                        recovery_acceleration
+                    )
+                else:
+                    agent_debug["s6_ego_only_recovery"] = False
+                s6_evidence = dict(
+                    getattr(
+                        getattr(env, "_scenario_orchestrator", None),
+                        "_conflict_evidence",
+                        {},
+                    )
+                    or {}
+                )
+                s6_reassembly_gaps = tuple(
+                    float(value)
+                    for value in s6_evidence.get(
+                        "formation_current_bumper_gaps_m", ()
+                    )
+                )
+                s6_speed_sync = bool(
+                    scenario_id == "S6_background_merge_in"
+                    and s6_evidence.get(
+                        "all_ego_changed_lane_after_cut_in", False
+                    )
+                    and len(s6_reassembly_gaps) == 2
+                )
+                if s6_speed_sync:
+                    gaps_in_reassembly_window = all(
+                        7.0 <= float(value) <= 15.0
+                        for value in s6_reassembly_gaps
+                    )
+                    reassembly_target_speed_mps = (
+                        19.3
+                        if gaps_in_reassembly_window
+                        else 18.0 + 2.0 * float(role_index)
+                    ) / 3.6
+                    sync_acceleration = float(
+                        np.clip(
+                            (
+                                1.5
+                                if gaps_in_reassembly_window
+                                else 1.0
+                            )
+                            * (reassembly_target_speed_mps - ego_speed)
+                            + (
+                                0.0
+                                if gaps_in_reassembly_window
+                                else s6_recovery_acceleration
+                            ),
+                            -2.0,
+                            2.0,
+                        )
+                    )
+                    sync_throttle = float(
+                        sync_acceleration
+                        / (
+                            DRIVE_ACCELERATION_SCALE_MPS2
+                            if sync_acceleration >= 0.0
+                            else BRAKE_ACCELERATION_SCALE_MPS2
+                        )
+                    )
+                    action = np.asarray(action, dtype=np.float32).copy()
+                    action[1] = sync_throttle
+                    agent_debug["s6_ego_only_speed_sync"] = True
+                    agent_debug["s6_ego_only_speed_sync_acceleration_mps2"] = (
+                        sync_acceleration
+                    )
+                else:
+                    agent_debug["s6_ego_only_speed_sync"] = False
                 s7_wait_speed_guard = bool(
                     scenario_id == "S7_ego_merge_from_ramp"
                     and not s7_release_ready

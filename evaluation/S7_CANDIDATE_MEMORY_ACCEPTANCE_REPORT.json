@@ -1,0 +1,200 @@
+{
+  "format": "s7_candidate_memory_acceptance_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-12T23:26:56+08:00",
+  "status": "s7_fixed_five_seed_memory_gate_passed",
+  "scenario_id": "S7_ego_merge_from_ramp",
+  "local_route": "R7_merge_core",
+  "source_memory": "docs/project/s5_s9_functional_scenario_design.json",
+  "source_git_commit": "d50ac792a3c5b3b14e2e968bb447439b3884e90d",
+  "worktree_state": "uncommitted_candidate_revision_changes_preserved",
+  "scope": {
+    "formal_v1_contract_changed": false,
+    "formal_50k_dataset_or_checkpoint_metadata_changed": false,
+    "candidate_v2_contract_frozen": false,
+    "reason_candidate_v2_not_frozen": "S7 passed independently; the full sequential S5-S9 activation gate still requires the other scenario gates."
+  },
+  "root_cause_and_fix": {
+    "failed_seed": 31,
+    "pre_fix_failure": "scenario_functional_gate_failed after 200/200 native planning steps because formation reassembly never remained stable",
+    "root_cause": "The low-severity sampler independently drew an 18.4326 m initial bumper gap. Three ego bodies, two such gaps, and the required actor-boundary margin needed about 74.09 m, but usable_mainline_gap_m was clipped to the memory maximum of 70 m, creating an internally infeasible logical sample.",
+    "fix": "Couple the sampled formation-gap upper bound to the declared 70 m maximum before drawing it, then assert the complete physical gap floor is no larger than the sampled usable gap.",
+    "memory_thresholds_relaxed": false,
+    "post_fix_seed31": {
+      "planning_success": "200/200",
+      "failure_reason": null,
+      "entry_steps": {
+        "agent0": 44,
+        "agent1": 73,
+        "agent2": 112
+      },
+      "formation_recovery_stable_steps": 10,
+      "final_bumper_gaps_m": [
+        8.430694459774557,
+        17.71533403318601
+      ]
+    }
+  },
+  "acceptance": {
+    "fixed_seeds": [
+      17,
+      23,
+      31,
+      47,
+      59
+    ],
+    "horizon_steps": 200,
+    "episodes_passed": "5/5",
+    "native_joint_planning_steps": "1000/1000",
+    "collision_count": 0,
+    "out_of_road_count": 0,
+    "planner_fallback_count": 0,
+    "functional_success_count": 5,
+    "declared_actor_realization_count": "25/25",
+    "behavior_coverage": [
+      "pass_first",
+      "yield_then_merge"
+    ],
+    "all_episodes_have_physical_split": true,
+    "all_episodes_entered_mainline": true,
+    "all_episodes_no_stranded_ego": true,
+    "all_episodes_formation_recovered": true,
+    "hard_gates_passed": true
+  },
+  "episodes": [
+    {
+      "seed": 17,
+      "severity": "high",
+      "actor_count": 6,
+      "expected_behavior": "yield_then_merge",
+      "observed_behavior": "yield_then_merge",
+      "ego_mainline_entry_steps": {
+        "agent0": 108,
+        "agent1": 142,
+        "agent2": 191
+      },
+      "formation_recovery_stable_steps": 50,
+      "final_bumper_gaps_m": [
+        9.496731896337302,
+        9.240265063497336
+      ],
+      "episode_json_sha256": "2a7b7245a195b0d2a25a104d021a2d899e72ef80615c5601e41c596962a5b12f",
+      "topdown_video_sha256": "101a48725118df411f69706d2b9c3644db986a33d20449f77d446ff5486fd416",
+      "semantic_bev_video_sha256": "f5288a7ce10309a6868bedeb54ff5f931b5d7980fc3f5528e87cd2a976a41bdb",
+      "trajectory_npz_sha256": "eb286dc77bb3f88127ed9ea8e7af76f6b0c05299a8e22f3415dd3520f389f1ac"
+    },
+    {
+      "seed": 23,
+      "severity": "low",
+      "actor_count": 4,
+      "expected_behavior": "pass_first",
+      "observed_behavior": "pass_first",
+      "ego_mainline_entry_steps": {
+        "agent0": 42,
+        "agent1": 73,
+        "agent2": 112
+      },
+      "formation_recovery_stable_steps": 5,
+      "final_bumper_gaps_m": [
+        9.223953162460063,
+        15.855966299362976
+      ],
+      "episode_json_sha256": "7c77a1f06730fdff4e266f040096ff87f0b0652cecef613653d065b3b9cda218",
+      "topdown_video_sha256": "cd6d2870ba34b9b51f8e8958475b2e6aba07ea78e92545c1872a2b8b6bb4e716",
+      "semantic_bev_video_sha256": "6a6959d2d11304f3221ef1187a2c8e2037a59c3a81584bc0d435875e13c2b5bc",
+      "trajectory_npz_sha256": "62ffbb2e5916d4fe56441cb208e2159dd4e06cb42fff1a54d42c0956b2f0e4fd"
+    },
+    {
+      "seed": 31,
+      "severity": "low",
+      "actor_count": 4,
+      "expected_behavior": "pass_first",
+      "observed_behavior": "pass_first",
+      "ego_mainline_entry_steps": {
+        "agent0": 44,
+        "agent1": 73,
+        "agent2": 112
+      },
+      "formation_recovery_stable_steps": 10,
+      "final_bumper_gaps_m": [
+        8.430694459774557,
+        17.71533403318601
+      ],
+      "episode_json_sha256": "9284299c6345f513c7765c3c23a702dec7f7feb7e9ea22c6dfc4ecc571ae64c4",
+      "topdown_video_sha256": "b5b3778dcb4140299f8b2b530cacbc2dcf4e03015e9ceb529fab5dec8102057b",
+      "semantic_bev_video_sha256": "24ec0c4dd64fb929d5c77d586947526bd65c48931cd925bfe70209f38c65a4f6",
+      "trajectory_npz_sha256": "b0f50dc5cdee422cb3519231d6c16310ad0a22b81219793364d78d12a864ec01"
+    },
+    {
+      "seed": 47,
+      "severity": "medium",
+      "actor_count": 5,
+      "expected_behavior": "pass_first",
+      "observed_behavior": "pass_first",
+      "ego_mainline_entry_steps": {
+        "agent0": 44,
+        "agent1": 73,
+        "agent2": 121
+      },
+      "formation_recovery_stable_steps": 400,
+      "final_bumper_gaps_m": [
+        11.617625240652757,
+        10.310121467319249
+      ],
+      "episode_json_sha256": "c72b2ce68098f44aaae30ebe901177b5c457281e1b20d41c35113f7b12474bf4",
+      "topdown_video_sha256": "843d9b942dbeb9eafb66bf21023d3feb37e77832a13fbf968e9bd1dcfa25e2b6",
+      "semantic_bev_video_sha256": "6ba21498bb25424e02951e16f694ab5fcdfa8726dd169b2f7dad07647308eec2",
+      "trajectory_npz_sha256": "a2f8dbf776eccb4bc9c01e82ebc3bc0d99032840fda9296323f4a5f575775a2a"
+    },
+    {
+      "seed": 59,
+      "severity": "high",
+      "actor_count": 6,
+      "expected_behavior": "yield_then_merge",
+      "observed_behavior": "yield_then_merge",
+      "ego_mainline_entry_steps": {
+        "agent0": 111,
+        "agent1": 144,
+        "agent2": 192
+      },
+      "formation_recovery_stable_steps": 45,
+      "final_bumper_gaps_m": [
+        9.281028893065308,
+        9.179004407603998
+      ],
+      "episode_json_sha256": "a066daa4c913280092cbc1b46b76c56288684693bb68bc6fdb4c0f75503f6e9f",
+      "topdown_video_sha256": "a3832a099b6a184d9204974e7ec641aafd9a2037b1ba24968b0503b5b6c112b0",
+      "semantic_bev_video_sha256": "9a447487e3fbbd9ca348a39a67fb1e10ce192303075cae98f8a0ef50873520d6",
+      "trajectory_npz_sha256": "af946f7065e8dcdd1eda617380dd321cc452fb59118d0f3be0267d7890194845"
+    }
+  ],
+  "artifact_validation": {
+    "artifact_root": "/tmp/s7_candidate_revision_final_20260812/S7_ego_merge_from_ramp",
+    "topdown_videos": "5/5 non-empty, decodable, exactly 200 frames",
+    "semantic_bev_videos": "5/5 non-empty, decodable, exactly 200 frames",
+    "trajectory_npz": "5/5 load successfully; core trajectory/control/action/execution arrays have the required shapes and finite values",
+    "optional_diagnostic_sentinels": "minimum_platoon_gap_m and tracking_error are all-NaN unavailable-value sentinels on this per-step replanning path, as initialized by evaluation/preview_and_evaluation.py; they are not consumed as trajectory or control evidence",
+    "topdown_review": "Reviewed a 5x4 contact sheet at frames 30, 80, 130, and 190. The ramp-to-mainline progression, asynchronous spacing, actor presence, and final common-lane recovery are visually consistent with the machine evidence; no obvious off-road motion, teleportation, or silent actor loss was observed.",
+    "contact_sheet": "/tmp/s7_review_frames/five_seed_contact_sheet.png"
+  },
+  "tests": [
+    {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_s5_s9_sampling.py -q",
+      "result": "7 passed"
+    },
+    {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_s5_s9_sampling.py tests/test_scenario_definitions.py tests/test_scenario_orchestrator_adjacent_vehicles.py tests/test_s7_g_block_drivable_geometry.py tests/test_rule_maker.py -q -k 's7 or severity_controls_exact_actor_count'",
+      "result": "13 passed, 126 deselected"
+    },
+    {
+      "command": "python -m evaluation.preview_and_evaluation --scenario-id S7_ego_merge_from_ramp --local-route R7_merge_core --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 200 --traffic-density 0 --output-root /tmp/s7_candidate_revision_final_20260812 --evaluate",
+      "result": "5/5 episodes passed; 1000/1000 native planning steps; all required artifacts written"
+    }
+  ],
+  "minimum_reproduction_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m evaluation.preview_and_evaluation --scenario-id S7_ego_merge_from_ramp --local-route R7_merge_core --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 200 --traffic-density 0 --output-root /tmp/s7_candidate_revision_final_20260812 --evaluate",
+  "remaining_risks": [
+    "This accepts S7 only and does not freeze the complete candidate-v2 S5-S9 scenario contract.",
+    "The formal v1 50k dataset and checkpoints remain bound to their prior frozen scenario hash and are not relabeled by this report.",
+    "The global sequential candidate workflow must still respect outstanding scenario gates before candidate-v2 activation."
+  ]
+}
