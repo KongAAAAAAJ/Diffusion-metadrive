@@ -1,11 +1,11 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-13T11:21:51+08:00",
+  "updated_at": "2026-08-13T11:36:54+08:00",
   "repository": {
     "branch": "s5-s9-scenario-revision",
-    "git_commit": "b7c41dff4b4c72a9c7ee3a0bb41f18ff0ed4deb0",
-    "worktree_clean_before_this_update": false,
+    "git_commit": "166a5093e2ee555576fa789b2e5a8f99ff569052",
+    "worktree_clean_before_this_update": true,
     "project_state_update_committed": false
   },
   "current": {
@@ -119,6 +119,10 @@
     "note": "Authorization follows the corrected formal-path pilot reviewed by the downstream RiskEntry project."
   },
   "source_of_truth": {
+    "git_tracked_output_cleanup_report": {
+      "path": "evaluation/GIT_TRACKED_OUTPUT_CLEANUP_REPORT.json",
+      "role": "Records removal of generated outputs from the Git index, local-file preservation, ignore coverage, and the remaining history-rewrite boundary"
+    },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
       "sha256": "5fdc3ea83cc8aaff1647496f228c44aa965abde7ac974fc5590db6a5694a48de",

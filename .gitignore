@@ -19,3 +19,6 @@
 
 # Keep gitignore itself
 !.gitignore
+
+# Keep generated run artifacts out of Git at any directory depth
+outputs/

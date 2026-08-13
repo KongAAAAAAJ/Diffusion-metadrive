@@ -1,0 +1,43 @@
+{
+  "format": "git_tracked_output_cleanup_v1",
+  "created_at": "2026-08-13T11:36:54+08:00",
+  "branch": "s5-s9-scenario-revision",
+  "source_git_commit": "166a5093e2ee555576fa789b2e5a8f99ff569052",
+  "status": "passed",
+  "scope": {
+    "path_rule": "any directory named outputs",
+    "tracked_files_removed_from_index": 1540,
+    "tracked_blob_bytes_removed_from_tip": 2639694393,
+    "tracked_blob_gib_removed_from_tip": 2.458,
+    "local_files_deleted": 0,
+    "history_rewritten": false
+  },
+  "paths": [
+    "outputs/",
+    "models/controller/outputs/",
+    "models/platoon_planner/outputs/"
+  ],
+  "largest_preserved_non_output_file": {
+    "path": "metadrive/assets/textures/terrain/heightfield.png",
+    "bytes": 18887325,
+    "reason": "runtime texture asset, not a generated run artifact"
+  },
+  "changes": [
+    "Removed all existing outputs directories from the Git index with git rm --cached.",
+    "Added a final outputs/ ignore rule that overrides the repository's broad JSON and PNG allow rules.",
+    "Preserved all output files in the working tree."
+  ],
+  "verification": {
+    "tracked_output_paths_after_cleanup": 0,
+    "sample_root_output_preserved": true,
+    "sample_nested_outputs_preserved": true,
+    "ignore_rule_matches_root_and_nested_outputs": true,
+    "git_diff_check_passed": true
+  },
+  "reproduce": [
+    "git ls-files | awk '/(^|\\/)outputs\\//{n++} END{print n+0}'",
+    "git check-ignore -v outputs/s8_candidate_revision_final_20260813_v3/S8_ego_exit_to_ramp/metrices/episode_0002/metrice.json",
+    "git diff --check"
+  ],
+  "remaining_risk": "The large blobs remain in existing Git history. Removing them from repository history would require a separately authorized history rewrite and force push."
+}
