@@ -29,6 +29,19 @@ def _rng(spawn_seed: int, scenario_id: str, local_route: str) -> np.random.Rando
     return np.random.RandomState(scenario_seed(spawn_seed, scenario_id, local_route))
 
 
+def _purpose_rng(
+    spawn_seed: int,
+    scenario_id: str,
+    local_route: str,
+    purpose: str,
+) -> np.random.RandomState:
+    payload = (
+        f"{int(spawn_seed)}\0{scenario_id}\0{local_route}\0{purpose}"
+    ).encode("utf-8")
+    seed = int.from_bytes(hashlib.sha256(payload).digest()[:4], "little")
+    return np.random.RandomState(seed)
+
+
 def _uniform(rng: np.random.RandomState, bounds) -> float:
     return float(rng.uniform(float(bounds[0]), float(bounds[1])))
 
@@ -341,6 +354,15 @@ def resolve_s5_s9_parameters(
         # can make the first 6 m background preflight and the unchanged 7 m
         # platoon separation mutually infeasible.
         s8_ego_initial_speed_km_h = 25.0
+        constraint_rng = _purpose_rng(
+            spawn_seed, scenario_id, local_route, "exit_constraints"
+        )
+        constraint_count = int(constraint_rng.randint(1, 4))
+        target_gap_id = (
+            "agent0-agent1"
+            if int(constraint_rng.randint(0, 2)) == 0
+            else "agent1-agent2"
+        )
         result.update(
             ego_initial_speed_km_h=s8_ego_initial_speed_km_h,
             ego_distance_to_diverge_m=_uniform(rng, (55.0, 57.0)),
@@ -348,6 +370,15 @@ def resolve_s5_s9_parameters(
             exit_lane_front_actor_speed_km_h=exit_stream_speed_km_h,
             exit_lane_rear_actor_speed_km_h=20.0,
             usable_exit_lane_gap_m=_uniform(rng, (74.0, 75.0)),
+            exit_constraint_actor_count=constraint_count,
+            exit_constraint_target_gap_id=target_gap_id,
+            exit_constraint_actor_speeds_km_h=[
+                s8_ego_initial_speed_km_h,
+                *[
+                    _uniform(constraint_rng, (18.0, 23.0))
+                    for _ in range(constraint_count - 1)
+                ],
+            ],
         )
     elif scenario_id == "S9_narrow_channel_negotiation":
         # Correlate the urgent LEFT window instead of independently drawing a
@@ -387,6 +418,21 @@ def resolve_s5_s9_parameters(
     else:
         return {}
 
+    incidental_rng = _purpose_rng(
+        spawn_seed, scenario_id, local_route, "incidental_background"
+    )
+    incidental_count = int(incidental_rng.randint(3, 7))
+    ego_speed = float(result.get("ego_initial_speed_km_h", ego_initial_speed_km_h))
+    result.update(
+        incidental_background_actor_count=incidental_count,
+        incidental_background_layout_seed=int(
+            incidental_rng.randint(0, np.iinfo(np.int32).max)
+        ),
+        incidental_background_speeds_km_h=[
+            float(np.clip(ego_speed + incidental_rng.uniform(-1.5, 1.5), 16.0, 31.0))
+            for _ in range(incidental_count)
+        ],
+    )
     return result
 
 

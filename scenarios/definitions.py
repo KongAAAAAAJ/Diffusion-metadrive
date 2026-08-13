@@ -66,6 +66,20 @@ class ScenarioDefinition:
         return self.trigger_by_local_route[local_route]
 
 
+def _s5_s9_incidental_background_recipe() -> RecipeSpec:
+    """Declare the non-causal traffic shared by every candidate S5--S9 scene."""
+
+    return RecipeSpec(
+        "inject_incidental_background_traffic",
+        {
+            "actor_count_range": (3, 6),
+            "minimum_ego_clearance_m": 60.0,
+            "minimum_actor_clearance_m": 18.0,
+            "trigger_on_start": True,
+        },
+    )
+
+
 SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
     ScenarioDefinition(
         code="S1",
@@ -177,6 +191,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     ),
                 },
             ),
+            _s5_s9_incidental_background_recipe(),
         ),
         ego_spawn_lane_preference="middle",
         ego_spawn_lane_probabilities=None,
@@ -194,7 +209,10 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         trigger_by_local_route={
             "R6_mainline_merge_approach": TriggerSpec("g1", 10.0, 95.0),
         },
-        traffic_recipes=build_s6_traffic_recipes(RecipeSpec),
+        traffic_recipes=(
+            *build_s6_traffic_recipes(RecipeSpec),
+            _s5_s9_incidental_background_recipe(),
+        ),
         ego_spawn_lane_preference="middle",
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",
@@ -227,7 +245,10 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         trigger_by_local_route={
             "R7_merge_core": TriggerSpec("h_ramp0", 5.0, 60.0),  # h_ramp0
         },
-        traffic_recipes=build_s7_traffic_recipes(RecipeSpec),
+        traffic_recipes=(
+            *build_s7_traffic_recipes(RecipeSpec),
+            _s5_s9_incidental_background_recipe(),
+        ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
         ego_spawn_longitude_m=(5.0, 6.0),  # *
@@ -256,6 +277,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "trigger_on_start": True,
                 },
             ),
+            _s5_s9_incidental_background_recipe(),
         ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
@@ -265,7 +287,11 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_longitude_m=(68.0, 70.0),
         ego_spawn_lane_id=1,
         ego_initial_speed_km_h=(22.0, 28.0),
-        ego_initial_bumper_gap_m=12.0,
+        # The exit-side split actor starts longitudinally inside one ego gap.
+        # An 18 m bumper gap keeps both adjacent-lane OBB clearances above the
+        # planner's unchanged 6 m committed-horizon boundary before the
+        # asynchronous RIGHT response and preserves the 7 m ego-pair gate.
+        ego_initial_bumper_gap_m=18.0,
         override_traffic_density=0.0,
         env_overrides={"platoon_route_spawn_lane_index": 1},
         expert_recipe="提前换道驶离",
@@ -293,6 +319,7 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "trigger_on_start": True,
                 },
             ),
+            _s5_s9_incidental_background_recipe(),
         ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,

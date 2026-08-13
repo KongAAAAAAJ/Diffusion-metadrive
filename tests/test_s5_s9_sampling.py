@@ -27,6 +27,18 @@ def test_sampler_is_deterministic_and_finite() -> None:
             assert _resolve(scenario_id, seed)["severity_bucket"] in {"low", "medium", "high"}
 
 
+def test_every_s5_s9_sample_has_three_to_six_incidental_background_actors() -> None:
+    realized_counts = set()
+    for scenario_id in ROUTES:
+        for seed in SEEDS:
+            value = _resolve(scenario_id, seed)
+            count = value["incidental_background_actor_count"]
+            realized_counts.add(count)
+            assert 3 <= count <= 6
+            assert len(value["incidental_background_speeds_km_h"]) == count
+    assert len(realized_counts) >= 2
+
+
 def test_severity_bucket_distribution_tracks_declared_weights() -> None:
     counts = {"low": 0, "medium": 0, "high": 0}
     for seed in range(2000):
@@ -88,8 +100,19 @@ def test_s7_severity_controls_exact_actor_count() -> None:
 
 
 def test_s8_and_s9_ranges_match_functional_contract() -> None:
+    s8_constraint_counts = set()
+    s8_target_gaps = set()
     for seed in SEEDS:
         s8 = _resolve("S8_ego_exit_to_ramp", seed)
+        s8_constraint_counts.add(s8["exit_constraint_actor_count"])
+        s8_target_gaps.add(s8["exit_constraint_target_gap_id"])
+        assert 1 <= s8["exit_constraint_actor_count"] <= 3
+        assert len(s8["exit_constraint_actor_speeds_km_h"]) == s8[
+            "exit_constraint_actor_count"
+        ]
+        assert s8["exit_constraint_actor_speeds_km_h"][0] == s8[
+            "ego_initial_speed_km_h"
+        ]
         assert s8["ego_initial_speed_km_h"] == 25.0
         assert 55.0 <= s8["ego_distance_to_diverge_m"] <= 57.0
         assert 58.0 <= s8["mandatory_lane_change_remaining_distance_m"] <= 60.0
@@ -110,3 +133,5 @@ def test_s8_and_s9_ranges_match_functional_contract() -> None:
         assert 45.0 <= s9["usable_bypass_gap_m"] <= 70.0
         assert 40.0 <= s9["ego_distance_to_narrow_entry_m"] <= 50.0
         assert 8.0 <= s9["latest_lane_change_completion_before_blocker_m"] <= 10.0
+    assert len(s8_constraint_counts) >= 2
+    assert s8_target_gaps == {"agent0-agent1", "agent1-agent2"}

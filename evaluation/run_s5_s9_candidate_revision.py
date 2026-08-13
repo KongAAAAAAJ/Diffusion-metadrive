@@ -117,6 +117,90 @@ def _s5_physical_behavior_gate(rows: list[dict[str, object]]) -> dict[str, objec
     }
 
 
+def _s8_physical_behavior_gate(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Require five-seed asynchronous front/behind crossing diversity."""
+
+    behavior_classes = {
+        str((row.get("conflict_evidence") or {}).get("observed_lane_change_behavior_class"))
+        for row in rows
+        if (row.get("conflict_evidence") or {}).get(
+            "observed_lane_change_behavior_class"
+        )
+    }
+    straddled_rows = [
+        row
+        for row in rows
+        if bool(
+            (row.get("conflict_evidence") or {}).get(
+                "constraint_straddled_by_lane_changes"
+            )
+        )
+    ]
+    asynchronous_rows = [
+        row
+        for row in rows
+        if bool(
+            (row.get("conflict_evidence") or {}).get(
+                "non_simultaneous_right_lane_changes"
+            )
+        )
+    ]
+    relations = {
+        str(value)
+        for row in rows
+        for value in (
+            (row.get("conflict_evidence") or {}).get(
+                "constraint_relation_at_lane_change_by_agent"
+            )
+            or {}
+        ).values()
+    }
+    passed = bool(
+        len(rows) == len(SEEDS)
+        and len(straddled_rows) == len(SEEDS)
+        and len(asynchronous_rows) == len(SEEDS)
+        and relations == {"ahead", "behind"}
+        and len(behavior_classes) >= 2
+    )
+    return {
+        "passed": passed,
+        "episode_count": len(rows),
+        "behavior_classes": sorted(behavior_classes),
+        "constraint_straddled_seeds": sorted(
+            int(row["seed"]) for row in straddled_rows
+        ),
+        "asynchronous_right_lane_change_seeds": sorted(
+            int(row["seed"]) for row in asynchronous_rows
+        ),
+        "realized_constraint_relations": sorted(relations),
+    }
+
+
+def _incidental_background_gate(rows: list[dict[str, object]]) -> dict[str, object]:
+    failures = []
+    counts = []
+    for row in rows:
+        evidence = row.get("conflict_evidence") or {}
+        declared = int(evidence.get("incidental_background_declared_count", 0))
+        realized = int(evidence.get("incidental_background_realized_count", 0))
+        counts.append(realized)
+        if not 3 <= declared == realized <= 6:
+            failures.append(
+                {
+                    "scenario_id": row.get("scenario_id"),
+                    "profile_id": row.get("profile_id"),
+                    "seed": row.get("seed"),
+                    "declared": declared,
+                    "realized": realized,
+                }
+            )
+    return {
+        "passed": bool(rows and not failures),
+        "realized_count_range": [min(counts), max(counts)] if counts else None,
+        "failures": failures,
+    }
+
+
 def _run_batch(root: Path, scenario_id: str, route: str, profile: str | None) -> Path:
     batch_root = root if profile is None else root / "S5_profiles" / profile
     run_scenario(
@@ -235,12 +319,19 @@ def main() -> None:
         bool(value["passed"])
         for value in s5_physical_behavior_gates.values()
     )
+    s8_rows = [
+        row for row in episodes if row["scenario_id"] == "S8_ego_exit_to_ramp"
+    ]
+    s8_physical_behavior_gate = _s8_physical_behavior_gate(s8_rows)
+    incidental_background_gate = _incidental_background_gate(episodes)
     hard_gates_passed = bool(
         base_ok and files_ok
         and s6_gaps == {"agent0-agent1", "agent1-agent2"}
         and s7_behaviors == {"pass_first", "yield_then_merge"}
         and profile_diversity
         and s5_memory_gate
+        and s8_physical_behavior_gate["passed"]
+        and incidental_background_gate["passed"]
     )
     contract = candidate_scenario_contract_v2(frozen=hard_gates_passed)
     manifest = {
@@ -255,6 +346,8 @@ def main() -> None:
         "s5_behavior_categories": s5_categories,
         "s5_physical_behavior_gates": s5_physical_behavior_gates,
         "s5_latest_memory_gate_passed": s5_memory_gate,
+        "s8_physical_behavior_gate": s8_physical_behavior_gate,
+        "incidental_background_gate": incidental_background_gate,
         "s6_target_gap_coverage": sorted(value for value in s6_gaps if value),
         "s7_behavior_coverage": sorted(
             value for value in s7_behaviors if value

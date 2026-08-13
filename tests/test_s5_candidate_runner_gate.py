@@ -1,4 +1,8 @@
-from evaluation.run_s5_s9_candidate_revision import _s5_physical_behavior_gate
+from evaluation.run_s5_s9_candidate_revision import (
+    _incidental_background_gate,
+    _s5_physical_behavior_gate,
+    _s8_physical_behavior_gate,
+)
 
 
 def _row(seed, behavior, *, directions=None, steps=None):
@@ -51,3 +55,53 @@ def test_s5_physical_gate_rejects_all_keep_or_all_synchronous_lane_change():
         for seed in (17, 23, 31, 47, 59)
     ]
     assert _s5_physical_behavior_gate(all_synchronous)["passed"] is False
+
+
+def test_s8_gate_requires_front_behind_straddling_and_diverse_async_order() -> None:
+    orders = (
+        ("agent0", "agent1", "agent2"),
+        ("agent0", "agent2", "agent1"),
+        ("agent0", "agent1", "agent2"),
+        ("agent0", "agent2", "agent1"),
+        ("agent0", "agent1", "agent2"),
+    )
+    rows = []
+    for seed, order in zip((17, 23, 31, 47, 59), orders):
+        rows.append(
+            {
+                "seed": seed,
+                "conflict_evidence": {
+                    "constraint_straddled_by_lane_changes": True,
+                    "non_simultaneous_right_lane_changes": True,
+                    "constraint_relation_at_lane_change_by_agent": {
+                        "agent0": "ahead",
+                        "agent1": "behind",
+                        "agent2": "behind",
+                    },
+                    "observed_lane_change_behavior_class": "gap:" + "-".join(order),
+                },
+            }
+        )
+
+    result = _s8_physical_behavior_gate(rows)
+
+    assert result["passed"] is True
+    rows[0]["conflict_evidence"]["constraint_straddled_by_lane_changes"] = False
+    assert _s8_physical_behavior_gate(rows)["passed"] is False
+
+
+def test_incidental_background_gate_requires_exact_three_to_six_realizations() -> None:
+    rows = [
+        {
+            "scenario_id": "S8_ego_exit_to_ramp",
+            "seed": seed,
+            "conflict_evidence": {
+                "incidental_background_declared_count": count,
+                "incidental_background_realized_count": count,
+            },
+        }
+        for seed, count in zip((17, 23, 31, 47, 59), (3, 4, 5, 6, 3))
+    ]
+    assert _incidental_background_gate(rows)["passed"] is True
+    rows[0]["conflict_evidence"]["incidental_background_realized_count"] = 2
+    assert _incidental_background_gate(rows)["passed"] is False

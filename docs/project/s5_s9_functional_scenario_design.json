@@ -1,12 +1,12 @@
 {
   "format": "bev_s5_s9_candidate_functional_scenario_memory_v1",
   "schema_version": 1,
-  "recorded_at": "2026-08-13T11:21:51+08:00",
-  "status": "user_confirmed_functional_definition_revision_pending_full_implementation_and_five_seed_validation",
+  "recorded_at": "2026-08-13T15:30:00+08:00",
+  "status": "user_confirmed_candidate_v3_implemented_pending_full_s5_s9_five_seed_validation",
   "purpose": "Store the user-confirmed functional semantics, constrained logical parameter ranges, and acceptance gates for the next S5-S9 scenario revision without retroactively changing the frozen scenario contract or the dataset used by the ongoing Stage1-A training run.",
   "latest_revision": {
     "date": "2026-08-13",
-    "summary": "Retain the revised S5 diversity definition and strengthened S6-S9 semantics. Confirm that S6 reassembly contains only the original three ego vehicles: the cut-in actor is never a platoon member, KEEP-only accommodation is invalid, and all three ego vehicles must physically change lane before ego-only reassembly. Record that S6, S7, S8, and S9 independently pass their fixed five-seed physical interaction, safety, reassembly, video, and artifact gates. S9 specifically proves causal bypass-lane interaction, three non-simultaneous physical LEFT transitions, blocker passage, narrow-road continuation, no return to lane 1, and bypass-route reassembly. Authorize S5-S9 implementation and per-scenario acceptance in any order while preserving the requirement for all five independent gates and a combined review before the complete candidate-v2 contract can be frozen.",
+    "summary": "Revise candidate S8 so one to three exit-side constraint actors physically split the platoon: across the fixed five seeds at least one ego must complete RIGHT ahead of the designated split actor and at least one behind it, with non-simultaneous lane changes and at least two physically evidenced behavior classes before ramp continuation and reassembly. Add exactly three to six explicitly managed, non-causal background actors to every S5-S9 episode. The new semantics supersede all previous per-scenario candidate acceptance for the current revision and require fresh fixed-five-seed safety, video, artifact, and combined-contract review without changing formal-v1 data or training metadata.",
     "formal_v1_contract_changed": false,
     "existing_dataset_or_training_metadata_changed": false
   },
@@ -47,6 +47,19 @@
     "episode_horizon_steps": 200,
     "simulated_duration_s": 20.0,
     "incidental_traffic_density": 0.0,
+    "explicit_incidental_background_traffic": {
+      "actor_count_range_per_episode": [
+        3,
+        6
+      ],
+      "applies_to_every_scenario": true,
+      "causal_scenario_role": false,
+      "spawn_strategy": "deterministic_route-lane_sampling_with_60m_minimum_initial_ego_clearance",
+      "lane_change_policy": "lane_keeping",
+      "resolved_count_speed_layout_and_roles_must_be_persisted": true,
+      "exact_declared_count_must_be_realized": true,
+      "must_not_replace_or_satisfy_any_primary_conflict_actor_gate": true
+    },
     "hard_safety_gates": {
       "background_gap_violation_m": 5.0,
       "platoon_pair_gap_violation_m": 7.0,
@@ -637,7 +650,13 @@
           1,
           3
         ],
-        "minimum_interacting_actor_count": 1
+        "minimum_interacting_actor_count": 1,
+        "designated_split_actor_required": true,
+        "designated_split_actor_target_gap_choices": [
+          "agent0-agent1",
+          "agent1-agent2"
+        ],
+        "ego_initial_bumper_gap_m": 18.0
       },
       "required_route_chain": [
         "mainline_lane",
@@ -662,8 +681,8 @@
           28.0
         ],
         "ego_distance_to_diverge_m": [
-          50.0,
-          90.0
+          55.0,
+          57.0
         ],
         "mandatory_lane_change_remaining_distance_m": [
           30.0,
@@ -685,7 +704,7 @@
       "expected_action_sequence": [
         "KEEP while approaching",
         "interact with at least one right-lane actor through measurable speed, gap, or lane-change timing adjustment",
-        "temporarily release formation and complete non-simultaneous RIGHT lane changes into the exit-side lane",
+        "temporarily release formation and complete non-simultaneous RIGHT lane changes into the exit-side lane, with at least one ego completing ahead of the designated split actor and at least one completing behind it",
         "KEEP through the diverge connector",
         "KEEP while continuing along the ramp",
         "recover longitudinal platoon gaps on the ramp"
@@ -694,7 +713,9 @@
         "the road graph exposes every edge in the required route chain",
         "one to three declared right-lane trigger actors spawn and remain addressable by role",
         "at least one trigger actor has a causal interaction with the ego platoon; incidental coexistence is insufficient",
+        "physical lane IDs and completion-time actor-relative longitudinal positions prove that at least one ego completed RIGHT ahead of the same designated split actor and at least one completed RIGHT behind it",
         "a physical split state and distinct lane-transition completion times prove that the three ego vehicles did not change to the rightmost lane simultaneously",
+        "the fixed five-seed suite contains at least two physical lane-change behavior classes derived from target-gap identity and completion order",
         "all three agents traverse the diverge connector",
         "all three agents enter and continue along the exit ramp",
         "all three ego vehicles reassemble in platoon order on the ramp through longitudinal gap recovery",
@@ -703,6 +724,7 @@
         "the interaction, exit, and reassembly complete without collision, road exit, or planner fallback"
       ],
       "candidate_revision_evidence_20260813": {
+        "superseded_for_current_candidate_revision": true,
         "implementation_state": "implemented_and_fixed_five_seed_memory_gate_passed",
         "verified_seeds": [
           17,
@@ -828,7 +850,33 @@
         "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s8_candidate_revision_final_20260813_v3/S8_ego_exit_to_ramp",
         "acceptance_report": "evaluation/S8_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
         "video_review": "seed 31 top-down and semantic-BEV videos reviewed at approach, exit transition, ramp continuation, and recovery frames; machine evidence remains authoritative for exact gates",
-        "five_seed_status": "memory_gate_passed_candidate_v2_not_globally_frozen"
+        "five_seed_status": "historical_candidate_v2_gate_passed_but_superseded_by_candidate_v3_semantics"
+      },
+      "candidate_revision_v3_smoke_evidence_20260813": {
+        "implementation_state": "implemented_and_unit_verified_pending_full_five_seed_gate",
+        "verified_seed": 17,
+        "validation_horizon_steps": 40,
+        "native_joint_planning_success": "40/40",
+        "collision": false,
+        "out_of_road": false,
+        "exit_constraint_actor_count": 1,
+        "incidental_background_actor_count": 4,
+        "right_lane_change_completion_steps": {
+          "agent0": 30,
+          "agent1": 30,
+          "agent2": 26
+        },
+        "constraint_relation_at_lane_change_by_agent": {
+          "agent0": "ahead",
+          "agent1": "ahead",
+          "agent2": "behind"
+        },
+        "constraint_straddled_by_lane_changes": true,
+        "physical_split_observed": true,
+        "non_simultaneous_right_lane_changes": true,
+        "causal_exit_actor_interaction_observed": true,
+        "artifact_root": "/tmp/s8_candidate_v3_transition_smoke2/S8_ego_exit_to_ramp",
+        "scope_limit": "40-step smoke ends before connector traversal, ramp continuation, formation recovery, fixed-five-seed diversity, and video gates"
       }
     },
     "S9_narrow_channel_negotiation": {
@@ -923,6 +971,8 @@
     "combined_fixed_seed_visual_and_machine_contract_review_required": true
   },
   "remaining_before_contract_freeze": [
+    "rerun every S5-S9 fixed-five-seed gate because the explicit 3-6 incidental actor contract changes every candidate episode",
+    "prove S8 fixed-five-seed front/behind split-actor crossing and at least two physical lane-change behavior classes",
     "freeze quantitative thresholds and persistence windows for physical formation release and reassembly evidence",
     "complete the combined fixed-seed visual and machine-contract review across all five independently accepted scenario gates",
     "assign a new contract identifier only after all five scenario gates and the combined review are complete"

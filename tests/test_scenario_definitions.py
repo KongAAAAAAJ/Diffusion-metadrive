@@ -36,10 +36,14 @@ def test_s6_declares_merge_aware_background_policy() -> None:
     assert "spawn_longitude" not in recipe.params
 
 
-def test_s6_declares_only_one_controlled_merge_vehicle() -> None:
+def test_s6_declares_one_controlled_merge_vehicle_plus_incidental_traffic() -> None:
     scenario = SCENARIO_BY_ID["S6_background_merge_in"]
-    assert len(scenario.traffic_recipes) == 1
-    recipe = scenario.traffic_recipes[0]
+    assert len(scenario.traffic_recipes) == 2
+    recipe = next(
+        row
+        for row in scenario.traffic_recipes
+        if row.operation == "inject_background_vehicle"
+    )
     assert recipe.operation == "inject_background_vehicle"
     assert recipe.params["reference_kind"] == "block_socket_road"
     assert recipe.params["trigger_on_start"] is True
@@ -114,7 +118,7 @@ def test_s8_declares_explicit_ego_spawn_controls() -> None:
     assert scenario.ego_spawn_reference_block_id == "g0"
     assert scenario.ego_spawn_longitude_m == (68.0, 70.0)
     assert scenario.ego_spawn_lane_id == 1
-    assert scenario.ego_initial_bumper_gap_m == pytest.approx(12.0)
+    assert scenario.ego_initial_bumper_gap_m == pytest.approx(18.0)
     assert scenario.override_traffic_density == pytest.approx(0.0)
 
 
@@ -130,3 +134,18 @@ def test_s8_declares_atomic_exit_gap_recipe() -> None:
         assert recipe.params["lane_index"] == 2
     assert len(recipes) == 1
     assert recipes[0].params["trigger_on_start"] is True
+
+
+def test_every_s5_s9_scenario_declares_three_to_six_incidental_actors() -> None:
+    for number in range(5, 10):
+        scenario = next(
+            value for value in SCENARIO_BY_ID.values() if value.code == f"S{number}"
+        )
+        recipes = [
+            recipe
+            for recipe in scenario.traffic_recipes
+            if recipe.operation == "inject_incidental_background_traffic"
+        ]
+        assert len(recipes) == 1
+        assert recipes[0].params["actor_count_range"] == (3, 6)
+        assert recipes[0].params["trigger_on_start"] is True

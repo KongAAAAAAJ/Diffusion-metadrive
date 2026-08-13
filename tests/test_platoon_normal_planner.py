@@ -2461,6 +2461,18 @@ def test_s9_lane_change_start_delays_follow_platoon_order():
     ] == [0.0, 1.0, 2.0]
 
 
+def test_s8_lane_change_start_delays_follow_platoon_order_on_control_grid():
+    vehicles = [SimpleNamespace(name=f"agent{index}") for index in range(3)]
+    env = SimpleNamespace(
+        agents={vehicle.name: vehicle for vehicle in vehicles}
+    )
+
+    assert [
+        PlatoonNormalPlanner._s8_platoon_lane_change_start_delay(env, vehicle)
+        for vehicle in vehicles
+    ] == [0.0, 0.2, 0.4]
+
+
 def test_s9_post_bypass_keep_prefers_recovery_speed():
     planner = PlatoonNormalPlanner()
 

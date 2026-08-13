@@ -2637,9 +2637,9 @@ class PlatoonNormalPlanner:
                     s9_start_delay_s,
                 )
             if scenario_id == "S8_ego_exit_to_ramp" and int(action) != 0:
-                start_delays = tuple(
-                    value for value in start_delays if value <= 2.0
-                ) or (0.0,)
+                start_delays = (
+                    self._s8_platoon_lane_change_start_delay(env, vehicle),
+                )
             if commitment_elapsed_s is not None and int(action) != 0:
                 start_delays = (0.0,)
             if lane_end_restricted and int(action) != 0:
@@ -4381,6 +4381,15 @@ class PlatoonNormalPlanner:
             0,
         )
         return float(platoon_index)
+
+    @staticmethod
+    def _s8_platoon_lane_change_start_delay(env, vehicle) -> float:
+        agents = list((getattr(env, "agents", {}) or {}).values())
+        platoon_index = next(
+            (index for index, agent in enumerate(agents) if agent is vehicle),
+            0,
+        )
+        return 0.2 * float(platoon_index)
 
     def _longitudinal_progress(
         self,

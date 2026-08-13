@@ -43,6 +43,12 @@ class _TimedMainlineStreamPolicy(GroundTruthIDMPolicy):
     LANE_CHANGE_FREQ = 10_000
 
 
+class _IncidentalBackgroundPolicy(GroundTruthIDMPolicy):
+    """Lane-keeping traffic that enriches perception without defining a hazard."""
+
+    LANE_CHANGE_FREQ = 10_000
+
+
 class _S9BlockingPolicy(GroundTruthIDMPolicy):
     """Keep the S9 obstruction slow and centred in its declared c3 lane.
 
@@ -656,6 +662,135 @@ class ScenarioOrchestrator:
         self._register_actor(role, spawned, step_count=step_count)
         return spawned
 
+    def _handle_inject_incidental_background_traffic(
+        self,
+        env,
+        ego_vehicle,
+        params,
+        step_count: int,
+    ) -> bool:
+        """Spawn the exact non-causal 3--6 actor set declared by S5--S9."""
+
+        resolved = self._resolved_scenario_parameters
+        count = int(resolved.get("incidental_background_actor_count", 0))
+        declared_range = tuple(params.get("actor_count_range", (3, 6)))
+        if len(declared_range) != 2 or not int(declared_range[0]) <= count <= int(
+            declared_range[1]
+        ):
+            raise ValueError("incidental background actor count violates contract")
+
+        role_prefix = "incidental_background_"
+        realized_roles = sorted(
+            role for role in self._actor_manifest if role.startswith(role_prefix)
+        )
+        if len(realized_roles) >= count:
+            return len(realized_roles) == count
+
+        traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        if traffic_manager is None or current_map is None:
+            return False
+
+        lanes = list(
+            getattr(traffic_manager, "_get_all_route_lanes", lambda: [])() or []
+        )
+        if not lanes:
+            for block in getattr(current_map, "blocks", ()) or ():
+                lane_groups = getattr(
+                    getattr(block, "block_network", None),
+                    "get_positive_lanes",
+                    lambda: [],
+                )() or []
+                for lane_group in lane_groups:
+                    lanes.extend(list(lane_group or ()))
+
+        unique_lanes = {}
+        for lane in lanes:
+            lane_index = tuple(getattr(lane, "index", ()) or ())
+            if lane_index and float(getattr(lane, "length", 0.0) or 0.0) >= 24.0:
+                unique_lanes[lane_index] = lane
+        candidates = []
+        for lane_index, lane in sorted(unique_lanes.items(), key=lambda row: str(row[0])):
+            lane_length = float(lane.length)
+            for fraction in (0.12, 0.3, 0.5, 0.7, 0.88):
+                longitude = float(np.clip(lane_length * fraction, 10.0, lane_length - 10.0))
+                position = lane.position(longitude, 0.0)
+                candidates.append((lane_index, longitude, position))
+        layout_rng = np.random.RandomState(
+            int(resolved.get("incidental_background_layout_seed", 0))
+        )
+        layout_rng.shuffle(candidates)
+
+        minimum_ego_clearance_m = float(params.get("minimum_ego_clearance_m", 60.0))
+        minimum_actor_clearance_m = float(
+            params.get("minimum_actor_clearance_m", 18.0)
+        )
+        agents = list((getattr(env, "agents", {}) or {}).values())
+        raw_traffic = getattr(traffic_manager, "_traffic_vehicles", ()) or ()
+        traffic = list(
+            raw_traffic.values() if isinstance(raw_traffic, dict) else raw_traffic
+        )
+        speeds = list(resolved.get("incidental_background_speeds_km_h", ()))
+        while candidates and len(realized_roles) < count:
+            lane_index, longitude, position = candidates.pop()
+            position_xy = np.asarray(position[:2], dtype=np.float64)
+            if any(
+                float(
+                    np.linalg.norm(
+                        position_xy
+                        - np.asarray(getattr(agent, "position", (0.0, 0.0))[:2])
+                    )
+                )
+                < minimum_ego_clearance_m
+                for agent in agents
+            ):
+                continue
+            if any(
+                float(
+                    np.linalg.norm(
+                        position_xy
+                        - np.asarray(getattr(actor, "position", (0.0, 0.0))[:2])
+                    )
+                )
+                < minimum_actor_clearance_m
+                for actor in traffic
+            ):
+                continue
+            role = f"{role_prefix}{len(realized_roles)}"
+            speed_kmh = float(speeds[len(realized_roles)])
+            spawned = self._spawn_on_lane_tuple(
+                env,
+                ego_vehicle,
+                lane_tuple=lane_index,
+                spawn_longitude=longitude,
+                reference_kind="absolute_lane",
+                target_speed_kmh=speed_kmh,
+                min_clearance_m=minimum_ego_clearance_m,
+                policy_class=_IncidentalBackgroundPolicy,
+                vehicle_type=self._scenario_vehicle_type(),
+            )
+            if spawned is None:
+                continue
+            setattr(spawned, "scenario_vehicle_role", role)
+            self._register_actor(role, spawned, step_count=step_count)
+            realized_roles.append(role)
+            traffic.append(spawned)
+
+        self._conflict_evidence.update(
+            {
+                "incidental_background_declared_count": count,
+                "incidental_background_realized_count": len(realized_roles),
+                "incidental_background_roles": list(realized_roles),
+            }
+        )
+        if len(realized_roles) == count:
+            self._mark_realized(step_count, "incidental_background_spawned")
+            return True
+        self.summary.notes.append(
+            f"incidental_background_incomplete:{len(realized_roles)}/{count}"
+        )
+        return False
+
     def _handle_inject_s7_merge_traffic(self, env, ego_vehicle, params, step_count: int) -> bool:
         resolved = self._resolved_scenario_parameters
         lane_tuple = self._resolve_lane_index(
@@ -887,41 +1022,62 @@ class ScenarioOrchestrator:
             self.summary.notes.append("s8_exit_lane_missing")
             return False
         lane = current_map.road_network.get_lane(lane_tuple)
-        agent_s = []
-        for agent in (getattr(env, "agents", {}) or {}).values():
+        agent_s = {}
+        for agent_id, agent in (getattr(env, "agents", {}) or {}).items():
             try:
-                agent_s.append(float(lane.local_coordinates(agent.position)[0]))
+                agent_s[str(agent_id)] = float(
+                    lane.local_coordinates(agent.position)[0]
+                )
             except Exception:
                 continue
-        if not agent_s:
+        if set(agent_s) != {"agent0", "agent1", "agent2"}:
             return False
-        gap = float(resolved.get("usable_exit_lane_gap_m", 60.0))
-        actor_length_m = 5.74
-        # Five metres is the immutable runtime background-gap boundary, not
-        # a robust spawn target.  Leave one platoon-sized buffer so the rear
-        # actor remains causally close without making ordinary tracking error
-        # or the required seam deceleration produce an unrecoverable t=0
-        # violation later in the episode.
-        hard_clearance_m = 12.0
-        rear_s = min(agent_s) - actor_length_m - hard_clearance_m
-        front_s = rear_s + actor_length_m + gap
-        minimum_front_s = max(agent_s) + actor_length_m + hard_clearance_m
-        if front_s < minimum_front_s:
-            front_s = minimum_front_s
-            rear_s = front_s - actor_length_m - gap
-        rows = (
-            ("exit_gap_front", front_s, resolved.get("exit_lane_front_actor_speed_km_h", 19.0)),
-            ("exit_gap_rear", rear_s, resolved.get("exit_lane_rear_actor_speed_km_h", 24.0)),
+
+        actor_count = int(resolved.get("exit_constraint_actor_count", 1))
+        if not 1 <= actor_count <= 3:
+            raise ValueError("S8 exit constraint actor count must be in [1, 3]")
+        target_gap_id = str(
+            resolved.get("exit_constraint_target_gap_id", "agent0-agent1")
         )
-        for role, longitudinal, speed in rows:
+        try:
+            target_front_id, target_rear_id = target_gap_id.split("-", 1)
+            split_s = 0.5 * (
+                float(agent_s[target_front_id]) + float(agent_s[target_rear_id])
+            )
+        except (KeyError, ValueError):
+            raise ValueError("S8 exit constraint target gap is invalid")
+
+        actor_length_m = 5.74
+        boundary_clearance_m = 18.0
+        speeds = list(resolved.get("exit_constraint_actor_speeds_km_h", (20.0,)))
+        rows = [("exit_split_constraint", split_s, float(speeds[0]), 6.0)]
+        if actor_count >= 2:
+            rows.append(
+                (
+                    "exit_constraint_front",
+                    max(agent_s.values()) + actor_length_m + boundary_clearance_m,
+                    float(speeds[1]),
+                    12.0,
+                )
+            )
+        if actor_count >= 3:
+            rows.append(
+                (
+                    "exit_constraint_rear",
+                    min(agent_s.values()) - actor_length_m - boundary_clearance_m,
+                    float(speeds[2]),
+                    12.0,
+                )
+            )
+        for role, longitudinal, speed, _ in rows:
             if not 2.0 <= float(longitudinal) <= float(lane.length) - 2.0:
-                self.summary.notes.append("s8_gap_geometry_out_of_range")
+                self.summary.notes.append("s8_constraint_geometry_out_of_range")
                 return False
-        for role, longitudinal, speed in rows:
+        for role, longitudinal, speed, clearance in rows:
             spawned = self._spawn_role_on_lane(
                 env, ego_vehicle, role=role, lane_tuple=lane_tuple,
                 longitudinal_m=longitudinal, speed_kmh=float(speed),
-                step_count=step_count, min_clearance_m=hard_clearance_m,
+                step_count=step_count, min_clearance_m=clearance,
                 policy_class=_TimedMainlineStreamPolicy,
             )
             if spawned is None:
@@ -939,14 +1095,15 @@ class ScenarioOrchestrator:
                 policy.routing_target_lane = lane
         self._conflict_evidence.update(
             {
-                "usable_exit_lane_gap_m": gap,
-                "exit_gap_spawn_lane_index": list(lane_tuple),
-                "exit_gap_spawn_front_s_m": float(front_s),
-                "exit_gap_spawn_rear_s_m": float(rear_s),
+                "exit_constraint_declared_count": actor_count,
+                "exit_constraint_target_gap_id": target_gap_id,
+                "exit_constraint_spawn_lane_index": list(lane_tuple),
+                "exit_split_constraint_spawn_s_m": float(split_s),
+                "exit_constraint_roles": [row[0] for row in rows],
             }
         )
-        self._mark_realized(step_count, "s8_exit_gap_spawned")
-        return {"exit_gap_front", "exit_gap_rear"}.issubset(self._actor_manifest)
+        self._mark_realized(step_count, "s8_exit_constraints_spawned")
+        return all(role in self._actor_manifest for role, *_ in rows)
 
     def _handle_inject_s9_bypass_actors(self, env, ego_vehicle, params, step_count: int) -> bool:
         resolved = self._resolved_scenario_parameters
@@ -3646,73 +3803,77 @@ class ScenarioOrchestrator:
             physical_split_observed
         )
 
-        front_row = self._actor_manifest.get("exit_gap_front", {})
-        rear_row = self._actor_manifest.get("exit_gap_rear", {})
-        front_actor = traffic_by_name.get(str(front_row.get("object_name", "")))
-        rear_actor = traffic_by_name.get(str(rear_row.get("object_name", "")))
-        interaction_observed = bool(
-            self._functional_state.get("s8_causal_interaction_observed", False)
+        split_row = self._actor_manifest.get("exit_split_constraint", {})
+        split_actor = traffic_by_name.get(str(split_row.get("object_name", "")))
+        relation_by_agent = self._functional_state.setdefault(
+            "s8_constraint_relation_by_agent", {}
         )
-        interaction_front_gap_m = None
-        interaction_rear_gap_m = None
-        if front_actor is not None and rear_actor is not None:
+        minimum_constraint_gap_m = float(
+            self._functional_state.get("s8_minimum_constraint_gap_m", np.inf)
+        )
+        maximum_speed_spread_kmh = float(
+            self._functional_state.get("s8_maximum_speed_spread_kmh", 0.0)
+        )
+        if split_actor is not None:
             current_map = getattr(getattr(env, "engine", None), "current_map", None)
             try:
                 exit_lane = current_map.road_network.get_lane((*exit_side_road, 2))
-                front_s = float(exit_lane.local_coordinates(front_actor.position)[0])
-                rear_s = float(exit_lane.local_coordinates(rear_actor.position)[0])
-                target_egos = [
-                    (name, (getattr(env, "agents", {}) or {})[name])
-                    for name, lane in current_lanes.items()
-                    if len(lane) >= 3
-                    and tuple(lane[:2]) == exit_side_road
-                    and int(lane[2]) == 2
-                ]
-                target_positions = [
-                    (name, vehicle, float(exit_lane.local_coordinates(vehicle.position)[0]))
-                    for name, vehicle in target_egos
-                ]
-                inside = [row for row in target_positions if rear_s < row[2] < front_s]
-                if inside:
-                    leading = max(inside, key=lambda row: row[2])
-                    trailing = min(inside, key=lambda row: row[2])
-                    interaction_front_gap_m = (
-                        front_s
-                        - leading[2]
-                        - 0.5 * self._vehicle_length_m(front_actor)
-                        - 0.5 * self._vehicle_length_m(leading[1])
+                split_s = float(exit_lane.local_coordinates(split_actor.position)[0])
+                split_length = self._vehicle_length_m(split_actor)
+                ego_speeds = []
+                for name, vehicle in (getattr(env, "agents", {}) or {}).items():
+                    ego_s = float(exit_lane.local_coordinates(vehicle.position)[0])
+                    center_delta = ego_s - split_s
+                    bumper_gap = max(
+                        abs(center_delta)
+                        - 0.5 * self._vehicle_length_m(vehicle)
+                        - 0.5 * split_length,
+                        0.0,
                     )
-                    interaction_rear_gap_m = (
-                        trailing[2]
-                        - rear_s
-                        - 0.5 * self._vehicle_length_m(trailing[1])
-                        - 0.5 * self._vehicle_length_m(rear_actor)
+                    minimum_constraint_gap_m = min(
+                        minimum_constraint_gap_m, bumper_gap
                     )
-                    close_to_boundary = min(
-                        interaction_front_gap_m, interaction_rear_gap_m
-                    ) <= 25.0
-                    if close_to_boundary:
-                        interaction_observed = True
-                        self._functional_state[
-                            "s8_causal_interaction_observed"
-                        ] = True
-                        self._conflict_evidence.setdefault(
-                            "exit_gap_interaction_step", int(step_count)
+                    ego_speeds.append(
+                        float(getattr(vehicle, "speed_km_h", 0.0) or 0.0)
+                    )
+                    if name in right_completion_steps and name not in relation_by_agent:
+                        relation_by_agent[str(name)] = (
+                            "ahead" if center_delta > 0.0 else "behind"
                         )
-                        self._conflict_evidence.setdefault(
-                            "exit_gap_interacting_agents",
-                            [str(row[0]) for row in inside],
-                        )
-                        self._conflict_evidence.setdefault(
-                            "observed_exit_gap_front_bumper_gap_m",
-                            float(interaction_front_gap_m),
-                        )
-                        self._conflict_evidence.setdefault(
-                            "observed_exit_gap_rear_bumper_gap_m",
-                            float(interaction_rear_gap_m),
-                        )
+                if ego_speeds:
+                    maximum_speed_spread_kmh = max(
+                        maximum_speed_spread_kmh,
+                        max(ego_speeds) - min(ego_speeds),
+                    )
             except (AttributeError, KeyError, TypeError, ValueError):
                 pass
+        self._functional_state["s8_minimum_constraint_gap_m"] = (
+            minimum_constraint_gap_m
+        )
+        self._functional_state["s8_maximum_speed_spread_kmh"] = (
+            maximum_speed_spread_kmh
+        )
+        constraint_straddled = bool(
+            "ahead" in relation_by_agent.values()
+            and "behind" in relation_by_agent.values()
+        )
+        ordered_lane_changes = [
+            name
+            for name, _ in sorted(
+                right_completion_steps.items(), key=lambda row: (row[1], row[0])
+            )
+        ]
+        behavior_class = None
+        if len(ordered_lane_changes) == 3 and constraint_straddled:
+            behavior_class = (
+                f"{self._resolved_scenario_parameters.get('exit_constraint_target_gap_id')}"
+                f":{'-'.join(ordered_lane_changes)}"
+            )
+        interaction_observed = bool(
+            constraint_straddled
+            and len(right_completion_steps) == 3
+            and len(set(right_completion_steps.values())) >= 2
+        )
         ramp_chain_seen = {
             name: any(
                 tuple(value) in exit_ramp_roads for value in road_history[name]
@@ -3771,11 +3932,37 @@ class ScenarioOrchestrator:
         )
         self._conflict_evidence.update(
             {
-                "exit_gap_roles_present": {
-                    "exit_gap_front", "exit_gap_rear"
+                "exit_constraint_roles_present": {
+                    "exit_split_constraint"
                 }.issubset(self._actor_manifest),
+                "exit_constraint_declared_count": int(
+                    self._resolved_scenario_parameters.get(
+                        "exit_constraint_actor_count", 0
+                    )
+                ),
+                "exit_constraint_realized_count": len(
+                    [
+                        role
+                        for role in self._actor_manifest
+                        if role.startswith("exit_") and "constraint" in role
+                    ]
+                ),
                 "exit_side_lane_entry_by_agent": initial_exit_lane_seen,
                 "right_lane_change_completion_steps": right_completion_steps,
+                "right_lane_change_order": ordered_lane_changes,
+                "constraint_relation_at_lane_change_by_agent": dict(
+                    relation_by_agent
+                ),
+                "constraint_straddled_by_lane_changes": constraint_straddled,
+                "minimum_split_constraint_bumper_gap_m": (
+                    None
+                    if not np.isfinite(minimum_constraint_gap_m)
+                    else float(minimum_constraint_gap_m)
+                ),
+                "maximum_platoon_speed_spread_during_exit_kmh": float(
+                    maximum_speed_spread_kmh
+                ),
+                "observed_lane_change_behavior_class": behavior_class,
                 "physical_split_observed": physical_split_observed,
                 "non_simultaneous_right_lane_changes": bool(
                     len(right_completion_steps) == 3
@@ -4087,7 +4274,7 @@ class ScenarioOrchestrator:
             )
         if scenario_id == "S8_ego_exit_to_ramp":
             return bool(
-                {"exit_gap_front", "exit_gap_rear"}.issubset(
+                {"exit_split_constraint"}.issubset(
                     self._actor_manifest
                 )
                 and self._route_completion.get(
@@ -4101,6 +4288,9 @@ class ScenarioOrchestrator:
                 )
                 and self._conflict_evidence.get(
                     "non_simultaneous_right_lane_changes", False
+                )
+                and self._conflict_evidence.get(
+                    "constraint_straddled_by_lane_changes", False
                 )
                 and self._route_completion.get(
                     "all_agents_traversed_diverge_connector", False
