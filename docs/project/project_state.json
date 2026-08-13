@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-13T11:36:54+08:00",
+  "updated_at": "2026-08-13T11:58:21+08:00",
   "repository": {
     "branch": "s5-s9-scenario-revision",
-    "git_commit": "166a5093e2ee555576fa789b2e5a8f99ff569052",
+    "git_commit": "72b4b21e058572ebb54a87e960fc0b88991d3c82",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false
   },
@@ -119,6 +119,10 @@
     "note": "Authorization follows the corrected formal-path pilot reviewed by the downstream RiskEntry project."
   },
   "source_of_truth": {
+    "tmp_output_cleanup_report": {
+      "path": "evaluation/TMP_OUTPUT_CLEANUP_REPORT.json",
+      "role": "Records the explicitly authorized permanent cleanup of 725 unreferenced project output directories under /tmp and preservation of active acceptance evidence"
+    },
     "git_tracked_output_cleanup_report": {
       "path": "evaluation/GIT_TRACKED_OUTPUT_CLEANUP_REPORT.json",
       "role": "Records removal of generated outputs from the Git index, local-file preservation, ignore coverage, and the remaining history-rewrite boundary"
