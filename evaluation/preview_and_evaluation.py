@@ -440,6 +440,7 @@ def _expert_debug_snapshot(
         "pairwise_conflict_count",
         "pairwise_conflict_pair_count",
         "pairwise_conflict_counts_by_pair",
+        "pairwise_safe_indices_by_pair",
         "selected_indices",
         "selected_score",
         "planning_time_ms",
@@ -461,10 +462,17 @@ def _expert_debug_snapshot(
         "first_committed_road_rejection",
         "committed_first_rejection_by_duration",
         "background_collision_rejection_count",
+        "background_gap_rejection_count",
         "lane_end_rejection_count",
         "minimum_speed_rejection_count",
         "collision_rejections_by_object",
         "kinematic_rejections_by_reason",
+        "best_rejected_dense_dynamics",
+        "best_rejected_background_gap_m",
+        "best_rejected_background_profile",
+        "selected_profile_attempts",
+        "source_lane_chain_indices",
+        "candidates",
         "lane_end_restricted",
         "commitment_elapsed_s",
         "commitment_deadline_remaining_s",
@@ -848,6 +856,26 @@ def _format_episode_stop_reason(
     if arrive_agents:
         parts.append(f"arrive_agents={','.join(arrive_agents)}")
     return " ".join(parts)
+
+
+def _diagnostic_initial_speed_km_h(
+    env: object,
+    scenario_summary: Mapping[str, object],
+) -> float:
+    """Report the scenario-resolved spawn speed when one is available."""
+
+    resolved = scenario_summary.get("resolved_scenario_parameters", {})
+    if isinstance(resolved, Mapping):
+        value = resolved.get("ego_initial_speed_km_h")
+        try:
+            speed = float(value)
+        except (TypeError, ValueError):
+            speed = np.nan
+        if np.isfinite(speed):
+            return speed
+    return float(
+        getattr(env, "config", {}).get("initial_speed_km_h", np.nan)
+    )
 
 
 def _run_single_episode(
@@ -1272,10 +1300,9 @@ def _run_single_episode(
         episode_diagnostics.update(
             {
                 "seed": int(seed),
-                "initial_speed_km_h": float(
-                    getattr(env, "config", {}).get(
-                        "initial_speed_km_h", np.nan
-                    )
+                "initial_speed_km_h": _diagnostic_initial_speed_km_h(
+                    env,
+                    scenario_summary,
                 ),
                 "simulator_steps": int(simulator_steps),
                 "simulated_duration_s": float(simulator_steps * dt_s),

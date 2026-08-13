@@ -637,7 +637,17 @@ class PlatoonNormalPlanner:
     # edge ends; 5.5--6.0 s profiles had no candidate for the front two egos.
     S6_LANE_CHANGE_DURATIONS_S = (2.5, 3.0)
     S6_SECOND_GAP_LANE_CHANGE_DURATIONS_S = (2.5, 3.0, 3.5, 4.0, 4.5)
-    S9_LANE_CHANGE_DURATIONS_S = (5.0, 5.5, 6.0, 6.5)
+    S9_LANE_CHANGE_DURATIONS_S = (4.5,)
+    # A vehicle that has already entered S9's bypass lane remains on the same
+    # committed joint plan while the next platoon member changes lanes.  Keep
+    # a prediction margin for longitudinal tracking error during that handoff;
+    # the runtime hard safety gate remains background_safe_gap_m (5 m).
+    S9_PREFLIGHT_BACKGROUND_GAP_M = 15.0
+    S9_TRACKING_LATERAL_LIMIT_M = 0.45
+    S9_TRACKING_HEADING_LIMIT_RAD = 0.18
+    S9_RECOVERY_TARGET_SPEED_MPS = 5.0
+    S9_RECOVERY_SPEED_PENALTY_WEIGHT = 40.0
+    S9_RECOVERY_BRAKE_PENALTY_WEIGHT = 80.0
     URGENT_LANE_CHANGE_DURATIONS_S = (1.0, 1.5, 2.0)
     LANE_END_CLEARANCE_M = 0.5
 
@@ -1281,7 +1291,22 @@ class PlatoonNormalPlanner:
                         # replans normally. Do not keep replaying a four-second
                         # lateral commitment after all vehicles have localized
                         # on that target lane.
-                        deadline = min(deadline, self.HORIZON_S - decision_dt_s)
+                        deadline = min(
+                            deadline,
+                            max(
+                                float(
+                                    selected_candidates[
+                                        agent_id
+                                    ].lane_change_start_delay_s
+                                )
+                                + float(
+                                    selected_candidates[
+                                        agent_id
+                                    ].lane_change_duration_s
+                                )
+                                for agent_id in committed_agents
+                            ),
+                        )
                     deadline_key = round(float(deadline), 6)
                     specs: dict[str, TrajectoryExecutionSpec] = {}
                     candidate_audits: dict[str, _CandidateFullHorizonAudit] = {}
@@ -1658,10 +1683,25 @@ class PlatoonNormalPlanner:
                 candidate.lane_change_start_delay_s
             ),
             default_heading=float(params["default_heading"]),
+            start_point_xy=np.asarray(
+                params.get(
+                    "start_point_xy",
+                    source_lane.position(
+                        float(params["start_s"]), float(params["start_d"])
+                    )[:2],
+                ),
+                dtype=np.float64,
+            ),
             times=sample_times,
             route_lane_chain=(
                 source_chain
                 if int(params.get("action", 0)) == 0 or route_transition_action
+                else None
+            ),
+            route_lateral_recovery_m=(
+                6.0
+                if int(params.get("action", 0)) == 0
+                and abs(float(params["start_d"])) > 1.0e-3
                 else None
             ),
         )
@@ -1928,15 +1968,31 @@ class PlatoonNormalPlanner:
         current_xy = np.asarray(trajectory_world[0, :2], dtype=np.float64)
         source_chain = self._connected_execution_prefix(source_chain)
         target_chain = self._connected_execution_prefix(target_chain)
+        path_start_s, path_start_d = source_chain[0].local_coordinates(
+            current_xy
+        )
+        path_start_s = float(
+            np.clip(
+                path_start_s,
+                0.0,
+                float(getattr(source_chain[0], "length", 0.0) or 0.0),
+            )
+        )
         source_path = build_continuous_lane_chain_path(
             source_chain,
-            start_s=float(start_s),
-            start_lateral_m=float(start_d),
+            start_s=path_start_s,
+            start_lateral_m=float(path_start_d),
+            start_point_xy=current_xy,
             step_m=0.25,
             seam_transition_m=float(
                 getattr(
                     source_chain[0], "route_seam_transition_m", 8.0
                 )
+            ),
+            lateral_recovery_m=(
+                6.0
+                if int(action) == 0 and abs(float(path_start_d)) > 1.0e-3
+                else None
             ),
         )
         source_path = self._anchor_route_path_heading(
@@ -2124,7 +2180,11 @@ class PlatoonNormalPlanner:
         committed_first_rejection_by_duration: dict[str, dict] = {}
         best_rejected_background_gap_m = -float("inf")
         best_rejected_background_profile: dict[str, float] | None = None
-        source_lane = getattr(vehicle, "lane", None)
+        source_lane = self._proposal_source_lane(
+            env,
+            vehicle,
+            source_lane_chain_indices,
+        )
         if source_lane is None:
             return [], self._empty_debug("missing_source_lane", stats, collision_hits)
 
@@ -2161,6 +2221,9 @@ class PlatoonNormalPlanner:
         )
         if target_lane is None:
             return [], self._empty_debug("target_lane_unavailable", stats, collision_hits)
+        scenario_id = str(
+            (getattr(env, "config", {}) or {}).get("scenario_id", "")
+        )
         source_lane_chain = [
             lane
             for lane in (
@@ -2200,7 +2263,24 @@ class PlatoonNormalPlanner:
         source_lane_chain = self._append_unique_execution_successors(
             env, source_lane_chain
         )
-        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        if (
+            scenario_id == "S8_ego_exit_to_ramp"
+            and source_lane_key == ("4G0_0_", "4G1_1_", 0)
+        ):
+            # MetaDrive relabels the vehicle onto the short exit connector
+            # while its body is still traversing the canonical offset seam.
+            # Retain the physical incoming lane so route geometry crops the
+            # same frozen transition instead of starting a second bend from
+            # the connector centreline.
+            incoming = self._lane_from_index(
+                env, ("3C0_1_", "4G0_0_", 2)
+            )
+            if incoming is not None and all(
+                tuple(getattr(lane, "index", ()) or ())
+                != ("3C0_1_", "4G0_0_", 2)
+                for lane in source_lane_chain
+            ):
+                source_lane_chain.insert(0, incoming)
         if (
             scenario_id == "S7_ego_merge_from_ramp"
             and source_lane_key == ("18c0_1_", "9g0_0_", 0)
@@ -2353,9 +2433,15 @@ class PlatoonNormalPlanner:
                 else self.S6_LANE_CHANGE_DURATIONS_S
             )
         if scenario_id == "S8_ego_exit_to_ramp" and int(action) != 0:
-            durations = tuple(value for value in durations if value >= 3.5)
+            durations = tuple(value for value in durations if value >= 4.5)
         if scenario_id == "S9_narrow_channel_negotiation" and int(action) != 0:
-            durations = tuple(self.S9_LANE_CHANGE_DURATIONS_S)
+            s9_start_delay_s = self._s9_platoon_lane_change_start_delay(
+                env, vehicle
+            )
+            durations = tuple(
+                float(value) + s9_start_delay_s
+                for value in self.S9_LANE_CHANGE_DURATIONS_S
+            )
         commitment_deadline_remaining_s = None
         if int(action) != 0 and commitment_elapsed_s is not None:
             durations, commitment_deadline_remaining_s = (
@@ -2390,6 +2476,7 @@ class PlatoonNormalPlanner:
             include_platoon=False,
         )
         candidates: list[_TrajectoryCandidate] = []
+        selected_profile_attempts: list[dict[str, float]] = []
         corridor_debug: dict[str, list[float | None]] = {}
         shared_ttc_penalty = self._ttc_penalty(
             np.empty((0, 3), dtype=np.float64),
@@ -2541,6 +2628,14 @@ class PlatoonNormalPlanner:
                 float(duration),
                 target_envelope,
             )
+            if (
+                scenario_id == "S9_narrow_channel_negotiation"
+                and int(action) != 0
+                and commitment_elapsed_s is None
+            ):
+                start_delays = (
+                    s9_start_delay_s,
+                )
             if scenario_id == "S8_ego_exit_to_ramp" and int(action) != 0:
                 start_delays = tuple(
                     value for value in start_delays if value <= 2.0
@@ -2617,6 +2712,55 @@ class PlatoonNormalPlanner:
                                 progress,
                             )
                         )
+            s8_rear_clearance_transition = bool(
+                scenario_id == "S8_ego_exit_to_ramp"
+                and int(action) == 0
+                and np.isfinite(lower)
+                and max(source_length - start_s, 0.0) <= 31.0
+            )
+            if (
+                s8_rear_clearance_transition
+                and max(source_length - start_s, 0.0) <= 25.0
+            ):
+                # Near the seam, terminal-progress coverage can retain either
+                # a rear-safe fast profile or a curve-safe slow profile while
+                # missing the temporal combination of both.  Add a small,
+                # bounded lattice that creates clearance on the straight and
+                # sheds speed before the canonical bend.  The same hard
+                # corridor, dynamics, road and OBB audits below remain final.
+                for acceleration in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+                    for acceleration_duration in (0.5, 1.0):
+                        for recovery_acceleration in (-2.0, -1.0):
+                            progress = self._longitudinal_progress(
+                                ego_speed,
+                                acceleration,
+                                self._dense_times,
+                                acceleration_duration_s=acceleration_duration,
+                                recovery_acceleration_mps2=(
+                                    recovery_acceleration
+                                ),
+                            )
+                            progress_at_completion = float(
+                                np.interp(
+                                    evaluation_time,
+                                    self._dense_times,
+                                    progress,
+                                )
+                            )
+                            if (
+                                progress_at_completion < lower - 1.0e-6
+                                or progress_at_completion > upper + 1.0e-6
+                            ):
+                                continue
+                            profile_options.append(
+                                (
+                                    abs(progress_at_completion - lower),
+                                    acceleration,
+                                    acceleration_duration,
+                                    recovery_acceleration,
+                                    progress,
+                                )
+                            )
             profile_options.sort(key=lambda value: value[0])
             for (
                 _profile_cost,
@@ -2630,7 +2774,20 @@ class PlatoonNormalPlanner:
                     scenario_id=scenario_id,
                     action=int(action),
                 ),
+                preserve_surge_then_brake=s8_rear_clearance_transition,
             ):
+                selected_profile_attempts.append(
+                    {
+                        "acceleration_mps2": float(acceleration),
+                        "acceleration_duration_s": float(
+                            acceleration_duration
+                        ),
+                        "recovery_acceleration_mps2": float(
+                            recovery_acceleration
+                        ),
+                        "terminal_progress_m": float(progress[-1]),
+                    }
+                )
                 for start_delay in start_delays:
                     if lane_end_restricted and int(action) != 0:
                         completion_progress = self._lane_change_completion_progress(
@@ -2658,6 +2815,9 @@ class PlatoonNormalPlanner:
                             default_heading=float(
                                 getattr(vehicle, "heading_theta", 0.0)
                             ),
+                            start_point_xy=np.asarray(
+                                vehicle.position[:2], dtype=np.float64
+                            ),
                             route_lane_chain=(
                                 source_lane_chain
                                 if int(action) == 0 or route_transition_action
@@ -2665,8 +2825,8 @@ class PlatoonNormalPlanner:
                             ),
                             route_lateral_recovery_m=(
                                 6.0
-                                if scenario_id == "S6_background_merge_in"
-                                and int(action) == 0
+                                if int(action) == 0
+                                and abs(float(start_d)) > 1.0e-3
                                 else None
                             ),
                         )
@@ -2896,6 +3056,25 @@ class PlatoonNormalPlanner:
                             if profile_speeds_mps.size
                             else 0.0
                         )
+                        s9_route_completion = getattr(
+                            getattr(env, "_scenario_orchestrator", None),
+                            "_route_completion",
+                            {},
+                        ) or {}
+                        score += self._scenario_recovery_speed_penalty(
+                            scenario_id=scenario_id,
+                            action=int(action),
+                            terminal_speed_mps=terminal_profile_speed_mps,
+                            acceleration_mps2=float(acceleration),
+                            acceleration_duration_s=float(
+                                acceleration_duration
+                            ),
+                            recovery_active=bool(
+                                s9_route_completion.get(
+                                    "all_agents_changed_lane", False
+                                )
+                            ),
+                        )
                         if self._scenario_minimum_speed_is_infeasible(
                             scenario_id=scenario_id,
                             action=int(action),
@@ -3063,6 +3242,10 @@ class PlatoonNormalPlanner:
                                     "initial_speed_mps": float(ego_speed),
                                     "default_heading": float(
                                         getattr(vehicle, "heading_theta", 0.0)
+                                    ),
+                                    "start_point_xy": tuple(
+                                        float(value)
+                                        for value in vehicle.position[:2]
                                     ),
                                     "rule_target_point": tuple(
                                         float(value) for value in target_point
@@ -3295,6 +3478,11 @@ class PlatoonNormalPlanner:
             "best_rejected_dense_dynamics": copy.deepcopy(
                 best_rejected_dense_dynamics
             ),
+            "selected_profile_attempts": selected_profile_attempts,
+            "source_lane_chain_indices": [
+                list(tuple(getattr(lane, "index", ()) or ()))
+                for lane in source_lane_chain
+            ],
             "best_rejected_background_gap_m": (
                 None
                 if not np.isfinite(best_rejected_background_gap_m)
@@ -3375,6 +3563,7 @@ class PlatoonNormalPlanner:
         profiles: list[tuple[float, float, float, float, np.ndarray]],
         *,
         maximum: int = 3,
+        preserve_surge_then_brake: bool = False,
     ) -> list[tuple[float, float, float, float, np.ndarray]]:
         """Choose profiles by score and terminal-progress coverage."""
 
@@ -3424,6 +3613,37 @@ class PlatoonNormalPlanner:
                     ),
                 )
             )
+
+        if preserve_surge_then_brake:
+            surge_then_brake = [
+                profile
+                for profile in profiles
+                if float(profile[1]) >= 2.0
+                and float(profile[2]) <= 1.0
+                and float(profile[3]) < 0.0
+            ]
+            if surge_then_brake:
+                # S8 can require the tail vehicle to create rear clearance on
+                # the straight and still shed speed before the exit seam.
+                # Terminal-progress stratification alone cannot distinguish
+                # this temporal shape from a late acceleration profile.
+                add(min(surge_then_brake, key=lambda value: float(value[0])))
+            gentle_surge_then_brake = [
+                profile
+                for profile in profiles
+                if 0.5 <= float(profile[1]) < 2.0
+                and float(profile[2]) <= 1.0
+                and float(profile[3]) < 0.0
+            ]
+            if gentle_surge_then_brake:
+                add(
+                    min(
+                        gentle_surge_then_brake,
+                        key=lambda value: (
+                            float(value[4][-1]), float(value[0])
+                        ),
+                    )
+                )
 
         score_slots = max(1, maximum // 3)
         for profile in profiles[:score_slots]:
@@ -3563,6 +3783,7 @@ class PlatoonNormalPlanner:
         conflict_tables: dict[tuple[int, int], np.ndarray] = {}
         conflict_pair_count = 0
         conflict_counts_by_pair: dict[str, int] = {}
+        safe_indices_by_pair: dict[str, list[list[int]]] = {}
         for first in range(len(ordered_ids)):
             for second in range(first + 1, len(ordered_ids)):
                 first_pool = pools[ordered_ids[first]]
@@ -3593,9 +3814,13 @@ class PlatoonNormalPlanner:
                             < self.platoon_safe_gap_m - 1e-6
                         )
                 conflict_pair_count += int(np.count_nonzero(table))
-                conflict_counts_by_pair[
-                    f"{ordered_ids[first]}:{ordered_ids[second]}"
-                ] = int(np.count_nonzero(table))
+                pair_key = f"{ordered_ids[first]}:{ordered_ids[second]}"
+                conflict_counts_by_pair[pair_key] = int(
+                    np.count_nonzero(table)
+                )
+                safe_indices_by_pair[pair_key] = np.argwhere(~table).astype(
+                    int
+                ).tolist()
                 conflict_tables[(first, second)] = table
         prefixes: list[tuple[int, ...]] = [tuple()]
         prefix_counts: list[int] = []
@@ -3619,6 +3844,7 @@ class PlatoonNormalPlanner:
                 break
 
         ranked_selections: list[tuple[float, tuple[int, ...]]] = []
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
         for selection in prefixes:
             if len(selection) != len(ordered_ids):
                 continue
@@ -3627,6 +3853,27 @@ class PlatoonNormalPlanner:
                 pools[agent_id][candidate_index]
                 for agent_id, candidate_index in zip(ordered_ids, selection)
             ]
+            if scenario_id == "S9_narrow_channel_negotiation":
+                lane_change_specs = [
+                    candidate.execution_spec
+                    for candidate in chosen
+                    if candidate.execution_spec is not None
+                    and abs(
+                        float(candidate.execution_spec.end_d)
+                        - float(candidate.execution_spec.start_d)
+                    )
+                    > 0.25
+                ]
+                if len(lane_change_specs) == len(chosen):
+                    delays = [
+                        float(spec.lane_change_start_delay_s)
+                        for spec in lane_change_specs
+                    ]
+                    if any(
+                        following - leading < 0.75
+                        for leading, following in zip(delays, delays[1:])
+                    ):
+                        continue
             score = sum(value.score for value in chosen)
             if formation_constraint_enabled:
                 score += self._joint_formation_penalty(
@@ -3655,6 +3902,7 @@ class PlatoonNormalPlanner:
             "pairwise_conflict_count": int(pairwise_conflict_count),
             "pairwise_conflict_pair_count": int(conflict_pair_count),
             "pairwise_conflict_counts_by_pair": conflict_counts_by_pair,
+            "pairwise_safe_indices_by_pair": safe_indices_by_pair,
             "prefix_counts": prefix_counts,
             "formation_constraint_enabled": bool(
                 formation_constraint_enabled
@@ -3843,7 +4091,7 @@ class PlatoonNormalPlanner:
                     }
                 )
             )
-        if str(scenario_id) != "S8_ego_exit_to_ramp" or int(action) == 0:
+        if str(scenario_id) != "S8_ego_exit_to_ramp":
             return tuple(accelerations)
         return tuple(
             sorted(
@@ -3851,8 +4099,14 @@ class PlatoonNormalPlanner:
                     *(round(float(value), 3) for value in accelerations),
                     -7.0,
                     -5.0,
+                    -4.0,
                     -3.0,
+                    -2.0,
                     -1.0,
+                    0.5,
+                    1.0,
+                    2.0,
+                    3.0,
                 }
             )
         )
@@ -3868,7 +4122,7 @@ class PlatoonNormalPlanner:
             if float(acceleration_mps2) > 0.25:
                 return (1.0, 2.0, 3.0, self.HORIZON_S)
             return self._acceleration_durations(float(acceleration_mps2))
-        if str(scenario_id) != "S8_ego_exit_to_ramp" or int(action) == 0:
+        if str(scenario_id) != "S8_ego_exit_to_ramp":
             return self._acceleration_durations(float(acceleration_mps2))
         if float(acceleration_mps2) >= -0.25:
             return (1.0, 2.0, 3.0, self.HORIZON_S)
@@ -3891,7 +4145,7 @@ class PlatoonNormalPlanner:
             return self._recovery_accelerations(
                 float(acceleration_mps2), float(acceleration_duration_s)
             )
-        if str(scenario_id) != "S8_ego_exit_to_ramp" or int(action) == 0:
+        if str(scenario_id) != "S8_ego_exit_to_ramp":
             return self._recovery_accelerations(
                 float(acceleration_mps2),
                 float(acceleration_duration_s),
@@ -3912,6 +4166,8 @@ class PlatoonNormalPlanner:
             str(scenario_id) == "S7_ego_merge_from_ramp"
             and int(action) == 0
         ):
+            return 24
+        if str(scenario_id) == "S8_ego_exit_to_ramp":
             return 24
         if str(scenario_id) in {
             "S5_hard_brake_lead",
@@ -3937,6 +4193,8 @@ class PlatoonNormalPlanner:
             # large speed spread.  Keep the complete S7 longitudinal set so
             # the joint audit can pair leader braking with follower recovery
             # instead of truncating those profiles before combination.
+            return max(int(self.candidate_pool_size), 24)
+        if str(scenario_id) == "S8_ego_exit_to_ramp":
             return max(int(self.candidate_pool_size), 24)
         if str(scenario_id) in {
             "S6_background_merge_in",
@@ -4039,6 +4297,36 @@ class PlatoonNormalPlanner:
             < self.s9_minimum_speed_mps - 1.0e-6
         )
 
+    def _scenario_recovery_speed_penalty(
+        self,
+        *,
+        scenario_id: str,
+        action: int,
+        terminal_speed_mps: float,
+        acceleration_mps2: float,
+        acceleration_duration_s: float,
+        recovery_active: bool,
+    ) -> float:
+        if (
+            str(scenario_id) != "S9_narrow_channel_negotiation"
+            or int(action) != 0
+            or not bool(recovery_active)
+        ):
+            return 0.0
+        shortfall_mps = max(
+            self.S9_RECOVERY_TARGET_SPEED_MPS
+            - float(terminal_speed_mps),
+            0.0,
+        )
+        deferred_brake = (
+            max(-float(acceleration_mps2), 0.0)
+            * min(max(float(acceleration_duration_s), 0.0), self.HORIZON_S)
+        )
+        return float(
+            self.S9_RECOVERY_SPEED_PENALTY_WEIGHT * shortfall_mps
+            + self.S9_RECOVERY_BRAKE_PENALTY_WEIGHT * deferred_brake
+        )
+
     def _recovery_accelerations(
         self,
         acceleration_mps2: float,
@@ -4084,6 +4372,15 @@ class PlatoonNormalPlanner:
         return tuple(
             value for value in base if value <= float(completion_time_s) - 0.5
         ) or (0.0,)
+
+    @staticmethod
+    def _s9_platoon_lane_change_start_delay(env, vehicle) -> float:
+        agents = list((getattr(env, "agents", {}) or {}).values())
+        platoon_index = next(
+            (index for index, agent in enumerate(agents) if agent is vehicle),
+            0,
+        )
+        return float(platoon_index)
 
     def _longitudinal_progress(
         self,
@@ -4215,6 +4512,7 @@ class PlatoonNormalPlanner:
         lane_change_duration_s: float,
         lane_change_start_delay_s: float,
         default_heading: float,
+        start_point_xy: np.ndarray | None = None,
         times: np.ndarray | None = None,
         route_lane_chain: list | None = None,
         route_lateral_recovery_m: float | None = None,
@@ -4265,10 +4563,31 @@ class PlatoonNormalPlanner:
                         start_heading=float(default_heading),
                     )
                 else:
+                    route_start_s = float(start_s)
+                    route_start_d = float(start_d)
+                    if start_point_xy is not None:
+                        route_start_s, route_start_d = connected_chain[
+                            0
+                        ].local_coordinates(
+                            np.asarray(start_point_xy, dtype=np.float64)
+                        )
+                        route_start_s = float(
+                            np.clip(
+                                route_start_s,
+                                0.0,
+                                float(
+                                    getattr(
+                                        connected_chain[0], "length", 0.0
+                                    )
+                                    or 0.0
+                                ),
+                            )
+                        )
                     route_path = build_continuous_lane_chain_path(
                         connected_chain,
-                        start_s=float(start_s),
-                        start_lateral_m=float(start_d),
+                        start_s=route_start_s,
+                        start_lateral_m=float(route_start_d),
+                        start_point_xy=start_point_xy,
                         step_m=0.25,
                         seam_transition_m=float(
                             getattr(
@@ -5797,6 +6116,48 @@ class PlatoonNormalPlanner:
         except Exception:
             return None
 
+    def _proposal_source_lane(
+        self,
+        env,
+        vehicle,
+        source_lane_chain_indices: tuple[tuple, ...],
+    ):
+        """Resolve S8's apron overlap against the RuleMaker route chain."""
+
+        localized_lane = getattr(vehicle, "lane", None)
+        scenario_id = str(
+            (getattr(env, "config", {}) or {}).get("scenario_id", "")
+        )
+        if scenario_id != "S8_ego_exit_to_ramp" or not source_lane_chain_indices:
+            return localized_lane
+        localized_index = tuple(
+            getattr(localized_lane, "index", ()) or ()
+        )
+        chain_indices = tuple(
+            tuple(value) for value in source_lane_chain_indices
+        )
+        if localized_index in chain_indices:
+            return localized_lane
+        proposed_lane = self._lane_from_index(env, chain_indices[0])
+        if proposed_lane is None:
+            return localized_lane
+        try:
+            longitudinal, lateral = proposed_lane.local_coordinates(
+                np.asarray(vehicle.position[:2], dtype=np.float64)
+            )
+        except Exception:
+            return localized_lane
+        lane_length = float(getattr(proposed_lane, "length", 0.0) or 0.0)
+        lane_width = float(getattr(proposed_lane, "width", 3.5) or 3.5)
+        vehicle_width = float(getattr(vehicle, "WIDTH", 2.3) or 2.3)
+        centre_tolerance = 0.5 * (lane_width + vehicle_width)
+        if (
+            -1.0e-6 <= float(longitudinal) <= lane_length + 1.0e-6
+            and abs(float(lateral)) <= centre_tolerance + 1.0e-6
+        ):
+            return proposed_lane
+        return localized_lane
+
     @staticmethod
     def _expand_drivable_lane_surfaces(env, lanes) -> tuple:
         """Return the real drivable road surface around execution lanes.
@@ -6293,8 +6654,13 @@ class JointTrajectoryExecutor:
         tracking["preview_reference_heading_rad"] = float(preview_heading)
         tracking["preview_reference_arc_m"] = float(preview_heading_arc)
         scenario_id = str(config.get("scenario_id", ""))
+        required_background_gap_m = (
+            self._scenario_preflight_background_gap_m(scenario_id, spec)
+        )
         tracking_heading_limit_rad = (
-            0.15
+            self.planner.S9_TRACKING_HEADING_LIMIT_RAD
+            if scenario_id == "S9_narrow_channel_negotiation"
+            else 0.15
             if scenario_id in {
                 "S6_background_merge_in",
                 "S7_ego_merge_from_ramp",
@@ -6302,11 +6668,15 @@ class JointTrajectoryExecutor:
             }
             else self.TRACKING_HEADING_LIMIT_RAD
         )
+        tracking_lateral_limit_m = (
+            self.planner.S9_TRACKING_LATERAL_LIMIT_M
+            if scenario_id == "S9_narrow_channel_negotiation"
+            else self.TRACKING_LATERAL_LIMIT_M
+        )
         if (
             abs(float(tracking["longitudinal_m"]))
             > self.TRACKING_LONGITUDINAL_LIMIT_M
-            or abs(float(tracking["lateral_m"]))
-            > self.TRACKING_LATERAL_LIMIT_M
+            or abs(float(tracking["lateral_m"])) > tracking_lateral_limit_m
             or abs(float(tracking["heading_rad"]))
             > tracking_heading_limit_rad
         ):
@@ -6436,7 +6806,7 @@ class JointTrajectoryExecutor:
                         * self.planner.DENSE_DT_S
                     ),
                 }
-            if collision_names or gap < self.planner.background_safe_gap_m - 1e-6:
+            if collision_names or gap < required_background_gap_m - 1e-6:
                 fail(
                     "committed_trajectory_background_unsafe",
                     "full-horizon window violates background safety",
@@ -6444,6 +6814,9 @@ class JointTrajectoryExecutor:
                         "elapsed_s": float(elapsed_s),
                         "collision_objects": collision_names,
                         "minimum_background_gap_m": gap,
+                        "required_background_gap_m": (
+                            required_background_gap_m
+                        ),
                         "minimum_background_gap_detail": gap_detail,
                     },
                 )
@@ -6466,6 +6839,7 @@ class JointTrajectoryExecutor:
             "coverage_end_s": float(completion_deadline_s)
             + self.planner.HORIZON_S,
             "minimum_background_gap_m": float(minimum_background_gap),
+            "required_background_gap_m": required_background_gap_m,
             "minimum_background_gap_detail": minimum_background_detail,
             "audit_time_ms": (time.perf_counter() - audit_started_at) * 1000.0,
             "background_prediction_requests": int(
@@ -6484,6 +6858,29 @@ class JointTrajectoryExecutor:
             minimum_background_gap_detail=minimum_background_detail,
             debug=debug,
         )
+
+    def _scenario_preflight_background_gap_m(
+        self,
+        scenario_id: str,
+        spec: TrajectoryExecutionSpec,
+    ) -> float:
+        required_gap_m = float(self.planner.background_safe_gap_m)
+        if scenario_id == "S8_ego_exit_to_ramp":
+            return required_gap_m + 1.0
+        source_lane_index = tuple(spec.source_lane_index)
+        target_lane_index = tuple(spec.target_lane_index)
+        s9_bypass_keep = (
+            scenario_id == "S9_narrow_channel_negotiation"
+            and source_lane_index == target_lane_index
+            and bool(source_lane_index)
+            and int(source_lane_index[-1]) == 0
+        )
+        if s9_bypass_keep:
+            return max(
+                required_gap_m,
+                self.planner.S9_PREFLIGHT_BACKGROUND_GAP_M,
+            )
+        return required_gap_m
 
     def audit_pairwise_full_horizon(
         self,
@@ -6651,7 +7048,9 @@ class JointTrajectoryExecutor:
             tracking["preview_reference_arc_m"] = preview_heading_arc
             scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
             tracking_heading_limit_rad = (
-                0.15
+                self.planner.S9_TRACKING_HEADING_LIMIT_RAD
+                if scenario_id == "S9_narrow_channel_negotiation"
+                else 0.15
                 if scenario_id in {
                     "S6_background_merge_in",
                     "S7_ego_merge_from_ramp",
@@ -6659,10 +7058,15 @@ class JointTrajectoryExecutor:
                 }
                 else self.TRACKING_HEADING_LIMIT_RAD
             )
+            tracking_lateral_limit_m = (
+                self.planner.S9_TRACKING_LATERAL_LIMIT_M
+                if scenario_id == "S9_narrow_channel_negotiation"
+                else self.TRACKING_LATERAL_LIMIT_M
+            )
             if (
                 abs(tracking["longitudinal_m"])
                 > self.TRACKING_LONGITUDINAL_LIMIT_M
-                or abs(tracking["lateral_m"]) > self.TRACKING_LATERAL_LIMIT_M
+                or abs(tracking["lateral_m"]) > tracking_lateral_limit_m
                 or abs(tracking["heading_rad"]) > tracking_heading_limit_rad
             ):
                 self._raise(

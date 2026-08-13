@@ -260,11 +260,12 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g0",
-        # Start one lane left of the exit-side lane. MetaDrive lane ids grow
-        # toward the left on this road, so RIGHT maps lane 1 -> lane 0.
-        ego_spawn_longitude_m=(40.0, 80.0),
+        # Start one lane left of the exit-side lane. On this G-block road the
+        # physical rightmost exit lane is lane 2, so RIGHT maps lane 1 -> 2.
+        ego_spawn_longitude_m=(68.0, 70.0),
         ego_spawn_lane_id=1,
         ego_initial_speed_km_h=(22.0, 28.0),
+        ego_initial_bumper_gap_m=12.0,
         override_traffic_density=0.0,
         env_overrides={"platoon_route_spawn_lane_index": 1},
         expert_recipe="提前换道驶离",

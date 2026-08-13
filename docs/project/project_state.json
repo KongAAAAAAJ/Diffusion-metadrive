@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-13T01:38:21+08:00",
+  "updated_at": "2026-08-13T11:21:51+08:00",
   "repository": {
     "branch": "s5-s9-scenario-revision",
-    "git_commit": "d50ac792a3c5b3b14e2e968bb447439b3884e90d",
+    "git_commit": "b7c41dff4b4c72a9c7ee3a0bb41f18ff0ed4deb0",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false
   },
@@ -17,19 +17,20 @@
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
       "branch": "s5-s9-scenario-revision",
-      "status": "s5_s6_and_s7_verified_s8_next_full_candidate_v2_unfrozen",
-      "execution_order": [
+      "status": "s5_s6_s7_s8_and_s9_verified_candidate_v2_unfrozen_pending_combined_review",
+      "independent_scenario_scope": [
         "S5_hard_brake_lead",
         "S6_background_merge_in",
         "S7_ego_merge_from_ramp",
         "S8_ego_exit_to_ramp",
         "S9_narrow_channel_negotiation"
       ],
-      "active_task": "S8_ego_exit_to_ramp",
-      "active_hard_gate": "complete_s8_memory_gate_before_continuing_sequential_candidate_activation",
+      "scenario_gate_order": "independent_any_order",
+      "active_task": "combined_s5_s9_candidate_v2_contract_review",
+      "active_hard_gate": "complete_combined_fixed_seed_visual_and_machine_contract_review",
       "formal_contract_activated": false,
       "formal_v1_dataset_or_checkpoint_metadata_changed": false,
-      "evidence_status": "s6_and_s7_fixed_five_seed_memory_gates_passed_with_full_artifacts",
+      "evidence_status": "s6_s7_s8_and_s9_fixed_five_seed_memory_gates_passed_with_full_artifacts_s9_accepted_independently",
       "completed_scenario_gates": {
         "S6_background_merge_in": {
           "passed": true,
@@ -68,6 +69,45 @@
           ],
           "report": "evaluation/S7_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
           "artifact_root": "/tmp/s7_candidate_revision_final_20260812/S7_ego_merge_from_ramp"
+        },
+        "S8_ego_exit_to_ramp": {
+          "passed": true,
+          "fixed_seeds": [
+            17,
+            23,
+            31,
+            47,
+            59
+          ],
+          "episodes_passed": "5/5",
+          "native_joint_planning_steps": "1000/1000",
+          "all_episodes_causal_actor_interaction": true,
+          "all_episodes_physical_split": true,
+          "all_episodes_non_simultaneous_right_transition": true,
+          "all_episodes_continued_on_ramp": true,
+          "all_episodes_formation_recovered": true,
+          "report": "evaluation/S8_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+          "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s8_candidate_revision_final_20260813_v3/S8_ego_exit_to_ramp"
+        },
+        "S9_narrow_channel_negotiation": {
+          "passed": true,
+          "fixed_seeds": [
+            17,
+            23,
+            31,
+            47,
+            59
+          ],
+          "episodes_passed": "5/5",
+          "native_joint_planning_steps": "1000/1000",
+          "all_episodes_causal_bypass_actor_interaction": true,
+          "all_episodes_three_real_left_transitions": true,
+          "all_episodes_non_simultaneous_left_completion": true,
+          "all_episodes_passed_blocker": true,
+          "all_episodes_continued_on_narrow_road": true,
+          "all_episodes_formation_recovered_without_lane_1_return": true,
+          "report": "evaluation/S9_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+          "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s9_candidate_memory_acceptance_20260813_v2/S9_narrow_channel_negotiation"
         }
       }
     }
@@ -86,8 +126,8 @@
     },
     "candidate_s5_s9_functional_scenario_memory": {
       "path": "docs/project/s5_s9_functional_scenario_design.json",
-      "sha256": "fed15ff21f5d7721c45c13031f84e8dcc5ede707b2798399c91935dcc70650d7",
-      "role": "User-confirmed functional semantics, constrained logical ranges, sequential implementation order, and fixed five-seed acceptance gates for the non-retroactive candidate scenario revision"
+      "sha256": "0669298fd73f9f0fabebb5be8038980eade7e9b845fd137cee3ec42828a40b6e",
+      "role": "User-confirmed functional semantics, constrained logical ranges, independent any-order per-scenario implementation, and fixed five-seed acceptance gates for the non-retroactive candidate scenario revision"
     },
     "s6_candidate_memory_acceptance_report": {
       "path": "evaluation/S6_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
@@ -98,6 +138,16 @@
       "path": "evaluation/S7_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
       "sha256": "9dca613a293c17441af83a3fd0144783460e949d5a9497ea5208f60c1a49abe3",
       "role": "Proves S7 fixed five-seed functional, safety, behavior-coverage, video, and artifact gates passed without activating the full candidate-v2 contract"
+    },
+    "s8_candidate_memory_acceptance_report": {
+      "path": "evaluation/S8_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+      "sha256": "f4ee905a71dfbf33deeb5457cd87db3967e8fb868124304d0005573f42a5811f",
+      "role": "Proves S8 fixed five-seed causal exit-lane interaction, asynchronous physical RIGHT transition, connector and ramp continuation, KEEP-only post-connector behavior, ramp reassembly, safety, video, and artifact gates passed without activating the full candidate-v2 contract"
+    },
+    "s9_candidate_memory_acceptance_report": {
+      "path": "evaluation/S9_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+      "sha256": "8ea9b0302bbb3f494d563f808b1c0c3ec252d444b84a678b95b5ecf044edab64",
+      "role": "Proves S9 fixed five-seed causal bypass interaction, asynchronous physical LEFT transitions, blocker clearance and passage, narrow-road continuation, bypass-route reassembly, safety, video, and artifact gates passed without activating the full candidate-v2 contract"
     },
     "candidate_s5_s9_implementation_report": {
       "path": "evaluation/S5_S9_CANDIDATE_REVISION_IMPLEMENTATION_REPORT.md",
@@ -270,7 +320,7 @@
     "Train GRPO-Exec from the same Stage1-A checkpoint with reward evaluated on surrogate-predicted tau_a.",
     "After both Stage 2 branches are stable, perform semantic-preserving Round 14 cleanup and rerun strict smoke gates.",
     "Run the final paired multi-seed S5-S9 evaluation for Stage1-A, Stage1-A+GRPO-Open, and Stage1-A+GRPO-Exec.",
-    "Candidate scenario workstream: S6 is accepted; complete the outstanding S8 memory gate before any full candidate-v2 contract activation or progression to S9."
+    "Candidate scenario workstream: S6, S7, S8, and S9 are independently accepted with full fixed-five-seed artifacts. Complete the combined S5-S9 visual and machine-contract review before activating the complete candidate-v2 contract."
   ],
   "invariants": {
     "metadata_override_forbidden": true,

@@ -330,6 +330,8 @@ class RouteAwareSpawnManager(SpawnManager):
         if fixed_seed is not None and scenario_id in {
             "S6_background_merge_in",
             "S7_ego_merge_from_ramp",
+            "S8_ego_exit_to_ramp",
+            "S9_narrow_channel_negotiation",
         }:
             from scenarios.s5_s9_sampling import resolve_s5_s9_parameters
 
@@ -341,9 +343,13 @@ class RouteAwareSpawnManager(SpawnManager):
                     self.engine.global_config.get("initial_speed_km_h", 24.0)
                 ),
             )
-            requested = float(lane_length) - float(
-                resolved["ego_distance_to_merge_point_m"]
-            )
+            distance_key = {
+                "S8_ego_exit_to_ramp": "ego_distance_to_diverge_m",
+                "S9_narrow_channel_negotiation": (
+                    "ego_distance_to_narrow_entry_m"
+                ),
+            }.get(scenario_id, "ego_distance_to_merge_point_m")
+            requested = float(lane_length) - float(resolved[distance_key])
             if scenario_id == "S7_ego_merge_from_ramp":
                 # S7's complete platoon can extend onto the unique upstream
                 # ramp chain.  Do not push the leader to the seam merely to
@@ -486,7 +492,14 @@ class RouteAwareSpawnManager(SpawnManager):
         scenario_id = str(
             self.engine.global_config.get("scenario_id", "") or ""
         )
-        if fixed_seed is not None and scenario_id == "S7_ego_merge_from_ramp":
+        speed_km_h = float(
+            self.engine.global_config.get("initial_speed_km_h", 25.0)
+        )
+        if fixed_seed is not None and scenario_id in {
+            "S7_ego_merge_from_ramp",
+            "S8_ego_exit_to_ramp",
+            "S9_narrow_channel_negotiation",
+        }:
             from scenarios.s5_s9_sampling import resolve_s5_s9_parameters
 
             resolved = resolve_s5_s9_parameters(
@@ -501,13 +514,16 @@ class RouteAwareSpawnManager(SpawnManager):
                     )
                 ),
             )
-            gap_m = float(
-                resolved["initial_platoon_bumper_gap_m"]
-            ) + float(
-                self.engine.global_config.get("vehicle_length_m", 5.74)
-            )
+            if scenario_id == "S7_ego_merge_from_ramp":
+                gap_m = float(
+                    resolved["initial_platoon_bumper_gap_m"]
+                ) + float(
+                    self.engine.global_config.get("vehicle_length_m", 5.74)
+                )
+            else:
+                speed_km_h = float(resolved["ego_initial_speed_km_h"])
         lead_long = self._fixed_route_spawn_lead_longitude(float(getattr(lane, "length", 0.0)), gap_m)
-        speed_m_s = float(self.engine.global_config.get("initial_speed_km_h", 25.0)) / 3.6
+        speed_m_s = speed_km_h / 3.6
 
         existing_configs = self.engine.global_config.get("agent_configs", {}) or {}
         agent_configs = {}

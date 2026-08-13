@@ -108,6 +108,7 @@ class S8HardcodedTargetFakeRoadNetwork:
             ("3C0_1_", "4G0_0_", 2): S8HardcodedTargetFakeLane("3C0_1_", "4G0_0_", 2, -3.5),
             ("3C0_1_", "4G1_0_", 0): S8HardcodedTargetFakeLane("3C0_1_", "4G1_0_", 0, -7.0),
             ("4G0_0_", "4G1_1_", 0): S8HardcodedTargetFakeLane("4G0_0_", "4G1_1_", 0, -3.5),
+            ("4G1_0_", "4G0_0_", 0): S8HardcodedTargetFakeLane("4G1_0_", "4G0_0_", 0, -1.8),
         }
 
     def get_lane(self, lane_index):
@@ -151,8 +152,30 @@ def _env(agent_lane_id: int = 1):
 def _env_s8_hardcoded_target():
     road_network = S8HardcodedTargetFakeRoadNetwork()
     return SimpleNamespace(
+        config={"scenario_id": "S8_ego_exit_to_ramp"},
         engine=SimpleNamespace(current_map=SimpleNamespace(road_network=road_network)),
     )
+
+
+def test_s8_planner_source_uses_proposed_exit_route_during_apron_overlap():
+    env = _env_s8_hardcoded_target()
+    network = env.engine.current_map.road_network
+    localized = network.get_lane(("4G1_0_", "4G0_0_", 0))
+    vehicle = _vehicle(
+        "agent0", 28.0, -3.5, localized, speed_km_h=25.0
+    )
+    planner = PlatoonNormalPlanner()
+
+    resolved = planner._proposal_source_lane(
+        env,
+        vehicle,
+        (
+            ("3C0_1_", "4G0_0_", 2),
+            ("4G0_0_", "4G1_1_", 0),
+        ),
+    )
+
+    assert tuple(resolved.index) == ("3C0_1_", "4G0_0_", 2)
 
 
 def _execution_fixture():
@@ -258,6 +281,24 @@ def test_route_chain_geometry_can_recover_initial_lateral_offset_before_seam():
     assert recovered.size
     assert float(np.max(np.abs(recovered[:, 1]))) <= 1e-6
     assert float(np.max(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1))) <= 0.5
+
+
+def test_route_chain_geometry_clips_lateral_recovery_to_remaining_first_lane():
+    source = AngledLane(("A", "B", 0), (0.0, 0.0), 0.0, length=20.0)
+    successor = AngledLane(("B", "C", 0), (20.0, 0.0), 0.0, length=20.0)
+
+    path = build_continuous_lane_chain_path(
+        [source, successor],
+        start_s=18.0,
+        start_lateral_m=-0.2,
+        step_m=0.1,
+        lateral_recovery_m=6.0,
+    )
+
+    np.testing.assert_allclose(path[0, :2], source.position(18.0, -0.2), atol=1e-8)
+    seam_rows = path[path[:, 0] >= 20.0 - 1e-6]
+    assert seam_rows.size
+    assert float(np.max(np.abs(seam_rows[:, 1]))) <= 1e-6
 
 
 def test_dense_route_candidate_anchors_measured_heading_without_lane_marker():
@@ -454,6 +495,30 @@ def test_default_hard_safety_gaps_match_collection_contract():
 
     assert planner.background_safe_gap_m == 5.0
     assert planner.platoon_safe_gap_m == 7.0
+
+
+def test_s9_committed_preflight_keeps_tracking_margin_above_hard_gate():
+    planner = PlatoonNormalPlanner()
+    executor = JointTrajectoryExecutor(planner)
+    bypass_keep = SimpleNamespace(
+        source_lane_index=("A", "B", 0),
+        target_lane_index=("A", "B", 0),
+    )
+    source_lane_change = SimpleNamespace(
+        source_lane_index=("A", "B", 1),
+        target_lane_index=("A", "B", 0),
+    )
+
+    assert executor._scenario_preflight_background_gap_m(
+        "S9_narrow_channel_negotiation", bypass_keep
+    ) == pytest.approx(15.0)
+    assert executor._scenario_preflight_background_gap_m(
+        "S9_narrow_channel_negotiation", source_lane_change
+    ) == pytest.approx(planner.background_safe_gap_m)
+    assert executor._scenario_preflight_background_gap_m(
+        "S5_hard_brake_lead", bypass_keep
+    ) == pytest.approx(planner.background_safe_gap_m)
+    assert planner.background_safe_gap_m == pytest.approx(5.0)
 
 
 def test_candidate_pool_rejects_rotated_footprint_before_joint_search():
@@ -1674,6 +1739,48 @@ def test_profile_selection_preserves_brake_wait_recover_shape():
     )
 
 
+def test_s8_profile_selection_preserves_surge_then_brake_shape():
+    planner = PlatoonNormalPlanner()
+    profiles = []
+    for index, (acceleration, duration, recovery) in enumerate(
+        (
+            (0.0, 4.0, 0.0),
+            (0.5, 1.0, 0.0),
+            (1.0, 1.0, -1.0),
+            (1.0, 2.0, 1.5),
+            (2.0, 2.0, 0.0),
+            (3.0, 1.0, -2.0),
+            (3.0, 3.0, 1.5),
+            (5.0, 4.0, 0.0),
+        )
+    ):
+        progress = planner._longitudinal_progress(
+            4.2,
+            acceleration,
+            planner._dense_times,
+            acceleration_duration_s=duration,
+            recovery_acceleration_mps2=recovery,
+        )
+        profiles.append(
+            (float(index), acceleration, duration, recovery, progress)
+        )
+
+    selected = planner._select_longitudinal_profiles(
+        profiles,
+        maximum=4,
+        preserve_surge_then_brake=True,
+    )
+
+    assert any(
+        acceleration == 3.0 and duration == 1.0 and recovery == -2.0
+        for _, acceleration, duration, recovery, _ in selected
+    )
+    assert any(
+        acceleration == 1.0 and duration == 1.0 and recovery == -1.0
+        for _, acceleration, duration, recovery, _ in selected
+    )
+
+
 def test_execution_extension_holds_four_second_terminal_speed():
     planner = PlatoonNormalPlanner()
     times = np.arange(0.0, 8.1, 0.1, dtype=np.float64)
@@ -1714,7 +1821,7 @@ def test_s8_adds_long_footprint_safe_lane_change_duration():
     assert max(base) == pytest.approx(5.0)
 
 
-def test_s8_uses_probe_justified_longitudinal_profile_resolution_only_for_lane_change():
+def test_s8_uses_probe_justified_longitudinal_profile_resolution_through_connector():
     planner = PlatoonNormalPlanner(candidate_pool_size=12)
     generic = (-8.0, -6.0, -4.0, -2.0, 0.0)
 
@@ -1749,7 +1856,13 @@ def test_s8_uses_probe_justified_longitudinal_profile_resolution_only_for_lane_c
         scenario_id="S8_ego_exit_to_ramp",
         action=0,
         acceleration_mps2=-5.0,
-    ) == planner._acceleration_durations(-5.0)
+    ) == (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
+    assert planner._scenario_longitudinal_profile_limit(
+        scenario_id="S8_ego_exit_to_ramp", action=0
+    ) == 24
+    assert planner._scenario_candidate_pool_limit(
+        scenario_id="S8_ego_exit_to_ramp", action=0
+    ) == 24
     assert planner._scenario_longitudinal_profile_limit(
         scenario_id="S7_ramp_merge", action=1
     ) == 6
@@ -2317,6 +2430,8 @@ def test_s9_active_manoeuvre_rejects_stopped_keep_profile():
 def test_s9_candidate_acceleration_grid_contains_rolling_brake_profiles():
     planner = PlatoonNormalPlanner()
 
+    assert planner.S9_LANE_CHANGE_DURATIONS_S == (4.5,)
+
     accelerations = planner._scenario_candidate_accelerations(
         scenario_id="S9_narrow_channel_negotiation",
         action=-1,
@@ -2332,3 +2447,52 @@ def test_s9_candidate_acceleration_grid_contains_rolling_brake_profiles():
     assert planner._scenario_candidate_pool_limit(
         scenario_id="S9_narrow_channel_negotiation", action=-1
     ) >= 24
+
+
+def test_s9_lane_change_start_delays_follow_platoon_order():
+    vehicles = [SimpleNamespace(name=f"agent{index}") for index in range(3)]
+    env = SimpleNamespace(
+        agents={vehicle.name: vehicle for vehicle in vehicles}
+    )
+
+    assert [
+        PlatoonNormalPlanner._s9_platoon_lane_change_start_delay(env, vehicle)
+        for vehicle in vehicles
+    ] == [0.0, 1.0, 2.0]
+
+
+def test_s9_post_bypass_keep_prefers_recovery_speed():
+    planner = PlatoonNormalPlanner()
+
+    assert planner._scenario_recovery_speed_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=0,
+        terminal_speed_mps=2.0,
+        acceleration_mps2=0.0,
+        acceleration_duration_s=4.0,
+        recovery_active=True,
+    ) == pytest.approx(120.0)
+    assert planner._scenario_recovery_speed_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=-1,
+        terminal_speed_mps=2.0,
+        acceleration_mps2=-1.0,
+        acceleration_duration_s=1.0,
+        recovery_active=True,
+    ) == pytest.approx(0.0)
+    assert planner._scenario_recovery_speed_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=0,
+        terminal_speed_mps=2.0,
+        acceleration_mps2=-1.0,
+        acceleration_duration_s=1.0,
+        recovery_active=False,
+    ) == pytest.approx(0.0)
+    assert planner._scenario_recovery_speed_penalty(
+        scenario_id="S9_narrow_channel_negotiation",
+        action=0,
+        terminal_speed_mps=5.0,
+        acceleration_mps2=-1.0,
+        acceleration_duration_s=1.0,
+        recovery_active=True,
+    ) == pytest.approx(80.0)

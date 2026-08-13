@@ -90,11 +90,23 @@ def test_s7_severity_controls_exact_actor_count() -> None:
 def test_s8_and_s9_ranges_match_functional_contract() -> None:
     for seed in SEEDS:
         s8 = _resolve("S8_ego_exit_to_ramp", seed)
-        assert 30.0 <= s8["mandatory_lane_change_remaining_distance_m"] <= 60.0
+        assert s8["ego_initial_speed_km_h"] == 25.0
+        assert 55.0 <= s8["ego_distance_to_diverge_m"] <= 57.0
+        assert 58.0 <= s8["mandatory_lane_change_remaining_distance_m"] <= 60.0
+        assert 20.0 <= s8["exit_lane_rear_actor_speed_km_h"] <= 28.0
+        assert 16.0 <= s8["exit_lane_front_actor_speed_km_h"] <= 23.0
+        assert (
+            s8["exit_lane_rear_actor_speed_km_h"]
+            < s8["exit_lane_front_actor_speed_km_h"]
+        )
         assert 45.0 <= s8["usable_exit_lane_gap_m"] <= 75.0
+        assert s8["usable_exit_lane_gap_m"] >= 74.0
         s9 = _resolve("S9_narrow_channel_negotiation", seed)
         assert s9["source_lane_id"] == 1 and s9["bypass_lane_id"] == 0
+        assert 21.5 <= s9["ego_initial_speed_km_h"] <= 22.0
         assert 15.0 <= s9["agent0_to_blocker_bumper_gap_m"] <= 28.0
-        assert 0.0 <= s9["blocker_speed_km_h"] <= 8.0
-        assert 2.0 <= s9["predicted_blocker_ttc_s"] <= 4.0
+        assert 0.0 <= s9["blocker_speed_km_h"] <= 0.5
+        assert 3.9 <= s9["predicted_blocker_ttc_s"] <= 4.0
         assert 45.0 <= s9["usable_bypass_gap_m"] <= 70.0
+        assert 40.0 <= s9["ego_distance_to_narrow_entry_m"] <= 50.0
+        assert 8.0 <= s9["latest_lane_change_completion_before_blocker_m"] <= 10.0

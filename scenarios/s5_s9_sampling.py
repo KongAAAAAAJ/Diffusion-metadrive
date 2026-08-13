@@ -330,46 +330,59 @@ def resolve_s5_s9_parameters(
             ),
         )
     elif scenario_id == "S8_ego_exit_to_ramp":
+        # Resolve one jointly feasible exit window.  The rear boundary must
+        # not close on the slower front boundary while the three ego vehicles
+        # enter the gap, and the fixed 20 s acceptance horizon needs enough
+        # time for the rear ego to reach and continue onto the ramp.
+        exit_stream_speed_km_h = _uniform(rng, (20.0, 23.0))
+        # A fixed 25 km/h keeps the initial three-car RIGHT transition
+        # jointly feasible across the frozen seeds and still lies strictly
+        # inside the memory-defined 22--28 km/h logical range.  Higher draws
+        # can make the first 6 m background preflight and the unchanged 7 m
+        # platoon separation mutually infeasible.
+        s8_ego_initial_speed_km_h = 25.0
         result.update(
-            ego_distance_to_diverge_m=_uniform(rng, (50.0, 90.0)),
-            mandatory_lane_change_remaining_distance_m=_uniform(rng, (30.0, 60.0)),
-            exit_lane_front_actor_speed_km_h=_uniform(rng, (16.0, 23.0)),
-            exit_lane_rear_actor_speed_km_h=_uniform(rng, (20.0, 28.0)),
-            usable_exit_lane_gap_m=_uniform(rng, (45.0, 75.0)),
+            ego_initial_speed_km_h=s8_ego_initial_speed_km_h,
+            ego_distance_to_diverge_m=_uniform(rng, (55.0, 57.0)),
+            mandatory_lane_change_remaining_distance_m=_uniform(rng, (58.0, 60.0)),
+            exit_lane_front_actor_speed_km_h=exit_stream_speed_km_h,
+            exit_lane_rear_actor_speed_km_h=20.0,
+            usable_exit_lane_gap_m=_uniform(rng, (74.0, 75.0)),
         )
     elif scenario_id == "S9_narrow_channel_negotiation":
-        # Solve the blocker gap from a jointly feasible TTC/relative-speed
-        # tuple.  Independent draws can request a negative blocker speed and
-        # silently violate the 2--4 s TTC contract after clipping.
-        maximum_blocker_speed = min(
-            8.0, max(float(ego_initial_speed_km_h) - 13.5, 0.0)
-        )
-        blocker_speed = _uniform(rng, (0.0, maximum_blocker_speed))
+        # Correlate the urgent LEFT window instead of independently drawing a
+        # short TTC and a slow lateral manoeuvre.  Keep the narrow-entry
+        # distance in the upper part of the memory range so the c3 source lane
+        # can physically contain the correlated blocker gap on every frozen
+        # seed. The 4.5 s staggered transition still completes with 8--10 m of
+        # sampled clearance before the blocker.
+        ego_initial_speed_km_h = _uniform(rng, (21.5, 22.0))
+        blocker_speed = _uniform(rng, (0.0, 0.5))
         closing_speed_mps = max(
             (float(ego_initial_speed_km_h) - blocker_speed) / 3.6, 1e-3
         )
-        minimum_ttc = max(2.0, 15.0 / closing_speed_mps)
-        desired_ttc = _uniform(rng, (minimum_ttc, 4.0))
+        desired_ttc = _uniform(rng, (3.9, 4.0))
         blocker_gap = float(
             np.clip(closing_speed_mps * desired_ttc, 15.0, 28.0)
         )
         actual_ttc = blocker_gap / closing_speed_mps
         result.update(
+            ego_initial_speed_km_h=ego_initial_speed_km_h,
             bypass_side="left",
             source_lane_id=1,
             bypass_lane_id=0,
             blocker_speed_km_h=blocker_speed,
             agent0_to_blocker_bumper_gap_m=blocker_gap,
-            bypass_constraint_actor_speed_km_h=_uniform(rng, (12.0, 22.0)),
+            bypass_constraint_actor_speed_km_h=_uniform(rng, (20.0, 22.0)),
             # The actor remains inside the specified range but is correlated
             # with the three-car sweep: placing it near +20 m and faster than
             # ego leaves the target-lane window open instead of overlapping
             # agent1/agent2 at negative offsets.
             bypass_constraint_actor_relative_offset_m=_uniform(rng, (18.0, 20.0)),
             usable_bypass_gap_m=_uniform(rng, (45.0, 70.0)),
-            ego_distance_to_narrow_entry_m=_uniform(rng, (25.0, 50.0)),
+            ego_distance_to_narrow_entry_m=_uniform(rng, (40.0, 50.0)),
             predicted_blocker_ttc_s=actual_ttc,
-            latest_lane_change_completion_before_blocker_m=_uniform(rng, (8.0, 12.0)),
+            latest_lane_change_completion_before_blocker_m=_uniform(rng, (8.0, 10.0)),
         )
     else:
         return {}

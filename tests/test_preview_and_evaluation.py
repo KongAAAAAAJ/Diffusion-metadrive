@@ -850,6 +850,21 @@ def test_format_episode_stop_reason_reports_truncation_without_agent_failures() 
     assert message == "Episode stopped: step=3 reason=truncated"
 
 
+def test_diagnostic_initial_speed_prefers_resolved_scenario_value() -> None:
+    env = SimpleNamespace(config={"initial_speed_km_h": 22.0})
+
+    speed = module._diagnostic_initial_speed_km_h(
+        env,
+        {
+            "resolved_scenario_parameters": {
+                "ego_initial_speed_km_h": 25.0,
+            }
+        },
+    )
+
+    assert speed == pytest.approx(25.0)
+
+
 def test_run_single_episode_prints_stop_reason(monkeypatch, capsys) -> None:
     fake_env = _FakeEnv([{"done_step": 0, "crash": True}])
     monkeypatch.setattr(module, "_capture_topdown_frame", lambda *args, **kwargs: np.zeros((8, 8, 3), dtype=np.uint8))

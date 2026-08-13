@@ -752,6 +752,35 @@ def test_s8_injected_traffic_uses_fixed_physical_type() -> None:
     assert orchestrator._scenario_vehicle_type() is TrafficDefaultVehicle
 
 
+def test_s8_functional_success_requires_interaction_split_and_ramp_recovery() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S8_ego_exit_to_ramp"],
+        "R6_exit_to_ramp",
+    )
+    orchestrator._actor_manifest = {
+        "exit_gap_front": {"active": True},
+        "exit_gap_rear": {"active": True},
+    }
+    orchestrator._route_completion = {
+        "all_agents_entered_exit_side_lane": True,
+        "all_agents_traversed_diverge_connector": True,
+        "all_agents_continued_on_exit_ramp": True,
+        "returned_to_mainline": False,
+    }
+    orchestrator._conflict_evidence = {
+        "causal_exit_actor_interaction_observed": True,
+        "physical_split_observed": True,
+        "non_simultaneous_right_lane_changes": True,
+        "post_connector_nonkeep_observed": False,
+        "formation_recovered_on_ramp": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is True
+
+    orchestrator._conflict_evidence["causal_exit_actor_interaction_observed"] = False
+    assert orchestrator._functional_success(recipes_complete=True) is False
+
+
 def test_hard_brake_recipe_rejects_legacy_static_contract(monkeypatch) -> None:
     rng = np.random.RandomState(123)
     env, _ego, _traffic_manager = make_env_and_ego(rng=rng)

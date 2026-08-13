@@ -734,54 +734,69 @@ class SimulatorDynamicAnchorGenerator:
                 (TRAJECTORY_STEPS, TRAJECTORY_DIM), dtype=np.float32
             )
         contract = HardModeMaskConfig(dt_s=self.config.dt_s)
-        distances = self._freeze_stationary_tail(
-            self._travel_distances(
-                speed_mps, self.config.stop_accel_mps2
-            ),
-            movement_epsilon_m=contract.movement_epsilon_m,
-        )
-        world, world_heading = self._sample_lane_pose_path(
-            road_network,
-            source_lane,
-            source_s,
-            source_d,
-            distances,
-        )
-        xy = self._world_to_ego(world, ego_pose)
-        increments = np.diff(np.concatenate(([0.0], distances)))
-        stationary = np.flatnonzero(
-            increments <= contract.movement_epsilon_m
-        )
-        if stationary.size:
-            first = int(stationary[0])
-            frozen_xy = (
-                np.zeros((2,), dtype=np.float64)
-                if first == 0
-                else xy[first - 1].copy()
+        last_audit = None
+        for braking_scale in (1.0, 0.875, 0.75, 0.625, 0.5):
+            distances = self._freeze_stationary_tail(
+                self._travel_distances(
+                    speed_mps,
+                    float(self.config.stop_accel_mps2) * braking_scale,
+                ),
+                movement_epsilon_m=contract.movement_epsilon_m,
             )
-            xy[first:] = frozen_xy
-        heading = self._contract_limited_headings(
-            _wrap_to_pi(world_heading - ego_pose[2]),
-            xy,
-            contract,
-        )
-        if stationary.size:
-            first = int(stationary[0])
-            frozen_heading = 0.0 if first == 0 else float(heading[first - 1])
-            heading[first:] = frozen_heading
-        result = np.column_stack([xy, heading]).astype(np.float32)
-        audit = validate_trajectory_kinematics(
-            result,
-            speed_mps,
-            np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
-            contract,
-        )
-        if not audit.valid:
-            raise DynamicAnchorError(
-                "STOP anchor violates fixed-time kinematics: "
-                + ",".join(audit.violations)
+            # Include the projected zero-distance pose, then translate the
+            # sampled lane path onto the measured vehicle pose.  MetaDrive's
+            # polyline projection is not an exact inverse near curved segment
+            # seams; using the reconstructed lane pose as the implicit origin
+            # can add a spurious first-step distance and push an otherwise
+            # reachable STOP anchor outside the fixed-time envelope.
+            sampled_world, sampled_heading = self._sample_lane_pose_path(
+                road_network,
+                source_lane,
+                source_s,
+                source_d,
+                np.concatenate(([0.0], distances)),
             )
-        return result
+            world = sampled_world[1:] + (
+                ego_pose[None, :2] - sampled_world[0:1]
+            )
+            world_heading = sampled_heading[1:]
+            xy = self._world_to_ego(world, ego_pose)
+            increments = np.diff(np.concatenate(([0.0], distances)))
+            stationary = np.flatnonzero(
+                increments <= contract.movement_epsilon_m
+            )
+            if stationary.size:
+                first = int(stationary[0])
+                frozen_xy = (
+                    np.zeros((2,), dtype=np.float64)
+                    if first == 0
+                    else xy[first - 1].copy()
+                )
+                xy[first:] = frozen_xy
+            heading = self._contract_limited_headings(
+                _wrap_to_pi(world_heading - ego_pose[2]),
+                xy,
+                contract,
+            )
+            if stationary.size:
+                first = int(stationary[0])
+                frozen_heading = (
+                    0.0 if first == 0 else float(heading[first - 1])
+                )
+                heading[first:] = frozen_heading
+            result = np.column_stack([xy, heading]).astype(np.float32)
+            last_audit = validate_trajectory_kinematics(
+                result,
+                speed_mps,
+                np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
+                contract,
+            )
+            if last_audit.valid:
+                return result
+        raise DynamicAnchorError(
+            "STOP anchor violates fixed-time kinematics: "
+            + ",".join(last_audit.violations)
+        )
 
     def generate(self, env: object, ego_id: str) -> DynamicAnchorOutput:
         agents = getattr(env, "agents", None)

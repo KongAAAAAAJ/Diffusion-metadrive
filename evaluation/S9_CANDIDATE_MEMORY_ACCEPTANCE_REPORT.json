@@ -1,0 +1,177 @@
+{
+  "format": "s9_candidate_memory_acceptance_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-13T11:21:51+08:00",
+  "status": "s9_fixed_five_seed_memory_gate_passed",
+  "scenario_id": "S9_narrow_channel_negotiation",
+  "local_route": "R8_narrow_channel",
+  "source_memory": "docs/project/s5_s9_functional_scenario_design.json",
+  "source_git_commit": "b7c41dff4b4c72a9c7ee3a0bb41f18ff0ed4deb0",
+  "worktree_state": "uncommitted_candidate_revision_changes_preserved",
+  "scope": {
+    "formal_v1_contract_changed": false,
+    "formal_50k_dataset_or_checkpoint_metadata_changed": false,
+    "candidate_v2_contract_frozen": false,
+    "reason_candidate_v2_not_frozen": "S9 passed independently under the any-order policy; the complete candidate-v2 contract still requires every S5-S9 scenario gate."
+  },
+  "root_cause_and_fix": {
+    "pre_fix_failures": [
+      "S9 initially treated the three forced LEFT decisions as simultaneous completion and did not prove temporary physical formation dissolution or causal interaction with the bypass-lane actor.",
+      "The sampled S9 narrow-entry distance and speed were recorded but not consumed by the fixed-route spawn manager, so seed 59 placed the platoon too close to the c3 seam and forced the blocker geometry out of its sampled relation.",
+      "A generic IDM blocker at the c3 seam could follow its navigation branch across lane 0, contradicting the declared middle-lane obstruction role."
+    ],
+    "fixes": [
+      "The S9 joint plan uses platoon-order start delays and distinct completion times while retaining all three real LEFT transitions and full joint safety audits.",
+      "The fixed-route spawn manager now consumes S9's deterministic ego_distance_to_narrow_entry_m and ego_initial_speed_km_h values, aligning physical spawn geometry with the memory parameters.",
+      "The blocking actor uses a scenario-specific lane-keeping policy, remains slow or stopped in c3 lane 1, and cannot turn across the bypass lane.",
+      "Persistent functional evidence now proves actor realization, causal bypass interaction, distinct LEFT completion times, completion clearance, blocker passage, narrow-road continuation, no return to lane 1, and post-bypass formation recovery."
+    ],
+    "memory_or_safety_thresholds_relaxed": false,
+    "unchanged_hard_thresholds": {
+      "background_runtime_gap_m": 5,
+      "s9_bypass_keep_selection_preflight_gap_m": 15,
+      "platoon_pair_gap_m": 7,
+      "minimum_acceleration_mps2": -8,
+      "episode_horizon_steps": 200
+    }
+  },
+  "acceptance": {
+    "fixed_seeds": [17, 23, 31, 47, 59],
+    "horizon_steps": 200,
+    "episodes_passed": "5/5",
+    "native_joint_planning_steps": "1000/1000",
+    "collision_count": 0,
+    "out_of_road_count": 0,
+    "planner_fallback_count": 0,
+    "persistable_episode_count": 5,
+    "functional_success_count": 5,
+    "declared_actor_roles_realized": "10/10",
+    "all_episodes_have_causal_bypass_actor_interaction": true,
+    "all_episodes_have_three_real_left_transitions": true,
+    "all_episodes_have_non_simultaneous_left_completion": true,
+    "all_episodes_complete_left_before_sampled_blocker_clearance": true,
+    "all_episodes_pass_blocker_longitudinally": true,
+    "all_episodes_continue_on_narrow_road": true,
+    "all_episodes_do_not_return_to_lane_1": true,
+    "all_episodes_reassemble_on_bypass_route": true,
+    "hard_gates_passed": true
+  },
+  "episodes": [
+    {
+      "seed": 17,
+      "severity": "high",
+      "ego_speed_km_h": 21.727884896209794,
+      "blocker_speed_km_h": 0.08537573208136157,
+      "blocker_gap_m": 24.01209434250387,
+      "predicted_blocker_ttc_s": 3.9941551590649453,
+      "left_completion_steps": {"agent0": 30, "agent1": 36, "agent2": 45},
+      "left_completion_clearance_m": {"agent0": 11.279604492187499, "agent1": 21.72702270507813, "agent2": 31.294222412109384},
+      "required_completion_clearance_m": 9.0348347563679,
+      "blocker_pass_steps": {"agent0": 59, "agent1": 87, "agent2": 122},
+      "final_bumper_gaps_m": [13.835500488281248, 10.052694091796873],
+      "episode_json_sha256": "60ebd7f3c764220c3a58e5b6db213b6471eb4bf41da1f1ea5fe75a35947ae0b9",
+      "topdown_video_sha256": "6eeb8c2d5b6cb8f77cd1ae09787a7aacb61e4b654bb02cf05d503dcad9b04786",
+      "semantic_bev_video_sha256": "4b1e485e9496a2b4e5bb5c64a68188a7f95548fa55a56fcbba582ba0e3413e27",
+      "trajectory_npz_sha256": "e7e4c298c2831d36dbfcb91fc516018d8c73d099efd8fd6fd3667a57d3e65323"
+    },
+    {
+      "seed": 23,
+      "severity": "high",
+      "ego_speed_km_h": 21.62392932120679,
+      "blocker_speed_km_h": 0.3063196515716664,
+      "blocker_gap_m": 23.582071671735015,
+      "predicted_blocker_ttc_s": 3.982409816761559,
+      "left_completion_steps": {"agent0": 27, "agent1": 36, "agent2": 45},
+      "left_completion_clearance_m": {"agent0": 11.519655761718749, "agent1": 21.288942871093756, "agent2": 31.06738525390626},
+      "required_completion_clearance_m": 9.832881203056505,
+      "blocker_pass_steps": {"agent0": 61, "agent1": 91, "agent2": 131},
+      "final_bumper_gaps_m": [12.819082031249998, 8.153371582031248],
+      "episode_json_sha256": "d998b1efdd93865c69f04d312fb7c3e63f26b894132d30d2ec3da1cdcb92364d",
+      "topdown_video_sha256": "853a1d450f2acf2054c38c7552fb0dca7bab38b30c11f8bf94f805bc27ef01d0",
+      "semantic_bev_video_sha256": "d06b110155f800aa0775a6b6aa9dbd6b2c455969c60071884d4f98577705fd37",
+      "trajectory_npz_sha256": "6787c0a1c7b5cd066ec8883b447c50ac5c393ac7347c838353547b4a2c76d8b4"
+    },
+    {
+      "seed": 31,
+      "severity": "low",
+      "ego_speed_km_h": 21.828974442233378,
+      "blocker_speed_km_h": 0.11907950155248725,
+      "blocker_gap_m": 23.73395560166159,
+      "predicted_blocker_ttc_s": 3.9356358194933763,
+      "left_completion_steps": {"agent0": 30, "agent1": 36, "agent2": 45},
+      "left_completion_clearance_m": {"agent0": 10.920198974609374, "agent1": 20.454653320312506, "agent2": 30.73944335937501},
+      "required_completion_clearance_m": 9.197516944065583,
+      "blocker_pass_steps": {"agent0": 58, "agent1": 86, "agent2": 121},
+      "final_bumper_gaps_m": [13.970021972656248, 10.468831787109373],
+      "episode_json_sha256": "00ebdf744d72c7b539f3887f793cd25a46a3a869f122a769263bef0781177679",
+      "topdown_video_sha256": "1ac09c3f257ca8cb8a265e450f96bf93ed7aa4f69bd94d4c31ca33b85d14cec1",
+      "semantic_bev_video_sha256": "4ad97570ce50f697a49623c93f1735deecc27575ba62875b56c4929b797f950e",
+      "trajectory_npz_sha256": "8520996cef993f20483c47d08c66843384f07e415b83e2abc5670d0f6735daf2"
+    },
+    {
+      "seed": 47,
+      "severity": "high",
+      "ego_speed_km_h": 21.55036195422507,
+      "blocker_speed_km_h": 0.13876339922746428,
+      "blocker_gap_m": 23.442835956459007,
+      "predicted_blocker_ttc_s": 3.9415183890393957,
+      "left_completion_steps": {"agent0": 27, "agent1": 36, "agent2": 45},
+      "left_completion_clearance_m": {"agent0": 10.998476562499999, "agent1": 21.328737792968756, "agent2": 30.93866210937501},
+      "required_completion_clearance_m": 9.312763575270845,
+      "blocker_pass_steps": {"agent0": 60, "agent1": 90, "agent2": 128},
+      "final_bumper_gaps_m": [13.239400634765623, 9.581502685546873],
+      "episode_json_sha256": "f194a4cbf8eee67143eabaff51b0caeb1f440fb4b86d26a7f28aaf936c436cc5",
+      "topdown_video_sha256": "e2a450a060738d8b87c391bd99725c9efc4af1ca6d4111aee8ebe2f9d12f155b",
+      "semantic_bev_video_sha256": "8ea969fb84690194552129250d87cd30bfcd932d3c60dc51bc0b9a91785a797f",
+      "trajectory_npz_sha256": "3eca588c478e2e09cd8130dfba8b4f86ea26172d4a1466851ef0e32064e8abba"
+    },
+    {
+      "seed": 59,
+      "severity": "high",
+      "ego_speed_km_h": 21.52671189140617,
+      "blocker_speed_km_h": 0.2832058299907369,
+      "blocker_gap_m": 23.107632560812785,
+      "predicted_blocker_ttc_s": 3.9159014984828424,
+      "left_completion_steps": {"agent0": 26, "agent1": 36, "agent2": 45},
+      "left_completion_clearance_m": {"agent0": 9.996523437499999, "agent1": 21.000063476562506, "agent2": 30.628572998046884},
+      "required_completion_clearance_m": 9.573736663309685,
+      "blocker_pass_steps": {"agent0": 56, "agent1": 87, "agent2": 120},
+      "final_bumper_gaps_m": [14.918966064453123, 10.792745361328123],
+      "episode_json_sha256": "dad7998bf2e26565d034c0b3989884a06ab22bf4a92ce25eed1a5715643ce1cf",
+      "topdown_video_sha256": "1ecb3fbaef767f35bd6d920f844199684ca75c8cc4f0d6eb445bc1e24e99dc36",
+      "semantic_bev_video_sha256": "53b6df5db5761e334dbc6bf169cf346aa73d81439cf9280b652482d8592f0603",
+      "trajectory_npz_sha256": "b85b0f7d323eb48e5b5639d2545514eb961f59e091fa4be5a819f9b598e0c9c1"
+    }
+  ],
+  "artifact_validation": {
+    "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s9_candidate_memory_acceptance_20260813_v2/S9_narrow_channel_negotiation",
+    "topdown_videos": "5/5 non-empty, decodable, exactly 200 frames",
+    "semantic_bev_videos": "5/5 non-empty, decodable, exactly 200 frames",
+    "trajectory_npz": "5/5 load successfully; step, rule action, world trajectory, control, proposal, execution, collection, and mode arrays have the required 200-step shapes and finite core values",
+    "visual_review": "Reviewed seed 59 top-down and semantic-BEV frames at 2, 5, 10, and 18 seconds. The middle-lane blocker, left-lane constraint actor, three physical LEFT transitions, longitudinal blocker passage, continued bypass-lane travel, and recovered ordering agree with the machine evidence; no collision, off-road motion, teleportation, route return, or silent actor loss was observed.",
+    "review_mosaics": [
+      "/tmp/s9_v2_visual_review/topdown_mosaic.png",
+      "/tmp/s9_v2_visual_review/bev_mosaic.png"
+    ]
+  },
+  "tests": [
+    {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_s8_g_block_drivable_geometry.py tests/test_s5_s9_sampling.py tests/test_scenario_definitions.py tests/test_scenario_orchestrator_adjacent_vehicles.py tests/test_rule_maker.py tests/test_platoon_normal_planner.py tests/test_joint_bev_collection.py tests/test_route_spawn_manager_fixed_platoon_spawn.py tests/test_platoon_route_spawn.py tests/test_preview_and_evaluation.py -q",
+      "result": "290 passed"
+    },
+    {
+      "command": "python -m evaluation.preview_and_evaluation --scenario-id S9_narrow_channel_negotiation --local-route R8_narrow_channel --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 200 --traffic-density 0 --output-root outputs/s9_candidate_memory_acceptance_20260813_v2 --evaluate",
+      "result": "5/5 episodes passed; 1000/1000 native planning steps; all required videos, trajectories, metrics, and diagnostics written"
+    },
+    {
+      "command": "machine audit of all five expert_episode.json files against every S9 memory range, functional predicate, safety result, native-planning count, and required artifact path",
+      "result": "5/5 episodes and all declared ranges/functional/safety/artifact predicates passed"
+    }
+  ],
+  "minimum_reproduction_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m evaluation.preview_and_evaluation --scenario-id S9_narrow_channel_negotiation --local-route R8_narrow_channel --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 200 --traffic-density 0 --output-root outputs/s9_candidate_memory_acceptance_20260813_v2 --evaluate",
+  "remaining_risks": [
+    "This accepts S9 only and does not freeze the complete candidate-v2 S5-S9 scenario contract.",
+    "The current formal v1 50k dataset and checkpoints remain bound to their prior frozen scenario hash and are not relabeled by this report.",
+    "The fixed five-seed gate proves the declared candidate range points, not exhaustive continuous-space robustness outside the accepted seed set."
+  ]
+}

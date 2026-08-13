@@ -734,6 +734,23 @@ class PlatoonEnv(BaseMultiEnv):
             return
 
         speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
+        if fixed_agent0_config is not None and bool(
+            fixed_agent0_config.get("spawn_velocity_car_frame", False)
+        ):
+            fixed_spawn_velocity = fixed_agent0_config.get(
+                "spawn_velocity", ()
+            )
+            if (
+                isinstance(fixed_spawn_velocity, (tuple, list))
+                and fixed_spawn_velocity
+                and np.isfinite(float(fixed_spawn_velocity[0]))
+                and float(fixed_spawn_velocity[0]) >= 0.0
+            ):
+                # The route-aware spawn manager owns correlated S5--S9
+                # realizations.  Repositioning must preserve its resolved
+                # car-frame speed instead of restoring the independent env
+                # default after the vehicles have been placed on the route.
+                speed_m_s = float(fixed_spawn_velocity[0])
         gap_m = self._cfg_float(
             "platoon_spawn_gap_m", self._desired_center_spacing_m()
         )

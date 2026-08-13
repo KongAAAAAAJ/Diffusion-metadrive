@@ -149,6 +149,14 @@ class MultiAgentRuleMaker(RuleMaker):
     ACTIONS = (-1, 0, 1)  # left, keep, right. Lane ids follow MetaDrive convention.
     LANE_CHANGE_COMPLETION_LATERAL_TOLERANCE_M = 0.25
     LANE_CHANGE_COMPLETION_HEADING_TOLERANCE_RAD = 0.1
+    S8_EXACT_EXIT_ROUTE = (
+        ("3C0_1_", "4G0_0_", 2),
+        ("4G0_0_", "4G1_1_", 0),
+        ("4G1_1_", "4G1_2_", 0),
+        ("4G1_2_", "4G1_3_", 0),
+        ("4G1_3_", "4G1_4_", 0),
+        ("4G1_4_", "15s0_0_", 0),
+    )
 
     def __init__(
         self,
@@ -761,6 +769,42 @@ class MultiAgentRuleMaker(RuleMaker):
             self._formation_locked = True
             risk_info["next_state"] = "LOCKED"
             risk_info["s7_lateral_coordination_preserved"] = True
+        if self._is_s8_exit_route(env):
+            orchestrator = getattr(env, "_scenario_orchestrator", None)
+            route_completion = getattr(orchestrator, "_route_completion", {}) or {}
+            exit_chain_complete = bool(
+                route_completion.get(
+                    "all_agents_traversed_diverge_connector", False
+                )
+            )
+            # S8 explicitly requires temporary formation dissolution while
+            # the three vehicles negotiate the actor-bounded exit gap and the
+            # curved connector.  Relock only after all three have crossed the
+            # connector so the LQR follower can recover longitudinal gaps on
+            # the ramp.  Dense OBB and 7 m pairwise safety remain active in
+            # both modes.
+            self._formation_locked = exit_chain_complete
+            risk_info["next_state"] = (
+                "LOCKED" if exit_chain_complete else "UNLOCKED"
+            )
+            risk_info["s8_exit_chain_release_active"] = not exit_chain_complete
+        if self._config_value(
+            getattr(env, "config", {}) or {}, "scenario_id"
+        ) == "S9_narrow_channel_negotiation":
+            orchestrator = getattr(env, "_scenario_orchestrator", None)
+            route_completion = getattr(orchestrator, "_route_completion", {}) or {}
+            bypass_complete = bool(
+                route_completion.get("all_agents_changed_lane", False)
+            )
+            # S9 intentionally dissolves the formation for the serial LEFT
+            # manoeuvres. As soon as all three have physically entered lane 0,
+            # relock longitudinal coordination so the followers close the
+            # temporary gaps while the platoon clears the blocker.
+            self._formation_locked = bypass_complete
+            risk_info["next_state"] = (
+                "LOCKED" if bypass_complete else "UNLOCKED"
+            )
+            risk_info["s9_serial_release_active"] = not bypass_complete
         formation_constraint_enabled = bool(self._formation_locked)
 
         s7_release_ready = self._s7_gap_release_ready(env)
@@ -1453,6 +1497,15 @@ class MultiAgentRuleMaker(RuleMaker):
                 # centering. The same 0.15 rad envelope used by committed S8
                 # tracking is the correct completion tolerance here.
                 heading_tolerance_rad = 0.15
+            scenario_id = self._config_value(
+                getattr(env, "config", {}) or {}, "scenario_id"
+            )
+            if scenario_id == "S9_narrow_channel_negotiation":
+                # S9's serial low-speed bypass finishes with a short centering
+                # tail. Match the planner's S9 tracking envelope, while still
+                # requiring the complete vehicle footprint inside lane 0.
+                lateral_tolerance_m = 0.45
+                heading_tolerance_rad = 0.18
             if (
                 not np.isfinite(target_lateral_m)
                 or not np.isfinite(heading_error_rad)
@@ -2073,6 +2126,10 @@ class MultiAgentRuleMaker(RuleMaker):
     ) -> dict | None:
         # Step 1: 计算当前车辆所在lane和目标lane
         source_lane = getattr(vehicle, "lane", None)
+        if self._is_s8_exit_route(env):
+            source_lane = self._s8_effective_source_lane(
+                env, vehicle, source_lane
+            )
         target_lane = (
             target_lane_override
             if target_lane_override is not None
@@ -2187,6 +2244,12 @@ class MultiAgentRuleMaker(RuleMaker):
                 == tuple(getattr(target_lane, "index", ())[:2])
             ):
                 candidate["forced_lane_change"] = True
+                candidate["forced_route_action"] = True
+            if self._is_s8_approach_keep(
+                env,
+                source_lane=source_lane,
+                action=int(action),
+            ):
                 candidate["forced_route_action"] = True
             if self._is_s8_required_exit_keep(
                 env,
@@ -2442,6 +2505,61 @@ class MultiAgentRuleMaker(RuleMaker):
         )
 
     @classmethod
+    def _s8_effective_source_lane(cls, env, vehicle, localized_lane):
+        """Keep RuleMaker on the frozen exit route across the G seam.
+
+        The non-routing junction apron overlaps the opposite G-block edge, so
+        MetaDrive may temporarily localize a vehicle there even though its
+        physical pose remains on the verified exit apron.  Resolve only that
+        short overlap by projection onto the exact S8 route; normal lane
+        localization remains authoritative everywhere else.
+        """
+
+        localized_index = tuple(
+            getattr(localized_lane, "index", ()) or ()
+        )
+        if localized_index in cls.S8_EXACT_EXIT_ROUTE:
+            return localized_lane
+        road_network = getattr(
+            getattr(
+                getattr(env, "engine", None), "current_map", None
+            ),
+            "road_network",
+            None,
+        )
+        if road_network is None:
+            return localized_lane
+        position = np.asarray(vehicle.position[:2], dtype=np.float64)
+        vehicle_width = float(getattr(vehicle, "WIDTH", 2.3) or 2.3)
+        projected = []
+        for route_order, lane_index in enumerate(cls.S8_EXACT_EXIT_ROUTE):
+            try:
+                lane = road_network.get_lane(lane_index)
+                longitudinal, lateral = lane.local_coordinates(position)
+            except Exception:
+                continue
+            lane_length = float(getattr(lane, "length", 0.0) or 0.0)
+            lane_width = float(getattr(lane, "width", 3.5) or 3.5)
+            outside = max(
+                -float(longitudinal),
+                float(longitudinal) - lane_length,
+                0.0,
+            )
+            centre_tolerance = 0.5 * (lane_width + vehicle_width)
+            if abs(float(lateral)) > centre_tolerance + 1.0e-6:
+                continue
+            projected.append(
+                (
+                    10.0 * outside + abs(float(lateral)),
+                    int(route_order),
+                    lane,
+                )
+            )
+        if not projected:
+            return localized_lane
+        return min(projected, key=lambda value: (value[0], value[1]))[2]
+
+    @classmethod
     def _is_s5_hard_brake_scenario(cls, env) -> bool:
         config = getattr(env, "config", {}) or {}
         return cls._config_value(config, "scenario_id") == "S5_hard_brake_lead"
@@ -2678,12 +2796,29 @@ class MultiAgentRuleMaker(RuleMaker):
         orchestrator = getattr(env, "_scenario_orchestrator", None)
         resolved = getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}
         threshold = float(resolved.get("mandatory_lane_change_remaining_distance_m", 60.0))
-        # Open the coordinated RIGHT manoeuvre when the formation centroid,
-        # rather than only agent0, reaches the sampled 30--60 m route window.
-        # This gives the three vehicles enough shared road for a staggered
-        # hard-safe lane change while preserving the declared trigger range.
-        remaining = float(np.mean(remaining_values))
+        # The contract's mandatory remaining distance is measured at the
+        # frontmost ego.  Waiting for the formation centroid consumes the
+        # leader's source path and can leave less than one complete audited
+        # lane-change horizon before the diverge.
+        remaining = float(min(remaining_values))
         return 0.0 <= remaining <= threshold
+
+    @classmethod
+    def _is_s8_approach_keep(
+        cls,
+        env,
+        *,
+        source_lane,
+        action: int,
+    ) -> bool:
+        """Keep the source lane until the sampled RIGHT window opens."""
+
+        if not cls._is_s8_exit_route(env) or int(action) != 0:
+            return False
+        source_index = tuple(getattr(source_lane, "index", ()) or ())
+        if source_index != ("3C0_1_", "4G0_0_", 1):
+            return False
+        return not cls._s8_lane_change_window_open(env, source_lane)
 
     def _is_s9_forced_route_candidate(self, env, candidate: dict) -> bool:
         config = getattr(env, "config", {}) or {}
@@ -2692,12 +2827,12 @@ class MultiAgentRuleMaker(RuleMaker):
         source = tuple(candidate.get("source_lane_index", ()) or ())
         target = tuple(candidate.get("target_lane_index", ()) or ())
         action = int(candidate.get("action", 0))
-        if int(self._decision_step) <= 5:
+        if int(self._decision_step) <= 0:
             return action == 0
         orchestrator = getattr(env, "_scenario_orchestrator", None)
         manifest = getattr(orchestrator, "_actor_manifest", {}) or {}
-        # Allow one KEEP step so the atomic blocker recipe exists before the
-        # topology/TTC gate constrains the joint action set.
+        # Allow only the reset decision to KEEP so the atomic blocker recipe
+        # exists before the topology/TTC gate constrains the joint action set.
         if "blocking_actor" not in manifest:
             return action == 0
         # Every ego still on c3 lane 1 must move LEFT. The native joint
@@ -2761,8 +2896,8 @@ class MultiAgentRuleMaker(RuleMaker):
         if len(source_index) < 3 or len(source_lane_chain) < 2:
             return False
         if source_index in {
-            ("3C0_1_", "4G0_0_", 0),
-            ("4G0_0_", "4G0_1_", 0),
+            ("3C0_1_", "4G0_0_", 2),
+            ("4G0_0_", "4G0_1_", 2),
         }:
             next_index = tuple(
                 getattr(source_lane_chain[1], "index", ()) or ()
@@ -2780,7 +2915,7 @@ class MultiAgentRuleMaker(RuleMaker):
         )
         if not siblings:
             return False
-        rightmost_slot = min(
+        rightmost_slot = max(
             int(tuple(getattr(lane, "index", ()) or (0, 0, -1))[2])
             for lane in siblings
         )
@@ -2889,36 +3024,22 @@ class MultiAgentRuleMaker(RuleMaker):
         # navigation checkpoints after localization on the G-block internal
         # lane.  Anchor the exact graph chain explicitly so KEEP cannot follow
         # the through continuation after the completed RIGHT manoeuvre.
-        if lane_index == ("3C0_1_", "4G0_0_", 0):
-            exact_indices = (
-                ("4G0_0_", "4G1_1_", 0),
-                ("4G1_1_", "4G1_2_", 0),
-                ("4G1_2_", "4G1_3_", 0),
-                ("4G1_3_", "4G1_4_", 0),
-                ("4G1_4_", "15s0_0_", 0),
-            )
-            try:
-                return [
-                    source_lane,
-                    *(road_network.get_lane(index) for index in exact_indices),
-                ]
-            except Exception:
-                return None
-        if lane_index == ("4G0_0_", "4G0_1_", 0):
-            exact_indices = (
-                ("4G0_0_", "4G1_1_", 0),
-                ("4G1_1_", "4G1_2_", 0),
-                ("4G1_2_", "4G1_3_", 0),
-                ("4G1_3_", "4G1_4_", 0),
-                ("4G1_4_", "15s0_0_", 0),
-            )
-            try:
-                return [
-                    source_lane,
-                    *(road_network.get_lane(index) for index in exact_indices),
-                ]
-            except Exception:
-                return None
+        exact_route = self.S8_EXACT_EXIT_ROUTE
+        if lane_index in exact_route:
+            # Localization advances through the short G-block connector
+            # edges before navigation checkpoints are refreshed.  Rebase the
+            # same frozen exit route at the current edge instead of letting a
+            # short/stale navigation suffix exhaust the four-second planner
+            # path.  Small fake networks used by unit tests may publish only
+            # a prefix, so retain every consecutively available edge.
+            suffix = exact_route[exact_route.index(lane_index) + 1 :]
+            lane_chain = [source_lane]
+            for index in suffix:
+                try:
+                    lane_chain.append(road_network.get_lane(index))
+                except Exception:
+                    break
+            return lane_chain if len(lane_chain) > 1 else None
 
         navigation = getattr(vehicle, "navigation", None)
         checkpoints = list(getattr(navigation, "checkpoints", []) or [])
@@ -2953,7 +3074,7 @@ class MultiAgentRuleMaker(RuleMaker):
             siblings = self._graph_lanes(
                 road_network, current_index[0], current_index[1]
             )
-            rightmost_slot = min(
+            rightmost_slot = max(
                 (
                     int(tuple(getattr(lane, "index", ()) or (0, 0, 0))[2])
                     for lane in siblings
@@ -3434,12 +3555,6 @@ class MultiAgentRuleMaker(RuleMaker):
         if len(lane_index) < 3:
             return None
         lane_delta = int(action)
-        if self._is_s8_exit_route(env):
-            # On the S8 mainline MetaDrive lane ids grow leftward: the
-            # semantic RIGHT action must therefore decrement the lane id.
-            # Keep the public action definition unchanged and localize the
-            # map-index conversion to this verified route.
-            lane_delta = -lane_delta
         target_lane_id = int(lane_index[2]) + lane_delta
         if target_lane_id < 0:
             return None

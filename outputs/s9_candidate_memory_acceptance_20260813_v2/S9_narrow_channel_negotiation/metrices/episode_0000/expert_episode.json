@@ -1,0 +1,4983 @@
+{
+  "seed": 17,
+  "initial_speed_km_h": 21.727884896209794,
+  "simulator_steps": 200,
+  "simulated_duration_s": 20.0,
+  "rollout_wall_time_s": 98.54268365399912,
+  "planning_attempt_steps": 200,
+  "native_joint_success_steps": 200,
+  "native_joint_planning_success_rate": 1.0,
+  "collection_ready_attempt_steps": 190,
+  "collection_ready_success_steps": 190,
+  "collection_ready_step_success_rate": 1.0,
+  "planning_time_ms": {
+    "mean": 383.9288618869614,
+    "p50": 296.190072549507,
+    "p95": 417.4637036980129
+  },
+  "native_plan_time_ms": {
+    "p50": 325.14391583390534,
+    "p95": 418.6458273092285
+  },
+  "committed_roll_time_ms": {
+    "p50": 66.42396585084498,
+    "p95": 67.31509040109813
+  },
+  "collision": false,
+  "collision_agents": [],
+  "out_of_road": false,
+  "out_of_road_agents": [],
+  "failure_reason": null,
+  "rejection_counts": {},
+  "rejection_details": {},
+  "rule_action_counts": {
+    "agent0:+0": 172,
+    "agent1:+0": 166,
+    "agent2:+0": 157,
+    "agent0:-1": 28,
+    "agent1:-1": 34,
+    "agent2:-1": 43
+  },
+  "scenario_summary": {
+    "scenario_id": "S9_narrow_channel_negotiation",
+    "scenario_triggered": true,
+    "scenario_realized": true,
+    "scenario_trigger_step": 0,
+    "scenario_realized_step": 0,
+    "scenario_recipe_count": 1,
+    "scenario_completed_recipe_count": 1,
+    "scenario_recipes_complete": true,
+    "scenario_notes": [
+      "s9_bypass_actors_spawned"
+    ],
+    "scenario_random_seed": 1503570547,
+    "resolved_recipe_parameters": {},
+    "severity_bucket": "high",
+    "resolved_scenario_parameters": {
+      "scenario_seed": 1503570547,
+      "severity_bucket": "high",
+      "ego_initial_speed_km_h": 21.727884896209794,
+      "bypass_side": "left",
+      "source_lane_id": 1,
+      "bypass_lane_id": 0,
+      "blocker_speed_km_h": 0.08537573208136157,
+      "agent0_to_blocker_bumper_gap_m": 24.01209434250387,
+      "bypass_constraint_actor_speed_km_h": 21.43698845971834,
+      "bypass_constraint_actor_relative_offset_m": 19.635105195770254,
+      "usable_bypass_gap_m": 47.565967632463924,
+      "ego_distance_to_narrow_entry_m": 45.87121147183963,
+      "predicted_blocker_ttc_s": 3.9941551590649453,
+      "latest_lane_change_completion_before_blocker_m": 9.0348347563679
+    },
+    "actor_manifest": {
+      "blocking_actor": {
+        "role": "blocking_actor",
+        "object_name": "7d7620ad-2bb5-491c-adcf-5d3c8bc0aac1",
+        "spawn_step": 0,
+        "spawn_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ],
+        "spawn_position_xy": [
+          424.9588623046875,
+          -373.6184997558594
+        ],
+        "active": true,
+        "current_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          1
+        ],
+        "current_speed_km_h": 0.012724425790888965,
+        "current_position_xy": [
+          424.9605407714844,
+          -373.6184997558594
+        ]
+      },
+      "bypass_constraint_actor": {
+        "role": "bypass_constraint_actor",
+        "object_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+        "spawn_step": 0,
+        "spawn_lane_index": [
+          "10C0_0_",
+          "10C0_1_",
+          0
+        ],
+        "spawn_position_xy": [
+          435.07586669921875,
+          -377.1184997558594
+        ],
+        "active": true,
+        "current_lane_index": [
+          "11y0_0_",
+          "11y0_1_",
+          0
+        ],
+        "current_speed_km_h": 21.436662483255798,
+        "current_position_xy": [
+          316.1153564453125,
+          -377.1184997558594
+        ]
+      }
+    },
+    "conflict_evidence": {
+      "minimum_actor_distance_m": 3.4363935285590426,
+      "minimum_actor_ttc_s": 0.4692731558814784,
+      "blocker_initial_bumper_gap_m": 24.01209434250387,
+      "usable_bypass_gap_m": 47.565967632463924,
+      "required_lane_change": "LEFT",
+      "s9_actor_roles_present": true,
+      "left_completion_steps": {
+        "agent0": 30,
+        "agent1": 36,
+        "agent2": 45
+      },
+      "left_completion_clearance_m": {
+        "agent0": 11.279604492187499,
+        "agent1": 21.72702270507813,
+        "agent2": 31.294222412109384
+      },
+      "required_completion_clearance_m": 9.0348347563679,
+      "left_completion_clearance_satisfied": true,
+      "non_simultaneous_left_lane_changes": true,
+      "minimum_bypass_constraint_gap_m": 14.784066375771925,
+      "maximum_platoon_speed_spread_during_bypass_kmh": 8.704678930701709,
+      "causal_bypass_constraint_interaction_observed": true,
+      "blocker_pass_steps": {
+        "agent0": 59,
+        "agent1": 87,
+        "agent2": 122
+      },
+      "formation_current_bumper_gaps_m": [
+        13.835500488281248,
+        10.052694091796873
+      ],
+      "formation_recovery_stable_steps": 340,
+      "formation_recovered_after_bypass": true
+    },
+    "route_completion": {
+      "agent_lane_transitions": {
+        "agent0": [
+          {
+            "step": 30,
+            "lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              0
+            ]
+          },
+          {
+            "step": 78,
+            "lane_index": [
+              "10C0_1_",
+              "11y0_0_",
+              0
+            ]
+          },
+          {
+            "step": 111,
+            "lane_index": [
+              "11y0_0_",
+              "11y0_1_",
+              0
+            ]
+          }
+        ],
+        "agent1": [
+          {
+            "step": 36,
+            "lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              0
+            ]
+          },
+          {
+            "step": 109,
+            "lane_index": [
+              "10C0_1_",
+              "11y0_0_",
+              0
+            ]
+          },
+          {
+            "step": 164,
+            "lane_index": [
+              "11y0_0_",
+              "11y0_1_",
+              0
+            ]
+          }
+        ],
+        "agent2": [
+          {
+            "step": 45,
+            "lane_index": [
+              "10C0_0_",
+              "10C0_1_",
+              0
+            ]
+          },
+          {
+            "step": 149,
+            "lane_index": [
+              "10C0_1_",
+              "11y0_0_",
+              0
+            ]
+          }
+        ]
+      },
+      "all_agents_changed_lane": true,
+      "all_agents_passed_blocker": true,
+      "all_agents_entered_exit_ramp": false,
+      "all_agents_entered_mainline": true,
+      "returned_to_original_lane": false,
+      "all_agents_continued_on_narrow_road": true
+    },
+    "functional_success": true,
+    "expert_profile_id": null,
+    "platoon_agent_ids": [
+      "agent0",
+      "agent1",
+      "agent2"
+    ],
+    "platoon_lead_agent_id": "agent0"
+  },
+  "final_debug": {
+    "rule_maker": {
+      "formation_locked": true,
+      "formation_constraint_enabled": true,
+      "coordination_mode": "LOCKED",
+      "risk_triggered": false,
+      "best_actions": {
+        "agent0": 0,
+        "agent1": 0,
+        "agent2": 0
+      },
+      "best_score": 0.0,
+      "dynamic_roles": {
+        "agent0": "leader",
+        "agent1": "follower",
+        "agent2": "follower"
+      },
+      "forced_lane_decision": true,
+      "forced_lane_wait_info": {
+        "decision_step": 201,
+        "threshold_steps": 10,
+        "forced_agents": [
+          "agent0",
+          "agent1",
+          "agent2"
+        ],
+        "all_forced_ready": true,
+        "partial_forced": false,
+        "partial_forced_wait_steps": 0,
+        "forced_wait_active": false,
+        "forced_wait_frozen": false,
+        "forced_lane_first_step": {},
+        "forced_lane_wait_steps_by_agent": {}
+      },
+      "risk_info": {
+        "triggered": false,
+        "transitioned": false,
+        "current_state": "LOCKED",
+        "next_state": "LOCKED",
+        "transition": null,
+        "reason": null,
+        "reasons": [],
+        "leader": {
+          "agent_id": "agent0",
+          "front_vehicle_id": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+          "front_net_gap_m": 35.97400146484375,
+          "closing_speed_mps": -1.8080000877477875,
+          "ttc_s": null
+        },
+        "follower_pairs": [],
+        "min_follower_gap_m": null,
+        "forced_lane_wait_info": {
+          "decision_step": 201,
+          "threshold_steps": 10,
+          "forced_agents": [
+            "agent0",
+            "agent1",
+            "agent2"
+          ],
+          "all_forced_ready": true,
+          "partial_forced": false,
+          "partial_forced_wait_steps": 0,
+          "forced_wait_active": false,
+          "forced_wait_frozen": false,
+          "forced_lane_first_step": {},
+          "forced_lane_wait_steps_by_agent": {}
+        },
+        "waiting_for_s5_hard_brake": false,
+        "s9_serial_release_active": false
+      },
+      "action_search": {
+        "strategy": "forced_route_combo_deferred_to_normal_planner",
+        "prefix_counts": [
+          1
+        ],
+        "pairwise_conflict_counts": {
+          "agent1:agent2": 1
+        },
+        "coarse_conflict_detected": true,
+        "final_feasibility_authority": "normal_planner",
+        "s9_serial_fallback_available": false
+      },
+      "lane_change_commitments": {
+        "active": {},
+        "pending": {},
+        "completed": {}
+      },
+      "proposal_batch_id": 143,
+      "proposal_count": 1,
+      "proposal_ranking": [
+        {
+          "proposal_id": 0,
+          "rank": 0,
+          "rule_score": 0.0,
+          "actions": {
+            "agent0": 0,
+            "agent1": 0,
+            "agent2": 0
+          }
+        }
+      ],
+      "accepted_proposal_id": 0,
+      "accepted_proposal_rank": 0
+    },
+    "planner_joint": {
+      "fallback_used": false,
+      "fallback_reason": null,
+      "combination_count": 742,
+      "pairwise_conflict_count": 788,
+      "pairwise_conflict_pair_count": 96,
+      "pairwise_conflict_counts_by_pair": {
+        "agent0:agent1": 18,
+        "agent0:agent2": 7,
+        "agent1:agent2": 71
+      },
+      "pairwise_safe_indices_by_pair": {
+        "agent0:agent1": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            0,
+            6
+          ],
+          [
+            0,
+            7
+          ],
+          [
+            0,
+            8
+          ],
+          [
+            0,
+            9
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            5
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            1,
+            9
+          ],
+          [
+            1,
+            10
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            2,
+            8
+          ],
+          [
+            2,
+            9
+          ],
+          [
+            2,
+            10
+          ],
+          [
+            2,
+            11
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            3,
+            2
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            3,
+            7
+          ],
+          [
+            3,
+            8
+          ],
+          [
+            3,
+            9
+          ],
+          [
+            3,
+            10
+          ],
+          [
+            3,
+            11
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            4,
+            1
+          ],
+          [
+            4,
+            2
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            7
+          ],
+          [
+            4,
+            8
+          ],
+          [
+            4,
+            9
+          ],
+          [
+            4,
+            10
+          ],
+          [
+            4,
+            11
+          ],
+          [
+            5,
+            0
+          ],
+          [
+            5,
+            1
+          ],
+          [
+            5,
+            2
+          ],
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            4
+          ],
+          [
+            5,
+            5
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            5,
+            7
+          ],
+          [
+            5,
+            8
+          ],
+          [
+            5,
+            9
+          ],
+          [
+            5,
+            10
+          ],
+          [
+            5,
+            11
+          ],
+          [
+            6,
+            0
+          ],
+          [
+            6,
+            1
+          ],
+          [
+            6,
+            2
+          ],
+          [
+            6,
+            3
+          ],
+          [
+            6,
+            4
+          ],
+          [
+            6,
+            5
+          ],
+          [
+            6,
+            6
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            6,
+            8
+          ],
+          [
+            6,
+            9
+          ],
+          [
+            6,
+            10
+          ],
+          [
+            6,
+            11
+          ],
+          [
+            7,
+            1
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            7,
+            3
+          ],
+          [
+            7,
+            4
+          ],
+          [
+            7,
+            5
+          ],
+          [
+            7,
+            6
+          ],
+          [
+            7,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            7,
+            9
+          ],
+          [
+            7,
+            10
+          ],
+          [
+            7,
+            11
+          ],
+          [
+            8,
+            7
+          ],
+          [
+            8,
+            8
+          ],
+          [
+            8,
+            9
+          ],
+          [
+            8,
+            10
+          ],
+          [
+            8,
+            11
+          ],
+          [
+            9,
+            2
+          ],
+          [
+            9,
+            3
+          ],
+          [
+            9,
+            4
+          ],
+          [
+            9,
+            5
+          ],
+          [
+            9,
+            6
+          ],
+          [
+            9,
+            7
+          ],
+          [
+            9,
+            8
+          ],
+          [
+            9,
+            9
+          ],
+          [
+            9,
+            10
+          ],
+          [
+            9,
+            11
+          ],
+          [
+            10,
+            1
+          ],
+          [
+            10,
+            2
+          ],
+          [
+            10,
+            3
+          ],
+          [
+            10,
+            4
+          ],
+          [
+            10,
+            5
+          ],
+          [
+            10,
+            6
+          ],
+          [
+            10,
+            7
+          ],
+          [
+            10,
+            8
+          ],
+          [
+            10,
+            9
+          ],
+          [
+            10,
+            10
+          ],
+          [
+            10,
+            11
+          ],
+          [
+            11,
+            7
+          ],
+          [
+            11,
+            8
+          ],
+          [
+            11,
+            9
+          ],
+          [
+            11,
+            10
+          ],
+          [
+            11,
+            11
+          ]
+        ],
+        "agent0:agent2": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            0,
+            6
+          ],
+          [
+            0,
+            7
+          ],
+          [
+            0,
+            8
+          ],
+          [
+            0,
+            9
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            5
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            1,
+            9
+          ],
+          [
+            1,
+            10
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            2,
+            8
+          ],
+          [
+            2,
+            9
+          ],
+          [
+            2,
+            10
+          ],
+          [
+            2,
+            11
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            3,
+            2
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            3,
+            7
+          ],
+          [
+            3,
+            8
+          ],
+          [
+            3,
+            9
+          ],
+          [
+            3,
+            10
+          ],
+          [
+            3,
+            11
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            4,
+            1
+          ],
+          [
+            4,
+            2
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            7
+          ],
+          [
+            4,
+            8
+          ],
+          [
+            4,
+            9
+          ],
+          [
+            4,
+            10
+          ],
+          [
+            4,
+            11
+          ],
+          [
+            5,
+            0
+          ],
+          [
+            5,
+            1
+          ],
+          [
+            5,
+            2
+          ],
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            4
+          ],
+          [
+            5,
+            5
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            5,
+            7
+          ],
+          [
+            5,
+            8
+          ],
+          [
+            5,
+            9
+          ],
+          [
+            5,
+            10
+          ],
+          [
+            5,
+            11
+          ],
+          [
+            6,
+            0
+          ],
+          [
+            6,
+            1
+          ],
+          [
+            6,
+            2
+          ],
+          [
+            6,
+            3
+          ],
+          [
+            6,
+            4
+          ],
+          [
+            6,
+            5
+          ],
+          [
+            6,
+            6
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            6,
+            8
+          ],
+          [
+            6,
+            9
+          ],
+          [
+            6,
+            10
+          ],
+          [
+            6,
+            11
+          ],
+          [
+            7,
+            0
+          ],
+          [
+            7,
+            1
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            7,
+            3
+          ],
+          [
+            7,
+            4
+          ],
+          [
+            7,
+            5
+          ],
+          [
+            7,
+            6
+          ],
+          [
+            7,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            7,
+            9
+          ],
+          [
+            7,
+            10
+          ],
+          [
+            7,
+            11
+          ],
+          [
+            8,
+            2
+          ],
+          [
+            8,
+            4
+          ],
+          [
+            8,
+            5
+          ],
+          [
+            8,
+            6
+          ],
+          [
+            8,
+            7
+          ],
+          [
+            8,
+            8
+          ],
+          [
+            8,
+            9
+          ],
+          [
+            8,
+            10
+          ],
+          [
+            8,
+            11
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            2
+          ],
+          [
+            9,
+            3
+          ],
+          [
+            9,
+            4
+          ],
+          [
+            9,
+            5
+          ],
+          [
+            9,
+            6
+          ],
+          [
+            9,
+            7
+          ],
+          [
+            9,
+            8
+          ],
+          [
+            9,
+            9
+          ],
+          [
+            9,
+            10
+          ],
+          [
+            9,
+            11
+          ],
+          [
+            10,
+            0
+          ],
+          [
+            10,
+            1
+          ],
+          [
+            10,
+            2
+          ],
+          [
+            10,
+            3
+          ],
+          [
+            10,
+            4
+          ],
+          [
+            10,
+            5
+          ],
+          [
+            10,
+            6
+          ],
+          [
+            10,
+            7
+          ],
+          [
+            10,
+            8
+          ],
+          [
+            10,
+            9
+          ],
+          [
+            10,
+            10
+          ],
+          [
+            10,
+            11
+          ],
+          [
+            11,
+            2
+          ],
+          [
+            11,
+            4
+          ],
+          [
+            11,
+            5
+          ],
+          [
+            11,
+            6
+          ],
+          [
+            11,
+            7
+          ],
+          [
+            11,
+            8
+          ],
+          [
+            11,
+            9
+          ],
+          [
+            11,
+            10
+          ],
+          [
+            11,
+            11
+          ]
+        ],
+        "agent1:agent2": [
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            0,
+            6
+          ],
+          [
+            0,
+            7
+          ],
+          [
+            0,
+            8
+          ],
+          [
+            0,
+            9
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            1,
+            5
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            1,
+            9
+          ],
+          [
+            1,
+            10
+          ],
+          [
+            1,
+            11
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            2,
+            8
+          ],
+          [
+            2,
+            9
+          ],
+          [
+            2,
+            10
+          ],
+          [
+            2,
+            11
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            3,
+            7
+          ],
+          [
+            3,
+            8
+          ],
+          [
+            3,
+            9
+          ],
+          [
+            3,
+            10
+          ],
+          [
+            3,
+            11
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            7
+          ],
+          [
+            4,
+            8
+          ],
+          [
+            4,
+            9
+          ],
+          [
+            4,
+            10
+          ],
+          [
+            4,
+            11
+          ],
+          [
+            5,
+            5
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            5,
+            7
+          ],
+          [
+            5,
+            8
+          ],
+          [
+            5,
+            9
+          ],
+          [
+            5,
+            10
+          ],
+          [
+            5,
+            11
+          ],
+          [
+            6,
+            5
+          ],
+          [
+            6,
+            6
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            6,
+            8
+          ],
+          [
+            6,
+            9
+          ],
+          [
+            6,
+            10
+          ],
+          [
+            6,
+            11
+          ],
+          [
+            7,
+            5
+          ],
+          [
+            7,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            7,
+            9
+          ],
+          [
+            7,
+            10
+          ],
+          [
+            7,
+            11
+          ],
+          [
+            8,
+            8
+          ],
+          [
+            8,
+            9
+          ],
+          [
+            8,
+            11
+          ],
+          [
+            9,
+            7
+          ],
+          [
+            9,
+            8
+          ],
+          [
+            9,
+            9
+          ],
+          [
+            9,
+            11
+          ],
+          [
+            10,
+            5
+          ],
+          [
+            10,
+            7
+          ],
+          [
+            10,
+            8
+          ],
+          [
+            10,
+            9
+          ],
+          [
+            10,
+            10
+          ],
+          [
+            10,
+            11
+          ],
+          [
+            11,
+            8
+          ],
+          [
+            11,
+            9
+          ],
+          [
+            11,
+            11
+          ]
+        ]
+      },
+      "selected_indices": [
+        0,
+        0,
+        2
+      ],
+      "selected_score": 126.98476470884907,
+      "planning_time_ms": 287.5243991147727,
+      "prefix_counts": [
+        12,
+        126,
+        742
+      ],
+      "formation_constraint_enabled": true,
+      "formation_penalty_applied": true
+    },
+    "planner_ranked": {
+      "proposal_attempts": [
+        {
+          "proposal_id": 0,
+          "rank": 0,
+          "rule_score": 0.0,
+          "actions": {
+            "agent0": 0,
+            "agent1": 0,
+            "agent2": 0
+          },
+          "fallback_reason": null,
+          "missing_agents": [],
+          "native_feasible": true,
+          "short_horizon_combination_count": 742,
+          "joint_candidate_attempt_count": 0,
+          "joint_candidate_attempts": [],
+          "joint_candidate_rejections_by_reason": {},
+          "first_joint_candidate_rejection_by_reason": {},
+          "agent_diagnostics": {
+            "agent0": {
+              "fallback_reason": null,
+              "raw_candidate_count": 12,
+              "generated_valid_candidate_count": 12,
+              "candidate_count": 12,
+              "road_rejection_count": 0,
+              "background_gap_rejection_count": 0,
+              "kinematic_rejection_count": 0
+            },
+            "agent1": {
+              "fallback_reason": null,
+              "raw_candidate_count": 12,
+              "generated_valid_candidate_count": 12,
+              "candidate_count": 12,
+              "road_rejection_count": 0,
+              "background_gap_rejection_count": 0,
+              "kinematic_rejection_count": 0
+            },
+            "agent2": {
+              "fallback_reason": null,
+              "raw_candidate_count": 12,
+              "generated_valid_candidate_count": 12,
+              "candidate_count": 12,
+              "road_rejection_count": 0,
+              "background_gap_rejection_count": 0,
+              "kinematic_rejection_count": 0
+            }
+          },
+          "selected_indices": [
+            0,
+            0,
+            2
+          ]
+        }
+      ],
+      "selected_proposal_id": 0,
+      "selected_proposal_rank": 0,
+      "pool_cache_entry_count": 3,
+      "pool_request_count": 3,
+      "pool_cache_hit_count": 0,
+      "candidate_audit_cache_entry_count": 0,
+      "candidate_audit_request_count": 0,
+      "candidate_audit_cache_hit_count": 0,
+      "pairwise_cache_entry_count": 0,
+      "pairwise_request_count": 0,
+      "pairwise_cache_hit_count": 0,
+      "ranked_planning_time_ms": 288.8847819995135,
+      "route_geometry_cache_entries": 2,
+      "route_geometry_cache_requests": 6,
+      "route_geometry_cache_hits": 4,
+      "background_prediction_cache_entries": 0,
+      "background_prediction_requests": 0,
+      "background_prediction_cache_hits": 0
+    },
+    "planner_execution": {},
+    "planner_agents": {
+      "agent0": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 12,
+        "raw_candidate_count": 12,
+        "kinematic_rejection_count": 0,
+        "local_kinematic_rejection_count": 0,
+        "corridor_rejection_count": 1,
+        "road_rejection_count": 0,
+        "road_rejections_by_reason": {},
+        "first_road_rejection": null,
+        "first_committed_road_rejection": null,
+        "committed_first_rejection_by_duration": {},
+        "background_collision_rejection_count": 0,
+        "background_gap_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "minimum_speed_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {},
+        "best_rejected_dense_dynamics": null,
+        "best_rejected_background_gap_m": null,
+        "best_rejected_background_profile": null,
+        "selected_profile_attempts": [
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 7.07465793252171
+          },
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 1.0746579325217094
+          },
+          {
+            "acceleration_mps2": 1.31,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 27.066513519289025
+          },
+          {
+            "acceleration_mps2": -4.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 27.461513519289024
+          },
+          {
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 26.586513519289024
+          },
+          {
+            "acceleration_mps2": -0.5,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 28.336513519289024
+          },
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 1.0746579325217094
+          },
+          {
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 2.8657544867245583
+          },
+          {
+            "acceleration_mps2": -2.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 1.5,
+            "terminal_progress_m": 7.586513519289024
+          },
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 1.5,
+            "terminal_progress_m": 10.774013519289024
+          },
+          {
+            "acceleration_mps2": -0.5,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 14.836513519289024
+          },
+          {
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 19.586513519289024
+          }
+        ],
+        "source_lane_chain_indices": [
+          [
+            "11y0_0_",
+            "11y0_1_",
+            0
+          ],
+          [
+            "11y0_1_",
+            "12S0_0_",
+            0
+          ],
+          [
+            "12S0_0_",
+            "13Y0_0_",
+            0
+          ],
+          [
+            "13Y0_0_",
+            "13Y0_1_",
+            0
+          ],
+          [
+            "13Y0_1_",
+            "14C0_0_",
+            0
+          ],
+          [
+            "14C0_0_",
+            "14C0_1_",
+            0
+          ]
+        ],
+        "candidates": [
+          {
+            "score": 0.06766418977949061,
+            "selected": true,
+            "acceleration_mps2": 1.31,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 27.066513519289025,
+            "minimum_background_gap_m": 32.726001815838856,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 32.726001815838856,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 40,
+              "ego_pose": [
+                330.7457423400899,
+                -377.1187133789062,
+                -3.141592653589793
+              ],
+              "predicted_obstacle_pose": [
+                292.89224052425106,
+                -377.1184997558593,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 4.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 4.578677563989028e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 4.212128379822256,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                355.5751953125,
+                -377.11871337890625,
+                -3.141591787338257
+              ],
+              [
+                353.0106201171875,
+                -377.11871337890625,
+                3.1415915489196777
+              ],
+              [
+                350.1185607910156,
+                -377.11871337890625,
+                3.141592502593994
+              ],
+              [
+                346.89898681640625,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                343.3519287109375,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                339.47735595703125,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                335.2752990722656,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                330.7457275390625,
+                -377.11871337890625,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 41.33839091474693,
+            "selected": false,
+            "acceleration_mps2": -0.5,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 28.336513519289024,
+            "minimum_background_gap_m": 31.456001815838874,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 31.456001815838874,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 40,
+              "ego_pose": [
+                329.47574234008994,
+                -377.1187133789062,
+                -3.141592653589793
+              ],
+              "predicted_obstacle_pose": [
+                292.89224052425106,
+                -377.1184997558593,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 4.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 3.6912013312573326e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 3.671628379822258,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                355.80145263671875,
+                -377.11871337890625,
+                -3.1415915489196777
+              ],
+              [
+                353.9156188964844,
+                -377.11871337890625,
+                3.141592025756836
+              ],
+              [
+                351.7173156738281,
+                -377.11871337890625,
+                3.1415915489196777
+              ],
+              [
+                348.7690124511719,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                345.0706787109375,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                340.62237548828125,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                335.4240417480469,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                329.4757385253906,
+                -377.11871337890625,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 80.5510007569659,
+            "selected": false,
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 26.586513519289024,
+            "minimum_background_gap_m": 33.206001815838874,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 33.206001815838874,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 40,
+              "ego_pose": [
+                331.22574234008994,
+                -377.1187133789062,
+                -3.141592653589793
+              ],
+              "predicted_obstacle_pose": [
+                292.89224052425106,
+                -377.1184997558593,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 4.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 3.6382387058608856e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 3.1966283798222594,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                355.86395263671875,
+                -377.11871337890625,
+                -3.1415915489196777
+              ],
+              [
+                354.1656188964844,
+                -377.11871337890625,
+                3.141592264175415
+              ],
+              [
+                352.2173156738281,
+                -377.11871337890625,
+                3.1415915489196777
+              ],
+              [
+                349.5190124511719,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                346.0706787109375,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                341.87237548828125,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                336.9240417480469,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                331.2257385253906,
+                -377.11871337890625,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 106.36961564352613,
+            "selected": false,
+            "acceleration_mps2": -0.5,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 14.836513519289024,
+            "minimum_background_gap_m": 35.974001464449934,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 35.974001464449934,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                357.812255859375,
+                -377.11871337890625,
+                -3.141591055693139
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 3.5966663336495235e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 3.646628379822232,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                355.80145263671875,
+                -377.11871337890625,
+                -3.1415915489196777
+              ],
+              [
+                353.9156188964844,
+                -377.11871337890625,
+                3.141592025756836
+              ],
+              [
+                352.0923156738281,
+                -377.11871337890625,
+                3.1415915489196777
+              ],
+              [
+                350.2690124511719,
+                -377.11871337890625,
+                3.141592502593994
+              ],
+              [
+                348.4456787109375,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                346.62237548828125,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                344.7990417480469,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                342.9757385253906,
+                -377.11871337890625,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 160.48214095658065,
+            "selected": false,
+            "acceleration_mps2": -4.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 27.461513519289024,
+            "minimum_background_gap_m": 32.331001815838874,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 32.331001815838874,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 40,
+              "ego_pose": [
+                330.35074234008994,
+                -377.1187133789062,
+                -3.141592653589793
+              ],
+              "predicted_obstacle_pose": [
+                292.89224052425106,
+                -377.1184997558593,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 4.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 4.078029505194536e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 2.2966283798222586,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                356.23895263671875,
+                -377.11871337890625,
+                -3.1415913105010986
+              ],
+              [
+                354.7906188964844,
+                -377.11871337890625,
+                -3.141592502593994
+              ],
+              [
+                352.5923156738281,
+                -377.11871337890625,
+                3.1415913105010986
+              ],
+              [
+                349.6440124511719,
+                -377.11871337890625,
+                3.1415927410125732
+              ],
+              [
+                345.9456787109375,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                341.49737548828125,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                336.2990417480469,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                330.3507385253906,
+                -377.11871337890625,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 247.57600105722508,
+            "selected": false,
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 19.586513519289024,
+            "minimum_background_gap_m": 35.974001464449934,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 35.974001464449934,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                357.812255859375,
+                -377.11871337890625,
+                -3.141591055693139
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 3.433957229681539e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 1.2966283798222555,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                356.11395263671875,
+                -377.11871337890625,
+                -3.1415915489196777
+              ],
+              [
+                355.1656188964844,
+                -377.11871337890625,
+                -3.141592264175415
+              ],
+              [
+                354.2173156738281,
+                -377.11871337890625,
+                3.141592264175415
+              ],
+              [
+                352.5190124511719,
+                -377.11871337890625,
+                3.1415913105010986
+              ],
+              [
+                350.0706787109375,
+                -377.11871337890625,
+                3.141592502593994
+              ],
+              [
+                346.87237548828125,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                342.9240417480469,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                338.2257385253906,
+                -377.11871337890625,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 351.9384336067858,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 1.5,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 10.774013519289024,
+            "minimum_background_gap_m": 35.974001464449934,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 35.974001464449934,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                357.812255859375,
+                -377.11871337890625,
+                -3.141591055693139
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 2.9160756165325097e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.22162837982225625,
+            "minimum_speed_score_penalty": 15.567432403554875,
+            "trajectory_world": [
+              [
+                356.73895263671875,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.4781188964844,
+                -377.11871337890625,
+                -3.1415913105010986
+              ],
+              [
+                355.8423156738281,
+                -377.11871337890625,
+                -3.1415915489196777
+              ],
+              [
+                354.8315124511719,
+                -377.11871337890625,
+                -3.141592502593994
+              ],
+              [
+                353.4456787109375,
+                -377.11871337890625,
+                3.141591787338257
+              ],
+              [
+                351.68487548828125,
+                -377.11871337890625,
+                3.1415915489196777
+              ],
+              [
+                349.5490417480469,
+                -377.11871337890625,
+                -3.1415927410125732
+              ],
+              [
+                347.0382385253906,
+                -377.11871337890625,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 432.2607986753592,
+            "selected": false,
+            "acceleration_mps2": -2.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 1.5,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 7.586513519289024,
+            "minimum_background_gap_m": 35.974001464449934,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 35.974001464449934,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                357.812255859375,
+                -377.11871337890625,
+                -3.141591055693139
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 2.2823801115734454e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.22162837982225625,
+            "minimum_speed_score_penalty": 15.567432403554875,
+            "trajectory_world": [
+              [
+                355.98895263671875,
+                -377.11871337890625,
+                -3.1415915489196777
+              ],
+              [
+                354.6656188964844,
+                -377.11871337890625,
+                -3.141592502593994
+              ],
+              [
+                353.8423156738281,
+                -377.11871337890625,
+                3.141592025756836
+              ],
+              [
+                353.5190124511719,
+                -377.11871337890625,
+                3.141591787338257
+              ],
+              [
+                353.2581787109375,
+                -377.11871337890625,
+                3.1415915489196777
+              ],
+              [
+                352.62237548828125,
+                -377.11871337890625,
+                3.1415913105010986
+              ],
+              [
+                351.6115417480469,
+                -377.11871337890625,
+                3.1415915489196777
+              ],
+              [
+                350.2257385253906,
+                -377.11871337890625,
+                3.141592502593994
+              ]
+            ]
+          },
+          {
+            "score": 886.0903717053338,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.518328547477782,
+            "terminal_progress_m": 1.0746579325217094,
+            "minimum_background_gap_m": 35.974001464449934,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 35.974001464449934,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                357.812255859375,
+                -377.11871337890625,
+                -3.141591055693139
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 5.751361120687193e-07,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                356.73895263671875,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ]
+            ]
+          },
+          {
+            "score": 1204.3492650933322,
+            "selected": false,
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 1.382209459940752,
+            "terminal_progress_m": 2.8657544867245583,
+            "minimum_background_gap_m": 35.974001464449934,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 35.974001464449934,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                357.812255859375,
+                -377.11871337890625,
+                -3.141591055693139
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 2.1261315774623313e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                356.11395263671875,
+                -377.11871337890625,
+                -3.1415915489196777
+              ],
+              [
+                355.1656188964844,
+                -377.11871337890625,
+                -3.141592264175415
+              ],
+              [
+                354.9465026855469,
+                -377.11871337890625,
+                -3.141592264175415
+              ],
+              [
+                354.9465026855469,
+                -377.11871337890625,
+                -3.141592264175415
+              ],
+              [
+                354.9465026855469,
+                -377.11871337890625,
+                -3.141592264175415
+              ],
+              [
+                354.9465026855469,
+                -377.11871337890625,
+                -3.141592264175415
+              ],
+              [
+                354.9465026855469,
+                -377.11871337890625,
+                -3.141592264175415
+              ],
+              [
+                354.9465026855469,
+                -377.11871337890625,
+                -3.141592264175415
+              ]
+            ]
+          },
+          {
+            "score": 1320.2503723322977,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.518328547477782,
+            "terminal_progress_m": 7.07465793252171,
+            "minimum_background_gap_m": 35.974001464449934,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 35.974001464449934,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                357.812255859375,
+                -377.11871337890625,
+                -3.141591055693139
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 3.690720045135265e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                356.73895263671875,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.36260986328125,
+                -377.11871337890625,
+                -3.1415913105010986
+              ],
+              [
+                355.23760986328125,
+                -377.11871337890625,
+                -3.141592025756836
+              ],
+              [
+                353.36260986328125,
+                -377.11871337890625,
+                3.141591787338257
+              ],
+              [
+                350.73760986328125,
+                -377.11871337890625,
+                3.141592264175415
+              ]
+            ]
+          },
+          {
+            "score": 2806.390371705334,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.518328547477782,
+            "terminal_progress_m": 1.0746579325217094,
+            "minimum_background_gap_m": 35.974001464449934,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 35.974001464449934,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                357.812255859375,
+                -377.11871337890625,
+                -3.141591055693139
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 5.751361120687193e-07,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                356.73895263671875,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ],
+              [
+                356.73760986328125,
+                -377.11871337890625,
+                -3.1415910720825195
+              ]
+            ]
+          }
+        ],
+        "lane_end_restricted": false,
+        "commitment_elapsed_s": null,
+        "commitment_deadline_remaining_s": null,
+        "source_lane_remaining_m": 68.97250989722102,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            null,
+            54.79251533512392
+          ]
+        },
+        "fallback_used": false,
+        "fallback_reason": null
+      },
+      "agent1": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 12,
+        "raw_candidate_count": 12,
+        "kinematic_rejection_count": 0,
+        "local_kinematic_rejection_count": 0,
+        "corridor_rejection_count": 0,
+        "road_rejection_count": 0,
+        "road_rejections_by_reason": {},
+        "first_road_rejection": null,
+        "first_committed_road_rejection": null,
+        "committed_first_rejection_by_duration": {},
+        "background_collision_rejection_count": 0,
+        "background_gap_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "minimum_speed_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {},
+        "best_rejected_dense_dynamics": null,
+        "best_rejected_background_gap_m": null,
+        "best_rejected_background_profile": null,
+        "selected_profile_attempts": [
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 6.532023199201319
+          },
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 0.5320231992013191
+          },
+          {
+            "acceleration_mps2": -0.34,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 8.950387268447336
+          },
+          {
+            "acceleration_mps2": -0.5,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 8.670387268447337
+          },
+          {
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 1.5,
+            "terminal_progress_m": 8.670387268447337
+          },
+          {
+            "acceleration_mps2": -0.34,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 9.630387268447336
+          },
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 0.5320231992013191
+          },
+          {
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 1.4187285312035178
+          },
+          {
+            "acceleration_mps2": -1.84,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 1.5,
+            "terminal_progress_m": 5.313144344353562
+          },
+          {
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 1.5,
+            "terminal_progress_m": 8.168728531203518
+          },
+          {
+            "acceleration_mps2": -0.34,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 11.032887268447338
+          },
+          {
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 1.5,
+            "terminal_progress_m": 14.920387268447337
+          }
+        ],
+        "source_lane_chain_indices": [
+          [
+            "11y0_0_",
+            "11y0_1_",
+            0
+          ],
+          [
+            "11y0_1_",
+            "12S0_0_",
+            0
+          ],
+          [
+            "12S0_0_",
+            "13Y0_0_",
+            0
+          ],
+          [
+            "13Y0_0_",
+            "13Y0_1_",
+            0
+          ],
+          [
+            "13Y0_1_",
+            "14C0_0_",
+            0
+          ],
+          [
+            "14C0_0_",
+            "14C0_1_",
+            0
+          ]
+        ],
+        "candidates": [
+          {
+            "score": 87.80630194337832,
+            "selected": true,
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 1.5,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 14.920387268447337,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.5600498786128014e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 1.9675968171118319,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                376.053955078125,
+                -377.1190185546875,
+                3.1415855884552
+              ],
+              [
+                374.97015380859375,
+                -377.1189880371094,
+                3.1415891647338867
+              ],
+              [
+                373.8238525390625,
+                -377.1189880371094,
+                -3.1415908336639404
+              ],
+              [
+                372.30255126953125,
+                -377.1190185546875,
+                -3.1415865421295166
+              ],
+              [
+                370.40625,
+                -377.1190185546875,
+                -3.141590118408203
+              ],
+              [
+                368.1349792480469,
+                -377.1190185546875,
+                3.1415927410125732
+              ],
+              [
+                365.4886779785156,
+                -377.1190185546875,
+                3.1415927410125732
+              ],
+              [
+                362.4673767089844,
+                -377.1190185546875,
+                3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 105.78140057513785,
+            "selected": false,
+            "acceleration_mps2": -0.34,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 11.032887268447338,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.2720891649171813e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 2.7475968171118126,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                375.9714660644531,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                374.59765625,
+                -377.1189880371094,
+                3.1415908336639404
+              ],
+              [
+                373.2238464355469,
+                -377.1189880371094,
+                -3.1415884494781494
+              ],
+              [
+                371.8500671386719,
+                -377.1190185546875,
+                -3.1415865421295166
+              ],
+              [
+                370.47625732421875,
+                -377.1190185546875,
+                -3.141589879989624
+              ],
+              [
+                369.10247802734375,
+                -377.1190185546875,
+                3.1415927410125732
+              ],
+              [
+                367.7286682128906,
+                -377.1190185546875,
+                3.1415927410125732
+              ],
+              [
+                366.3548583984375,
+                -377.1190185546875,
+                3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 165.5852797436618,
+            "selected": false,
+            "acceleration_mps2": -0.34,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 9.630387268447336,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.1970952429329884e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 2.23759681711182,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                375.9714660644531,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                374.6401672363281,
+                -377.1189880371094,
+                3.1415905952453613
+              ],
+              [
+                373.39385986328125,
+                -377.1189880371094,
+                -3.1415891647338867
+              ],
+              [
+                372.2325744628906,
+                -377.1190185546875,
+                -3.1415865421295166
+              ],
+              [
+                371.11376953125,
+                -377.1190185546875,
+                -3.141587734222412
+              ],
+              [
+                369.9949645996094,
+                -377.1190185546875,
+                -3.1415915489196777
+              ],
+              [
+                368.87615966796875,
+                -377.1190185546875,
+                3.1415927410125732
+              ],
+              [
+                367.7573547363281,
+                -377.1190185546875,
+                3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 203.58956103065495,
+            "selected": false,
+            "acceleration_mps2": -0.5,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 8.670387268447337,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.0970810611077297e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 1.9175968171118285,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                375.991455078125,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                374.72015380859375,
+                -377.1189880371094,
+                3.1415903568267822
+              ],
+              [
+                373.5738525390625,
+                -377.1189880371094,
+                -3.141589879989624
+              ],
+              [
+                372.55255126953125,
+                -377.1190185546875,
+                -3.1415867805480957
+              ],
+              [
+                371.59375,
+                -377.1190185546875,
+                -3.1415867805480957
+              ],
+              [
+                370.6349792480469,
+                -377.1190185546875,
+                -3.141589403152466
+              ],
+              [
+                369.6761779785156,
+                -377.1190185546875,
+                -3.141592264175415
+              ],
+              [
+                368.7173767089844,
+                -377.1190185546875,
+                3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 207.28012566472376,
+            "selected": false,
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 1.5,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 8.670387268447337,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.1745094226078834e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.9675968171118354,
+            "minimum_speed_score_penalty": 0.6480636577632914,
+            "trajectory_world": [
+              [
+                376.053955078125,
+                -377.1190185546875,
+                3.1415855884552
+              ],
+              [
+                374.97015380859375,
+                -377.1189880371094,
+                3.1415891647338867
+              ],
+              [
+                374.1363525390625,
+                -377.1189880371094,
+                -3.141592264175415
+              ],
+              [
+                373.55255126953125,
+                -377.1189880371094,
+                -3.141589879989624
+              ],
+              [
+                372.90625,
+                -377.1190185546875,
+                -3.141587495803833
+              ],
+              [
+                371.8849792480469,
+                -377.1190185546875,
+                -3.1415863037109375
+              ],
+              [
+                370.4886779785156,
+                -377.1190185546875,
+                -3.141589879989624
+              ],
+              [
+                368.7173767089844,
+                -377.1190185546875,
+                3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 245.83444993650312,
+            "selected": false,
+            "acceleration_mps2": -0.34,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 8.950387268447336,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.1970952429329884e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 1.5745968171118285,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                375.9714660644531,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                374.6401672363281,
+                -377.1189880371094,
+                3.1415905952453613
+              ],
+              [
+                373.39385986328125,
+                -377.1189880371094,
+                -3.1415891647338867
+              ],
+              [
+                372.2325744628906,
+                -377.1190185546875,
+                -3.1415865421295166
+              ],
+              [
+                371.15625,
+                -377.1190185546875,
+                -3.141587734222412
+              ],
+              [
+                370.16497802734375,
+                -377.1190185546875,
+                -3.1415910720825195
+              ],
+              [
+                369.2586669921875,
+                -377.1190185546875,
+                -3.1415927410125732
+              ],
+              [
+                368.4373779296875,
+                -377.1190185546875,
+                3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 282.3500818251159,
+            "selected": false,
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 1.5,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.9725322723706115,
+            "terminal_progress_m": 8.168728531203518,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.3654392145845407e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.07500000000000062,
+            "minimum_speed_score_penalty": 18.499999999999986,
+            "trajectory_world": [
+              [
+                376.303955078125,
+                -377.1190185546875,
+                3.141585111618042
+              ],
+              [
+                375.9690246582031,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                375.7815246582031,
+                -377.1190185546875,
+                3.1415863037109375
+              ],
+              [
+                375.2190246582031,
+                -377.1189880371094,
+                3.1415882110595703
+              ],
+              [
+                374.2815246582031,
+                -377.1189880371094,
+                3.141592264175415
+              ],
+              [
+                372.9690246582031,
+                -377.1190185546875,
+                -3.141587734222412
+              ],
+              [
+                371.2815246582031,
+                -377.1190185546875,
+                -3.141587257385254
+              ],
+              [
+                369.2190246582031,
+                -377.1190185546875,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 401.11417323954265,
+            "selected": false,
+            "acceleration_mps2": -1.84,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 1.5,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 1.5856504440825185,
+            "terminal_progress_m": 5.313144344353562,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.073775857118875e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                376.1589660644531,
+                -377.1190185546875,
+                3.141585350036621
+              ],
+              [
+                375.3901672363281,
+                -377.1190185546875,
+                3.141587495803833
+              ],
+              [
+                375.08135986328125,
+                -377.1189880371094,
+                3.1415886878967285
+              ],
+              [
+                375.0746154785156,
+                -377.1189880371094,
+                3.1415886878967285
+              ],
+              [
+                374.8871154785156,
+                -377.1189880371094,
+                3.141589641571045
+              ],
+              [
+                374.3246154785156,
+                -377.1189880371094,
+                3.141592025756836
+              ],
+              [
+                373.3871154785156,
+                -377.1189880371094,
+                -3.1415891647338867
+              ],
+              [
+                372.0746154785156,
+                -377.1190185546875,
+                -3.1415863037109375
+              ]
+            ]
+          },
+          {
+            "score": 548.4692962767191,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.3646996021389793,
+            "terminal_progress_m": 0.5320231992013191,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 8.660002626115215e-07,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ]
+            ]
+          },
+          {
+            "score": 1187.6825807319042,
+            "selected": false,
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.9725322723706115,
+            "terminal_progress_m": 1.4187285312035178,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 2.8471559287979176e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                376.303955078125,
+                -377.1190185546875,
+                3.141585111618042
+              ],
+              [
+                375.9690246582031,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                375.9690246582031,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                375.9690246582031,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                375.9690246582031,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                375.9690246582031,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                375.9690246582031,
+                -377.1190185546875,
+                3.1415858268737793
+              ],
+              [
+                375.9690246582031,
+                -377.1190185546875,
+                3.1415858268737793
+              ]
+            ]
+          },
+          {
+            "score": 1302.679299231896,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.3646996021389793,
+            "terminal_progress_m": 6.532023199201319,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.9578146712717626e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.4807434082031,
+                -377.1190185546875,
+                3.141584873199463
+              ],
+              [
+                375.3557434082031,
+                -377.1190185546875,
+                3.141587734222412
+              ],
+              [
+                373.4807434082031,
+                -377.1189880371094,
+                -3.141589403152466
+              ],
+              [
+                370.8557434082031,
+                -377.1190185546875,
+                -3.1415886878967285
+              ]
+            ]
+          },
+          {
+            "score": 2788.819296276719,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.3646996021389793,
+            "terminal_progress_m": 0.5320231992013191,
+            "minimum_background_gap_m": 55.54950195533737,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 55.54950195533737,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                377.38775634765625,
+                -377.1190185546875,
+                3.1415845309484682
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 8.660002626115215e-07,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ],
+              [
+                376.8557434082031,
+                -377.1190185546875,
+                3.141584634780884
+              ]
+            ]
+          }
+        ],
+        "lane_end_restricted": false,
+        "commitment_elapsed_s": null,
+        "commitment_deadline_remaining_s": null,
+        "source_lane_remaining_m": 88.54801038550227,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            null,
+            null
+          ]
+        },
+        "fallback_used": false,
+        "fallback_reason": null
+      },
+      "agent2": {
+        "candidate_count": 12,
+        "generated_valid_candidate_count": 12,
+        "raw_candidate_count": 12,
+        "kinematic_rejection_count": 0,
+        "local_kinematic_rejection_count": 0,
+        "corridor_rejection_count": 0,
+        "road_rejection_count": 0,
+        "road_rejections_by_reason": {},
+        "first_road_rejection": null,
+        "first_committed_road_rejection": null,
+        "committed_first_rejection_by_duration": {},
+        "background_collision_rejection_count": 0,
+        "background_gap_rejection_count": 0,
+        "lane_end_rejection_count": 0,
+        "minimum_speed_rejection_count": 0,
+        "collision_rejections_by_object": {},
+        "kinematic_rejections_by_reason": {},
+        "best_rejected_dense_dynamics": null,
+        "best_rejected_background_gap_m": null,
+        "best_rejected_background_profile": null,
+        "selected_profile_attempts": [
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 6.372728708899445
+          },
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 0.37272870889944515
+          },
+          {
+            "acceleration_mps2": 1.787,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 24.06424188266537
+          },
+          {
+            "acceleration_mps2": -2.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 24.39324188266537
+          },
+          {
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 3.0,
+            "terminal_progress_m": 22.51824188266537
+          },
+          {
+            "acceleration_mps2": 2.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 25.76824188266537
+          },
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 0.37272870889944515
+          },
+          {
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 0.9939432237318536
+          },
+          {
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 3.7682418826653734
+          },
+          {
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 1.5,
+            "terminal_progress_m": 6.768241882665373
+          },
+          {
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 1.5,
+            "terminal_progress_m": 9.560228708899444
+          },
+          {
+            "acceleration_mps2": 0.5,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "terminal_progress_m": 13.768241882665373
+          }
+        ],
+        "source_lane_chain_indices": [
+          [
+            "10C0_1_",
+            "11y0_0_",
+            0
+          ],
+          [
+            "11y0_0_",
+            "11y0_1_",
+            0
+          ],
+          [
+            "11y0_1_",
+            "12S0_0_",
+            0
+          ],
+          [
+            "12S0_0_",
+            "13Y0_0_",
+            0
+          ],
+          [
+            "13Y0_0_",
+            "13Y0_1_",
+            0
+          ],
+          [
+            "13Y0_1_",
+            "14C0_0_",
+            0
+          ],
+          [
+            "14C0_0_",
+            "14C0_1_",
+            0
+          ]
+        ],
+        "candidates": [
+          {
+            "score": 7.5248772155937225,
+            "selected": false,
+            "acceleration_mps2": 1.787,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 24.06424188266537,
+            "minimum_background_gap_m": 71.09646834378401,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.09646834378401,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 40,
+              "ego_pose": [
+                369.1162088680351,
+                -377.11851026778555,
+                -3.141592653589793
+              ],
+              "predicted_obstacle_pose": [
+                292.89224052425106,
+                -377.1184997558593,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 4.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 0.010277498216899834,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 2.5314104706663434,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                391.7360534667969,
+                -377.1177062988281,
+                -3.141584634780884
+              ],
+              [
+                389.8448791503906,
+                -377.11773681640625,
+                3.141591787338257
+              ],
+              [
+                387.5069885253906,
+                -377.118408203125,
+                -3.1414718627929688
+              ],
+              [
+                384.7223205566406,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                381.4909362792969,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                377.8127746582031,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                373.6878662109375,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                369.1162109375,
+                -377.1184997558594,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 9.094921101997782,
+            "selected": false,
+            "acceleration_mps2": 2.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 25.76824188266537,
+            "minimum_background_gap_m": 69.392468343784,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 69.392468343784,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 40,
+              "ego_pose": [
+                367.41220886803507,
+                -377.11851026778555,
+                -3.141592653589793
+              ],
+              "predicted_obstacle_pose": [
+                292.89224052425106,
+                -377.1184997558593,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 4.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 0.006662698230215369,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 2.5420604706663434,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                391.70941162109375,
+                -377.1177062988281,
+                -3.141584634780884
+              ],
+              [
+                389.7384033203125,
+                -377.11773681640625,
+                3.1415913105010986
+              ],
+              [
+                387.2673645019531,
+                -377.1184387207031,
+                -3.1414875984191895
+              ],
+              [
+                384.29632568359375,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                380.8252868652344,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                376.8542785644531,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                372.38323974609375,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                367.4122009277344,
+                -377.1184997558594,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 38.93726559054045,
+            "selected": true,
+            "acceleration_mps2": 0.5,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 13.768241882665373,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 0.011115383942750474,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 2.4670604706663433,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                391.89691162109375,
+                -377.1177062988281,
+                -3.1415841579437256
+              ],
+              [
+                390.4884033203125,
+                -377.11773681640625,
+                -3.141589879989624
+              ],
+              [
+                388.9548645019531,
+                -377.11773681640625,
+                -3.14102840423584
+              ],
+              [
+                387.29632568359375,
+                -377.118408203125,
+                -3.1414856910705566
+              ],
+              [
+                385.5127868652344,
+                -377.1184997558594,
+                -3.141587257385254
+              ],
+              [
+                383.6042785644531,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                381.57073974609375,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                379.4122009277344,
+                -377.1184997558594,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 85.94835578230646,
+            "selected": false,
+            "acceleration_mps2": -2.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 24.39324188266537,
+            "minimum_background_gap_m": 70.767468343784,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 70.767468343784,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 40,
+              "ego_pose": [
+                368.78720886803507,
+                -377.11851026778555,
+                -3.141592653589793
+              ],
+              "predicted_obstacle_pose": [
+                292.89224052425106,
+                -377.1184997558593,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 4.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 0.006688590285239826,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 1.5420604706663432,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                392.20941162109375,
+                -377.1177062988281,
+                -3.1415836811065674
+              ],
+              [
+                391.1134033203125,
+                -377.11773681640625,
+                -3.141587018966675
+              ],
+              [
+                389.2673645019531,
+                -377.11773681640625,
+                3.1415889263153076
+              ],
+              [
+                386.67132568359375,
+                -377.11846923828125,
+                -3.1415281295776367
+              ],
+              [
+                383.3252868652344,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                379.2292785644531,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                374.38323974609375,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                368.7872009277344,
+                -377.1184997558594,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 127.78320851415816,
+            "selected": false,
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 22.51824188266537,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 0.008729829668239437,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 1.0920604706663428,
+            "minimum_speed_score_penalty": 0.0,
+            "trajectory_world": [
+              [
+                392.33441162109375,
+                -377.1177062988281,
+                -3.1415834426879883
+              ],
+              [
+                391.4884033203125,
+                -377.1177062988281,
+                -3.141585350036621
+              ],
+              [
+                389.8923645019531,
+                -377.11773681640625,
+                3.141592025756836
+              ],
+              [
+                387.54632568359375,
+                -377.1183776855469,
+                -3.1414694786071777
+              ],
+              [
+                384.4502868652344,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                380.6042785644531,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                376.00823974609375,
+                -377.1184997558594,
+                -3.1415927410125732
+              ],
+              [
+                370.6622009277344,
+                -377.1184997558594,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 252.82524138496447,
+            "selected": false,
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 1.5,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 6.768241882665373,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 0.01086846917382811,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.4920604706663445,
+            "minimum_speed_score_penalty": 10.15879058667311,
+            "trajectory_world": [
+              [
+                392.08441162109375,
+                -377.1177062988281,
+                -3.1415839195251465
+              ],
+              [
+                391.2384033203125,
+                -377.11773681640625,
+                -3.1415863037109375
+              ],
+              [
+                390.6423645019531,
+                -377.11773681640625,
+                -3.1415891647338867
+              ],
+              [
+                390.29632568359375,
+                -377.11773681640625,
+                -3.1415910720825195
+              ],
+              [
+                389.8877868652344,
+                -377.11773681640625,
+                3.141592025756836
+              ],
+              [
+                389.1042785644531,
+                -377.11773681640625,
+                -3.141404867172241
+              ],
+              [
+                387.94573974609375,
+                -377.11834716796875,
+                -3.141446113586426
+              ],
+              [
+                386.4122009277344,
+                -377.1184997558594,
+                -3.141545057296753
+              ]
+            ]
+          },
+          {
+            "score": 354.58183813787645,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 1.5,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.3052575588332929,
+            "terminal_progress_m": 9.560228708899444,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 0.007816669202607152,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.6202087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.0577087402344,
+                -377.1177062988281,
+                -3.1415839195251465
+              ],
+              [
+                391.1202087402344,
+                -377.11773681640625,
+                -3.1415867805480957
+              ],
+              [
+                389.8077087402344,
+                -377.11773681640625,
+                3.1415915489196777
+              ],
+              [
+                388.1202087402344,
+                -377.1183166503906,
+                -3.141437530517578
+              ],
+              [
+                386.0577087402344,
+                -377.1184997558594,
+                -3.1415655612945557
+              ],
+              [
+                383.6202087402344,
+                -377.1184997558594,
+                -3.1415927410125732
+              ]
+            ]
+          },
+          {
+            "score": 373.79631610700244,
+            "selected": false,
+            "acceleration_mps2": -1.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": null,
+            "terminal_progress_m": 3.7682418826653734,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 1.237103638640491e-05,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.44206047066634113,
+            "minimum_speed_score_penalty": 11.158790586673177,
+            "trajectory_world": [
+              [
+                392.08441162109375,
+                -377.1177062988281,
+                -3.1415839195251465
+              ],
+              [
+                391.2384033203125,
+                -377.11773681640625,
+                -3.1415863037109375
+              ],
+              [
+                390.6423645019531,
+                -377.11773681640625,
+                -3.1415891647338867
+              ],
+              [
+                390.29632568359375,
+                -377.11773681640625,
+                -3.1415910720825195
+              ],
+              [
+                390.0752868652344,
+                -377.11773681640625,
+                -3.141592264175415
+              ],
+              [
+                389.8542785644531,
+                -377.11773681640625,
+                3.141591787338257
+              ],
+              [
+                389.63323974609375,
+                -377.11773681640625,
+                3.1415905952453613
+              ],
+              [
+                389.4122009277344,
+                -377.11773681640625,
+                3.141589641571045
+              ]
+            ]
+          },
+          {
+            "score": 483.1067773272528,
+            "selected": false,
+            "acceleration_mps2": -3.0,
+            "acceleration_duration_s": 1.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.8140201568887812,
+            "terminal_progress_m": 0.9939432237318536,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 2.1834214347649095e-06,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                392.33441162109375,
+                -377.1177062988281,
+                -3.1415834426879883
+              ],
+              [
+                392.1864929199219,
+                -377.1177062988281,
+                -3.1415836811065674
+              ],
+              [
+                392.1864929199219,
+                -377.1177062988281,
+                -3.1415836811065674
+              ],
+              [
+                392.1864929199219,
+                -377.1177062988281,
+                -3.1415836811065674
+              ],
+              [
+                392.1864929199219,
+                -377.1177062988281,
+                -3.1415836811065674
+              ],
+              [
+                392.1864929199219,
+                -377.1177062988281,
+                -3.1415836811065674
+              ],
+              [
+                392.1864929199219,
+                -377.1177062988281,
+                -3.1415836811065674
+              ],
+              [
+                392.1864929199219,
+                -377.1177062988281,
+                -3.1415836811065674
+              ]
+            ]
+          },
+          {
+            "score": 563.7404907294748,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 0.5,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.3052575588332929,
+            "terminal_progress_m": 0.37272870889944515,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 2.3329460585586043e-07,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ]
+            ]
+          },
+          {
+            "score": 1317.9493603419407,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 2.0,
+            "recovery_acceleration_mps2": 3.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.3052575588332929,
+            "terminal_progress_m": 6.372728708899445,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 0.010124594971385964,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.4327087402344,
+                -377.1177062988281,
+                -3.1415834426879883
+              ],
+              [
+                391.3077087402344,
+                -377.11773681640625,
+                -3.1415860652923584
+              ],
+              [
+                389.4327087402344,
+                -377.11773681640625,
+                3.141589641571045
+              ],
+              [
+                386.8077087402344,
+                -377.11846923828125,
+                -3.1415188312530518
+              ]
+            ]
+          },
+          {
+            "score": 2804.090490729475,
+            "selected": false,
+            "acceleration_mps2": -8.0,
+            "acceleration_duration_s": 4.0,
+            "recovery_acceleration_mps2": 0.0,
+            "lane_change_duration_s": 4.0,
+            "lane_change_start_delay_s": 0.0,
+            "stop_time_s": 0.3052575588332929,
+            "terminal_progress_m": 0.37272870889944515,
+            "minimum_background_gap_m": 71.34219604901459,
+            "minimum_background_gap_detail": {
+              "minimum_gap_m": 71.34219604901459,
+              "obstacle_name": "8cbfb5b7-80ff-4c09-b04e-e5b528065720",
+              "time_index": 0,
+              "ego_pose": [
+                393.1804504394531,
+                -377.1177062988281,
+                -3.141583066209869
+              ],
+              "predicted_obstacle_pose": [
+                316.71075439453125,
+                -377.1184997558594,
+                3.1415926535897905
+              ],
+              "relative_plan_time_s": 0.0
+            },
+            "committed_minimum_background_gap_m": null,
+            "committed_minimum_background_gap_detail": null,
+            "trackability_max_yaw_rate_rad_s": 2.3329460585586043e-07,
+            "trackability_score_penalty": 0.0,
+            "minimum_speed_mps": 0.0,
+            "minimum_speed_score_penalty": 20.0,
+            "trajectory_world": [
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ],
+              [
+                392.8077087402344,
+                -377.1177062988281,
+                -3.141583204269409
+              ]
+            ]
+          }
+        ],
+        "lane_end_restricted": false,
+        "commitment_elapsed_s": null,
+        "commitment_deadline_remaining_s": null,
+        "source_lane_remaining_m": 4.340704477299141,
+        "safe_corridor_by_duration_m": {
+          "4.0": [
+            null,
+            null
+          ]
+        },
+        "fallback_used": false,
+        "fallback_reason": null
+      }
+    },
+    "agent_states": {}
+  },
+  "persistable": true,
+  "episode": 0,
+  "scenario_id": "S9_narrow_channel_negotiation",
+  "local_route": "R8_narrow_channel",
+  "topdown_video_path": "outputs/s9_candidate_memory_acceptance_20260813_v2/S9_narrow_channel_negotiation/video/episode_0000.mp4",
+  "semantic_bev_video_path": "outputs/s9_candidate_memory_acceptance_20260813_v2/S9_narrow_channel_negotiation/semantic_bev_video/episode_0000.mp4",
+  "trajectory_path": "outputs/s9_candidate_memory_acceptance_20260813_v2/S9_narrow_channel_negotiation/trajectories/episode_0000.npz"
+}

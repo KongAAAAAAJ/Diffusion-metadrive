@@ -112,8 +112,9 @@ def test_s8_declares_explicit_ego_spawn_controls() -> None:
     scenario = SCENARIO_BY_ID["S8_ego_exit_to_ramp"]
 
     assert scenario.ego_spawn_reference_block_id == "g0"
-    assert scenario.ego_spawn_longitude_m == (40.0, 80.0)
+    assert scenario.ego_spawn_longitude_m == (68.0, 70.0)
     assert scenario.ego_spawn_lane_id == 1
+    assert scenario.ego_initial_bumper_gap_m == pytest.approx(12.0)
     assert scenario.override_traffic_density == pytest.approx(0.0)
 
 

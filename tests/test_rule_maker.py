@@ -317,6 +317,38 @@ def test_commitment_is_not_completed_at_lane_assignment_boundary():
     ] == "converged_to_target_lane_pose"
 
 
+def test_s9_commitment_releases_inside_target_footprint_at_centering_tail():
+    vehicle = _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=20.0)
+    env = _env(agents={"agent0": vehicle}, traffic=[])
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=False,
+        lane_change_preference=20.0,
+        lc_cost=0.0,
+        w_mobil=0.0,
+        w_keep_bias=0.0,
+    )
+    batch = rule_maker.propose_joint_actions(env, ["agent0"], {})
+    proposal = next(
+        value
+        for value in batch.proposals
+        if int(value.decisions["agent0"]["action"]) == -1
+    )
+    rule_maker.accept_joint_action(batch.batch_id, proposal.proposal_id)
+    rule_maker.advance_committed_execution(env, ["agent0"], 13)
+
+    env.config = {"scenario_id": "S9_narrow_channel_negotiation"}
+    env.agents["agent0"] = _vehicle(
+        "agent0", 24.0, 3.1, 0, speed_km_h=20.0
+    )
+    env.agents["agent0"].heading_theta = 0.16
+    completed = rule_maker.advance_committed_execution(env, ["agent0"], 13)
+
+    evidence = completed["lane_change_commitments"]["completed"]["agent0"]
+    assert completed["lane_change_commitments"]["active"] == {}
+    assert evidence["target_lateral_error_m"] == pytest.approx(-0.4)
+    assert evidence["target_heading_error_rad"] == pytest.approx(0.16)
+
+
 def test_risk_detector_unlocks_when_leader_ttc_is_below_threshold():
     env = _env(
         agents={
@@ -974,6 +1006,11 @@ class S8HardcodedBranchFakeRoadNetwork:
                     ConnectedFakeLane(0, -3.5, 30.0, "4G0_0_", "4G1_1_", length=30.0),
                 ],
             },
+            "4G1_0_": {
+                "4G0_0_": [
+                    ConnectedFakeLane(0, -1.8, 0.0, "4G1_0_", "4G0_0_", length=30.0),
+                ],
+            },
         }
 
     def get_lane(self, lane_index):
@@ -1574,6 +1611,34 @@ def test_s8_rightmost_lane_rejects_wrong_upstream_branch():
     assert ("4G0_0_", "4G1_1_", 0) in {
         tuple(lane.index) for lane in chain
     }
+
+
+def test_s8_rule_source_stays_on_exit_route_during_junction_overlap():
+    vehicle = _vehicle("agent0", 28.0, -3.5, 2, speed_km_h=25.0)
+    env = _env_s8_hardcoded_branch(vehicle)
+    vehicle.lane = env.engine.current_map.road_network.graph["4G1_0_"][
+        "4G0_0_"
+    ][0]
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+    )
+
+    candidate = rule_maker._build_coarse_trajectory(
+        env, vehicle, 0, []
+    )
+
+    assert candidate is not None
+    assert candidate["source_lane_index"] == (
+        "3C0_1_",
+        "4G0_0_",
+        2,
+    )
+    assert candidate["target_lane_chain_indices"][:2] == (
+        ("3C0_1_", "4G0_0_", 2),
+        ("4G0_0_", "4G1_1_", 0),
+    )
 
 
 def test_debug_compute_s8_rightmost_lane_does_not_emit_fake_right():
@@ -2514,6 +2579,27 @@ def test_s9_forces_left_for_every_ego_remaining_on_source_lane():
 
         assert rule_maker._is_s9_forced_route_candidate(env, left)
         assert not rule_maker._is_s9_forced_route_candidate(env, keep)
+
+
+def test_s9_starts_forced_left_immediately_after_reset_decision():
+    env = SimpleNamespace(
+        config={"scenario_id": "S9_narrow_channel_negotiation"},
+        _scenario_orchestrator=SimpleNamespace(
+            _actor_manifest={"blocking_actor": {}}
+        ),
+    )
+    rule_maker = MultiAgentRuleMaker(locked_on_reset=False)
+    candidate = {
+        "agent_id": "agent0",
+        "action": -1,
+        "source_lane_index": ("10C0_0_", "10C0_1_", 1),
+        "target_lane_index": ("10C0_0_", "10C0_1_", 0),
+    }
+
+    rule_maker._decision_step = 0
+    assert not rule_maker._is_s9_forced_route_candidate(env, candidate)
+    rule_maker._decision_step = 1
+    assert rule_maker._is_s9_forced_route_candidate(env, candidate)
 
 
 def test_s9_serial_fallback_moves_first_pending_ego_only():

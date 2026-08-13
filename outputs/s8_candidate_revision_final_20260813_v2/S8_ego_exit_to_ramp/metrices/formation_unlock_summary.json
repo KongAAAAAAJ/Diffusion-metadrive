@@ -1,0 +1,51 @@
+{
+  "formation_unlock_events": [
+    {
+      "episode": 0,
+      "unlocked_triggered": true,
+      "unlocked_ranges": [
+        {
+          "start_step": 0,
+          "end_step": 164
+        }
+      ]
+    },
+    {
+      "episode": 1,
+      "unlocked_triggered": true,
+      "unlocked_ranges": [
+        {
+          "start_step": 0,
+          "end_step": 160
+        }
+      ]
+    },
+    {
+      "episode": 2,
+      "unlocked_triggered": true,
+      "unlocked_ranges": [
+        {
+          "start_step": 0,
+          "end_step": 171
+        }
+      ]
+    },
+    {
+      "episode": 3,
+      "unlocked_triggered": false,
+      "unlocked_ranges": []
+    },
+    {
+      "episode": 4,
+      "unlocked_triggered": true,
+      "unlocked_ranges": [
+        {
+          "start_step": 0,
+          "end_step": 148
+        }
+      ]
+    }
+  ],
+  "formation_unlock_trigger_count": 4,
+  "formation_unlock_trigger_rate": 0.8
+}

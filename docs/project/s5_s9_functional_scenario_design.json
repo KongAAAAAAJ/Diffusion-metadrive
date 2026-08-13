@@ -1,12 +1,12 @@
 {
   "format": "bev_s5_s9_candidate_functional_scenario_memory_v1",
   "schema_version": 1,
-  "recorded_at": "2026-08-13T01:38:21+08:00",
+  "recorded_at": "2026-08-13T11:21:51+08:00",
   "status": "user_confirmed_functional_definition_revision_pending_full_implementation_and_five_seed_validation",
   "purpose": "Store the user-confirmed functional semantics, constrained logical parameter ranges, and acceptance gates for the next S5-S9 scenario revision without retroactively changing the frozen scenario contract or the dataset used by the ongoing Stage1-A training run.",
   "latest_revision": {
     "date": "2026-08-13",
-    "summary": "Retain the revised S5 diversity definition and strengthened S6-S9 semantics. Confirm that S6 reassembly contains only the original three ego vehicles: the cut-in actor is never a platoon member, KEEP-only accommodation is invalid, and all three ego vehicles must physically change lane before ego-only reassembly. Record that S6 and S7 independently pass their fixed five-seed physical interaction, safety, reassembly, video, and artifact gates without activating or retroactively changing the full candidate-v2 contract.",
+    "summary": "Retain the revised S5 diversity definition and strengthened S6-S9 semantics. Confirm that S6 reassembly contains only the original three ego vehicles: the cut-in actor is never a platoon member, KEEP-only accommodation is invalid, and all three ego vehicles must physically change lane before ego-only reassembly. Record that S6, S7, S8, and S9 independently pass their fixed five-seed physical interaction, safety, reassembly, video, and artifact gates. S9 specifically proves causal bypass-lane interaction, three non-simultaneous physical LEFT transitions, blocker passage, narrow-road continuation, no return to lane 1, and bypass-route reassembly. Authorize S5-S9 implementation and per-scenario acceptance in any order while preserving the requirement for all five independent gates and a combined review before the complete candidate-v2 contract can be frozen.",
     "formal_v1_contract_changed": false,
     "existing_dataset_or_training_metadata_changed": false
   },
@@ -29,7 +29,7 @@
     "non_retroactivity": "This candidate memory does not relabel, overwrite, or invalidate metadata on the current formal 50k dataset or checkpoints trained from it.",
     "no_mixing": "Artifacts generated after implementing this candidate design must use a new scenario contract identifier and must not be mixed with the current formal 50k root.",
     "activation_gates": [
-      "implement scenarios sequentially in order S5, S6, S7, S8, S9 outside the active training execution boundary",
+      "implement and validate each S5-S9 scenario independently in any order outside the active training execution boundary",
       "run focused topology, actor-realization, conflict-realization, expert-action, and safety tests for each scenario",
       "run a fixed five-seed top-down video review after each scenario implementation",
       "require every declared actor and recipe to be realized with no silent actor loss",
@@ -701,7 +701,135 @@
         "repeated RIGHT after entering the connector is forbidden",
         "remaining on the through mainline at the horizon is failure even without a collision",
         "the interaction, exit, and reassembly complete without collision, road exit, or planner fallback"
-      ]
+      ],
+      "candidate_revision_evidence_20260813": {
+        "implementation_state": "implemented_and_fixed_five_seed_memory_gate_passed",
+        "verified_seeds": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "five_seed_result": {
+          "episodes_passed": "5/5",
+          "planner_success": "1000/1000",
+          "collision": false,
+          "out_of_road": false,
+          "planner_fallback": false,
+          "joint_rejections": 0,
+          "persistable_episodes": "5/5",
+          "functional_success": "5/5",
+          "causal_actor_interaction": "5/5",
+          "physical_split": "5/5",
+          "non_simultaneous_right_transition": "5/5",
+          "all_agents_traversed_connector": "5/5",
+          "all_agents_continued_on_ramp": "5/5",
+          "keep_only_after_connector": "5/5",
+          "formation_recovered_on_ramp": "5/5"
+        },
+        "resolved_parameter_policy": {
+          "ego_initial_speed_km_h": 25.0,
+          "memory_range_respected": [
+            22.0,
+            28.0
+          ],
+          "seed_varying_parameters": [
+            "severity_bucket",
+            "ego_distance_to_diverge_m",
+            "mandatory_lane_change_remaining_distance_m",
+            "exit_lane_front_actor_speed_km_h",
+            "usable_exit_lane_gap_m"
+          ],
+          "safety_thresholds_relaxed": false
+        },
+        "per_seed_physical_evidence": {
+          "17": {
+            "right_lane_change_steps": {
+              "agent0": 26,
+              "agent1": 26,
+              "agent2": 28
+            },
+            "ramp_entry_steps": {
+              "agent0": 97,
+              "agent1": 135,
+              "agent2": 180
+            },
+            "final_bumper_gaps_m": [
+              16.5621349952125,
+              18.55199916915727
+            ]
+          },
+          "23": {
+            "right_lane_change_steps": {
+              "agent0": 26,
+              "agent1": 28,
+              "agent2": 28
+            },
+            "ramp_entry_steps": {
+              "agent0": 103,
+              "agent1": 135,
+              "agent2": 178
+            },
+            "final_bumper_gaps_m": [
+              11.155282750464963,
+              21.010416836045497
+            ]
+          },
+          "31": {
+            "right_lane_change_steps": {
+              "agent0": 26,
+              "agent1": 28,
+              "agent2": 28
+            },
+            "ramp_entry_steps": {
+              "agent0": 93,
+              "agent1": 128,
+              "agent2": 173
+            },
+            "final_bumper_gaps_m": [
+              12.41557373680467,
+              21.11388852193983
+            ]
+          },
+          "47": {
+            "right_lane_change_steps": {
+              "agent0": 26,
+              "agent1": 28,
+              "agent2": 28
+            },
+            "ramp_entry_steps": {
+              "agent0": 100,
+              "agent1": 136,
+              "agent2": 177
+            },
+            "final_bumper_gaps_m": [
+              16.51115620675282,
+              12.818149485634105
+            ]
+          },
+          "59": {
+            "right_lane_change_steps": {
+              "agent0": 26,
+              "agent1": 28,
+              "agent2": 28
+            },
+            "ramp_entry_steps": {
+              "agent0": 95,
+              "agent1": 131,
+              "agent2": 166
+            },
+            "final_bumper_gaps_m": [
+              11.242424379191792,
+              19.667071135475645
+            ]
+          }
+        },
+        "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s8_candidate_revision_final_20260813_v3/S8_ego_exit_to_ramp",
+        "acceptance_report": "evaluation/S8_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+        "video_review": "seed 31 top-down and semantic-BEV videos reviewed at approach, exit transition, ramp continuation, and recovery frames; machine evidence remains authoritative for exact gates",
+        "five_seed_status": "memory_gate_passed_candidate_v2_not_globally_frozen"
+      }
     },
     "S9_narrow_channel_negotiation": {
       "functional_name": "mandatory coordinated bypass of a slow or stopped blocker",
@@ -787,18 +915,16 @@
       ]
     }
   },
-  "implementation_order": [
-    "common conflict and route-completion evidence fields",
-    "S5_hard_brake_lead",
-    "S6_background_merge_in",
-    "S7_ego_merge_from_ramp",
-    "S8_ego_exit_to_ramp",
-    "S9_narrow_channel_negotiation",
-    "combined fixed-seed visual and machine-contract review"
-  ],
+  "implementation_policy": {
+    "common_conflict_and_route_completion_evidence_required": true,
+    "scenario_gate_order": "independent_any_order",
+    "independent_scenario_acceptance_allowed": true,
+    "complete_candidate_v2_freeze_requires_all_five_scenario_gates": true,
+    "combined_fixed_seed_visual_and_machine_contract_review_required": true
+  },
   "remaining_before_contract_freeze": [
     "freeze quantitative thresholds and persistence windows for physical formation release and reassembly evidence",
-    "implement the revised S6-S9 trigger-actor, asynchronous-maneuver, and reassembly semantics",
-    "pass the fixed five-seed closed-loop functional acceptance for every scenario before assigning a new contract identifier"
+    "complete the combined fixed-seed visual and machine-contract review across all five independently accepted scenario gates",
+    "assign a new contract identifier only after all five scenario gates and the combined review are complete"
   ]
 }

@@ -230,6 +230,33 @@ def test_stop_anchor_preserves_current_lane_offset_without_recentering() -> None
     ).valid
 
 
+def test_stop_anchor_uses_measured_pose_when_lane_projection_is_inexact() -> None:
+    class _ProjectionBiasedLane(_Lane):
+        def local_coordinates(
+            self, position: np.ndarray
+        ) -> tuple[float, float]:
+            longitudinal, lateral = super().local_coordinates(position)
+            return longitudinal + 0.35, lateral
+
+    env = _Env()
+    lane = _ProjectionBiasedLane(1, 0.0)
+    env.current_map.road_network.lanes[("A", "B", 1)] = lane
+    env.current_map.road_network.graph["A"]["B"][1] = lane
+    vehicle = env.agents["agent0"]
+    vehicle.lane = lane
+    vehicle.position = np.asarray([30.0, 0.0], dtype=np.float32)
+
+    output = SimulatorDynamicAnchorGenerator().generate(env, "agent0")
+    stop = output.coarse_trajectories[ModeIndex.STOP]
+
+    assert validate_trajectory_kinematics(
+        stop,
+        vehicle.speed_km_h / 3.6,
+        np.zeros(3),
+    ).valid
+    assert float(stop[0, 0]) > 0.0
+
+
 def test_low_speed_stop_limits_heading_change_to_kinematic_contract() -> None:
     env = _Env()
     vehicle = env.agents["agent0"]
