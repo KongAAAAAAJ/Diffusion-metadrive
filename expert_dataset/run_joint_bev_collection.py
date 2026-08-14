@@ -77,8 +77,56 @@ SECTION_KEYS = {
         "enabled",
         "scenario_quotas",
         "max_attempts_per_scenario",
+        "min_episodes_per_scenario",
+        "max_samples_per_episode",
+        "require_all_scenarios_in_each_split",
+        "required_spawn_seeds",
+        "required_incidental_background_actor_counts",
+        "required_behavior_categories",
     },
 }
+
+FORMAL_SPLITS = ("train", "val", "test")
+FORMAL_BEHAVIOR_SOURCE = {
+    "S5_hard_brake_lead": ("conflict_evidence", "observed_behavior_class"),
+    "S6_background_merge_in": ("conflict_evidence", "target_gap_id"),
+    "S7_ego_merge_from_ramp": ("conflict_evidence", "observed_behavior"),
+    "S8_ego_exit_to_ramp": (
+        "conflict_evidence",
+        "exit_constraint_target_gap_id",
+    ),
+    "S9_narrow_channel_negotiation": (
+        "conflict_evidence",
+        "designated_split_actor_target_gap_id",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class FormalDiversityRequirements:
+    min_episodes_per_scenario: int
+    max_samples_per_episode: int
+    require_all_scenarios_in_each_split: bool
+    required_spawn_seeds: tuple[int, ...]
+    required_incidental_background_actor_counts: tuple[int, ...]
+    required_behavior_categories: Mapping[str, tuple[str, ...]]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "min_episodes_per_scenario": self.min_episodes_per_scenario,
+            "max_samples_per_episode": self.max_samples_per_episode,
+            "require_all_scenarios_in_each_split": (
+                self.require_all_scenarios_in_each_split
+            ),
+            "required_spawn_seeds": list(self.required_spawn_seeds),
+            "required_incidental_background_actor_counts": list(
+                self.required_incidental_background_actor_counts
+            ),
+            "required_behavior_categories": {
+                name: list(values)
+                for name, values in self.required_behavior_categories.items()
+            },
+        }
 
 
 @dataclass(frozen=True)
@@ -103,6 +151,7 @@ class JointCollectionRunConfig:
     diagnostic_max_attempts_per_scenario: int = 0
     formal_scenario_quotas: Mapping[str, int] | None = None
     formal_max_attempts_per_scenario: int = 0
+    formal_diversity: FormalDiversityRequirements | None = None
     scenario_contract_id: str = FORMAL_V1_CONTRACT_ID
 
     def __post_init__(self) -> None:
@@ -260,6 +309,79 @@ class JointCollectionRunConfig:
                 "formal_max_attempts_per_scenario",
                 int(self.formal_max_attempts_per_scenario),
             )
+            diversity = self.formal_diversity
+            if diversity is not None:
+                if diversity.min_episodes_per_scenario <= 0:
+                    raise ValueError(
+                        "formal_pilot min_episodes_per_scenario must be positive"
+                    )
+                if diversity.max_samples_per_episode <= 0:
+                    raise ValueError(
+                        "formal_pilot max_samples_per_episode must be positive"
+                    )
+                if not diversity.require_all_scenarios_in_each_split:
+                    raise ValueError(
+                        "formal_pilot must require all S5--S9 in every split"
+                    )
+                if (
+                    not diversity.required_spawn_seeds
+                    or len(set(diversity.required_spawn_seeds))
+                    != len(diversity.required_spawn_seeds)
+                    or any(value < 0 for value in diversity.required_spawn_seeds)
+                ):
+                    raise ValueError(
+                        "formal_pilot required_spawn_seeds must be unique non-negative integers"
+                    )
+                if (
+                    tuple(sorted(set(
+                        diversity.required_incidental_background_actor_counts
+                    )))
+                    != diversity.required_incidental_background_actor_counts
+                    or not diversity.required_incidental_background_actor_counts
+                    or any(
+                        value < 3 or value > 6
+                        for value in diversity.required_incidental_background_actor_counts
+                    )
+                ):
+                    raise ValueError(
+                        "formal_pilot background coverage must be an ordered subset of 3--6"
+                    )
+                if tuple(diversity.required_behavior_categories) != expected:
+                    raise ValueError(
+                        "formal_pilot behavior coverage must use ordered S5--S9"
+                    )
+                for scenario_id, values in (
+                    diversity.required_behavior_categories.items()
+                ):
+                    if (
+                        not values
+                        or len(set(values)) != len(values)
+                        or any(not value for value in values)
+                    ):
+                        raise ValueError(
+                            f"formal_pilot behavior coverage is invalid for {scenario_id}"
+                        )
+                for scenario_id, quota in normalized_formal_quotas.items():
+                    if (
+                        diversity.min_episodes_per_scenario
+                        * diversity.max_samples_per_episode
+                        < quota
+                    ):
+                        raise ValueError(
+                            "formal_pilot episode minimum/sample cap cannot satisfy "
+                            f"the quota for {scenario_id}"
+                        )
+                if (
+                    len(diversity.required_spawn_seeds)
+                    > diversity.min_episodes_per_scenario
+                ):
+                    raise ValueError(
+                        "formal_pilot required seed count exceeds the episode minimum"
+                    )
+        elif self.formal_diversity is not None:
+            raise ValueError(
+                "formal_pilot diversity constraints require formal_pilot.enabled=true"
+            )
 
     def immutable_fingerprint(self) -> str:
         return fingerprint_payload(
@@ -298,6 +420,11 @@ class JointCollectionRunConfig:
                             self.formal_max_attempts_per_scenario
                         ),
                         "scenario_contract": self.scenario_contract(),
+                        **(
+                            {}
+                            if self.formal_diversity is None
+                            else {"diversity": self.formal_diversity.as_dict()}
+                        ),
                     }
                 ),
             }
@@ -433,6 +560,7 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
         raise ValueError("formal_pilot.enabled must be bool")
     formal_quotas = None
     formal_max_attempts = 0
+    formal_diversity = None
     if formal_enabled:
         raw_formal_quotas = _required(
             formal, "formal_pilot", "scenario_quotas"
@@ -449,6 +577,66 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
                 "max_attempts_per_scenario",
             )
         )
+        diversity_fields = (
+            "min_episodes_per_scenario",
+            "max_samples_per_episode",
+            "require_all_scenarios_in_each_split",
+            "required_spawn_seeds",
+            "required_incidental_background_actor_counts",
+            "required_behavior_categories",
+        )
+        supplied_diversity_fields = [
+            name for name in diversity_fields if name in formal
+        ]
+        if supplied_diversity_fields and len(supplied_diversity_fields) != len(
+            diversity_fields
+        ):
+            missing = sorted(set(diversity_fields) - set(supplied_diversity_fields))
+            raise ValueError(
+                f"formal_pilot diversity constraints must be supplied together; missing={missing}"
+            )
+        if supplied_diversity_fields:
+            raw_required_seeds = formal["required_spawn_seeds"]
+            raw_background_counts = formal[
+                "required_incidental_background_actor_counts"
+            ]
+            raw_behavior = formal["required_behavior_categories"]
+            if not isinstance(raw_required_seeds, (list, tuple)):
+                raise ValueError("formal_pilot.required_spawn_seeds must be a list")
+            if not isinstance(raw_background_counts, (list, tuple)):
+                raise ValueError(
+                    "formal_pilot.required_incidental_background_actor_counts must be a list"
+                )
+            if not isinstance(raw_behavior, Mapping):
+                raise ValueError(
+                    "formal_pilot.required_behavior_categories must be a mapping"
+                )
+            behavior_categories = {}
+            for scenario_id, values in raw_behavior.items():
+                if not isinstance(values, (list, tuple)):
+                    raise ValueError(
+                        "formal_pilot behavior category values must be lists"
+                    )
+                behavior_categories[str(scenario_id)] = tuple(
+                    str(value) for value in values
+                )
+            split_coverage = formal["require_all_scenarios_in_each_split"]
+            if not isinstance(split_coverage, bool):
+                raise ValueError(
+                    "formal_pilot.require_all_scenarios_in_each_split must be bool"
+                )
+            formal_diversity = FormalDiversityRequirements(
+                min_episodes_per_scenario=int(
+                    formal["min_episodes_per_scenario"]
+                ),
+                max_samples_per_episode=int(formal["max_samples_per_episode"]),
+                require_all_scenarios_in_each_split=split_coverage,
+                required_spawn_seeds=tuple(int(value) for value in raw_required_seeds),
+                required_incidental_background_actor_counts=tuple(
+                    int(value) for value in raw_background_counts
+                ),
+                required_behavior_categories=behavior_categories,
+            )
 
     return JointCollectionRunConfig(
         config_path=config_path,
@@ -488,6 +676,7 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
         diagnostic_max_attempts_per_scenario=diagnostic_max_attempts,
         formal_scenario_quotas=formal_quotas,
         formal_max_attempts_per_scenario=formal_max_attempts,
+        formal_diversity=formal_diversity,
         scenario_contract_id=str(
             dataset.get("scenario_contract", FORMAL_V1_CONTRACT_ID)
         ),
@@ -541,6 +730,8 @@ def sample_episode_spec_for_scenario(
     config: JointCollectionRunConfig,
     episode_index: int,
     scenario_id: str,
+    *,
+    spawn_seed: int | None = None,
 ) -> JointEpisodeSpec:
     """Sample episode nuisance variables while freezing the diagnostic scenario."""
 
@@ -571,7 +762,11 @@ def sample_episode_spec_for_scenario(
     return JointEpisodeSpec(
         scenario_id=scenario_id,
         local_route=local_route,
-        spawn_seed=int(rng.randint(0, 2**31 - 1)),
+        spawn_seed=(
+            int(rng.randint(0, 2**31 - 1))
+            if spawn_seed is None
+            else int(spawn_seed)
+        ),
         traffic_density=density,
         initial_speed_km_h=initial_speed_km_h,
     )
@@ -640,6 +835,7 @@ def _select_formal_quota_samples(
     rollout,
     *,
     remaining: int,
+    max_samples: int | None = None,
 ) -> tuple[tuple[object, ...], tuple[int, ...]]:
     """Keep a complete episode, clipping only its persisted sample view."""
 
@@ -659,7 +855,16 @@ def _select_formal_quota_samples(
             "formal episode selected no samples",
             reason_code="formal_pilot_sample_missing",
         )
-    selected_count = min(sample_count, int(remaining))
+    selected_count = min(
+        sample_count,
+        int(remaining),
+        sample_count if max_samples is None else int(max_samples),
+    )
+    if selected_count <= 0:
+        raise JointCollectionError(
+            "formal episode has no diversity-safe sample capacity",
+            reason_code="formal_pilot_diversity_capacity",
+        )
     if selected_count == sample_count:
         indices = tuple(range(sample_count))
     else:
@@ -709,6 +914,282 @@ def _stored_scenario_counts(
             reason_code="formal_pilot_resume_mismatch",
         )
     return counts
+
+
+def _formal_episode_coverage(
+    scenario_id: str,
+    scenario_summary: Mapping[str, object],
+) -> dict[str, object]:
+    resolved = scenario_summary.get("resolved_scenario_parameters", {})
+    evidence = scenario_summary.get("conflict_evidence", {})
+    if not isinstance(resolved, Mapping) or not isinstance(evidence, Mapping):
+        raise JointCollectionError(
+            "formal episode has malformed scenario coverage metadata",
+            reason_code="formal_pilot_coverage_metadata_missing",
+        )
+    background_count = resolved.get("incidental_background_actor_count")
+    realized_background_count = evidence.get(
+        "incidental_background_realized_count"
+    )
+    source_section, source_key = FORMAL_BEHAVIOR_SOURCE[scenario_id]
+    source = evidence if source_section == "conflict_evidence" else resolved
+    behavior_category = source.get(source_key)
+    if (
+        isinstance(background_count, bool)
+        or not isinstance(background_count, (int, np.integer))
+        or isinstance(realized_background_count, bool)
+        or not isinstance(realized_background_count, (int, np.integer))
+        or int(realized_background_count) != int(background_count)
+        or behavior_category in (None, "")
+    ):
+        raise JointCollectionError(
+            "formal episode is missing background or behavior coverage metadata",
+            reason_code="formal_pilot_coverage_metadata_missing",
+        )
+    return {
+        "incidental_background_actor_count": int(background_count),
+        "behavior_category": str(behavior_category),
+    }
+
+
+def _empty_formal_progress(quotas: Mapping[str, int]) -> dict[str, dict[str, object]]:
+    return {
+        scenario_id: {
+            "joint_samples": 0,
+            "episodes": 0,
+            "spawn_seeds": set(),
+            "splits": set(),
+            "incidental_background_actor_counts": set(),
+            "behavior_categories": set(),
+        }
+        for scenario_id in quotas
+    }
+
+
+def _stored_formal_progress(
+    store: JointBEVDatasetStore,
+    quotas: Mapping[str, int],
+    requirements: FormalDiversityRequirements | None,
+) -> dict[str, dict[str, object]]:
+    progress = _empty_formal_progress(quotas)
+    for writer in store.writers.values():
+        for episode in writer.episodes.values():
+            scenario_id = str(episode.attributes.get("scenario_id", ""))
+            if scenario_id not in progress:
+                raise JointCollectionError(
+                    f"formal pilot contains unexpected scenario {scenario_id!r}",
+                    reason_code="formal_pilot_resume_mismatch",
+                )
+            row = progress[scenario_id]
+            row["joint_samples"] += int(episode.joint_samples)
+            row["episodes"] += 1
+            row["splits"].add(str(episode.split))
+            spawn_seed = episode.attributes.get("spawn_seed")
+            if isinstance(spawn_seed, bool) or not isinstance(
+                spawn_seed, (int, np.integer)
+            ):
+                raise JointCollectionError(
+                    "formal episode has no valid spawn seed",
+                    reason_code="formal_pilot_resume_mismatch",
+                )
+            if (
+                requirements is not None
+                and int(spawn_seed) in row["spawn_seeds"]
+            ):
+                raise JointCollectionError(
+                    f"formal scenario {scenario_id} reuses spawn seed {spawn_seed}",
+                    reason_code="formal_pilot_duplicate_spawn_seed",
+                )
+            row["spawn_seeds"].add(int(spawn_seed))
+            if requirements is None:
+                continue
+            if episode.joint_samples > requirements.max_samples_per_episode:
+                raise JointCollectionError(
+                    f"formal episode {episode.episode_index} exceeds the sample cap",
+                    reason_code="formal_pilot_episode_sample_cap_exceeded",
+                )
+            coverage = episode.attributes.get("formal_coverage")
+            if not isinstance(coverage, Mapping):
+                raise JointCollectionError(
+                    "formal episode has no persisted coverage metadata",
+                    reason_code="formal_pilot_resume_mismatch",
+                )
+            background_count = coverage.get("incidental_background_actor_count")
+            behavior_category = coverage.get("behavior_category")
+            if (
+                isinstance(background_count, bool)
+                or not isinstance(background_count, (int, np.integer))
+                or behavior_category in (None, "")
+            ):
+                raise JointCollectionError(
+                    "formal episode has malformed persisted coverage metadata",
+                    reason_code="formal_pilot_resume_mismatch",
+                )
+            row["incidental_background_actor_counts"].add(int(background_count))
+            row["behavior_categories"].add(str(behavior_category))
+    for scenario_id, row in progress.items():
+        if int(row["joint_samples"]) > int(quotas[scenario_id]):
+            raise JointCollectionError(
+                f"formal pilot scenario {scenario_id} exceeds its quota",
+                reason_code="formal_pilot_resume_mismatch",
+            )
+    if sum(int(row["joint_samples"]) for row in progress.values()) != (
+        store.total_joint_samples
+    ):
+        raise JointCollectionError(
+            "formal pilot scenario counts do not match stored sample count",
+            reason_code="formal_pilot_resume_mismatch",
+        )
+    return progress
+
+
+def _serializable_formal_progress(
+    progress: Mapping[str, Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    result = {}
+    for scenario_id, row in progress.items():
+        result[scenario_id] = {
+            "joint_samples": int(row["joint_samples"]),
+            "episodes": int(row["episodes"]),
+            "spawn_seeds": sorted(row["spawn_seeds"]),
+            "splits": sorted(row["splits"]),
+            "incidental_background_actor_counts": sorted(
+                row["incidental_background_actor_counts"]
+            ),
+            "behavior_categories": sorted(row["behavior_categories"]),
+        }
+    return result
+
+
+def _validate_formal_completion(
+    progress: Mapping[str, Mapping[str, object]],
+    quotas: Mapping[str, int],
+    requirements: FormalDiversityRequirements | None,
+) -> None:
+    counts = {
+        scenario_id: int(row["joint_samples"])
+        for scenario_id, row in progress.items()
+    }
+    if counts != dict(quotas):
+        raise JointCollectionError(
+            "formal pilot ended before all quotas were met",
+            reason_code="formal_pilot_quota_incomplete",
+        )
+    if requirements is None:
+        return
+    required_splits = set(FORMAL_SPLITS)
+    required_seeds = set(requirements.required_spawn_seeds)
+    required_background = set(
+        requirements.required_incidental_background_actor_counts
+    )
+    for scenario_id, row in progress.items():
+        if int(row["episodes"]) < requirements.min_episodes_per_scenario:
+            raise JointCollectionError(
+                f"formal scenario {scenario_id} has too few independent episodes",
+                reason_code="formal_pilot_episode_diversity_incomplete",
+            )
+        if requirements.require_all_scenarios_in_each_split and not (
+            required_splits <= set(row["splits"])
+        ):
+            raise JointCollectionError(
+                f"formal scenario {scenario_id} is missing from a dataset split",
+                reason_code="formal_pilot_split_coverage_incomplete",
+            )
+        if not required_seeds <= set(row["spawn_seeds"]):
+            raise JointCollectionError(
+                f"formal scenario {scenario_id} is missing a required seed",
+                reason_code="formal_pilot_seed_coverage_incomplete",
+            )
+        if not required_background <= set(
+            row["incidental_background_actor_counts"]
+        ):
+            raise JointCollectionError(
+                f"formal scenario {scenario_id} lacks background-count coverage",
+                reason_code="formal_pilot_background_coverage_incomplete",
+            )
+        required_behavior = set(
+            requirements.required_behavior_categories[scenario_id]
+        )
+        if not required_behavior <= set(row["behavior_categories"]):
+            raise JointCollectionError(
+                f"formal scenario {scenario_id} lacks behavior-category coverage",
+                reason_code="formal_pilot_behavior_coverage_incomplete",
+            )
+
+
+def _select_formal_scenario(
+    order: tuple[str, ...],
+    progress: Mapping[str, Mapping[str, object]],
+    quotas: Mapping[str, int],
+    split: str,
+) -> str:
+    incomplete = [
+        scenario_id
+        for scenario_id in order
+        if int(progress[scenario_id]["joint_samples"]) < int(quotas[scenario_id])
+    ]
+    if not incomplete:
+        raise JointCollectionError(
+            "formal scenario quotas are already complete",
+            reason_code="formal_pilot_quota_complete",
+        )
+    missing_current_split = [
+        scenario_id
+        for scenario_id in incomplete
+        if split not in progress[scenario_id]["splits"]
+    ]
+    candidates = missing_current_split or incomplete
+    return min(
+        candidates,
+        key=lambda scenario_id: (
+            int(progress[scenario_id]["joint_samples"])
+            / int(quotas[scenario_id]),
+            order.index(scenario_id),
+        ),
+    )
+
+
+def _formal_sample_capacity(
+    *,
+    scenario_id: str,
+    remaining: int,
+    row: Mapping[str, object],
+    requirements: FormalDiversityRequirements,
+    split: str,
+    spawn_seed: int,
+    coverage: Mapping[str, object],
+) -> int:
+    episodes_after = int(row["episodes"]) + 1
+    missing_episode_count = max(
+        requirements.min_episodes_per_scenario - episodes_after,
+        0,
+    )
+    splits_after = set(row["splits"]) | {split}
+    seeds_after = set(row["spawn_seeds"]) | {spawn_seed}
+    backgrounds_after = set(row["incidental_background_actor_counts"]) | {
+        int(coverage["incidental_background_actor_count"])
+    }
+    behaviors_after = set(row["behavior_categories"]) | {
+        str(coverage["behavior_category"])
+    }
+    coverage_still_missing = any(
+        (
+            requirements.require_all_scenarios_in_each_split
+            and not set(FORMAL_SPLITS) <= splits_after,
+            not set(requirements.required_spawn_seeds) <= seeds_after,
+            not set(requirements.required_incidental_background_actor_counts)
+            <= backgrounds_after,
+            not set(requirements.required_behavior_categories[
+                scenario_id
+            ])
+            <= behaviors_after,
+        )
+    )
+    reserved_samples = max(missing_episode_count, int(coverage_still_missing))
+    return min(
+        requirements.max_samples_per_episode,
+        int(remaining) - reserved_samples,
+    )
 
 
 def _configure_episode(
@@ -965,20 +1446,29 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
             }
             if config.formal_scenario_quotas is not None:
                 quotas = dict(config.formal_scenario_quotas)
-                counts = _stored_scenario_counts(store, quotas)
-                if counts != quotas:
-                    raise JointCollectionError(
-                        "formal pilot target is met but scenario quotas differ",
-                        reason_code="formal_pilot_resume_mismatch",
-                    )
+                progress = _stored_formal_progress(
+                    store, quotas, config.formal_diversity
+                )
+                _validate_formal_completion(
+                    progress, quotas, config.formal_diversity
+                )
                 summary["formal_pilot"] = {
                     "scenario_quotas": quotas,
-                    "scenario_counts": counts,
+                    "scenario_counts": {
+                        name: int(row["joint_samples"])
+                        for name, row in progress.items()
+                    },
                     "attempts": {
                         name: sum(row.scenario_id == name for row in bundle.rows)
                         for name in quotas
                     },
                     "scenario_contract_sha256": scenario_contract_sha256,
+                    "diversity_requirements": (
+                        None
+                        if config.formal_diversity is None
+                        else config.formal_diversity.as_dict()
+                    ),
+                    "diversity_observed": _serializable_formal_progress(progress),
                 }
             print("[INFO] target already satisfied; no simulator started", flush=True)
             return summary
@@ -1013,6 +1503,13 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
             None
             if formal_quotas is None
             else _stored_scenario_counts(store, formal_quotas)
+        )
+        formal_progress = (
+            None
+            if formal_quotas is None
+            else _stored_formal_progress(
+                store, formal_quotas, config.formal_diversity
+            )
         )
         formal_attempts = (
             None
@@ -1056,15 +1553,24 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         config, episode_index, scenario_id
                     )
                 else:
-                    incomplete = [
-                        scenario_id
-                        for scenario_id in formal_order
-                        if formal_counts[scenario_id]
-                        < formal_quotas[scenario_id]
-                    ]
-                    if not incomplete:
-                        break
-                    scenario_id = incomplete[episode_index % len(incomplete)]
+                    split = store.assigner.split_for_episode(episode_index)
+                    if config.formal_diversity is None:
+                        incomplete = [
+                            scenario_id
+                            for scenario_id in formal_order
+                            if formal_counts[scenario_id]
+                            < formal_quotas[scenario_id]
+                        ]
+                        if not incomplete:
+                            break
+                        scenario_id = incomplete[episode_index % len(incomplete)]
+                    else:
+                        scenario_id = _select_formal_scenario(
+                            formal_order,
+                            formal_progress,
+                            formal_quotas,
+                            split,
+                        )
                     if (
                         formal_attempts[scenario_id]
                         >= config.formal_max_attempts_per_scenario
@@ -1075,9 +1581,30 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             reason_code="formal_pilot_attempt_limit",
                         )
                     formal_attempts[scenario_id] += 1
+                    forced_spawn_seed = None
+                    if config.formal_diversity is not None:
+                        stored_seeds = formal_progress[scenario_id]["spawn_seeds"]
+                        forced_spawn_seed = next(
+                            (
+                                value
+                                for value in config.formal_diversity.required_spawn_seeds
+                                if value not in stored_seeds
+                            ),
+                            None,
+                        )
                     spec = sample_episode_spec_for_scenario(
-                        config, episode_index, scenario_id
+                        config,
+                        episode_index,
+                        scenario_id,
+                        spawn_seed=forced_spawn_seed,
                     )
+                    if config.formal_diversity is not None:
+                        stored_seeds = formal_progress[scenario_id]["spawn_seeds"]
+                        unique_seed = spec.spawn_seed
+                        while unique_seed in stored_seeds:
+                            unique_seed = (unique_seed + 1) % (2**31 - 1)
+                        if unique_seed != spec.spawn_seed:
+                            spec = replace(spec, spawn_seed=unique_seed)
                 split = store.assigner.split_for_episode(episode_index)
                 bundle.begin_attempt(
                     BundleEpisodeAttempt(
@@ -1139,6 +1666,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     continue
 
                 samples_to_store = rollout.samples
+                formal_coverage = None
                 selected_steps: tuple[int, ...] = tuple(
                     int(value) for value in rollout.sample_step_indices
                 )
@@ -1172,10 +1700,35 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         - formal_counts[spec.scenario_id]
                     )
                     try:
+                        max_samples = None
+                        if config.formal_diversity is not None:
+                            formal_coverage = _formal_episode_coverage(
+                                spec.scenario_id, rollout.scenario_summary
+                            )
+                            if (
+                                formal_coverage[
+                                    "incidental_background_actor_count"
+                                ]
+                                not in config.formal_diversity.required_incidental_background_actor_counts
+                            ):
+                                raise JointCollectionError(
+                                    "formal episode background count is outside the frozen contract",
+                                    reason_code="formal_pilot_background_count_invalid",
+                                )
+                            max_samples = _formal_sample_capacity(
+                                scenario_id=spec.scenario_id,
+                                remaining=remaining,
+                                row=formal_progress[spec.scenario_id],
+                                requirements=config.formal_diversity,
+                                split=split,
+                                spawn_seed=spec.spawn_seed,
+                                coverage=formal_coverage,
+                            )
                         samples_to_store, selected_steps = (
                             _select_formal_quota_samples(
                                 rollout,
                                 remaining=remaining,
+                                max_samples=max_samples,
                             )
                         )
                     except JointCollectionError as exc:
@@ -1281,6 +1834,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                                 formal_quotas is not None
                                 and len(samples_to_store) < len(rollout.samples)
                             ),
+                            "formal_coverage": formal_coverage,
                             "scenario_contract_sha256": scenario_contract_sha256,
                         },
                     )
@@ -1320,6 +1874,9 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     diagnostic_counts[spec.scenario_id] += stored.joint_samples
                 if formal_counts is not None:
                     formal_counts[spec.scenario_id] += stored.joint_samples
+                    formal_progress = _stored_formal_progress(
+                        store, formal_quotas, config.formal_diversity
+                    )
                 elapsed = max(time.perf_counter() - wall_start, 1e-6)
                 rate = (
                     store.total_joint_samples - starting_joint_samples
@@ -1353,17 +1910,26 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     reason_code="diagnostic_quota_incomplete",
                 )
         if formal_quotas is not None:
+            formal_progress = _stored_formal_progress(
+                store, formal_quotas, config.formal_diversity
+            )
             summary["formal_pilot"] = {
                 "scenario_quotas": formal_quotas,
                 "scenario_counts": formal_counts,
                 "attempts": formal_attempts,
                 "scenario_contract_sha256": scenario_contract_sha256,
+                "diversity_requirements": (
+                    None
+                    if config.formal_diversity is None
+                    else config.formal_diversity.as_dict()
+                ),
+                "diversity_observed": _serializable_formal_progress(
+                    formal_progress
+                ),
             }
-            if formal_counts != formal_quotas:
-                raise JointCollectionError(
-                    "formal pilot ended before all quotas were met",
-                    reason_code="formal_pilot_quota_incomplete",
-                )
+            _validate_formal_completion(
+                formal_progress, formal_quotas, config.formal_diversity
+            )
 
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     return summary

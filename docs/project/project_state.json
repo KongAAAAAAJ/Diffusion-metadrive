@@ -1,13 +1,14 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-14T14:10:13+08:00",
+  "updated_at": "2026-08-14T22:21:52+08:00",
   "repository": {
     "branch": "s5-s9-scenario-revision",
-    "git_commit": "34e5f8e2726c4ef9973967d889f22e708791e2d1",
+    "git_commit": "12dd114034fef164c5202fe1b77bfdf6c72159c2",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
-    "uncommitted_plan_update_present": false,
+    "uncommitted_plan_update_present": true,
+    "uncommitted_formal50k_diversity_contract_present": true,
     "uncommitted_s7_implementation_present": false,
     "uncommitted_s8_implementation_present": false,
     "uncommitted_s6_definition_update_present": false,
@@ -16,10 +17,10 @@
     "uncommitted_combined_acceptance_evidence_present": false
   },
   "current": {
-    "phase": "candidate_v3_diagnostic10k_collection",
-    "round": "candidate-v3-diagnostic10k-reauthorized-20260814",
-    "status": "candidate_v3_10k_collection_running",
-    "active_hard_gate": "complete_balanced_10k_then_run_both_strict_verifiers_and_quality_audit"
+    "phase": "candidate_v3_data_verification",
+    "round": "diagnostic10k-dual-verification-and-quality-audit-20260814",
+    "status": "formal50k_diversity_contract_implemented_diagnostic10k_pending_verification",
+    "active_hard_gate": "candidate_v3_diagnostic10k_dual_strict_verification_and_quality_audit"
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
@@ -271,13 +272,22 @@
       }
     },
     "candidate_v3_data_refresh": {
-      "status": "balanced_10k_collection_running",
-      "active_task": "monitor_collection_logs_throughput_storage_and_integrity",
+      "status": "diagnostic10k_complete_pending_dual_verification_and_quality_audit",
+      "active_task": "candidate_v3_diagnostic10k_dual_strict_verification_and_quality_audit",
       "pilot_target_joint_steps": 10000,
       "pilot_per_scenario_quota": 2000,
       "pilot_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
       "pilot_collection_started": true,
       "pilot_collection_started_at": "2026-08-14T14:10:13+08:00",
+      "pilot_collection_completed_at": "2026-08-14T16:25:20+08:00",
+      "pilot_collection_complete": true,
+      "pilot_joint_samples": 10000,
+      "pilot_attempted_episodes": 59,
+      "pilot_committed_base_episodes": 47,
+      "pilot_committed_sidecar_episodes": 59,
+      "pilot_base_dataset_fingerprint": "4bcb9455294675c640b5e76f63d3693f559f713082a6107a674a4871c7fbe13f",
+      "pilot_sidecar_dataset_fingerprint": "833a9a70e6a739da1f9b69029e86cceefd59c00f407646c84131eba21c168adc",
+      "pilot_bundle_index_sha256": "8df0f64f0d9b991dd7941a61849d783ee61c934f41f11e31219d22a44c8177f0",
       "pilot_collection_log": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/candidate_v3_diagnostic10k_20260814_1409.log",
       "pilot_collection_cancelled_by_user": false,
       "pilot_quality_gate_passed": false,
@@ -293,7 +303,12 @@
       "merge_requires_fresh_user_authorization": true,
       "merge_completed": false,
       "new_formal_50k_collection_started": false,
-      "new_formal_50k_eligible": false
+      "new_formal_50k_eligible": false,
+      "formal50k_diversity_constraints_authorized_by_user": true,
+      "formal50k_diversity_constraints_recorded_on": "2026-08-14",
+      "formal50k_diversity_constraints_implemented": true,
+      "formal50k_collection_config": "configs/dataset/data_collect_candidate_v3_formal50k.yaml",
+      "formal50k_collection_started": false
     }
   },
   "authorization": {
@@ -337,8 +352,17 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "b9c01d6646c4cbcd58ecb5e9994447b4fcb7bdd23b58a39081e27e0c13d13274",
-      "role": "Freezes the user-authorized balanced 10k diagnostic collection after S7/S9 acceptance, preserves remaining all-scenario and quality gates before merge, and retains the later isolated formal-50k mainline"
+      "sha256": "388e7556518c64775d840b72dc6322ff2ff1b715d1358d709a71134dc88a8667",
+      "role": "Freezes the completed candidate-v3 diagnostic 10k evidence, the formal-50k diversity contract, remaining dual-verification and quality gates, and the isolated formal-data mainline"
+    },
+    "candidate_v3_formal50k_diversity_contract_report": {
+      "path": "evaluation/CANDIDATE_V3_FORMAL50K_DIVERSITY_CONTRACT_REPORT.json",
+      "sha256": "92464854d7042910de5530c3f82697f7465a766b8db073b13e7e25b150127dbb",
+      "role": "Records executable 10k-per-scenario, minimum-episode, per-episode cap, all-split, fixed-seed, background-count and behavior-category gates without starting formal collection"
+    },
+    "candidate_v3_formal50k_collection_config": {
+      "path": "configs/dataset/data_collect_candidate_v3_formal50k.yaml",
+      "sha256": "7a7250ce9c49967128e37fc2bbaa23ec3e949d95d6ddf2c33b71cb6ed31247d4"
     },
     "candidate_v3_data_refresh_plan_update_report": {
       "path": "evaluation/CANDIDATE_V3_DATA_REFRESH_PLAN_UPDATE_REPORT.json",
@@ -486,7 +510,7 @@
         "compositional_ood": 10000,
         "topology_ood": 10000
       },
-      "collection_complete": false,
+      "collection_complete": true,
       "full_verifier_passed": false,
       "eligible_for_formal_training": false,
       "collection_stopped": true,
@@ -524,18 +548,28 @@
       "target_joint_steps": 10000,
       "per_scenario_quota": 2000,
       "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
-      "collection_complete": false,
+      "collection_complete": true,
       "diffusion_verifier_passed": false,
       "riskentry_verifier_passed": false,
       "quality_gate_passed": false,
       "eligible_for_formal_training": false,
       "reuse_in_formal_50k": false,
-      "blocker": "collection_in_progress_not_yet_verified_or_quality_accepted"
+      "base_dataset_fingerprint": "4bcb9455294675c640b5e76f63d3693f559f713082a6107a674a4871c7fbe13f",
+      "sidecar_dataset_fingerprint": "833a9a70e6a739da1f9b69029e86cceefd59c00f407646c84131eba21c168adc",
+      "bundle_index_sha256": "8df0f64f0d9b991dd7941a61849d783ee61c934f41f11e31219d22a44c8177f0",
+      "blocker": "dual_verification_and_quality_audit_not_run"
     },
     "candidate_v3_formal_s5_s9_50k": {
-      "root": null,
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
       "target_joint_steps": 50000,
       "per_scenario_quota": 10000,
+      "collection_config": "configs/dataset/data_collect_candidate_v3_formal50k.yaml",
+      "minimum_unique_seed_episodes_per_scenario": 50,
+      "maximum_joint_samples_per_episode": 200,
+      "all_s5_s9_required_in_each_split": true,
+      "required_spawn_seeds_per_scenario": [17, 23, 31, 47, 59],
+      "required_incidental_background_actor_counts_per_scenario": [3, 4, 5, 6],
+      "diversity_contract_implemented": true,
       "source_branch": "BEV",
       "source_merge_commit": null,
       "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
@@ -546,7 +580,7 @@
       "base_dataset_fingerprint": null,
       "sidecar_dataset_fingerprint": null,
       "bundle_index_sha256": null,
-      "blocker": "no_collection_or_bev_merge_authorized_after_user_cancelled_diagnostic10k_before_start"
+      "blocker": "diagnostic10k_dual_verification_quality_audit_and_bev_merge_authorization_pending"
     },
     "collection_performance_pilot": {
       "serial_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v1",
@@ -600,7 +634,8 @@
   "future_hard_gates": [
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
     "The user reauthorized the isolated candidate-v3 diagnostic 10k on 2026-08-14; this does not authorize BEV merge, formal collection, or training.",
-    "If collection is reauthorized, bind the collector and both strict verifiers to candidate_v3 SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860 and retain the S6=260 and S9=800 evaluation horizons.",
+    "Bind the collector and both strict verifiers to candidate_v3 SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860 and retain the S6=260 and S9=800 evaluation horizons.",
+    "The formal candidate-v3 50k is incomplete unless all frozen sample, episode, split, seed, incidental-background-count, and behavior-category postconditions pass.",
     "Merge into BEV and any new formal 50k collection still require explicit user direction plus the pre-frozen exact-path, verifier and data-quality gates.",
     "Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
@@ -609,7 +644,7 @@
   "next_actions": [
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
     "Preserve the accepted candidate-v3 combined manifest and all 140 hashed artifacts without rerunning, relabeling or overwriting them unless the frozen scenario contract changes.",
-    "Monitor the running isolated candidate-v3 balanced diagnostic 10k collection; after completion run both strict verifiers and the frozen quality audit before any merge decision."
+    "Run both complete strict verifiers and the frozen quality audit on the completed candidate-v3 diagnostic 10k; do not merge or start formal 50k collection in the same hard-gate thread."
   ],
   "invariants": {
     "metadata_override_forbidden": true,

@@ -51,6 +51,38 @@ def test_s7_stop_collapse_blocks_formal_collection(tmp_path: Path):
     assert not report["eligible_for_formal_50k_collection"]
 
 
+def test_formal50k_quality_contract_rejects_sample_only_coverage(tmp_path: Path):
+    base = tmp_path / "platoon_joint_bev"
+    for split in ("train", "val", "test"):
+        (base / split).mkdir(parents=True)
+        (base / split / "manifest.json").write_text('{"episodes": []}')
+    for scenario in (
+        "S5_hard_brake_lead",
+        "S6_background_merge_in",
+        "S7_ego_merge_from_ramp",
+        "S8_ego_exit_to_ramp",
+        "S9_narrow_channel_negotiation",
+    ):
+        _write_episode(base, scenario, np.ones((2, 3), dtype=np.int64), 4.0)
+    (tmp_path / "riskentry_actor_sidecar" / "train" / "episodes").mkdir(
+        parents=True
+    )
+
+    report = audit_bundle_quality(
+        tmp_path,
+        require_all_splits=False,
+        formal_collection_config=Path(
+            "configs/dataset/data_collect_candidate_v3_formal50k.yaml"
+        ),
+    )
+
+    assert report["status"] == "statistical_quality_blocked"
+    assert not report["gates"]["formal_scenario_joint_sample_quotas"]
+    assert not report["gates"]["formal_minimum_independent_episodes"]
+    assert not report["gates"]["formal_all_scenarios_in_each_split"]
+    assert not report["gates"]["formal_coverage_metadata_valid"]
+
+
 def test_s7_focused_corrective_gate_accepts_lateral_motion(tmp_path: Path):
     base = tmp_path / "platoon_joint_bev"
     for split in ("train", "val", "test"):

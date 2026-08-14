@@ -10,6 +10,8 @@ from typing import Iterable, Mapping
 
 import numpy as np
 
+from expert_dataset.run_joint_bev_collection import load_run_config
+
 
 MODE_NAMES = (
     "KEEP_HIGH", "KEEP_MEDIUM", "KEEP_LOW",
@@ -58,6 +60,7 @@ def audit_bundle_quality(
     s7_min_lateral_mode_fraction: float = 0.10,
     required_scenarios: tuple[str, ...] = PRIMARY_SCENARIOS,
     require_all_splits: bool = True,
+    formal_collection_config: Path | None = None,
 ) -> dict[str, object]:
     bundle_root = Path(bundle_root)
     base_root = bundle_root / "platoon_joint_bev"
@@ -71,6 +74,12 @@ def audit_bundle_quality(
     scenario_displacement: dict[str, list[float]] = defaultdict(list)
     scenario_samples: Counter[str] = Counter()
     episode_counts: Counter[str] = Counter()
+    scenario_splits: dict[str, set[str]] = defaultdict(set)
+    scenario_seeds: dict[str, list[int]] = defaultdict(list)
+    scenario_background_counts: dict[str, set[int]] = defaultdict(set)
+    scenario_behavior_categories: dict[str, set[str]] = defaultdict(set)
+    max_episode_samples: Counter[str] = Counter()
+    formal_metadata_valid = True
     split_samples: Counter[str] = Counter()
     global_modes: Counter[str] = Counter()
     valid_counts = np.zeros(len(MODE_NAMES), dtype=np.int64)
@@ -89,6 +98,37 @@ def audit_bundle_quality(
         scenario_samples[scenario] += sample_count
         split_samples[split] += sample_count
         episode_counts[scenario] += 1
+        scenario_splits[scenario].add(split)
+        max_episode_samples[scenario] = max(
+            max_episode_samples[scenario], sample_count
+        )
+        spawn_seed = attrs.get("spawn_seed")
+        coverage = attrs.get("formal_coverage")
+        if isinstance(spawn_seed, bool) or not isinstance(spawn_seed, int):
+            formal_metadata_valid = False
+        else:
+            scenario_seeds[scenario].append(int(spawn_seed))
+        if not isinstance(coverage, Mapping):
+            formal_metadata_valid = False
+        else:
+            background_count = coverage.get(
+                "incidental_background_actor_count"
+            )
+            behavior_category = coverage.get("behavior_category")
+            if isinstance(background_count, bool) or not isinstance(
+                background_count, int
+            ):
+                formal_metadata_valid = False
+            else:
+                scenario_background_counts[scenario].add(
+                    int(background_count)
+                )
+            if behavior_category in (None, ""):
+                formal_metadata_valid = False
+            else:
+                scenario_behavior_categories[scenario].add(
+                    str(behavior_category)
+                )
         for role in range(3):
             for mode in np.asarray(gt_mode[:, role], dtype=np.int64):
                 name = MODE_NAMES[int(mode)]
@@ -162,6 +202,80 @@ def audit_bundle_quality(
                 s7["lateral_mode_fraction"] >= s7_min_lateral_mode_fraction
             ),
         )
+    formal_contract = None
+    if formal_collection_config is not None:
+        formal_run = load_run_config(formal_collection_config)
+        requirements = formal_run.formal_diversity
+        if formal_run.formal_scenario_quotas is None or requirements is None:
+            raise DatasetQualityError(
+                "formal collection config has no diversity contract"
+            )
+        quotas = dict(formal_run.formal_scenario_quotas)
+        required_splits = set(("train", "val", "test"))
+        required_seeds = set(requirements.required_spawn_seeds)
+        required_background = set(
+            requirements.required_incidental_background_actor_counts
+        )
+        gates.update(
+            formal_scenario_joint_sample_quotas=(
+                dict(scenario_samples) == quotas
+            ),
+            formal_minimum_independent_episodes=all(
+                episode_counts[name] >= requirements.min_episodes_per_scenario
+                and len(set(scenario_seeds[name])) == episode_counts[name]
+                for name in quotas
+            ),
+            formal_episode_sample_cap=all(
+                max_episode_samples[name] <= requirements.max_samples_per_episode
+                for name in quotas
+            ),
+            formal_all_scenarios_in_each_split=all(
+                required_splits <= scenario_splits[name]
+                for name in quotas
+            ),
+            formal_required_seed_coverage=all(
+                required_seeds <= set(scenario_seeds[name])
+                for name in quotas
+            ),
+            formal_background_count_coverage=all(
+                required_background <= scenario_background_counts[name]
+                for name in quotas
+            ),
+            formal_background_counts_in_contract=all(
+                scenario_background_counts[name] <= required_background
+                for name in quotas
+            ),
+            formal_behavior_category_coverage=all(
+                set(requirements.required_behavior_categories[name])
+                <= scenario_behavior_categories[name]
+                for name in quotas
+            ),
+            formal_coverage_metadata_valid=formal_metadata_valid,
+        )
+        formal_contract = {
+            "config": str(Path(formal_collection_config).resolve()),
+            "scenario_quotas": quotas,
+            "diversity_requirements": requirements.as_dict(),
+            "observed": {
+                name: {
+                    "joint_samples": int(scenario_samples[name]),
+                    "episodes": int(episode_counts[name]),
+                    "max_samples_per_episode": int(max_episode_samples[name]),
+                    "splits": sorted(scenario_splits[name]),
+                    "unique_spawn_seeds": len(set(scenario_seeds[name])),
+                    "required_spawn_seeds_observed": sorted(
+                        required_seeds & set(scenario_seeds[name])
+                    ),
+                    "incidental_background_actor_counts": sorted(
+                        scenario_background_counts[name]
+                    ),
+                    "behavior_categories": sorted(
+                        scenario_behavior_categories[name]
+                    ),
+                }
+                for name in quotas
+            },
+        }
     infrastructure = None
     if infrastructure_report is not None:
         infrastructure = json.loads(Path(infrastructure_report).read_text(encoding="utf-8"))
@@ -195,6 +309,7 @@ def audit_bundle_quality(
             name: dict(value) for name, value in event_actor_type.items()
         },
         "infrastructure_report_status": None if infrastructure is None else infrastructure.get("status"),
+        "formal_collection_contract": formal_contract,
     }
 
 
@@ -202,6 +317,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle_root", type=Path)
     parser.add_argument("--infrastructure-report", type=Path)
+    parser.add_argument("--formal-collection-config", type=Path)
     parser.add_argument(
         "--required-scenarios",
         nargs="+",
@@ -215,6 +331,7 @@ def main() -> None:
         infrastructure_report=args.infrastructure_report,
         required_scenarios=tuple(args.required_scenarios),
         require_all_splits=not args.allow_empty_splits,
+        formal_collection_config=args.formal_collection_config,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

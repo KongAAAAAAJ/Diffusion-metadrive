@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-14T01:45:00+08:00",
-  "status": "frozen_candidate_v3_data_refresh_mainline",
+  "updated_at": "2026-08-14T22:21:52+08:00",
+  "status": "frozen_candidate_v3_data_refresh_with_formal50k_diversity_contract",
   "purpose": "Machine-readable memory for the candidate-v3 data refresh, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
@@ -82,7 +82,9 @@
       "required_metric_groups": {
         "integrity_and_coverage": [
           "complete base and actor-sidecar scans, schema, shape, dtype, finite-value, join, fingerprint, and unfinished-transaction checks",
-          "balanced S5-S9 quotas and non-empty train, validation, and test episode splits",
+          "exact 10000-joint-sample quota per S5-S9 scenario, at least 50 unique-seed base episodes per scenario, and at most 200 persisted joint samples from any one episode",
+          "train, validation, and test must each contain at least one committed base episode from every S5-S9 scenario",
+          "every scenario must cover fixed seeds 17, 23, 31, 47, and 59; incidental-background counts 3, 4, 5, and 6; and its frozen required behavior categories",
           "all declared primary and exactly 3-6 incidental actors realized and persisted in every episode"
         ],
         "safety": [
@@ -129,9 +131,26 @@
     },
     "new_formal_dataset": {
       "name": "candidate-v3 formal S5-S9 50k",
-      "root": null,
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
       "target_joint_steps": 50000,
       "per_scenario_quota": 10000,
+      "collection_config": "configs/dataset/data_collect_candidate_v3_formal50k.yaml",
+      "diversity_contract": {
+        "min_independent_episodes_per_scenario": 50,
+        "independence_key": "unique committed spawn_seed within scenario",
+        "max_joint_samples_per_episode": 200,
+        "all_scenarios_required_in_each_split": true,
+        "required_spawn_seeds_per_scenario": [17, 23, 31, 47, 59],
+        "required_incidental_background_actor_counts_per_scenario": [3, 4, 5, 6],
+        "required_behavior_categories": {
+          "S5_hard_brake_lead": ["keep_emergency_braking", "temporary_formation_release_and_recovery"],
+          "S6_background_merge_in": ["agent0-agent1", "agent1-agent2"],
+          "S7_ego_merge_from_ramp": ["pass_first", "yield_then_merge"],
+          "S8_ego_exit_to_ramp": ["agent0-agent1", "agent1-agent2"],
+          "S9_narrow_channel_negotiation": ["agent0-agent1", "agent1-agent2"]
+        },
+        "enforcement": "The collector persists formal_coverage metadata, caps and schedules episodes during collection, then performs a complete on-disk postcondition scan. The quality audit must be invoked with the same formal collection config and all formal_* gates must pass. Sample quota alone is insufficient."
+      },
       "scenario_contract_sha256": null,
       "base_dataset_fingerprint": null,
       "sidecar_dataset_fingerprint": null,
@@ -140,7 +159,7 @@
       "full_verifier_passed": false,
       "quality_gate_passed": false,
       "eligible_for_formal_training": false,
-      "collection_policy": "Collect into a new empty root from the clean merged BEV commit. Do not append, resume, copy, or relabel samples from the historical v1 dataset or the 10k diagnostic collection."
+      "collection_policy": "Collect into the named new empty root from the clean merged BEV commit using the frozen candidate-v3 formal50k config. Resume is allowed only for this new root with exact fingerprint and diversity metadata agreement. Do not append, copy, relabel, or mix samples from the historical v1 dataset or the 10k diagnostic collection. Reaching 50000 samples is not completion unless every diversity postcondition passes."
     }
   },
   "trajectory_domains": {

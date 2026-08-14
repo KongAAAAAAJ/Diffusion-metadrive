@@ -1,7 +1,7 @@
 {
   "format": "candidate_v3_diagnostic10k_collection_report_v1",
-  "updated_at": "2026-08-14T14:10:13+08:00",
-  "status": "collection_running",
+  "updated_at": "2026-08-14T22:14:31+08:00",
+  "status": "collection_complete_pending_dual_verification_and_quality_audit",
   "authorization": "User explicitly reauthorized the isolated candidate-v3 10k dataset collection on 2026-08-14 after the earlier cancellation.",
   "scope": {
     "target_joint_samples": 10000,
@@ -83,11 +83,35 @@
     "collection_log": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/candidate_v3_diagnostic10k_20260814_1409.log",
     "persistent_session": "candidate_v3_10k_20260814",
     "formal_output_root_created": true,
-    "joint_samples_collected_to_formal_output_root": 0,
+    "collection_completed_at": "2026-08-14T16:25:20+08:00",
+    "joint_samples_collected_to_formal_output_root": 10000,
+    "attempted_episodes": 59,
+    "committed_base_episodes": 47,
+    "committed_sidecar_episodes": 59,
+    "sidecar_only_episodes": 12,
+    "scenario_counts": {
+      "S5_hard_brake_lead": 2000,
+      "S6_background_merge_in": 2000,
+      "S7_ego_merge_from_ramp": 2000,
+      "S8_ego_exit_to_ramp": 2000,
+      "S9_narrow_channel_negotiation": 2000
+    },
+    "base_dataset_fingerprint": "4bcb9455294675c640b5e76f63d3693f559f713082a6107a674a4871c7fbe13f",
+    "sidecar_dataset_fingerprint": "833a9a70e6a739da1f9b69029e86cceefd59c00f407646c84131eba21c168adc",
+    "bundle_index_sha256": "8df0f64f0d9b991dd7941a61849d783ee61c934f41f11e31219d22a44c8177f0",
+    "rejection_reasons": {
+      "all_rule_proposals_infeasible": 6,
+      "committed_action_infeasible": 3,
+      "committed_trajectory_kinematic_infeasible": 2,
+      "rule_maker_no_action": 1
+    },
     "active_collection_processes": 0,
-    "stop_reason": null,
-    "preserved_smoke_only": true,
+    "stop_reason": "target_and_all_balanced_scenario_quotas_reached",
+    "preserved_smoke_only": false,
     "historical_cancellation": "The earlier 10k authorization was cancelled before the formal output root was created; this history is preserved and superseded only for the isolated diagnostic 10k by the fresh 2026-08-14 user authorization.",
-    "active_hard_gate": "complete_balanced_10k_then_run_both_strict_verifiers_and_quality_audit"
+    "active_hard_gate": "formal50k_diversity_constraint_contract_implementation",
+    "diffusion_verifier_passed": false,
+    "riskentry_verifier_passed": false,
+    "quality_gate_passed": false
   }
 }
