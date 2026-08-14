@@ -1,7 +1,7 @@
 dataset:
   name: platoon_joint_bev
   sidecar_name: riskentry_actor_sidecar
-  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1
+  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260815_v2
   scenario_contract: candidate_v3
 
 split:
@@ -11,9 +11,9 @@ split:
   seed: 17
 
 collection:
-  target_joint_steps: 50000
-  start_seed: 71017
-  max_episodes: 1000
+  target_joint_steps: 10000
+  start_seed: 81017
+  max_episodes: 500
   max_episode_steps: 200
   scenario_max_episode_steps:
     S9_narrow_channel_negotiation: 800
@@ -30,13 +30,13 @@ collection:
 formal_pilot:
   enabled: true
   scenario_quotas:
-    S5_hard_brake_lead: 10000
-    S6_background_merge_in: 10000
-    S7_ego_merge_from_ramp: 10000
-    S8_ego_exit_to_ramp: 10000
-    S9_narrow_channel_negotiation: 10000
+    S5_hard_brake_lead: 2000
+    S6_background_merge_in: 2000
+    S7_ego_merge_from_ramp: 2000
+    S8_ego_exit_to_ramp: 2000
+    S9_narrow_channel_negotiation: 2000
   max_attempts_per_scenario: 200
-  min_episodes_per_scenario: 50
+  min_episodes_per_scenario: 10
   max_samples_per_episode: 200
   require_all_scenarios_in_each_split: true
   required_spawn_seeds: [17, 23, 31, 47, 59]

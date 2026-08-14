@@ -83,6 +83,7 @@ SECTION_KEYS = {
         "required_spawn_seeds",
         "required_incidental_background_actor_counts",
         "required_behavior_categories",
+        "behavior_rule_maker_profiles",
     },
 }
 
@@ -110,6 +111,7 @@ class FormalDiversityRequirements:
     required_spawn_seeds: tuple[int, ...]
     required_incidental_background_actor_counts: tuple[int, ...]
     required_behavior_categories: Mapping[str, tuple[str, ...]]
+    behavior_rule_maker_profiles: Mapping[str, Mapping[str, str]]
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -125,6 +127,10 @@ class FormalDiversityRequirements:
             "required_behavior_categories": {
                 name: list(values)
                 for name, values in self.required_behavior_categories.items()
+            },
+            "behavior_rule_maker_profiles": {
+                name: dict(values)
+                for name, values in self.behavior_rule_maker_profiles.items()
             },
         }
 
@@ -360,6 +366,22 @@ class JointCollectionRunConfig:
                     ):
                         raise ValueError(
                             f"formal_pilot behavior coverage is invalid for {scenario_id}"
+                        )
+                for scenario_id, profiles in (
+                    diversity.behavior_rule_maker_profiles.items()
+                ):
+                    if scenario_id not in diversity.required_behavior_categories:
+                        raise ValueError(
+                            "formal_pilot behavior profile has an unknown scenario: "
+                            f"{scenario_id}"
+                        )
+                    unknown = set(profiles) - set(
+                        diversity.required_behavior_categories[scenario_id]
+                    )
+                    if unknown or any(not value for value in profiles.values()):
+                        raise ValueError(
+                            "formal_pilot behavior profile mapping is invalid for "
+                            f"{scenario_id}: {sorted(unknown)}"
                         )
                 for scenario_id, quota in normalized_formal_quotas.items():
                     if (
@@ -601,6 +623,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
                 "required_incidental_background_actor_counts"
             ]
             raw_behavior = formal["required_behavior_categories"]
+            raw_behavior_profiles = formal.get(
+                "behavior_rule_maker_profiles", {}
+            )
             if not isinstance(raw_required_seeds, (list, tuple)):
                 raise ValueError("formal_pilot.required_spawn_seeds must be a list")
             if not isinstance(raw_background_counts, (list, tuple)):
@@ -611,6 +636,10 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
                 raise ValueError(
                     "formal_pilot.required_behavior_categories must be a mapping"
                 )
+            if not isinstance(raw_behavior_profiles, Mapping):
+                raise ValueError(
+                    "formal_pilot.behavior_rule_maker_profiles must be a mapping"
+                )
             behavior_categories = {}
             for scenario_id, values in raw_behavior.items():
                 if not isinstance(values, (list, tuple)):
@@ -620,6 +649,16 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
                 behavior_categories[str(scenario_id)] = tuple(
                     str(value) for value in values
                 )
+            behavior_profiles = {}
+            for scenario_id, values in raw_behavior_profiles.items():
+                if not isinstance(values, Mapping):
+                    raise ValueError(
+                        "formal_pilot behavior profile values must be mappings"
+                    )
+                behavior_profiles[str(scenario_id)] = {
+                    str(category): str(profile)
+                    for category, profile in values.items()
+                }
             split_coverage = formal["require_all_scenarios_in_each_split"]
             if not isinstance(split_coverage, bool):
                 raise ValueError(
@@ -636,6 +675,7 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
                     int(value) for value in raw_background_counts
                 ),
                 required_behavior_categories=behavior_categories,
+                behavior_rule_maker_profiles=behavior_profiles,
             )
 
     return JointCollectionRunConfig(
@@ -1192,6 +1232,22 @@ def _formal_sample_capacity(
     )
 
 
+def _formal_rule_maker_profile(
+    *,
+    scenario_id: str,
+    row: Mapping[str, object],
+    requirements: FormalDiversityRequirements,
+) -> str | None:
+    """Select the configured profile for the first still-missing behavior."""
+
+    observed = set(row["behavior_categories"])
+    profiles = requirements.behavior_rule_maker_profiles.get(scenario_id, {})
+    for behavior in requirements.required_behavior_categories[scenario_id]:
+        if behavior not in observed and behavior in profiles:
+            return str(profiles[behavior])
+    return None
+
+
 def _configure_episode(
     env: SensorlessJointBEVPlatoonEnv,
     spec: JointEpisodeSpec,
@@ -1622,6 +1678,14 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 if env is not None:
                     env.close()
                 episode_env_config = dict(config.env_config)
+                rule_maker_profile_id = None
+                if config.formal_diversity is not None:
+                    rule_maker_profile_id = _formal_rule_maker_profile(
+                        scenario_id=spec.scenario_id,
+                        row=formal_progress[spec.scenario_id],
+                        requirements=config.formal_diversity,
+                    )
+                episode_env_config["rule_maker_profile_id"] = rule_maker_profile_id
                 episode_step_limit = config.episode_step_limit(spec.scenario_id)
                 episode_env_config.update(
                     {
@@ -1835,6 +1899,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                                 and len(samples_to_store) < len(rollout.samples)
                             ),
                             "formal_coverage": formal_coverage,
+                            "rule_maker_profile_id": rule_maker_profile_id,
                             "scenario_contract_sha256": scenario_contract_sha256,
                         },
                     )

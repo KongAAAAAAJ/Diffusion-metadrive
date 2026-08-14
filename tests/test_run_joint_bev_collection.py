@@ -292,6 +292,12 @@ def test_candidate_v3_formal50k_freezes_diversity_contract() -> None:
     assert set(requirements.required_behavior_categories) == set(
         config.formal_scenario_quotas
     )
+    assert requirements.behavior_rule_maker_profiles == {
+        "S5_hard_brake_lead": {
+            "keep_emergency_braking": "brake_first",
+            "temporary_formation_release_and_recovery": "balanced",
+        }
+    }
     assert config.episode_step_limit("S9_narrow_channel_negotiation") == 800
 
     forced = runner.sample_episode_spec_for_scenario(
@@ -347,6 +353,30 @@ def test_formal_diversity_capacity_reserves_the_last_sample() -> None:
             "behavior_category": "keep_emergency_braking",
         },
     ) == 200
+
+
+def test_formal_rule_profile_targets_the_first_missing_behavior() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_formal50k.yaml")
+    )
+    requirements = config.formal_diversity
+    row = {"behavior_categories": set()}
+    assert runner._formal_rule_maker_profile(
+        scenario_id="S5_hard_brake_lead",
+        row=row,
+        requirements=requirements,
+    ) == "brake_first"
+    row["behavior_categories"].add("keep_emergency_braking")
+    assert runner._formal_rule_maker_profile(
+        scenario_id="S5_hard_brake_lead",
+        row=row,
+        requirements=requirements,
+    ) == "balanced"
+    assert runner._formal_rule_maker_profile(
+        scenario_id="S7_ego_merge_from_ramp",
+        row={"behavior_categories": set()},
+        requirements=requirements,
+    ) is None
 
 
 def test_formal_coverage_requires_realized_background_and_behavior() -> None:

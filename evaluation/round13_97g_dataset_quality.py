@@ -80,6 +80,7 @@ def audit_bundle_quality(
     scenario_behavior_categories: dict[str, set[str]] = defaultdict(set)
     max_episode_samples: Counter[str] = Counter()
     formal_metadata_valid = True
+    base_episode_keys: set[tuple[str, str]] = set()
     split_samples: Counter[str] = Counter()
     global_modes: Counter[str] = Counter()
     valid_counts = np.zeros(len(MODE_NAMES), dtype=np.int64)
@@ -87,6 +88,7 @@ def audit_bundle_quality(
 
     for split, episode_dir, row in _episodes(base_root):
         attrs = row["attributes"]
+        base_episode_keys.add((split, episode_dir.name))
         scenario = str(attrs["scenario_id"])
         gt_mode = np.load(episode_dir / "gt_mode.npy", mmap_mode="r")
         mask = np.load(episode_dir / "mode_valid_mask.npy", mmap_mode="r")
@@ -142,8 +144,16 @@ def audit_bundle_quality(
         scenario_displacement[scenario].extend(displacement.reshape(-1).tolist())
 
     event_actor_type: dict[str, Counter[str]] = defaultdict(Counter)
+    committed_event_actor_type: dict[str, Counter[str]] = defaultdict(Counter)
+    sidecar_only_event_actor_type: dict[str, Counter[str]] = defaultdict(Counter)
     for episode_path in sidecar_root.glob("*/episodes/*/episode.json"):
         episode = json.loads(episode_path.read_text(encoding="utf-8"))
+        split = str(episode.get("split", episode_path.parents[2].name))
+        scoped_counts = (
+            committed_event_actor_type
+            if (split, episode_path.parent.name) in base_episode_keys
+            else sidecar_only_event_actor_type
+        )
         actor_type = {
             str(actor["actor_id"]): str(actor["actor_type"])
             for actor in episode["actors"]
@@ -151,7 +161,9 @@ def audit_bundle_quality(
         for event in episode["events"]:
             event_type = str(event["event_type"])
             for actor_id in event.get("actor_ids", []):
-                event_actor_type[event_type][actor_type.get(str(actor_id), "unknown")] += 1
+                resolved_type = actor_type.get(str(actor_id), "unknown")
+                event_actor_type[event_type][resolved_type] += 1
+                scoped_counts[event_type][resolved_type] += 1
 
     scenario_stats: dict[str, object] = {}
     audited_scenarios = tuple(
@@ -190,7 +202,7 @@ def audit_bundle_quality(
             else any(split_samples[name] > 0 for name in ("train", "val", "test"))
         ),
         "sidecar_no_platoon_collision_events": all(
-            event_actor_type[name]["platoon"] == 0
+            committed_event_actor_type[name]["platoon"] == 0
             for name in (
                 "collision_vehicle",
                 "collision_object",
@@ -198,7 +210,7 @@ def audit_bundle_quality(
             )
         ),
         "sidecar_no_platoon_out_of_road_events": (
-            event_actor_type["out_of_road"]["platoon"] == 0
+            committed_event_actor_type["out_of_road"]["platoon"] == 0
         ),
     }
     if s7 is not None:
@@ -320,9 +332,9 @@ def audit_bundle_quality(
             name: dict(value) for name, value in event_actor_type.items()
         },
         "sidecar_safety_audit": {
-            "platoon_collision_events": int(
+            "base_committed_platoon_collision_events": int(
                 sum(
-                    event_actor_type[name]["platoon"]
+                    committed_event_actor_type[name]["platoon"]
                     for name in (
                         "collision_vehicle",
                         "collision_object",
@@ -330,8 +342,21 @@ def audit_bundle_quality(
                     )
                 )
             ),
-            "platoon_out_of_road_events": int(
-                event_actor_type["out_of_road"]["platoon"]
+            "base_committed_platoon_out_of_road_events": int(
+                committed_event_actor_type["out_of_road"]["platoon"]
+            ),
+            "sidecar_only_platoon_collision_events_retained": int(
+                sum(
+                    sidecar_only_event_actor_type[name]["platoon"]
+                    for name in (
+                        "collision_vehicle",
+                        "collision_object",
+                        "collision_sidewalk",
+                    )
+                )
+            ),
+            "sidecar_only_platoon_out_of_road_events_retained": int(
+                sidecar_only_event_actor_type["out_of_road"]["platoon"]
             ),
             "external_collision_events_retained_as_context": int(
                 sum(
@@ -348,7 +373,8 @@ def audit_bundle_quality(
             ),
             "interpretation": (
                 "Raw external-actor events remain losslessly retained for RiskEntry; "
-                "formal BEV safety eligibility is gated on platoon actors only."
+                "formal BEV safety eligibility is gated on platoon actors from "
+                "base-committed episodes only. Sidecar-only failures remain evidence."
             ),
         },
         "infrastructure_report_status": None if infrastructure is None else infrastructure.get("status"),

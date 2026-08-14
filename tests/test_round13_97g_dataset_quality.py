@@ -141,3 +141,46 @@ def test_platoon_sidecar_safety_event_blocks_quality_gate(tmp_path: Path):
     assert not report["gates"]["sidecar_no_platoon_collision_events"]
     assert report["gates"]["sidecar_no_platoon_out_of_road_events"]
     assert not report["eligible_for_formal_50k_collection"]
+
+
+def test_sidecar_only_platoon_failure_is_retained_without_blocking(tmp_path: Path):
+    base = tmp_path / "platoon_joint_bev"
+    for split in ("train", "val", "test"):
+        (base / split).mkdir(parents=True)
+        (base / split / "manifest.json").write_text('{"episodes": []}')
+    modes = np.asarray([[3, 1, 1], [1, 1, 1]], dtype=np.int64)
+    _write_episode(base, "S7_ego_merge_from_ramp", modes, 6.0)
+    episode = (
+        tmp_path
+        / "riskentry_actor_sidecar"
+        / "train"
+        / "episodes"
+        / "episode_00000001"
+    )
+    episode.mkdir(parents=True)
+    (episode / "episode.json").write_text(
+        json.dumps(
+            {
+                "episode_index": 1,
+                "split": "train",
+                "actors": [{"actor_id": "P0", "actor_type": "platoon"}],
+                "events": [
+                    {"event_type": "collision_sidewalk", "actor_ids": ["P0"]},
+                    {"event_type": "out_of_road", "actor_ids": ["P0"]},
+                ],
+            }
+        )
+    )
+
+    report = audit_bundle_quality(
+        tmp_path,
+        required_scenarios=("S7_ego_merge_from_ramp",),
+        require_all_splits=False,
+    )
+
+    assert report["status"] == "statistical_quality_accepted"
+    assert report["gates"]["sidecar_no_platoon_collision_events"]
+    assert report["gates"]["sidecar_no_platoon_out_of_road_events"]
+    audit = report["sidecar_safety_audit"]
+    assert audit["sidecar_only_platoon_collision_events_retained"] == 1
+    assert audit["sidecar_only_platoon_out_of_road_events_retained"] == 1
