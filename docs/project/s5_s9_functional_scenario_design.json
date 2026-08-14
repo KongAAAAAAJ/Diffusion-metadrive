@@ -1,12 +1,12 @@
 {
   "format": "bev_s5_s9_candidate_functional_scenario_memory_v1",
   "schema_version": 1,
-  "recorded_at": "2026-08-14T10:42:00+08:00",
-  "status": "candidate_v3_s6_explicit_incidental_background_fixed_five_seed_gate_accepted_combined_s5_s9_acceptance_pending",
-  "purpose": "Store the user-confirmed functional semantics, constrained logical parameter ranges, and acceptance gates for the next S5-S9 scenario revision without retroactively changing the frozen scenario contract or the dataset used by the ongoing Stage1-A training run.",
+  "recorded_at": "2026-08-14T13:02:22+08:00",
+  "status": "candidate_v3_combined_fixed_five_seed_contract_accepted_and_frozen",
+  "purpose": "Store the user-confirmed functional semantics, constrained logical parameter ranges, acceptance gates, and frozen candidate-v3 S5-S9 scenario contract without retroactively changing formal-v1 dataset or checkpoint metadata.",
   "latest_revision": {
     "date": "2026-08-14",
-    "summary": "Candidate-v3 S6 now requires three to six separately managed non-causal incidental background actors in addition to the designated ramp cut-in actor and every existing functional and safety gate. Its fresh fixed-five-seed 260-step closed-loop gate passed 1300/1300 native planning steps with exact actor realization, both target gaps, physical three-ego lane changes, ego-only reassembly, complete videos and trajectories, while the unchanged 5 m background and 7 m platoon hard gaps remained enforced. Combined S5-S9 contract validation remains pending without changing formal-v1 data or training metadata.",
+    "summary": "The fresh combined candidate-v3 S5-S9 contract run passed all 35 fixed-seed/profile episodes and 10300/10300 native planning steps with no collision, road exit, fallback or functional failure. It passed S5 behavior diversity, S6 dual-gap coverage, S7 dual behavior and parallel constraints, S8/S9 physical behavior gates, and exact three-to-six incidental background actor realization in every episode. All 70 videos, 35 trajectory packages and 35 expert records passed independent integrity review. Contract candidate_v3 is frozen at SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860; formal-v1 data and training metadata remain unchanged.",
     "formal_v1_contract_changed": false,
     "existing_dataset_or_training_metadata_changed": false
   },
@@ -20,14 +20,19 @@
     ],
     "definition_level": "functional_scenario_plus_candidate_logical_ranges",
     "implementation_authorized": true,
-    "formal_contract_activated": false
+    "candidate_v3_contract_activated": true,
+    "formal_contract_activated": false,
+    "formal_contract_activated_note": "The candidate-v3 scenario contract is frozen and addressable as candidate_v3, but no new formal dataset or training metadata has been activated."
   },
   "compatibility": {
-    "current_frozen_scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+    "current_frozen_scenario_contract_id": "candidate_v3",
+    "current_frozen_scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+    "historical_formal_v1_scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
     "current_formal_dataset_fingerprint": "58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144",
     "ongoing_training_policy": "Do not stop or modify the ongoing training run. It remains bound to the current frozen scenario contract and formal 50k dataset.",
     "non_retroactivity": "This candidate memory does not relabel, overwrite, or invalidate metadata on the current formal 50k dataset or checkpoints trained from it.",
     "no_mixing": "Artifacts generated after implementing this candidate design must use a new scenario contract identifier and must not be mixed with the current formal 50k root.",
+    "activation_gate_status": "all_candidate_v3_scenario_and_combined_contract_gates_passed",
     "activation_gates": [
       "implement and validate each S5-S9 scenario independently in any order outside the active training execution boundary",
       "run focused topology, actor-realization, conflict-realization, expert-action, and safety tests for each scenario",
@@ -36,6 +41,38 @@
       "freeze a new scenario contract hash only after all five functional acceptance gates pass",
       "collect a new exact-path pilot before considering any new formal dataset collection"
     ]
+  },
+  "combined_candidate_v3_acceptance_20260814": {
+    "result": "passed",
+    "hard_gate_passed": true,
+    "contract_id": "candidate_v3",
+    "contract_format": "bev_primary_s5_s9_contract_v2",
+    "contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+    "fixed_seeds": [
+      17,
+      23,
+      31,
+      47,
+      59
+    ],
+    "episodes_passed": "35/35",
+    "native_joint_planning_steps": "10300/10300",
+    "collision": false,
+    "out_of_road": false,
+    "planner_fallback_or_sample_rejection": false,
+    "functional_success": "35/35",
+    "topdown_videos": "35/35 decodable with exact expected frame count",
+    "semantic_bev_videos": "35/35 decodable with exact expected frame count",
+    "trajectory_npz": "35/35 integrity and shape checks passed",
+    "expert_episode_json": "35/35 exact horizon, planning, safety and persistability checks passed",
+    "all_declared_incidental_background_actors_realized": true,
+    "incidental_background_actor_count_range": [
+      3,
+      6
+    ],
+    "report": "evaluation/S5_S9_CANDIDATE_V3_COMBINED_ACCEPTANCE_REPORT.json",
+    "artifact_manifest": "outputs/s5_s9_candidate_v3_combined_acceptance_20260814_v2/artifact_manifest.json",
+    "artifact_manifest_sha256": "bc424ee4d6c8ab65f0a7888b01cb239d2197a61daa564394adda763375910283"
   },
   "common_contract": {
     "num_platoon_agents": 3,
@@ -296,6 +333,49 @@
           "59": "a8254b86ad874ededfae9103c969fa82ec641a7dd2dcd7b7c7ae990ad381af97"
         },
         "five_seed_status": "machine_closed_loop_gate_passed_video_review_not_run"
+      },
+      "candidate_revision_v3_acceptance_evidence_20260814": {
+        "implementation_state": "combined_fixed_five_seed_profile_video_and_machine_gate_passed",
+        "profiles": [
+          "brake_first",
+          "balanced",
+          "evasive"
+        ],
+        "fixed_seeds": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "episodes_passed": "15/15",
+        "native_joint_planning_steps": "3000/3000",
+        "latest_memory_gate_passed": true,
+        "physical_behavior_gate_by_profile": {
+          "brake_first": false,
+          "balanced": true,
+          "evasive": true
+        },
+        "behavior_classes": [
+          "keep_emergency_braking",
+          "temporary_formation_release_and_recovery"
+        ],
+        "physical_lane_change_seeds": [
+          17,
+          23
+        ],
+        "asynchronous_response_seeds": [
+          17,
+          23
+        ],
+        "collision": false,
+        "out_of_road": false,
+        "planner_fallback_or_sample_rejection": false,
+        "topdown_video_artifacts": "15/15 decodable, exactly 200 frames and representative contact sheets reviewed",
+        "semantic_bev_video_artifacts": "15/15 decodable, exactly 200 frames and representative contact sheets reviewed",
+        "trajectory_artifacts": "15/15 valid, exactly 200 steps",
+        "artifact_root": "outputs/s5_s9_candidate_v3_combined_acceptance_20260814_v2/S5_profiles",
+        "report": "evaluation/S5_S9_CANDIDATE_V3_COMBINED_ACCEPTANCE_REPORT.json"
       }
     },
     "S6_background_merge_in": {
@@ -534,7 +614,7 @@
         "artifact_root": "outputs/s6_candidate_v3_memory_acceptance_20260814_v2/S6_background_merge_in",
         "acceptance_report": "evaluation/S6_CANDIDATE_V3_MEMORY_ACCEPTANCE_REPORT.json",
         "acceptance_report_sha256": "c82576236dcf53f05a3ef848f4e660a8dd97f0758ac872b5707db7ddf9cf7b4b",
-        "remaining_combined_gate": "complete the separate candidate-v3 S5-S9 combined video and contract review before freezing a new formal scenario contract"
+        "combined_gate_status": "passed in the fresh 35-episode candidate-v3 S5-S9 combined video and machine-contract review"
       }
     },
     "S7_ego_merge_from_ramp": {
@@ -676,7 +756,7 @@
         "formation_recovery_evidence": "sticky event: once two consecutive post-merge observations satisfy 5-24 m bumper gaps and <=10 km/h speed spread, later normal variation does not erase the observed reassembly",
         "implementation_report": "evaluation/S7_CANDIDATE_V3_PARALLEL_CONSTRAINT_IMPLEMENTATION_REPORT.json",
         "hard_gate_passed": true,
-        "remaining": "S7 complete; S9 is also independently accepted; global candidate-v3 freeze still requires the remaining scenario gates and combined S5-S9 review"
+        "combined_gate_status": "S7 independent acceptance is preserved and the global candidate-v3 combined contract gate has passed"
       },
       "historical_candidate_v2_evidence_20260812": {
         "implementation_state": "implemented_and_fixed_five_seed_closed_loop_accepted",
@@ -1006,7 +1086,7 @@
         "trajectory_artifacts": "5/5 non-empty",
         "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s8_candidate_revision_5seed_ACCEPTED_FINAL_20260814/S8_ego_exit_to_ramp",
         "acceptance_report": "evaluation/S8_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
-        "remaining_combined_gate": "complete the separate candidate-v3 S5-S9 combined video and contract review before freezing a new formal scenario contract"
+        "combined_gate_status": "passed in the fresh 35-episode candidate-v3 S5-S9 combined video and machine-contract review"
       }
     },
     "S9_narrow_channel_negotiation": {
@@ -1141,7 +1221,7 @@
           "outputs/s9_candidate_v3_final_video_seed47/S9_narrow_channel_negotiation",
           "outputs/s9_candidate_v3_final_video_seed59/S9_narrow_channel_negotiation"
         ],
-        "remaining_combined_gate": "complete the separate candidate-v3 S5-S9 combined video and contract review before freezing a new formal scenario contract"
+        "combined_gate_status": "passed in the fresh 35-episode candidate-v3 S5-S9 combined video and machine-contract review"
       }
     }
   },
@@ -1149,13 +1229,9 @@
     "common_conflict_and_route_completion_evidence_required": true,
     "scenario_gate_order": "independent_any_order",
     "independent_scenario_acceptance_allowed": true,
-    "complete_candidate_v2_freeze_requires_all_five_scenario_gates": true,
-    "combined_fixed_seed_visual_and_machine_contract_review_required": true
+    "complete_candidate_v3_freeze_requires_all_five_scenario_gates": true,
+    "combined_fixed_seed_visual_and_machine_contract_review_required": true,
+    "combined_fixed_seed_visual_and_machine_contract_review_passed": true
   },
-  "remaining_before_contract_freeze": [
-    "preserve the accepted S6/S7/S8/S9 candidate-v3 evidence and complete any remaining independent candidate-v3 scenario review",
-    "freeze quantitative thresholds and persistence windows for physical formation release and reassembly evidence",
-    "complete the combined fixed-seed visual and machine-contract review across all five independently accepted scenario gates",
-    "assign a new contract identifier only after all five scenario gates and the combined review are complete"
-  ]
+  "remaining_before_contract_freeze": []
 }
