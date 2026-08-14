@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-14T13:02:22+08:00",
+  "updated_at": "2026-08-14T14:10:13+08:00",
   "repository": {
     "branch": "s5-s9-scenario-revision",
-    "git_commit": "bb52b1bd1dd234600206b8dd9e352381256af1ec",
+    "git_commit": "34e5f8e2726c4ef9973967d889f22e708791e2d1",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": false,
@@ -13,13 +13,13 @@
     "uncommitted_s6_definition_update_present": false,
     "uncommitted_s9_definition_update_present": false,
     "uncommitted_s9_implementation_present": false,
-    "uncommitted_combined_acceptance_evidence_present": true
+    "uncommitted_combined_acceptance_evidence_present": false
   },
   "current": {
-    "phase": "candidate_v3_combined_contract_accepted_data_refresh_stopped",
-    "round": "candidate-v3-combined-contract-accepted-awaiting-user-direction",
-    "status": "candidate_v3_contract_frozen_10k_collection_cancelled_by_user_before_start",
-    "active_hard_gate": "no_collection_authorized_wait_for_user_direction"
+    "phase": "candidate_v3_diagnostic10k_collection",
+    "round": "candidate-v3-diagnostic10k-reauthorized-20260814",
+    "status": "candidate_v3_10k_collection_running",
+    "active_hard_gate": "complete_balanced_10k_then_run_both_strict_verifiers_and_quality_audit"
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
@@ -271,19 +271,23 @@
       }
     },
     "candidate_v3_data_refresh": {
-      "status": "cancelled_by_user_before_10k_start",
-      "active_task": null,
+      "status": "balanced_10k_collection_running",
+      "active_task": "monitor_collection_logs_throughput_storage_and_integrity",
       "pilot_target_joint_steps": 10000,
       "pilot_per_scenario_quota": 2000,
       "pilot_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
-      "pilot_collection_started": false,
-      "pilot_collection_cancelled_by_user": true,
+      "pilot_collection_started": true,
+      "pilot_collection_started_at": "2026-08-14T14:10:13+08:00",
+      "pilot_collection_log": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/candidate_v3_diagnostic10k_20260814_1409.log",
+      "pilot_collection_cancelled_by_user": false,
       "pilot_quality_gate_passed": false,
       "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
       "exact_path_smoke_passed": true,
       "exact_path_smoke_attempted_episodes": 6,
       "exact_path_smoke_base_samples": 5,
       "exact_path_smoke_sidecar_only_episodes": 1,
+      "fresh_reauthorization_smoke_root": "/tmp/candidate_v3_reauth_smoke_20260814_1351",
+      "fresh_reauthorization_smoke_passed_at": "2026-08-14T14:08:59+08:00",
       "merge_target": "BEV",
       "merge_authorized_after_quality_pass": false,
       "merge_requires_fresh_user_authorization": true,
@@ -298,12 +302,14 @@
     "recorded_from_user_confirmation_on": "2026-08-10",
     "candidate_v3_data_refresh_authorized_by_user": true,
     "candidate_v3_data_refresh_recorded_on": "2026-08-13",
-    "candidate_v3_data_refresh_authorization_superseded_by_user_cancellation": true,
-    "current_candidate_v3_collection_authorized": false,
+    "candidate_v3_data_refresh_authorization_superseded_by_user_cancellation": false,
+    "current_candidate_v3_collection_authorized": true,
+    "candidate_v3_diagnostic10k_reauthorized_by_user": true,
+    "candidate_v3_diagnostic10k_reauthorized_on": "2026-08-14T13:51:44+08:00",
     "current_bev_merge_authorized": false,
     "candidate_v3_s6_background_enrichment_authorized_by_user": true,
     "candidate_v3_s6_background_enrichment_recorded_on": "2026-08-14",
-    "note": "The user-authorized S6 background enrichment and the fresh S5-S9 combined contract acceptance are complete. Candidate-v3 is frozen under contract ID candidate_v3 and SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860. The user previously cancelled the diagnostic 10k collection before start; this acceptance does not restart or authorize collection."
+    "note": "The user explicitly reauthorized the isolated candidate-v3 diagnostic 10k collection on 2026-08-14 after its earlier cancellation. Candidate-v3 remains frozen under contract ID candidate_v3 and SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860. This authorization covers the diagnostic 10k only; BEV merge, formal 50k collection, and training remain unauthorized."
   },
   "source_of_truth": {
     "candidate_v3_s5_s9_combined_acceptance_report": {
@@ -331,7 +337,7 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "46837e0f12119745e56470afaf36bffc5203b453739c6afd57655b61ab0ad6f4",
+      "sha256": "b9c01d6646c4cbcd58ecb5e9994447b4fcb7bdd23b58a39081e27e0c13d13274",
       "role": "Freezes the user-authorized balanced 10k diagnostic collection after S7/S9 acceptance, preserves remaining all-scenario and quality gates before merge, and retains the later isolated formal-50k mainline"
     },
     "candidate_v3_data_refresh_plan_update_report": {
@@ -524,7 +530,7 @@
       "quality_gate_passed": false,
       "eligible_for_formal_training": false,
       "reuse_in_formal_50k": false,
-      "blocker": "cancelled_by_user_before_collection_start"
+      "blocker": "collection_in_progress_not_yet_verified_or_quality_accepted"
     },
     "candidate_v3_formal_s5_s9_50k": {
       "root": null,
@@ -593,7 +599,7 @@
   "blockers": [],
   "future_hard_gates": [
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
-    "Do not start or resume candidate-v3 diagnostic or formal collection unless the user explicitly authorizes it after the recorded cancellation.",
+    "The user reauthorized the isolated candidate-v3 diagnostic 10k on 2026-08-14; this does not authorize BEV merge, formal collection, or training.",
     "If collection is reauthorized, bind the collector and both strict verifiers to candidate_v3 SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860 and retain the S6=260 and S9=800 evaluation horizons.",
     "Merge into BEV and any new formal 50k collection still require explicit user direction plus the pre-frozen exact-path, verifier and data-quality gates.",
     "Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded.",
@@ -603,7 +609,7 @@
   "next_actions": [
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
     "Preserve the accepted candidate-v3 combined manifest and all 140 hashed artifacts without rerunning, relabeling or overwriting them unless the frozen scenario contract changes.",
-    "Wait for explicit user direction; no dataset collection, BEV merge, formal-50k refresh or training is currently authorized."
+    "Monitor the running isolated candidate-v3 balanced diagnostic 10k collection; after completion run both strict verifiers and the frozen quality audit before any merge decision."
   ],
   "invariants": {
     "metadata_override_forbidden": true,

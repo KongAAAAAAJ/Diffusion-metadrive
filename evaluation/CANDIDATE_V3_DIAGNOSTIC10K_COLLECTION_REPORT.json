@@ -1,8 +1,8 @@
 {
   "format": "candidate_v3_diagnostic10k_collection_report_v1",
-  "updated_at": "2026-08-14T01:45:00+08:00",
-  "status": "cancelled_by_user_before_10k_start",
-  "authorization": "User requested a 10k dataset collection after the current S7 and S9 scenario modifications completed.",
+  "updated_at": "2026-08-14T14:10:13+08:00",
+  "status": "collection_running",
+  "authorization": "User explicitly reauthorized the isolated candidate-v3 10k dataset collection on 2026-08-14 after the earlier cancellation.",
   "scope": {
     "target_joint_samples": 10000,
     "per_scenario_quota": 2000,
@@ -44,10 +44,29 @@
     "observed_rejection_reasons": {
       "committed_trajectory_kinematic_infeasible": 1
     },
-    "quality_risk": "RiskEntry sidecar recorded collision/out-of-road outcomes in the random smoke. The diagnostic collection may proceed, but these observations require post-collection safety audit and prevent automatic formal-training eligibility."
+    "quality_risk": "RiskEntry sidecar recorded collision/out-of-road outcomes in the random smoke. The diagnostic collection may proceed, but these observations require post-collection safety audit and prevent automatic formal-training eligibility.",
+    "fresh_reauthorization_smoke": {
+      "root": "/tmp/candidate_v3_reauth_smoke_20260814_1351",
+      "passed_at": "2026-08-14T14:08:59+08:00",
+      "attempted_episodes": 6,
+      "committed_base_episodes": 5,
+      "committed_sidecar_episodes": 6,
+      "sidecar_only_episodes": 1,
+      "scenario_counts": {
+        "S5_hard_brake_lead": 1,
+        "S6_background_merge_in": 1,
+        "S7_ego_merge_from_ramp": 1,
+        "S8_ego_exit_to_ramp": 1,
+        "S9_narrow_channel_negotiation": 1
+      },
+      "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+      "rejection_reasons": {
+        "committed_trajectory_kinematic_infeasible": 1
+      }
+    }
   },
   "eligibility": {
-    "diagnostic_collection_authorized": false,
+    "diagnostic_collection_authorized": true,
     "eligible_for_formal_training": false,
     "reuse_in_formal_50k": false,
     "remaining_before_merge_or_formal_use": [
@@ -58,11 +77,17 @@
     ]
   },
   "result": {
-    "collection_started": false,
-    "formal_output_root_created": false,
+    "collection_started": true,
+    "collection_started_at": "2026-08-14T14:10:13+08:00",
+    "collection_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH=/tmp/diffusion-metadrive-s5-s9-revision /home/kong/anaconda3/envs/meta_drive/bin/python -m expert_dataset.run_joint_bev_collection --config /tmp/diffusion-metadrive-s5-s9-revision/configs/dataset/data_collect_candidate_v3_diagnostic10k_20260814.yaml",
+    "collection_log": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/candidate_v3_diagnostic10k_20260814_1409.log",
+    "persistent_session": "candidate_v3_10k_20260814",
+    "formal_output_root_created": true,
     "joint_samples_collected_to_formal_output_root": 0,
     "active_collection_processes": 0,
-    "stop_reason": "user_cancelled_10k_collection",
-    "preserved_smoke_only": true
+    "stop_reason": null,
+    "preserved_smoke_only": true,
+    "historical_cancellation": "The earlier 10k authorization was cancelled before the formal output root was created; this history is preserved and superseded only for the isolated diagnostic 10k by the fresh 2026-08-14 user authorization.",
+    "active_hard_gate": "complete_balanced_10k_then_run_both_strict_verifiers_and_quality_audit"
   }
 }
