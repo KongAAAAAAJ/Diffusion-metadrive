@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from scenarios.s5_s9_sampling import resolve_s5_s9_parameters
 
 
@@ -78,15 +80,35 @@ def test_s5_fixed_seeds_couple_lead_pressure_to_adjacent_windows() -> None:
 
 
 def test_s6_fixed_seeds_cover_both_internal_platoon_gaps() -> None:
-    gaps = {_resolve("S6_background_merge_in", seed)["target_gap_id"] for seed in SEEDS}
+    values = {seed: _resolve("S6_background_merge_in", seed) for seed in SEEDS}
+    gaps = {value["target_gap_id"] for value in values.values()}
     assert gaps == {"agent0-agent1", "agent1-agent2"}
+    assert values[23]["merge_actor_speed_km_h"] == pytest.approx(22.6)
+    assert values[47]["merge_actor_speed_km_h"] == pytest.approx(21.5)
+    assert -0.8 <= values[47]["response_timing_compensation_s"] <= -0.5
 
 
-def test_s7_severity_controls_exact_actor_count() -> None:
-    expected = {"low": 4, "medium": 5, "high": 6}
+def test_s7_severity_controls_parallel_constraint_actor_count() -> None:
+    expected_constraints = {"low": 1, "medium": 2, "high": 3}
     for seed in SEEDS:
         value = _resolve("S7_ego_merge_from_ramp", seed)
-        assert value["actor_count"] == expected[value["severity_bucket"]]
+        expected = expected_constraints[value["severity_bucket"]]
+        assert value["timed_stream_actor_count"] == 4
+        assert value["parallel_constraint_actor_count"] == expected
+        assert value["actor_count"] == 4 + expected
+        assert len(value["mainline_actor_speeds_km_h"]) == 4
+        assert len(value["parallel_constraint_actor_speeds_km_h"]) == expected
+        speed_bounds = {
+            "low": (28.0, 31.0),
+            "medium": (24.0, 28.0),
+            "high": (24.0, 28.0),
+        }[value["severity_bucket"]]
+        assert all(
+            speed_bounds[0] <= speed <= speed_bounds[1]
+            for speed in value["parallel_constraint_actor_speeds_km_h"]
+        )
+        distance_bounds = (18.0, 21.0)
+        assert distance_bounds[0] <= value["ego_distance_to_merge_point_m"] <= distance_bounds[1]
         assert 45.0 <= value["usable_mainline_gap_m"] <= 70.0
         actor_boundary_margin_m = (
             3.0 if value["severity_bucket"] == "high" else 20.0
@@ -113,6 +135,10 @@ def test_s8_and_s9_ranges_match_functional_contract() -> None:
         assert s8["exit_constraint_actor_speeds_km_h"][0] == s8[
             "ego_initial_speed_km_h"
         ]
+        assert all(
+            18.0 <= speed <= 23.0
+            for speed in s8["exit_constraint_actor_speeds_km_h"][1:]
+        )
         assert s8["ego_initial_speed_km_h"] == 25.0
         assert 55.0 <= s8["ego_distance_to_diverge_m"] <= 57.0
         assert 58.0 <= s8["mandatory_lane_change_remaining_distance_m"] <= 60.0
@@ -126,6 +152,17 @@ def test_s8_and_s9_ranges_match_functional_contract() -> None:
         assert s8["usable_exit_lane_gap_m"] >= 74.0
         s9 = _resolve("S9_narrow_channel_negotiation", seed)
         assert s9["source_lane_id"] == 1 and s9["bypass_lane_id"] == 0
+        assert s9["initial_platoon_bumper_gap_m"] == 16.5
+        assert s9["narrow_section_block_id"] == "c3"
+        assert s9["post_narrow_return_lane_id"] == 1
+        assert s9["left_bypass_trigger_actor_count"] == 1
+        assert s9["designated_split_actor_role"] == "left_bypass_split_actor"
+        assert s9["designated_split_actor_target_gap_id"] in {
+            "agent0-agent1",
+            "agent1-agent2",
+        }
+        assert 12.0 <= s9["designated_split_actor_speed_km_h"] <= 22.0
+        assert s9["additional_left_bypass_trigger_actor_count"] == 0
         assert 21.5 <= s9["ego_initial_speed_km_h"] <= 22.0
         assert 15.0 <= s9["agent0_to_blocker_bumper_gap_m"] <= 28.0
         assert 0.0 <= s9["blocker_speed_km_h"] <= 0.5

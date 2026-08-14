@@ -34,10 +34,44 @@ from models.decisioner.rule_decisioner import (
     RuleMakerProposalBatch,
 )
 from models.platoon_planner.platoon_normal_planner import (
+    CommittedTrajectoryError,
     JointTrajectoryExecutor,
     NormalPlannerNoFeasiblePlan,
     RankedJointPlan,
 )
+
+
+def test_s6_dynamic_intruder_invalidates_only_stale_background_commitment() -> None:
+    s6_env = SimpleNamespace(config={"scenario_id": "S6_background_merge_in"})
+    other_env = SimpleNamespace(config={"scenario_id": "S7_ego_merge_from_ramp"})
+    background_error = CommittedTrajectoryError(
+        "dynamic actor entered the old horizon",
+        reason_code="committed_trajectory_background_unsafe",
+        debug={},
+    )
+    pairwise_error = CommittedTrajectoryError(
+        "ego pair became unsafe",
+        reason_code="committed_trajectory_pairwise_unsafe",
+        debug={},
+    )
+    tracking_error = CommittedTrajectoryError(
+        "old lateral reference drifted",
+        reason_code="committed_trajectory_tracking_deviation",
+        debug={},
+    )
+
+    assert RulePlannerExpert._can_replan_committed_error(
+        s6_env, background_error
+    )
+    assert not RulePlannerExpert._can_replan_committed_error(
+        s6_env, pairwise_error
+    )
+    assert RulePlannerExpert._can_replan_committed_error(
+        s6_env, tracking_error
+    )
+    assert not RulePlannerExpert._can_replan_committed_error(
+        other_env, background_error
+    )
 
 
 def _rectangle(x0: float, x1: float, y0: float, y1: float) -> np.ndarray:
@@ -362,6 +396,32 @@ def test_moving_anchors_start_from_current_lane_offset() -> None:
             vehicle.speed_km_h / 3.6,
             np.zeros(3),
         ).valid
+
+
+def test_s9_low_speed_right_anchors_retain_a_hard_valid_mode() -> None:
+    env = _Env()
+    env.config["scenario_id"] = "S9_narrow_channel_negotiation"
+    vehicle = env.agents["agent0"]
+    vehicle.lane = env.current_map.road_network.get_lane(("A", "B", 0))
+    vehicle.position[:] = [30.0, vehicle.lane.y]
+    vehicle.speed_km_h = 7.2
+
+    output = SimulatorDynamicAnchorGenerator().generate(env, "agent0")
+    right_audits = [
+        validate_trajectory_kinematics(
+            output.coarse_trajectories[mode],
+            vehicle.speed_km_h / 3.6,
+            np.zeros(3),
+        )
+        for mode in (
+            ModeIndex.RIGHT_HIGH,
+            ModeIndex.RIGHT_MEDIUM,
+            ModeIndex.RIGHT_LOW,
+        )
+    ]
+
+    assert output.topology.right_reachable
+    assert any(audit.valid for audit in right_audits)
 
 
 def test_joint_sample_contract_is_exact_and_joint_first() -> None:

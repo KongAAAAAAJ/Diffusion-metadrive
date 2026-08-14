@@ -1,0 +1,68 @@
+{
+  "format": "candidate_v3_s9_split_return_implementation_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-13T23:59:00+08:00",
+  "status": "implemented_and_fixed_five_seed_closed_loop_accepted",
+  "scenario_id": "S9_narrow_channel_negotiation",
+  "implemented_semantics": [
+    "exactly one causal left_bypass_split_actor is spawned on lane 0 inside the inclusive initial longitudinal envelope of agent0-agent2",
+    "the three ego vehicles temporarily dissolve the formation and complete non-simultaneous LEFT transitions",
+    "the same designated actor is ahead of at least one ego and behind at least one ego at LEFT completion",
+    "all three ego vehicles pass the blocker and clear the narrow section on bypass lane 0",
+    "RIGHT return starts only after all three ego vehicles clear the narrow section",
+    "all three ego vehicles return to the downstream continuation of original lane 1 and recover original order and longitudinal gaps"
+  ],
+  "implementation_files": [
+    "scenarios/s5_s9_sampling.py",
+    "scenarios/definitions.py",
+    "scenarios/orchestrator.py",
+    "models/decisioner/rule_decisioner.py",
+    "models/platoon_planner/platoon_normal_planner.py",
+    "models/bev_planner/dynamic_anchors.py",
+    "evaluation/run_s5_s9_candidate_revision.py"
+  ],
+  "fixed_five_seed_acceptance": {
+    "seeds": [17, 23, 31, 47, 59],
+    "horizon_steps_per_episode": 800,
+    "episodes_passed": "5/5",
+    "native_joint_planning_steps": "4000/4000",
+    "failure_reason": null,
+    "planner_or_sample_rejections": 0,
+    "persistable_episodes": "5/5",
+    "functional_success": "5/5",
+    "collision": false,
+    "out_of_road": false,
+    "incidental_background_count_coverage": [3, 4, 5, 6],
+    "same_actor_front_behind_split": "5/5",
+    "post_channel_right_return": "5/5",
+    "formation_recovery": "5/5",
+    "topdown_video_artifacts": "5/5 non-empty and visually reviewed",
+    "semantic_bev_video_artifacts": "5/5 non-empty and visually reviewed",
+    "trajectory_artifacts": "5/5 non-empty",
+    "minimum_designated_actor_gap_m_range": [5.690187988281258, 6.056643066406249],
+    "right_return_completion_step_range": [235, 471]
+  },
+  "artifact_roots": {
+    "17": "outputs/s9_candidate_v3_final_video_seed17/S9_narrow_channel_negotiation",
+    "23": "outputs/s9_candidate_v3_final_video_seed23/S9_narrow_channel_negotiation",
+    "31": "outputs/s9_candidate_v3_final_video_seed31/S9_narrow_channel_negotiation",
+    "47": "outputs/s9_candidate_v3_final_video_seed47/S9_narrow_channel_negotiation",
+    "59": "outputs/s9_candidate_v3_final_video_seed59/S9_narrow_channel_negotiation"
+  },
+  "verification": {
+    "focused_s9_and_planner_regression": "237 passed before final low-speed-anchor regression addition",
+    "mode_contract_regression": "31 passed before final dedicated S9 anchor test addition",
+    "json_parse": "passed",
+    "diff_check": "passed",
+    "final_full_focused_regression": "269 passed",
+    "topdown_video_review": "passed at initial, split traversal, return and reassembly frames for all five seeds",
+    "semantic_bev_video_review": "passed at matching frames for all five seeds"
+  },
+  "compatibility_boundary": {
+    "formal_v1_contract_changed": false,
+    "formal_v1_dataset_or_checkpoint_metadata_changed": false,
+    "candidate_v3_s9_independent_gate_passed": true,
+    "new_formal_scenario_contract_activated": false,
+    "combined_s5_s9_video_and_contract_review_still_required": true
+  }
+}

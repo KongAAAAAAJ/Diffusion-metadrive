@@ -1,0 +1,65 @@
+{
+  "format": "candidate_v3_s9_definition_update_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-13T19:47:05+08:00",
+  "status": "definition_superseded_by_implemented_and_fixed_five_seed_accepted_revision",
+  "workflow": "project_administration",
+  "user_authorized_revision": {
+    "recorded_on": "2026-08-13",
+    "scenario_id": "S9_narrow_channel_negotiation",
+    "requested_semantics": [
+      "add one background vehicle on the leftmost lane inside the longitudinal extent of the three-ego platoon",
+      "force temporary platoon dissolution and individual safe lane-change timing",
+      "allow ego vehicles to complete the lane change ahead of or behind the left-lane background vehicle",
+      "make all three ego vehicles traverse the narrow section",
+      "change lane and reassemble only after traversing the narrow section"
+    ]
+  },
+  "resolved_definition": {
+    "designated_actor_role": "left_bypass_split_actor",
+    "designated_actor_count": 1,
+    "designated_actor_lane": "c3_lane_0_left",
+    "designated_actor_initial_region": "inside the inclusive longitudinal envelope from the rear of agent2 to the front of agent0 projected onto c3_lane_0_left",
+    "same_actor_split_gate": "at least one ego completes LEFT ahead of the designated actor and at least one completes LEFT behind the same actor",
+    "temporary_formation_release_gate": "physical lane IDs and distinct LEFT completion times are required",
+    "narrow_section_gate": "all three ego vehicles traverse and clear the narrow section on c3_lane_0_left",
+    "post_channel_return_gate": "all three ego vehicles complete a real RIGHT transition to the downstream continuation of original middle lane 1 only after clearing the narrow section",
+    "reassembly_gate": "original platoon order and longitudinal gaps recover on the downstream continuation of original middle lane 1 for the configured persistence window",
+    "separate_incidental_actor_contract_preserved": true
+  },
+  "compatibility_boundary": {
+    "formal_v1_contract_changed": false,
+    "formal_v1_dataset_or_checkpoint_metadata_changed": false,
+    "previous_s9_candidate_acceptance_superseded": true,
+    "new_scenario_contract_activated": false,
+    "pilot_or_formal_collection_authorized_by_this_report": false,
+    "implementation_report": "evaluation/S9_CANDIDATE_V3_SPLIT_RETURN_IMPLEMENTATION_REPORT.json"
+  },
+  "files_changed": [
+    "docs/project/s5_s9_functional_scenario_design.json",
+    "evaluation/CANDIDATE_V3_S9_DEFINITION_UPDATE_REPORT.json",
+    "docs/project/project_state.json"
+  ],
+  "source_memory": {
+    "path": "docs/project/s5_s9_functional_scenario_design.json",
+    "sha256": "eb988281f78d2185a9338c65c0a9b0aa7fc30883c34b710428f117e6eb856b6c"
+  },
+  "verification": {
+    "json_parse": "passed",
+    "focused_static_contract_assertions": "passed",
+    "focused_static_contract_scope": [
+      "exactly one designated left_bypass_split_actor on c3_lane_0_left",
+      "same-actor front-and-behind LEFT completion gate",
+      "post-narrow RIGHT return to the downstream continuation of original lane 1",
+      "reassembly credited only after return"
+    ],
+    "closed_loop_scenario_test": "passed",
+    "fixed_five_seed_acceptance": "5/5 episodes and 4000/4000 native joint planning steps passed",
+    "hard_gate_passed": true
+  },
+  "remaining_risks": [
+    "the independent S9 physical and machine-evidence gate is complete, but the separate combined candidate-v3 S5-S9 video and contract review remains pending before a new formal contract can be frozen"
+  ],
+  "next_permitted_action": "complete the remaining candidate-v3 scenario gates and combined S5-S9 video-contract review before the balanced 5k pilot",
+  "maintainability_gap": "no dedicated repository skill exists for scenario-definition-only project administration; the workflow used the authoritative candidate scenario memory and manage-bev-project-workflow"
+}

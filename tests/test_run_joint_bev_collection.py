@@ -157,6 +157,16 @@ def test_load_config_is_strict_and_fingerprint_excludes_run_target(
         runner.load_run_config(_write_config(tmp_path, "unexpected: {}\n"))
 
 
+def test_candidate_v3_config_binds_current_contract_and_s9_horizon() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_diagnostic10k_20260814.yaml")
+    )
+    assert config.scenario_contract_id == "candidate_v3"
+    assert config.scenario_contract()["format"] == "bev_primary_s5_s9_contract_v2"
+    assert config.episode_step_limit("S7_ego_merge_from_ramp") == 200
+    assert config.episode_step_limit("S9_narrow_channel_negotiation") == 800
+
+
 def test_config_rejects_sensor_or_non_boolean_resume(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     text = config_path.read_text(encoding="utf-8").replace(

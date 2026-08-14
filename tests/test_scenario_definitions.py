@@ -71,7 +71,7 @@ def test_s5_declares_adjacent_lane_side_vehicle_recipe() -> None:
     assert scenario.override_traffic_density == 0.0
 
 
-def test_s7_declares_atomic_gap_conditioned_mainline_traffic() -> None:
+def test_s7_declares_atomic_gap_and_parallel_constraint_traffic() -> None:
     scenario = SCENARIO_BY_ID["S7_ego_merge_from_ramp"]
     recipes = [
         recipe
@@ -83,7 +83,11 @@ def test_s7_declares_atomic_gap_conditioned_mainline_traffic() -> None:
     assert recipes[0].params["required_roles"] == (
         "critical_gap_front", "critical_gap_rear", "next_gap_front", "next_gap_rear"
     )
-    assert recipes[0].params["optional_adjacent_actor_range"] == (0, 2)
+    assert recipes[0].params["parallel_constraint_actor_range"] == (1, 3)
+    assert (
+        recipes[0].params["parallel_constraint_role_prefix"]
+        == "parallel_merge_constraint_"
+    )
 
 
 def test_s5_declares_hard_brake_random_ranges() -> None:
@@ -106,10 +110,21 @@ def test_s9_declares_safe_internal_spawn_road() -> None:
     assert scenario.ego_spawn_internal_road_index == 1
     assert scenario.ego_spawn_longitude_m == (50.0, 75.0)
     assert scenario.ego_spawn_lane_id == 1
+    assert scenario.ego_initial_bumper_gap_m == pytest.approx(16.5)
     assert scenario.ego_spawn_lane_probabilities is None
     trigger = scenario.trigger_by_local_route["R8_narrow_channel"]
     assert trigger.block_id == "c3"
     assert trigger.longitudinal_min == pytest.approx(35.0)
+    recipe = next(
+        row
+        for row in scenario.traffic_recipes
+        if row.operation == "inject_s9_bypass_actors"
+    )
+    assert recipe.params["designated_split_actor_role"] == "left_bypass_split_actor"
+    assert recipe.params["designated_split_actor_count"] == 1
+    assert recipe.params["additional_trigger_actor_range"] == (0, 2)
+    assert recipe.params["narrow_section_block_id"] == "c3"
+    assert recipe.params["post_narrow_return_lane_id"] == 1
 
 
 def test_s8_declares_explicit_ego_spawn_controls() -> None:

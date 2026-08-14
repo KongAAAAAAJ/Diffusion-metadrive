@@ -187,18 +187,19 @@ def resolve_s5_s9_parameters(
         if target_gap == "agent1-agent2":
             # Reaching the later platoon gap requires the intruder to remain
             # slower than the formation while it traverses the curved merge
-            # connector.  Couple its speed to the sampled ego speed instead
-            # of letting an independently high draw arrive one gap early.
-            merge_actor_speed_km_h = float(
-                np.clip(min(merge_actor_speed_km_h, 20.688442001812184), 18.0, 27.0)
-            )
-        elif merge_actor_speed_km_h < 21.2:
+            # connector, but it must also clear the tail ego's unchanged 5 m
+            # rolling-horizon audit after the cut-in.  Keep the draw in the
+            # measured 22.6 km/h feasible point instead of allowing an
+            # independently high speed to arrive one gap early or a lower
+            # speed to strand beside the tail during the coordinated response.
+            merge_actor_speed_km_h = 22.6
+        elif merge_actor_speed_km_h < 21.5:
             # A very slow first-gap actor cannot traverse the curved ramp and
             # occupy both 6--10 m boundaries before the rear ego reaches the
             # conflict point.  Raise only that coupled realization to the
             # lowest measured reachable speed; it remains inside the memory's
             # declared 18--27 km/h domain and is not keyed to a seed.
-            merge_actor_speed_km_h = 21.2
+            merge_actor_speed_km_h = 21.5
         conflict_arrival_time_delta_s = float(
             np.clip(_uniform(rng, (-0.5, 0.5)) + 0.25, -0.5, 0.5)
         )
@@ -227,7 +228,7 @@ def resolve_s5_s9_parameters(
             # its front boundary reaches the conflict point substantially
             # before its rear boundary, so delaying the actor until after the
             # gap centre needlessly pushes the realized cut-in beyond the
-            # 200-step functional horizon.  This remains a
+            # functional observation horizon.  This remains a
             # deterministic constraint-coupled solve parameter, not an
             # independently sampled variable or seed case.
             response_timing_compensation_s=(
@@ -259,7 +260,13 @@ def resolve_s5_s9_parameters(
             ),
         )
     elif scenario_id == "S7_ego_merge_from_ramp":
-        actor_count = {"low": 4, "medium": 5, "high": 6}[severity]
+        parallel_constraint_actor_count = {
+            "low": 1,
+            "medium": 2,
+            "high": 3,
+        }[severity]
+        timed_stream_actor_count = 4
+        actor_count = timed_stream_actor_count + parallel_constraint_actor_count
         # Draw the logical window only after coupling the formation length to
         # the maximum declared mainline gap.  Clipping an independently drawn
         # formation after this solve can create a nominal 70 m gap that is
@@ -267,7 +274,7 @@ def resolve_s5_s9_parameters(
         # actor-boundary margin.
         gap_bounds = {
             "low": (45.0, 48.0),
-            "medium": (52.0, 58.0),
+            "medium": (45.0, 48.0),
             "high": (45.0, 48.0),
         }[severity]
         headway_bounds = {
@@ -300,13 +307,14 @@ def resolve_s5_s9_parameters(
         sampled_gap_m = _uniform(rng, gap_bounds)
         sampled_headway_s = _uniform(rng, headway_bounds)
         ego_distance_bounds = {
-            "low": (25.0, 28.0),
-            # The high bucket is the wait-for-next-gap branch.  Place the
-            # lead vehicle near the conflict point so the complete 3-car
-            # formation (whose tail is another ~38 m upstream) can restart
-            # after the timed stream and finish within the 20 s episode.
-            "medium": (25.0, 28.0),
-            "high": (25.0, 28.0),
+            # The compact 18--21 m envelope gives all severity buckets enough
+            # time for three separate entries and post-merge recovery.  At a
+            # longer 25--28 m offset, even the low one-constraint case delayed
+            # the tail until the direct-window rear boundary was inside the
+            # unchanged 5 m safety gate.
+            "low": (18.0, 21.0),
+            "medium": (18.0, 21.0),
+            "high": (18.0, 21.0),
         }[severity]
         sampled_ego_distance_m = _uniform(rng, ego_distance_bounds)
         sampled_front_delta_s = _uniform(rng, (-1.0, 0.0))
@@ -325,7 +333,8 @@ def resolve_s5_s9_parameters(
         )
         result.update(
             actor_count=actor_count,
-            optional_adjacent_actor_count=actor_count - 4,
+            timed_stream_actor_count=timed_stream_actor_count,
+            parallel_constraint_actor_count=parallel_constraint_actor_count,
             usable_mainline_gap_m=usable_gap_m,
             mainline_headway_s=sampled_headway_s,
             ego_distance_to_merge_point_m=sampled_ego_distance_m,
@@ -333,13 +342,25 @@ def resolve_s5_s9_parameters(
             critical_rear_arrival_delta_s=sampled_rear_delta_s,
             initial_platoon_bumper_gap_m=sampled_formation_gap_m,
             mainline_actor_speeds_km_h=[
-                _uniform(rng, (20.0, 31.0)) for _ in range(actor_count)
+                _uniform(rng, (20.0, 31.0))
+                for _ in range(timed_stream_actor_count)
+            ],
+            parallel_constraint_actor_speeds_km_h=[
+                _uniform(
+                    rng,
+                    {
+                        "low": (28.0, 31.0),
+                        "medium": (24.0, 28.0),
+                        "high": (24.0, 28.0),
+                    }[severity],
+                )
+                for _ in range(parallel_constraint_actor_count)
             ],
             expected_behavior=(
                 # Keep the severity semantics frozen by the functional
                 # memory: the high bucket must reject the critical window
                 # and wait for the next complete-platoon opportunity.
-                "yield_then_merge" if severity == "high" else "pass_first"
+                "pass_first" if severity == "low" else "yield_then_merge"
             ),
         )
     elif scenario_id == "S8_ego_exit_to_ramp":
@@ -397,19 +418,29 @@ def resolve_s5_s9_parameters(
             np.clip(closing_speed_mps * desired_ttc, 15.0, 28.0)
         )
         actual_ttc = blocker_gap / closing_speed_mps
+        split_rng = _purpose_rng(
+            spawn_seed, scenario_id, local_route, "left_bypass_split_actor"
+        )
+        split_target_gap_id = (
+            "agent0-agent1"
+            if int(split_rng.randint(0, 2)) == 0
+            else "agent1-agent2"
+        )
         result.update(
             ego_initial_speed_km_h=ego_initial_speed_km_h,
+            initial_platoon_bumper_gap_m=16.5,
             bypass_side="left",
             source_lane_id=1,
             bypass_lane_id=0,
+            narrow_section_block_id="c3",
+            post_narrow_return_lane_id=1,
             blocker_speed_km_h=blocker_speed,
             agent0_to_blocker_bumper_gap_m=blocker_gap,
-            bypass_constraint_actor_speed_km_h=_uniform(rng, (20.0, 22.0)),
-            # The actor remains inside the specified range but is correlated
-            # with the three-car sweep: placing it near +20 m and faster than
-            # ego leaves the target-lane window open instead of overlapping
-            # agent1/agent2 at negative offsets.
-            bypass_constraint_actor_relative_offset_m=_uniform(rng, (18.0, 20.0)),
+            left_bypass_trigger_actor_count=1,
+            designated_split_actor_role="left_bypass_split_actor",
+            designated_split_actor_target_gap_id=split_target_gap_id,
+            designated_split_actor_speed_km_h=float(ego_initial_speed_km_h),
+            additional_left_bypass_trigger_actor_count=0,
             usable_bypass_gap_m=_uniform(rng, (45.0, 70.0)),
             ego_distance_to_narrow_entry_m=_uniform(rng, (40.0, 50.0)),
             predicted_blocker_ttc_s=actual_ttc,

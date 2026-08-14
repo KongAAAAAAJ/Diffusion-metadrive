@@ -351,6 +351,20 @@ class RulePlannerExpert:
             raise JointCollectionError("RuleMaker coordination metadata is inconsistent")
         return action, target, formation_enabled, coordination_mode
 
+    @staticmethod
+    def _can_replan_committed_error(env, error: CommittedTrajectoryError) -> bool:
+        """Allow S6 to replace a stale commitment after the intruder moves."""
+
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        return bool(
+            scenario_id == "S6_background_merge_in"
+            and str(error.reason_code)
+            in {
+                "committed_trajectory_background_unsafe",
+                "committed_trajectory_tracking_deviation",
+            }
+        )
+
     def _hard_valid_modes_by_action(
         self,
         model_inputs: JointBEVModelInputs | None,
@@ -429,42 +443,54 @@ class RulePlannerExpert:
                 try:
                     rolled = self.trajectory_executor.roll(env)
                 except CommittedTrajectoryError as exc:
-                    self.planner._last_debug = {
-                        "_joint": {
-                            "fallback_used": False,
-                            "fallback_reason": exc.reason_code,
-                            "trajectory_source": "committed_roll",
-                        },
-                        "_execution": dict(exc.debug),
-                    }
-                    raise JointCollectionError(
-                        str(exc), reason_code=exc.reason_code
-                    ) from exc
-                effective_actions = (
-                    self.rule_maker.committed_execution_rule_actions(
-                        env,
-                        rolled.rule_actions,
+                    if not self._can_replan_committed_error(env, exc):
+                        self.planner._last_debug = {
+                            "_joint": {
+                                "fallback_used": False,
+                                "fallback_reason": exc.reason_code,
+                                "trajectory_source": "committed_roll",
+                            },
+                            "_execution": dict(exc.debug),
+                        }
+                        raise JointCollectionError(
+                            str(exc), reason_code=exc.reason_code
+                        ) from exc
+                    # The S6 intruder changes its future occupancy while an
+                    # ego KEEP trajectory is being executed.  Retire only the
+                    # stale trajectory buffer and immediately run the normal
+                    # RuleMaker + NormalPlanner path again.  Lane-change
+                    # commitments remain owned by RuleMaker, and every fresh
+                    # candidate still passes the unchanged hard audits.
+                    self.rule_maker.retire_committed_execution(
+                        execution_plan.execution_id
                     )
-                )
-                self._validate_actions_have_hard_modes(
-                    effective_actions, hard_valid_modes_by_action
-                )
-                execution_debug = dict(rolled.debug)
-                execution_debug["plan_rule_actions"] = {
-                    key: int(value) for key, value in rolled.rule_actions.items()
-                }
-                execution_debug["effective_rule_actions"] = dict(
-                    effective_actions
-                )
-                return self._build_expert_step(
-                    env,
-                    actions=effective_actions,
-                    trajectories=rolled.trajectories_world,
-                    trajectories_local=rolled.trajectories_local,
-                    trajectory_source="committed_roll",
-                    execution_debug=execution_debug,
-                    longitudinal_references=rolled.longitudinal_references,
-                )
+                    self.trajectory_executor.reset()
+                else:
+                    effective_actions = (
+                        self.rule_maker.committed_execution_rule_actions(
+                            env,
+                            rolled.rule_actions,
+                        )
+                    )
+                    self._validate_actions_have_hard_modes(
+                        effective_actions, hard_valid_modes_by_action
+                    )
+                    execution_debug = dict(rolled.debug)
+                    execution_debug["plan_rule_actions"] = {
+                        key: int(value) for key, value in rolled.rule_actions.items()
+                    }
+                    execution_debug["effective_rule_actions"] = dict(
+                        effective_actions
+                    )
+                    return self._build_expert_step(
+                        env,
+                        actions=effective_actions,
+                        trajectories=rolled.trajectories_world,
+                        trajectories_local=rolled.trajectories_local,
+                        trajectory_source="committed_roll",
+                        execution_debug=execution_debug,
+                        longitudinal_references=rolled.longitudinal_references,
+                    )
         try:
             proposal_batch = self.rule_maker.propose_joint_actions(
                 env,

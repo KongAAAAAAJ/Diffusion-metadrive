@@ -1,4 +1,4 @@
-"""Sequential five-seed S5--S9 candidate-v2 expert/video evaluation."""
+"""Sequential five-seed S5--S9 candidate-v3 expert/video evaluation."""
 
 from __future__ import annotations
 
@@ -21,6 +21,10 @@ SCENARIOS = (
     ("S8_ego_exit_to_ramp", "R6_exit_to_ramp"),
     ("S9_narrow_channel_negotiation", "R8_narrow_channel"),
 )
+SCENARIO_HORIZONS = {
+    "S6_background_merge_in": 260,
+    "S9_narrow_channel_negotiation": 800,
+}
 
 
 def _sha256(path: Path) -> str:
@@ -176,6 +180,105 @@ def _s8_physical_behavior_gate(rows: list[dict[str, object]]) -> dict[str, objec
     }
 
 
+def _s7_parallel_constraint_gate(rows: list[dict[str, object]]) -> dict[str, object]:
+    failures = []
+    counts = []
+    for row in rows:
+        evidence = row.get("conflict_evidence") or {}
+        declared = int(evidence.get("parallel_constraint_declared_count", 0))
+        realized = int(evidence.get("parallel_constraint_realized_count", 0))
+        counts.append(realized)
+        passed = bool(
+            1 <= declared == realized <= 3
+            and evidence.get("parallel_constraint_initial_region_valid", False)
+            and evidence.get("parallel_constraint_roles_present", False)
+            and evidence.get("physical_split_observed", False)
+            and evidence.get("non_simultaneous_mainline_entries", False)
+            and evidence.get("formation_recovered_after_merge", False)
+        )
+        if not passed:
+            failures.append(
+                {
+                    "seed": row.get("seed"),
+                    "declared": declared,
+                    "realized": realized,
+                    "initial_region_valid": evidence.get(
+                        "parallel_constraint_initial_region_valid", False
+                    ),
+                    "physical_split_observed": evidence.get(
+                        "physical_split_observed", False
+                    ),
+                    "non_simultaneous_mainline_entries": evidence.get(
+                        "non_simultaneous_mainline_entries", False
+                    ),
+                    "formation_recovered_after_merge": evidence.get(
+                        "formation_recovered_after_merge", False
+                    ),
+                }
+            )
+    return {
+        "passed": bool(len(rows) == len(SEEDS) and not failures),
+        "realized_count_range": [min(counts), max(counts)] if counts else None,
+        "failures": failures,
+    }
+
+
+def _s9_physical_behavior_gate(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Require the designated split, narrow traversal, return and recovery."""
+
+    failures = []
+    for row in rows:
+        evidence = row.get("conflict_evidence") or {}
+        route = row.get("route_completion") or {}
+        relations = set(
+            (evidence.get("split_actor_relation_at_left_completion_by_agent") or {}).values()
+        )
+        passed = bool(
+            evidence.get("left_bypass_trigger_actor_declared_count") == 1
+            and evidence.get("left_bypass_trigger_actor_realized_count") == 1
+            and evidence.get("designated_split_actor_initial_region_valid", False)
+            and evidence.get("s9_actor_roles_present", False)
+            and evidence.get("non_simultaneous_left_lane_changes", False)
+            and evidence.get("split_actor_straddled_by_left_completions", False)
+            and relations == {"ahead", "behind"}
+            and evidence.get("causal_split_actor_interaction_observed", False)
+            and evidence.get("left_completion_clearance_satisfied", False)
+            and route.get("all_agents_passed_blocker", False)
+            and route.get("all_agents_traversed_narrow_section", False)
+            and route.get("all_agents_returned_to_original_lane", False)
+            and not evidence.get(
+                "return_before_narrow_section_clear_observed", False
+            )
+            and evidence.get("formation_recovered_after_return", False)
+        )
+        if not passed:
+            failures.append(
+                {
+                    "seed": row.get("seed"),
+                    "declared_split_actors": evidence.get(
+                        "left_bypass_trigger_actor_declared_count"
+                    ),
+                    "realized_split_actors": evidence.get(
+                        "left_bypass_trigger_actor_realized_count"
+                    ),
+                    "relations": sorted(str(value) for value in relations),
+                    "traversed_narrow_section": route.get(
+                        "all_agents_traversed_narrow_section", False
+                    ),
+                    "returned_to_original_lane": route.get(
+                        "all_agents_returned_to_original_lane", False
+                    ),
+                    "formation_recovered_after_return": evidence.get(
+                        "formation_recovered_after_return", False
+                    ),
+                }
+            )
+    return {
+        "passed": bool(len(rows) == len(SEEDS) and not failures),
+        "failures": failures,
+    }
+
+
 def _incidental_background_gate(rows: list[dict[str, object]]) -> dict[str, object]:
     failures = []
     counts = []
@@ -213,7 +316,7 @@ def _run_batch(root: Path, scenario_id: str, route: str, profile: str | None) ->
         traffic_density=0.0,
         start_seed=SEEDS[0],
         fps=10,
-        horizon=200,
+        horizon=SCENARIO_HORIZONS.get(scenario_id, 200),
         seeds=SEEDS,
         evaluate=True,
         save_topdown_video=True,
@@ -297,6 +400,10 @@ def main() -> None:
         row["conflict_evidence"].get("expected_behavior")
         for row in episodes if row["scenario_id"] == "S7_ego_merge_from_ramp"
     }
+    s7_rows = [
+        row for row in episodes if row["scenario_id"] == "S7_ego_merge_from_ramp"
+    ]
+    s7_parallel_constraint_gate = _s7_parallel_constraint_gate(s7_rows)
     s5_categories = {}
     s5_physical_behavior_gates = {}
     for profile in S5_PROFILES:
@@ -323,14 +430,22 @@ def main() -> None:
         row for row in episodes if row["scenario_id"] == "S8_ego_exit_to_ramp"
     ]
     s8_physical_behavior_gate = _s8_physical_behavior_gate(s8_rows)
+    s9_rows = [
+        row
+        for row in episodes
+        if row["scenario_id"] == "S9_narrow_channel_negotiation"
+    ]
+    s9_physical_behavior_gate = _s9_physical_behavior_gate(s9_rows)
     incidental_background_gate = _incidental_background_gate(episodes)
     hard_gates_passed = bool(
         base_ok and files_ok
         and s6_gaps == {"agent0-agent1", "agent1-agent2"}
         and s7_behaviors == {"pass_first", "yield_then_merge"}
+        and s7_parallel_constraint_gate["passed"]
         and profile_diversity
         and s5_memory_gate
         and s8_physical_behavior_gate["passed"]
+        and s9_physical_behavior_gate["passed"]
         and incidental_background_gate["passed"]
     )
     contract = candidate_scenario_contract_v2(frozen=hard_gates_passed)
@@ -346,7 +461,9 @@ def main() -> None:
         "s5_behavior_categories": s5_categories,
         "s5_physical_behavior_gates": s5_physical_behavior_gates,
         "s5_latest_memory_gate_passed": s5_memory_gate,
+        "s7_parallel_constraint_gate": s7_parallel_constraint_gate,
         "s8_physical_behavior_gate": s8_physical_behavior_gate,
+        "s9_physical_behavior_gate": s9_physical_behavior_gate,
         "incidental_background_gate": incidental_background_gate,
         "s6_target_gap_coverage": sorted(value for value in s6_gaps if value),
         "s7_behavior_coverage": sorted(

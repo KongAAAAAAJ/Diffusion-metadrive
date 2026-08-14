@@ -177,7 +177,8 @@ scenario_overrides:
     w_keep_bias: 0.1
     w_formation_consistent: 0.8
 
-  # S9: blocker TTC + topology force LEFT; after lane 0 only KEEP is admissible.
+  # S9: blocker TTC + topology force LEFT; after the narrow section force
+  # RIGHT back to the original middle lane before formation reassembly.
   S9_narrow_channel_negotiation:
     traffic_safety_distance_m: 12.0
     agent_safety_distance_m: 10.0

@@ -6,7 +6,7 @@ from typing import Callable
 
 
 def build_s7_traffic_recipes(recipe_factory: Callable[..., object]) -> tuple[object, ...]:
-    """Build one atomic 4--6 actor mainline-gap recipe."""
+    """Build one atomic timed-stream plus parallel-constraint recipe."""
     return (
         recipe_factory(
             "inject_s7_merge_traffic",
@@ -19,7 +19,8 @@ def build_s7_traffic_recipes(recipe_factory: Callable[..., object]) -> tuple[obj
                     "next_gap_front",
                     "next_gap_rear",
                 ),
-                "optional_adjacent_actor_range": (0, 2),
+                "parallel_constraint_actor_range": (1, 3),
+                "parallel_constraint_role_prefix": "parallel_merge_constraint_",
                 "trigger_on_start": True,
             },
         ),

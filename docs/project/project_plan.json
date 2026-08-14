@@ -1,9 +1,9 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-11T15:30:00+08:00",
-  "status": "frozen_revised_mainline",
-  "purpose": "Machine-readable memory for the current formal training and evaluation plan after removing Stage 1 A/B as a main comparison and moving the principal ablation to the Stage 2 reward domain.",
+  "updated_at": "2026-08-14T01:45:00+08:00",
+  "status": "frozen_candidate_v3_data_refresh_mainline",
+  "purpose": "Machine-readable memory for the candidate-v3 data refresh, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
     "最新计划",
@@ -37,19 +37,111 @@
     ]
   },
   "frozen_artifacts": {
-    "formal_dataset": {
+    "historical_formal_dataset_v1": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_formal50k_v1",
       "joint_samples": 50000,
       "samples_per_scenario": 10000,
       "base_dataset_fingerprint": "58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144",
       "sidecar_dataset_fingerprint": "1f2b31adcb4019247d5ae9e9c1f2e7fa0dce1ed9252023f3b14d484f1635cee5",
       "bundle_index_sha256": "a754561f95e1e40399dde22e5780472a64f127725aab228972441b7ac867306a",
-      "eligible_for_formal_training": true
+      "eligible_under_original_contract": true,
+      "eligible_for_next_stage1_run": false,
+      "preservation_policy": "Preserve as historical evidence. Do not relabel, overwrite, resume, or mix it with candidate-v3 data."
     },
-    "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+    "historical_scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
     "planner_architecture_memory": "docs/project/diffusion_model_architecture.json",
     "chassis_fusion_branch": "chassis-fusion",
     "chassis_fusion_worktree": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion"
+  },
+  "candidate_v3_data_refresh": {
+    "scenario_precondition": {
+      "required": true,
+      "gate": "User-authorized 10k diagnostic collection starts after the candidate-v3 S7 and S9 fixed-seed implementation gates pass. Remaining S5, S6, S8 and combined-contract acceptance remain mandatory before merge, formal-50k reuse, or training eligibility.",
+      "output": "one collection-time candidate-v3 scenario contract hash; formal contract activation remains pending the all-scenario combined gate"
+    },
+    "pilot": {
+      "name": "candidate-v3 balanced quality pilot",
+      "execution_status": "cancelled_by_user_before_10k_start",
+      "target_joint_steps": 10000,
+      "per_scenario_quota": 2000,
+      "scenario_scope": [
+        "S5_hard_brake_lead",
+        "S6_background_merge_in",
+        "S7_ego_merge_from_ramp",
+        "S8_ego_exit_to_ramp",
+        "S9_narrow_channel_negotiation"
+      ],
+      "scale_rationale": "User-authorized 10k diagnostic quality collection after the S7 and S9 candidate-v3 gates; use 20 percent of the formal target with balanced 2k quotas so per-scenario and per-role behavior, following-gap, TTC, and unlock fractions are more stable than the previous 1k and planned 5k pilots.",
+      "isolated_root_required": true,
+      "reuse_in_formal_50k": false,
+      "eligible_for_training": false,
+      "full_diffusion_and_riskentry_verifiers_required": true
+    },
+    "quality_gate": {
+      "threshold_policy": "Freeze exact numeric thresholds and confidence-interval handling before pilot collection. Do not tune thresholds after seeing pilot results.",
+      "required_metric_groups": {
+        "integrity_and_coverage": [
+          "complete base and actor-sidecar scans, schema, shape, dtype, finite-value, join, fingerprint, and unfinished-transaction checks",
+          "balanced S5-S9 quotas and non-empty train, validation, and test episode splits",
+          "all declared primary and exactly 3-6 incidental actors realized and persisted in every episode"
+        ],
+        "safety": [
+          "collision, out-of-road, background 5 m gap violation, and platoon-pair 7 m gap violation rates by scenario and role",
+          "minimum TTC and TTC quantiles by ego role and actor class",
+          "designated conflict-actor TTC evaluated against scenario-specific sampled ranges; incidental-background TTC evaluated separately",
+          "hard TTC below 0.5 s is a zero-tolerance safety violation unless an authoritative scenario contract explicitly defines a different measurement semantics"
+        ],
+        "formation_following": [
+          "actual leader-middle and middle-rear bumper gaps and desired-gap error quantiles while LOCKED",
+          "locked follower desired-gap absolute error P95 must not exceed the frozen 1.5 m controller-quality gate",
+          "formation release magnitude, recovery time, recovered gap error, platoon order preservation, and recovery persistence while UNLOCKED and after relock"
+        ],
+        "per_vehicle_behavior": [
+          "leader, middle, and rear KEEP/LEFT/RIGHT/STOP mode counts and fractions per scenario",
+          "speed, acceleration, jerk, lane-transition direction and completion-time distributions per role",
+          "scenario-required behavior-class coverage, including S5 response diversity, S6 target-gap coverage, S7 pass/yield coverage, S8 split-actor order diversity, and S9 bypass completion"
+        ],
+        "unlock_state": [
+          "LOCKED and UNLOCKED step counts and fractions globally, per scenario, per episode, and per ego role",
+          "unlock trigger rate, trigger cause, continuous unlocked duration, relock rate, and relock latency",
+          "zero unexpected unlock outside declared hazards and non-zero unlock coverage in every scenario whose contract requires formation release"
+        ],
+        "distribution_and_training_usability": [
+          "GT mode distribution and valid-mode rate globally, per scenario, and per role",
+          "speed, stop, low-speed, terminal displacement, progress, and expert-trajectory distributions",
+          "duplicate, missing, corrupt, NaN/Inf, leakage, scenario imbalance, role imbalance, and unobserved-mode checks"
+        ]
+      },
+      "decision": "Every hard gate must pass and all soft distribution risks must be reviewed and explicitly accepted before merge. A failed pilot returns to scenario, expert-policy, collector, or metric implementation without merging or starting 50k collection."
+    },
+    "merge_gate": {
+      "source_branch": "s5-s9-scenario-revision",
+      "target_branch": "BEV",
+      "required_before_merge": [
+        "candidate-v3 scenario contract frozen",
+        "10k diagnostic quality collection complete with immutable fingerprints",
+        "both complete verifiers passed",
+        "quality report accepted",
+        "repository tests and git diff check passed",
+        "no active collection or training process"
+      ],
+      "post_merge_requirement": "Record the BEV merge commit and re-run a short exact-path smoke from the merged tree before formal collection. The pre-merge 10k diagnostic samples are not reused in formal 50k."
+    },
+    "new_formal_dataset": {
+      "name": "candidate-v3 formal S5-S9 50k",
+      "root": null,
+      "target_joint_steps": 50000,
+      "per_scenario_quota": 10000,
+      "scenario_contract_sha256": null,
+      "base_dataset_fingerprint": null,
+      "sidecar_dataset_fingerprint": null,
+      "bundle_index_sha256": null,
+      "collection_complete": false,
+      "full_verifier_passed": false,
+      "quality_gate_passed": false,
+      "eligible_for_formal_training": false,
+      "collection_policy": "Collect into a new empty root from the clean merged BEV commit. Do not append, resume, copy, or relabel samples from the historical v1 dataset or the 10k diagnostic collection."
+    }
   },
   "trajectory_domains": {
     "tau_d": {
@@ -71,8 +163,8 @@
     "name": "Formal BEV-only diffusion pretraining",
     "formal_variant": "A",
     "joint_update": "joint_mean",
-    "predecessor_condition": "none",
-    "dataset": "frozen_artifacts.formal_dataset",
+    "predecessor_condition": "candidate_v3_data_refresh.new_formal_dataset must be complete, fully verified, quality accepted, fingerprinted, and eligible_for_formal_training=true",
+    "dataset": "candidate_v3_data_refresh.new_formal_dataset",
     "initialization": "ResNet18.a1 pretrained backbone plus newly initialized BEV planner modules",
     "trainable_modules": "all planner parameters, with the existing separate backbone and planner learning rates",
     "variant_b_policy": {
@@ -186,38 +278,71 @@
   "execution_order": [
     {
       "order": 1,
-      "action": "Train and qualify one formal Stage1-A checkpoint on the frozen 50k S5-S9 dataset."
+      "action": "Use the completed candidate-v3 S7 and S9 fixed-five-seed gates as the user-authorized trigger for an isolated diagnostic collection; bind the run to the exact collection-time candidate-v3 scenario hash."
     },
     {
       "order": 2,
-      "action": "Freeze the common Stage 2 manifest, including source checkpoint hash, scenario seeds, rollout noise seeds, update budget, reward config, and optimizer config."
+      "action": "Freeze the candidate-v3 10k diagnostic config, balanced 2k-per-scenario quotas, split seed, collection seed, per-scenario horizons, and isolated output root."
     },
     {
       "order": 3,
-      "action": "Calibrate and formally train GRPO-Open from the frozen Stage1-A checkpoint."
+      "action": "Collect the balanced 10k diagnostic dataset with 2k joint steps per S5-S9 scenario."
     },
     {
       "order": 4,
-      "action": "Complete the real TruckSim surrogate data, fit, ID/OOD, and probability-calibration gates."
+      "action": "Run complete Diffusion and RiskEntry verification on the 10k dataset and record immutable fingerprints; then complete the frozen data-quality audit covering formation following gaps, TTC, per-vehicle behavior, unlock-state fractions, safety, coverage, and training usability."
     },
     {
       "order": 5,
-      "action": "Calibrate and formally train GRPO-Exec from the same frozen Stage1-A checkpoint and Stage 2 manifest."
+      "action": "Complete the remaining candidate-v3 S5, S6, S8 and combined-contract acceptance. Only after those gates and the 10k quality gate pass, merge s5-s9-scenario-revision into BEV, record the merge commit, and pass a post-merge exact-path smoke."
     },
     {
       "order": 6,
-      "action": "Freeze both Stage 2 branches and run paired short smoke evaluation."
+      "action": "From the clean merged BEV commit, collect a new balanced candidate-v3 S5-S9 50k dataset into a new root."
     },
     {
       "order": 7,
-      "action": "Perform semantic-preserving Round 14 cleanup only after both branches are stable; rerun all strict checkpoint and smoke gates after cleanup."
+      "action": "Run both complete verifiers and the same quality audit on the new 50k dataset, then freeze its contract hash, fingerprints, bundle index, and formal-training eligibility."
     },
     {
       "order": 8,
+      "action": "Train and qualify one formal Stage1-A checkpoint on the newly frozen candidate-v3 50k dataset."
+    },
+    {
+      "order": 9,
+      "action": "Freeze the common Stage 2 manifest, including source checkpoint hash, dataset fingerprints, scenario seeds, rollout noise seeds, update budget, reward config, and optimizer config."
+    },
+    {
+      "order": 10,
+      "action": "Calibrate and formally train GRPO-Open from the frozen Stage1-A checkpoint."
+    },
+    {
+      "order": 11,
+      "action": "Complete the real TruckSim surrogate data, fit, ID/OOD, and probability-calibration gates."
+    },
+    {
+      "order": 12,
+      "action": "Calibrate and formally train GRPO-Exec from the same Stage1-A checkpoint and Stage 2 manifest."
+    },
+    {
+      "order": 13,
+      "action": "Freeze both Stage 2 branches and run paired short smoke evaluation."
+    },
+    {
+      "order": 14,
+      "action": "Perform semantic-preserving Round 14 cleanup only after both branches are stable; rerun all strict checkpoint and smoke gates after cleanup."
+    },
+    {
+      "order": 15,
       "action": "Run the final multi-seed S5-S9 three-model evaluation and produce the main comparison, optional surrogate ablation, latency, and failure-analysis reports."
     }
   ],
   "stop_conditions": [
+    "Do not start the user-authorized candidate-v3 10k collection before the S7 and S9 fixed-five-seed gates, collection-time scenario hash binding, and exact-path smoke pass.",
+    "Do not treat the 10k diagnostic dataset as formal or training-eligible, and do not merge into BEV or start the new 50k collection, unless the remaining S5, S6, S8 and combined-contract gates plus both complete verifiers and the pre-frozen quality gate pass.",
+    "Do not reuse 10k diagnostic samples in the formal 50k root, and do not mix candidate-v3 samples with the historical v1 dataset.",
+    "Do not change scenario, expert-policy, collector, schema, split, or quality-threshold semantics while pilot or formal collection is running.",
+    "Do not start Stage1-A until the new candidate-v3 50k dataset is complete, fully verified, quality accepted, fingerprinted, and eligible.",
     "Do not start formal GRPO before the Stage1-A checkpoint is eligible.",
     "Do not start formal GRPO-Exec with a synthetic-only surrogate.",
     "Do not compare branches whose source checkpoint, seeds, budget, reward semantics, or trajectory optimizer differ.",
@@ -225,5 +350,5 @@
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision."
   ],
-  "current_next_action": "Train and qualify the formal Stage1-A checkpoint on the frozen 50k S5-S9 dataset."
+  "current_next_action": "The candidate-v3 10k collection was cancelled by the user before its formal data root was created. Preserve the completed smoke evidence and wait for explicit authorization before any future dataset collection."
 }

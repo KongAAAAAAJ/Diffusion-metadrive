@@ -1,0 +1,68 @@
+{
+  "format": "candidate_v3_diagnostic10k_collection_report_v1",
+  "updated_at": "2026-08-14T01:45:00+08:00",
+  "status": "cancelled_by_user_before_10k_start",
+  "authorization": "User requested a 10k dataset collection after the current S7 and S9 scenario modifications completed.",
+  "scope": {
+    "target_joint_samples": 10000,
+    "per_scenario_quota": 2000,
+    "scenarios": [
+      "S5_hard_brake_lead",
+      "S6_background_merge_in",
+      "S7_ego_merge_from_ramp",
+      "S8_ego_exit_to_ramp",
+      "S9_narrow_channel_negotiation"
+    ],
+    "output_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
+    "scenario_contract_id": "candidate_v3",
+    "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+    "default_episode_horizon": 200,
+    "s9_episode_horizon": 800
+  },
+  "preflight": {
+    "s7_fixed_seed_gate_passed": true,
+    "s9_fixed_seed_gate_passed": true,
+    "collector_contract_tests": "14 passed",
+    "smoke_root": "/tmp/candidate_v3_exact_path_smoke5_20260814_v1",
+    "attempted_episodes": 6,
+    "committed_base_episodes": 5,
+    "committed_sidecar_episodes": 6,
+    "sidecar_only_episodes": 1,
+    "scenario_counts": {
+      "S5_hard_brake_lead": 1,
+      "S6_background_merge_in": 1,
+      "S7_ego_merge_from_ramp": 1,
+      "S8_ego_exit_to_ramp": 1,
+      "S9_narrow_channel_negotiation": 1
+    },
+    "base_complete_verifier_passed": true,
+    "sidecar_complete_verifier_passed": true,
+    "bundle_complete_verifier_passed": true,
+    "base_dataset_fingerprint": "dbb7cc4b482c687e8564b246226d4b248648f1af491c4e5af9d7a8417f1dbfc1",
+    "sidecar_dataset_fingerprint": "a765ab2d52e630550070ad7986a59db0dac5b971c0b6b96431713e241ec644a5",
+    "bundle_sha256": "3fc29c014faf12bfbb80cebd319641c4dd19c490ced6d7994cea76a56dd32f09",
+    "observed_rejection_reasons": {
+      "committed_trajectory_kinematic_infeasible": 1
+    },
+    "quality_risk": "RiskEntry sidecar recorded collision/out-of-road outcomes in the random smoke. The diagnostic collection may proceed, but these observations require post-collection safety audit and prevent automatic formal-training eligibility."
+  },
+  "eligibility": {
+    "diagnostic_collection_authorized": false,
+    "eligible_for_formal_training": false,
+    "reuse_in_formal_50k": false,
+    "remaining_before_merge_or_formal_use": [
+      "candidate-v3 S5, S6, and S8 independent gates",
+      "combined S5-S9 contract acceptance",
+      "complete 10k verifiers",
+      "pre-frozen safety and quality audit"
+    ]
+  },
+  "result": {
+    "collection_started": false,
+    "formal_output_root_created": false,
+    "joint_samples_collected_to_formal_output_root": 0,
+    "active_collection_processes": 0,
+    "stop_reason": "user_cancelled_10k_collection",
+    "preserved_smoke_only": true
+  }
+}

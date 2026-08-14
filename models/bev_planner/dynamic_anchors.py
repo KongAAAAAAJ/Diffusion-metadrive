@@ -115,6 +115,8 @@ def _unique_lanes(lanes: Iterable[object]) -> list[object]:
 class SimulatorDynamicAnchorGenerator:
     """Build fixed-mode anchors from the active MetaDrive lane graph."""
 
+    S9_MINIMUM_LANE_CHANGE_PROGRESS_M = 20.0
+
     def __init__(self, config: DynamicAnchorConfig | None = None) -> None:
         self.config = config or DynamicAnchorConfig()
 
@@ -580,6 +582,7 @@ class SimulatorDynamicAnchorGenerator:
         ego_pose: np.ndarray,
         speed_mps: float,
         accel_mps2: float,
+        minimum_lane_change_progress_m: float | None = None,
     ) -> np.ndarray:
         distances = self._travel_distances(speed_mps, accel_mps2)
         source_world, _ = self._sample_lane_pose_path(
@@ -602,12 +605,24 @@ class SimulatorDynamicAnchorGenerator:
             # executable action group violate the hard curvature contract.
             transition_progress = max(
                 float(distances[-1]),
-                self.config.minimum_lane_change_progress_m,
+                self.config.minimum_lane_change_progress_m
+                if minimum_lane_change_progress_m is None
+                else float(minimum_lane_change_progress_m),
             )
             progress = np.clip(distances / transition_progress, 0.0, 1.0)
             blend = 10.0 * progress**3 - 15.0 * progress**4 + 6.0 * progress**5
             xy = source_local * (1.0 - blend[:, None]) + target_local * blend[:, None]
         heading = self._headings_from_xy(xy)
+        if target_lane is not None and minimum_lane_change_progress_m is not None:
+            # S9 can begin the post-channel return after a temporary
+            # low-speed hold.  Limit only the stored semantic-anchor headings
+            # to the unchanged hard yaw/curvature contract; the XY sweep and
+            # drivable-footprint checks remain untouched.
+            heading = self._contract_limited_headings(
+                heading,
+                xy,
+                HardModeMaskConfig(dt_s=self.config.dt_s),
+            )
         return np.column_stack([xy, heading]).astype(np.float32)
 
     def _route_transition_trajectory(
@@ -824,6 +839,12 @@ class SimulatorDynamicAnchorGenerator:
         s7_route_target = self._s7_route_target(env, road_network, source_lane)
         if s7_route_target is not None:
             left_lane = s7_route_target
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        lane_change_progress_m = (
+            self.S9_MINIMUM_LANE_CHANGE_PROGRESS_M
+            if scenario_id == "S9_narrow_channel_negotiation"
+            else self.config.minimum_lane_change_progress_m
+        )
         left_s = self._project(left_lane, position[:2])[0] if left_lane is not None else 0.0
         right_s = self._project(right_lane, position[:2])[0] if right_lane is not None else 0.0
 
@@ -872,6 +893,7 @@ class SimulatorDynamicAnchorGenerator:
                         ego_pose,
                         speed_mps,
                         accel,
+                        minimum_lane_change_progress_m=lane_change_progress_m,
                     )
                 )
         if right_lane is not None:
@@ -888,6 +910,7 @@ class SimulatorDynamicAnchorGenerator:
                     ego_pose,
                     speed_mps,
                     accel,
+                    minimum_lane_change_progress_m=lane_change_progress_m,
                 )
         trajectories[ModeIndex.STOP] = self._stop_trajectory(
             road_network,

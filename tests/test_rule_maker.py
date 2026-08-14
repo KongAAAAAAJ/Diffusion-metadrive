@@ -250,6 +250,33 @@ def test_committed_execution_advances_state_without_generating_proposals():
     assert rule_maker.active_lane_change_agent_ids == frozenset()
 
 
+def test_stale_execution_can_retire_without_dropping_lane_commitment():
+    vehicle = _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=20.0)
+    env = _env(agents={"agent0": vehicle}, traffic=[])
+    rule_maker = MultiAgentRuleMaker(
+        locked_on_reset=False,
+        lane_change_preference=20.0,
+        lc_cost=0.0,
+        w_mobil=0.0,
+        w_keep_bias=0.0,
+    )
+    batch = rule_maker.propose_joint_actions(env, ["agent0"], {})
+    proposal = next(
+        value
+        for value in batch.proposals
+        if int(value.decisions["agent0"]["action"]) != 0
+    )
+    rule_maker.accept_joint_action(batch.batch_id, proposal.proposal_id)
+    rule_maker.advance_committed_execution(env, ["agent0"], 21)
+
+    rule_maker.retire_committed_execution(21)
+
+    assert rule_maker._active_execution_id is None
+    assert rule_maker.active_lane_change_agent_ids == frozenset({"agent0"})
+    restarted = rule_maker.advance_committed_execution(env, ["agent0"], 22)
+    assert restarted["active_execution_id"] == 22
+
+
 def test_commitment_is_not_completed_at_lane_assignment_boundary():
     vehicle = _vehicle("agent0", 20.0, 0.0, 1, speed_km_h=20.0)
     env = _env(agents={"agent0": vehicle}, traffic=[])
@@ -1794,8 +1821,92 @@ def test_s7_route_merge_bypasses_joint_score_and_selects_keep_action(monkeypatch
     assert decisions["agent0"]["action"] == 0
     assert debug is not None
     assert debug["forced_lane_decision"] is False
+    assert debug["formation_locked"] is False
+    assert debug["formation_constraint_enabled"] is False
+    assert debug["risk_info"]["s7_asynchronous_merge_release_active"] is True
     assert debug["action_search"]["strategy"] == "s7_wait_for_sampled_merge_window"
     assert debug["action_search"]["timed_gap_released"] is False
+
+
+def test_s7_relocks_only_after_all_agents_enter_mainline(monkeypatch):
+    vehicle = _vehicle("agent0", 25.0, 0.0, 0, speed_km_h=25.0)
+    env = _env_s7_real_lane_contract(vehicle)
+    env._scenario_orchestrator = SimpleNamespace(
+        _route_completion={"all_agents_entered_mainline": True}
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+    )
+    monkeypatch.setattr(
+        rule_maker,
+        "_build_agent_candidates",
+        lambda *args, **kwargs: [
+            {
+                "agent_id": "agent0",
+                "action": 0,
+                "target_point": np.asarray([15.0, 0.0], dtype=np.float32),
+                "source_lane_index": ("9g0_0_", "9g1_4_", 0),
+                "target_lane_index": ("9g0_0_", "9g1_4_", 0),
+            }
+        ],
+    )
+
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == 0
+    assert debug["formation_locked"] is True
+    assert debug["formation_constraint_enabled"] is True
+    assert debug["risk_info"]["s7_asynchronous_merge_release_active"] is False
+
+
+@pytest.mark.parametrize(
+    ("all_entered_exit_side_lane", "expected_locked"),
+    [(False, False), (True, True)],
+)
+def test_s8_relocks_after_all_agents_complete_right_transition(
+    monkeypatch,
+    all_entered_exit_side_lane,
+    expected_locked,
+):
+    vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
+    env = _env_s8_exit(vehicle)
+    env._scenario_orchestrator = SimpleNamespace(
+        _route_completion={
+            "all_agents_entered_exit_side_lane": all_entered_exit_side_lane
+        }
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+    )
+    monkeypatch.setattr(
+        rule_maker,
+        "_build_agent_candidates",
+        lambda *args, **kwargs: [
+            {
+                "agent_id": "agent0",
+                "action": 0,
+                "target_point": np.asarray([15.0, 0.0], dtype=np.float32),
+                "source_lane_index": ("A", "B", 1),
+                "target_lane_index": ("A", "B", 1),
+            }
+        ],
+    )
+
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+    debug = rule_maker.get_last_debug()
+
+    assert decisions["agent0"]["action"] == 0
+    assert debug["formation_locked"] is expected_locked
+    assert debug["formation_constraint_enabled"] is expected_locked
+    assert (
+        debug["risk_info"]["s8_exit_chain_release_active"]
+        is not expected_locked
+    )
 
 
 def test_s7_left_lane_change_to_other_lane_is_not_marked_forced():
@@ -1878,7 +1989,7 @@ def test_s6_realized_cut_in_forces_physical_ego_lane_change():
     assert debug["action_search"]["strategy"] == (
         "s6_forced_ego_lane_change_after_cut_in"
     )
-    assert 0 not in debug["action_search"]["available_coordinated_actions"]
+    assert debug["action_search"]["available_coordinated_actions"] == [-1, 1, 0]
 
 
 def test_s6_latched_actor_sweep_waits_for_physical_cut_in():
@@ -1905,6 +2016,33 @@ def test_s6_latched_actor_sweep_waits_for_physical_cut_in():
     assert decisions["agent0"]["action"] == 0
     assert rule_maker.get_last_debug()["action_search"]["strategy"] == (
         "s6_pre_cut_in_keep_only"
+    )
+
+
+def test_s6_second_gap_sweep_releases_coordinated_response():
+    vehicle = _vehicle("agent0", 25.0, 0.0, 1, speed_km_h=25.0)
+    env = _env_s7_merge(
+        vehicle,
+        lane_id=1,
+        scenario_id="S6_background_merge_in",
+        local_route="R6_mainline_merge_approach",
+    )
+    env._scenario_orchestrator = SimpleNamespace(
+        _conflict_evidence={"merge_sweep_committed": True},
+        _resolved_scenario_parameters={"target_gap_id": "agent1-agent2"},
+    )
+    rule_maker = MultiAgentRuleMaker(
+        target_speed_km_h=30.0,
+        horizon_s=2.0,
+        num_waypoints=8,
+        locked_on_reset=True,
+    )
+
+    decisions = rule_maker.compute(env, ["agent0"], planner_batch={})
+
+    assert decisions["agent0"]["action"] == -1
+    assert rule_maker.get_last_debug()["action_search"]["strategy"] == (
+        "s6_forced_ego_lane_change_after_cut_in"
     )
 
 
@@ -2562,7 +2700,11 @@ def test_s9_forces_left_for_every_ego_remaining_on_source_lane():
     env = SimpleNamespace(
         config={"scenario_id": "S9_narrow_channel_negotiation"},
         _scenario_orchestrator=SimpleNamespace(
-            _actor_manifest={"blocking_actor": {}}
+            _actor_manifest={
+                "blocking_actor": {
+                    "spawn_lane_index": ("10C0_0_", "10C0_1_", 1)
+                }
+            }
         ),
     )
     rule_maker = MultiAgentRuleMaker(locked_on_reset=False)
@@ -2585,7 +2727,11 @@ def test_s9_starts_forced_left_immediately_after_reset_decision():
     env = SimpleNamespace(
         config={"scenario_id": "S9_narrow_channel_negotiation"},
         _scenario_orchestrator=SimpleNamespace(
-            _actor_manifest={"blocking_actor": {}}
+            _actor_manifest={
+                "blocking_actor": {
+                    "spawn_lane_index": ("10C0_0_", "10C0_1_", 1)
+                }
+            }
         ),
     )
     rule_maker = MultiAgentRuleMaker(locked_on_reset=False)
@@ -2600,6 +2746,45 @@ def test_s9_starts_forced_left_immediately_after_reset_decision():
     assert not rule_maker._is_s9_forced_route_candidate(env, candidate)
     rule_maker._decision_step = 1
     assert rule_maker._is_s9_forced_route_candidate(env, candidate)
+
+
+def test_s9_forces_right_only_after_all_egos_clear_narrow_section():
+    orchestrator = SimpleNamespace(
+        _actor_manifest={
+            "blocking_actor": {
+                "spawn_lane_index": ("10C0_0_", "10C0_1_", 1)
+            }
+        },
+        _functional_state={"s9_narrow_section_clear_steps": {}},
+        _route_completion={"all_agents_cleared_narrow_section": False},
+        _resolved_scenario_parameters={"post_narrow_return_lane_id": 1},
+    )
+    env = SimpleNamespace(
+        config={"scenario_id": "S9_narrow_channel_negotiation"},
+        _scenario_orchestrator=orchestrator,
+    )
+    rule_maker = MultiAgentRuleMaker(locked_on_reset=False)
+    rule_maker._decision_step = 10
+    right = {
+        "agent_id": "agent0",
+        "action": 1,
+        "source_lane_index": ("10C0_1_", "11y0_0_", 0),
+        "target_lane_index": ("10C0_1_", "11y0_0_", 1),
+    }
+    keep = dict(right, action=0, target_lane_index=right["source_lane_index"])
+
+    assert rule_maker._is_s9_forced_route_candidate(env, keep)
+    assert not rule_maker._is_s9_forced_route_candidate(env, right)
+    orchestrator._functional_state["s9_narrow_section_clear_steps"] = {
+        "agent0": 78,
+        "agent1": 88,
+        "agent2": 98,
+    }
+    assert rule_maker._is_s9_forced_route_candidate(env, keep)
+    assert not rule_maker._is_s9_forced_route_candidate(env, right)
+    orchestrator._route_completion["all_agents_cleared_narrow_section"] = True
+    assert rule_maker._is_s9_forced_route_candidate(env, right)
+    assert not rule_maker._is_s9_forced_route_candidate(env, keep)
 
 
 def test_s9_serial_fallback_moves_first_pending_ego_only():
@@ -2620,3 +2805,82 @@ def test_s9_serial_fallback_moves_first_pending_ego_only():
 
     assert fallback is not None
     assert [int(candidate["action"]) for candidate in fallback] == [-1, 0, 0]
+
+
+def test_s8_split_combo_moves_actor_separated_groups_in_order():
+    env = SimpleNamespace(
+        config={
+            "scenario_id": "S8_ego_exit_to_ramp",
+            "local_route": "R6_exit_to_ramp",
+        },
+        _scenario_orchestrator=SimpleNamespace(
+            _resolved_scenario_parameters={
+                "exit_constraint_target_gap_id": "agent1-agent2"
+            }
+        ),
+    )
+    agent_ids = ["agent0", "agent1", "agent2"]
+    candidates = {
+        agent_id: [
+            {"agent_id": agent_id, "action": 1},
+            {"agent_id": agent_id, "action": 0},
+        ]
+        for agent_id in agent_ids
+    }
+    forced = tuple(candidates[agent_id][0] for agent_id in agent_ids)
+
+    combo = MultiAgentRuleMaker._s8_split_forced_combo(
+        env, agent_ids, candidates, forced
+    )
+
+    assert combo is not None
+    assert [int(candidate["action"]) for candidate in combo] == [1, 1, 0]
+
+    forced_after_front_group = (
+        candidates["agent0"][1],
+        candidates["agent1"][1],
+        candidates["agent2"][0],
+    )
+    combo = MultiAgentRuleMaker._s8_split_forced_combo(
+        env, agent_ids, candidates, forced_after_front_group
+    )
+    assert combo is not None
+    assert [int(candidate["action"]) for candidate in combo] == [0, 0, 1]
+
+    env._scenario_orchestrator._resolved_scenario_parameters[
+        "exit_constraint_target_gap_id"
+    ] = "agent0-agent1"
+    combo = MultiAgentRuleMaker._s8_split_forced_combo(
+        env, agent_ids, candidates, forced
+    )
+    assert combo is not None
+    assert [int(candidate["action"]) for candidate in combo] == [1, 1, 1]
+
+
+def test_s8_ranked_proposals_include_front_and_rear_group_waits():
+    env = _env_s8_exit(_vehicle("agent0", 25.0, 0.0, 1, 25.0))
+    env._agent_ids = ["agent0", "agent1", "agent2"]
+    env.agents = {
+        name: _vehicle(name, 25.0 - 20.0 * index, 0.0, 1, 25.0)
+        for index, name in enumerate(env._agent_ids)
+    }
+    env._scenario_orchestrator = SimpleNamespace(
+        _resolved_scenario_parameters={
+            "exit_constraint_target_gap_id": "agent1-agent2"
+        }
+    )
+    rule_maker = MultiAgentRuleMaker()
+
+    batch = rule_maker.propose_joint_actions(
+        env, env._agent_ids, planner_batch={}
+    )
+    actions = [
+        [
+            int(proposal.decisions[name]["action"])
+            for name in env._agent_ids
+        ]
+        for proposal in batch.proposals
+    ]
+
+    assert [1, 1, 0] in actions
+    assert [0, 0, 0] in actions

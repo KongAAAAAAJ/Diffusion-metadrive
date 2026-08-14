@@ -21,7 +21,11 @@ from expert_dataset.joint_risk_bundle_storage import (
 )
 from expert_dataset.verify_joint_bev_dataset import verify_joint_bev_dataset
 from expert_dataset.verify_riskentry_sidecar import verify_riskentry_sidecar_dataset
-from scenarios.bev_round13_contract import primary_scenario_contract
+from scenarios.bev_round13_contract import (
+    CANDIDATE_V3_CONTRACT_ID,
+    FORMAL_V1_CONTRACT_ID,
+    scenario_contract_for_id,
+)
 
 
 class JointRiskBundleVerificationError(RuntimeError):
@@ -42,8 +46,15 @@ def _episode_path(root: Path, split: str, episode_index: int) -> Path:
     return root / split / "episodes" / f"episode_{episode_index:08d}"
 
 
-def verify_joint_risk_bundle(bundle_root: Path | str) -> dict[str, object]:
+def verify_joint_risk_bundle(
+    bundle_root: Path | str,
+    *,
+    scenario_contract_id: str = FORMAL_V1_CONTRACT_ID,
+) -> dict[str, object]:
     root = Path(bundle_root).expanduser()
+    expected_scenario_sha256 = str(
+        scenario_contract_for_id(scenario_contract_id)["sha256"]
+    )
     manifest = _read_object(root / "dataset_bundle_manifest.json")
     if (root / ".bundle_episode_pending.json").exists():
         raise JointRiskBundleVerificationError(
@@ -68,7 +79,7 @@ def verify_joint_risk_bundle(bundle_root: Path | str) -> dict[str, object]:
         or manifest["schema_version"] != BUNDLE_SCHEMA_VERSION
         or manifest["protocol_sha256"] != bundle_protocol_sha256()
         or manifest["scenario_contract_sha256"]
-        != primary_scenario_contract()["sha256"]
+        != expected_scenario_sha256
         or float(manifest["decision_dt_s"]) != 0.1
         or int(manifest["split_seed"]) != 17
     ):
@@ -78,7 +89,10 @@ def verify_joint_risk_bundle(bundle_root: Path | str) -> dict[str, object]:
     if base_root == sidecar_root:
         raise JointRiskBundleVerificationError("base and sidecar roots overlap")
 
-    base_report = verify_joint_bev_dataset(base_root)
+    base_report = verify_joint_bev_dataset(
+        base_root,
+        expected_scenario_contract_sha256=expected_scenario_sha256,
+    )
     sidecar_report = verify_riskentry_sidecar_dataset(sidecar_root)
     base_contract = _read_object(base_root / "dataset_contract.json")
     if base_contract.get("dataset_fingerprint") != manifest["base_dataset_fingerprint"]:
@@ -201,14 +215,29 @@ def verify_joint_risk_bundle(bundle_root: Path | str) -> dict[str, object]:
         "sidecar_raw_steps": sidecar_report["raw_steps"],
         "base_dataset_fingerprint": manifest["base_dataset_fingerprint"],
         "sidecar_dataset_fingerprint": manifest["sidecar_dataset_fingerprint"],
+        "scenario_contract_sha256": manifest["scenario_contract_sha256"],
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle_root", type=Path)
+    parser.add_argument(
+        "--scenario-contract",
+        choices=(FORMAL_V1_CONTRACT_ID, CANDIDATE_V3_CONTRACT_ID),
+        default=FORMAL_V1_CONTRACT_ID,
+    )
     args = parser.parse_args(argv)
-    print(json.dumps(verify_joint_risk_bundle(args.bundle_root), indent=2, ensure_ascii=False))
+    print(
+        json.dumps(
+            verify_joint_risk_bundle(
+                args.bundle_root,
+                scenario_contract_id=args.scenario_contract,
+            ),
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 

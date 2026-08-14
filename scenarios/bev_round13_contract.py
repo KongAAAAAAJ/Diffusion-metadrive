@@ -25,6 +25,8 @@ INTERFACE_SMOKE_SCENARIOS: tuple[tuple[str, str], ...] = (
 DEVELOPMENT_SEEDS: tuple[int, ...] = (17, 23)
 HOLDOUT_SEEDS: tuple[int, ...] = (31, 47)
 _V1_SNAPSHOT = Path(__file__).resolve().parent / "contracts" / "bev_primary_s5_s9_v1.json"
+FORMAL_V1_CONTRACT_ID = "formal_v1"
+CANDIDATE_V3_CONTRACT_ID = "candidate_v3"
 
 
 class BEVScenarioContractError(RuntimeError):
@@ -103,6 +105,19 @@ def candidate_scenario_contract_v2(
     return payload
 
 
+def scenario_contract_for_id(contract_id: str) -> dict[str, object]:
+    """Resolve an explicit dataset binding without weakening the v1 default."""
+
+    normalized = str(contract_id).strip()
+    if normalized == FORMAL_V1_CONTRACT_ID:
+        return primary_scenario_contract()
+    if normalized == CANDIDATE_V3_CONTRACT_ID:
+        return candidate_scenario_contract_v2(frozen=True)
+    raise BEVScenarioContractError(
+        f"unknown S5--S9 scenario contract id: {normalized!r}"
+    )
+
+
 def validate_primary_scenario_contract(
     payload: object,
     scenarios: Sequence[tuple[str, str]] = PRIMARY_S5_S9_SCENARIOS,
@@ -164,11 +179,14 @@ def _deterministic_speed_from_definition(definition, scenario_id: str, seed: int
 
 __all__ = [
     "BEVScenarioContractError",
+    "CANDIDATE_V3_CONTRACT_ID",
     "DEVELOPMENT_SEEDS",
+    "FORMAL_V1_CONTRACT_ID",
     "HOLDOUT_SEEDS",
     "INTERFACE_SMOKE_SCENARIOS",
     "PRIMARY_S5_S9_SCENARIOS",
     "primary_scenario_contract",
+    "scenario_contract_for_id",
     "candidate_scenario_contract_v2",
     "deterministic_initial_speed_km_h",
     "deterministic_candidate_initial_speed_km_h",

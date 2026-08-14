@@ -1,0 +1,155 @@
+{
+  "format": "s6_candidate_v3_memory_acceptance_report_v1",
+  "recorded_at": "2026-08-14T10:40:00+08:00",
+  "scenario_id": "S6_background_merge_in",
+  "local_route": "R6_mainline_merge_approach",
+  "result": "passed",
+  "hard_gate_passed": true,
+  "definition_source": {
+    "path": "docs/project/s5_s9_functional_scenario_design.json",
+    "sha256_before_acceptance_evidence_update": "6c59ba079b86cc26aceea2e61859133d4a41f5a7931b6b038a73d5cff4fa6747"
+  },
+  "code_state": {
+    "git_commit": "6c0f081cfbc6b6cf874d60507b4aca6c8c417382",
+    "worktree_clean": false,
+    "note": "The repository already contained unrelated uncommitted S5/S7/S8/S9 and project-state work. This report binds the accepted S6 artifacts to the current working tree and does not claim a clean commit."
+  },
+  "acceptance_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m evaluation.preview_and_evaluation --scenario-id S6_background_merge_in --local-route R6_mainline_merge_approach --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 260 --traffic-density 0 --output-root outputs/s6_candidate_v3_memory_acceptance_20260814_v2 --evaluate",
+  "artifact_root": "outputs/s6_candidate_v3_memory_acceptance_20260814_v2/S6_background_merge_in",
+  "fixed_seeds": [17, 23, 31, 47, 59],
+  "summary": {
+    "episodes_passed": "5/5",
+    "native_joint_planning_steps": "1300/1300",
+    "collection_ready_steps": "1300/1300",
+    "persistable_episodes": "5/5",
+    "functional_success": "5/5",
+    "collision": false,
+    "out_of_road": false,
+    "planner_fallback_or_sample_rejection": false,
+    "target_gap_coverage": ["agent0-agent1", "agent1-agent2"],
+    "observed_front_bumper_gap_range_m": [9.474311994580344, 9.985991799485575],
+    "observed_rear_bumper_gap_range_m": [6.4289123789904545, 8.86898702697366],
+    "observed_arrival_delta_range_s": [0.1, 0.30000000000000004],
+    "observed_ttc_range_s": [2.0891629011982187, 3.3246217402201124],
+    "all_episodes_three_ego_physical_lane_change_after_cut_in": true,
+    "all_episodes_cut_in_actor_excluded_from_reassembly": true,
+    "all_episodes_ego_only_reassembly": true,
+    "all_episodes_formation_recovered": true,
+    "incidental_background_count_coverage": [3, 6],
+    "all_declared_incidental_background_actors_realized": true,
+    "incidental_background_policy": "lane_keeping_non_causal_non_interacting",
+    "unchanged_hard_background_gap_m": 5.0,
+    "unchanged_hard_platoon_gap_m": 7.0
+  },
+  "per_seed": {
+    "17": {
+      "target_gap_id": "agent0-agent1",
+      "merge_actor_speed_km_h": 24.064487683261337,
+      "observed_target_bumper_gaps_m": [9.976682013506881, 6.480647669090572],
+      "observed_arrival_delta_s": 0.30000000000000004,
+      "observed_conflict_ttc_s": 2.4906396827416364,
+      "ego_lane_change_direction": "left",
+      "ego_lane_change_steps": {"agent0": 130, "agent1": 131, "agent2": 127},
+      "formation_recovery_stable_steps": 48,
+      "incidental_background_count": 3,
+      "incidental_background_layout_seed": 2134645250
+    },
+    "23": {
+      "target_gap_id": "agent1-agent2",
+      "merge_actor_speed_km_h": 22.6,
+      "observed_target_bumper_gaps_m": [9.474311994580344, 7.68493143016286],
+      "observed_arrival_delta_s": 0.2,
+      "observed_conflict_ttc_s": 2.0891629011982187,
+      "ego_lane_change_direction": "right",
+      "ego_lane_change_steps": {"agent0": 108, "agent1": 101, "agent2": 98},
+      "formation_recovery_stable_steps": 106,
+      "incidental_background_count": 3,
+      "incidental_background_layout_seed": 732689855
+    },
+    "31": {
+      "target_gap_id": "agent0-agent1",
+      "merge_actor_speed_km_h": 26.83493684741312,
+      "observed_target_bumper_gaps_m": [9.92593449591044, 6.4289123789904545],
+      "observed_arrival_delta_s": 0.30000000000000004,
+      "observed_conflict_ttc_s": 3.3246217402201124,
+      "ego_lane_change_direction": "left",
+      "ego_lane_change_steps": {"agent0": 168, "agent1": 170, "agent2": 164},
+      "formation_recovery_stable_steps": 10,
+      "incidental_background_count": 6,
+      "incidental_background_layout_seed": 399634367
+    },
+    "47": {
+      "target_gap_id": "agent0-agent1",
+      "merge_actor_speed_km_h": 21.5,
+      "observed_target_bumper_gaps_m": [9.638537594195224, 7.352918515850306],
+      "observed_arrival_delta_s": 0.2,
+      "observed_conflict_ttc_s": 2.4915939790142136,
+      "ego_lane_change_direction": "left",
+      "ego_lane_change_steps": {"agent0": 136, "agent1": 140, "agent2": 138},
+      "formation_recovery_stable_steps": 40,
+      "incidental_background_count": 3,
+      "incidental_background_layout_seed": 1094236103
+    },
+    "59": {
+      "target_gap_id": "agent0-agent1",
+      "merge_actor_speed_km_h": 23.415148794211966,
+      "observed_target_bumper_gaps_m": [9.985991799485575, 8.86898702697366],
+      "observed_arrival_delta_s": 0.1,
+      "observed_conflict_ttc_s": 2.5890957377738495,
+      "ego_lane_change_direction": "left",
+      "ego_lane_change_steps": {"agent0": 142, "agent1": 144, "agent2": 145},
+      "formation_recovery_stable_steps": 35,
+      "incidental_background_count": 6,
+      "incidental_background_layout_seed": 1227361468
+    }
+  },
+  "artifact_validation": {
+    "topdown_videos": "5/5 decodable, 800x800, 260 frames",
+    "semantic_bev_videos": "5/5 decodable, 776x256, 260 frames",
+    "trajectory_npz": "5/5 valid zip containers; each has step=(260,), trajectories_world=(260,3,8,3), controls=(260,3,2)",
+    "visual_review": "Top-down contact sheets for all five seeds and a semantic-BEV contact sheet for seed 23 were reviewed at frames 0, 70, 105, 160 and 259. They show the designated merge, physical ego response, route progression and ego-only reassembly without frozen or black frames."
+  },
+  "artifact_sha256": {
+    "17": {
+      "expert_episode_json": "b334de6a1740bfdbe61ba05072576bedbecbed2b7eb41e87aea3d9dc93fb6261",
+      "topdown_mp4": "45724da454ec889652df8bbe9edf6ab6855a8c3789d84d77e4a3a108adb55b2d",
+      "semantic_bev_mp4": "116b8d5583bd37b22ac2b7a02dc1b8fd132f85f32dfbcbbbf06fc455f933cbf5",
+      "trajectory_npz": "a5d35dd4d303d8b2b8398207d684761f11fae7716e20cf5d932def59a28ed990"
+    },
+    "23": {
+      "expert_episode_json": "a9465b4989eed02caf702dd7fae4fe030b9cb5374e6dd7ebdbf0cd6de599af7c",
+      "topdown_mp4": "36471e7311c9f917a29ab5a1ff1beac7526d7cfa7ffb45555defb2b3f2dc48b9",
+      "semantic_bev_mp4": "744e4231fa6eb0ddb0f533e5ea9721bc1f330ec54c05e5a3aa6c81db119e0b97",
+      "trajectory_npz": "26a09f8cd46305033406a3df2597e6aa7b0f7529a063f09a27459bb69fd9239c"
+    },
+    "31": {
+      "expert_episode_json": "45b627960172b62e50ba3d9326ac822a406a710832c8d257f9a0258ecbcf2067",
+      "topdown_mp4": "2ffba86dab8d690982c7966416131603150d7e58e099654bcd046c15b239730b",
+      "semantic_bev_mp4": "ffcea33b1e63306eac288182de605018ec1e9b5d508d522ee969a7123fb478aa",
+      "trajectory_npz": "b9c561235379c4e1c7ed0a2fcc0263ba47a74111cee920b051df205b072034a3"
+    },
+    "47": {
+      "expert_episode_json": "e69a395b98a652c4d3cce1ea35268eb31337b2544b1f4b31aa378ab95b62aca4",
+      "topdown_mp4": "8be1d6b1594c8b7d94a020b8ac3f62dba87419e82a91faafbfbb738f6776f361",
+      "semantic_bev_mp4": "4868a0be62b0f32373d3f7dd14ba2fb872a1e0aada6305c21f05870a64c53b6b",
+      "trajectory_npz": "4111cbebb94bda428cd7558acfd887674182521a1d105f0fb615294ed0fa7114"
+    },
+    "59": {
+      "expert_episode_json": "e842e69285120512c32877c18695debcd09dee06a364ec6f57d2ac9da9a39bd8",
+      "topdown_mp4": "2750683703520e1baf427d20f4e847dc62c301745f2a7118d4329a51096317d0",
+      "semantic_bev_mp4": "493beb04f828f5a8b550858b82a3286da68a629908719e6e9026d2acb90881bc",
+      "trajectory_npz": "4d21e30b5e583f935d4d82daead600aac77eb4f9d3de538099785dbfb3bc076f"
+    }
+  },
+  "tests": {
+    "focused_regression": "57 passed, 271 deselected",
+    "test_interpreter": "/home/kong/anaconda3/envs/meta_drive/bin/python",
+    "initial_system_python_attempt": "invalid environment; collection failed because cv2, timm and shapely were unavailable, then the identical selection passed under the project interpreter"
+  },
+  "scope_boundary": {
+    "candidate_v3_s6_independent_gate_complete": true,
+    "combined_s5_s9_gate_complete": false,
+    "formal_contract_frozen": false,
+    "dataset_collection_authorized_by_this_report": false
+  }
+}

@@ -37,8 +37,10 @@ from expert_dataset.riskentry_sidecar_storage import (
 )
 from scenarios.definitions import SCENARIO_BY_ID, get_scenario_definition
 from scenarios.bev_round13_contract import (
+    FORMAL_V1_CONTRACT_ID,
     PRIMARY_S5_S9_SCENARIOS,
     primary_scenario_contract,
+    scenario_contract_for_id,
 )
 
 
@@ -52,13 +54,14 @@ TOP_LEVEL_KEYS = {
     "formal_pilot",
 }
 SECTION_KEYS = {
-    "dataset": {"name", "sidecar_name", "output_root"},
+    "dataset": {"name", "sidecar_name", "output_root", "scenario_contract"},
     "split": {"train_ratio", "val_ratio", "test_ratio", "seed"},
     "collection": {
         "target_joint_steps",
         "start_seed",
         "max_episodes",
         "max_episode_steps",
+        "scenario_max_episode_steps",
         "resume",
         "scenario_weights",
         "traffic_density_min",
@@ -89,6 +92,7 @@ class JointCollectionRunConfig:
     start_seed: int
     max_episodes: int
     max_episode_steps: int
+    scenario_max_episode_steps: Mapping[str, int]
     resume: bool
     scenario_weights: Mapping[str, float]
     traffic_density_min: float
@@ -99,6 +103,7 @@ class JointCollectionRunConfig:
     diagnostic_max_attempts_per_scenario: int = 0
     formal_scenario_quotas: Mapping[str, int] | None = None
     formal_max_attempts_per_scenario: int = 0
+    scenario_contract_id: str = FORMAL_V1_CONTRACT_ID
 
     def __post_init__(self) -> None:
         bundle_root = Path(self.bundle_root).expanduser().resolve()
@@ -119,6 +124,19 @@ class JointCollectionRunConfig:
             raise ValueError("collection.max_episodes must be non-negative")
         if self.max_episode_steps <= 0:
             raise ValueError("collection.max_episode_steps must be positive")
+        scenario_steps = {}
+        for scenario_id, value in self.scenario_max_episode_steps.items():
+            if scenario_id not in SCENARIO_BY_ID:
+                raise ValueError(
+                    f"unknown scenario in scenario_max_episode_steps: {scenario_id}"
+                )
+            if isinstance(value, bool) or int(value) <= 0:
+                raise ValueError(
+                    "collection.scenario_max_episode_steps values must be positive integers"
+                )
+            scenario_steps[str(scenario_id)] = int(value)
+        object.__setattr__(self, "scenario_max_episode_steps", scenario_steps)
+        scenario_contract_for_id(self.scenario_contract_id)
         if not self.scenario_weights:
             raise ValueError("collection.scenario_weights must not be empty")
         normalized = {}
@@ -247,8 +265,10 @@ class JointCollectionRunConfig:
         return fingerprint_payload(
             {
                 "collector": "joint_bev_rule_planner",
+                "scenario_contract": self.scenario_contract(),
                 "start_seed": self.start_seed,
                 "max_episode_steps": self.max_episode_steps,
+                "scenario_max_episode_steps": dict(self.scenario_max_episode_steps),
                 "scenario_weights": dict(self.scenario_weights),
                 "traffic_density_min": self.traffic_density_min,
                 "traffic_density_max": self.traffic_density_max,
@@ -266,7 +286,7 @@ class JointCollectionRunConfig:
                         "max_attempts_per_scenario": (
                             self.diagnostic_max_attempts_per_scenario
                         ),
-                        "scenario_contract": primary_scenario_contract(),
+                        "scenario_contract": self.scenario_contract(),
                     }
                 ),
                 "formal_pilot": (
@@ -277,10 +297,20 @@ class JointCollectionRunConfig:
                         "max_attempts_per_scenario": (
                             self.formal_max_attempts_per_scenario
                         ),
-                        "scenario_contract": primary_scenario_contract(),
+                        "scenario_contract": self.scenario_contract(),
                     }
                 ),
             }
+        )
+
+    def scenario_contract(self) -> dict[str, object]:
+        return scenario_contract_for_id(self.scenario_contract_id)
+
+    def episode_step_limit(self, scenario_id: str) -> int:
+        return int(
+            self.scenario_max_episode_steps.get(
+                str(scenario_id), self.max_episode_steps
+            )
         )
 
 
@@ -358,6 +388,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
     )
     if not isinstance(scenario_weights, Mapping):
         raise ValueError("collection.scenario_weights must be a mapping")
+    scenario_steps = collection.get("scenario_max_episode_steps", {})
+    if not isinstance(scenario_steps, Mapping):
+        raise ValueError("collection.scenario_max_episode_steps must be a mapping")
     resume = _required(collection, "collection", "resume")
     if not isinstance(resume, bool):
         raise ValueError("collection.resume must be a boolean")
@@ -436,6 +469,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
         max_episode_steps=int(
             _required(collection, "collection", "max_episode_steps")
         ),
+        scenario_max_episode_steps={
+            str(name): int(value) for name, value in scenario_steps.items()
+        },
         resume=resume,
         scenario_weights={
             str(name): float(weight) for name, weight in scenario_weights.items()
@@ -452,6 +488,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
         diagnostic_max_attempts_per_scenario=diagnostic_max_attempts,
         formal_scenario_quotas=formal_quotas,
         formal_max_attempts_per_scenario=formal_max_attempts,
+        scenario_contract_id=str(
+            dataset.get("scenario_contract", FORMAL_V1_CONTRACT_ID)
+        ),
     )
 
 
@@ -835,6 +874,7 @@ def _sidecar_start(
     rollout,
     base_dataset_fingerprint: str,
     decision_dt_s: float,
+    scenario_contract_sha256: str | None = None,
 ) -> SidecarEpisodeStart:
     summary = dict(rollout.scenario_summary)
     return SidecarEpisodeStart(
@@ -846,7 +886,11 @@ def _sidecar_start(
         decision_dt_s=decision_dt_s,
         base_dataset_fingerprint=base_dataset_fingerprint,
         scenario_parameters={
-            "scenario_contract_sha256": primary_scenario_contract()["sha256"],
+            "scenario_contract_sha256": (
+                scenario_contract_for_id(FORMAL_V1_CONTRACT_ID)["sha256"]
+                if scenario_contract_sha256 is None
+                else str(scenario_contract_sha256)
+            ),
             "traffic_density": spec.traffic_density,
             "initial_speed_km_h": spec.initial_speed_km_h,
             "scenario_trigger_step": summary.get("scenario_trigger_step"),
@@ -880,6 +924,8 @@ def _prepare_rollout_sidecar(
 
 def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
     wall_start = time.perf_counter()
+    scenario_contract = config.scenario_contract()
+    scenario_contract_sha256 = str(scenario_contract["sha256"])
     base_fingerprint = config.immutable_fingerprint()
     effective_resume = _effective_resume_mode(config)
     with JointBEVDatasetStore(
@@ -897,7 +943,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
         sidecar_directory=config.sidecar_root.name,
         base_dataset_fingerprint=base_fingerprint,
         sidecar_dataset_fingerprint=sidecar_store.dataset_fingerprint,
-        scenario_contract_sha256=primary_scenario_contract()["sha256"],
+        scenario_contract_sha256=scenario_contract_sha256,
         split_seed=config.split_config.seed,
         resume=effective_resume,
     ) as bundle:
@@ -932,9 +978,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         name: sum(row.scenario_id == name for row in bundle.rows)
                         for name in quotas
                     },
-                    "scenario_contract_sha256": primary_scenario_contract()[
-                        "sha256"
-                    ],
+                    "scenario_contract_sha256": scenario_contract_sha256,
                 }
             print("[INFO] target already satisfied; no simulator started", flush=True)
             return summary
@@ -1051,15 +1095,20 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 if env is not None:
                     env.close()
                 episode_env_config = dict(config.env_config)
+                episode_step_limit = config.episode_step_limit(spec.scenario_id)
                 episode_env_config.update(
-                    {"start_seed": int(spec.spawn_seed), "num_scenarios": 1}
+                    {
+                        "start_seed": int(spec.spawn_seed),
+                        "num_scenarios": 1,
+                        "horizon": episode_step_limit,
+                    }
                 )
                 env = SensorlessJointBEVPlatoonEnv(episode_env_config)
                 _configure_episode(env, spec)
                 try:
                     rollout = collect_joint_episode(
                         env,
-                        max_steps=config.max_episode_steps,
+                        max_steps=episode_step_limit,
                         reset_seed=spec.spawn_seed,
                     )
                 except JointCollectionError as exc:
@@ -1144,6 +1193,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             rollout=rollout,
                             base_dataset_fingerprint=base_fingerprint,
                             decision_dt_s=decision_dt_s,
+                            scenario_contract_sha256=scenario_contract_sha256,
                         ),
                         rollout=rollout,
                         base_sample_step_indices=mapping,
@@ -1231,9 +1281,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                                 formal_quotas is not None
                                 and len(samples_to_store) < len(rollout.samples)
                             ),
-                            "scenario_contract_sha256": (
-                                primary_scenario_contract()["sha256"]
-                            ),
+                            "scenario_contract_sha256": scenario_contract_sha256,
                         },
                     )
                 else:
@@ -1297,9 +1345,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 "scenario_quotas": diagnostic_quotas,
                 "scenario_counts": diagnostic_counts,
                 "attempts": diagnostic_attempts,
-                "scenario_contract_sha256": primary_scenario_contract()[
-                    "sha256"
-                ],
+                "scenario_contract_sha256": scenario_contract_sha256,
             }
             if diagnostic_counts != diagnostic_quotas:
                 raise JointCollectionError(
@@ -1311,9 +1357,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 "scenario_quotas": formal_quotas,
                 "scenario_counts": formal_counts,
                 "attempts": formal_attempts,
-                "scenario_contract_sha256": primary_scenario_contract()[
-                    "sha256"
-                ],
+                "scenario_contract_sha256": scenario_contract_sha256,
             }
             if formal_counts != formal_quotas:
                 raise JointCollectionError(

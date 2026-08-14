@@ -511,12 +511,23 @@ def test_s9_committed_preflight_keeps_tracking_margin_above_hard_gate():
 
     assert executor._scenario_preflight_background_gap_m(
         "S9_narrow_channel_negotiation", bypass_keep
+    ) == pytest.approx(planner.background_safe_gap_m)
+    env = SimpleNamespace(
+        _scenario_orchestrator=SimpleNamespace(
+            _route_completion={"all_agents_changed_lane": True}
+        )
+    )
+    assert executor._scenario_preflight_background_gap_m(
+        "S9_narrow_channel_negotiation", bypass_keep, env=env
     ) == pytest.approx(15.0)
     assert executor._scenario_preflight_background_gap_m(
         "S9_narrow_channel_negotiation", source_lane_change
     ) == pytest.approx(planner.background_safe_gap_m)
     assert executor._scenario_preflight_background_gap_m(
         "S5_hard_brake_lead", bypass_keep
+    ) == pytest.approx(planner.background_safe_gap_m)
+    assert executor._scenario_preflight_background_gap_m(
+        "S6_background_merge_in", source_lane_change
     ) == pytest.approx(planner.background_safe_gap_m)
     assert planner.background_safe_gap_m == pytest.approx(5.0)
 
@@ -1118,7 +1129,14 @@ def test_executor_reuses_identical_background_prediction_time_grid(monkeypatch):
     executor = JointTrajectoryExecutor(planner)
     calls = []
 
-    def fake_predictions(env, vehicle, times, *, include_platoon):
+    def fake_predictions(
+        env,
+        vehicle,
+        times,
+        *,
+        include_platoon,
+        include_policy_branches=False,
+    ):
         calls.append((env, vehicle, np.asarray(times).copy(), include_platoon))
         return [
             (
@@ -1830,7 +1848,7 @@ def test_s8_uses_probe_justified_longitudinal_profile_resolution_through_connect
         action=1,
         accelerations=generic,
     )
-    assert {-7.0, -5.0, -3.0, -1.0}.issubset(set(s8))
+    assert {-7.0, -5.0, -3.0, -1.0, 4.0, 5.0}.issubset(set(s8))
     assert planner._scenario_acceleration_durations(
         scenario_id="S8_ego_exit_to_ramp",
         action=1,
@@ -1863,6 +1881,28 @@ def test_s8_uses_probe_justified_longitudinal_profile_resolution_through_connect
     assert planner._scenario_candidate_pool_limit(
         scenario_id="S8_ego_exit_to_ramp", action=0
     ) == 24
+    s8_env = SimpleNamespace(
+        _scenario_orchestrator=SimpleNamespace(
+            _route_completion={"all_agents_entered_exit_side_lane": True}
+        )
+    )
+    assert planner._scenario_formation_penalty_multiplier(
+        env=s8_env,
+        scenario_id="S8_ego_exit_to_ramp",
+    ) == pytest.approx(12.0)
+    assert planner._scenario_formation_penalty_multiplier(
+        env=s8_env,
+        scenario_id="S7_ego_merge_from_ramp",
+    ) == pytest.approx(1.0)
+    assert planner._scenario_trackability_score_penalty(
+        scenario_id="S8_ego_exit_to_ramp",
+        action=1,
+        max_yaw_rate_rad_s=0.9,
+    ) > planner._scenario_trackability_score_penalty(
+        scenario_id="S8_ego_exit_to_ramp",
+        action=1,
+        max_yaw_rate_rad_s=0.2,
+    )
     assert planner._scenario_longitudinal_profile_limit(
         scenario_id="S7_ramp_merge", action=1
     ) == 6
@@ -1888,6 +1928,25 @@ def test_dense_dynamics_rejects_s8_style_compressed_lane_change():
     assert not audit.valid
     assert "dense_lateral_acceleration_limit" in audit.violations
     assert audit.max_lateral_acceleration_mps2 > 6.0
+
+
+def test_execution_chain_stops_before_disconnected_s8_exit_branch():
+    connected = S8HardcodedTargetFakeLane("A", "B", 1, 0.0)
+    successor = S8HardcodedTargetFakeLane("B", "C", 1, 0.0)
+    disconnected_exit = S8HardcodedTargetFakeLane("C", "D", 0, 0.0)
+    connected.length = successor.length = disconnected_exit.length = 20.0
+    successor.position = lambda longitudinal, lateral: np.asarray(
+        [20.0 + longitudinal, lateral], dtype=np.float32
+    )
+    disconnected_exit.position = lambda longitudinal, lateral: np.asarray(
+        [100.0 + longitudinal, lateral], dtype=np.float32
+    )
+
+    prefix = PlatoonNormalPlanner._connected_execution_prefix(
+        [connected, successor, disconnected_exit]
+    )
+
+    assert prefix == [connected, successor]
 
 
 def test_dense_dynamics_accepts_longer_delayed_lane_change():
@@ -2350,7 +2409,7 @@ def test_s9_trackability_penalty_ranks_lower_yaw_rate_lane_change_first():
         scenario_id="S8_ego_exit_to_ramp",
         action=-1,
         max_yaw_rate_rad_s=0.41,
-    ) == pytest.approx(0.0)
+    ) == pytest.approx(0.82)
     assert planner._scenario_trackability_score_penalty(
         scenario_id="S9_narrow_channel_negotiation",
         action=0,
@@ -2430,7 +2489,7 @@ def test_s9_active_manoeuvre_rejects_stopped_keep_profile():
 def test_s9_candidate_acceleration_grid_contains_rolling_brake_profiles():
     planner = PlatoonNormalPlanner()
 
-    assert planner.S9_LANE_CHANGE_DURATIONS_S == (4.5,)
+    assert planner.S9_LANE_CHANGE_DURATIONS_S == (3.25,)
 
     accelerations = planner._scenario_candidate_accelerations(
         scenario_id="S9_narrow_channel_negotiation",
@@ -2459,6 +2518,12 @@ def test_s9_lane_change_start_delays_follow_platoon_order():
         PlatoonNormalPlanner._s9_platoon_lane_change_start_delay(env, vehicle)
         for vehicle in vehicles
     ] == [0.0, 1.0, 2.0]
+    assert [
+        PlatoonNormalPlanner._s9_platoon_lane_change_start_delay(
+            env, vehicle, action=1
+        )
+        for vehicle in vehicles
+    ] == [2.0, 1.0, 0.0]
 
 
 def test_s8_lane_change_start_delays_follow_platoon_order_on_control_grid():
@@ -2470,7 +2535,11 @@ def test_s8_lane_change_start_delays_follow_platoon_order_on_control_grid():
     assert [
         PlatoonNormalPlanner._s8_platoon_lane_change_start_delay(env, vehicle)
         for vehicle in vehicles
-    ] == [0.0, 0.2, 0.4]
+    ] == [0.0, 0.4, 0.8]
+
+
+def test_s8_curved_exit_tracking_heading_limit_matches_verified_curve_limit():
+    assert PlatoonNormalPlanner.S8_TRACKING_HEADING_LIMIT_RAD == pytest.approx(0.18)
 
 
 def test_s9_post_bypass_keep_prefers_recovery_speed():
@@ -2508,3 +2577,26 @@ def test_s9_post_bypass_keep_prefers_recovery_speed():
         acceleration_duration_s=1.0,
         recovery_active=True,
     ) == pytest.approx(80.0)
+
+
+def test_s7_speed_synchronization_penalty_activates_only_after_gap_recovery():
+    planner = PlatoonNormalPlanner()
+
+    assert planner._s7_speed_synchronization_penalty(
+        scenario_id="S7_ego_merge_from_ramp",
+        action=0,
+        terminal_speed_mps=6.0,
+        target_speed_mps=4.0,
+        synchronization_active=True,
+    ) == pytest.approx(200.0)
+    assert planner._s7_speed_synchronization_penalty(
+        scenario_id="S7_ego_merge_from_ramp",
+        action=0,
+        terminal_speed_mps=6.0,
+        target_speed_mps=4.0,
+        synchronization_active=False,
+    ) == 0.0
+
+
+def test_s6_lane_change_uses_short_route_safe_durations():
+    assert PlatoonNormalPlanner.S6_LANE_CHANGE_DURATIONS_S == (2.5, 3.0)

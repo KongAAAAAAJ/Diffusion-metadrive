@@ -1,23 +1,29 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-13T16:03:23+08:00",
+  "updated_at": "2026-08-14T10:43:00+08:00",
   "repository": {
     "branch": "s5-s9-scenario-revision",
-    "git_commit": "3e15c2a5d0297a2dd0bfb62e8374df89d9e1fe8d",
-    "worktree_clean_before_this_update": true,
-    "project_state_update_committed": false
+    "git_commit": "6c0f081cfbc6b6cf874d60507b4aca6c8c417382",
+    "worktree_clean_before_this_update": false,
+    "project_state_update_committed": false,
+    "uncommitted_plan_update_present": true,
+    "uncommitted_s7_implementation_present": true,
+    "uncommitted_s8_implementation_present": true,
+    "uncommitted_s6_definition_update_present": true,
+    "uncommitted_s9_definition_update_present": true,
+    "uncommitted_s9_implementation_present": true
   },
   "current": {
-    "phase": "formal_training",
-    "round": "revised-stage1-stage2-dual-domain-plan",
-    "status": "formal_s5_s9_50k_eligible_and_stage1_a_ready",
-    "active_hard_gate": "stage1_a_formal_training"
+    "phase": "candidate_v3_data_refresh_stopped",
+    "round": "candidate-v3-pilot-quality-merge-formal50k-refresh",
+    "status": "candidate_v3_10k_collection_cancelled_by_user_before_start",
+    "active_hard_gate": "no_collection_authorized_wait_for_user_direction"
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
       "branch": "s5-s9-scenario-revision",
-      "status": "candidate_v3_implemented_pending_all_s5_s9_fixed_five_seed_revalidation",
+      "status": "candidate_v3_s6_s7_s8_s9_accepted_s5_and_combined_review_pending",
       "independent_scenario_scope": [
         "S5_hard_brake_lead",
         "S6_background_merge_in",
@@ -26,15 +32,115 @@
         "S9_narrow_channel_negotiation"
       ],
       "scenario_gate_order": "independent_any_order",
-      "active_task": "validate_candidate_v3_s5_s9_fixed_five_seed_gates",
-      "active_hard_gate": "complete_new_s5_s9_fixed_five_seed_physical_safety_video_and_artifact_validation",
+      "active_task": "complete_remaining_candidate_v3_s5_gate_and_combined_s5_s9_review",
+      "active_hard_gate": "complete_remaining_s5_and_combined_contract_validation_without_reopening_accepted_s6_s7_s8_s9_gates",
       "formal_contract_activated": false,
       "formal_v1_dataset_or_checkpoint_metadata_changed": false,
-      "evidence_status": "candidate_v3_unit_regression_and_s8_seed17_40_step_physical_smoke_passed_previous_candidate_v2_acceptances_superseded",
-      "completed_scenario_gates": {},
+      "evidence_status": "s6_explicit_three_to_six_noncausal_background_fixed_five_seed_gate_passed_s7_s8_s9_gates_passed_combined_gate_pending",
+      "completed_scenario_gates": {
+        "S6_background_merge_in": {
+          "implementation_complete": true,
+          "fixed_seeds": [17, 23, 31, 47, 59],
+          "episodes_passed": "5/5",
+          "native_joint_planning_steps": "1300/1300",
+          "collection_ready_steps": "1300/1300",
+          "all_episodes_persistable": true,
+          "target_gap_coverage": ["agent0-agent1", "agent1-agent2"],
+          "all_episodes_three_ego_physical_lane_change_after_cut_in": true,
+          "all_episodes_cut_in_actor_excluded": true,
+          "all_episodes_ego_only_reassembly": true,
+          "all_formation_recovery_events_observed": true,
+          "incidental_background_count_coverage": [3, 6],
+          "all_declared_incidental_background_actors_realized": true,
+          "collision": false,
+          "out_of_road": false,
+          "planner_fallback_or_sample_rejection": false,
+          "topdown_video_artifacts": "5/5 decodable and visually reviewed, 260 frames",
+          "semantic_bev_video_artifacts": "5/5 decodable, 260 frames",
+          "trajectory_artifacts": "5/5 valid, 260 steps",
+          "fixed_five_seed_gate_passed": true,
+          "report": "evaluation/S6_CANDIDATE_V3_MEMORY_ACCEPTANCE_REPORT.json",
+          "artifact_root": "outputs/s6_candidate_v3_memory_acceptance_20260814_v2/S6_background_merge_in"
+        },
+        "S8_ego_exit_to_ramp": {
+          "implementation_complete": true,
+          "fixed_seeds": [17, 23, 31, 47, 59],
+          "episodes_passed": "5/5",
+          "native_joint_planning_steps": "1000/1000",
+          "all_episodes_persistable": true,
+          "target_gap_coverage": ["agent0-agent1", "agent1-agent2"],
+          "exit_constraint_actor_count_coverage": [1, 2, 3],
+          "behavior_class_count": 3,
+          "all_episodes_same_actor_front_behind_split": true,
+          "all_episodes_non_simultaneous_right_completion": true,
+          "all_episodes_diverge_connector_and_ramp_keep": true,
+          "all_formation_recovery_events_observed": true,
+          "collision": false,
+          "out_of_road": false,
+          "planner_fallback_or_sample_rejection": false,
+          "topdown_video_artifacts": "5/5 non-empty",
+          "semantic_bev_video_artifacts": "5/5 non-empty",
+          "trajectory_artifacts": "5/5 non-empty",
+          "fixed_five_seed_gate_passed": true,
+          "report": "evaluation/S8_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+          "artifact_root": "outputs/s8_candidate_revision_5seed_ACCEPTED_FINAL_20260814/S8_ego_exit_to_ramp"
+        },
+        "S7_ego_merge_from_ramp": {
+          "implementation_complete": true,
+          "fixed_seeds": [17, 23, 31, 47, 59],
+          "episodes_passed": "5/5",
+          "native_joint_planning_steps": "1000/1000",
+          "parallel_constraint_count_coverage": [1, 2, 3],
+          "behavior_coverage": ["pass_first", "yield_then_merge"],
+          "all_physical_splits_observed": true,
+          "all_non_simultaneous_entries": true,
+          "all_formation_recovery_events_observed": true,
+          "collision": false,
+          "out_of_road": false,
+          "planner_fallback": false,
+          "fixed_five_seed_gate_passed": true,
+          "report": "evaluation/S7_CANDIDATE_V3_PARALLEL_CONSTRAINT_IMPLEMENTATION_REPORT.json"
+        },
+        "S9_narrow_channel_negotiation": {
+          "implementation_complete": true,
+          "fixed_seeds": [17, 23, 31, 47, 59],
+          "episodes_passed": "5/5",
+          "native_joint_planning_steps": "4000/4000",
+          "all_episodes_persistable": true,
+          "all_episodes_designated_actor_initial_region_valid": true,
+          "all_episodes_same_actor_front_behind_split": true,
+          "all_episodes_non_simultaneous_left_completion": true,
+          "all_episodes_cleared_narrow_section_before_return": true,
+          "all_episodes_post_channel_right_return": true,
+          "all_formation_recovery_events_observed": true,
+          "incidental_background_count_coverage": [3, 4, 5, 6],
+          "collision": false,
+          "out_of_road": false,
+          "planner_fallback_or_sample_rejection": false,
+          "topdown_video_artifacts": "5/5 non-empty and visually reviewed",
+          "semantic_bev_video_artifacts": "5/5 non-empty and visually reviewed",
+          "trajectory_artifacts": "5/5 non-empty",
+          "fixed_five_seed_gate_passed": true,
+          "report": "evaluation/S9_CANDIDATE_V3_SPLIT_RETURN_IMPLEMENTATION_REPORT.json"
+        }
+      },
+      "in_progress_scenario_gates": {},
+      "latest_combined_evaluation_attempt": {
+        "status": "stopped_at_s6_seed17_functional_hard_gate_failure",
+        "S5_profiles_and_seeds_passed": "15/15",
+        "S5_native_joint_planning_steps": "3000/3000",
+        "S5_topdown_and_semantic_videos": "15/15 each, 200 frames",
+        "S6_seed17_native_joint_planning_steps": "200/200",
+        "S6_seed17_failure_reason": "scenario_functional_gate_failed",
+        "S6_seed17_video_artifacts": "topdown and semantic-BEV non-empty, decodable, 200 frames",
+        "S7_S8_S9_executed_in_this_attempt": false,
+        "report": "evaluation/S5_S9_CANDIDATE_V3_5SEED_VIDEO_EVAL_20260814_REPORT.json",
+        "artifact_root": "outputs/s5_s9_candidate_v3_5seed_video_eval_20260814"
+      },
       "historical_candidate_v2_completed_scenario_gates": {
         "S6_background_merge_in": {
           "passed": true,
+          "superseded_by": "candidate_v3_s6_explicit_three_to_six_noncausal_incidental_background_definition",
           "fixed_seeds": [
             17,
             23,
@@ -92,6 +198,7 @@
         },
         "S9_narrow_channel_negotiation": {
           "passed": true,
+          "superseded_by": "candidate_v3_s9_designated_split_actor_and_post_channel_return_definition",
           "fixed_seeds": [
             17,
             23,
@@ -111,15 +218,44 @@
           "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s9_candidate_memory_acceptance_20260813_v2/S9_narrow_channel_negotiation"
         }
       }
+    },
+    "candidate_v3_data_refresh": {
+      "status": "cancelled_by_user_before_10k_start",
+      "active_task": null,
+      "pilot_target_joint_steps": 10000,
+      "pilot_per_scenario_quota": 2000,
+      "pilot_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
+      "pilot_collection_started": false,
+      "pilot_collection_cancelled_by_user": true,
+      "pilot_quality_gate_passed": false,
+      "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+      "exact_path_smoke_passed": true,
+      "exact_path_smoke_attempted_episodes": 6,
+      "exact_path_smoke_base_samples": 5,
+      "exact_path_smoke_sidecar_only_episodes": 1,
+      "merge_target": "BEV",
+      "merge_authorized_after_quality_pass": true,
+      "merge_completed": false,
+      "new_formal_50k_collection_started": false,
+      "new_formal_50k_eligible": false
     }
   },
   "authorization": {
     "riskentry_format_accepted_by_downstream": true,
     "formal_collection_authorized_by_user": true,
     "recorded_from_user_confirmation_on": "2026-08-10",
-    "note": "Authorization follows the corrected formal-path pilot reviewed by the downstream RiskEntry project."
+    "candidate_v3_data_refresh_authorized_by_user": true,
+    "candidate_v3_data_refresh_recorded_on": "2026-08-13",
+    "candidate_v3_s6_background_enrichment_authorized_by_user": true,
+    "candidate_v3_s6_background_enrichment_recorded_on": "2026-08-14",
+    "note": "The latest user instruction explicitly adds three to six non-causal, non-interacting incidental background actors to S6 while preserving every existing S6 functional and safety requirement. This definition update does not authorize collection and remains non-formal until fresh S6 and combined candidate-v3 gates pass."
   },
   "source_of_truth": {
+    "candidate_v3_s5_s9_five_seed_video_evaluation_attempt": {
+      "path": "evaluation/S5_S9_CANDIDATE_V3_5SEED_VIDEO_EVAL_20260814_REPORT.json",
+      "sha256": "f5b24ecb58bdb45925dcefc51106d32937bcf3d8d1e05fe09ccfec387710668b",
+      "role": "Records the 2026-08-14 combined candidate-v3 evaluation attempt: S5 passed all 15 profile-seed episodes with 30 videos, then S6 seed 17 failed the unchanged physical cut-in and reassembly gate, so later scenarios were not executed in this attempt"
+    },
     "tmp_output_cleanup_report": {
       "path": "evaluation/TMP_OUTPUT_CLEANUP_REPORT.json",
       "role": "Records the explicitly authorized permanent cleanup of 725 unreferenced project output directories under /tmp and preservation of active acceptance evidence"
@@ -130,13 +266,47 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "5fdc3ea83cc8aaff1647496f228c44aa965abde7ac974fc5590db6a5694a48de",
-      "role": "Freezes the revised Stage1-A-only mainline, the GRPO-Open versus GRPO-Exec reward-domain ablation, the three-model final matrix, and the ordered formal gates"
+      "sha256": "46837e0f12119745e56470afaf36bffc5203b453739c6afd57655b61ab0ad6f4",
+      "role": "Freezes the user-authorized balanced 10k diagnostic collection after S7/S9 acceptance, preserves remaining all-scenario and quality gates before merge, and retains the later isolated formal-50k mainline"
+    },
+    "candidate_v3_data_refresh_plan_update_report": {
+      "path": "evaluation/CANDIDATE_V3_DATA_REFRESH_PLAN_UPDATE_REPORT.json",
+      "sha256": "c44bf1b52d8fcb6278d2378504947becadb8bdeef283ae980cde91d50aea5869",
+      "role": "Records the user-authorized pilot, data-quality, merge, new 50k, and training-order revision plus its hard boundaries"
+    },
+    "candidate_v3_diagnostic10k_collection_report": {
+      "path": "evaluation/CANDIDATE_V3_DIAGNOSTIC10K_COLLECTION_REPORT.json",
+      "role": "Records the user-authorized 10k target, candidate-v3 contract hash, per-scenario horizons, passed exact-path smoke, strict verifier evidence, and non-formal eligibility boundary"
     },
     "candidate_s5_s9_functional_scenario_memory": {
       "path": "docs/project/s5_s9_functional_scenario_design.json",
-      "sha256": "c6564f0669de201041384ad97799c94e3d0a586f4eb254eb6eca1c78e8b4e455",
-      "role": "Candidate-v3 source of truth: S8 split-actor front/behind and asynchronous lane-change semantics plus exactly 3-6 incidental background actors in every S5-S9 episode; full fixed-five-seed acceptance remains pending"
+      "sha256": "771a61e1b7241abb46dbcade7c53915ddd0f623059375c7a19ae89ca1c5fb330",
+      "role": "Candidate-v3 source of truth: S6 explicitly requires three to six separately managed non-causal incidental background actors and its fresh fixed-five-seed physical, safety, actor, video and artifact gate has passed; combined S5-S9 acceptance remains pending"
+    },
+    "candidate_v3_s6_memory_acceptance_report": {
+      "path": "evaluation/S6_CANDIDATE_V3_MEMORY_ACCEPTANCE_REPORT.json",
+      "sha256": "c82576236dcf53f05a3ef848f4e660a8dd97f0758ac872b5707db7ddf9cf7b4b",
+      "role": "Records the accepted candidate-v3 S6 fixed seeds 17/23/31/47/59, 1300/1300 native and collection-ready steps, both target gaps, physical three-ego lane changes, ego-only reassembly, exact 3-6 incidental actor realization, and complete video/trajectory evidence"
+    },
+    "candidate_v3_s6_background_enrichment_definition_update_report": {
+      "path": "evaluation/CANDIDATE_V3_S6_BACKGROUND_ENRICHMENT_DEFINITION_UPDATE_REPORT.json",
+      "sha256": "428cb949c7a23738cb987d2cb0a5dd1204c5d53f1f49676c8d235530a122d093",
+      "role": "Records the user-authorized S6 definition update, existing runtime support, formal-v1 compatibility boundary, focused 18-test result, and pending fresh fixed-five-seed S6 acceptance gate"
+    },
+    "candidate_v3_s7_parallel_constraint_implementation_report": {
+      "path": "evaluation/S7_CANDIDATE_V3_PARALLEL_CONSTRAINT_IMPLEMENTATION_REPORT.json",
+      "sha256": "a862eaa029f12f8c223ae372cb60cf5e335d2df00d30cd3442f9c12ceb72b3f9",
+      "role": "Records the S7 causal 1-3 vehicle implementation, temporary unlock and asynchronous merge semantics, 254-test regression, and passed five-seed 1000/1000 closed-loop acceptance"
+    },
+    "candidate_v3_s9_definition_update_report": {
+      "path": "evaluation/CANDIDATE_V3_S9_DEFINITION_UPDATE_REPORT.json",
+      "sha256": "cd8dcf80028a6c2a1452ca7ee2c61c1f9bf62deda4e3209ac4888c012ba5dd58",
+      "role": "Records the user-authorized S9 definition and its supersession by the completed fixed-five-seed implementation gate"
+    },
+    "candidate_v3_s9_split_return_implementation_report": {
+      "path": "evaluation/S9_CANDIDATE_V3_SPLIT_RETURN_IMPLEMENTATION_REPORT.json",
+      "sha256": "0a1575b92f48d1a974b9f00ea59520e66dd2e0e57ac239bd6377bf701b6dc849",
+      "role": "Records the implemented S9 designated split actor, temporary dissolution, same-actor front/behind split, narrow traversal, delayed RIGHT return, reassembly, and passed 5/5 4000/4000 closed-loop gate"
     },
     "candidate_s5_s9_v3_definition_implementation_report": {
       "path": "evaluation/S5_S9_CANDIDATE_V3_DEFINITION_IMPLEMENTATION_REPORT.json",
@@ -155,13 +325,13 @@
     },
     "s8_candidate_memory_acceptance_report": {
       "path": "evaluation/S8_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
-      "sha256": "f4ee905a71dfbf33deeb5457cd87db3967e8fb868124304d0005573f42a5811f",
-      "role": "Historical candidate-v2 evidence, superseded for candidate-v3 by the stronger same-actor front/behind split gate, cross-seed behavior diversity gate, and mandatory incidental background actors"
+      "sha256": "b41d61d3eef73eef03f99bb2c278b1a9c5a55b93e6869f29b3a1125f24853f89",
+      "role": "Candidate-v3 S8 acceptance: fixed seeds 17/23/31/47/59 passed 1000/1000 native joint steps, same-actor split, three behavior classes, ramp KEEP and reassembly, with 5 top-down, 5 semantic-BEV, and 5 trajectory artifacts"
     },
     "s9_candidate_memory_acceptance_report": {
       "path": "evaluation/S9_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
       "sha256": "8ea9b0302bbb3f494d563f808b1c0c3ec252d444b84a678b95b5ecf044edab64",
-      "role": "Historical candidate-v2 evidence, superseded for candidate-v3 by the new mandatory 3-6 incidental background-actor contract"
+      "role": "Historical candidate-v2 evidence, superseded by the candidate-v3 designated left split actor, required same-actor front/behind ego split, post-channel return and reassembly, and mandatory 3-6 incidental background-actor contract"
     },
     "candidate_s5_s9_implementation_report": {
       "path": "evaluation/S5_S9_CANDIDATE_REVISION_IMPLEMENTATION_REPORT.md",
@@ -272,7 +442,40 @@
       "sidecar_dataset_fingerprint": "1f2b31adcb4019247d5ae9e9c1f2e7fa0dce1ed9252023f3b14d484f1635cee5",
       "bundle_index_sha256": "a754561f95e1e40399dde22e5780472a64f127725aab228972441b7ac867306a",
       "riskentry_eligible_windows": 31225,
-      "blocker": null
+      "blocker": null,
+      "status": "preserved_historical_v1",
+      "eligible_under_original_contract": true,
+      "selected_for_next_stage1_run": false,
+      "preservation_policy": "preserve_without_overwrite_resume_relabel_or_mixing_with_candidate_v3"
+    },
+    "candidate_v3_balanced_diagnostic10k": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
+      "target_joint_steps": 10000,
+      "per_scenario_quota": 2000,
+      "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+      "collection_complete": false,
+      "diffusion_verifier_passed": false,
+      "riskentry_verifier_passed": false,
+      "quality_gate_passed": false,
+      "eligible_for_formal_training": false,
+      "reuse_in_formal_50k": false,
+      "blocker": "cancelled_by_user_before_collection_start"
+    },
+    "candidate_v3_formal_s5_s9_50k": {
+      "root": null,
+      "target_joint_steps": 50000,
+      "per_scenario_quota": 10000,
+      "source_branch": "BEV",
+      "source_merge_commit": null,
+      "scenario_contract_sha256": null,
+      "collection_complete": false,
+      "full_verifier_passed": false,
+      "quality_gate_passed": false,
+      "eligible_for_formal_training": false,
+      "base_dataset_fingerprint": null,
+      "sidecar_dataset_fingerprint": null,
+      "bundle_index_sha256": null,
+      "blocker": "remaining_candidate_v3_scenario_combined_gate_10k_quality_gate_and_bev_merge_pending"
     },
     "collection_performance_pilot": {
       "serial_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v1",
@@ -297,7 +500,8 @@
     "stage1_a_formal": {
       "available": false,
       "eligible": false,
-      "required_by_current_plan": true
+      "required_by_current_plan": true,
+      "blocked_until": "candidate_v3_formal_s5_s9_50k_is_complete_verified_quality_accepted_and_fingerprinted"
     },
     "stage1_b_formal": {
       "available": false,
@@ -323,24 +527,39 @@
   },
   "blockers": [],
   "future_hard_gates": [
+    "The accepted candidate-v3 S6/S7/S8/S9 evidence must remain unchanged while the remaining S5 and combined S5-S9 contract gates are completed.",
+    "The user-authorized candidate-v3 10k diagnostic collection requires the accepted S7/S9 gates, collection-time scenario hash binding, and exact-path smoke.",
+    "Merge into BEV and the new formal 50k collection still require remaining S5 plus combined-contract acceptance, both complete 10k verifiers, and the pre-frozen data-quality gate to pass.",
+    "Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen."
   ],
   "next_actions": [
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
-    "Train Stage1-A only with run_mode=formal and bind it to base dataset fingerprint 58ae5f56ba3452b86baf42de77acad6033d8542cd9ce2284ef505572ba469144.",
+    "Preserve the accepted candidate-v3 S6 fixed-five-seed actor, trajectory, and video evidence without rerunning or relabeling it unless the S6 contract or implementation changes.",
+    "Bind the collector and both strict verifiers to the exact collection-time candidate-v3 hash and configure the longer S9 horizon.",
+    "Freeze the balanced 10k diagnostic config with 2k joint steps per S5-S9 scenario, then pass an isolated exact-path smoke.",
+    "Collect the 10k diagnostic dataset into an isolated root and run both complete verifiers; record fingerprints and the non-formal eligibility boundary.",
+    "Complete candidate-v3 S5 and combined-contract acceptance plus the 10k quality audit.",
+    "Only if every remaining scenario, combined-contract, verifier, and quality gate passes, merge s5-s9-scenario-revision into BEV, record the merge commit, and pass a post-merge exact-path smoke.",
+    "Collect a new balanced candidate-v3 50k dataset from the clean merged BEV commit into a new empty root; do not reuse the pilot or historical v1 samples.",
+    "Run complete verification and the same quality gate on the new 50k dataset, then freeze its fingerprints and eligibility.",
+    "Train Stage1-A only with run_mode=formal and bind it to the new candidate-v3 50k base dataset fingerprint.",
     "Freeze one common Stage 2 manifest and train GRPO-Open with reward evaluated on tau_cmd.",
     "Complete the real TruckSim chassis-surrogate fit, ID/OOD, and calibration gates.",
     "Train GRPO-Exec from the same Stage1-A checkpoint with reward evaluated on surrogate-predicted tau_a.",
     "After both Stage 2 branches are stable, perform semantic-preserving Round 14 cleanup and rerun strict smoke gates.",
-    "Run the final paired multi-seed S5-S9 evaluation for Stage1-A, Stage1-A+GRPO-Open, and Stage1-A+GRPO-Exec.",
-    "Candidate scenario workstream: rerun the candidate-v3 S5-S9 fixed five-seed, 200-step physical, safety, video, and artifact gates; require exactly 3-6 incidental actors in every episode and the stronger S8 split-actor behavior-diversity gate before any new contract freeze."
+    "Run the final paired multi-seed S5-S9 evaluation for Stage1-A, Stage1-A+GRPO-Open, and Stage1-A+GRPO-Exec."
   ],
   "invariants": {
     "metadata_override_forbidden": true,
     "dataset_fingerprint_mixing_forbidden": true,
     "code_or_contract_changes_during_collection_forbidden": true,
     "long_running_collection_or_training_must_be_separate_from_code_changes": true,
-    "formal_results_require_eligible_artifacts": true
+    "formal_results_require_eligible_artifacts": true,
+    "diagnostic_10k_samples_must_not_be_reused_in_formal_50k": true,
+    "historical_v1_and_candidate_v3_dataset_mixing_forbidden": true,
+    "quality_thresholds_must_be_frozen_before_collection": true,
+    "bev_merge_requires_pilot_quality_pass": true
   }
 }

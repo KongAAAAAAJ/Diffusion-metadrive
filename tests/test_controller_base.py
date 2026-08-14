@@ -6,6 +6,10 @@ import numpy as np
 import pytest
 
 from models.controller import BaseController, LQRFollowerController, PIDTrajectoryController
+from models.controller.PIDController import _world_trajectory_to_ego_local
+from models.controller.longitudinal_reference import (
+    trajectory_to_longitudinal_reference,
+)
 
 lqr_module = importlib.import_module("models.controller.LQRFollowerController")
 
@@ -368,6 +372,61 @@ def test_lqr_follower_controller_records_lateral_debug_for_followers() -> None:
     assert -1.0 <= follower_debug["clipped_steering"] <= 1.0
 
 
+def test_s6_reassembly_syncs_recovered_middle_before_tail_gap_closes() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_resolved_scenario_parameters": {
+                "target_gap_id": "agent0-agent1",
+            },
+            "_conflict_evidence": {
+                "physical_gap_corridor_entered": True,
+                "merge_sweep_committed": True,
+                "all_ego_changed_lane_after_cut_in": True,
+                "formation_current_bumper_gaps_m": [10.0, 20.0],
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1", "agent2"],
+            "config": {"scenario_id": "S6_background_merge_in"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(
+                    x=40.0, speed_km_h=18.0, lane=shared_lane
+                ),
+                "agent1": _FakeVehicle(
+                    x=25.0, speed_km_h=25.0, lane=shared_lane
+                ),
+                "agent2": _FakeVehicle(
+                    x=0.0, speed_km_h=30.0, lane=shared_lane
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [[4.0 * (index + 1), 0.0, 0.0] for index in range(8)],
+            dtype=np.float32,
+        )
+        for name in env.agents
+    }
+
+    controller.compute_actions(env, trajectories)
+    debug = controller.get_last_debug()
+
+    assert debug["agent1"]["s6_ego_only_speed_sync_acceleration_mps2"] == pytest.approx(
+        -3.0
+    )
+    assert debug["agent2"]["s6_ego_only_speed_sync_acceleration_mps2"] > 0.0
+
+
 def test_s5_realized_split_preserves_cross_lane_longitudinal_order() -> None:
     left_lane = _FakeLane(("A", "B", 0))
     right_lane = _FakeLane(("A", "B", 2))
@@ -405,12 +464,647 @@ def test_s5_realized_split_preserves_cross_lane_longitudinal_order() -> None:
         for name, vehicle in env.agents.items()
     }
 
-    controller.compute_actions(env, trajectories)
+    actions = controller.compute_actions(env, trajectories)
     follower = controller.get_last_debug()["agent1"]
 
     assert follower["mode"] == "follower_platoon"
     assert follower["leader_id"] == "agent0"
     assert follower["gap_feedback_mps2"] > 0.0
+
+
+def test_s8_reassembly_preserves_follower_feedback_across_route_seam() -> None:
+    front_lane = _FakeLane(("A", "B", 0))
+    rear_lane = _FakeLane(("B", "C", 0))
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent0-agent1"
+            },
+            "_conflict_evidence": {
+                "ramp_entry_steps": {"agent0": 80, "agent1": 140}
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(
+                    x=30.0, speed_km_h=25.0, lane=front_lane
+                ),
+                "agent1": _FakeVehicle(
+                    x=0.0, speed_km_h=25.0, lane=rear_lane
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 4.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent1"]
+
+    assert follower["mode"] == "follower_platoon"
+    assert follower["leader_id"] == "agent0"
+    assert follower["actual_gap_m"] == pytest.approx(25.0)
+    assert follower["gap_feedback_mps2"] == pytest.approx(3.0)
+
+
+def test_s8_reassembly_cascade_waits_for_tail_during_committed_keep() -> None:
+    lanes = [_FakeLane((str(index), str(index + 1), 0)) for index in range(3)]
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent0-agent1"
+            },
+            "_conflict_evidence": {
+                "ramp_entry_steps": {"agent0": 80, "agent1": 140}
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1", "agent2"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(x=60.0, speed_km_h=25.0, lane=lanes[0]),
+                "agent1": _FakeVehicle(x=30.0, speed_km_h=25.0, lane=lanes[1]),
+                "agent2": _FakeVehicle(
+                    x=0.0, y=5.0, speed_km_h=25.0, lane=lanes[2]
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 4.0 * (index + 1), vehicle.position[1], 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+    references = {
+        name: trajectory_to_longitudinal_reference(
+            _world_trajectory_to_ego_local(vehicle, trajectories[name]),
+            vehicle.speed_km_h / 3.6,
+            source="committed_roll",
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    controller.compute_actions(
+        env,
+        trajectories,
+        longitudinal_references=references,
+    )
+    debug = controller.get_last_debug()
+    leader = debug["agent0"]
+    middle = debug["agent1"]
+
+    assert leader["rear_platoon_gap_m"] > controller.desired_gap_m
+    assert leader["rear_gap_feedback_mps2"] < 0.0
+    assert middle["rear_platoon_gap_m"] > controller.desired_gap_m
+    assert middle["rear_gap_feedback_mps2"] < 0.0
+
+
+def test_s8_reassembly_keeps_rear_feedback_on_curved_ramp_reference() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent0-agent1"
+            },
+            "_conflict_evidence": {
+                "ramp_entry_steps": {"agent0": 80, "agent1": 140}
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(x=40.0, speed_km_h=25.0, lane=shared_lane),
+                "agent1": _FakeVehicle(x=0.0, speed_km_h=25.0, lane=shared_lane),
+            },
+        },
+    )()
+    trajectories = {
+        "agent0": np.asarray(
+            [[40.0 + 3.0 * (index + 1), 2.0, 0.0] for index in range(8)],
+            dtype=np.float32,
+        ),
+        "agent1": np.asarray(
+            [[3.0 * (index + 1), 2.0, 0.0] for index in range(8)],
+            dtype=np.float32,
+        ),
+    }
+
+    controller.compute_actions(env, trajectories)
+    leader = controller.get_last_debug()["agent0"]
+
+    assert leader["rear_gap_feedback_suppressed_for_lateral_maneuver"] is False
+    assert leader["rear_gap_feedback_mps2"] < 0.0
+
+
+def test_s8_predecessor_does_not_brake_for_faster_closing_rear() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent0-agent1"
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(x=40.0, speed_km_h=15.0, lane=shared_lane),
+                "agent1": _FakeVehicle(x=0.0, speed_km_h=50.0, lane=shared_lane),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 3.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    controller.compute_actions(env, trajectories)
+    leader = controller.get_last_debug()["agent0"]
+
+    assert leader["rear_platoon_gap_m"] > controller.desired_gap_m
+    assert leader["rear_gap_feedback_mps2"] == pytest.approx(0.0)
+
+
+def test_s8_predecessor_uses_mild_braking_for_gently_closing_rear() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent0-agent1"
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(x=40.0, speed_km_h=20.0, lane=shared_lane),
+                "agent1": _FakeVehicle(x=0.0, speed_km_h=30.0, lane=shared_lane),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 3.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    controller.compute_actions(env, trajectories)
+    leader = controller.get_last_debug()["agent0"]
+
+    assert leader["rear_platoon_gap_m"] > controller.desired_gap_m
+    assert leader["rear_gap_feedback_mps2"] == pytest.approx(-1.5)
+
+
+def test_s8_reassembly_closing_tail_does_not_brake_prematurely() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {"_route_completion": {"all_agents_entered_exit_side_lane": True}},
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(
+                    x=35.0, speed_km_h=14.0, lane=shared_lane
+                ),
+                "agent1": _FakeVehicle(
+                    x=0.0, speed_km_h=20.0, lane=shared_lane
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 2.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    actions = controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent1"]
+
+    assert follower["actual_gap_m"] > 24.0
+    assert follower["s8_tail_catchup_guard"] is True
+    assert actions["agent1"][1] >= 0.0
+
+
+def test_s8_reassembly_expanded_gap_has_direct_catchup_authority() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {"_route_completion": {"all_agents_entered_exit_side_lane": True}},
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(
+                    x=31.0, speed_km_h=24.0, lane=shared_lane
+                ),
+                "agent1": _FakeVehicle(
+                    x=0.0, speed_km_h=23.0, lane=shared_lane
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 3.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    actions = controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent1"]
+
+    assert follower["actual_gap_m"] > 20.0
+    assert follower["s8_gap_recovery_guard"] is True
+    assert actions["agent1"][1] > 0.0
+
+
+def test_s8_reassembly_tail_brakes_when_closing_near_recovery_window() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {"_route_completion": {"all_agents_entered_exit_side_lane": True}},
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(
+                    x=28.0, speed_km_h=16.0, lane=shared_lane
+                ),
+                "agent1": _FakeVehicle(
+                    x=0.0, speed_km_h=30.0, lane=shared_lane
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 2.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    actions = controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent1"]
+
+    assert 20.0 < follower["actual_gap_m"] < 24.0
+    assert follower["gap_feedback_mps2"] < 0.0
+    assert follower["s8_tail_catchup_guard"] is False
+    assert follower["s8_tail_speed_sync_guard"] is True
+    assert follower["s8_speed_sync_latched"] is True
+    assert actions["agent1"][1] < 0.0
+
+
+def test_s8_ramp_reassembly_matches_follower_speed_inside_gap_window() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_conflict_evidence": {
+                "ramp_entry_steps": {"agent0": 80, "agent1": 130, "agent2": 170}
+            },
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent0-agent1"
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1", "agent2"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(x=60.0, speed_km_h=16.0, lane=shared_lane),
+                "agent1": _FakeVehicle(x=35.0, speed_km_h=30.0, lane=shared_lane),
+                "agent2": _FakeVehicle(x=10.0, speed_km_h=30.0, lane=shared_lane),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 3.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    actions = controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent1"]
+
+    assert follower["actual_gap_m"] == pytest.approx(20.0)
+    assert follower["s8_ramp_speed_match_guard"] is True
+    assert actions["agent1"][1] <= (
+        -3.0 / lqr_module.BRAKE_ACCELERATION_SCALE_MPS2 + 1e-6
+    )
+
+
+def test_s8_reassembly_tail_brakes_before_recovery_window_when_coast_is_unsafe() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent1-agent2"
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1", "agent2"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(
+                    x=40.0, speed_km_h=18.0, lane=shared_lane
+                ),
+                "agent1": _FakeVehicle(
+                    x=40.0, speed_km_h=18.0, lane=shared_lane
+                ),
+                "agent2": _FakeVehicle(
+                    x=0.0, speed_km_h=50.0, lane=shared_lane
+                ),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 3.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    actions = controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent2"]
+
+    assert follower["actual_gap_m"] > 28.0
+    assert follower["s8_tail_catchup_guard"] is False
+    assert follower["s8_tail_speed_sync_guard"] is True
+    assert actions["agent2"][1] < 0.0
+
+
+def test_s8_predictive_sync_follows_designated_split_gap_rear() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent0-agent1"
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1", "agent2"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(x=80.0, speed_km_h=14.0, lane=shared_lane),
+                "agent1": _FakeVehicle(x=40.0, speed_km_h=48.0, lane=shared_lane),
+                "agent2": _FakeVehicle(x=0.0, speed_km_h=44.0, lane=shared_lane),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 3.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    actions = controller.compute_actions(env, trajectories)
+    debug = controller.get_last_debug()
+
+    assert debug["agent1"]["s8_tail_speed_sync_guard"] is True
+    assert debug["agent1"]["s8_speed_sync_latched"] is True
+    assert actions["agent1"][1] < 0.0
+    assert debug["agent2"]["s8_speed_sync_latched"] is False
+
+
+def test_s8_designated_gap_rear_does_not_coast_above_ramp_tracking_speed() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent0-agent1"
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(x=45.0, speed_km_h=25.0, lane=shared_lane),
+                "agent1": _FakeVehicle(x=0.0, speed_km_h=47.0, lane=shared_lane),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 3.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    actions = controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent1"]
+
+    assert follower["actual_gap_m"] > 28.0
+    assert follower["s8_tail_catchup_guard"] is False
+    assert follower["s8_tail_speed_sync_guard"] is True
+    assert actions["agent1"][1] < 0.0
+
+
+def test_s8_designated_gap_rear_keeps_sync_at_large_gap_until_speed_matches() -> None:
+    shared_lane = _FakeLane()
+    controller = LQRFollowerController()
+    controller._s8_speed_sync_active["agent2"] = True
+    orchestrator = type(
+        "Orchestrator",
+        (),
+        {
+            "_route_completion": {"all_agents_entered_exit_side_lane": True},
+            "_resolved_scenario_parameters": {
+                "exit_constraint_target_gap_id": "agent1-agent2"
+            },
+        },
+    )()
+    env = type(
+        "Env",
+        (),
+        {
+            "_agent_ids": ["agent0", "agent1", "agent2"],
+            "config": {"scenario_id": "S8_ego_exit_to_ramp"},
+            "_scenario_orchestrator": orchestrator,
+            "agents": {
+                "agent0": _FakeVehicle(x=80.0, speed_km_h=25.0, lane=shared_lane),
+                "agent1": _FakeVehicle(x=40.0, speed_km_h=25.0, lane=shared_lane),
+                "agent2": _FakeVehicle(x=0.0, speed_km_h=31.0, lane=shared_lane),
+            },
+        },
+    )()
+    trajectories = {
+        name: np.asarray(
+            [
+                [vehicle.position[0] + 3.0 * (index + 1), 0.0, 0.0]
+                for index in range(8)
+            ],
+            dtype=np.float32,
+        )
+        for name, vehicle in env.agents.items()
+    }
+
+    actions = controller.compute_actions(env, trajectories)
+    follower = controller.get_last_debug()["agent2"]
+
+    assert follower["actual_gap_m"] > 28.0
+    assert follower["s8_speed_sync_latched"] is True
+    assert follower["s8_tail_speed_sync_guard"] is True
+    assert actions["agent2"][1] < 0.0
 
 
 def test_lqr_leader_slows_when_rear_platoon_gap_is_too_large() -> None:

@@ -390,10 +390,176 @@ def test_s7_atomic_mainline_background_spawns_all_declared_roles() -> None:
     ]
     assert len(calls) == orchestrator._resolved_scenario_parameters["actor_count"]
     spawned_lane_ids = [call[1]["spawn_lane_index"][-1] for call in calls]
-    assert 2 in spawned_lane_ids
+    assert set(spawned_lane_ids) == {2}
     assert [call[1]["spawn_lane_index"][:2] for call in calls] == [("road_a", "road_b")] * len(calls)
     assert all(call[1]["spawn_velocity_car_frame"] is True for call in calls)
+    constraint_roles = [
+        role
+        for role in orchestrator._actor_manifest
+        if role.startswith("parallel_merge_constraint_")
+    ]
+    assert len(constraint_roles) == orchestrator._resolved_scenario_parameters[
+        "parallel_constraint_actor_count"
+    ]
+    evidence = orchestrator._conflict_evidence
+    envelope_min, envelope_max = evidence[
+        "parallel_constraint_initial_ego_envelope_remaining_m"
+    ]
+    assert evidence["parallel_constraint_initial_region_valid"] is True
+    assert all(
+        envelope_min <= value <= envelope_max
+        for value in evidence["parallel_constraint_initial_remaining_m"]
+    )
+    constraint_remaining = evidence["parallel_constraint_initial_remaining_m"]
+    if len(constraint_remaining) > 1:
+        assert np.allclose(
+            np.diff(constraint_remaining),
+            5.74 + 5.0,
+        )
+        assert constraint_remaining[-1] < envelope_max
     assert orchestrator.summary.scenario_realized is True
+
+
+def test_s7_functional_success_requires_parallel_constraints_and_async_merge() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S7_ego_merge_from_ramp"],
+        "R7_merge_core",
+    )
+    orchestrator._resolved_scenario_parameters = {
+        "parallel_constraint_actor_count": 2,
+    }
+    orchestrator._actor_manifest = {
+        role: {"active": True}
+        for role in (
+            "critical_gap_front",
+            "critical_gap_rear",
+            "next_gap_front",
+            "next_gap_rear",
+            "parallel_merge_constraint_0",
+            "parallel_merge_constraint_1",
+        )
+    }
+    orchestrator._route_completion = {
+        "all_agents_entered_mainline": True,
+        "no_agent_stranded_on_ramp": True,
+    }
+    orchestrator._conflict_evidence = {
+        "parallel_constraint_initial_region_valid": True,
+        "parallel_constraint_roles_present": True,
+        "critical_pair_traversed_conflict": True,
+        "expected_behavior_matched": True,
+        "physical_split_observed": True,
+        "non_simultaneous_mainline_entries": True,
+        "formation_recovered_after_merge": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is True
+
+    orchestrator._conflict_evidence["parallel_constraint_roles_present"] = False
+    assert orchestrator._functional_success(recipes_complete=True) is False
+
+
+def test_s8_split_actor_accelerates_only_after_async_transition(monkeypatch) -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S8_ego_exit_to_ramp"],
+        "R6_exit_to_ramp",
+    )
+    actor = SimpleNamespace(name="split", speed_km_h=25.0)
+    orchestrator._actor_manifest = {
+        "exit_split_constraint": {"object_name": "split"}
+    }
+    orchestrator._speed_profiles = {
+        "split": {"remaining_steps": float("inf"), "target_speed_kmh": 25.0}
+    }
+    orchestrator._route_completion = {
+        "all_agents_entered_exit_side_lane": False
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_find_traffic_vehicle",
+        lambda env, name: actor if name == "split" else None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_set_vehicle_target_speed",
+        lambda env, vehicle, speed: setattr(vehicle, "target_speed", speed),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_force_vehicle_speed",
+        lambda vehicle, speed: setattr(vehicle, "speed_km_h", speed),
+    )
+
+    orchestrator._apply_speed_profiles(SimpleNamespace())
+    assert actor.target_speed == pytest.approx(25.0)
+
+    orchestrator._route_completion["all_agents_entered_exit_side_lane"] = True
+    orchestrator._apply_speed_profiles(SimpleNamespace())
+
+    assert actor.target_speed == pytest.approx(28.0)
+    assert orchestrator._conflict_evidence[
+        "split_actor_post_transition_release_speed_km_h"
+    ] == pytest.approx(28.0)
+
+
+def test_s8_downstream_ramp_blocks_count_toward_reassembly(monkeypatch) -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S8_ego_exit_to_ramp"],
+        "R6_exit_to_ramp",
+    )
+    orchestrator._initial_agent_lanes = {
+        name: ("3C0_1_", "4G0_0_", 1)
+        for name in ("agent0", "agent1", "agent2")
+    }
+    orchestrator._route_completion = {
+        "agent_lane_transitions": {
+            name: [
+                {
+                    "step": 10 + index,
+                    "lane_index": ["3C0_1_", "4G0_0_", 2],
+                }
+            ]
+            for index, name in enumerate(("agent0", "agent1", "agent2"))
+        }
+    }
+    orchestrator._resolved_scenario_parameters = {
+        "exit_constraint_actor_count": 1,
+        "exit_constraint_target_gap_id": "agent1-agent2",
+    }
+    orchestrator._actor_manifest = {"exit_split_constraint": {}}
+    orchestrator._functional_state = {
+        "s8_constraint_relation_by_agent": {
+            "agent0": "ahead",
+            "agent1": "ahead",
+            "agent2": "behind",
+        }
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_platoon_formation_recovered",
+        lambda env: (True, [10.0, 10.0]),
+    )
+    lanes = {
+        "agent0": ("downstream_a", "downstream_b", 0),
+        "agent1": ("downstream_c", "downstream_d", 0),
+        "agent2": ("downstream_e", "downstream_f", 0),
+    }
+    blocks = {
+        "agent0": "s_ramp1",
+        "agent1": "c1_ramp0",
+        "agent2": "h_ramp0",
+    }
+
+    for step in range(5):
+        orchestrator._update_s8_functional_evidence(
+            SimpleNamespace(agents={}),
+            {},
+            lanes,
+            blocks,
+            step,
+        )
+
+    assert orchestrator._conflict_evidence["formation_recovered_on_ramp"] is True
 
 
 def test_s5_hard_brake_recipe_uses_episode_local_scenario_rng(monkeypatch) -> None:
@@ -815,6 +981,100 @@ def test_s8_functional_success_requires_interaction_split_and_ramp_recovery() ->
     assert orchestrator._functional_success(recipes_complete=True) is True
 
     orchestrator._conflict_evidence["causal_exit_actor_interaction_observed"] = False
+    assert orchestrator._functional_success(recipes_complete=True) is False
+
+
+def test_s9_spawns_designated_split_actor_inside_sampled_ego_gap(monkeypatch) -> None:
+    env, ego, _traffic_manager = make_env_and_ego()
+    lane = env.engine.current_map.road_network.get_lane(("road_a", "road_b", 1))
+    center_spacing_m = 16.5 + 5.74
+    env.agents = {
+        f"agent{index}": SimpleNamespace(
+            name=f"agent{index}",
+            lane=lane,
+            lane_index=lane.index,
+            position=(90.0 - index * center_spacing_m, 4.0),
+            speed_km_h=22.0,
+            LENGTH=5.74,
+        )
+        for index in range(3)
+    }
+    ego = env.agents["agent0"]
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S9_narrow_channel_negotiation"],
+        "R8_narrow_channel",
+    )
+    orchestrator._actor_manifest = {}
+    orchestrator._conflict_evidence = {}
+    orchestrator._resolved_scenario_parameters = {
+        "agent0_to_blocker_bumper_gap_m": 20.0,
+        "blocker_speed_km_h": 0.0,
+        "ego_initial_speed_km_h": 22.0,
+        "designated_split_actor_role": "left_bypass_split_actor",
+        "designated_split_actor_target_gap_id": "agent0-agent1",
+        "designated_split_actor_speed_km_h": 22.0,
+        "usable_bypass_gap_m": 55.0,
+        "predicted_blocker_ttc_s": 4.0,
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_lane_index",
+        lambda *args, **kwargs: ("road_a", "road_b", 1),
+    )
+
+    assert orchestrator._handle_inject_s9_bypass_actors(
+        env,
+        ego,
+        {
+            "source_lane_id": 1,
+            "bypass_lane_id": 0,
+            "designated_split_actor_role": "left_bypass_split_actor",
+        },
+        0,
+    )
+    evidence = orchestrator._conflict_evidence
+    expected_midpoint = 0.5 * (
+        env.agents["agent0"].position[0] + env.agents["agent1"].position[0]
+    )
+    assert evidence["designated_split_actor_spawn_s_m"] == pytest.approx(
+        expected_midpoint
+    )
+    assert evidence["designated_split_actor_initial_region_valid"] is True
+    assert evidence["left_bypass_trigger_actor_declared_count"] == 1
+    assert evidence["left_bypass_trigger_actor_realized_count"] == 1
+    assert "left_bypass_split_actor" in orchestrator._actor_manifest
+
+
+def test_s9_functional_success_requires_post_channel_return_and_reassembly() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S9_narrow_channel_negotiation"],
+        "R8_narrow_channel",
+    )
+    orchestrator._resolved_scenario_parameters = {
+        "designated_split_actor_role": "left_bypass_split_actor"
+    }
+    orchestrator._actor_manifest = {
+        "blocking_actor": {"active": True},
+        "left_bypass_split_actor": {"active": True},
+    }
+    orchestrator._route_completion = {
+        "all_agents_changed_lane": True,
+        "all_agents_passed_blocker": True,
+        "all_agents_traversed_narrow_section": True,
+        "all_agents_returned_to_original_lane": True,
+    }
+    orchestrator._conflict_evidence = {
+        "designated_split_actor_initial_region_valid": True,
+        "non_simultaneous_left_lane_changes": True,
+        "split_actor_straddled_by_left_completions": True,
+        "causal_split_actor_interaction_observed": True,
+        "left_completion_clearance_satisfied": True,
+        "return_before_narrow_section_clear_observed": False,
+        "formation_recovered_after_return": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is True
+    orchestrator._route_completion["all_agents_returned_to_original_lane"] = False
     assert orchestrator._functional_success(recipes_complete=True) is False
 
 

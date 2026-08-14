@@ -103,11 +103,13 @@ class LQRFollowerController(BaseController):
         self.dt               = physics_dt * max(decision_repeat, 1)
 
         self._prev_speed_ms: dict[str, float] = {}
+        self._s8_speed_sync_active: dict[str, bool] = {}
         self._last_debug: dict[str, dict] = {}
 
     def reset(self) -> None:
         self._pid.reset()
         self._prev_speed_ms.clear()
+        self._s8_speed_sync_active.clear()
         self._last_debug = {}
 
     def get_last_debug(self) -> dict[str, dict]:
@@ -230,7 +232,7 @@ class LQRFollowerController(BaseController):
                 "target_rear_bumper_gap_m",
                 getattr(s6_actor, "scenario_target_rear_bumper_gap_m", 6.0),
             )
-        ) + (-2.0 if s6_target_gap_id == "agent0-agent1" else 0.0)
+        )
         orchestrator = getattr(env, "_scenario_orchestrator", None)
         s7_evidence = dict(getattr(orchestrator, "_conflict_evidence", {}) or {})
         s7_resolved = dict(
@@ -244,6 +246,26 @@ class LQRFollowerController(BaseController):
         s5_split_realized = bool(
             scenario_id == "S5_hard_brake_lead"
             and s5_evidence.get("mixed_direction_lane_change_completed", False)
+        )
+        s8_reassembly_active = bool(
+            scenario_id == "S8_ego_exit_to_ramp"
+            and (
+                getattr(orchestrator, "_route_completion", {}) or {}
+            ).get("all_agents_entered_exit_side_lane", False)
+        )
+        s8_target_gap_id = str(
+            (getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}).get(
+                "exit_constraint_target_gap_id", ""
+            )
+        )
+        s8_sync_agent_id = (
+            s8_target_gap_id.split("-", 1)[-1]
+            if "-" in s8_target_gap_id
+            else ""
+        )
+        s8_all_agents_on_ramp = bool(
+            len(dict(s7_evidence.get("ramp_entry_steps", {}) or {}))
+            == len(active_ids)
         )
         if s7_expected == "pass_first":
             s7_manifest = dict(
@@ -269,16 +291,19 @@ class LQRFollowerController(BaseController):
             )
             front_veh, gap_m, is_platoon = self._find_front_vehicle(vehicle, agents, traffic_vehicles)
             if (
-                scenario_id == "S7_ego_merge_from_ramp"
+                (
+                    scenario_id == "S7_ego_merge_from_ramp"
+                    or s8_reassembly_active
+                )
                 and role_index > 0
                 and front_veh is None
             ):
                 # MetaDrive's lane-local front lookup becomes discontinuous
-                # while adjacent platoon members straddle the two curved ramp
-                # connectors.  The formation order is fixed, so retain a
-                # conservative centre-distance bumper gap to the immediate
-                # predecessor across that seam.  This is control feedback;
-                # NormalPlanner remains the exact route/OBB authority.
+                # while adjacent platoon members straddle curved route seams.
+                # The formation order is fixed, so retain a conservative
+                # centre-distance bumper gap to the immediate predecessor
+                # across that seam. This is control feedback; NormalPlanner
+                # remains the exact route/OBB authority.
                 predecessor = agents.get(active_ids[role_index - 1])
                 if predecessor is not None:
                     centre_distance_m = float(
@@ -442,14 +467,23 @@ class LQRFollowerController(BaseController):
                             if is_s6_target_pair
                             else 0.22
                             if s5_split_realized and is_platoon
+                            else 0.30
+                            if s8_reassembly_active and is_platoon
                             else 0.15
                         )
                         * (actual_gap - desired_gap)
-                        + 0.20 * (front_speed - ego_speed),
+                        + (
+                            1.20
+                            if s8_reassembly_active and is_platoon
+                            else 0.20
+                        )
+                        * (front_speed - ego_speed),
                         -0.5
                         if is_s6_target_pair
                         else -2.0
                         if s5_split_realized and is_platoon
+                        else -3.0
+                        if s8_reassembly_active and is_platoon
                         else -1.0,
                         (
                             1.2
@@ -459,6 +493,8 @@ class LQRFollowerController(BaseController):
                             if is_s6_target_pair
                             else 1.5
                             if s5_split_realized and is_platoon
+                            else 3.0
+                            if s8_reassembly_active and is_platoon
                             else 1.0
                         ),
                     )
@@ -479,7 +515,18 @@ class LQRFollowerController(BaseController):
             )
             if scenario_id == "S6_background_merge_in" and s6_physical_corridor_entered:
                 rear_feedback_suppressed = False
-            if role_index + 1 < len(active_ids) and not rear_feedback_suppressed:
+            if s8_reassembly_active and (
+                not lateral_maneuver_active
+                or (
+                    s8_target_gap_id == "agent0-agent1"
+                    and s8_all_agents_on_ramp
+                )
+            ):
+                rear_feedback_suppressed = False
+            if (
+                role_index + 1 < len(active_ids)
+                and not rear_feedback_suppressed
+            ):
                 rear_vehicle = agents.get(active_ids[role_index + 1])
                 rear_lane = getattr(rear_vehicle, "lane", None)
                 ego_lane = getattr(vehicle, "lane", None)
@@ -488,12 +535,25 @@ class LQRFollowerController(BaseController):
                         ego_s, _ = ego_lane.local_coordinates(vehicle.position)
                         rear_s, rear_t = ego_lane.local_coordinates(rear_vehicle.position)
                         lane_width = float(getattr(ego_lane, "width", 3.5) or 3.5)
-                        if abs(float(rear_t)) <= 0.30 * lane_width:
+                        projection_aligned = bool(
+                            abs(float(rear_t)) <= 0.30 * lane_width
+                        )
+                        if projection_aligned or s8_reassembly_active:
                             rear_gap = (
-                                float(ego_s)
-                                - float(rear_s)
-                                - 0.5 * float(getattr(vehicle, "LENGTH", 5.0))
-                                - 0.5 * float(getattr(rear_vehicle, "LENGTH", 5.0))
+                                float(ego_s) - float(rear_s)
+                                if projection_aligned
+                                else float(
+                                    np.linalg.norm(
+                                        np.asarray(vehicle.position[:2], dtype=float)
+                                        - np.asarray(
+                                            rear_vehicle.position[:2], dtype=float
+                                        )
+                                    )
+                                )
+                            ) - 0.5 * float(
+                                getattr(vehicle, "LENGTH", 5.0)
+                            ) - 0.5 * float(
+                                getattr(rear_vehicle, "LENGTH", 5.0)
                             )
                             rear_speed = float(
                                 getattr(rear_vehicle, "speed_km_h", 0.0) or 0.0
@@ -527,7 +587,10 @@ class LQRFollowerController(BaseController):
                                 gap_acceleration = float(
                                     max(gap_acceleration, rear_gap_feedback)
                                 )
-                            elif scenario_id == "S7_ego_merge_from_ramp":
+                            elif scenario_id in {
+                                "S7_ego_merge_from_ramp",
+                                "S8_ego_exit_to_ramp",
+                            }:
                                 # The curved ramp seams make lane-local rear
                                 # progress noisy.  Use the directly measured
                                 # bumper gap to keep an S7 predecessor from
@@ -535,13 +598,37 @@ class LQRFollowerController(BaseController):
                                 # full platoon enters the mainline.
                                 rear_gap_feedback = float(
                                     np.clip(
-                                        -0.18
+                                        (
+                                            -0.30
+                                            if scenario_id
+                                            == "S8_ego_exit_to_ramp"
+                                            else -0.18
+                                        )
                                         * (rear_gap - self.desired_gap_m)
                                         + 0.10 * (rear_speed - ego_speed),
                                         -3.0,
                                         0.0,
                                     )
                                 )
+                                if (
+                                    scenario_id == "S8_ego_exit_to_ramp"
+                                    and s8_target_gap_id == "agent0-agent1"
+                                    and rear_speed > ego_speed + 4.0
+                                ):
+                                    # The rear vehicle is already closing the
+                                    # expanded gap.  Additional predecessor
+                                    # braking lowers the entire ramp convoy's
+                                    # speed and can strand the tail before the
+                                    # fixed 200-step S8 completion window.
+                                    rear_gap_feedback = 0.0
+                                elif (
+                                    scenario_id == "S8_ego_exit_to_ramp"
+                                    and s8_target_gap_id == "agent0-agent1"
+                                    and rear_speed > ego_speed
+                                ):
+                                    rear_gap_feedback = max(
+                                        rear_gap_feedback, -1.5
+                                    )
                             elif s5_split_realized:
                                 rear_gap_feedback = float(
                                     np.clip(
@@ -566,7 +653,10 @@ class LQRFollowerController(BaseController):
                                 # Do not let a positive front-gap/free-road
                                 # command cancel the predecessor's duty to
                                 # recover an expanding rear formation gap.
-                                if scenario_id == "S7_ego_merge_from_ramp":
+                                if scenario_id in {
+                                    "S7_ego_merge_from_ramp",
+                                    "S8_ego_exit_to_ramp",
+                                }:
                                     gap_acceleration = float(
                                         np.clip(
                                             gap_acceleration
@@ -830,28 +920,41 @@ class LQRFollowerController(BaseController):
                         7.0 <= float(value) <= 15.0
                         for value in s6_reassembly_gaps
                     )
-                    reassembly_target_speed_mps = (
-                        19.3
-                        if gaps_in_reassembly_window
-                        else 18.0 + 2.0 * float(role_index)
-                    ) / 3.6
-                    sync_acceleration = float(
-                        np.clip(
-                            (
-                                1.5
-                                if gaps_in_reassembly_window
-                                else 1.0
-                            )
-                            * (reassembly_target_speed_mps - ego_speed)
-                            + (
-                                0.0
-                                if gaps_in_reassembly_window
-                                else s6_recovery_acceleration
-                            ),
-                            -2.0,
-                            2.0,
+                    if role_index == 0:
+                        sync_acceleration = float(
+                            np.clip(1.5 * (19.3 / 3.6 - ego_speed), -2.0, 2.0)
                         )
-                    )
+                    else:
+                        own_gap_m = float(s6_reassembly_gaps[role_index - 1])
+                        predecessor = agents.get(active_ids[role_index - 1])
+                        predecessor_speed_mps = float(
+                            getattr(predecessor, "speed_km_h", 0.0) or 0.0
+                        ) / 3.6
+                        # Global adjacent-gap feedback stays valid while the
+                        # three ego vehicles straddle consecutive route edges.
+                        # The velocity term starts braking before a catching
+                        # follower can consume the unchanged 7 m hard buffer.
+                        if gaps_in_reassembly_window:
+                            sync_acceleration = float(
+                                np.clip(
+                                    3.0
+                                    * (predecessor_speed_mps - ego_speed)
+                                    + 0.3
+                                    * (19.3 / 3.6 - predecessor_speed_mps),
+                                    -3.0,
+                                    2.5,
+                                )
+                            )
+                        else:
+                            sync_acceleration = float(
+                                np.clip(
+                                    0.40 * (own_gap_m - 12.0)
+                                    + 1.2
+                                    * (predecessor_speed_mps - ego_speed),
+                                    -3.0,
+                                    2.5,
+                                )
+                            )
                     sync_throttle = float(
                         sync_acceleration
                         / (
@@ -1019,6 +1122,166 @@ class LQRFollowerController(BaseController):
                     agent_debug["s7_mainline_coordination_guard"] = True
                 else:
                     agent_debug["s7_mainline_coordination_guard"] = False
+                s8_tail_catchup_guard = False
+                s8_tail_speed_sync_guard = False
+                s8_speed_sync_latched = bool(
+                    str(agent_id) == s8_sync_agent_id
+                    and self._s8_speed_sync_active.get(agent_id, False)
+                )
+                if (
+                    s8_reassembly_active
+                    and is_platoon
+                    and actual_gap is not None
+                    and front_speed is not None
+                    and float(actual_gap) > 20.0
+                    and ego_speed > float(front_speed)
+                    and not committed_roll_active
+                ):
+                    # Once an S8 follower is already closing a still-expanded
+                    # ego-only gap, a short-horizon KEEP reference can ask it
+                    # to brake too early at a curved ramp seam.  Preserve
+                    # coasting authority while the kinematic stopping buffer
+                    # remains comfortably above the 10 m formation target.
+                    # This never adds throttle and never applies to a
+                    # background-vehicle leader.
+                    closing_speed_mps = ego_speed - float(front_speed)
+                    predictive_sync_enabled = bool(
+                        str(agent_id) == s8_sync_agent_id
+                    )
+                    if closing_speed_mps <= 1.5:
+                        s8_speed_sync_latched = False
+                    braking_buffer_m = (
+                        closing_speed_mps
+                        * closing_speed_mps
+                        / (2.0 * (1.5 if predictive_sync_enabled else 2.0))
+                        + 3.0
+                    )
+                    available_buffer_m = float(actual_gap) - self.desired_gap_m
+                    if (
+                        float(actual_gap) > 28.0
+                        and available_buffer_m > braking_buffer_m
+                        and (
+                            not predictive_sync_enabled
+                            or s8_target_gap_id != "agent0-agent1"
+                            or ego_speed <= 40.0 / 3.6
+                        )
+                        and not s8_speed_sync_latched
+                    ):
+                        action = np.asarray(action, dtype=np.float32).copy()
+                        action[1] = max(float(action[1]), 0.0)
+                        s8_tail_catchup_guard = True
+                    elif (
+                        predictive_sync_enabled
+                        and (float(actual_gap) > 28.0 or s8_speed_sync_latched)
+                    ):
+                        # Start matching speed before entering the recovery
+                        # window when coasting can no longer dissipate the
+                        # relative speed.  Without this branch a fast tail
+                        # reaches an acceptable gap but misses S8's unchanged
+                        # 8 km/h stability gate.
+                        recovery_distance_m = max(
+                            float(actual_gap) - 18.0, 1.0
+                        )
+                        predictive_braking_mps2 = -float(
+                            np.clip(
+                                closing_speed_mps * closing_speed_mps
+                                / (2.0 * recovery_distance_m)
+                                + 0.5,
+                                2.0,
+                                4.0,
+                            )
+                        )
+                        action = np.asarray(action, dtype=np.float32).copy()
+                        action[1] = min(
+                            float(action[1]),
+                            predictive_braking_mps2
+                            / BRAKE_ACCELERATION_SCALE_MPS2,
+                        )
+                        s8_tail_speed_sync_guard = True
+                        s8_speed_sync_latched = predictive_sync_enabled
+                    elif (
+                        closing_speed_mps > 1.0
+                        and float(actual_gap) <= 28.0
+                    ):
+                        action = np.asarray(action, dtype=np.float32).copy()
+                        action[1] = min(
+                            float(action[1]),
+                            -3.0 / BRAKE_ACCELERATION_SCALE_MPS2,
+                        )
+                        s8_tail_speed_sync_guard = True
+                        s8_speed_sync_latched = True
+                else:
+                    s8_speed_sync_latched = False
+                self._s8_speed_sync_active[agent_id] = bool(
+                    s8_speed_sync_latched
+                )
+                s8_ramp_speed_match_guard = False
+                if (
+                    s8_reassembly_active
+                    and s8_all_agents_on_ramp
+                    and is_platoon
+                    and actual_gap is not None
+                    and front_speed is not None
+                    and 5.0 <= float(actual_gap) <= 24.0
+                    and ego_speed - float(front_speed) > 1.0
+                    and not committed_roll_active
+                ):
+                    # Once every ego has reached the ramp, keep each follower
+                    # from accelerating away from its immediate predecessor.
+                    # Gap recovery alone can leave a geometrically valid
+                    # formation with more than S8's 8 km/h speed spread.
+                    action = np.asarray(action, dtype=np.float32).copy()
+                    action[1] = min(
+                        float(action[1]),
+                        -3.0 / BRAKE_ACCELERATION_SCALE_MPS2,
+                    )
+                    s8_ramp_speed_match_guard = True
+                agent_debug["s8_tail_catchup_guard"] = bool(
+                    s8_tail_catchup_guard
+                )
+                agent_debug["s8_tail_speed_sync_guard"] = bool(
+                    s8_tail_speed_sync_guard
+                )
+                agent_debug["s8_speed_sync_latched"] = bool(
+                    s8_speed_sync_latched
+                )
+                agent_debug["s8_ramp_speed_match_guard"] = bool(
+                    s8_ramp_speed_match_guard
+                )
+                s8_gap_recovery_guard = False
+                if (
+                    s8_reassembly_active
+                    and is_platoon
+                    and actual_gap is not None
+                    and front_speed is not None
+                    and float(actual_gap) > 20.0
+                    and not s8_tail_speed_sync_guard
+                    and not committed_roll_active
+                ):
+                    # Give an expanded S8 follower direct catch-up authority.
+                    # The reference planner may otherwise select a comfortable
+                    # common-speed KEEP profile that preserves a 24+ m gap.
+                    # Near the 7 m hard bound the generic predictive guard below
+                    # still overrides this command with braking.
+                    recovery_acceleration = float(
+                        np.clip(
+                            0.60 * (float(actual_gap) - 18.0)
+                            + 0.80 * (float(front_speed) - ego_speed),
+                            0.0,
+                            2.5,
+                        )
+                    )
+                    if recovery_acceleration > 0.0:
+                        action = np.asarray(action, dtype=np.float32).copy()
+                        action[1] = max(
+                            float(action[1]),
+                            recovery_acceleration
+                            / DRIVE_ACCELERATION_SCALE_MPS2,
+                        )
+                        s8_gap_recovery_guard = True
+                agent_debug["s8_gap_recovery_guard"] = bool(
+                    s8_gap_recovery_guard
+                )
                 agent_debug["mode"] = mode
                 agent_debug["scenario_id"] = scenario_id
             agent_debug.update(

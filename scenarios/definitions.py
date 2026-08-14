@@ -316,6 +316,11 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                     "internal_road_index": 1,
                     "source_lane_id": 1,
                     "bypass_lane_id": 0,
+                    "designated_split_actor_role": "left_bypass_split_actor",
+                    "designated_split_actor_count": 1,
+                    "additional_trigger_actor_range": (0, 2),
+                    "narrow_section_block_id": "c3",
+                    "post_narrow_return_lane_id": 1,
                     "trigger_on_start": True,
                 },
             ),
@@ -329,6 +334,10 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         ego_spawn_longitude_m=(50.0, 75.0),
         ego_spawn_lane_id=1,
         ego_initial_speed_km_h=(16.0, 22.0),
+        # The designated left-lane split actor starts inside one ego gap. An
+        # A 16.5 m bumper gap leaves a hard-safe physical window on both sides of
+        # that actor while still fitting the complete formation on c3.
+        ego_initial_bumper_gap_m=16.5,
         override_traffic_density=0.0,
         env_overrides={"platoon_route_spawn_lane_index": 1},
         expert_recipe="保守通过",

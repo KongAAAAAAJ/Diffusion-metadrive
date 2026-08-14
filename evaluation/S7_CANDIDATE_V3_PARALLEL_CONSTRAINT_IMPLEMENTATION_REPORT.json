@@ -1,0 +1,100 @@
+{
+  "format": "s7_candidate_v3_parallel_constraint_implementation_report_v1",
+  "recorded_at": "2026-08-13T23:59:00+08:00",
+  "scenario_id": "S7_ego_merge_from_ramp",
+  "local_route": "R7_merge_core",
+  "status": "implemented_fixed_five_seed_closed_loop_gate_passed",
+  "implemented_contract": {
+    "causal_parallel_actor_count_by_severity": {
+      "low": 1,
+      "medium": 2,
+      "high": 3
+    },
+    "role_prefix": "parallel_merge_constraint_",
+    "lane": "rightmost_mainline_lane",
+    "initial_longitudinal_region": "inside the ego platoon projected longitudinal envelope",
+    "speed_range_km_h": [
+      24.0,
+      31.0
+    ],
+    "speed_range_by_severity_km_h": {
+      "low": [28.0, 31.0],
+      "medium": [24.0, 28.0],
+      "high": [24.0, 28.0]
+    },
+    "ego_distance_to_merge_point_m": [
+      18.0,
+      21.0
+    ],
+    "multi_actor_layout": "compact front-side packing at 5 m OBB clearance; the two-actor group begins at the agent0-agent1 projected midpoint",
+    "formation_state": "UNLOCKED while any ego remains on the ramp; LOCKED after all three enter the mainline",
+    "required_behavior": "temporary dissolution, non-simultaneous mainline entries, then same-lane reassembly"
+  },
+  "implementation_files": [
+    "scenarios/S7_inject_vehicles.py",
+    "scenarios/s5_s9_sampling.py",
+    "scenarios/orchestrator.py",
+    "models/decisioner/rule_decisioner.py",
+    "evaluation/run_s5_s9_candidate_revision.py",
+    "docs/project/s5_s9_functional_scenario_design.json"
+  ],
+  "focused_regression": {
+    "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_s5_s9_sampling.py tests/test_scenario_definitions.py tests/test_scenario_orchestrator_adjacent_vehicles.py tests/test_s5_candidate_runner_gate.py tests/test_bev_round13_scenario_contract.py tests/test_platoon_normal_planner.py tests/test_route_spawn_manager_fixed_platoon_spawn.py tests/test_rule_maker.py -q",
+    "result": "254 passed"
+  },
+  "seed17_full_closed_loop": {
+    "artifact": "/tmp/s7_parallel_constraint_full_seed17_v5/S7_ego_merge_from_ramp/metrices/episode_0000/expert_episode.json",
+    "horizon_steps": 200,
+    "native_joint_planning_steps": "200/200",
+    "failure_reason": null,
+    "persistable": true,
+    "collision": false,
+    "out_of_road": false,
+    "severity": "high",
+    "parallel_constraint_declared_realized": "3/3",
+    "parallel_constraint_initial_region_valid": true,
+    "scenario_recipes_complete": true,
+    "physical_split_observed": true,
+    "ego_mainline_entry_steps": {
+      "agent0": 113,
+      "agent1": 147,
+      "agent2": 181
+    },
+    "non_simultaneous_mainline_entries": true,
+    "observed_behavior": "yield_then_merge",
+    "formation_final_bumper_gaps_m": [
+      22.525344336990962,
+      17.589492776924327
+    ],
+    "formation_recovered_after_merge": true,
+    "functional_success": true
+  },
+  "fixed_seed_acceptance": {
+    "seeds_attempted": [
+      17,
+      23,
+      31,
+      47,
+      59
+    ],
+    "episodes_passed": "5/5",
+    "native_joint_planning_steps": "1000/1000",
+    "constraint_count_coverage": [1, 2, 3],
+    "behavior_coverage": ["pass_first", "yield_then_merge"],
+    "all_parallel_constraint_regions_valid": true,
+    "all_physical_splits_observed": true,
+    "all_non_simultaneous_entries": true,
+    "all_formation_recovery_events_observed": true,
+    "collision": false,
+    "out_of_road": false,
+    "planner_fallback": false,
+    "artifacts": {
+      "seeds_17_23_47_59": "/tmp/s7_parallel_constraints_final_5seed/S7_ego_merge_from_ramp/metrices",
+      "seed_31": "/tmp/s7_seed31_sticky_recovery/S7_ego_merge_from_ramp/metrices/episode_0000/expert_episode.json"
+    },
+    "recovery_evidence_semantics": "sticky event evidence: once two consecutive post-merge observations satisfy the 5-24 m gaps and <=10 km/h speed-spread gate, later normal speed variation does not erase the observed reassembly event",
+    "safety_gate_weakened": false,
+    "hard_gate_passed": true
+  },
+  "remaining_hard_gate": "S7 implementation gate is complete. Candidate-v3 global freeze still requires the independent S9 implementation and combined S5-S9 fixed-five-seed review."
+}

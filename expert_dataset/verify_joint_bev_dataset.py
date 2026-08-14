@@ -42,8 +42,10 @@ from models.bev_planner.mode_contract import (
     validate_trajectory_kinematics,
 )
 from scenarios.bev_round13_contract import (
+    CANDIDATE_V3_CONTRACT_ID,
+    FORMAL_V1_CONTRACT_ID,
     PRIMARY_S5_S9_SCENARIOS,
-    primary_scenario_contract,
+    scenario_contract_for_id,
 )
 
 
@@ -259,6 +261,7 @@ def verify_joint_bev_dataset(
     chunk_size: int = 16,
     min_decode_samples_per_s: float = 0.0,
     diagnostic_64: bool = False,
+    expected_scenario_contract_sha256: str | None = None,
 ) -> dict[str, object]:
     """Run strict verification and return a JSON-serializable report."""
 
@@ -387,6 +390,14 @@ def verify_joint_bev_dataset(
                     raise JointBEVVerificationError(
                         f"episode {record.episode_index} lacks scenario/route attributes"
                     )
+                if (
+                    expected_scenario_contract_sha256 is not None
+                    and record.attributes.get("scenario_contract_sha256")
+                    != expected_scenario_contract_sha256
+                ):
+                    raise JointBEVVerificationError(
+                        f"episode {record.episode_index} scenario contract hash mismatch"
+                    )
                 if diagnostic_64:
                     expected_routes = dict(PRIMARY_S5_S9_SCENARIOS)
                     if expected_routes.get(scenario_id) != local_route:
@@ -400,7 +411,12 @@ def verify_joint_bev_dataset(
                         )
                     if (
                         record.attributes.get("scenario_contract_sha256")
-                        != primary_scenario_contract()["sha256"]
+                        != (
+                            expected_scenario_contract_sha256
+                            or scenario_contract_for_id(FORMAL_V1_CONTRACT_ID)[
+                                "sha256"
+                            ]
+                        )
                     ):
                         raise JointBEVVerificationError(
                             "diagnostic scenario contract hash mismatch"
@@ -656,6 +672,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=16)
     parser.add_argument("--min-decode-samples-per-s", type=float, default=0.0)
     parser.add_argument("--diagnostic-64", action="store_true")
+    parser.add_argument(
+        "--scenario-contract",
+        choices=(FORMAL_V1_CONTRACT_ID, CANDIDATE_V3_CONTRACT_ID),
+        default=None,
+    )
     return parser.parse_args(argv)
 
 
@@ -670,6 +691,11 @@ def main(argv: list[str] | None = None) -> int:
         chunk_size=args.chunk_size,
         min_decode_samples_per_s=args.min_decode_samples_per_s,
         diagnostic_64=args.diagnostic_64,
+        expected_scenario_contract_sha256=(
+            None
+            if args.scenario_contract is None
+            else str(scenario_contract_for_id(args.scenario_contract)["sha256"])
+        ),
     )
     print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True))
     return 0

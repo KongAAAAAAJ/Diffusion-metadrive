@@ -1,8 +1,18 @@
 from evaluation.run_s5_s9_candidate_revision import (
+    SCENARIO_HORIZONS,
     _incidental_background_gate,
     _s5_physical_behavior_gate,
+    _s7_parallel_constraint_gate,
     _s8_physical_behavior_gate,
+    _s9_physical_behavior_gate,
 )
+
+
+def test_s6_and_s9_runner_horizons_match_candidate_memory() -> None:
+    assert SCENARIO_HORIZONS == {
+        "S6_background_merge_in": 260,
+        "S9_narrow_channel_negotiation": 800,
+    }
 
 
 def _row(seed, behavior, *, directions=None, steps=None):
@@ -88,6 +98,66 @@ def test_s8_gate_requires_front_behind_straddling_and_diverse_async_order() -> N
     assert result["passed"] is True
     rows[0]["conflict_evidence"]["constraint_straddled_by_lane_changes"] = False
     assert _s8_physical_behavior_gate(rows)["passed"] is False
+
+
+def test_s7_gate_requires_parallel_constraints_and_async_reassembly() -> None:
+    rows = [
+        {
+            "seed": seed,
+            "conflict_evidence": {
+                "parallel_constraint_declared_count": count,
+                "parallel_constraint_realized_count": count,
+                "parallel_constraint_initial_region_valid": True,
+                "parallel_constraint_roles_present": True,
+                "physical_split_observed": True,
+                "non_simultaneous_mainline_entries": True,
+                "formation_recovered_after_merge": True,
+            },
+        }
+        for seed, count in zip((17, 23, 31, 47, 59), (3, 1, 1, 2, 3))
+    ]
+
+    assert _s7_parallel_constraint_gate(rows)["passed"] is True
+    rows[0]["conflict_evidence"]["parallel_constraint_initial_region_valid"] = False
+    assert _s7_parallel_constraint_gate(rows)["passed"] is False
+
+
+def test_s9_gate_requires_same_actor_split_post_channel_return_and_recovery() -> None:
+    rows = []
+    for seed in (17, 23, 31, 47, 59):
+        rows.append(
+            {
+                "seed": seed,
+                "conflict_evidence": {
+                    "left_bypass_trigger_actor_declared_count": 1,
+                    "left_bypass_trigger_actor_realized_count": 1,
+                    "designated_split_actor_initial_region_valid": True,
+                    "s9_actor_roles_present": True,
+                    "non_simultaneous_left_lane_changes": True,
+                    "split_actor_straddled_by_left_completions": True,
+                    "split_actor_relation_at_left_completion_by_agent": {
+                        "agent0": "ahead",
+                        "agent1": "behind",
+                        "agent2": "behind",
+                    },
+                    "causal_split_actor_interaction_observed": True,
+                    "left_completion_clearance_satisfied": True,
+                    "return_before_narrow_section_clear_observed": False,
+                    "formation_recovered_after_return": True,
+                },
+                "route_completion": {
+                    "all_agents_passed_blocker": True,
+                    "all_agents_traversed_narrow_section": True,
+                    "all_agents_returned_to_original_lane": True,
+                },
+            }
+        )
+
+    assert _s9_physical_behavior_gate(rows)["passed"] is True
+    rows[0]["conflict_evidence"][
+        "return_before_narrow_section_clear_observed"
+    ] = True
+    assert _s9_physical_behavior_gate(rows)["passed"] is False
 
 
 def test_incidental_background_gate_requires_exact_three_to_six_realizations() -> None:

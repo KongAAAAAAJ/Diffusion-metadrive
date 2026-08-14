@@ -1,37 +1,31 @@
 {
-  "format": "s8_candidate_memory_acceptance_report_v1",
-  "schema_version": 1,
-  "recorded_at": "2026-08-13T11:06:10+08:00",
-  "status": "s8_fixed_five_seed_memory_gate_passed",
+  "format": "s8_candidate_memory_acceptance_report_v2",
+  "schema_version": 2,
+  "recorded_at": "2026-08-14T05:30:00+08:00",
+  "status": "s8_candidate_v3_fixed_five_seed_memory_gate_passed",
   "scenario_id": "S8_ego_exit_to_ramp",
   "local_route": "R6_exit_to_ramp",
   "source_memory": "docs/project/s5_s9_functional_scenario_design.json",
-  "source_git_commit": "b7c41dff4b4c72a9c7ee3a0bb41f18ff0ed4deb0",
+  "source_git_commit": "6c0f081cfbc6b6cf874d60507b4aca6c8c417382",
   "worktree_state": "uncommitted_candidate_revision_changes_preserved",
-  "scope": {
-    "formal_v1_contract_changed": false,
-    "formal_50k_dataset_or_checkpoint_metadata_changed": false,
-    "candidate_v2_contract_frozen": false,
-    "reason_candidate_v2_not_frozen": "S8 passed independently; the complete candidate-v2 contract still requires every remaining S5-S9 scenario gate."
-  },
   "root_cause_and_fix": {
-    "pre_fix_failures": [
-      "Seed 23 completed the route but one curved-seam STOP anchor was rejected because lane projection and reconstruction added a spurious first-segment distance.",
-      "Seed 31 reached the ramp at a higher sampled speed but did not leave five stable formation-recovery steps before the 200-step horizon.",
-      "Seed 47 had no first-step joint RIGHT solution at 26.267 km/h under the unchanged 6 m selection preflight and 7 m platoon-pair separation gates."
+    "observed_failure": "The first episode saved normally, while later fixed-seed episodes either hit a joint-planning infeasibility before ramp entry or completed the route without satisfying the unchanged ramp reassembly speed-spread gate.",
+    "causes": [
+      "Curved-ramp rear-gap feedback was enabled before all three ego vehicles reached the ramp, perturbing the pre-ramp hard-safe joint solution in seed 47.",
+      "After geometrically valid gaps were recovered, fast followers could continue accelerating and leave the final platoon speed spread above the unchanged 8 km/h gate in seeds 23, 47, and 59."
     ],
     "fixes": [
-      "Anchor lane sampling now translates its reconstructed zero-distance pose onto the measured simulator pose before applying the fixed-time braking profile.",
-      "The S8 constrained sampler fixes ego speed at 25 km/h, which remains inside the memory-defined 22-28 km/h range and preserves seed variation in distance, mandatory window, actor speed, severity, and usable gap.",
-      "Route-chain geometry, connector-source resolution, physical exit seam, spawn speed propagation, and S8 functional evidence were aligned to the exact R6 exit chain."
+      "Delay first-gap curved-ramp rear feedback until all three ego vehicles have recorded ramp entry.",
+      "Add predictive designated-rear speed synchronization and an all-on-ramp follower speed-match guard while preserving the 5-24 m gap and 8 km/h speed-spread acceptance thresholds.",
+      "Retain scenario-aware temporary formation unlock, asynchronous RIGHT proposals, actor-relative split evidence, connector KEEP enforcement, and ramp-only reassembly."
     ],
     "memory_or_safety_thresholds_relaxed": false,
     "unchanged_hard_thresholds": {
-      "background_runtime_gap_m": 5.0,
-      "s8_selection_preflight_gap_m": 6.0,
-      "platoon_pair_gap_m": 7.0,
-      "minimum_acceleration_mps2": -8.0,
-      "ramp_continuation_steps": 10,
+      "s8_selection_preflight_actor_gap_m": 6,
+      "platoon_pair_gap_m": 7,
+      "reassembly_bumper_gap_range_m": [5, 24],
+      "reassembly_speed_spread_km_h": 8,
+      "reassembly_persistence_steps": 5,
       "episode_horizon_steps": 200
     }
   },
@@ -43,118 +37,96 @@
     "collision_count": 0,
     "out_of_road_count": 0,
     "planner_fallback_count": 0,
-    "joint_rejection_count": 0,
     "persistable_episode_count": 5,
     "functional_success_count": 5,
-    "declared_exit_actor_roles_realized": "10/10",
+    "exit_constraint_actor_count_coverage": [1, 2, 3],
+    "target_gap_coverage": ["agent0-agent1", "agent1-agent2"],
+    "physical_behavior_classes": [
+      "agent0-agent1:agent2-agent0-agent1",
+      "agent0-agent1:agent2-agent1-agent0",
+      "agent1-agent2:agent0-agent1-agent2"
+    ],
     "all_episodes_have_causal_actor_interaction": true,
-    "all_episodes_have_physical_split": true,
+    "all_episodes_have_same_actor_front_behind_split": true,
     "all_episodes_have_non_simultaneous_right_transition": true,
     "all_episodes_traverse_diverge_connector": true,
     "all_episodes_continue_on_exit_ramp": true,
     "all_episodes_keep_after_connector": true,
-    "all_episodes_do_not_return_to_mainline": true,
     "all_episodes_reassemble_on_ramp": true,
     "hard_gates_passed": true
   },
   "episodes": [
     {
       "seed": 17,
-      "severity": "low",
-      "resolved_speed_km_h": 25.0,
-      "right_lane_change_steps": {"agent0": 26, "agent1": 26, "agent2": 28},
-      "ramp_entry_steps": {"agent0": 97, "agent1": 135, "agent2": 180},
-      "actor_interaction_step": 26,
-      "minimum_actor_distance_m": 18.081964212509863,
-      "final_bumper_gaps_m": [16.5621349952125, 18.55199916915727],
-      "episode_json_sha256": "f340d29fb137b910201e101298f70be2a2fc8fae47b8900c5bf53e52d6456867",
-      "topdown_video_sha256": "52ecea66da3bedaa72bf729ab35ed2c0bd074cf518e1d0fa2a910baa5dbe3243",
-      "semantic_bev_video_sha256": "4ed9e4a0217455c3462efbf471f8a0623441967be33b1738a42dfe5c81805510",
-      "trajectory_npz_sha256": "d2e3cb85c5cbef8c33bd9e38128f6285c85e0d87e0e5c891a92aaa5635484b03"
+      "target_gap": "agent1-agent2",
+      "behavior_class": "agent1-agent2:agent0-agent1-agent2",
+      "exit_constraint_actor_count": 1,
+      "right_lane_change_steps": {"agent0": 30, "agent1": 31, "agent2": 67},
+      "ramp_entry_steps": {"agent0": 88, "agent1": 121, "agent2": 180},
+      "final_bumper_gaps_m": [16.019883009234057, 23.859448564002907],
+      "formation_recovery_stable_steps": 5
     },
     {
       "seed": 23,
-      "severity": "medium",
-      "resolved_speed_km_h": 25.0,
-      "right_lane_change_steps": {"agent0": 26, "agent1": 28, "agent2": 28},
-      "ramp_entry_steps": {"agent0": 103, "agent1": 135, "agent2": 178},
-      "actor_interaction_step": 26,
-      "minimum_actor_distance_m": 18.081964212509863,
-      "final_bumper_gaps_m": [11.155282750464963, 21.010416836045497],
-      "episode_json_sha256": "73ee6fb8ccc15719f7d456417114df7a841ebb9d462c6669aca220a286ff3fbd",
-      "topdown_video_sha256": "53eb4ee351db5e7754bdb79babdf0776a3b3be7d2c01d99ffa126ef81ed22c45",
-      "semantic_bev_video_sha256": "b349653d0fc03e9f19c4ba3cdf3ce3ab6345b38a01f1d776e1a3d4bc08449b4a",
-      "trajectory_npz_sha256": "60d8c077314fa6c1fa95dbb547f5b7bd7ac0dce10dc8c54c4bfe4ed8db40a916"
+      "target_gap": "agent0-agent1",
+      "behavior_class": "agent0-agent1:agent2-agent1-agent0",
+      "exit_constraint_actor_count": 1,
+      "right_lane_change_steps": {"agent0": 30, "agent1": 29, "agent2": 28},
+      "ramp_entry_steps": {"agent0": 80, "agent1": 149, "agent2": 178},
+      "final_bumper_gaps_m": [22.585447454214425, 19.31985632042047],
+      "formation_recovery_stable_steps": 45
     },
     {
       "seed": 31,
-      "severity": "medium",
-      "resolved_speed_km_h": 25.0,
-      "right_lane_change_steps": {"agent0": 26, "agent1": 28, "agent2": 28},
-      "ramp_entry_steps": {"agent0": 93, "agent1": 128, "agent2": 173},
-      "actor_interaction_step": 26,
-      "minimum_actor_distance_m": 18.081959191035832,
-      "final_bumper_gaps_m": [12.41557373680467, 21.11388852193983],
-      "episode_json_sha256": "4a8f9451346131226e6b17bc97aedcc82cfc93d13284a31c7cd186964d5b4678",
-      "topdown_video_sha256": "1af08c37d3fd84f5cc7d8c4b19bc0de9cae375c8ab1c10bcef932cb05e81c3e6",
-      "semantic_bev_video_sha256": "c8916fe949fdd396119933a57c39db5f232ac3f4fa08cd0d08f5e6f9858e2131",
-      "trajectory_npz_sha256": "4f789796fc3e5e458490f5c15b37ca77dbac8762daf7ed2afdadc130e427017e"
+      "target_gap": "agent1-agent2",
+      "behavior_class": "agent1-agent2:agent0-agent1-agent2",
+      "exit_constraint_actor_count": 3,
+      "right_lane_change_steps": {"agent0": 27, "agent1": 30, "agent2": 69},
+      "ramp_entry_steps": {"agent0": 87, "agent1": 116, "agent2": 166},
+      "final_bumper_gaps_m": [15.866825512122684, 21.01162097079623],
+      "formation_recovery_stable_steps": 95
     },
     {
       "seed": 47,
-      "severity": "high",
-      "resolved_speed_km_h": 25.0,
-      "right_lane_change_steps": {"agent0": 26, "agent1": 28, "agent2": 28},
-      "ramp_entry_steps": {"agent0": 100, "agent1": 136, "agent2": 177},
-      "actor_interaction_step": 26,
-      "minimum_actor_distance_m": 17.573604722058167,
-      "final_bumper_gaps_m": [16.51115620675282, 12.818149485634105],
-      "episode_json_sha256": "f9b874b0fed155fc0d035794a85f43aaedea18c1cbb5fa23e2f9c27969faaf37",
-      "topdown_video_sha256": "c47aaee53813579d2e82c3f64e3711c4ccd5b5b8ee45f6641611873b4509cf56",
-      "semantic_bev_video_sha256": "f969d0261c0da035669077ca23407643458ded51570717a5a4a1e0c2d208c6a1",
-      "trajectory_npz_sha256": "6fcd2dec5015689979b9cb51d45e8a5d862792baeb087d7a0c8981e3e49ba31a"
+      "target_gap": "agent0-agent1",
+      "behavior_class": "agent0-agent1:agent2-agent0-agent1",
+      "exit_constraint_actor_count": 1,
+      "right_lane_change_steps": {"agent0": 30, "agent1": 31, "agent2": 29},
+      "ramp_entry_steps": {"agent0": 80, "agent1": 132, "agent2": 170},
+      "final_bumper_gaps_m": [21.725915808151726, 17.64454856658911],
+      "formation_recovery_stable_steps": 120
     },
     {
       "seed": 59,
-      "severity": "high",
-      "resolved_speed_km_h": 25.0,
-      "right_lane_change_steps": {"agent0": 26, "agent1": 28, "agent2": 28},
-      "ramp_entry_steps": {"agent0": 95, "agent1": 131, "agent2": 166},
-      "actor_interaction_step": 26,
-      "minimum_actor_distance_m": 17.609061898407155,
-      "final_bumper_gaps_m": [11.242424379191792, 19.667071135475645],
-      "episode_json_sha256": "8b5eed808997eb17821357eea253a5d05a3afc14e0e17a9ad81747b044256c3a",
-      "topdown_video_sha256": "2048cb1804067829d265945e4614b391d1df99d14282a73fe03b15c0ec72413b",
-      "semantic_bev_video_sha256": "377d3bcee35fe4a6c588af15acbd771217d5e94a9d2a8c867dbb27e7df2ebc88",
-      "trajectory_npz_sha256": "e12dc8a3f9f87a79e5d93ec78c5d12717488ccb087ac8dbe5c73807f3d23a531"
+      "target_gap": "agent0-agent1",
+      "behavior_class": "agent0-agent1:agent2-agent1-agent0",
+      "exit_constraint_actor_count": 2,
+      "right_lane_change_steps": {"agent0": 32, "agent1": 31, "agent2": 29},
+      "ramp_entry_steps": {"agent0": 80, "agent1": 133, "agent2": 168},
+      "final_bumper_gaps_m": [21.442246869027137, 17.508084974549817],
+      "formation_recovery_stable_steps": 140
     }
   ],
   "artifact_validation": {
-    "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s8_candidate_revision_final_20260813_v3/S8_ego_exit_to_ramp",
-    "topdown_videos": "5/5 non-empty, decodable, exactly 200 frames",
-    "semantic_bev_videos": "5/5 non-empty, decodable, exactly 200 frames",
-    "trajectory_npz": "5/5 load successfully; step, rule action, world trajectory, control, proposal, execution, collection, and mode arrays have the required 200-step shapes and finite core values",
-    "optional_diagnostic_sentinels": "minimum_platoon_gap_m and tracking_error are all-NaN unavailable-value sentinels on this per-step replanning path; they are not used as route, control, or functional evidence",
-    "visual_review": "Reviewed seed 31 top-down frames at 2.5, 7.5, 13.5, and 19.0 seconds plus semantic-BEV frames at 7.5 and 17.5 seconds. The right-lane actor interaction, physical exit-side transition, continuous diverge/ramp geometry, KEEP continuation, and final common-route ordering agree with the machine evidence; no off-road motion, teleportation, route return, or silent actor loss was observed.",
-    "review_mosaics": [
-      "/tmp/s8_v3_visual_review/topdown_mosaic.png",
-      "/tmp/s8_v3_visual_review/bev_mosaic.png"
-    ]
+    "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s8_candidate_revision_5seed_ACCEPTED_FINAL_20260814/S8_ego_exit_to_ramp",
+    "topdown_videos": "5/5 non-empty",
+    "semantic_bev_videos": "5/5 non-empty",
+    "trajectory_npz": "5/5 non-empty",
+    "episode_metric_records": "5/5 present",
+    "later_episode_video_regression": "episodes 1-4 all saved non-empty top-down and semantic-BEV videos; the first-episode-only failure is not reproduced"
   },
   "tests": [
     {
-      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_s8_g_block_drivable_geometry.py tests/test_s5_s9_sampling.py tests/test_scenario_definitions.py tests/test_scenario_orchestrator_adjacent_vehicles.py tests/test_rule_maker.py tests/test_platoon_normal_planner.py tests/test_joint_bev_collection.py tests/test_route_spawn_manager_fixed_platoon_spawn.py tests/test_platoon_route_spawn.py tests/test_preview_and_evaluation.py -q",
-      "result": "289 passed"
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_controller_base.py tests/test_platoon_normal_planner.py tests/test_rule_maker.py tests/test_s5_s9_sampling.py tests/test_scenario_orchestrator_adjacent_vehicles.py tests/test_scenario_definitions.py tests/test_s5_candidate_runner_gate.py tests/test_s8_g_block_drivable_geometry.py tests/test_platoon_route_spawn.py tests/test_route_spawn_manager_fixed_platoon_spawn.py -q",
+      "result": "307 passed"
     },
     {
-      "command": "python -m evaluation.preview_and_evaluation --scenario-id S8_ego_exit_to_ramp --local-route R6_exit_to_ramp --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 200 --traffic-density 0 --output-root outputs/s8_candidate_revision_final_20260813_v3 --evaluate",
-      "result": "5/5 episodes passed; 1000/1000 native planning steps; all required videos, trajectories, metrics, and diagnostics written"
+      "command": "python -m evaluation.preview_and_evaluation --scenario-id S8_ego_exit_to_ramp --local-route R6_exit_to_ramp --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 200 --traffic-density 0 --output-root outputs/s8_candidate_revision_5seed_ACCEPTED_FINAL_20260814 --evaluate",
+      "result": "5/5 episodes passed; 1000/1000 native joint planning steps; 5 top-down videos, 5 semantic-BEV videos, and 5 trajectory files written"
     }
   ],
-  "minimum_reproduction_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m evaluation.preview_and_evaluation --scenario-id S8_ego_exit_to_ramp --local-route R6_exit_to_ramp --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 200 --traffic-density 0 --output-root outputs/s8_candidate_revision_final_20260813_v3 --evaluate",
-  "remaining_risks": [
-    "This accepts S8 only and does not freeze the complete candidate-v2 S5-S9 scenario contract.",
-    "The current formal v1 50k dataset and checkpoints remain bound to their prior frozen scenario hash and are not relabeled by this report.",
-    "The fixed five-seed gate proves the declared candidate range points, not exhaustive continuous-space robustness outside the accepted seed set."
+  "remaining_scope": [
+    "This accepts the independent candidate-v3 S8 gate only; the combined S5-S9 contract review remains separate.",
+    "No historical dataset or checkpoint is relabeled by this report."
   ]
 }

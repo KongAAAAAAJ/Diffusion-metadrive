@@ -650,6 +650,18 @@ class MultiAgentRuleMaker(RuleMaker):
             self._active_execution_id = None
         return copy.deepcopy(debug)
 
+    def retire_committed_execution(self, execution_id: int) -> None:
+        """Detach a stale trajectory buffer without dropping its maneuver."""
+
+        if (
+            self._active_execution_id is not None
+            and int(self._active_execution_id) != int(execution_id)
+        ):
+            raise LaneChangeCommitmentError(
+                "lane_change_commitment_invalid: execution id mismatch"
+            )
+        self._active_execution_id = None
+
     @staticmethod
     def _decision_from_candidate(
         candidate: Mapping[str, object],
@@ -690,6 +702,9 @@ class MultiAgentRuleMaker(RuleMaker):
                 formation_constraint_enabled
             ),
             "coordination_mode": str(coordination_mode),
+            "s8_serial_release": bool(
+                candidate.get("s8_serial_release", False)
+            ),
         }
 
     def _compute_primary_decision(
@@ -763,48 +778,72 @@ class MultiAgentRuleMaker(RuleMaker):
             risk_info["next_state"] = "LOCKED"
             risk_info["s6_lateral_coordination_preserved"] = True
         if self._is_s7_merge_route(env):
-            # A full-platoon ramp merge is one atomic lateral manoeuvre.  The
-            # timed actor gate controls when it may start; risk-state changes
-            # must not split the three route-required actions afterwards.
-            self._formation_locked = True
-            risk_info["next_state"] = "LOCKED"
-            risk_info["s7_lateral_coordination_preserved"] = True
+            orchestrator = getattr(env, "_scenario_orchestrator", None)
+            route_completion = getattr(orchestrator, "_route_completion", {}) or {}
+            all_entered_mainline = bool(
+                route_completion.get("all_agents_entered_mainline", False)
+            )
+            # S7 is an asynchronous ramp merge: mainline actors occupying the
+            # projected ego envelope make an atomic three-car transition
+            # unavailable.  Release the formation constraint while any ego
+            # remains on the ramp, but keep dense pairwise OBB/background
+            # safety active.  Relock only after all three centres are on the
+            # mainline so longitudinal recovery can begin there.
+            self._formation_locked = all_entered_mainline
+            risk_info["next_state"] = (
+                "LOCKED" if all_entered_mainline else "UNLOCKED"
+            )
+            risk_info["s7_asynchronous_merge_release_active"] = (
+                not all_entered_mainline
+            )
         if self._is_s8_exit_route(env):
             orchestrator = getattr(env, "_scenario_orchestrator", None)
             route_completion = getattr(orchestrator, "_route_completion", {}) or {}
-            exit_chain_complete = bool(
+            exit_transition_complete = bool(
                 route_completion.get(
-                    "all_agents_traversed_diverge_connector", False
+                    "all_agents_entered_exit_side_lane", False
                 )
             )
             # S8 explicitly requires temporary formation dissolution while
             # the three vehicles negotiate the actor-bounded exit gap and the
-            # curved connector.  Relock only after all three have crossed the
-            # connector so the LQR follower can recover longitudinal gaps on
-            # the ramp.  Dense OBB and 7 m pairwise safety remain active in
-            # both modes.
-            self._formation_locked = exit_chain_complete
+            # curved connector.  Once every ego has physically completed the
+            # asynchronous RIGHT transition into that common lane, relock the
+            # longitudinal controller so gap recovery can begin before the
+            # vehicles fan out across the connector.  Functional acceptance
+            # still requires stable recovery on the ramp itself.  Dense OBB
+            # and 7 m pairwise safety remain active in both modes.
+            self._formation_locked = exit_transition_complete
             risk_info["next_state"] = (
-                "LOCKED" if exit_chain_complete else "UNLOCKED"
+                "LOCKED" if exit_transition_complete else "UNLOCKED"
             )
-            risk_info["s8_exit_chain_release_active"] = not exit_chain_complete
+            risk_info["s8_exit_chain_release_active"] = (
+                not exit_transition_complete
+            )
         if self._config_value(
             getattr(env, "config", {}) or {}, "scenario_id"
         ) == "S9_narrow_channel_negotiation":
             orchestrator = getattr(env, "_scenario_orchestrator", None)
             route_completion = getattr(orchestrator, "_route_completion", {}) or {}
-            bypass_complete = bool(
-                route_completion.get("all_agents_changed_lane", False)
+            return_started = bool(
+                route_completion.get("all_agents_cleared_narrow_section", False)
             )
-            # S9 intentionally dissolves the formation for the serial LEFT
-            # manoeuvres. As soon as all three have physically entered lane 0,
-            # relock longitudinal coordination so the followers close the
-            # temporary gaps while the platoon clears the blocker.
-            self._formation_locked = bypass_complete
+            return_complete = bool(
+                route_completion.get(
+                    "all_agents_returned_to_original_lane", False
+                )
+            )
+            # S9's platoon remains dissolved throughout the asynchronous LEFT
+            # negotiation, the narrow-channel traversal, and the post-channel
+            # RIGHT return. Re-lock only after every ego is physically back on
+            # the middle lane, where longitudinal-gap recovery is required.
+            self._formation_locked = return_complete
             risk_info["next_state"] = (
-                "LOCKED" if bypass_complete else "UNLOCKED"
+                "LOCKED" if self._formation_locked else "UNLOCKED"
             )
-            risk_info["s9_serial_release_active"] = not bypass_complete
+            risk_info["s9_serial_release_active"] = not self._formation_locked
+            risk_info["s9_post_channel_return_active"] = bool(
+                return_started and not return_complete
+            )
         formation_constraint_enabled = bool(self._formation_locked)
 
         s7_release_ready = self._s7_gap_release_ready(env)
@@ -857,9 +896,44 @@ class MultiAgentRuleMaker(RuleMaker):
             # Dropping the only route-valid action here can turn a coarse
             # prediction mismatch into ``rule_maker_no_action`` before that
             # authoritative check runs.
-            best_combo = forced_combo
+            s8_split_combo = self._s8_split_forced_combo(
+                env,
+                ordered_agent_ids,
+                candidates_by_agent,
+                forced_combo,
+            )
+            best_combo = (
+                s8_split_combo
+                if s8_split_combo is not None
+                else forced_combo
+            )
             best_score = 0.0
             ranked_combos = [(tuple(best_combo), float(best_score))]
+            if s8_split_combo is not None:
+                # S8 is intentionally asynchronous: never attempt the atomic
+                # three-ego route action before the one-at-a-time split
+                # proposal.  The unchanged dense joint/full-horizon audits
+                # remain the final authority for every released vehicle.
+                s8_wait_combo = tuple(
+                    self._candidate_for_action(
+                        candidates_by_agent[agent_id], 0
+                    )
+                    for agent_id in ordered_agent_ids
+                )
+                wait_signature = tuple(
+                    int(candidate["action"])
+                    for candidate in s8_wait_combo
+                    if candidate is not None
+                )
+                known_signatures = {
+                    tuple(int(candidate["action"]) for candidate in forced_combo),
+                    tuple(int(candidate["action"]) for candidate in s8_split_combo),
+                }
+                if (
+                    all(candidate is not None for candidate in s8_wait_combo)
+                    and wait_signature not in known_signatures
+                ):
+                    ranked_combos.append((s8_wait_combo, -1.0))
             s9_serial_fallback = self._s9_serial_forced_fallback_combo(
                 env,
                 ordered_agent_ids,
@@ -867,7 +941,7 @@ class MultiAgentRuleMaker(RuleMaker):
                 forced_combo,
             )
             if s9_serial_fallback is not None:
-                ranked_combos.append((s9_serial_fallback, -1.0))
+                ranked_combos.append((s9_serial_fallback, -2.0))
             action_search_debug = {
                 "strategy": "forced_route_combo_deferred_to_normal_planner",
                 "prefix_counts": [1],
@@ -876,6 +950,16 @@ class MultiAgentRuleMaker(RuleMaker):
                 "final_feasibility_authority": "normal_planner",
                 "s9_serial_fallback_available": bool(
                     s9_serial_fallback is not None
+                ),
+                "s8_split_transition_active": bool(
+                    s8_split_combo is not None
+                ),
+                "s8_split_fallback_available": bool(
+                    s8_split_combo is not None
+                ),
+                "s8_rear_group_wait_fallback_available": bool(
+                    s8_split_combo is not None
+                    and len(ranked_combos) >= 3
                 ),
             }
         elif (
@@ -1017,17 +1101,12 @@ class MultiAgentRuleMaker(RuleMaker):
             # manoeuvre without releasing the ego vehicles prematurely.
             # KEEP-only accommodation is no longer a valid functional
             # response: all three ego vehicles must leave the intruder lane
-            # and later recover an ego-only formation.  Keep both coordinated
-            # directions available to the NormalPlanner, which remains the
-            # dense OBB / 7 m gap feasibility authority.
+            # and later recover an ego-only formation. The NormalPlanner
+            # retains dense OBB / 7 m gap authority over the coordinated
+            # response and its rear-to-front start offsets.
             orchestrator = getattr(env, "_scenario_orchestrator", None)
             resolved = getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}
             target_gap_id = str(resolved.get("target_gap_id", ""))
-            # The ramp actor approaches from the outer/right lane and crosses
-            # into the middle mainline lane.  LEFT is therefore the robust
-            # ego-only escape lane for either internal target gap; RIGHT stays
-            # available only as a fully audited fallback after the physical
-            # cut-in has been observed.
             preferred_action = -1
             direction_order = (preferred_action, -preferred_action)
             ranked_combos = []
@@ -1041,6 +1120,18 @@ class MultiAgentRuleMaker(RuleMaker):
                 if any(candidate is None for candidate in combo):
                     continue
                 ranked_combos.append((tuple(combo), float(-rank)))
+            keep_combo = tuple(
+                self._candidate_for_action(
+                    candidates_by_agent.get(agent_id, []), 0
+                )
+                for agent_id in ordered_agent_ids
+            )
+            if not any(candidate is None for candidate in keep_combo):
+                # Wait safely when neither physical lane-change direction has
+                # a full-horizon solution yet. KEEP is ranked after both
+                # response directions and never latches the S6 response, so a
+                # KEEP-only episode still fails the unchanged functional gate.
+                ranked_combos.append((tuple(keep_combo), -2.0))
             if ranked_combos:
                 best_combo, best_score = ranked_combos[0]
             else:
@@ -1064,14 +1155,30 @@ class MultiAgentRuleMaker(RuleMaker):
             and self._is_s6_background_merge_route(env)
             and self._s6_gap_response_action is not None
         ):
-            post_response_action = 0
-            post_combo = tuple(
-                self._candidate_for_action(
-                    candidates_by_agent.get(agent_id, []),
-                    post_response_action,
+            if self._lane_change_commitments:
+                post_combo = tuple(
+                    self._candidate_for_action(
+                        candidates_by_agent.get(agent_id, []),
+                        int(
+                            self._lane_change_commitments[agent_id].action
+                            if agent_id in self._lane_change_commitments
+                            else self._s6_gap_response_action
+                        ),
+                    )
+                    for agent_id in ordered_agent_ids
                 )
-                for agent_id in ordered_agent_ids
-            )
+                strategy = "s6_committed_response_replan"
+                post_response_action = int(self._s6_gap_response_action)
+            else:
+                post_response_action = 0
+                post_combo = tuple(
+                    self._candidate_for_action(
+                        candidates_by_agent.get(agent_id, []),
+                        post_response_action,
+                    )
+                    for agent_id in ordered_agent_ids
+                )
+                strategy = "s6_post_lane_change_keep"
             best_combo = (
                 None
                 if any(candidate is None for candidate in post_combo)
@@ -1084,7 +1191,7 @@ class MultiAgentRuleMaker(RuleMaker):
                 else []
             )
             action_search_debug = {
-                "strategy": "s6_post_lane_change_keep",
+                "strategy": strategy,
                 "accepted_response_action": int(self._s6_gap_response_action),
                 "post_response_action": int(post_response_action),
                 "prefix_counts": [1 if best_combo is not None else 0],
@@ -1716,6 +1823,65 @@ class MultiAgentRuleMaker(RuleMaker):
             fallback.append(candidate)
         return tuple(fallback)
 
+    @classmethod
+    def _s8_split_forced_combo(
+        cls,
+        env,
+        ordered_agent_ids: list[str],
+        candidates_by_agent: dict[str, list[dict]],
+        forced_combo: tuple[dict, ...],
+    ) -> tuple[dict, ...] | None:
+        """Release actor-separated ego groups in order, with planner staggering."""
+
+        if not cls._is_s8_exit_route(env):
+            return None
+        resolved = getattr(
+            getattr(env, "_scenario_orchestrator", None),
+            "_resolved_scenario_parameters",
+            {},
+        ) or {}
+        target_gap_id = str(
+            resolved.get("exit_constraint_target_gap_id", "")
+        )
+        split_after = {
+            "agent0-agent1": 0,
+            "agent1-agent2": 1,
+        }.get(target_gap_id)
+        if split_after is None:
+            return None
+        pending_indices = [
+            index
+            for index, candidate in enumerate(forced_combo)
+            if int(candidate.get("action", 0)) != 0
+        ]
+        if not pending_indices:
+            return None
+        front_pending = [index for index in pending_indices if index <= split_after]
+        rear_pending = [index for index in pending_indices if index > split_after]
+        # For the second-gap class, the two front-side egos must overlap their
+        # staggered transitions to preserve the finite diverge.  For the
+        # first-gap class, execute all three in one hard-audited joint plan:
+        # agent0 passes ahead while agent1/agent2 yield behind the same actor,
+        # and distinct start delays keep the completions asynchronous.
+        active_indices = set(
+            pending_indices
+            if split_after == 0
+            else front_pending if front_pending else rear_pending
+        )
+        combo = []
+        for index, agent_id in enumerate(ordered_agent_ids):
+            candidate = (
+                forced_combo[index]
+                if index in active_indices
+                else cls._candidate_for_action(
+                    candidates_by_agent.get(agent_id, []), 0
+                )
+            )
+            if candidate is None:
+                return None
+            combo.append(candidate)
+        return tuple(combo)
+
     @staticmethod
     def _forced_candidates_for_agent(candidates: list[dict]) -> list[dict]:
         return [
@@ -1865,6 +2031,20 @@ class MultiAgentRuleMaker(RuleMaker):
         """Complete leader-to-rear prefix search with immediate collision pruning."""
 
         agents = getattr(env, "agents", {}) or {}
+        s9_return_phase = bool(
+            self._config_value(
+                getattr(env, "config", {}) or {}, "scenario_id"
+            )
+            == "S9_narrow_channel_negotiation"
+            and (
+                getattr(
+                    getattr(env, "_scenario_orchestrator", None),
+                    "_route_completion",
+                    {},
+                )
+                or {}
+            ).get("all_agents_cleared_narrow_section", False)
+        )
         prefixes: list[tuple[dict, ...]] = [tuple()]
         prefix_counts: list[int] = []
         conflict_counts: dict[str, int] = {}
@@ -1876,7 +2056,7 @@ class MultiAgentRuleMaker(RuleMaker):
                     conflict = False
                     for previous_index, previous in enumerate(prefix):
                         previous_id = ordered_agent_ids[previous_index]
-                        if self._coarse_pair_collides(
+                        if not s9_return_phase and self._coarse_pair_collides(
                             previous,
                             agents.get(previous_id),
                             candidate,
@@ -1913,12 +2093,17 @@ class MultiAgentRuleMaker(RuleMaker):
         )
         best_combo, best_score = scored[0] if scored else (None, -float("inf"))
         return best_combo, best_score, {
-            "strategy": "leader_to_rear_complete_prefix",
+            "strategy": (
+                "s9_return_deferred_to_normal_planner"
+                if s9_return_phase
+                else "leader_to_rear_complete_prefix"
+            ),
             "prefix_counts": prefix_counts,
             "pairwise_conflict_counts": conflict_counts,
             "complete_combo_count": sum(
                 1 for value in prefixes if len(value) == len(ordered_agent_ids)
             ),
+            "coarse_conflicts_deferred": s9_return_phase,
         }, scored
 
     def _combo_has_hard_conflict(
@@ -2835,15 +3020,49 @@ class MultiAgentRuleMaker(RuleMaker):
         # exists before the topology/TTC gate constrains the joint action set.
         if "blocking_actor" not in manifest:
             return action == 0
-        # Every ego still on c3 lane 1 must move LEFT. The native joint
-        # planner remains the full-horizon OBB and 7 m spacing authority.
-        if len(source) >= 3 and len(target) >= 3 and source[:2] == target[:2]:
+        if len(source) < 3 or len(target) < 3:
+            return False
+        blocker_row = manifest.get("blocking_actor", {}) or {}
+        blocker_spawn_lane = tuple(
+            blocker_row.get("spawn_lane_index", ()) or ()
+        )
+        on_narrow_source_road = bool(
+            len(blocker_spawn_lane) >= 2
+            and source[:2] == blocker_spawn_lane[:2]
+        )
+        # Every ego still on c3 lane 1 must move LEFT. Vehicles already in the
+        # bypass lane KEEP until their physical block transition proves that
+        # they have cleared the narrow section.
+        if on_narrow_source_road:
             if int(source[2]) == 1:
-                return action == -1 and int(target[2]) == 0
-            if int(source[2]) == 0:
+                return (
+                    action == -1
+                    and source[:2] == target[:2]
+                    and int(target[2]) == 0
+                )
+            return int(source[2]) == 0 and action == 0
+
+        all_cleared = bool(
+            (getattr(orchestrator, "_route_completion", {}) or {}).get(
+                "all_agents_cleared_narrow_section", False
+            )
+        )
+        return_lane_id = int(
+            (getattr(orchestrator, "_resolved_scenario_parameters", {}) or {}).get(
+                "post_narrow_return_lane_id", 1
+            )
+        )
+        if int(source[2]) == 0:
+            if not all_cleared:
                 return action == 0
-        # Once downstream of c3 the route is single-lane: KEEP only.
-        return len(source) >= 3 and int(source[2]) == 0 and action == 0
+            return (
+                action == 1
+                and source[:2] == target[:2]
+                and int(target[2]) == return_lane_id
+            )
+        if int(source[2]) == return_lane_id:
+            return action == 0
+        return False
 
     @classmethod
     def _is_s6_background_merge_route(cls, env) -> bool:
