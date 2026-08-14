@@ -1,7 +1,7 @@
 {
   "format": "candidate_v3_diagnostic10k_collection_report_v1",
-  "updated_at": "2026-08-14T22:14:31+08:00",
-  "status": "collection_complete_pending_dual_verification_and_quality_audit",
+  "updated_at": "2026-08-15T00:05:51+08:00",
+  "status": "remediation_implemented_smoke_passed_new_isolated_diagnostic_pending",
   "authorization": "User explicitly reauthorized the isolated candidate-v3 10k dataset collection on 2026-08-14 after the earlier cancellation.",
   "scope": {
     "target_joint_samples": 10000,
@@ -73,7 +73,8 @@
       "candidate-v3 S5, S6, and S8 independent gates",
       "combined S5-S9 contract acceptance",
       "complete 10k verifiers",
-      "pre-frozen safety and quality audit"
+      "pre-frozen safety and quality audit",
+      "remediate the failed S7 lateral-mode and sidecar safety-risk evidence before BEV merge or formal 50k collection"
     ]
   },
   "result": {
@@ -109,9 +110,143 @@
     "stop_reason": "target_and_all_balanced_scenario_quotas_reached",
     "preserved_smoke_only": false,
     "historical_cancellation": "The earlier 10k authorization was cancelled before the formal output root was created; this history is preserved and superseded only for the isolated diagnostic 10k by the fresh 2026-08-14 user authorization.",
-    "active_hard_gate": "formal50k_diversity_constraint_contract_implementation",
-    "diffusion_verifier_passed": false,
-    "riskentry_verifier_passed": false,
+    "active_hard_gate": "candidate_v3_diagnostic10k_quality_remediation",
+    "diffusion_verifier_passed": true,
+    "riskentry_verifier_passed": true,
     "quality_gate_passed": false
+  },
+  "post_collection_gate": {
+    "recorded_at": "2026-08-14T23:34:18+08:00",
+    "source_git_commit": "52b6195db3c10d2c1b3ab592e96c8d87f6c786be",
+    "base_complete_verifier": {
+      "passed": true,
+      "complete_scan": true,
+      "episodes": 47,
+      "joint_samples": 10000,
+      "scanned_joint_samples": 10000,
+      "decode_joint_samples_per_s": 846.7139962598873,
+      "scenario_joint_samples": {
+        "S5_hard_brake_lead": 2000,
+        "S6_background_merge_in": 2000,
+        "S7_ego_merge_from_ramp": 2000,
+        "S8_ego_exit_to_ramp": 2000,
+        "S9_narrow_channel_negotiation": 2000
+      },
+      "kinematic_validation": {
+        "expert_valid": "30000/30000",
+        "hard_valid_anchor_valid": "240344/240344",
+        "stop_valid": "30000/30000"
+      }
+    },
+    "riskentry_sidecar_complete_verifier": {
+      "passed": true,
+      "complete_scan": true,
+      "episodes": 59,
+      "base_samples": 10000,
+      "raw_steps": 13577,
+      "outcomes": {
+        "collision": 47,
+        "out_of_road": 8,
+        "out_of_route": 3,
+        "truncated": 1
+      },
+      "safety_interpretation": "Integrity passed, but the high collision/out-of-road outcome counts are a quality risk and are not accepted as formal-data evidence. Collision events are attributed to external actors in this report and require scenario/actor-level diagnosis rather than metadata waiver."
+    },
+    "bundle_complete_verifier": {
+      "passed": true,
+      "attempted_episodes": 59,
+      "committed_base_episodes": 47,
+      "committed_sidecar_episodes": 59,
+      "sidecar_only_episodes": 12,
+      "bundle_index_sha256": "8df0f64f0d9b991dd7941a61849d783ee61c934f41f11e31219d22a44c8177f0"
+    },
+    "statistical_quality_audit": {
+      "passed": false,
+      "status": "statistical_quality_blocked",
+      "s7_lateral_mode_fraction": 0.0,
+      "required_s7_lateral_mode_fraction": 0.1,
+      "s7_stop_fraction": 0.0545,
+      "maximum_s7_stop_fraction": 0.4,
+      "s7_low_speed_fraction": 0.05733333333333333,
+      "maximum_s7_low_speed_fraction": 0.4,
+      "failed_gates": [
+        "s7_lateral_mode_fraction"
+      ],
+      "audit_output_sha256": "cf96d0ebf84a06fde50d2471ee03480fa513399cfbc31be996f4d197e3b3b1c5"
+    },
+    "split_observation": {
+      "train_scenarios": ["S5", "S6", "S7", "S8", "S9"],
+      "val_scenarios": ["S5", "S6", "S7", "S8", "S9"],
+      "test_scenarios": ["S5", "S6", "S7"],
+      "formal50k_contract_would_require_all_scenarios_in_every_split": true
+    },
+    "decision": {
+      "diagnostic10k_integrity_gate_passed": true,
+      "diagnostic10k_quality_gate_passed": false,
+      "bev_merge_allowed": false,
+      "formal50k_collection_start_allowed": false,
+      "formal50k_output_root_created": false,
+      "next_required_action": "Diagnose and remediate the S7 zero lateral-mode labels and the sidecar safety outcomes, recollect a new isolated diagnostic artifact if collection semantics change, then rerun this complete gate."
+    }
+  },
+  "remediation_precollection_gate": {
+    "recorded_at": "2026-08-15T00:05:51+08:00",
+    "source_git_commit_before_remediation": "52b6195db3c10d2c1b3ab592e96c8d87f6c786be",
+    "root_cause": {
+      "s7_zero_lateral_labels": "The accepted S7 planner intentionally executes the continuous ramp-to-mainline topology chain as KEEP. The collector reused that execution action as the semantic GT group, erasing physical lateral merge trajectories even though 31.9%-46.7% of inspected old-episode labels were closest to a hard-valid lateral candidate.",
+      "sidecar_safety_events": "The sidecar correctly retained raw events from every actor, but the quality interpretation treated episode-wide external-actor collision/out-of-road outcomes as expert-platoon failures. The failed 10k contained no platoon collision or platoon out-of-road events."
+    },
+    "implementation": {
+      "s7_label_fix": "For S7 R7 route-chain KEEP only, quantize each physical expert trajectory against all hard-valid semantic modes; all other scenarios retain the frozen RuleMaker-action group contract.",
+      "sidecar_safety_fix": "Preserve the frozen lossless RiskEntry event/outcome protocol and add hard actor-scoped quality gates requiring zero platoon collision and zero platoon out-of-road events.",
+      "frozen_thresholds_changed": false,
+      "scenario_contract_changed": false,
+      "sidecar_schema_changed": false
+    },
+    "tests": {
+      "command_scope": "tests/test_bev_mode_contract.py tests/test_joint_bev_collection.py tests/test_riskentry_sidecar_storage.py tests/test_round13_97g_dataset_quality.py tests/test_run_joint_bev_collection.py",
+      "passed": 65,
+      "failed": 0
+    },
+    "exact_path_smoke": {
+      "root": "/tmp/candidate_v3_remediation_smoke5_20260814_v1",
+      "attempted_episodes": 6,
+      "committed_base_episodes": 5,
+      "committed_sidecar_episodes": 6,
+      "sidecar_only_episodes": 1,
+      "base_joint_samples": 5,
+      "sidecar_raw_steps": 2072,
+      "base_complete_verifier_passed": true,
+      "sidecar_complete_verifier_passed": true,
+      "bundle_complete_verifier_passed": true,
+      "base_decode_joint_samples_per_s": 949.1942497175601,
+      "s7_gt_mode": [4, 1, 1],
+      "s7_lateral_mode_fraction": 0.3333333333333333,
+      "platoon_collision_events": 0,
+      "platoon_out_of_road_events": 0,
+      "external_collision_events_retained_as_context": 8,
+      "external_out_of_road_events_retained_as_context": 12,
+      "quality_audit_status": "statistical_quality_accepted",
+      "quality_audit_sha256": "57bd51dbe0ed39e37d353c290eab3c300e6ed60fc7c3de5c3b46c1122d309992"
+    },
+    "new_isolated_diagnostic": {
+      "config": "configs/dataset/data_collect_candidate_v3_remediation_diagnostic10k_20260814.yaml",
+      "config_sha256": "cec608d940495c5e320bae02e48d034462bdcca69867671b33f66dc3febe24fe",
+      "output_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260814_v1",
+      "target_joint_samples": 10000,
+      "per_scenario_quota": 2000,
+      "minimum_unique_seed_episodes_per_scenario": 10,
+      "maximum_joint_samples_per_episode": 200,
+      "all_s5_s9_required_in_each_split": true,
+      "collection_started": false,
+      "quality_gate_passed": false
+    },
+    "decision": {
+      "remediation_smoke_passed": true,
+      "new_isolated_diagnostic_collection_allowed": true,
+      "bev_merge_allowed": false,
+      "formal50k_collection_start_allowed": false,
+      "next_required_action": "Commit the verified remediation baseline, collect the new isolated 10k, and rerun complete base, sidecar, bundle, diversity, S7-label, and actor-scoped safety gates."
+    }
   }
 }

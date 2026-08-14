@@ -474,6 +474,29 @@ def test_rule_action_changes_only_label_not_bev_input() -> None:
     )
 
 
+def test_s7_route_chain_keep_uses_physical_lateral_gt_mode() -> None:
+    env = _Env()
+    env.config.update(
+        scenario_id="S7_ego_merge_from_ramp", local_route="R7_merge_core"
+    )
+    generator = SimulatorDynamicAnchorGenerator()
+    builder = JointBEVSampleBuilder(anchor_generator=generator)
+    _prime_builder(builder, env)
+    expert = _expert_step(
+        env, generator, {"agent0": -1, "agent1": -1, "agent2": -1}
+    )
+    route_keep = ExpertJointStep(
+        rule_actions={agent_id: 0 for agent_id in env.agents},
+        trajectories_world=expert.trajectories_world,
+        controls=expert.controls,
+    )
+
+    sample = builder.build_sample(env, route_keep)
+
+    assert all(int(mode) in LEFT_MODES for mode in sample.gt_mode)
+    assert np.all(sample.mode_valid_mask[np.arange(3), sample.gt_mode])
+
+
 def test_one_agent_contract_failure_discards_whole_joint_step() -> None:
     env = _Env()
     # Remove the left lane from both direct lookup and the drivable map.

@@ -673,3 +673,38 @@ def label_gt_mode(
     if not bool(valid_mask[selected]):
         raise AssertionError("GT mode selection escaped the hard-valid candidate set")
     return selected
+
+
+def label_gt_mode_from_trajectory(
+    expert_trajectory: np.ndarray,
+    coarse_trajectories: np.ndarray,
+    mode_valid_mask: np.ndarray,
+    heading_error_weight: float = 0.2,
+) -> int:
+    """Quantize an expert trajectory against every hard-valid semantic mode.
+
+    This is reserved for route-topology transitions whose execution action is
+    KEEP even though the physical trajectory contains a lateral manoeuvre.
+    """
+
+    expert = _validate_expert_trajectory(expert_trajectory)
+    coarse = _validate_coarse_trajectories(coarse_trajectories)
+    valid_mask = _validate_mode_mask(mode_valid_mask)
+    weight = float(heading_error_weight)
+    if not np.isfinite(weight) or weight < 0.0:
+        raise ModeContractError("heading_error_weight must be finite and non-negative")
+
+    candidates = tuple(int(index) for index in np.flatnonzero(valid_mask))
+    if not candidates:
+        raise ModeContractError(
+            "expert trajectory has no hard-valid mode; the joint sample must be discarded"
+        )
+    scores = []
+    for index in candidates:
+        xy_error = np.linalg.norm(expert[:, :2] - coarse[index, :, :2], axis=-1).mean()
+        heading_error = np.abs(_wrap_to_pi(expert[:, 2] - coarse[index, :, 2])).mean()
+        scores.append(float(xy_error + weight * heading_error))
+    selected = int(candidates[int(np.argmin(np.asarray(scores, dtype=np.float64)))])
+    if not bool(valid_mask[selected]):
+        raise AssertionError("trajectory GT mode selection escaped the hard-valid candidate set")
+    return selected

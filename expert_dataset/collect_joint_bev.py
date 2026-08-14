@@ -28,6 +28,7 @@ from models.bev_planner.mode_contract import (
     ModeIndex,
     build_hard_mode_valid_mask,
     label_gt_mode,
+    label_gt_mode_from_trajectory,
     mode_indices_for_rule_action,
     validate_trajectory_kinematics,
 )
@@ -979,12 +980,39 @@ class JointBEVSampleBuilder:
                     reason_code="normal_planner_final_kinematic_invalid",
                 )
             try:
-                gt_mode = label_gt_mode(
-                    expert_step.rule_actions[agent_id],
-                    expert_local,
-                    model_inputs.coarse_trajectories[role_index],
-                    model_inputs.mode_valid_mask[role_index],
+                config = getattr(env, "config", {}) or {}
+                scenario_id = (
+                    config.get("scenario_id", "")
+                    if isinstance(config, Mapping)
+                    else getattr(config, "scenario_id", "")
                 )
+                local_route = (
+                    config.get("local_route", "")
+                    if isinstance(config, Mapping)
+                    else getattr(config, "local_route", "")
+                )
+                route_chain_keep = (
+                    str(scenario_id) == "S7_ego_merge_from_ramp"
+                    and str(local_route) == "R7_merge_core"
+                    and int(expert_step.rule_actions[agent_id]) == 0
+                )
+                if route_chain_keep:
+                    # S7 follows a continuous ramp-to-mainline topology chain
+                    # under the stable KEEP execution action.  Quantize the
+                    # physical expert trajectory so its lateral merge intent
+                    # is not erased from the supervised label.
+                    gt_mode = label_gt_mode_from_trajectory(
+                        expert_local,
+                        model_inputs.coarse_trajectories[role_index],
+                        model_inputs.mode_valid_mask[role_index],
+                    )
+                else:
+                    gt_mode = label_gt_mode(
+                        expert_step.rule_actions[agent_id],
+                        expert_local,
+                        model_inputs.coarse_trajectories[role_index],
+                        model_inputs.mode_valid_mask[role_index],
+                    )
             except ModeContractError as exc:
                 raise JointStepRejected(
                     f"{agent_id} RuleMaker action has no valid GT mode: {exc}",

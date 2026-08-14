@@ -189,6 +189,17 @@ def audit_bundle_quality(
             if require_all_splits
             else any(split_samples[name] > 0 for name in ("train", "val", "test"))
         ),
+        "sidecar_no_platoon_collision_events": all(
+            event_actor_type[name]["platoon"] == 0
+            for name in (
+                "collision_vehicle",
+                "collision_object",
+                "collision_sidewalk",
+            )
+        ),
+        "sidecar_no_platoon_out_of_road_events": (
+            event_actor_type["out_of_road"]["platoon"] == 0
+        ),
     }
     if s7 is not None:
         gates.update(
@@ -307,6 +318,38 @@ def audit_bundle_quality(
         },
         "sidecar_event_actor_types": {
             name: dict(value) for name, value in event_actor_type.items()
+        },
+        "sidecar_safety_audit": {
+            "platoon_collision_events": int(
+                sum(
+                    event_actor_type[name]["platoon"]
+                    for name in (
+                        "collision_vehicle",
+                        "collision_object",
+                        "collision_sidewalk",
+                    )
+                )
+            ),
+            "platoon_out_of_road_events": int(
+                event_actor_type["out_of_road"]["platoon"]
+            ),
+            "external_collision_events_retained_as_context": int(
+                sum(
+                    event_actor_type[name]["external"]
+                    for name in (
+                        "collision_vehicle",
+                        "collision_object",
+                        "collision_sidewalk",
+                    )
+                )
+            ),
+            "external_out_of_road_events_retained_as_context": int(
+                event_actor_type["out_of_road"]["external"]
+            ),
+            "interpretation": (
+                "Raw external-actor events remain losslessly retained for RiskEntry; "
+                "formal BEV safety eligibility is gated on platoon actors only."
+            ),
         },
         "infrastructure_report_status": None if infrastructure is None else infrastructure.get("status"),
         "formal_collection_contract": formal_contract,

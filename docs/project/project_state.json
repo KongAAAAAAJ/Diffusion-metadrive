@@ -1,14 +1,16 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-14T22:21:52+08:00",
+  "updated_at": "2026-08-15T00:05:51+08:00",
   "repository": {
     "branch": "s5-s9-scenario-revision",
-    "git_commit": "12dd114034fef164c5202fe1b77bfdf6c72159c2",
+    "git_commit": "52b6195db3c10d2c1b3ab592e96c8d87f6c786be",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
-    "uncommitted_plan_update_present": true,
-    "uncommitted_formal50k_diversity_contract_present": true,
+    "uncommitted_plan_update_present": false,
+    "uncommitted_formal50k_diversity_contract_present": false,
+    "uncommitted_diagnostic10k_quality_gate_evidence_present": true,
+    "uncommitted_diagnostic10k_remediation_present": true,
     "uncommitted_s7_implementation_present": false,
     "uncommitted_s8_implementation_present": false,
     "uncommitted_s6_definition_update_present": false,
@@ -17,10 +19,10 @@
     "uncommitted_combined_acceptance_evidence_present": false
   },
   "current": {
-    "phase": "candidate_v3_data_verification",
-    "round": "diagnostic10k-dual-verification-and-quality-audit-20260814",
-    "status": "formal50k_diversity_contract_implemented_diagnostic10k_pending_verification",
-    "active_hard_gate": "candidate_v3_diagnostic10k_dual_strict_verification_and_quality_audit"
+    "phase": "candidate_v3_data_quality_remediation",
+    "round": "diagnostic10k-quality-remediation-and-recollection-20260815",
+    "status": "remediation_smoke_passed_new_isolated_diagnostic_pending",
+    "active_hard_gate": "candidate_v3_remediation_diagnostic10k_complete_verification"
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
@@ -272,8 +274,8 @@
       }
     },
     "candidate_v3_data_refresh": {
-      "status": "diagnostic10k_complete_pending_dual_verification_and_quality_audit",
-      "active_task": "candidate_v3_diagnostic10k_dual_strict_verification_and_quality_audit",
+      "status": "remediation_smoke_passed_new_isolated_diagnostic_pending",
+      "active_task": "candidate_v3_remediation_diagnostic10k_complete_verification",
       "pilot_target_joint_steps": 10000,
       "pilot_per_scenario_quota": 2000,
       "pilot_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
@@ -291,6 +293,24 @@
       "pilot_collection_log": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/candidate_v3_diagnostic10k_20260814_1409.log",
       "pilot_collection_cancelled_by_user": false,
       "pilot_quality_gate_passed": false,
+      "pilot_diffusion_verifier_passed": true,
+      "pilot_riskentry_verifier_passed": true,
+      "pilot_bundle_verifier_passed": true,
+      "pilot_quality_failed_gate": "s7_lateral_mode_fraction",
+      "pilot_s7_lateral_mode_fraction": 0.0,
+      "pilot_s7_required_lateral_mode_fraction": 0.1,
+      "pilot_sidecar_collision_outcomes": 47,
+      "remediation_root_cause_confirmed": true,
+      "remediation_focused_tests_passed": 65,
+      "remediation_smoke_root": "/tmp/candidate_v3_remediation_smoke5_20260814_v1",
+      "remediation_smoke_passed": true,
+      "remediation_smoke_s7_lateral_mode_fraction": 0.3333333333333333,
+      "remediation_smoke_platoon_collision_events": 0,
+      "remediation_smoke_platoon_out_of_road_events": 0,
+      "remediation_diagnostic_config": "configs/dataset/data_collect_candidate_v3_remediation_diagnostic10k_20260814.yaml",
+      "remediation_diagnostic_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260814_v1",
+      "remediation_diagnostic_collection_started": false,
+      "remediation_diagnostic_quality_gate_passed": false,
       "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
       "exact_path_smoke_passed": true,
       "exact_path_smoke_attempted_episodes": 6,
@@ -321,10 +341,13 @@
     "current_candidate_v3_collection_authorized": true,
     "candidate_v3_diagnostic10k_reauthorized_by_user": true,
     "candidate_v3_diagnostic10k_reauthorized_on": "2026-08-14T13:51:44+08:00",
+    "candidate_v3_formal50k_collection_requested_by_user": true,
+    "candidate_v3_formal50k_collection_requested_on": "2026-08-14T23:34:18+08:00",
+    "candidate_v3_formal50k_collection_gate_bypass_authorized": false,
     "current_bev_merge_authorized": false,
     "candidate_v3_s6_background_enrichment_authorized_by_user": true,
     "candidate_v3_s6_background_enrichment_recorded_on": "2026-08-14",
-    "note": "The user explicitly reauthorized the isolated candidate-v3 diagnostic 10k collection on 2026-08-14 after its earlier cancellation. Candidate-v3 remains frozen under contract ID candidate_v3 and SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860. This authorization covers the diagnostic 10k only; BEV merge, formal 50k collection, and training remain unauthorized."
+    "note": "The user explicitly requested remediation and a new isolated diagnostic before BEV merge or formal candidate-v3 50k collection. The remediation exact-path smoke passed on 2026-08-15, but formal collection remains blocked until the new isolated 10k passes every complete verifier and quality gate; this does not authorize metadata overrides, BEV merge, or training."
   },
   "source_of_truth": {
     "candidate_v3_s5_s9_combined_acceptance_report": {
@@ -371,7 +394,13 @@
     },
     "candidate_v3_diagnostic10k_collection_report": {
       "path": "evaluation/CANDIDATE_V3_DIAGNOSTIC10K_COLLECTION_REPORT.json",
-      "role": "Records the user-authorized 10k target, candidate-v3 contract hash, per-scenario horizons, passed exact-path smoke, strict verifier evidence, and non-formal eligibility boundary"
+      "sha256": "aa6b8116538dbc0d95cbb258bbe6c242bdbb9d9c9a95c7a81eea8adb4e79421a",
+      "role": "Records the failed original 10k quality gate, root-cause diagnosis, S7 trajectory-semantic label fix, actor-scoped sidecar safety gate, passed remediation smoke, and the new isolated diagnostic boundary"
+    },
+    "candidate_v3_remediation_diagnostic10k_collection_config": {
+      "path": "configs/dataset/data_collect_candidate_v3_remediation_diagnostic10k_20260814.yaml",
+      "sha256": "cec608d940495c5e320bae02e48d034462bdcca69867671b33f66dc3febe24fe",
+      "role": "Defines the new isolated 10k remediation diagnostic with balanced S5-S9 quotas, minimum independent episodes, per-episode cap, all-split coverage, fixed seeds, background counts, and behavior categories"
     },
     "candidate_s5_s9_functional_scenario_memory": {
       "path": "docs/project/s5_s9_functional_scenario_design.json",
@@ -549,15 +578,42 @@
       "per_scenario_quota": 2000,
       "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
       "collection_complete": true,
-      "diffusion_verifier_passed": false,
-      "riskentry_verifier_passed": false,
+      "diffusion_verifier_passed": true,
+      "riskentry_verifier_passed": true,
+      "bundle_verifier_passed": true,
       "quality_gate_passed": false,
       "eligible_for_formal_training": false,
       "reuse_in_formal_50k": false,
       "base_dataset_fingerprint": "4bcb9455294675c640b5e76f63d3693f559f713082a6107a674a4871c7fbe13f",
       "sidecar_dataset_fingerprint": "833a9a70e6a739da1f9b69029e86cceefd59c00f407646c84131eba21c168adc",
       "bundle_index_sha256": "8df0f64f0d9b991dd7941a61849d783ee61c934f41f11e31219d22a44c8177f0",
-      "blocker": "dual_verification_and_quality_audit_not_run"
+      "quality_failure": {
+        "gate": "s7_lateral_mode_fraction",
+        "observed": 0.0,
+        "required_minimum": 0.1,
+        "sidecar_collision_outcomes": 47,
+        "sidecar_out_of_road_outcomes": 8
+      },
+      "blocker": "quality_gate_failed_s7_lateral_mode_and_sidecar_safety_risk"
+    },
+    "candidate_v3_remediation_diagnostic10k": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260814_v1",
+      "collection_config": "configs/dataset/data_collect_candidate_v3_remediation_diagnostic10k_20260814.yaml",
+      "target_joint_steps": 10000,
+      "per_scenario_quota": 2000,
+      "minimum_unique_seed_episodes_per_scenario": 10,
+      "maximum_joint_samples_per_episode": 200,
+      "all_s5_s9_required_in_each_split": true,
+      "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+      "collection_started": false,
+      "collection_complete": false,
+      "diffusion_verifier_passed": false,
+      "riskentry_verifier_passed": false,
+      "bundle_verifier_passed": false,
+      "quality_gate_passed": false,
+      "eligible_for_formal_training": false,
+      "reuse_in_formal_50k": false,
+      "blocker": "new_isolated_diagnostic_collection_and_complete_quality_gate_pending"
     },
     "candidate_v3_formal_s5_s9_50k": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
@@ -580,7 +636,7 @@
       "base_dataset_fingerprint": null,
       "sidecar_dataset_fingerprint": null,
       "bundle_index_sha256": null,
-      "blocker": "diagnostic10k_dual_verification_quality_audit_and_bev_merge_authorization_pending"
+      "blocker": "diagnostic10k_quality_remediation_and_bev_merge_authorization_pending"
     },
     "collection_performance_pilot": {
       "serial_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v1",
@@ -630,10 +686,13 @@
       "blocked_until": "real_trucksim_surrogate_gate_passes"
     }
   },
-  "blockers": [],
+  "blockers": [
+    "The original candidate-v3 diagnostic 10k remains quality-failed and immutable; it cannot be reused or relabeled.",
+    "The remediation exact-path smoke passed, but the new isolated 10k has not yet completed the full base, sidecar, bundle, diversity, S7-label, and actor-scoped safety gates."
+  ],
   "future_hard_gates": [
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
-    "The user reauthorized the isolated candidate-v3 diagnostic 10k on 2026-08-14; this does not authorize BEV merge, formal collection, or training.",
+    "The user requested formal candidate-v3 50k collection on 2026-08-14, but this does not waive failed quality gates or authorize BEV merge or training.",
     "Bind the collector and both strict verifiers to candidate_v3 SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860 and retain the S6=260 and S9=800 evaluation horizons.",
     "The formal candidate-v3 50k is incomplete unless all frozen sample, episode, split, seed, incidental-background-count, and behavior-category postconditions pass.",
     "Merge into BEV and any new formal 50k collection still require explicit user direction plus the pre-frozen exact-path, verifier and data-quality gates.",
@@ -644,7 +703,7 @@
   "next_actions": [
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
     "Preserve the accepted candidate-v3 combined manifest and all 140 hashed artifacts without rerunning, relabeling or overwriting them unless the frozen scenario contract changes.",
-    "Run both complete strict verifiers and the frozen quality audit on the completed candidate-v3 diagnostic 10k; do not merge or start formal 50k collection in the same hard-gate thread."
+    "Commit the verified remediation baseline, collect the new isolated candidate-v3 remediation 10k, and rerun the complete base, sidecar, bundle, diversity, S7-label, and actor-scoped safety gates before requesting BEV merge or starting formal 50k."
   ],
   "invariants": {
     "metadata_override_forbidden": true,
