@@ -1,0 +1,45 @@
+{
+  "format": "candidate_v3_bev_merge_report_v1",
+  "recorded_at": "2026-08-15T08:49:15+08:00",
+  "status": "merged_post_merge_exact_path_smoke_pending",
+  "authorization": {
+    "authorized_by_user": true,
+    "request": "将candidate-v3合入BEV"
+  },
+  "target": {
+    "branch": "BEV",
+    "pre_merge_commit": "259ecae3838b200dfbb48d54a5555360d9f7758d"
+  },
+  "source": {
+    "branch": "s5-s9-scenario-revision",
+    "commit": "200d6b42e7e8dd91b4f1a179a105360fbad3de7b"
+  },
+  "merge": {
+    "commit": "2d2266623626594e0fb8762ecc35b5576b353581",
+    "parents": [
+      "259ecae3838b200dfbb48d54a5555360d9f7758d",
+      "200d6b42e7e8dd91b4f1a179a105360fbad3de7b"
+    ],
+    "strategy": "non_fast_forward",
+    "conflicts_resolved": {
+      "candidate_v3": [
+        ".gitignore",
+        "docs/project/project_plan.json",
+        "docs/project/project_state.json",
+        "docs/project/s5_s9_functional_scenario_design.json"
+      ],
+      "bev": [
+        "git_push.sh"
+      ]
+    }
+  },
+  "validation": {
+    "git_diff_check_passed": true,
+    "json_and_shell_syntax_passed": true,
+    "focused_pytest": "64 passed, 15 warnings",
+    "post_merge_exact_path_smoke_passed": false
+  },
+  "formal50k_collection_started": false,
+  "training_started": false,
+  "next_hard_gate": "post_merge_exact_path_smoke"
+}

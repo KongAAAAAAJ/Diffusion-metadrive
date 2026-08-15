@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-15T17:35:00+08:00",
-  "status": "candidate_v3_remediation9999_user_accepted_pending_bev_merge",
+  "updated_at": "2026-08-15T08:49:15+08:00",
+  "status": "candidate_v3_merged_into_bev_post_merge_exact_path_smoke_pending",
   "purpose": "Machine-readable memory for the candidate-v3 data refresh, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
@@ -427,5 +427,5 @@
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision."
   ],
-  "current_next_action": "The remediation9999 dataset is accepted by explicit user risk waiver as the formal50k collection precondition, while measured failures remain recorded. Before collection, commit the current evidence, explicitly authorize and merge candidate-v3 into BEV, record the merge commit, and pass the post-merge exact-path smoke."
+  "current_next_action": "Candidate-v3 is merged into BEV at merge commit 2d2266623626594e0fb8762ecc35b5576b353581. In a separate hard-gate thread, run and record the post-merge exact-path smoke; do not start formal50k collection or training before that gate is completed."
 }
