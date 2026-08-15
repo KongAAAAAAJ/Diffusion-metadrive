@@ -414,6 +414,12 @@ class PlatoonEnv(BaseMultiEnv):
             if traffic_density is not None:
                 updates["traffic_density"] = float(traffic_density)
         updates.update(dict(getattr(scenario, "env_overrides", None) or {}))
+        bumper_gap = getattr(scenario, "ego_initial_bumper_gap_m", None)
+        if bumper_gap is not None:
+            updates["platoon_spawn_gap_m"] = (
+                self._sample_scenario_float(bumper_gap)
+                + float(self.platoon_config.vehicle_length_m)
+            )
 
         self.platoon_config.scenario_id = scenario_id
         self.platoon_config.local_route = local_route
@@ -461,6 +467,12 @@ class PlatoonEnv(BaseMultiEnv):
         if scenario_traffic_density is not None and "traffic_density" not in explicit_config_keys:
             resolved["traffic_density"] = float(scenario_traffic_density)
         resolved.update(dict(getattr(scenario, "env_overrides", None) or {}))
+        bumper_gap = getattr(scenario, "ego_initial_bumper_gap_m", None)
+        if bumper_gap is not None:
+            resolved["platoon_spawn_gap_m"] = (
+                PlatoonEnv._float_or_range_midpoint(bumper_gap)
+                + float(resolved.get("vehicle_length_m", 5.74))
+            )
         return resolved
 
     def _sample_scenario_float(self, value) -> float:
@@ -604,7 +616,12 @@ class PlatoonEnv(BaseMultiEnv):
 
     def _build_metadrive_config(self) -> dict:
         speed_m_s = self.platoon_config.initial_speed_km_h / 3.6
-        gap_m = self._desired_center_spacing_m()
+        gap_m = float(
+            (getattr(self, "_env_overrides", {}) or {}).get(
+                "platoon_spawn_gap_m",
+                self._desired_center_spacing_m(),
+            )
+        )
         lane_index = (FirstPGBlock.NODE_1, FirstPGBlock.NODE_2, 0)
         lead_long = 20.0
         agent_configs = {
@@ -717,7 +734,26 @@ class PlatoonEnv(BaseMultiEnv):
             return
 
         speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
-        gap_m = self._desired_center_spacing_m()
+        if fixed_agent0_config is not None and bool(
+            fixed_agent0_config.get("spawn_velocity_car_frame", False)
+        ):
+            fixed_spawn_velocity = fixed_agent0_config.get(
+                "spawn_velocity", ()
+            )
+            if (
+                isinstance(fixed_spawn_velocity, (tuple, list))
+                and fixed_spawn_velocity
+                and np.isfinite(float(fixed_spawn_velocity[0]))
+                and float(fixed_spawn_velocity[0]) >= 0.0
+            ):
+                # The route-aware spawn manager owns correlated S5--S9
+                # realizations.  Repositioning must preserve its resolved
+                # car-frame speed instead of restoring the independent env
+                # default after the vehicles have been placed on the route.
+                speed_m_s = float(fixed_spawn_velocity[0])
+        gap_m = self._cfg_float(
+            "platoon_spawn_gap_m", self._desired_center_spacing_m()
+        )
         # The platoon-level lane selection is authoritative.  In particular,
         # controller diagnostics deliberately start on an interior lane so
         # both signed lane-change references remain on-road.  The generated
@@ -730,13 +766,32 @@ class PlatoonEnv(BaseMultiEnv):
             lead_long = float(fixed_agent0_config.get("spawn_longitude", self._select_route_spawn_lead_long(lane, gap_m)))
         else:
             lead_long = self._select_route_spawn_lead_long(lane, gap_m)
+        scenario_id = str(self.config.get("scenario_id", "") or "")
+        fixed_agent_configs = (
+            getattr(getattr(self, "engine", None), "global_config", {})
+            .get("agent_configs", {})
+        )
         for i, agent_id in enumerate(self._agent_ids):
             vehicle = self.agents.get(agent_id)
             if vehicle is None:
                 continue
+            agent_lane = lane
             long = self._route_spawn_vehicle_longitude(lead_long, gap_m, i)
-            pos = lane.position(long, 0.0)
-            heading = lane.heading_theta_at(long)
+            if scenario_id == "S7_ego_merge_from_ramp":
+                agent_config = fixed_agent_configs.get(agent_id, {}) or {}
+                agent_lane_index = tuple(
+                    agent_config.get("spawn_lane_index", ()) or ()
+                )
+                if len(agent_lane_index) == 3:
+                    try:
+                        agent_lane = current_map.road_network.get_lane(
+                            agent_lane_index
+                        )
+                        long = float(agent_config["spawn_longitude"])
+                    except (KeyError, TypeError, ValueError):
+                        agent_lane = lane
+            pos = agent_lane.position(long, 0.0)
+            heading = agent_lane.heading_theta_at(long)
             vehicle.set_position(pos)
             vehicle.set_heading_theta(heading)
             # Re-apply initial speed along lane heading
@@ -826,6 +881,7 @@ class PlatoonEnv(BaseMultiEnv):
     def _setup_scenario_orchestrator(self) -> None:
         """Initialise PlatoonScenarioOrchestrator when scenario_id + local_route are both set."""
         self._scenario_orchestrator = None
+        self._scenario_orchestrator_setup_error = None
         self._scenario_step_count = 0
         scenario_id = self.config.scenario_id
         local_route = self.config.local_route
@@ -845,7 +901,10 @@ class PlatoonEnv(BaseMultiEnv):
                 defn, local_route, self._agent_ids
             )
             self._scenario_orchestrator.reset(self, self._agent_ids[0])
-        except Exception:
+        except Exception as exc:
+            self._scenario_orchestrator_setup_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
             self._scenario_orchestrator = None
 
     def reset(self, seed: Optional[int] = None):
@@ -1691,11 +1750,50 @@ class PlatoonEnv(BaseMultiEnv):
         return self._cfg_float("vehicle_length_m", 5.74)
 
     def _desired_center_spacing_m(self, ego_id: Optional[str] = None, other_id: Optional[str] = None) -> float:
-        speed_m_s = self._cfg_float("initial_speed_km_h", 25.0) / 3.6
         ego_length = self._vehicle_length_m(ego_id)
         other_length = self._vehicle_length_m(other_id)
-        # return 0.5 * (ego_length + other_length) + speed_m_s * self._cfg_float("headway_time_s", 0.5)
-        return 0.5 * (ego_length + other_length) + 10  # !暂时设置成固定的
+        default = 0.5 * (ego_length + other_length) + 10.0
+        runtime_config = getattr(self, "config", None)
+        formation_spacing = (
+            runtime_config.get("platoon_formation_gap_m")
+            if runtime_config is not None
+            else (getattr(self, "_env_overrides", {}) or {}).get(
+                "platoon_formation_gap_m"
+            )
+        )
+        if formation_spacing is not None:
+            scenario_id = str(
+                (runtime_config or {}).get("scenario_id", "")
+            )
+            if scenario_id == "S6_background_merge_in":
+                traffic_manager = getattr(
+                    getattr(self, "engine", None), "traffic_manager", None
+                )
+                traffic = getattr(traffic_manager, "traffic_vehicles", None)
+                if traffic is None:
+                    traffic = getattr(
+                        traffic_manager, "_traffic_vehicles", ()
+                    ) or ()
+                traffic_values = (
+                    traffic.values() if isinstance(traffic, dict) else traffic
+                )
+                actor = next(
+                    (
+                        vehicle
+                        for vehicle in traffic_values
+                        if str(
+                            getattr(vehicle, "scenario_vehicle_role", "")
+                        )
+                        == "s6_gap_intruder"
+                    ),
+                    None,
+                )
+                if actor is None or not bool(
+                    getattr(actor, "scenario_designated_gap_completed", False)
+                ):
+                    return self._cfg_float("platoon_spawn_gap_m", default)
+            return float(formation_spacing)
+        return self._cfg_float("platoon_spawn_gap_m", default)
 
     def get_formation_relation_state(self, agent_id: str) -> np.ndarray:
         ego_pose = self._agent_pose(agent_id)

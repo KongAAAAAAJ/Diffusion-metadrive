@@ -20,5 +20,5 @@
 # Keep gitignore itself
 !.gitignore
 
-# Generated evaluation and experiment artifacts (must follow allow rules)
-/outputs/
+# Keep generated run artifacts out of Git at any directory depth
+outputs/

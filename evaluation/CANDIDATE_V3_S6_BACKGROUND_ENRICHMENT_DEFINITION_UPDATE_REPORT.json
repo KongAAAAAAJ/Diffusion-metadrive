@@ -1,0 +1,73 @@
+{
+  "format": "candidate_v3_s6_background_enrichment_definition_update_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-14T06:59:20+08:00",
+  "status": "definition_recorded_pending_fresh_s6_acceptance",
+  "workflow": "project_administration",
+  "user_authorized_revision": {
+    "recorded_on": "2026-08-14",
+    "scenario_id": "S6_background_merge_in",
+    "requested_semantics": [
+      "preserve every existing S6 functional and safety requirement",
+      "add three to six background vehicles near the heterogeneous platoon to enrich the scene",
+      "keep the additional vehicles unrelated to the causal S6 interaction"
+    ]
+  },
+  "resolved_definition": {
+    "incidental_actor_count_range_per_episode": [
+      3,
+      6
+    ],
+    "relationship_to_platoon": "non_causal_non_interacting",
+    "spatial_scope": "near the platoon route context but outside the designated S6 cut-in conflict envelope",
+    "minimum_initial_ego_clearance_m": 60.0,
+    "minimum_actor_clearance_m": 18.0,
+    "lane_change_policy": "lane_keeping",
+    "designated_cut_in_actor_remains_separate": true,
+    "resolved_actor_metadata_persistence_required": true,
+    "exact_declared_count_realization_required": true
+  },
+  "implementation_boundary": {
+    "runtime_support_already_present": true,
+    "runtime_recipe": "inject_incidental_background_traffic",
+    "source_code_changed_by_this_round": false,
+    "fresh_s6_closed_loop_acceptance_required": true
+  },
+  "compatibility_boundary": {
+    "formal_v1_contract_changed": false,
+    "formal_v1_dataset_or_checkpoint_metadata_changed": false,
+    "historical_candidate_v2_s6_acceptance_superseded": true,
+    "new_scenario_contract_activated": false,
+    "pilot_or_formal_collection_authorized_by_this_report": false
+  },
+  "files_changed": [
+    "docs/project/s5_s9_functional_scenario_design.json",
+    "evaluation/CANDIDATE_V3_S6_BACKGROUND_ENRICHMENT_DEFINITION_UPDATE_REPORT.json",
+    "docs/project/project_state.json"
+  ],
+  "source_memory": {
+    "path": "docs/project/s5_s9_functional_scenario_design.json",
+    "sha256": "6c59ba079b86cc26aceea2e61859133d4a41f5a7931b6b038a73d5cff4fa6747"
+  },
+  "verification": {
+    "json_parse": "passed",
+    "focused_static_contract_assertions": "passed",
+    "focused_static_contract_scope": [
+      "S6 declares exactly three to six incidental actors",
+      "incidental actors remain non-causal and separate from the designated cut-in actor",
+      "resolved actor metadata and exact actor-count realization are required",
+      "historical candidate-v2 S6 evidence is explicitly superseded for the current definition"
+    ],
+    "focused_unit_tests": "18 passed",
+    "focused_unit_test_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_scenario_definitions.py tests/test_s5_s9_sampling.py",
+    "closed_loop_scenario_test": "not_run_definition_only_round",
+    "fixed_five_seed_acceptance": "pending",
+    "hard_gate_passed": false
+  },
+  "remaining_risks": [
+    "the explicit S6 definition has not yet passed a fresh fixed-five-seed physical, safety, actor-realization, video, and artifact gate",
+    "the combined candidate-v3 S5-S9 contract review remains pending"
+  ],
+  "next_permitted_action": "run the fresh candidate-v3 S6 fixed-five-seed gate with the explicit three-to-six incidental-background contract before combined S5-S9 review",
+  "maintainability_gap": "no dedicated repository skill exists for scenario-definition-only project administration; the workflow used the authoritative candidate scenario memory, simple-code, and manage-bev-project-workflow"
+}

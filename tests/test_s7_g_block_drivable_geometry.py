@@ -51,7 +51,7 @@ def test_s7_g_block_has_non_routing_drivable_merge_surface() -> None:
 
         assert len(overlays) == 1
         assert overlays[0].width == 5.0
-        assert ramp_lane.route_seam_transition_m == 16.0
+        assert ramp_lane.route_seam_transition_m == 20.0
         assert overlays[0].need_lane_localization is False
         assert not any(overlays[0] is lane for lane in network.get_all_lanes())
         assert tuple(ramp_lane.junction_drivable_surfaces) == overlays
@@ -71,7 +71,7 @@ def test_s7_g_block_has_non_routing_drivable_merge_surface() -> None:
             [ramp_lane, mainline_right_lane],
             start_s=float(ramp_lane.length) - 12.0,
             step_m=0.1,
-            seam_transition_m=16.0,
+            seam_transition_m=20.0,
         )[:450]
         valid, detail = audit_dense_footprint_on_lanes(
             path,

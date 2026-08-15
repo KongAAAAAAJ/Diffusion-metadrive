@@ -86,9 +86,12 @@ def _make_policy(road_network: _RoadNetwork, vehicle_lane, objects):
     policy.merge_rear_gap_m = 15.0
     policy.merge_creep_speed_kmh = 5.0
     policy.merge_cruise_speed_kmh = 24.0
+    policy.merge_activation_step = 11
+    policy.merge_rear_ttc_min_s = 4.0
     policy.MAX_LONG_DIST = 30.0
     policy.target_speed = 24.0
     policy.merge_completed = False
+    policy.merge_sweep_committed = False
     policy.merge_policy_step = 0
     policy.action_info = {}
     return policy
@@ -162,6 +165,117 @@ def test_merge_policy_restores_cruise_speed_when_gap_is_safe(monkeypatch) -> Non
     assert result[2] is target_lane
 
 
+def test_merge_policy_uses_recipe_bound_gap_on_overlapping_connector(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    target_lane = road_network.mainline[-1]
+    generic_front = SimpleNamespace(
+        lane=target_lane, position=np.asarray([4.0, 0.0])
+    )
+    generic_rear = SimpleNamespace(
+        lane=target_lane, position=np.asarray([-4.0, 0.0]), speed_km_h=24.0
+    )
+    designated_front = SimpleNamespace(
+        lane=target_lane, position=np.asarray([30.0, 0.0])
+    )
+    designated_rear = SimpleNamespace(
+        lane=target_lane, position=np.asarray([-20.0, 0.0]), speed_km_h=24.0
+    )
+    policy = _make_policy(
+        road_network, road_network.connector, [generic_front, generic_rear]
+    )
+    policy.control_object.scenario_target_front_vehicle = designated_front
+    policy.control_object.scenario_target_rear_vehicle = designated_rear
+    policy.merge_policy_step = 11
+    monkeypatch.setattr(
+        IDMPolicy,
+        "lane_change_policy",
+        lambda self, objects: (None, 30.0, self.control_object.lane),
+    )
+
+    result = policy.lane_change_policy([generic_front, generic_rear])
+
+    assert policy.action_info["merge_gap_accepted"] is True
+    assert policy.action_info["merge_front_gap"] == pytest.approx(30.0)
+    assert policy.action_info["merge_rear_gap"] == pytest.approx(20.0)
+    assert result == (designated_front, pytest.approx(30.0), target_lane)
+
+
+def test_merge_target_lane_rebinds_across_multilane_graph_seam() -> None:
+    road_network = _RoadNetwork()
+    downstream_lanes = [_Lane("C", "D", lane_id) for lane_id in range(3)]
+    road_network.graph["C"]["D"] = downstream_lanes
+    policy = _make_policy(road_network, downstream_lanes[2], [])
+
+    target = policy._find_merge_target_lane()
+
+    assert target is downstream_lanes[1]
+    assert policy.control_object.navigation.merge_target_lane is downstream_lanes[1]
+
+
+def test_merge_sweep_remains_committed_after_gap_window_closes(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    target_lane = road_network.mainline[-1]
+    designated_front = SimpleNamespace(
+        lane=target_lane, position=np.asarray([30.0, 0.0])
+    )
+    designated_rear = SimpleNamespace(
+        lane=target_lane, position=np.asarray([-20.0, 0.0]), speed_km_h=24.0
+    )
+    policy = _make_policy(road_network, road_network.connector, [])
+    policy.control_object.scenario_target_front_vehicle = designated_front
+    policy.control_object.scenario_target_rear_vehicle = designated_rear
+    policy.merge_policy_step = 11
+    monkeypatch.setattr(
+        IDMPolicy,
+        "lane_change_policy",
+        lambda self, objects: (None, 30.0, self.control_object.lane),
+    )
+
+    first = policy.lane_change_policy([])
+    designated_rear.position = np.asarray([-4.0, 0.0])
+    second = policy.lane_change_policy([])
+
+    assert first[2] is target_lane
+    assert policy.action_info["merge_gap_accepted"] is False
+    assert policy.action_info["merge_sweep_committed"] is True
+    assert policy.target_speed == policy.merge_cruise_speed_kmh
+    assert second[2] is target_lane
+
+
+def test_premerge_desired_gap_uses_mps_units() -> None:
+    road_network = _RoadNetwork()
+    policy = _make_policy(road_network, road_network.connector, [])
+    front = SimpleNamespace(speed_km_h=24.0)
+
+    gap_m = policy.desired_gap(policy.control_object, front)
+
+    assert gap_m == pytest.approx(7.0 + 0.8 * (24.0 / 3.6))
+
+
+def test_bound_gap_requires_designated_front_and_rear_order(monkeypatch) -> None:
+    road_network = _RoadNetwork()
+    target_lane = road_network.mainline[-1]
+    policy = _make_policy(road_network, road_network.connector, [])
+    policy.control_object.scenario_target_front_vehicle = SimpleNamespace(
+        position=np.asarray([30.0, 0.0])
+    )
+    policy.control_object.scenario_target_rear_vehicle = SimpleNamespace(
+        position=np.asarray([10.0, 0.0]), speed_km_h=24.0
+    )
+    policy.merge_policy_step = 11
+    monkeypatch.setattr(
+        IDMPolicy,
+        "lane_change_policy",
+        lambda self, objects: (None, 30.0, self.control_object.lane),
+    )
+
+    result = policy.lane_change_policy([])
+
+    assert policy.action_info["merge_gap_accepted"] is False
+    assert policy.action_info["merge_sweep_committed"] is False
+    assert result[2] is road_network.connector
+
+
 def test_merge_policy_uses_rear_speed_when_safe_rear_vehicle_is_faster(monkeypatch) -> None:
     road_network = _RoadNetwork()
     target_lane = road_network.mainline[-1]
@@ -174,7 +288,7 @@ def test_merge_policy_uses_rear_speed_when_safe_rear_vehicle_is_faster(monkeypat
 
     assert policy.action_info["merge_gap_accepted"] is True
     assert policy.action_info["merge_rear_ttc_s"] == pytest.approx(12.0)
-    assert policy.target_speed == pytest.approx(30.0)
+    assert policy.target_speed == pytest.approx(24.0)
     assert result[2] is target_lane
 
 
@@ -225,7 +339,7 @@ def test_merge_policy_latches_completed_after_entering_mainline(monkeypatch) -> 
     result = policy.lane_change_policy([])
 
     assert result == sentinel
-    assert policy.target_speed == 17.0
+    assert policy.target_speed == 20.0
     assert policy.merge_completed is True
     assert policy.action_info["merge_active"] is False
     assert policy.action_info["merge_force_active"] is False

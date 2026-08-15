@@ -668,7 +668,18 @@ class FreeOutRampOnStraight(FreeRamp):
         connect_road = Road(bend_1_road.end_node, self.add_road_node())
         self.block_network.add_lane(bend_1_road.start_node, bend_1_road.end_node, bend_1)
         self.block_network.add_lane(connect_road.start_node, connect_road.end_node, connect_part)
-        junction_surface = build_lane_seam_drivable_surface(dec_right_lane, bend_1)
+        # The exit branch joins the right-most mainline lane to a 30-degree
+        # bend with a one-lane lateral offset.  Eight metres leaves the
+        # Hermite join at the hard curvature boundary for an XL vehicle and
+        # can make a physically valid KEEP continuation disappear after the
+        # vehicle has committed to the exit.  Use one shared 12 m geometry
+        # for both the rendered/drivable apron and every route-chain planner.
+        exit_seam_transition_m = 12.0
+        junction_surface = build_lane_seam_drivable_surface(
+            dec_right_lane,
+            bend_1,
+            transition_m=exit_seam_transition_m,
+        )
         junction_surface.index = (
             f"{self.name}-junction",
             f"{self.name}-junction-surface",
@@ -677,6 +688,8 @@ class FreeOutRampOnStraight(FreeRamp):
         self.junction_drivable_surfaces = (junction_surface,)
         dec_right_lane.junction_drivable_surfaces = self.junction_drivable_surfaces
         bend_1.junction_drivable_surfaces = self.junction_drivable_surfaces
+        dec_right_lane.route_seam_transition_m = exit_seam_transition_m
+        bend_1.route_seam_transition_m = exit_seam_transition_m
         no_cross = (
             not check_lane_on_road(
                 self._global_network, bend_1, 0.95, ignore_intersection_checking=self.ignore_intersection_checking

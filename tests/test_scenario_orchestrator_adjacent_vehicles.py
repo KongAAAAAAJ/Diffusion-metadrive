@@ -173,7 +173,9 @@ def make_s6_alignment_env():
         traffic_manager=traffic_manager,
         get_policy=lambda name: traffic_manager.policies.get(name),
     )
-    agent_positions = (75.0, 59.26, 43.52)
+    # Keep the platoon within the S6 functional 25--50 m approach range so
+    # the dependent connector spawn is physically realizable.
+    agent_positions = (150.0, 134.26, 118.52)
     agents = {}
     for index, longitudinal in enumerate(agent_positions):
         lane = main_lanes[2]
@@ -252,34 +254,59 @@ def test_s6_spawns_one_arrival_aligned_merge_vehicle_only_once() -> None:
     orchestrator.before_step(env, "agent0", 1)
     orchestrator.before_step(env, "agent0", 2)
 
-    assert len(traffic_manager.spawn_calls) == 1
-    call = traffic_manager.spawn_calls[0]
-    assert call[1]["spawn_lane_index"] == ("A", "B", 0)
-    assert call[1]["spawn_longitude"] == pytest.approx(67.0, abs=0.05)
-    assert call[1]["spawn_velocity"] == pytest.approx((24.0 / 3.6, 0.0))
-    assert call[3] == {
-        "merge_front_gap_m": 10.0,
-        "merge_rear_gap_m": 10.0,
-        "merge_creep_speed_kmh": 20.0,
-        "merge_cruise_speed_kmh": 24.0,
-    }
-    vehicle = traffic_manager._traffic_vehicles[0]
-    assert vehicle.scenario_vehicle_role == "s6_merge_vehicle"
-    assert vehicle.scenario_merge_arrival_offset_s == pytest.approx(1.2)
+    merge_vehicle = next(
+        vehicle
+        for vehicle in traffic_manager._traffic_vehicles
+        if getattr(vehicle, "scenario_vehicle_role", None) == "s6_gap_intruder"
+    )
+    call = traffic_manager.spawn_calls[
+        traffic_manager._traffic_vehicles.index(merge_vehicle)
+    ]
+    assert call[1]["spawn_lane_index"] == ("B", "C", 0)
+    resolved = orchestrator._resolved_scenario_parameters
+    assert 2.0 <= call[1]["spawn_longitude"] <= 78.0
+    assert call[1]["spawn_velocity"] == pytest.approx((resolved["merge_actor_speed_km_h"] / 3.6, 0.0))
+    assert call[3] == pytest.approx({
+        "merge_front_gap_m": (
+            5.75 if resolved["target_gap_id"] == "agent0-agent1" else 6.0
+        ) + 5.74,
+        "merge_rear_gap_m": (
+            5.75 if resolved["target_gap_id"] == "agent0-agent1" else 6.0
+        ) + 5.74,
+        "merge_creep_speed_kmh": min(
+            resolved["merge_actor_speed_km_h"],
+            max(18.0, resolved["ego_initial_speed_km_h"] - 2.83),
+        ),
+        "merge_cruise_speed_kmh": resolved["merge_actor_speed_km_h"],
+            "merge_rear_ttc_min_s": 0.5,
+            "merge_activation_step": resolved["merge_activation_step"],
+            "merge_lateral_kp": (
+                1.0
+                if resolved["target_gap_id"] == "agent0-agent1"
+                and resolved["merge_actor_speed_km_h"] <= 21.2
+                else 0.7
+                if resolved["target_gap_id"] == "agent1-agent2"
+                else 0.7
+            ),
+    })
+    vehicle = merge_vehicle
+    assert vehicle.scenario_vehicle_role == "s6_gap_intruder"
+    assert vehicle.scenario_merge_arrival_offset_s == pytest.approx(resolved["conflict_arrival_time_delta_s"])
     assert (
-        vehicle.scenario_leader_ttc_s
+        vehicle.scenario_target_front_ttc_s
         < vehicle.scenario_merge_ttc_s
-        < vehicle.scenario_middle_ttc_s
+        < vehicle.scenario_target_rear_ttc_s + 3.0
     )
-    assert (
-        vehicle.scenario_merge_ttc_s - vehicle.scenario_leader_ttc_s
-        == pytest.approx(1.2)
+    assert vehicle.scenario_merge_ttc_s == pytest.approx(
+        vehicle.scenario_gap_center_ttc_s
+        + resolved["conflict_arrival_time_delta_s"]
+        + resolved["response_timing_compensation_s"]
     )
-    branch_lane = env.engine.current_map.road_network.get_lane(
+    connector_lane = env.engine.current_map.road_network.get_lane(
         call[1]["spawn_lane_index"]
     )
-    spawn_position = branch_lane.position(call[1]["spawn_longitude"], 0.0)
-    spawn_heading = branch_lane.heading_theta_at(call[1]["spawn_longitude"])
+    spawn_position = connector_lane.position(call[1]["spawn_longitude"], 0.0)
+    spawn_heading = connector_lane.heading_theta_at(call[1]["spawn_longitude"])
     assert all(
         not orchestrator._oriented_boxes_overlap(
             spawn_position,
@@ -293,7 +320,53 @@ def test_s6_spawns_one_arrival_aligned_merge_vehicle_only_once() -> None:
     )
 
 
-def test_s7_mainline_background_spawns_on_three_g1_lanes() -> None:
+def test_s6_functional_success_requires_ego_only_lane_change_reassembly() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S6_background_merge_in"],
+        "R6_mainline_merge_approach",
+    )
+    orchestrator._actor_manifest = {
+        "s6_gap_intruder": {"active": True},
+    }
+    orchestrator._conflict_evidence = {
+        "designated_gap_observed": True,
+        "measurable_platoon_response": True,
+        # These were sufficient for the obsolete four-vehicle-chain gate.
+        "formation_recovered_after_merge": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is False
+
+    orchestrator._conflict_evidence.update(
+        {
+            "all_ego_changed_lane_after_cut_in": True,
+            "cut_in_actor_excluded_from_reassembly": True,
+            "ego_only_reassembly": True,
+        }
+    )
+    assert orchestrator._functional_success(recipes_complete=True) is True
+
+
+def test_s6_final_cleanup_does_not_erase_realized_gap_evidence() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S6_background_merge_in"],
+        "R6_mainline_merge_approach",
+    )
+    orchestrator._resolved_scenario_parameters = {
+        "target_gap_id": "agent0-agent1",
+    }
+    orchestrator._conflict_evidence = {"designated_gap_observed": True}
+    orchestrator._functional_state = {}
+
+    # MetaDrive clears active agents before the terminal summary refresh.
+    orchestrator._update_s6_functional_evidence(
+        SimpleNamespace(agents={}), {}, step_count=200
+    )
+
+    assert orchestrator._conflict_evidence["designated_gap_observed"] is True
+
+
+def test_s7_atomic_mainline_background_spawns_all_declared_roles() -> None:
     env, _ego, traffic_manager = make_env_and_ego()
     env.engine.current_map.blocks[0].graph_block_id = "g1"
     orchestrator = ScenarioOrchestrator(
@@ -304,17 +377,189 @@ def test_s7_mainline_background_spawns_on_three_g1_lanes() -> None:
 
     orchestrator.before_step(env, "agent0", 1)
 
-    calls = traffic_manager.spawn_calls
-    assert len(calls) == 10
+    scenario_vehicles = [
+        vehicle
+        for vehicle in traffic_manager._traffic_vehicles
+        if not str(getattr(vehicle, "scenario_vehicle_role", "")).startswith(
+            "incidental_background_"
+        )
+    ]
+    calls = [
+        traffic_manager.spawn_calls[traffic_manager._traffic_vehicles.index(vehicle)]
+        for vehicle in scenario_vehicles
+    ]
+    assert len(calls) == orchestrator._resolved_scenario_parameters["actor_count"]
     spawned_lane_ids = [call[1]["spawn_lane_index"][-1] for call in calls]
-    assert {lane_id: spawned_lane_ids.count(lane_id) for lane_id in sorted(set(spawned_lane_ids))} == {
-        0: 3,
-        1: 4,
-        2: 3,
-    }
-    assert [call[1]["spawn_lane_index"][:2] for call in calls] == [("road_a", "road_b")] * 10
+    assert set(spawned_lane_ids) == {2}
+    assert [call[1]["spawn_lane_index"][:2] for call in calls] == [("road_a", "road_b")] * len(calls)
     assert all(call[1]["spawn_velocity_car_frame"] is True for call in calls)
+    constraint_roles = [
+        role
+        for role in orchestrator._actor_manifest
+        if role.startswith("parallel_merge_constraint_")
+    ]
+    assert len(constraint_roles) == orchestrator._resolved_scenario_parameters[
+        "parallel_constraint_actor_count"
+    ]
+    evidence = orchestrator._conflict_evidence
+    envelope_min, envelope_max = evidence[
+        "parallel_constraint_initial_ego_envelope_remaining_m"
+    ]
+    assert evidence["parallel_constraint_initial_region_valid"] is True
+    assert all(
+        envelope_min <= value <= envelope_max
+        for value in evidence["parallel_constraint_initial_remaining_m"]
+    )
+    constraint_remaining = evidence["parallel_constraint_initial_remaining_m"]
+    if len(constraint_remaining) > 1:
+        assert np.allclose(
+            np.diff(constraint_remaining),
+            5.74 + 5.0,
+        )
+        assert constraint_remaining[-1] < envelope_max
     assert orchestrator.summary.scenario_realized is True
+
+
+def test_s7_functional_success_requires_parallel_constraints_and_async_merge() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S7_ego_merge_from_ramp"],
+        "R7_merge_core",
+    )
+    orchestrator._resolved_scenario_parameters = {
+        "parallel_constraint_actor_count": 2,
+    }
+    orchestrator._actor_manifest = {
+        role: {"active": True}
+        for role in (
+            "critical_gap_front",
+            "critical_gap_rear",
+            "next_gap_front",
+            "next_gap_rear",
+            "parallel_merge_constraint_0",
+            "parallel_merge_constraint_1",
+        )
+    }
+    orchestrator._route_completion = {
+        "all_agents_entered_mainline": True,
+        "no_agent_stranded_on_ramp": True,
+    }
+    orchestrator._conflict_evidence = {
+        "parallel_constraint_initial_region_valid": True,
+        "parallel_constraint_roles_present": True,
+        "critical_pair_traversed_conflict": True,
+        "expected_behavior_matched": True,
+        "physical_split_observed": True,
+        "non_simultaneous_mainline_entries": True,
+        "formation_recovered_after_merge": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is True
+
+    orchestrator._conflict_evidence["parallel_constraint_roles_present"] = False
+    assert orchestrator._functional_success(recipes_complete=True) is False
+
+
+def test_s8_split_actor_accelerates_only_after_async_transition(monkeypatch) -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S8_ego_exit_to_ramp"],
+        "R6_exit_to_ramp",
+    )
+    actor = SimpleNamespace(name="split", speed_km_h=25.0)
+    orchestrator._actor_manifest = {
+        "exit_split_constraint": {"object_name": "split"}
+    }
+    orchestrator._speed_profiles = {
+        "split": {"remaining_steps": float("inf"), "target_speed_kmh": 25.0}
+    }
+    orchestrator._route_completion = {
+        "all_agents_entered_exit_side_lane": False
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_find_traffic_vehicle",
+        lambda env, name: actor if name == "split" else None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_set_vehicle_target_speed",
+        lambda env, vehicle, speed: setattr(vehicle, "target_speed", speed),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_force_vehicle_speed",
+        lambda vehicle, speed: setattr(vehicle, "speed_km_h", speed),
+    )
+
+    orchestrator._apply_speed_profiles(SimpleNamespace())
+    assert actor.target_speed == pytest.approx(25.0)
+
+    orchestrator._route_completion["all_agents_entered_exit_side_lane"] = True
+    orchestrator._apply_speed_profiles(SimpleNamespace())
+
+    assert actor.target_speed == pytest.approx(28.0)
+    assert orchestrator._conflict_evidence[
+        "split_actor_post_transition_release_speed_km_h"
+    ] == pytest.approx(28.0)
+
+
+def test_s8_downstream_ramp_blocks_count_toward_reassembly(monkeypatch) -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S8_ego_exit_to_ramp"],
+        "R6_exit_to_ramp",
+    )
+    orchestrator._initial_agent_lanes = {
+        name: ("3C0_1_", "4G0_0_", 1)
+        for name in ("agent0", "agent1", "agent2")
+    }
+    orchestrator._route_completion = {
+        "agent_lane_transitions": {
+            name: [
+                {
+                    "step": 10 + index,
+                    "lane_index": ["3C0_1_", "4G0_0_", 2],
+                }
+            ]
+            for index, name in enumerate(("agent0", "agent1", "agent2"))
+        }
+    }
+    orchestrator._resolved_scenario_parameters = {
+        "exit_constraint_actor_count": 1,
+        "exit_constraint_target_gap_id": "agent1-agent2",
+    }
+    orchestrator._actor_manifest = {"exit_split_constraint": {}}
+    orchestrator._functional_state = {
+        "s8_constraint_relation_by_agent": {
+            "agent0": "ahead",
+            "agent1": "ahead",
+            "agent2": "behind",
+        }
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_platoon_formation_recovered",
+        lambda env: (True, [10.0, 10.0]),
+    )
+    lanes = {
+        "agent0": ("downstream_a", "downstream_b", 0),
+        "agent1": ("downstream_c", "downstream_d", 0),
+        "agent2": ("downstream_e", "downstream_f", 0),
+    }
+    blocks = {
+        "agent0": "s_ramp1",
+        "agent1": "c1_ramp0",
+        "agent2": "h_ramp0",
+    }
+
+    for step in range(5):
+        orchestrator._update_s8_functional_evidence(
+            SimpleNamespace(agents={}),
+            {},
+            lanes,
+            blocks,
+            step,
+        )
+
+    assert orchestrator._conflict_evidence["formation_recovered_on_ramp"] is True
 
 
 def test_s5_hard_brake_recipe_uses_episode_local_scenario_rng(monkeypatch) -> None:
@@ -343,19 +588,13 @@ def test_s5_hard_brake_recipe_uses_episode_local_scenario_rng(monkeypatch) -> No
 
     monkeypatch.setattr(orchestrator, "_spawn_lead_vehicle", fake_spawn)
 
-    orchestrator.before_step(env, "agent0", 31)
+    orchestrator.before_step(env, "agent0", 40)
 
-    expected_rng = np.random.RandomState(orchestrator._scenario_random_seed)
-    assert captured_params["lead_bumper_gap_m"] == float(
-        expected_rng.uniform(9.0, 13.0)
-    )
-    assert captured_params["lead_target_speed_kmh"] == float(
-        expected_rng.uniform(22.0, 26.0)
-    )
-    assert captured_params["brake_target_speed_kmh"] == float(expected_rng.uniform(0.5, 2.0))
-    assert captured_params["brake_deceleration_mps2"] == float(
-        expected_rng.uniform(5.0, 7.0)
-    )
+    resolved = orchestrator._resolved_scenario_parameters
+    assert captured_params["lead_bumper_gap_m"] == resolved["lead_trigger_bumper_gap_m"]
+    assert captured_params["lead_target_speed_kmh"] == resolved["lead_approach_speed_km_h"]
+    assert captured_params["brake_target_speed_kmh"] == resolved["lead_target_speed_km_h"]
+    assert captured_params["brake_deceleration_mps2"] == resolved["lead_brake_deceleration_mps2"]
     assert orchestrator._speed_profiles["spawned_lead"]["remaining_steps"] == float(
         "inf"
     )
@@ -374,22 +613,32 @@ def test_s5_adjacent_recipe_uses_episode_local_scenario_rng() -> None:
 
     orchestrator.before_step(env, "agent0", 1)
 
-    expected_rng = np.random.RandomState(orchestrator._scenario_random_seed)
-    left_offset = float(expected_rng.uniform(-15.0, -13.0))
-    right_offset = float(expected_rng.uniform(13.0, 15.0))
+    left_offset = orchestrator._resolved_scenario_parameters["left_offset_m"]
+    right_offset = orchestrator._resolved_scenario_parameters["right_offset_m"]
 
-    assert [call[1]["spawn_lane_index"] for call in traffic_manager.spawn_calls] == [
+    adjacent_vehicles = [
+        vehicle
+        for vehicle in traffic_manager._traffic_vehicles
+        if str(getattr(vehicle, "scenario_vehicle_role", "")).startswith(
+            "s5_adjacent_"
+        )
+    ]
+    adjacent_calls = [
+        traffic_manager.spawn_calls[traffic_manager._traffic_vehicles.index(vehicle)]
+        for vehicle in adjacent_vehicles
+    ]
+    assert [call[1]["spawn_lane_index"] for call in adjacent_calls] == [
         ("road_a", "road_b", 0),
         ("road_a", "road_b", 2),
     ]
-    assert [call[1]["spawn_longitude"] for call in traffic_manager.spawn_calls] == [
+    assert [call[1]["spawn_longitude"] for call in adjacent_calls] == [
         20.0 + left_offset,
         20.0 + right_offset,
     ]
-    assert [traffic_manager.policies[vehicle.name].target_speed for vehicle in traffic_manager._traffic_vehicles] == [
-        24.0,
-        24.0,
-    ]
+    assert [traffic_manager.policies[vehicle.name].target_speed for vehicle in adjacent_vehicles] == pytest.approx([
+        orchestrator._resolved_scenario_parameters["left_speed_km_h"],
+        orchestrator._resolved_scenario_parameters["right_speed_km_h"],
+    ])
 
 
 def test_s5_scenario_parameters_ignore_unrelated_traffic_rng_consumption(
@@ -430,10 +679,269 @@ def test_s5_controlled_vehicles_use_fixed_physical_type() -> None:
 
     orchestrator.before_step(env, "agent0", 1)
 
-    assert [call[0] for call in traffic_manager.spawn_calls] == [
+    core_vehicles = [
+        vehicle
+        for vehicle in traffic_manager._traffic_vehicles
+        if not str(getattr(vehicle, "scenario_vehicle_role", "")).startswith(
+            "incidental_background_"
+        )
+    ]
+    assert [
+        traffic_manager.spawn_calls[traffic_manager._traffic_vehicles.index(vehicle)][0]
+        for vehicle in core_vehicles
+    ] == [
         TrafficDefaultVehicle,
         TrafficDefaultVehicle,
     ]
+
+
+def test_s5_functional_success_requires_realized_response_and_recovery() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"], "R1_entry_straight"
+    )
+    orchestrator._actor_manifest = {
+        role: {"active": True}
+        for role in ("hard_brake_lead", "s5_adjacent_left", "s5_adjacent_right")
+    }
+    orchestrator._conflict_evidence = {}
+
+    assert orchestrator._functional_success(recipes_complete=True) is False
+    orchestrator._conflict_evidence.update(
+        lead_brake_profile_realized=True,
+        observed_behavior_class="keep_emergency_braking",
+        hazard_cleared=True,
+        formation_recovered_after_hazard=True,
+    )
+    assert orchestrator._functional_success(recipes_complete=True) is True
+
+
+def test_s5_lane_change_requires_post_trigger_physical_lane_change() -> None:
+    env, ego, traffic_manager = make_env_and_ego()
+    env.current_seed = 17
+    agents = {
+        f"agent{index}": SimpleNamespace(
+            name=f"agent{index}",
+            lane=ego.lane,
+            lane_index=("road_a", "road_b", 1),
+            position=(90.0 - 15.0 * index, 4.0),
+            speed_km_h=22.0,
+            LENGTH=5.74,
+        )
+        for index in range(3)
+    }
+    env.agents = agents
+    lead = SimpleNamespace(
+        name="lead",
+        lane=ego.lane,
+        lane_index=("road_a", "road_b", 1),
+        position=(110.0, 4.0),
+        speed_km_h=0.0,
+        LENGTH=5.74,
+    )
+    traffic_manager._traffic_vehicles = [lead]
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"], "R1_entry_straight"
+    )
+    orchestrator._last_env = env
+    orchestrator._initial_agent_lanes = {
+        name: ("road_a", "road_b", 1) for name in agents
+    }
+    orchestrator.summary.scenario_triggered = True
+    orchestrator.summary.trigger_step = 30
+    orchestrator._actor_manifest = {
+        "hard_brake_lead": {"object_name": "lead", "active": True},
+    }
+    orchestrator._resolved_scenario_parameters = {
+        "lead_target_speed_km_h": 0.0,
+        "lead_brake_deceleration_mps2": 4.5,
+    }
+    orchestrator._route_completion = {
+        "agent_lane_transitions": {
+            name: [{"step": -1, "lane_index": ["road_a", "road_b", 0]}]
+            for name in agents
+        }
+    }
+    orchestrator._functional_state = {
+        "last_step": None,
+        "actor_speeds_kmh": {"hard_brake_lead": 2.0},
+        "ego_speeds_kmh": {},
+        "formation_stable_steps": 0,
+    }
+
+    orchestrator._update_s5_functional_evidence(
+        env, {"lead": lead}, step_count=31
+    )
+    assert orchestrator._conflict_evidence["real_lane_change_completed"] is False
+    assert orchestrator._conflict_evidence.get("lane_change_direction") is None
+
+    for vehicle in agents.values():
+        vehicle.lane_index = ("road_a", "road_b", 0)
+    orchestrator._update_s5_functional_evidence(
+        env, {"lead": lead}, step_count=32
+    )
+    assert orchestrator._conflict_evidence["real_lane_change_completed"] is False
+    orchestrator._update_s5_functional_evidence(
+        env, {"lead": lead}, step_count=33
+    )
+    assert orchestrator._conflict_evidence["real_lane_change_completed"] is True
+    assert orchestrator._conflict_evidence["lane_change_direction"] == "left"
+    assert orchestrator._conflict_evidence["observed_behavior_class"] == (
+        "coordinated_lane_change"
+    )
+
+
+def test_s5_mixed_lane_changes_require_real_return_before_recovery_class() -> None:
+    env, ego, traffic_manager = make_env_and_ego()
+    agents = {
+        f"agent{index}": SimpleNamespace(
+            name=f"agent{index}",
+            lane=ego.lane,
+            lane_index=("road_a", "road_b", 1),
+            position=(90.0 - 15.0 * index, 4.0),
+            speed_km_h=22.0,
+            LENGTH=5.74,
+        )
+        for index in range(3)
+    }
+    env.agents = agents
+    lead = SimpleNamespace(
+        name="lead",
+        lane=ego.lane,
+        lane_index=("road_a", "road_b", 1),
+        position=(60.0, 4.0),
+        speed_km_h=0.0,
+        LENGTH=5.74,
+    )
+    traffic_manager._traffic_vehicles = [lead]
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"], "R1_entry_straight"
+    )
+    orchestrator._initial_agent_lanes = {
+        name: ("road_a", "road_b", 1) for name in agents
+    }
+    orchestrator.summary.scenario_triggered = True
+    orchestrator.summary.trigger_step = 30
+    orchestrator._actor_manifest = {
+        "hard_brake_lead": {"object_name": "lead", "active": True},
+    }
+    orchestrator._resolved_scenario_parameters = {
+        "lead_target_speed_km_h": 0.0,
+        "lead_brake_deceleration_mps2": 4.5,
+    }
+    orchestrator._route_completion = {}
+    orchestrator._functional_state = {
+        "last_step": None,
+        "actor_speeds_kmh": {"hard_brake_lead": 2.0},
+        "ego_speeds_kmh": {},
+        "formation_stable_steps": 0,
+    }
+
+    for name, lane_id in {"agent0": 0, "agent1": 0, "agent2": 2}.items():
+        agents[name].lane_index = ("road_a", "road_b", lane_id)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 31)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 32)
+
+    evidence = orchestrator._conflict_evidence
+    assert evidence["mixed_direction_lane_change_completed"] is True
+    assert evidence["reassembly_completed"] is False
+    assert evidence["reassembly_to_initial_lane_completed"] is False
+    assert evidence["observed_behavior_class"] == "temporary_formation_release"
+
+    for vehicle in agents.values():
+        vehicle.lane_index = ("road_a", "road_b", 1)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 33)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 34)
+
+    evidence = orchestrator._conflict_evidence
+    assert evidence["reassembly_completed"] is True
+    assert evidence["reassembly_to_initial_lane_completed"] is True
+    assert evidence["observed_behavior_class"] == (
+        "temporary_formation_release_and_recovery"
+    )
+
+
+def test_s5_mixed_lane_changes_can_reassemble_on_any_common_valid_lane() -> None:
+    env, ego, traffic_manager = make_env_and_ego()
+    agents = {
+        f"agent{index}": SimpleNamespace(
+            name=f"agent{index}",
+            lane=ego.lane,
+            lane_index=("road_a", "road_b", 1),
+            position=(90.0 - 15.0 * index, 4.0),
+            speed_km_h=22.0,
+            LENGTH=5.74,
+        )
+        for index in range(3)
+    }
+    env.agents = agents
+    lead = SimpleNamespace(
+        name="lead",
+        lane=ego.lane,
+        lane_index=("road_a", "road_b", 1),
+        position=(60.0, 4.0),
+        speed_km_h=0.0,
+        LENGTH=5.74,
+    )
+    traffic_manager._traffic_vehicles = [lead]
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"], "R1_entry_straight"
+    )
+    orchestrator._initial_agent_lanes = {
+        name: ("road_a", "road_b", 1) for name in agents
+    }
+    orchestrator.summary.scenario_triggered = True
+    orchestrator.summary.trigger_step = 30
+    orchestrator._actor_manifest = {
+        "hard_brake_lead": {"object_name": "lead", "active": True},
+    }
+    orchestrator._resolved_scenario_parameters = {
+        "lead_target_speed_km_h": 0.0,
+        "lead_brake_deceleration_mps2": 4.5,
+    }
+    orchestrator._route_completion = {}
+    orchestrator._functional_state = {
+        "last_step": None,
+        "actor_speeds_kmh": {"hard_brake_lead": 2.0},
+        "ego_speeds_kmh": {},
+        "formation_stable_steps": 0,
+    }
+
+    for name, lane_id in {"agent0": 0, "agent1": 0, "agent2": 2}.items():
+        agents[name].lane_index = ("road_a", "road_b", lane_id)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 31)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 32)
+
+    for vehicle in agents.values():
+        vehicle.lane_index = ("road_a", "road_b", 0)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 33)
+    orchestrator._update_s5_functional_evidence(env, {"lead": lead}, 34)
+
+    evidence = orchestrator._conflict_evidence
+    assert evidence["reassembly_completed"] is True
+    assert evidence["reassembly_lane_index"] == ["road_a", "road_b", 0]
+    assert evidence["reassembly_to_initial_lane_completed"] is False
+    assert evidence["observed_behavior_class"] == (
+        "temporary_formation_release_and_recovery"
+    )
+
+
+def test_s5_functional_success_rejects_claimed_lane_change_without_lane_evidence() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"], "R1_entry_straight"
+    )
+    orchestrator._actor_manifest = {
+        role: {"active": True}
+        for role in ("hard_brake_lead", "s5_adjacent_left", "s5_adjacent_right")
+    }
+    orchestrator._conflict_evidence = {
+        "lead_brake_profile_realized": True,
+        "observed_behavior_class": "coordinated_lane_change",
+        "real_lane_change_completed": False,
+        "hazard_cleared": True,
+        "formation_recovered_after_hazard": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is False
 
 
 def test_s8_injected_traffic_uses_fixed_physical_type() -> None:
@@ -445,6 +953,155 @@ def test_s8_injected_traffic_uses_fixed_physical_type() -> None:
     )
 
     assert orchestrator._scenario_vehicle_type() is TrafficDefaultVehicle
+
+
+def test_s8_functional_success_requires_interaction_split_and_ramp_recovery() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S8_ego_exit_to_ramp"],
+        "R6_exit_to_ramp",
+    )
+    orchestrator._actor_manifest = {
+        "exit_split_constraint": {"active": True},
+    }
+    orchestrator._route_completion = {
+        "all_agents_entered_exit_side_lane": True,
+        "all_agents_traversed_diverge_connector": True,
+        "all_agents_continued_on_exit_ramp": True,
+        "returned_to_mainline": False,
+    }
+    orchestrator._conflict_evidence = {
+        "causal_exit_actor_interaction_observed": True,
+        "physical_split_observed": True,
+        "non_simultaneous_right_lane_changes": True,
+        "constraint_straddled_by_lane_changes": True,
+        "post_connector_nonkeep_observed": False,
+        "formation_recovered_on_ramp": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is True
+
+    orchestrator._conflict_evidence["causal_exit_actor_interaction_observed"] = False
+    assert orchestrator._functional_success(recipes_complete=True) is False
+
+
+def test_s9_spawns_designated_split_actor_inside_sampled_ego_gap(monkeypatch) -> None:
+    env, ego, _traffic_manager = make_env_and_ego()
+    lane = env.engine.current_map.road_network.get_lane(("road_a", "road_b", 1))
+    center_spacing_m = 16.5 + 5.74
+    env.agents = {
+        f"agent{index}": SimpleNamespace(
+            name=f"agent{index}",
+            lane=lane,
+            lane_index=lane.index,
+            position=(90.0 - index * center_spacing_m, 4.0),
+            speed_km_h=22.0,
+            LENGTH=5.74,
+        )
+        for index in range(3)
+    }
+    ego = env.agents["agent0"]
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S9_narrow_channel_negotiation"],
+        "R8_narrow_channel",
+    )
+    orchestrator._actor_manifest = {}
+    orchestrator._conflict_evidence = {}
+    orchestrator._resolved_scenario_parameters = {
+        "agent0_to_blocker_bumper_gap_m": 20.0,
+        "blocker_speed_km_h": 0.0,
+        "ego_initial_speed_km_h": 22.0,
+        "designated_split_actor_role": "left_bypass_split_actor",
+        "designated_split_actor_target_gap_id": "agent0-agent1",
+        "designated_split_actor_speed_km_h": 22.0,
+        "usable_bypass_gap_m": 55.0,
+        "predicted_blocker_ttc_s": 4.0,
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_lane_index",
+        lambda *args, **kwargs: ("road_a", "road_b", 1),
+    )
+
+    assert orchestrator._handle_inject_s9_bypass_actors(
+        env,
+        ego,
+        {
+            "source_lane_id": 1,
+            "bypass_lane_id": 0,
+            "designated_split_actor_role": "left_bypass_split_actor",
+        },
+        0,
+    )
+    evidence = orchestrator._conflict_evidence
+    expected_midpoint = 0.5 * (
+        env.agents["agent0"].position[0] + env.agents["agent1"].position[0]
+    )
+    assert evidence["designated_split_actor_spawn_s_m"] == pytest.approx(
+        expected_midpoint
+    )
+    assert evidence["designated_split_actor_initial_region_valid"] is True
+    assert evidence["left_bypass_trigger_actor_declared_count"] == 1
+    assert evidence["left_bypass_trigger_actor_realized_count"] == 1
+    assert "left_bypass_split_actor" in orchestrator._actor_manifest
+
+
+def test_s9_functional_success_requires_post_channel_return_and_reassembly() -> None:
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S9_narrow_channel_negotiation"],
+        "R8_narrow_channel",
+    )
+    orchestrator._resolved_scenario_parameters = {
+        "designated_split_actor_role": "left_bypass_split_actor"
+    }
+    orchestrator._actor_manifest = {
+        "blocking_actor": {"active": True},
+        "left_bypass_split_actor": {"active": True},
+    }
+    orchestrator._route_completion = {
+        "all_agents_changed_lane": True,
+        "all_agents_passed_blocker": True,
+        "all_agents_traversed_narrow_section": True,
+        "all_agents_returned_to_original_lane": True,
+    }
+    orchestrator._conflict_evidence = {
+        "designated_split_actor_initial_region_valid": True,
+        "non_simultaneous_left_lane_changes": True,
+        "split_actor_straddled_by_left_completions": True,
+        "causal_split_actor_interaction_observed": True,
+        "left_completion_clearance_satisfied": True,
+        "return_before_narrow_section_clear_observed": False,
+        "formation_recovered_after_return": True,
+    }
+
+    assert orchestrator._functional_success(recipes_complete=True) is True
+    orchestrator._route_completion["all_agents_returned_to_original_lane"] = False
+    assert orchestrator._functional_success(recipes_complete=True) is False
+
+
+def test_s5_s9_incidental_recipe_realizes_exact_sampled_count() -> None:
+    env, _ego, traffic_manager = make_env_and_ego()
+    for lane in env.engine.current_map.road_network._lanes.values():
+        lane.length = 500.0
+    env.current_seed = 31
+    orchestrator = ScenarioOrchestrator(
+        SCENARIO_BY_ID["S5_hard_brake_lead"], "R1_entry_straight"
+    )
+
+    orchestrator.reset(env, "agent0")
+
+    expected = orchestrator._resolved_scenario_parameters[
+        "incidental_background_actor_count"
+    ]
+    roles = [
+        role
+        for role in orchestrator._actor_manifest
+        if role.startswith("incidental_background_")
+    ]
+    assert len(roles) == expected
+    assert 3 <= len(roles) <= 6
+    assert orchestrator._conflict_evidence[
+        "incidental_background_realized_count"
+    ] == expected
 
 
 def test_hard_brake_recipe_rejects_legacy_static_contract(monkeypatch) -> None:
@@ -549,7 +1206,7 @@ def test_adjacent_lane_recipe_can_trigger_on_episode_start_before_scenario_windo
     ]
     assert [call[1]["spawn_longitude"] for call in traffic_manager.spawn_calls] == [32.0, 26.0]
     assert orchestrator.summary.scenario_triggered is True
-    assert orchestrator.summary.trigger_step == 1
+    assert orchestrator.summary.trigger_step == 0
     assert orchestrator.summary.notes.count("adjacent_spawned:left_side") == 1
     assert orchestrator.summary.notes.count("adjacent_spawned:right_side") == 1
 
@@ -782,9 +1439,11 @@ def test_s6_injected_background_uses_merge_policy_and_start_edge_navigation() ->
     assert call[3] == {
         "merge_front_gap_m": 25.0,
         "merge_rear_gap_m": 15.0,
-        "merge_creep_speed_kmh": 5.0,
-        "merge_cruise_speed_kmh": 24.0,
-    }
+            "merge_creep_speed_kmh": 5.0,
+            "merge_cruise_speed_kmh": 24.0,
+            "merge_rear_ttc_min_s": 4.0,
+            "merge_lateral_kp": 0.7,
+        }
     assert call[4]["navigation_module"] is StartEdgeNodeNavigation
     assert call[1]["spawn_velocity"] == (24.0 / 3.6, 0.0)
     assert call[1]["spawn_velocity_car_frame"] is True

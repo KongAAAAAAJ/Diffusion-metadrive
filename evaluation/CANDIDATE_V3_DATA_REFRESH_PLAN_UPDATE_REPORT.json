@@ -1,0 +1,63 @@
+{
+  "format": "candidate_v3_data_refresh_plan_update_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-13T17:51:50+08:00",
+  "status": "plan_revised_pending_execution",
+  "user_authorized_revision": {
+    "recorded_on": "2026-08-13",
+    "requested_order": [
+      "collect one small-scale dataset",
+      "evaluate data quality including formation following gaps, TTC, per-vehicle behavior, and unlock-state fraction",
+      "merge the current branch into BEV only after data quality passes",
+      "recollect a new 50k dataset",
+      "start formal training"
+    ]
+  },
+  "resolved_plan": {
+    "precondition": "Complete candidate-v3 fixed-five-seed scenario acceptance and freeze a new scenario contract before collection.",
+    "pilot_default": {
+      "target_joint_steps": 5000,
+      "per_scenario_quota": 1000,
+      "reason": "A 5k balanced pilot is 10 percent of the formal target and gives more stable per-scenario and per-role quality estimates than the previous 1k format-only pilot."
+    },
+    "pilot_is_training_data": false,
+    "pilot_reused_in_formal_50k": false,
+    "merge_source": "s5-s9-scenario-revision",
+    "merge_target": "BEV",
+    "formal_50k_policy": "Collect from the clean merged BEV commit into a new empty root; do not resume or mix the historical v1 root or the pilot root.",
+    "stage1_policy": "Train Stage1-A only after the new candidate-v3 50k dataset passes complete verification and the frozen quality gate."
+  },
+  "quality_scope": [
+    "bundle integrity, schema, joins, fingerprints, splits, and S5-S9 balance",
+    "collision, out-of-road, 5 m background-gap and 7 m platoon-gap violations",
+    "TTC by ego role, actor class, and scenario semantics",
+    "leader-middle and middle-rear following gaps and locked desired-gap error",
+    "formation release, recovery, order preservation, and persistence",
+    "leader, middle, and rear behavior/mode, speed, acceleration, jerk, and lane-transition distributions",
+    "LOCKED/UNLOCKED step fractions, trigger rate and cause, duration, relock rate, and relock latency",
+    "scenario-required behavior coverage and exactly 3-6 incidental actors per episode",
+    "duplicate, missing, corrupt, NaN/Inf, leakage, imbalance, and unobserved-mode risks"
+  ],
+  "hard_boundaries": [
+    "Freeze exact numeric thresholds before pilot collection and do not tune them after observing the pilot.",
+    "Evaluate designated conflict TTC separately from incidental-background TTC.",
+    "Do not merge or collect 50k when any hard pilot gate fails.",
+    "Do not modify code, scenario, policy, schema, collector, split, or threshold semantics during collection.",
+    "Do not mark the historical formal50k_v1 dataset as candidate-v3 data."
+  ],
+  "plan_memory": {
+    "path": "docs/project/project_plan.json",
+    "sha256": "46837e0f12119745e56470afaf36bffc5203b453739c6afd57655b61ab0ad6f4"
+  },
+  "verification": {
+    "plan_json_parse": "passed",
+    "state_json_parse": "passed",
+    "plan_state_consistency": "passed",
+    "source_of_truth_paths_exist": "passed",
+    "stage1_a_only_and_grpo_reward_domain_semantics_preserved": "passed",
+    "execution_order_is_contiguous_1_to_15": "passed",
+    "git_diff_check": "passed"
+  },
+  "active_hard_gate": "candidate_v3_fixed_five_seed_acceptance_before_pilot",
+  "next_action": "Run and review the candidate-v3 S5-S9 fixed-five-seed acceptance, then freeze the pilot config and exact quality thresholds."
+}

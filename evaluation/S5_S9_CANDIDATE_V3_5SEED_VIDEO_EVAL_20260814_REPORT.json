@@ -1,0 +1,91 @@
+{
+  "format": "s5_s9_candidate_v3_five_seed_video_evaluation_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-14T06:39:13+08:00",
+  "status": "stopped_at_s6_functional_hard_gate_failure",
+  "source_git_commit": "6c0f081cfbc6b6cf874d60507b4aca6c8c417382",
+  "worktree_state": "uncommitted_candidate_revision_changes_preserved",
+  "fixed_seeds": [17, 23, 31, 47, 59],
+  "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s5_s9_candidate_v3_5seed_video_eval_20260814",
+  "log_path": "/tmp/s5_s9_candidate_v3_5seed_video_eval_20260814.log",
+  "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m evaluation.run_s5_s9_candidate_revision --output-root outputs/s5_s9_candidate_v3_5seed_video_eval_20260814",
+  "execution_policy": {
+    "stop_on_first_scenario_hard_gate_failure": true,
+    "code_or_threshold_changes_during_run": false,
+    "s5_profiles": ["brake_first", "balanced", "evasive"],
+    "horizon_steps": {
+      "S5_hard_brake_lead": 200,
+      "S6_background_merge_in": 200,
+      "S7_ego_merge_from_ramp": 200,
+      "S8_ego_exit_to_ramp": 200,
+      "S9_narrow_channel_negotiation": 800
+    }
+  },
+  "completed_scope": {
+    "S5_hard_brake_lead": {
+      "profiles_completed": "3/3",
+      "episodes_completed": "15/15",
+      "native_joint_planning_steps": "3000/3000",
+      "functional_success": "15/15",
+      "collision_count": 0,
+      "out_of_road_count": 0,
+      "planner_fallback_count": 0,
+      "topdown_videos": "15/15 non-empty, decodable, exactly 200 frames",
+      "semantic_bev_videos": "15/15 non-empty, decodable, exactly 200 frames",
+      "trajectory_files": "15/15 non-empty",
+      "physical_behavior_gate": {
+        "brake_first": false,
+        "balanced": true,
+        "evasive": true,
+        "overall_memory_gate": true,
+        "behavior_classes": [
+          "keep_emergency_braking",
+          "temporary_formation_release_and_recovery"
+        ],
+        "physical_lane_change_seeds": [17, 23],
+        "asynchronous_response_seeds": [17, 23]
+      }
+    },
+    "S6_background_merge_in": {
+      "episodes_attempted": "1/5",
+      "failed_seed": 17,
+      "native_joint_planning_steps": "200/200",
+      "collision": false,
+      "out_of_road": false,
+      "failure_reason": "scenario_functional_gate_failed",
+      "functional_success": false,
+      "persistable": false,
+      "target_gap_id": "agent0-agent1",
+      "merge_completed": false,
+      "designated_gap_lane_realized": false,
+      "physical_gap_corridor_entered": false,
+      "all_ego_changed_lane_after_cut_in": false,
+      "formation_recovered_after_merge": false,
+      "topdown_video": "1/1 non-empty, decodable, exactly 200 frames",
+      "semantic_bev_video": "1/1 non-empty, decodable, exactly 200 frames",
+      "trajectory_file": "1/1 non-empty",
+      "expert_episode_sha256": "b7aaa553608b6db94edb4d640506a86672c13c1e759e822f7c757b0f10b86a0a",
+      "topdown_video_sha256": "27e147e762deef790036e44d7d5445f9b43b25bad7680db520722d0661ca4df9",
+      "semantic_bev_video_sha256": "84054665beff49c23284b26bc4dc8522a7c77cda10379ce6239227fe2dbb06bf",
+      "trajectory_sha256": "cdf63ef51ffb8b24ac08347243ebda8ba75e8413e82fa3d1e7b86f49336368aa"
+    }
+  },
+  "not_executed_after_failed_gate": [
+    "S6 seeds 23, 31, 47, 59",
+    "S7 fixed five-seed batch",
+    "S8 fixed five-seed batch",
+    "S9 fixed five-seed batch"
+  ],
+  "hard_gate_result": {
+    "combined_s5_s9_gate_passed": false,
+    "blocking_scenario": "S6_background_merge_in",
+    "blocking_seed": 17,
+    "diagnosis": "The merge actor remained active but did not commit or complete its lane transition into the designated ego corridor. The required physical cut-in, three-ego lane-change response, and ego-only formation recovery therefore did not occur within the unchanged 200-step candidate-v3 horizon."
+  },
+  "existing_independent_evidence_not_counted_as_this_run": {
+    "S7": "evaluation/S7_CANDIDATE_V3_PARALLEL_CONSTRAINT_IMPLEMENTATION_REPORT.json",
+    "S8": "evaluation/S8_CANDIDATE_MEMORY_ACCEPTANCE_REPORT.json",
+    "S9": "evaluation/S9_CANDIDATE_V3_SPLIT_RETURN_IMPLEMENTATION_REPORT.json"
+  },
+  "next_required_action": "Repair S6 under the unchanged candidate-v3 memory and 200-step hard gate, rerun its fixed five seeds with videos, then restart the combined S5-S9 evaluation from a fresh output root."
+}

@@ -1,0 +1,147 @@
+{
+  "format": "s6_candidate_memory_acceptance_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-13T01:38:21+08:00",
+  "status": "s6_fixed_five_seed_memory_gate_passed",
+  "scenario_id": "S6_background_merge_in",
+  "local_route": "R6_mainline_merge_approach",
+  "source_memory": "docs/project/s5_s9_functional_scenario_design.json",
+  "source_git_commit": "d50ac792a3c5b3b14e2e968bb447439b3884e90d",
+  "worktree_state": "uncommitted_candidate_revision_changes_preserved",
+  "scope": {
+    "formal_v1_contract_changed": false,
+    "formal_50k_dataset_or_checkpoint_metadata_changed": false,
+    "candidate_v2_contract_frozen": false,
+    "reason_candidate_v2_not_frozen": "S6 passed independently; the complete S5-S9 candidate-v2 activation gate is still open."
+  },
+  "accepted_functional_definition": {
+    "cut_in_actor_membership": "The ramp cut-in actor is never a platoon member.",
+    "required_response": "All three ego vehicles must physically change lane after the actor occupies the designated internal gap; KEEP-only accommodation is invalid.",
+    "required_reassembly": "Only agent0, agent1, and agent2 reassemble on one common lane in platoon order; the cut-in actor is excluded.",
+    "safety": "No collision, road exit, or planner fallback is allowed."
+  },
+  "scenario_horizon_note": "The complete S6 cut-in, three-ego lane-change, and persistent ego-only reassembly sequence is validated at 260 steps. A 200-step audit is not accepted as an S6 completion run because safe atomic lane-change execution can leave insufficient time for persistent reassembly; no safety or formation threshold was relaxed to force it into 200 steps.",
+  "acceptance": {
+    "fixed_seeds": [17, 23, 31, 47, 59],
+    "horizon_steps": 260,
+    "episodes_passed": "5/5",
+    "native_joint_planning_steps": "1300/1300",
+    "collision_count": 0,
+    "out_of_road_count": 0,
+    "planner_fallback_count": 0,
+    "functional_success_count": 5,
+    "declared_actor_realization_count": "5/5",
+    "target_gap_coverage": ["agent0-agent1", "agent1-agent2"],
+    "all_episodes_physical_target_gap_occupation": true,
+    "all_episodes_three_ego_lane_change": true,
+    "all_episodes_ego_only_reassembly": true,
+    "all_episodes_cut_in_actor_excluded": true,
+    "hard_gates_passed": true
+  },
+  "episodes": [
+    {
+      "seed": 17,
+      "severity": "high",
+      "target_gap_id": "agent0-agent1",
+      "observed_target_bumper_gaps_m": [9.997115009387855, 7.108450944985198],
+      "observed_conflict_ttc_s": 2.4748903989513185,
+      "observed_arrival_delta_s": 0.30000000000000004,
+      "ego_lane_change_direction": "left",
+      "ego_lane_change_steps": {"agent0": 134, "agent1": 135, "agent2": 129},
+      "formation_recovery_stable_steps": 19,
+      "final_ego_bumper_gaps_m": [10.480642089843748, 13.092672119140623],
+      "episode_json_sha256": "c8a818fd012b9e7afcc8672016d2310f68dbd54a5ec07a11302fcc2b5bea8053",
+      "topdown_video_sha256": "8369b1063f60cc12a40f3978a8315d2cee93c159b1b8d759b320f07586b4b076",
+      "semantic_bev_video_sha256": "24b80489d6eabd3887805588dc801440723be1f48b89bb1f0530469962c94629",
+      "trajectory_npz_sha256": "8951e3bbdd39ef639df95523b99c2a1b04880963e1184bb203903fd31eef918c"
+    },
+    {
+      "seed": 23,
+      "severity": "medium",
+      "target_gap_id": "agent1-agent2",
+      "observed_target_bumper_gaps_m": [8.667148464933572, 7.405354708713699],
+      "observed_conflict_ttc_s": 2.0430794402454198,
+      "observed_arrival_delta_s": 0.1,
+      "ego_lane_change_direction": "right",
+      "ego_lane_change_steps": {"agent0": 103, "agent1": 105, "agent2": 102},
+      "formation_recovery_stable_steps": 106,
+      "final_ego_bumper_gaps_m": [8.644582519531248, 12.753133544921873],
+      "episode_json_sha256": "a09bbbfe46005b3241452d346922b44fa2667a167ff2d86553861bd443d1b13d",
+      "topdown_video_sha256": "8f8984fd4a103936177238dc31e213b9e37605389a925f3e687fbafd6cef8b89",
+      "semantic_bev_video_sha256": "d635e959d9e9ddc8c1f2effdeb5ce41713f48420c7c961646b1871126345bde1",
+      "trajectory_npz_sha256": "3cf54e788042cc3da67266e5b748a6a09ae3afb590329c85bab1c7354b9ab351"
+    },
+    {
+      "seed": 31,
+      "severity": "medium",
+      "target_gap_id": "agent0-agent1",
+      "observed_target_bumper_gaps_m": [9.364170510381577, 6.453958804128697],
+      "observed_conflict_ttc_s": 3.3277031733923748,
+      "observed_arrival_delta_s": 0.30000000000000004,
+      "ego_lane_change_direction": "left",
+      "ego_lane_change_steps": {"agent0": 153, "agent1": 155, "agent2": 150},
+      "formation_recovery_stable_steps": 11,
+      "final_ego_bumper_gaps_m": [10.165303955078123, 13.198659667968748],
+      "episode_json_sha256": "b2306df41bea67037ff969d6d57c6c5263d5bdfefc753bf38eb94d4c677c60b3",
+      "topdown_video_sha256": "dbf29f45516816290733a2a1ad1958eff5c3c00844bb468e2fd68a5fe4373977",
+      "semantic_bev_video_sha256": "119a6cb8df91004a8ee0e344d55498453c5f2217aebe1256514c9c148afbfd79",
+      "trajectory_npz_sha256": "8b8642bfcbbf86a853a90b31388f9b2768e4eb994331f8aa5d7fd260743908fd"
+    },
+    {
+      "seed": 47,
+      "severity": "medium",
+      "target_gap_id": "agent0-agent1",
+      "observed_target_bumper_gaps_m": [9.981642991225428, 6.253428031615365],
+      "observed_conflict_ttc_s": 2.5669195375875016,
+      "observed_arrival_delta_s": 0.4,
+      "ego_lane_change_direction": "left",
+      "ego_lane_change_steps": {"agent0": 105, "agent1": 105, "agent2": 101},
+      "formation_recovery_stable_steps": 90,
+      "final_ego_bumper_gaps_m": [12.596029052734373, 13.638631591796873],
+      "episode_json_sha256": "3020d754c9d5d9ff640d8e9ad55cff8b300ed99ae3bd4beb54e54206025e5047",
+      "topdown_video_sha256": "238f553d940f79479dc5c8038a6b729de516022ec4877ae0f49794649d53cdf6",
+      "semantic_bev_video_sha256": "ffab4a21ff9d5fcb3fef0fb151fa430346c126bc753efffab4b56029e1dd717e",
+      "trajectory_npz_sha256": "65f860921c7168cd024cfe0de4fb8ac1c9e78d0f51cda18faf7c8c767a57ff71"
+    },
+    {
+      "seed": 59,
+      "severity": "medium",
+      "target_gap_id": "agent0-agent1",
+      "observed_target_bumper_gaps_m": [9.94498982076821, 8.653302035847322],
+      "observed_conflict_ttc_s": 2.557013736126425,
+      "observed_arrival_delta_s": 0.1,
+      "ego_lane_change_direction": "left",
+      "ego_lane_change_steps": {"agent0": 143, "agent1": 150, "agent2": 149},
+      "formation_recovery_stable_steps": 14,
+      "final_ego_bumper_gaps_m": [11.719259033203123, 13.381643066406248],
+      "episode_json_sha256": "3d09856da49586a47c59ef17f5af7e4b71f3f9c1e9f945fd7695531f57d161f5",
+      "topdown_video_sha256": "8cc363767607d18a162680a81ce0f1fa9b5594bcecddc6896d35b92a7e8d6c0c",
+      "semantic_bev_video_sha256": "4a935ead530397846b2f6feda954ccbe5b559088809bca858ec69bc9451ac2bf",
+      "trajectory_npz_sha256": "5ef6fed3bc3c8835d89cf86392a36f794dff232c5e7b8684e99325de6c19883f"
+    }
+  ],
+  "artifact_validation": {
+    "artifact_root": "/tmp/diffusion-metadrive-s5-s9-revision/outputs/s6_memory_compliance_eval_20260813_v2/S6_background_merge_in",
+    "topdown_videos": "5/5 non-empty, H.264 decodable, 800x800, exactly 260 frames",
+    "semantic_bev_videos": "5/5 non-empty, H.264 decodable, 776x256, exactly 260 frames",
+    "trajectory_npz": "5/5 non-empty",
+    "episode_json": "5/5 non-empty and functional_success=true",
+    "topdown_review": "Reviewed a 5x4 contact sheet at frames 60, 110, 160, and 230. The realized cut-in, physical ego lane changes, and final ego-only common-lane recovery are visually consistent with the machine evidence.",
+    "contact_sheet": "/tmp/s6_review_frames/five_seed_contact_sheet_v2.png"
+  },
+  "tests": [
+    {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_idm_merge_policy.py tests/test_controller_base.py tests/test_rule_maker.py tests/test_scenario_orchestrator_adjacent_vehicles.py tests/test_s5_s9_sampling.py tests/test_scenario_definitions.py tests/test_platoon_normal_planner.py -k 's6 or merge or cross_track or route_chain_geometry'",
+      "result": "46 passed, 210 deselected"
+    },
+    {
+      "command": "python -m evaluation.preview_and_evaluation --scenario-id S6_background_merge_in --local-route R6_mainline_merge_approach --num-agents 3 --num-episodes 5 --seeds 17 23 31 47 59 --horizon 260 --traffic-density 0 --output-root outputs/s6_memory_compliance_eval_20260813",
+      "result": "5/5 episodes passed; 1300/1300 native planning steps; all required artifacts written"
+    }
+  ],
+  "remaining_risks": [
+    "This accepts S6 only and does not freeze the complete candidate-v2 S5-S9 scenario contract.",
+    "The formal v1 50k dataset and checkpoints remain bound to their prior frozen scenario hash and are not relabeled by this report.",
+    "The common candidate-memory default remains 200 steps; S6 requires an explicit 260-step scenario-level evaluation override until a future redesign shortens the safe physical sequence."
+  ]
+}

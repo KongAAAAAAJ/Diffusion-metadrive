@@ -148,7 +148,13 @@ class MAHybridMap(PGMap):
                         key = (lane_index, successor_index)
                         if key in created_keys:
                             continue
-                        seam_transition_m = 16.0
+                        # This equivalent-incoming seam is the S7 ramp merge
+                        # apron.  Extending the successor leg keeps the full
+                        # XL-vehicle footprint on the physical apron until it
+                        # has converged to the mainline centreline; 16 m left
+                        # the front corner beyond the synthetic PointLane
+                        # while the vehicle centre was still in the merge.
+                        seam_transition_m = 20.0
                         # The offset ramp-to-mainline seam is an unstructured
                         # merge apron, not a 4 m routing lane.  At the bend an
                         # XL vehicle's corner sweeps about 2.25 m from the seam

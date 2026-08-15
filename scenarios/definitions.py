@@ -54,8 +54,9 @@ class ScenarioDefinition:
     ego_spawn_longitude_m: float | Tuple[float, float] | None = None
     ego_spawn_lane_id: int | None = None
     # Backward-compatible alternative: distance from selected road end.
-    ego_spawn_distance_to_route_end_m: float | None = None
+    ego_spawn_distance_to_route_end_m: float | Tuple[float, float] | None = None
     ego_initial_speed_km_h: float | Tuple[float, float] | None = None
+    ego_initial_bumper_gap_m: float | Tuple[float, float] | None = None
 
     @property
     def allowed_route_presets(self) -> Tuple[str, ...]:
@@ -63,6 +64,20 @@ class ScenarioDefinition:
 
     def get_trigger_spec(self, local_route: str) -> TriggerSpec:
         return self.trigger_by_local_route[local_route]
+
+
+def _s5_s9_incidental_background_recipe() -> RecipeSpec:
+    """Declare the non-causal traffic shared by every candidate S5--S9 scene."""
+
+    return RecipeSpec(
+        "inject_incidental_background_traffic",
+        {
+            "actor_count_range": (3, 6),
+            "minimum_ego_clearance_m": 60.0,
+            "minimum_actor_clearance_m": 18.0,
+            "trigger_on_start": True,
+        },
+    )
 
 
 SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
@@ -144,12 +159,11 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
             RecipeSpec(
                 "hard_brake_lead",
                 {
-                    "trigger_after_s": 3.0,
-                    "lead_bumper_gap_range_m": (9.0, 13.0),
-                    "lead_target_speed_range_kmh": (22.0, 26.0),
-                    "brake_target_speed_kmh": 1.0,
-                    "brake_target_speed_range_kmh": (0.5, 2.0),
-                    "brake_deceleration_range_mps2": (5.0, 7.0),
+                    "trigger_after_range_s": (2.5, 4.0),
+                    "lead_bumper_gap_range_m": (9.0, 15.0),
+                    "lead_speed_delta_from_ego_range_kmh": (-3.0, 3.0),
+                    "brake_target_speed_range_kmh": (0.0, 3.0),
+                    "brake_deceleration_range_mps2": (4.5, 7.0),
                 },
             ),
             RecipeSpec(
@@ -161,23 +175,29 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
                         {
                             "name": "left_side",
                             "lane_side": "left",
-                            "spawn_longitude_offset_range_m": (-15.0, -13.0),
-                            "target_speed_kmh": 24.0,
+                            "relation_choices": ("ahead", "behind"),
+                            "behind_offset_range_m": (-20.0, -10.0),
+                            "ahead_offset_range_m": (10.0, 22.0),
+                            "target_speed_range_kmh": (18.0, 32.0),
                         },
                         {
                             "name": "right_side",
                             "lane_side": "right",
-                            "spawn_longitude_offset_range_m": (13.0, 15.0),
-                            "target_speed_kmh": 24.0,
+                            "relation_choices": ("ahead", "behind"),
+                            "behind_offset_range_m": (-20.0, -10.0),
+                            "ahead_offset_range_m": (10.0, 22.0),
+                            "target_speed_range_kmh": (18.0, 32.0),
                         },
                     ),
                 },
             ),
+            _s5_s9_incidental_background_recipe(),
         ),
         ego_spawn_lane_preference="middle",
         ego_spawn_lane_probabilities=None,
-        ego_initial_speed_km_h=24.0,
+        ego_initial_speed_km_h=(22.0, 28.0),
         override_traffic_density=0.0,
+        env_overrides={"platoon_route_spawn_lane_index": 1},
         expert_recipe="提高安全时距",
         description="前车急减速",
         independent_trajectory_control_after_realization=True,
@@ -189,18 +209,30 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         trigger_by_local_route={
             "R6_mainline_merge_approach": TriggerSpec("g1", 10.0, 95.0),
         },
-        traffic_recipes=build_s6_traffic_recipes(RecipeSpec),
-        ego_spawn_lane_preference="rightmost",
+        traffic_recipes=(
+            *build_s6_traffic_recipes(RecipeSpec),
+            _s5_s9_incidental_background_recipe(),
+        ),
+        ego_spawn_lane_preference="middle",
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g1",
         ego_spawn_reference_kind="block_internal_road",
         ego_spawn_internal_road_index=1,
-        ego_spawn_longitude_m=(72.0, 78.0),
-        ego_initial_speed_km_h=(23.0, 25.0),
+        # Sample relative to the actual selected road end.  Its runtime length
+        # is map-dependent (currently about 180 m), so an absolute longitude
+        # does not preserve the functional distance-to-conflict contract.
+        ego_spawn_distance_to_route_end_m=(25.0, 50.0),
+        ego_initial_speed_km_h=(22.0, 27.0),
+        # Start 1 m above the unchanged 7 m platoon hard-gap contract.  This keeps
+        # the rear ego body clear of the merge-gore sidewalk for the sampled
+        # 25--50 m agent0 conflict distance, while the expert still has to
+        # create the actor's sampled 6--10 m corridor dynamically.
+        ego_initial_bumper_gap_m=8.0,
         override_traffic_density=0.0,
         env_overrides={
             "traffic_spawn_exclusion_ahead_m": 100.0,
             "traffic_spawn_exclusion_behind_m": 100.0,
+            "platoon_route_spawn_lane_index": 1,
         },
         expert_recipe="保守让行",
         description="背景车并入 ego 所在主线",
@@ -213,12 +245,17 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         trigger_by_local_route={
             "R7_merge_core": TriggerSpec("h_ramp0", 5.0, 60.0),  # h_ramp0
         },
-        traffic_recipes=build_s7_traffic_recipes(RecipeSpec),
+        traffic_recipes=(
+            *build_s7_traffic_recipes(RecipeSpec),
+            _s5_s9_incidental_background_recipe(),
+        ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
         ego_spawn_longitude_m=(5.0, 6.0),  # *
         ego_spawn_reference_block_id="h_ramp0",
-        ego_initial_speed_km_h=(22, 23),
+        ego_initial_speed_km_h=(20.0, 26.0),
+        ego_initial_bumper_gap_m=(12.0, 20.0),
+        env_overrides={"platoon_route_spawn_lane_index": 0},
         expert_recipe="汇入博弈",
         description="ego 从匝道汇入主线",
         independent_trajectory_control_after_realization=True,
@@ -232,40 +269,31 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         },
         traffic_recipes=(
             RecipeSpec(
-                "inject_background_vehicle",
+                "inject_s8_exit_gap",
                 {
-                    "reference_kind": "block_internal_road",
                     "block_id": "g0",
                     "internal_road_index": 0,
                     "lane_index": 2,
-                    "spawn_longitude": 5.0,
-                    "target_speed_kmh": 18.0,
+                    "trigger_on_start": True,
                 },
             ),
-            RecipeSpec(
-                "inject_background_vehicle",
-                {
-                    "reference_kind": "block_internal_road",
-                    "block_id": "g0",
-                    "internal_road_index": 0,
-                    "lane_index": 2,
-                    # Round 13.882b4 exhaustively rejected both the old 30 m
-                    # window and a 50 m probe.  Keep controlled 18 km/h
-                    # traffic, but provide a 75 m centre-to-centre window so
-                    # three XL vehicles can satisfy both 5 m background and
-                    # 7 m pairwise gaps without changing safety boundaries.
-                    "spawn_longitude": 80.0,
-                    "target_speed_kmh": 18.0,
-                },
-            ),
+            _s5_s9_incidental_background_recipe(),
         ),
         ego_spawn_lane_preference=None,
         ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="g0",
-        ego_spawn_longitude_m=30,
+        # Start one lane left of the exit-side lane. On this G-block road the
+        # physical rightmost exit lane is lane 2, so RIGHT maps lane 1 -> 2.
+        ego_spawn_longitude_m=(68.0, 70.0),
         ego_spawn_lane_id=1,
-        ego_initial_speed_km_h=24.0,
+        ego_initial_speed_km_h=(22.0, 28.0),
+        # The exit-side split actor starts longitudinally inside one ego gap.
+        # An 18 m bumper gap keeps both adjacent-lane OBB clearances above the
+        # planner's unchanged 6 m committed-horizon boundary before the
+        # asynchronous RIGHT response and preserves the 7 m ego-pair gate.
+        ego_initial_bumper_gap_m=18.0,
         override_traffic_density=0.0,
+        env_overrides={"platoon_route_spawn_lane_index": 1},
         expert_recipe="提前换道驶离",
         description="ego 从主线驶出",
         independent_trajectory_control_after_realization=True,
@@ -282,35 +310,36 @@ SCENARIO_DEFINITIONS: Tuple[ScenarioDefinition, ...] = (
         },
         traffic_recipes=(
             RecipeSpec(
-                "inject_background_vehicle",
+                "inject_s9_bypass_actors",
                 {
-                    "reference_kind": "block_route_road",
-                    "block_id": "merge0",
-                    "spawn_longitude": 12.0,
-                    "target_speed_kmh": 14.0,
+                    "block_id": "c3",
+                    "internal_road_index": 1,
+                    "source_lane_id": 1,
+                    "bypass_lane_id": 0,
+                    "designated_split_actor_role": "left_bypass_split_actor",
+                    "designated_split_actor_count": 1,
+                    "additional_trigger_actor_range": (0, 2),
+                    "narrow_section_block_id": "c3",
+                    "post_narrow_return_lane_id": 1,
+                    "trigger_on_start": True,
                 },
             ),
-            RecipeSpec(
-                "inject_background_vehicle",
-                {
-                    "reference_kind": "block_route_road",
-                    "block_id": "split0",
-                    "spawn_longitude": 18.0,
-                    "target_speed_kmh": 16.0,
-                },
-            ),
+            _s5_s9_incidental_background_recipe(),
         ),
         ego_spawn_lane_preference=None,
-        ego_spawn_lane_probabilities={
-            "rightmost": 0.4,
-            "middle": 0.4,
-            "leftmost": 0.2,
-        },
+        ego_spawn_lane_probabilities=None,
         ego_spawn_reference_block_id="c3",
         ego_spawn_reference_kind="block_internal_road",
         ego_spawn_internal_road_index=1,
-        ego_spawn_longitude_m=10.0,
-        ego_initial_speed_km_h=18.0,
+        ego_spawn_longitude_m=(50.0, 75.0),
+        ego_spawn_lane_id=1,
+        ego_initial_speed_km_h=(16.0, 22.0),
+        # The designated left-lane split actor starts inside one ego gap. An
+        # A 16.5 m bumper gap leaves a hard-safe physical window on both sides of
+        # that actor while still fitting the complete formation on c3.
+        ego_initial_bumper_gap_m=16.5,
+        override_traffic_density=0.0,
+        env_overrides={"platoon_route_spawn_lane_index": 1},
         expert_recipe="保守通过",
         description="合流-分流窄通道博弈",
         independent_trajectory_control_after_realization=True,

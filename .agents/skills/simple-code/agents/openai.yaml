@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simple Code"
+  short_description: "Mandatory minimal-change and verification gate"
+  default_prompt: "Use $simple-code before modifying repository code, tests, configuration, scripts, or dependencies."

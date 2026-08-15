@@ -15,6 +15,7 @@ from models.bev_planner.mode_contract import (
     RuleAction,
     build_hard_mode_valid_mask,
     label_gt_mode,
+    label_gt_mode_from_trajectory,
 )
 
 
@@ -191,6 +192,16 @@ def test_keep_and_stop_compete_for_emergency_braking_label() -> None:
     valid_mask = _mask(coarse=coarse).valid_mask.copy()
     selected = label_gt_mode(RuleAction.KEEP, coarse[ModeIndex.STOP], coarse, valid_mask)
     assert selected == ModeIndex.STOP
+    assert valid_mask[selected]
+
+
+def test_route_topology_label_quantizes_against_all_hard_valid_modes() -> None:
+    coarse = _coarse()
+    valid_mask = _mask(coarse=coarse).valid_mask.copy()
+    selected = label_gt_mode_from_trajectory(
+        coarse[ModeIndex.LEFT_MEDIUM], coarse, valid_mask
+    )
+    assert selected == ModeIndex.LEFT_MEDIUM
     assert valid_mask[selected]
 
 

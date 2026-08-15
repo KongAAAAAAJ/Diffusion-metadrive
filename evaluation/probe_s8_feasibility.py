@@ -71,11 +71,17 @@ class _DenseS8FeasibilityPlanner(PlatoonNormalPlanner):
         return (-2.0, 0.0, 1.5, 3.0, 5.0)
 
     @staticmethod
-    def _select_longitudinal_profiles(profiles, *, maximum=3):
+    def _select_longitudinal_profiles(
+        profiles,
+        *,
+        maximum=3,
+        preserve_surge_then_brake=False,
+    ):
         del maximum
         return PlatoonNormalPlanner._select_longitudinal_profiles(
             profiles,
             maximum=24,
+            preserve_surge_then_brake=preserve_surge_then_brake,
         )
 
 

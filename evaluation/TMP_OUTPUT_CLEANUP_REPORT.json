@@ -1,0 +1,57 @@
+{
+  "format": "tmp_output_cleanup_v1",
+  "created_at": "2026-08-13T11:58:21+08:00",
+  "branch": "s5-s9-scenario-revision",
+  "source_git_commit": "72b4b21e058572ebb54a87e960fc0b88991d3c82",
+  "status": "passed",
+  "authorization": "User explicitly confirmed permanent deletion of the enumerated 725 directories.",
+  "scope": {
+    "root": "/tmp",
+    "deleted_top_level_directories": 725,
+    "deleted_apparent_bytes": 18228037589,
+    "deleted_apparent_gib": 16.976,
+    "remaining_matching_directories": 0,
+    "filesystem_available_bytes_before": 21830217728,
+    "filesystem_available_bytes_after": 40093765632,
+    "filesystem_available_bytes_increase": 18263547904
+  },
+  "target_families": [
+    "0716_* and 0721_* scratch runs",
+    "bev-control-*",
+    "bev-joint-grpo-*",
+    "unreferenced bev-round13-* and bev-stage1-*",
+    "joint-bev-round*",
+    "s5_* through s9_* smoke, probe, and diagnostic runs",
+    "lat_mpc_comparison, matplotlib_plot_*, and original_smoke"
+  ],
+  "preserved_paths": [
+    "/tmp/diffusion-metadrive-s5-s9-revision",
+    "/tmp/bev-round13-881a-s6-smoke2",
+    "/tmp/bev-round13-881a-s8-smoke2",
+    "/tmp/bev-round13-881b-s6-regression",
+    "/tmp/bev-round13-881b-s8-smoke",
+    "/tmp/bev-round13-89a-diagnostic64",
+    "/tmp/bev-round13-92-final",
+    "/tmp/bev-round13-97e-final-RJ5EJI",
+    "/tmp/bev-stage1-round13-89",
+    "/tmp/s5_latest_memory_rank_fix_5seed",
+    "/tmp/s6_review_frames",
+    "/tmp/s7_candidate_revision_final_20260812",
+    "/tmp/s7_review_frames",
+    "/tmp/s8_v3_visual_review",
+    "/tmp/s9_v2_visual_review"
+  ],
+  "safety_checks": {
+    "active_training_collection_or_evaluation_processes": 0,
+    "top_level_symbolic_link_targets": 0,
+    "internal_symbolic_links_removed_without_following": 1,
+    "protected_paths_present_after_cleanup": 15,
+    "repository_preserved": true
+  },
+  "verification": {
+    "all_enumerated_targets_absent": true,
+    "protected_paths_present": true,
+    "git_diff_check_passed": true
+  },
+  "remaining_risk": "Deletion was permanent and is not recoverable from /tmp. Paths outside the enumerated project-output families were not inspected or removed."
+}

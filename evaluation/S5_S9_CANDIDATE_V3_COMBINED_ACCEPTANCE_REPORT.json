@@ -1,0 +1,154 @@
+{
+  "format": "s5_s9_candidate_v3_combined_acceptance_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-14T13:02:22+08:00",
+  "result": "passed",
+  "hard_gate_passed": true,
+  "source_git_commit": "bb52b1bd1dd234600206b8dd9e352381256af1ec",
+  "definition_source": {
+    "path": "docs/project/s5_s9_functional_scenario_design.json",
+    "sha256_before_combined_acceptance_update": "771a61e1b7241abb46dbcade7c53915ddd0f623059375c7a19ae89ca1c5fb330"
+  },
+  "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m evaluation.run_s5_s9_candidate_revision --output-root outputs/s5_s9_candidate_v3_combined_acceptance_20260814_v2",
+  "artifact_root": "outputs/s5_s9_candidate_v3_combined_acceptance_20260814_v2",
+  "artifact_manifest": {
+    "path": "outputs/s5_s9_candidate_v3_combined_acceptance_20260814_v2/artifact_manifest.json",
+    "sha256": "bc424ee4d6c8ab65f0a7888b01cb239d2197a61daa564394adda763375910283",
+    "hard_gates_passed": true
+  },
+  "frozen_contract": {
+    "contract_id": "candidate_v3",
+    "format": "bev_primary_s5_s9_contract_v2",
+    "sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+    "scenario_count": 5,
+    "formal_v1_contract_changed": false,
+    "historical_formal_dataset_or_checkpoint_metadata_changed": false
+  },
+  "fixed_seeds": [
+    17,
+    23,
+    31,
+    47,
+    59
+  ],
+  "summary": {
+    "episodes_passed": "35/35",
+    "native_joint_planning_steps": "10300/10300",
+    "planning_success_rate": 1.0,
+    "functional_success": "35/35",
+    "collision_count": 0,
+    "out_of_road_count": 0,
+    "planner_fallback_or_sample_rejection_count": 0,
+    "topdown_videos": "35/35 non-empty, decodable, exact expected frame count",
+    "semantic_bev_videos": "35/35 non-empty, decodable, exact expected frame count",
+    "trajectory_npz": "35/35 valid ZIP containers with expected steps and shapes",
+    "expert_episode_json": "35/35 valid with exact horizon, 100% planning, safe and persistable",
+    "incidental_background_actor_count_range": [
+      3,
+      6
+    ],
+    "all_declared_incidental_background_actors_realized": true
+  },
+  "scenario_results": {
+    "S5_hard_brake_lead": {
+      "profiles": [
+        "brake_first",
+        "balanced",
+        "evasive"
+      ],
+      "episodes_passed": "15/15",
+      "native_joint_planning_steps": "3000/3000",
+      "physical_behavior_gate_by_profile": {
+        "brake_first": false,
+        "balanced": true,
+        "evasive": true
+      },
+      "latest_memory_gate_passed": true,
+      "behavior_classes": [
+        "keep_emergency_braking",
+        "temporary_formation_release_and_recovery"
+      ],
+      "rule_action_category_coverage": [
+        "-1",
+        "+0",
+        "+1"
+      ]
+    },
+    "S6_background_merge_in": {
+      "episodes_passed": "5/5",
+      "native_joint_planning_steps": "1300/1300",
+      "target_gap_coverage": [
+        "agent0-agent1",
+        "agent1-agent2"
+      ],
+      "evaluation_horizon_steps": 260
+    },
+    "S7_ego_merge_from_ramp": {
+      "episodes_passed": "5/5",
+      "native_joint_planning_steps": "1000/1000",
+      "behavior_coverage": [
+        "pass_first",
+        "yield_then_merge"
+      ],
+      "parallel_constraint_count_range": [
+        1,
+        3
+      ],
+      "parallel_constraint_gate_passed": true
+    },
+    "S8_ego_exit_to_ramp": {
+      "episodes_passed": "5/5",
+      "native_joint_planning_steps": "1000/1000",
+      "physical_behavior_gate_passed": true,
+      "constraint_straddled_seeds": [
+        17,
+        23,
+        31,
+        47,
+        59
+      ],
+      "asynchronous_right_lane_change_seeds": [
+        17,
+        23,
+        31,
+        47,
+        59
+      ]
+    },
+    "S9_narrow_channel_negotiation": {
+      "episodes_passed": "5/5",
+      "native_joint_planning_steps": "4000/4000",
+      "physical_behavior_gate_passed": true,
+      "designated_actor_split_narrow_traversal_return_and_recovery_failures": [],
+      "evaluation_horizon_steps": 800
+    }
+  },
+  "independent_artifact_audit": {
+    "artifact_sha256": "140/140 matched manifest",
+    "video_frame_audit": "70/70 exact: S5/S7/S8 200 frames, S6 260 frames, S9 800 frames",
+    "trajectory_npz_audit": "35/35 passed ZIP CRC, required-key, exact-shape, contiguous-step and finite-value checks",
+    "expert_json_audit": "35/35 passed exact-horizon, planning-rate, collision, out-of-road, failure-reason and persistable checks",
+    "visual_review": "Representative top-down contact sheets covered all three S5 profiles, both S6 target gaps, both S7 behaviors, S8 and S9. Representative semantic-BEV contact sheets covered S5-S9. No black, frozen or missing scenario-evolution evidence was observed."
+  },
+  "tests": {
+    "pre_run_contract_smoke": "25 passed, 15 warnings",
+    "post_run_focused_regression": "27 passed, 15 warnings",
+    "post_run_test_selection": [
+      "tests/test_s5_candidate_runner_gate.py",
+      "tests/test_scenario_definitions.py",
+      "tests/test_s5_s9_sampling.py",
+      "tests/test_s7_g_block_drivable_geometry.py",
+      "tests/test_s8_g_block_drivable_geometry.py"
+    ],
+    "warnings": "Only existing Gym deprecation and Matplotlib/NumPy summary warnings were observed; they did not affect the hard-gate result or artifact audits."
+  },
+  "scope_boundary": {
+    "candidate_v3_combined_contract_gate_complete": true,
+    "candidate_v3_contract_frozen": true,
+    "candidate_v3_contract_id": "candidate_v3",
+    "formal_v1_contract_and_historical_data_unchanged": true,
+    "dataset_collection_started": false,
+    "dataset_collection_authorized_by_this_report": false,
+    "candidate_v3_diagnostic10k_remains_cancelled_by_user": true
+  }
+}

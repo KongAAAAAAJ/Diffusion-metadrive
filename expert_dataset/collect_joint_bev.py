@@ -28,6 +28,7 @@ from models.bev_planner.mode_contract import (
     ModeIndex,
     build_hard_mode_valid_mask,
     label_gt_mode,
+    label_gt_mode_from_trajectory,
     mode_indices_for_rule_action,
     validate_trajectory_kinematics,
 )
@@ -351,6 +352,20 @@ class RulePlannerExpert:
             raise JointCollectionError("RuleMaker coordination metadata is inconsistent")
         return action, target, formation_enabled, coordination_mode
 
+    @staticmethod
+    def _can_replan_committed_error(env, error: CommittedTrajectoryError) -> bool:
+        """Allow S6 to replace a stale commitment after the intruder moves."""
+
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        return bool(
+            scenario_id == "S6_background_merge_in"
+            and str(error.reason_code)
+            in {
+                "committed_trajectory_background_unsafe",
+                "committed_trajectory_tracking_deviation",
+            }
+        )
+
     def _hard_valid_modes_by_action(
         self,
         model_inputs: JointBEVModelInputs | None,
@@ -429,42 +444,54 @@ class RulePlannerExpert:
                 try:
                     rolled = self.trajectory_executor.roll(env)
                 except CommittedTrajectoryError as exc:
-                    self.planner._last_debug = {
-                        "_joint": {
-                            "fallback_used": False,
-                            "fallback_reason": exc.reason_code,
-                            "trajectory_source": "committed_roll",
-                        },
-                        "_execution": dict(exc.debug),
-                    }
-                    raise JointCollectionError(
-                        str(exc), reason_code=exc.reason_code
-                    ) from exc
-                effective_actions = (
-                    self.rule_maker.committed_execution_rule_actions(
-                        env,
-                        rolled.rule_actions,
+                    if not self._can_replan_committed_error(env, exc):
+                        self.planner._last_debug = {
+                            "_joint": {
+                                "fallback_used": False,
+                                "fallback_reason": exc.reason_code,
+                                "trajectory_source": "committed_roll",
+                            },
+                            "_execution": dict(exc.debug),
+                        }
+                        raise JointCollectionError(
+                            str(exc), reason_code=exc.reason_code
+                        ) from exc
+                    # The S6 intruder changes its future occupancy while an
+                    # ego KEEP trajectory is being executed.  Retire only the
+                    # stale trajectory buffer and immediately run the normal
+                    # RuleMaker + NormalPlanner path again.  Lane-change
+                    # commitments remain owned by RuleMaker, and every fresh
+                    # candidate still passes the unchanged hard audits.
+                    self.rule_maker.retire_committed_execution(
+                        execution_plan.execution_id
                     )
-                )
-                self._validate_actions_have_hard_modes(
-                    effective_actions, hard_valid_modes_by_action
-                )
-                execution_debug = dict(rolled.debug)
-                execution_debug["plan_rule_actions"] = {
-                    key: int(value) for key, value in rolled.rule_actions.items()
-                }
-                execution_debug["effective_rule_actions"] = dict(
-                    effective_actions
-                )
-                return self._build_expert_step(
-                    env,
-                    actions=effective_actions,
-                    trajectories=rolled.trajectories_world,
-                    trajectories_local=rolled.trajectories_local,
-                    trajectory_source="committed_roll",
-                    execution_debug=execution_debug,
-                    longitudinal_references=rolled.longitudinal_references,
-                )
+                    self.trajectory_executor.reset()
+                else:
+                    effective_actions = (
+                        self.rule_maker.committed_execution_rule_actions(
+                            env,
+                            rolled.rule_actions,
+                        )
+                    )
+                    self._validate_actions_have_hard_modes(
+                        effective_actions, hard_valid_modes_by_action
+                    )
+                    execution_debug = dict(rolled.debug)
+                    execution_debug["plan_rule_actions"] = {
+                        key: int(value) for key, value in rolled.rule_actions.items()
+                    }
+                    execution_debug["effective_rule_actions"] = dict(
+                        effective_actions
+                    )
+                    return self._build_expert_step(
+                        env,
+                        actions=effective_actions,
+                        trajectories=rolled.trajectories_world,
+                        trajectories_local=rolled.trajectories_local,
+                        trajectory_source="committed_roll",
+                        execution_debug=execution_debug,
+                        longitudinal_references=rolled.longitudinal_references,
+                    )
         try:
             proposal_batch = self.rule_maker.propose_joint_actions(
                 env,
@@ -953,12 +980,39 @@ class JointBEVSampleBuilder:
                     reason_code="normal_planner_final_kinematic_invalid",
                 )
             try:
-                gt_mode = label_gt_mode(
-                    expert_step.rule_actions[agent_id],
-                    expert_local,
-                    model_inputs.coarse_trajectories[role_index],
-                    model_inputs.mode_valid_mask[role_index],
+                config = getattr(env, "config", {}) or {}
+                scenario_id = (
+                    config.get("scenario_id", "")
+                    if isinstance(config, Mapping)
+                    else getattr(config, "scenario_id", "")
                 )
+                local_route = (
+                    config.get("local_route", "")
+                    if isinstance(config, Mapping)
+                    else getattr(config, "local_route", "")
+                )
+                route_chain_keep = (
+                    str(scenario_id) == "S7_ego_merge_from_ramp"
+                    and str(local_route) == "R7_merge_core"
+                    and int(expert_step.rule_actions[agent_id]) == 0
+                )
+                if route_chain_keep:
+                    # S7 follows a continuous ramp-to-mainline topology chain
+                    # under the stable KEEP execution action.  Quantize the
+                    # physical expert trajectory so its lateral merge intent
+                    # is not erased from the supervised label.
+                    gt_mode = label_gt_mode_from_trajectory(
+                        expert_local,
+                        model_inputs.coarse_trajectories[role_index],
+                        model_inputs.mode_valid_mask[role_index],
+                    )
+                else:
+                    gt_mode = label_gt_mode(
+                        expert_step.rule_actions[agent_id],
+                        expert_local,
+                        model_inputs.coarse_trajectories[role_index],
+                        model_inputs.mode_valid_mask[role_index],
+                    )
             except ModeContractError as exc:
                 raise JointStepRejected(
                     f"{agent_id} RuleMaker action has no valid GT mode: {exc}",
@@ -1034,6 +1088,7 @@ def collect_joint_episode(
     failure_reason = None
     episode_terminated = False
     episode_truncated = False
+    latest_scenario_summary: dict[str, object] = {}
 
     for joint_step in range(int(max_steps)):
         try:
@@ -1060,6 +1115,13 @@ def collect_joint_episode(
                 # conflict makes all three aligned training rows unusable.
                 rejected_joint_steps += 1
                 joint_step_rejection_counts[exc.reason_code] += 1
+        live_orchestrator = getattr(env, "_scenario_orchestrator", None)
+        if live_orchestrator is not None and hasattr(
+            live_orchestrator, "get_episode_summary"
+        ):
+            latest_scenario_summary = dict(
+                live_orchestrator.get_episode_summary() or {}
+            )
         _, _, terminated, truncated, info = env.low_level_step(dict(expert_step.controls))
         simulator_steps += 1
         try:
@@ -1115,6 +1177,8 @@ def collect_joint_episode(
         scenario_orchestrator, "get_episode_summary"
     ):
         scenario_summary = scenario_orchestrator.get_episode_summary()
+    if not scenario_summary:
+        scenario_summary = dict(latest_scenario_summary)
         if failure_reason is None and not bool(
             scenario_summary.get("scenario_realized", False)
         ):

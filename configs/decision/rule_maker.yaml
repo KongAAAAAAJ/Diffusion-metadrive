@@ -137,18 +137,23 @@ scenario_overrides:
     w_mobil: 0.4
     w_formation_consistent: 1.0
     lane_change_preference: -1.0
+    # Release the formation constraint 0.8 s before the sampled brake marker.
+    # Profile-specific ranking may then promote LEFT/RIGHT split proposals;
+    # NormalPlanner still owns all hard safety checks.
+    s5_early_unlock_s: 0.8
+    s5_reassembly_hold_steps: 30
 
   # S6: 背景车从匝道合流 — 强化侧方安全，允许适度换道躲避
   S6_background_merge_in:
     traffic_safety_distance_m: 10.0
     agent_safety_distance_m: 8.0
-    lane_change_preference: -2.0
-    lc_cost: 1.5
-    w_keep_bias: 2.0
-    w_close_keep: 2.0
+    lane_change_preference: 0.0
+    lc_cost: 0.5
+    w_keep_bias: 0.25
+    w_close_keep: 0.8
     w_formation_consistent: 1.0
-    w_mobil: 0.4
-    mobil_lane_change_threshold: 0.5
+    w_mobil: 1.2
+    mobil_lane_change_threshold: 0.15
 
   # S7: ego编队从匝道合流 — 主动执行左换道汇入主路
   S7_ego_merge_from_ramp:
@@ -172,17 +177,19 @@ scenario_overrides:
     w_keep_bias: 0.1
     w_formation_consistent: 0.8
 
-  # S9: 狭道会车 — 极度保守，绝不换道
+  # S9: blocker TTC + topology force LEFT; after the narrow section force
+  # RIGHT back to the original middle lane before formation reassembly.
   S9_narrow_channel_negotiation:
     traffic_safety_distance_m: 12.0
     agent_safety_distance_m: 10.0
     idm_time_headway_s: 2.0
     idm_min_gap_m: 10.0
-    w_keep_bias: 1.5
-    lc_cost: 3.0
-    lane_change_preference: -2.0
-    mobil_lane_change_threshold: 1.0
-    w_close_keep: 3.0
+    risk_ttc_trigger_s: 5.0
+    w_keep_bias: 0.1
+    lc_cost: 0.2
+    lane_change_preference: 0.6
+    mobil_lane_change_threshold: 0.05
+    w_close_keep: 0.5
 
   # S12: 被横向切入 — 快速制动响应，不主动换道
   S12_cut_in_from_adjacent_lane:
@@ -193,3 +200,33 @@ scenario_overrides:
     w_keep_bias: 0.8
     lc_cost: 1.2
     mobil_lane_change_threshold: 0.4
+
+scenario_profiles:
+  S5_hard_brake_lead:
+    brake_first:
+      idm_time_headway_s: 2.2
+      idm_min_gap_m: 10.0
+      mobil_lane_change_threshold: 0.60
+      w_keep_bias: 1.00
+      lc_cost: 1.60
+      w_mobil: 0.50
+      lane_change_preference: -0.80
+      s5_mixed_direction_preference: 0.0
+    balanced:
+      idm_time_headway_s: 1.7
+      idm_min_gap_m: 8.0
+      mobil_lane_change_threshold: 0.20
+      w_keep_bias: 0.30
+      lc_cost: 0.70
+      w_mobil: 1.10
+      lane_change_preference: 0.00
+      s5_mixed_direction_preference: 1.0
+    evasive:
+      idm_time_headway_s: 1.3
+      idm_min_gap_m: 6.0
+      mobil_lane_change_threshold: 0.05
+      w_keep_bias: 0.05
+      lc_cost: 0.20
+      w_mobil: 1.80
+      lane_change_preference: 0.60
+      s5_mixed_direction_preference: 1.0

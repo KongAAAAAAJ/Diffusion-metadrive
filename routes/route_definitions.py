@@ -22,7 +22,19 @@ ROUTE_DEFINITIONS: Tuple[RouteDefinition, ...] = (
     RouteDefinition("R3_post_transition_straight", ("s_main1",), "straight", "mainline", "主线后段直道"),
     RouteDefinition("R4_mainline_transition", ("x0",), "transition", "mainline", "主线右偏过渡段"),
     RouteDefinition("R5_ramp_curve", ("s_ramp0", "c0_ramp0", "s_ramp1", "c1_ramp0"), "curve", "ramp_merge", "匝道弯道段"),
-    RouteDefinition("R6_mainline_merge_approach", ("c2", "g1", "c3"), "merge", "mainline", "主线并入干扰观察段"),
+    # Keep the post-conflict mainline continuation in the route contract.
+    # Ending at c3 made a successfully negotiated S6 interaction reach its
+    # navigation terminal around step 160, where the lead ego stopped and the
+    # otherwise safe formation became jointly infeasible before the required
+    # 200-step acceptance horizon.  merge0/s_main2 are the topology-contiguous
+    # downstream mainline; they do not change the S6 conflict geometry.
+    RouteDefinition(
+        "R6_mainline_merge_approach",
+        ("c2", "g1", "c3", "merge0", "s_main2"),
+        "merge",
+        "mainline",
+        "主线并入干扰观察段",
+    ),
     RouteDefinition("R6_mainline_curve", ("s_main1", "c2", "g1", "c3"), "curve", "mainline", "匝道前弯道段"),
     RouteDefinition("R6_exit_to_ramp", ("g0", "s_ramp0", "c0_ramp0"), "exit", "ramp_merge", "主线驶离/汇出段"),
     RouteDefinition("R7_merge_core", ("h_ramp0", "g1", "c3"), "merge", "ramp_merge", "匝道汇入主线核心段"),

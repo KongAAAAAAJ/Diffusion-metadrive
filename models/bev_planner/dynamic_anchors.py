@@ -115,6 +115,8 @@ def _unique_lanes(lanes: Iterable[object]) -> list[object]:
 class SimulatorDynamicAnchorGenerator:
     """Build fixed-mode anchors from the active MetaDrive lane graph."""
 
+    S9_MINIMUM_LANE_CHANGE_PROGRESS_M = 20.0
+
     def __init__(self, config: DynamicAnchorConfig | None = None) -> None:
         self.config = config or DynamicAnchorConfig()
 
@@ -553,6 +555,12 @@ class SimulatorDynamicAnchorGenerator:
                     / max(speed, 1.0e-9)
                 ),
             )
+            # Keep the generated heading strictly inside the hard contract.
+            # The stored anchor is float32, so a value constructed exactly on
+            # the curvature boundary can round a few ulps outside it when the
+            # validator recomputes arc length from the quantised poses.  This
+            # numerical margin does not relax any physical limit.
+            max_delta *= 1.0 - 1.0e-5
             delta = float(_wrap_to_pi(float(target) - previous))
             previous = float(
                 _wrap_to_pi(
@@ -574,6 +582,7 @@ class SimulatorDynamicAnchorGenerator:
         ego_pose: np.ndarray,
         speed_mps: float,
         accel_mps2: float,
+        minimum_lane_change_progress_m: float | None = None,
     ) -> np.ndarray:
         distances = self._travel_distances(speed_mps, accel_mps2)
         source_world, _ = self._sample_lane_pose_path(
@@ -596,12 +605,24 @@ class SimulatorDynamicAnchorGenerator:
             # executable action group violate the hard curvature contract.
             transition_progress = max(
                 float(distances[-1]),
-                self.config.minimum_lane_change_progress_m,
+                self.config.minimum_lane_change_progress_m
+                if minimum_lane_change_progress_m is None
+                else float(minimum_lane_change_progress_m),
             )
             progress = np.clip(distances / transition_progress, 0.0, 1.0)
             blend = 10.0 * progress**3 - 15.0 * progress**4 + 6.0 * progress**5
             xy = source_local * (1.0 - blend[:, None]) + target_local * blend[:, None]
         heading = self._headings_from_xy(xy)
+        if target_lane is not None and minimum_lane_change_progress_m is not None:
+            # S9 can begin the post-channel return after a temporary
+            # low-speed hold.  Limit only the stored semantic-anchor headings
+            # to the unchanged hard yaw/curvature contract; the XY sweep and
+            # drivable-footprint checks remain untouched.
+            heading = self._contract_limited_headings(
+                heading,
+                xy,
+                HardModeMaskConfig(dt_s=self.config.dt_s),
+            )
         return np.column_stack([xy, heading]).astype(np.float32)
 
     def _route_transition_trajectory(
@@ -728,54 +749,69 @@ class SimulatorDynamicAnchorGenerator:
                 (TRAJECTORY_STEPS, TRAJECTORY_DIM), dtype=np.float32
             )
         contract = HardModeMaskConfig(dt_s=self.config.dt_s)
-        distances = self._freeze_stationary_tail(
-            self._travel_distances(
-                speed_mps, self.config.stop_accel_mps2
-            ),
-            movement_epsilon_m=contract.movement_epsilon_m,
-        )
-        world, world_heading = self._sample_lane_pose_path(
-            road_network,
-            source_lane,
-            source_s,
-            source_d,
-            distances,
-        )
-        xy = self._world_to_ego(world, ego_pose)
-        increments = np.diff(np.concatenate(([0.0], distances)))
-        stationary = np.flatnonzero(
-            increments <= contract.movement_epsilon_m
-        )
-        if stationary.size:
-            first = int(stationary[0])
-            frozen_xy = (
-                np.zeros((2,), dtype=np.float64)
-                if first == 0
-                else xy[first - 1].copy()
+        last_audit = None
+        for braking_scale in (1.0, 0.875, 0.75, 0.625, 0.5):
+            distances = self._freeze_stationary_tail(
+                self._travel_distances(
+                    speed_mps,
+                    float(self.config.stop_accel_mps2) * braking_scale,
+                ),
+                movement_epsilon_m=contract.movement_epsilon_m,
             )
-            xy[first:] = frozen_xy
-        heading = self._contract_limited_headings(
-            _wrap_to_pi(world_heading - ego_pose[2]),
-            xy,
-            contract,
-        )
-        if stationary.size:
-            first = int(stationary[0])
-            frozen_heading = 0.0 if first == 0 else float(heading[first - 1])
-            heading[first:] = frozen_heading
-        result = np.column_stack([xy, heading]).astype(np.float32)
-        audit = validate_trajectory_kinematics(
-            result,
-            speed_mps,
-            np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
-            contract,
-        )
-        if not audit.valid:
-            raise DynamicAnchorError(
-                "STOP anchor violates fixed-time kinematics: "
-                + ",".join(audit.violations)
+            # Include the projected zero-distance pose, then translate the
+            # sampled lane path onto the measured vehicle pose.  MetaDrive's
+            # polyline projection is not an exact inverse near curved segment
+            # seams; using the reconstructed lane pose as the implicit origin
+            # can add a spurious first-step distance and push an otherwise
+            # reachable STOP anchor outside the fixed-time envelope.
+            sampled_world, sampled_heading = self._sample_lane_pose_path(
+                road_network,
+                source_lane,
+                source_s,
+                source_d,
+                np.concatenate(([0.0], distances)),
             )
-        return result
+            world = sampled_world[1:] + (
+                ego_pose[None, :2] - sampled_world[0:1]
+            )
+            world_heading = sampled_heading[1:]
+            xy = self._world_to_ego(world, ego_pose)
+            increments = np.diff(np.concatenate(([0.0], distances)))
+            stationary = np.flatnonzero(
+                increments <= contract.movement_epsilon_m
+            )
+            if stationary.size:
+                first = int(stationary[0])
+                frozen_xy = (
+                    np.zeros((2,), dtype=np.float64)
+                    if first == 0
+                    else xy[first - 1].copy()
+                )
+                xy[first:] = frozen_xy
+            heading = self._contract_limited_headings(
+                _wrap_to_pi(world_heading - ego_pose[2]),
+                xy,
+                contract,
+            )
+            if stationary.size:
+                first = int(stationary[0])
+                frozen_heading = (
+                    0.0 if first == 0 else float(heading[first - 1])
+                )
+                heading[first:] = frozen_heading
+            result = np.column_stack([xy, heading]).astype(np.float32)
+            last_audit = validate_trajectory_kinematics(
+                result,
+                speed_mps,
+                np.zeros((TRAJECTORY_DIM,), dtype=np.float64),
+                contract,
+            )
+            if last_audit.valid:
+                return result
+        raise DynamicAnchorError(
+            "STOP anchor violates fixed-time kinematics: "
+            + ",".join(last_audit.violations)
+        )
 
     def generate(self, env: object, ego_id: str) -> DynamicAnchorOutput:
         agents = getattr(env, "agents", None)
@@ -803,6 +839,12 @@ class SimulatorDynamicAnchorGenerator:
         s7_route_target = self._s7_route_target(env, road_network, source_lane)
         if s7_route_target is not None:
             left_lane = s7_route_target
+        scenario_id = str((getattr(env, "config", {}) or {}).get("scenario_id", ""))
+        lane_change_progress_m = (
+            self.S9_MINIMUM_LANE_CHANGE_PROGRESS_M
+            if scenario_id == "S9_narrow_channel_negotiation"
+            else self.config.minimum_lane_change_progress_m
+        )
         left_s = self._project(left_lane, position[:2])[0] if left_lane is not None else 0.0
         right_s = self._project(right_lane, position[:2])[0] if right_lane is not None else 0.0
 
@@ -851,6 +893,7 @@ class SimulatorDynamicAnchorGenerator:
                         ego_pose,
                         speed_mps,
                         accel,
+                        minimum_lane_change_progress_m=lane_change_progress_m,
                     )
                 )
         if right_lane is not None:
@@ -867,6 +910,7 @@ class SimulatorDynamicAnchorGenerator:
                     ego_pose,
                     speed_mps,
                     accel,
+                    minimum_lane_change_progress_m=lane_change_progress_m,
                 )
         trajectories[ModeIndex.STOP] = self._stop_trajectory(
             road_network,

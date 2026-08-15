@@ -59,8 +59,10 @@ def build_continuous_lane_chain_path(
     *,
     start_s: float,
     start_lateral_m: float = 0.0,
+    start_point_xy: np.ndarray | None = None,
     step_m: float = 0.25,
     seam_transition_m: float = 8.0,
+    lateral_recovery_m: float | None = None,
 ) -> np.ndarray:
     """Build a dense center path, smoothing connected offset road seams.
 
@@ -76,19 +78,68 @@ def build_continuous_lane_chain_path(
     validate_lane_chain_topology(lane_values)
     if not np.isfinite([start_s, start_lateral_m, step_m, seam_transition_m]).all():
         raise RouteChainGeometryError("route geometry inputs must be finite")
+    exact_start_xy = None
+    if start_point_xy is not None:
+        exact_start_xy = np.asarray(start_point_xy, dtype=np.float64)
+        if exact_start_xy.shape != (2,) or not np.isfinite(exact_start_xy).all():
+            raise RouteChainGeometryError("route start point must be finite XY")
     if step_m <= 0.0 or step_m > 0.5 or seam_transition_m <= 0.0:
         raise RouteChainGeometryError("route sampling step/transition is invalid")
+    if lateral_recovery_m is not None and (
+        not np.isfinite(lateral_recovery_m) or float(lateral_recovery_m) <= 0.0
+    ):
+        raise RouteChainGeometryError("lateral recovery distance is invalid")
     first_length = float(getattr(lane_values[0], "length", 0.0) or 0.0)
-    if start_s < -1.0e-6 or start_s > first_length + 1.0e-6:
+    # At an unstructured junction MetaDrive can localize the vehicle on the
+    # successor a few centimetres before its mathematical s=0.  The measured
+    # XY remains the path authority; accept only this sub-sample numerical
+    # overlap and clamp the lane parameter below.
+    if start_s < -0.5 or start_s > first_length + 1.0e-6:
         raise RouteChainGeometryError("route start_s is outside the first lane")
 
     pieces: list[np.ndarray] = []
     current_start = float(np.clip(start_s, 0.0, first_length))
+
+    def sample_lane_segment(lane, segment_start: float, segment_end: float, index: int):
+        if index != 0 or lateral_recovery_m is None:
+            lateral = float(start_lateral_m) if index == 0 else 0.0
+            return _lane_samples(
+                lane, segment_start, segment_end, step_m, lateral
+            )
+        distance = max(float(segment_end) - float(segment_start), 0.0)
+        recovery_distance = min(float(lateral_recovery_m), distance)
+        count = max(int(math.ceil(distance / step_m)), 1)
+        longitudinal = np.linspace(
+            float(segment_start), float(segment_end), count + 1
+        )
+        ratio = np.clip(
+            (longitudinal - float(start_s)) / max(recovery_distance, step_m),
+            0.0,
+            1.0,
+        )
+        weight = 6.0 * ratio**5 - 15.0 * ratio**4 + 10.0 * ratio**3
+        lateral = float(start_lateral_m) * (1.0 - weight)
+        rows = []
+        for value, offset in zip(longitudinal, lateral):
+            point = np.asarray(
+                lane.position(float(value), float(offset))[:2],
+                dtype=np.float64,
+            )
+            rows.append(
+                (
+                    float(point[0]),
+                    float(point[1]),
+                    float(lane.heading_theta_at(float(value))),
+                )
+            )
+        return np.asarray(rows, dtype=np.float64)
+
     for index, lane in enumerate(lane_values):
         lane_length = float(getattr(lane, "length", 0.0) or 0.0)
-        lateral = float(start_lateral_m) if index == 0 else 0.0
         if index == len(lane_values) - 1:
-            pieces.append(_lane_samples(lane, current_start, lane_length, step_m, lateral))
+            pieces.append(
+                sample_lane_segment(lane, current_start, lane_length, index)
+            )
             break
 
         successor = lane_values[index + 1]
@@ -104,33 +155,83 @@ def build_continuous_lane_chain_path(
                 f"connected route seam is too wide ({seam_gap:.3f}m)"
             )
         if seam_gap <= 0.5:
-            pieces.append(_lane_samples(lane, current_start, lane_length, step_m, lateral))
+            pieces.append(
+                sample_lane_segment(lane, current_start, lane_length, index)
+            )
             current_start = 0.0
             continue
 
-        back = min(float(seam_transition_m), max(lane_length - current_start, 0.0))
+        back = min(float(seam_transition_m), lane_length)
         ahead = min(float(seam_transition_m), successor_length)
         if back < 1.0 or ahead < 1.0:
             raise RouteChainGeometryError("offset route seam lacks transition length")
         join_start_s = lane_length - back
         join_end_s = ahead
-        pieces.append(_lane_samples(lane, current_start, join_start_s, step_m, lateral))
-        pieces.append(
-            build_lane_seam_transition_centerline(
-                lane,
-                successor,
-                transition_m=float(seam_transition_m),
-                step_m=float(step_m),
-                predecessor_start_s=float(join_start_s),
-                successor_end_s=float(join_end_s),
-            )
+        transition = build_lane_seam_transition_centerline(
+            lane,
+            successor,
+            transition_m=float(seam_transition_m),
+            step_m=float(step_m),
+            predecessor_start_s=float(join_start_s),
+            successor_end_s=float(join_end_s),
         )
+        if current_start < join_start_s:
+            pieces.append(
+                sample_lane_segment(lane, current_start, join_start_s, index)
+            )
+            pieces.append(transition)
+        else:
+            # Once replanning starts inside an offset seam, preserve the same
+            # canonical transition instead of shortening its bend on every
+            # step.  Crop at the point nearest the vehicle's current lane
+            # coordinates; rebuilding a 3 m bend from an 8 m design creates
+            # a fictitious high-curvature path outside the declared pavement.
+            current_point = (
+                exact_start_xy
+                if index == 0 and exact_start_xy is not None
+                else np.asarray(
+                    lane.position(current_start, float(start_lateral_m))[:2],
+                    dtype=np.float64,
+                )
+            )
+            forward_indices = []
+            for transition_index, point in enumerate(transition[:, :2]):
+                transition_s, _ = lane.local_coordinates(point)
+                if float(transition_s) >= current_start - 1.0e-6:
+                    forward_indices.append(transition_index)
+            if not forward_indices:
+                raise RouteChainGeometryError(
+                    "offset route seam has no forward continuation"
+                )
+            forward_array = np.asarray(forward_indices, dtype=np.int64)
+            nearest_offset = int(
+                np.argmin(
+                    np.linalg.norm(
+                        transition[forward_array, :2] - current_point,
+                        axis=1,
+                    )
+                )
+            )
+            start_index = int(forward_array[nearest_offset])
+            forward_transition = transition[start_index:].copy()
+            forward_transition[0, :2] = current_point
+            forward_transition[0, 2] = float(
+                lane.heading_theta_at(current_start)
+            )
+            pieces.append(forward_transition)
         current_start = join_end_s
 
     result = np.concatenate(
         [piece if index == 0 else piece[1:] for index, piece in enumerate(pieces)],
         axis=0,
     )
+    if exact_start_xy is not None:
+        # MetaDrive's circular-lane local_coordinates()/position() pair can
+        # differ by centimetres near the G-block seam.  The dense dynamics
+        # audit replaces row zero with the measured pose, so retaining the
+        # inverse-projection point here creates a fictitious first bend.  Pin
+        # the frozen path to the same measured XY used by the controller.
+        result[0, :2] = exact_start_xy
     delta = np.linalg.norm(np.diff(result[:, :2], axis=0), axis=1)
     keep = np.concatenate(([True], delta > 1.0e-8))
     result = np.ascontiguousarray(result[keep], dtype=np.float64)

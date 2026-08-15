@@ -80,7 +80,7 @@ from expert_dataset.collect_joint_bev import (
 )
 from scenarios.bev_round13_contract import (
     PRIMARY_S5_S9_SCENARIOS,
-    deterministic_initial_speed_km_h,
+    deterministic_candidate_initial_speed_km_h,
 )
 from tools.topdown_view import (
     capture_topdown_frame as _capture_topdown_frame,
@@ -440,6 +440,7 @@ def _expert_debug_snapshot(
         "pairwise_conflict_count",
         "pairwise_conflict_pair_count",
         "pairwise_conflict_counts_by_pair",
+        "pairwise_safe_indices_by_pair",
         "selected_indices",
         "selected_score",
         "planning_time_ms",
@@ -456,10 +457,22 @@ def _expert_debug_snapshot(
         "local_kinematic_rejection_count",
         "corridor_rejection_count",
         "road_rejection_count",
+        "road_rejections_by_reason",
+        "first_road_rejection",
+        "first_committed_road_rejection",
+        "committed_first_rejection_by_duration",
         "background_collision_rejection_count",
+        "background_gap_rejection_count",
         "lane_end_rejection_count",
+        "minimum_speed_rejection_count",
         "collision_rejections_by_object",
         "kinematic_rejections_by_reason",
+        "best_rejected_dense_dynamics",
+        "best_rejected_background_gap_m",
+        "best_rejected_background_profile",
+        "selected_profile_attempts",
+        "source_lane_chain_indices",
+        "candidates",
         "lane_end_restricted",
         "commitment_elapsed_s",
         "commitment_deadline_remaining_s",
@@ -845,6 +858,26 @@ def _format_episode_stop_reason(
     return " ".join(parts)
 
 
+def _diagnostic_initial_speed_km_h(
+    env: object,
+    scenario_summary: Mapping[str, object],
+) -> float:
+    """Report the scenario-resolved spawn speed when one is available."""
+
+    resolved = scenario_summary.get("resolved_scenario_parameters", {})
+    if isinstance(resolved, Mapping):
+        value = resolved.get("ego_initial_speed_km_h")
+        try:
+            speed = float(value)
+        except (TypeError, ValueError):
+            speed = np.nan
+        if np.isfinite(speed):
+            return speed
+    return float(
+        getattr(env, "config", {}).get("initial_speed_km_h", np.nan)
+    )
+
+
 def _run_single_episode(
     env, agent_ids, lead_id, heading_up, seed, action_fn_factory,
     pdms_params: Optional[dict] = None,
@@ -888,6 +921,7 @@ def _run_single_episode(
     collision_agents: list[str] = []
     out_of_road_agents: list[str] = []
     simulator_steps = 0
+    latest_scenario_summary: dict[str, object] = {}
 
     if platoon_metrics is not None:
         platoon_metrics.start_episode()
@@ -1148,8 +1182,47 @@ def _run_single_episode(
         if frame is not None:
             frames.append(frame)
 
+        live_orchestrator = getattr(env, "_scenario_orchestrator", None)
+        if live_orchestrator is not None and hasattr(
+            live_orchestrator, "get_episode_summary"
+        ):
+            latest_scenario_summary = dict(
+                live_orchestrator.get_episode_summary() or {}
+            )
         obs, reward, terminated, truncated, info = env.low_level_step(actions)
         simulator_steps += 1
+        # The wrapper may expose the orchestrator only while building the
+        # low-level info dict.  Preserve that post-step snapshot as well as
+        # the direct pre-step snapshot, including on planner-triggered early
+        # exits where MetaDrive clears managers during auto-reset.
+        for agent_info in (info or {}).values():
+            if not isinstance(agent_info, Mapping) or "scenario_id" not in agent_info:
+                continue
+            latest_scenario_summary = {
+                key: agent_info[key]
+                for key in (
+                    "scenario_id",
+                    "scenario_triggered",
+                    "scenario_realized",
+                    "scenario_trigger_step",
+                    "scenario_realized_step",
+                    "scenario_recipe_count",
+                    "scenario_completed_recipe_count",
+                    "scenario_recipes_complete",
+                    "scenario_notes",
+                    "scenario_random_seed",
+                    "resolved_recipe_parameters",
+                    "severity_bucket",
+                    "resolved_scenario_parameters",
+                    "actor_manifest",
+                    "conflict_evidence",
+                    "route_completion",
+                    "functional_success",
+                    "expert_profile_id",
+                )
+                if key in agent_info
+            }
+            break
 
         if platoon_metrics is not None:
             platoon_metrics.update(info)
@@ -1203,9 +1276,18 @@ def _run_single_episode(
     orchestrator = getattr(env, "_scenario_orchestrator", None)
     if orchestrator is not None and hasattr(orchestrator, "get_episode_summary"):
         scenario_summary = dict(orchestrator.get_episode_summary() or {})
+    if not scenario_summary:
+        # MetaDrive can auto-reset its managers at the horizon boundary.  Keep
+        # the final pre-step snapshot so functional evidence is not lost on a
+        # technically successful truncated episode.
+        scenario_summary = dict(latest_scenario_summary)
     if failure_reason is None and scenario_summary:
         if not bool(scenario_summary.get("scenario_realized", False)):
             failure_reason = "scenario_not_realized"
+        elif str(scenario_summary.get("scenario_id")) in dict(PRIMARY_S5_S9_SCENARIOS) and not bool(
+            scenario_summary.get("functional_success", False)
+        ):
+            failure_reason = "scenario_functional_gate_failed"
     if failure_reason is None and rejection_counts:
         reason, _ = sorted(
             rejection_counts.items(), key=lambda item: (-item[1], item[0])
@@ -1218,10 +1300,9 @@ def _run_single_episode(
         episode_diagnostics.update(
             {
                 "seed": int(seed),
-                "initial_speed_km_h": float(
-                    getattr(env, "config", {}).get(
-                        "initial_speed_km_h", np.nan
-                    )
+                "initial_speed_km_h": _diagnostic_initial_speed_km_h(
+                    env,
+                    scenario_summary,
                 ),
                 "simulator_steps": int(simulator_steps),
                 "simulated_duration_s": float(simulator_steps * dt_s),
@@ -1334,6 +1415,7 @@ def run_scenario(
     save_semantic_bev_video: bool = True,
     save_trajectory_data: bool = True,
     target_speed_km_h: float = DEFAULT_TARGET_SPEED_KM_H,
+    rule_maker_profile: str | None = None,
 ) -> Path:
     if local_route is None:
         local_route = _pick_local_route(scenario_id)
@@ -1377,11 +1459,16 @@ def run_scenario(
         "out_of_road_done": False,
         "horizon": int(horizon),
         "target_speed_km_h": float(target_speed_km_h),
+        "rule_maker_profile_id": rule_maker_profile,
     }
-    if env_factory is not None:
-        env = env_factory(env_config)
-    else:
-        env = SensorlessJointBEVPlatoonEnv(env_config)
+    def _new_episode_env(initial_speed_km_h: float):
+        episode_config = dict(env_config)
+        episode_config["initial_speed_km_h"] = float(initial_speed_km_h)
+        if env_factory is not None:
+            return env_factory(episode_config)
+        return SensorlessJointBEVPlatoonEnv(episode_config)
+
+    env = None
     agent_ids = [f"agent{i}" for i in range(num_agents)]
     lead_id = agent_ids[0]
     action_fn_factory = _build_pipeline_factory(decision_policy, planning_policy, control_policy)
@@ -1390,7 +1477,7 @@ def run_scenario(
     pdms_params: Optional[dict] = None
     if evaluate:
         pdms_params = build_platoon_metric_params(
-            {**dict(getattr(env, "config", {}) or {}), **(metric_params or {})}
+            {**env_config, **(metric_params or {})}
         )
     metrics_dir = output_root / scenario_id / "metrices"
     all_episode_step_records: list[list[dict]] = []
@@ -1409,9 +1496,15 @@ def run_scenario(
             episode_unlock_record: dict | None = None
             for retry in range(max(1, int(max_episode_retries))):
                 episode_seed = used_seed + retry
-                initial_speed_km_h = deterministic_initial_speed_km_h(
+                initial_speed_km_h = deterministic_candidate_initial_speed_km_h(
                     scenario_id, episode_seed
                 )
+                if env is not None:
+                    try:
+                        env.close()
+                    except Exception:
+                        pass
+                env = _new_episode_env(initial_speed_km_h)
                 runtime_updates = {
                     "traffic_density": float(traffic_density),
                     "initial_speed_km_h": float(initial_speed_km_h),
@@ -1445,7 +1538,15 @@ def run_scenario(
                     episode_diagnostics=episode_diagnostics,
                 )
                 episode_unlock_record = unlock_tracker.finalize(len(frames) - 1)
-                if not _episode_failed_immediately(frames, terminated, truncated, info):
+                failed_immediately = _episode_failed_immediately(
+                    frames, terminated, truncated, info
+                )
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                env = None
+                if not failed_immediately:
                     used_seed = episode_seed
                     break
                 print(f"  retry ep {ep_idx + 1} seed={episode_seed + 1} (frames={len(frames)})")
@@ -1531,10 +1632,11 @@ def run_scenario(
                 _plot_episode_pdms(episode_pdms_png, episode_steps)
                 _plot_episode_results(episode_results_dir, episode_steps, agent_ids)
     finally:
-        try:
-            env.close()
-        except Exception:
-            pass
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
 
     if evaluate:
         unlock_summary = summarize_formation_unlock_records(formation_unlock_records)
@@ -1730,6 +1832,12 @@ def main() -> None:
         help="Explicit unique episode seeds; count must equal --num-episodes",
     )
     parser.add_argument("--video-fps", type=int, default=DEFAULT_VIDEO_FPS)
+    parser.add_argument(
+        "--rule-maker-profile",
+        default=None,
+        choices=("brake_first", "balanced", "evasive"),
+        help="Optional S5 RuleMaker profile.",
+    )
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON,
                         help=f"Override environment horizon / max steps per agent (default: {DEFAULT_HORIZON})")
     parser.add_argument(
@@ -1769,6 +1877,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.all_scenarios and args.primary_s5_s9:
         parser.error("--all-scenarios and --primary-s5-s9 are mutually exclusive")
+    if (args.all_scenarios or args.primary_s5_s9) and args.rule_maker_profile:
+        parser.error("--rule-maker-profile is only valid for a single S5 run")
 
     heading_up = args.heading_up.lower() in ("true", "1", "yes")
     output_root = Path(args.output_root)
@@ -1830,6 +1940,7 @@ def main() -> None:
             save_semantic_bev_video=not args.no_semantic_bev_video,
             save_trajectory_data=not args.no_trajectory_data,
             target_speed_km_h=args.target_speed_km_h,
+            rule_maker_profile=args.rule_maker_profile,
         )
         print(f"\n=== Videos saved to: {video_dir} ===")
 

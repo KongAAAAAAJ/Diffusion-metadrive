@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING, Dict, List, Tuple
 import numpy as np
 
 from scenarios.definitions import ScenarioDefinition, TriggerSpec
+from scenarios.s5_s9_sampling import resolve_s5_s9_parameters
 from metadrive.policy.idm_policy import IDMPolicy
+from envs.diffusion_envs.ground_truth_idm_policy import GroundTruthIDMPolicy
 
 if TYPE_CHECKING:
     pass
@@ -25,6 +27,58 @@ if TYPE_CHECKING:
 class _RouteRoadRef:
     start_node: str
     end_node: str
+
+
+class _TimedMainlineStreamPolicy(GroundTruthIDMPolicy):
+    """IDM stream policy compatible with the sampled 1--2 s headway.
+
+    MetaDrive's default 10 m + 1.5 s desired spacing expands the declared S7
+    headway before the actors reach the conflict point.  The scenario's
+    unchanged 5 m hard background spacing permits this lower cooperative IDM
+    target, so the four timed roles retain their jointly solved arrival order.
+    """
+
+    DISTANCE_WANTED = 5.0
+    TIME_WANTED = 0.5
+    LANE_CHANGE_FREQ = 10_000
+
+
+class _S8ExitConstraintPolicy(GroundTruthIDMPolicy):
+    """Hold the sampled exit-stream speed while preserving lane keeping."""
+
+    LANE_CHANGE_FREQ = 10_000
+
+    def act(self, *args, **kwargs):
+        steering = self.steering_control(self.routing_target_lane)
+        speed_error = float(self.NORMAL_SPEED) - float(
+            getattr(self.control_object, "speed_km_h", 0.0) or 0.0
+        )
+        action = [steering, float(np.clip(speed_error / 5.0, -1.0, 1.0))]
+        self.action_info["action"] = action
+        return action
+
+
+class _IncidentalBackgroundPolicy(GroundTruthIDMPolicy):
+    """Lane-keeping traffic that enriches perception without defining a hazard."""
+
+    LANE_CHANGE_FREQ = 10_000
+
+
+class _S9BlockingPolicy(GroundTruthIDMPolicy):
+    """Keep the S9 obstruction slow and centred in its declared c3 lane.
+
+    The generic IDM policy follows its navigation branch at the end of c3.
+    For a near-stationary actor this can turn the nominal obstruction across
+    lane 0, contradicting S9's fixed middle-lane blocker contract.  The
+    orchestrator already enforces the sampled speed, so this policy only owns
+    lane keeping and braking between those speed-profile updates.
+    """
+
+    def act(self, *args, **kwargs):
+        steering = self.steering_control(self.control_object.lane)
+        action = [steering, -1.0]
+        self.action_info["action"] = action
+        return action
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +161,13 @@ class ScenarioOrchestrator:
         self._scenario_random_seed: int | None = None
         self._scenario_rng = None
         self._resolved_recipe_parameters: Dict[str, Dict[str, float]] = {}
+        self._resolved_scenario_parameters: Dict[str, object] = {}
+        self._actor_manifest: Dict[str, Dict[str, object]] = {}
+        self._conflict_evidence: Dict[str, object] = {}
+        self._route_completion: Dict[str, object] = {}
+        self._initial_agent_lanes: Dict[str, tuple] = {}
+        self._functional_state: Dict[str, object] = {}
+        self._last_env = None
 
     def reset(self, env, agent_id: str) -> None:
         self.summary = ScenarioEpisodeSummary(scenario_id=self.definition.scenario_id)
@@ -118,8 +179,63 @@ class ScenarioOrchestrator:
         self._scenario_random_seed = self._derive_scenario_random_seed(env)
         self._scenario_rng = np.random.RandomState(self._scenario_random_seed)
         self._resolved_recipe_parameters = {}
+        self._last_env = env
+        agents = getattr(env, "agents", {}) or {}
+        self._initial_agent_lanes = {
+            str(name): tuple(getattr(vehicle, "lane_index", ()) or ())
+            for name, vehicle in agents.items()
+        }
+        lead = agents.get("agent0") or agents.get(agent_id)
+        ego_speed = float(getattr(lead, "speed_km_h", 0.0) or 0.0)
+        raw_seed = getattr(env, "current_seed", None)
+        if raw_seed is None:
+            raw_seed = getattr(getattr(env, "engine", None), "global_random_seed", 0)
+        self._resolved_scenario_parameters = resolve_s5_s9_parameters(
+            spawn_seed=int(raw_seed or 0),
+            scenario_id=self.definition.scenario_id,
+            local_route=self.local_route,
+            ego_initial_speed_km_h=ego_speed,
+            decision_dt_s=self._scenario_step_dt_s(env),
+        )
+        self._actor_manifest = {}
+        self._conflict_evidence = {
+            "minimum_actor_distance_m": None,
+            "minimum_actor_ttc_s": None,
+        }
+        self._route_completion = {
+            "agent_lane_transitions": {str(name): [] for name in agents},
+            "all_agents_changed_lane": False,
+            "all_agents_passed_blocker": False,
+            "all_agents_cleared_narrow_section": False,
+            "all_agents_returned_to_original_lane": False,
+            "all_agents_entered_exit_ramp": False,
+            "all_agents_entered_mainline": False,
+            "returned_to_original_lane": False,
+        }
+        self._functional_state = {
+            "last_step": None,
+            "actor_speeds_kmh": {},
+            "ego_speeds_kmh": {},
+            "formation_stable_steps": 0,
+            "s6_conflict_distances_m": {},
+            "s6_conflict_origin_roads": {},
+            "s6_arrival_steps": {},
+            "s5_lane_candidate_steps": {},
+            "s5_lane_completion_steps": {},
+            "s5_reassembly_candidate_steps": {},
+            "s5_reassembly_completion_steps": {},
+        }
+        # ``trigger_on_start`` means the actor must exist in the very first
+        # expert planning snapshot.  Deferring this to env.before_step() lets
+        # the planner commit a multi-second trajectory against an empty scene
+        # and only discover the actor during the rolling hard audit.
+        if lead is not None:
+            self._execute_recipe(env, lead, step_count=0, startup_only=True)
+            self._update_functional_evidence(env, step_count=0)
 
     def before_step(self, env, agent_id: str, step_count: int) -> None:
+        self._last_env = env
+        self._functional_state["last_observation_step"] = int(step_count)
         self._apply_speed_profiles(env)
         ego_vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
         if ego_vehicle is None:
@@ -130,10 +246,22 @@ class ScenarioOrchestrator:
                 self.summary.scenario_triggered = True
                 self.summary.trigger_step = int(step_count)
         self._execute_recipe(env, ego_vehicle, step_count)
+        self._update_functional_evidence(env, step_count)
 
     def get_episode_summary(self) -> Dict[str, object]:
+        if self._last_env is not None:
+            # Capture the state produced by the final env.step() with a real
+            # monotonic index.  A synthetic ``-1`` made valid last-frame lane
+            # transitions look temporally invalid and prevented scenario-
+            # specific evidence updaters from observing completion.
+            final_step = int(
+                self._functional_state.get("last_observation_step", -1)
+            ) + 1
+            self._update_functional_evidence(self._last_env, final_step)
         recipe_count = len(self.definition.traffic_recipes)
         completed_recipe_count = len(self._completed_recipe_keys)
+        recipes_complete = completed_recipe_count == recipe_count
+        functional_success = self._functional_success(recipes_complete)
         return {
             "scenario_id": self.summary.scenario_id,
             "scenario_triggered": bool(self.summary.scenario_triggered),
@@ -142,24 +270,52 @@ class ScenarioOrchestrator:
             "scenario_realized_step": self.summary.realized_step,
             "scenario_recipe_count": int(recipe_count),
             "scenario_completed_recipe_count": int(completed_recipe_count),
-            "scenario_recipes_complete": bool(
-                completed_recipe_count == recipe_count
-            ),
+            "scenario_recipes_complete": bool(recipes_complete),
             "scenario_notes": list(self.summary.notes),
             "scenario_random_seed": self._scenario_random_seed,
             "resolved_recipe_parameters": {
                 key: dict(value)
                 for key, value in self._resolved_recipe_parameters.items()
             },
+            "severity_bucket": self._resolved_scenario_parameters.get(
+                "severity_bucket"
+            ),
+            "resolved_scenario_parameters": dict(
+                self._resolved_scenario_parameters
+            ),
+            "actor_manifest": {
+                role: dict(row) for role, row in self._actor_manifest.items()
+            },
+            "conflict_evidence": dict(self._conflict_evidence),
+            "route_completion": {
+                key: (dict(value) if isinstance(value, dict) else value)
+                for key, value in self._route_completion.items()
+            },
+            "functional_success": bool(functional_success),
+            "expert_profile_id": self._expert_profile_id(),
         }
 
-    def _execute_recipe(self, env, ego_vehicle, step_count: int) -> None:
+    def _expert_profile_id(self) -> str | None:
+        config = getattr(self._last_env, "config", {}) if self._last_env is not None else {}
+        value = config.get("rule_maker_profile_id") if hasattr(config, "get") else None
+        return None if value in (None, "") else str(value)
+
+    def _execute_recipe(
+        self,
+        env,
+        ego_vehicle,
+        step_count: int,
+        *,
+        startup_only: bool = False,
+    ) -> None:
         if not self.definition.traffic_recipes:
             self._mark_realized(step_count, "no-op")
             return
         realized = False
         considered = False
         for recipe_index, recipe in enumerate(self.definition.traffic_recipes):
+            if startup_only and not bool(recipe.params.get("trigger_on_start", False)):
+                continue
             recipe_key = f"{recipe_index}:{recipe.operation}"
             if recipe_key in self._completed_recipe_keys:
                 continue
@@ -284,6 +440,7 @@ class ScenarioOrchestrator:
         )
         if realized_gap is not None:
             setattr(lead_vehicle, "scenario_brake_trigger_bumper_gap_m", realized_gap)
+        self._register_actor("hard_brake_lead", lead_vehicle, step_count=step_count)
         self._mark_realized(step_count, "lead_brake_profile")
         return True
 
@@ -295,6 +452,23 @@ class ScenarioOrchestrator:
 
     def _handle_inject_background_vehicle(self, env, ego_vehicle, params: Dict[str, object], step_count: int) -> bool:
         params = self._resolve_background_vehicle_params(env, params)
+        if self.definition.scenario_id == "S6_background_merge_in":
+            resolved = self._resolved_scenario_parameters
+            params.update(
+                target_speed_kmh=float(resolved["merge_actor_speed_km_h"]),
+                merge_front_gap_m=float(resolved["target_front_bumper_gap_m"]),
+                merge_rear_gap_m=float(resolved["target_rear_bumper_gap_m"]),
+                merge_arrival_offset_s=float(
+                    resolved["conflict_arrival_time_delta_s"]
+                ),
+                target_gap_id=str(resolved["target_gap_id"]),
+                merge_activation_step=int(resolved["merge_activation_step"]),
+                # MetaDrive's FrontBackObjects reports centre-to-centre
+                # longitudinal distances.  Convert the memory's sampled
+                # bumper gaps before IDMMergePolicy decides that the target
+                # corridor is safe to enter.
+                merge_gap_center_offset_m=5.74,
+            )
         merge_alignment = None
         if (
             str(params.get("policy", "")) == "idm_merge"
@@ -309,17 +483,78 @@ class ScenarioOrchestrator:
                 self.summary.notes.append("s6_merge_alignment_failed")
                 return False
             params["spawn_longitude"] = merge_alignment["spawn_longitude_m"]
+            params["target_speed_kmh"] = merge_alignment["merge_speed_km_h"]
+            ego_speed_kmh = float(
+                self._resolved_scenario_parameters.get(
+                    "ego_initial_speed_km_h", 22.0
+                )
+            )
+            params["merge_creep_speed_kmh"] = (
+                min(
+                    float(merge_alignment["merge_speed_km_h"]),
+                    max(18.0, ego_speed_kmh - 2.83),
+                )
+                if str(merge_alignment["target_gap_id"])
+                == "agent0-agent1"
+                else float(merge_alignment["merge_speed_km_h"])
+            )
+            params["merge_lateral_kp"] = (
+                1.0
+                if str(merge_alignment["target_gap_id"]) == "agent0-agent1"
+                and float(merge_alignment["merge_speed_km_h"]) <= 21.2
+                else 0.7
+                if str(merge_alignment["target_gap_id"]) == "agent1-agent2"
+                else 0.7
+            )
+            self._resolved_scenario_parameters["merge_actor_speed_km_h"] = (
+                merge_alignment["merge_speed_km_h"]
+            )
         reference_kind = str(params.get("reference_kind", "ego_lane"))
         policy_class, policy_kwargs, vehicle_config_overrides = self._resolve_injected_background_policy(params)
+        if merge_alignment is not None:
+            # Keep the actor's navigation alive over the same continuous
+            # downstream route as the ego formation.  Binding it to the old
+            # c3 endpoint made late gap-1 merges decelerate to a terminal stop
+            # before occupying the designated lane.  The explicit
+            # ``merge_target_lane`` binding below still controls which lane is
+            # used through the conflict corridor.
+            try:
+                spawn_manager = getattr(
+                    getattr(env, "engine", None), "spawn_manager", None
+                )
+                current_map = getattr(
+                    getattr(env, "engine", None), "current_map", None
+                )
+                if str(merge_alignment["target_gap_id"]) == "agent0-agent1":
+                    from envs.diffusion_envs.route_spawn_manager import (
+                        RouteAwareSpawnManager,
+                    )
+
+                    c3_block = self._get_block_by_graph_id(current_map, "c3")
+                    c3_road = (
+                        RouteAwareSpawnManager._get_last_positive_block_network_road(
+                            c3_block
+                        )
+                    )
+                    destination = (
+                        None if c3_road is None else c3_road.end_node
+                    )
+                else:
+                    # Preserve the merge policy's native branch navigation for
+                    # the second gap.  Explicit downstream routing selects the
+                    # terminating outside lane before the actor occupies the
+                    # designated middle-lane corridor.
+                    destination = None
+                if destination is not None:
+                    vehicle_config_overrides = dict(vehicle_config_overrides or {})
+                    vehicle_config_overrides["destination"] = destination
+                    self._conflict_evidence["merge_actor_destination_node"] = str(
+                        destination
+                    )
+            except (AttributeError, TypeError, ValueError):
+                self.summary.notes.append("s6_merge_actor_destination_bind_failed")
         lane_index = params.get("lane_index", params.get("lane_id", 0))
-        spawned = self._spawn_on_reference(
-            env,
-            ego_vehicle,
-            reference_kind=reference_kind,
-            block_id=params.get("block_id"),
-            socket_index=params.get("socket_index"),
-            internal_road_index=params.get("internal_road_index"),
-            lane_index=int(lane_index),
+        spawn_kwargs = dict(
             spawn_longitude=float(params.get("spawn_longitude", 15.0)),
             spawn_longitude_offset=float(params.get("spawn_longitude_offset", 0.0)),
             target_speed_kmh=float(params.get("target_speed_kmh", getattr(ego_vehicle, "speed_km_h", 20.0))),
@@ -329,6 +564,28 @@ class ScenarioOrchestrator:
             vehicle_config_overrides=vehicle_config_overrides,
             vehicle_type=self._scenario_vehicle_type(),
         )
+        if merge_alignment is not None:
+            # The S6 conflict is on the converging connector.  Spawning on the
+            # upstream branch cannot realize a 1.5--3.5 s conflict horizon
+            # while ego is only 25--50 m from the merge point.
+            spawned = self._spawn_on_lane_tuple(
+                env,
+                ego_vehicle,
+                lane_tuple=tuple(merge_alignment["spawn_lane_index"]),
+                reference_kind="absolute_lane",
+                **spawn_kwargs,
+            )
+        else:
+            spawned = self._spawn_on_reference(
+                env,
+                ego_vehicle,
+                reference_kind=reference_kind,
+                block_id=params.get("block_id"),
+                socket_index=params.get("socket_index"),
+                internal_road_index=params.get("internal_road_index"),
+                lane_index=int(lane_index),
+                **spawn_kwargs,
+            )
         if spawned is None:
             self.summary.notes.append(f"inject_failed:{reference_kind}")
             return False
@@ -349,23 +606,806 @@ class ScenarioOrchestrator:
         if merge_alignment is not None:
             for key, value in merge_alignment.items():
                 setattr(spawned, f"scenario_{key}", value)
+            # Bind the merge policy to the ego formation's continuous
+            # downstream lane explicitly.  The actor's shortest-path
+            # checkpoints omit the parallel mainline edge, so navigation
+            # cannot infer this target from its own branch route alone.
+            try:
+                target_front_id, target_rear_id = str(
+                    merge_alignment["target_gap_id"]
+                ).split("-", 1)
+                active_agents = getattr(env, "agents", {}) or {}
+                target_front = active_agents[target_front_id]
+                target_rear = active_agents[target_rear_id]
+                setattr(spawned, "scenario_target_front_vehicle", target_front)
+                setattr(spawned, "scenario_target_rear_vehicle", target_rear)
+                target_front_lane = getattr(target_front, "lane", None)
+                target_lane_number = int(
+                    tuple(getattr(target_front_lane, "index", ()) or ())[2]
+                )
+                next_ref_lanes = list(
+                    getattr(
+                        getattr(target_front, "navigation", None),
+                        "next_ref_lanes",
+                        (),
+                    )
+                    or ()
+                )
+                merge_target_lane = next_ref_lanes[target_lane_number]
+                actor_navigation = getattr(spawned, "navigation", None)
+                actor_navigation.merge_target_lane = merge_target_lane
+                actor_navigation.merge_branch_roads = {
+                    tuple(merge_alignment["spawn_lane_index"][:2])
+                }
+                actor_navigation.merge_force_road = tuple(
+                    merge_alignment["spawn_lane_index"][:2]
+                )
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                self.summary.notes.append("s6_merge_target_lane_bind_failed")
+        role = str(getattr(spawned, "scenario_vehicle_role", "injected_background"))
+        self._register_actor(role, spawned, step_count=step_count)
+        if merge_alignment is not None:
+            self._conflict_evidence.update(dict(merge_alignment))
         self._mark_realized(step_count, f"injected:{reference_kind}")
         return True
+
+    def _spawn_role_on_lane(
+        self, env, ego_vehicle, *, role: str, lane_tuple, longitudinal_m: float,
+        speed_kmh: float, step_count: int, min_clearance_m: float = 0.0,
+        policy_class=None,
+    ):
+        spawned = self._spawn_on_lane_tuple(
+            env,
+            ego_vehicle,
+            lane_tuple=lane_tuple,
+            spawn_longitude=float(longitudinal_m),
+            reference_kind="absolute_lane",
+            target_speed_kmh=float(speed_kmh),
+            min_clearance_m=float(min_clearance_m),
+            clearance_scope="same_lane",
+            policy_class=policy_class,
+            vehicle_type=self._scenario_vehicle_type(),
+        )
+        if spawned is None:
+            return None
+        setattr(spawned, "scenario_vehicle_role", role)
+        setattr(spawned, "scenario_warning_marker", "!")
+        name = getattr(spawned, "name", None)
+        if name is not None:
+            self._speed_profiles[name] = {
+                "remaining_steps": float("inf"),
+                "target_speed_kmh": float(speed_kmh),
+            }
+        self._register_actor(role, spawned, step_count=step_count)
+        return spawned
+
+    def _handle_inject_incidental_background_traffic(
+        self,
+        env,
+        ego_vehicle,
+        params,
+        step_count: int,
+    ) -> bool:
+        """Spawn the exact non-causal 3--6 actor set declared by S5--S9."""
+
+        resolved = self._resolved_scenario_parameters
+        count = int(resolved.get("incidental_background_actor_count", 0))
+        declared_range = tuple(params.get("actor_count_range", (3, 6)))
+        if len(declared_range) != 2 or not int(declared_range[0]) <= count <= int(
+            declared_range[1]
+        ):
+            raise ValueError("incidental background actor count violates contract")
+
+        role_prefix = "incidental_background_"
+        realized_roles = sorted(
+            role for role in self._actor_manifest if role.startswith(role_prefix)
+        )
+        if len(realized_roles) >= count:
+            return len(realized_roles) == count
+
+        traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        if traffic_manager is None or current_map is None:
+            return False
+
+        lanes = list(
+            getattr(traffic_manager, "_get_all_route_lanes", lambda: [])() or []
+        )
+        # Route lanes can be fully occupied by the causal S7 merge stream and
+        # its parallel constraints.  Incidental actors are explicitly
+        # non-causal, so search every positive map lane and let the unchanged
+        # 60 m ego / 18 m actor clearance filters keep them outside the
+        # interaction corridor.
+        for block in getattr(current_map, "blocks", ()) or ():
+            lane_groups = getattr(
+                getattr(block, "block_network", None),
+                "get_positive_lanes",
+                lambda: [],
+            )() or []
+            for lane_group in lane_groups:
+                lanes.extend(list(lane_group or ()))
+
+        unique_lanes = {}
+        for lane in lanes:
+            lane_index = tuple(getattr(lane, "index", ()) or ())
+            if lane_index and float(getattr(lane, "length", 0.0) or 0.0) >= 24.0:
+                unique_lanes[lane_index] = lane
+        candidates = []
+        for lane_index, lane in sorted(unique_lanes.items(), key=lambda row: str(row[0])):
+            lane_length = float(lane.length)
+            for fraction in (0.12, 0.3, 0.5, 0.7, 0.88):
+                longitude = float(np.clip(lane_length * fraction, 10.0, lane_length - 10.0))
+                position = lane.position(longitude, 0.0)
+                candidates.append((lane_index, longitude, position))
+        layout_rng = np.random.RandomState(
+            int(resolved.get("incidental_background_layout_seed", 0))
+        )
+        layout_rng.shuffle(candidates)
+
+        minimum_ego_clearance_m = float(params.get("minimum_ego_clearance_m", 60.0))
+        minimum_actor_clearance_m = float(
+            params.get("minimum_actor_clearance_m", 18.0)
+        )
+        agents = list((getattr(env, "agents", {}) or {}).values())
+        raw_traffic = getattr(traffic_manager, "_traffic_vehicles", ()) or ()
+        traffic = list(
+            raw_traffic.values() if isinstance(raw_traffic, dict) else raw_traffic
+        )
+        speeds = list(resolved.get("incidental_background_speeds_km_h", ()))
+        while candidates and len(realized_roles) < count:
+            lane_index, longitude, position = candidates.pop()
+            position_xy = np.asarray(position[:2], dtype=np.float64)
+            if any(
+                float(
+                    np.linalg.norm(
+                        position_xy
+                        - np.asarray(getattr(agent, "position", (0.0, 0.0))[:2])
+                    )
+                )
+                < minimum_ego_clearance_m
+                for agent in agents
+            ):
+                continue
+            if any(
+                float(
+                    np.linalg.norm(
+                        position_xy
+                        - np.asarray(getattr(actor, "position", (0.0, 0.0))[:2])
+                    )
+                )
+                < minimum_actor_clearance_m
+                for actor in traffic
+            ):
+                continue
+            role = f"{role_prefix}{len(realized_roles)}"
+            speed_kmh = float(speeds[len(realized_roles)])
+            spawned = self._spawn_on_lane_tuple(
+                env,
+                ego_vehicle,
+                lane_tuple=lane_index,
+                spawn_longitude=longitude,
+                reference_kind="absolute_lane",
+                target_speed_kmh=speed_kmh,
+                min_clearance_m=minimum_ego_clearance_m,
+                policy_class=_IncidentalBackgroundPolicy,
+                vehicle_type=self._scenario_vehicle_type(),
+            )
+            if spawned is None:
+                continue
+            setattr(spawned, "scenario_vehicle_role", role)
+            self._register_actor(role, spawned, step_count=step_count)
+            realized_roles.append(role)
+            traffic.append(spawned)
+
+        self._conflict_evidence.update(
+            {
+                "incidental_background_declared_count": count,
+                "incidental_background_realized_count": len(realized_roles),
+                "incidental_background_roles": list(realized_roles),
+            }
+        )
+        if len(realized_roles) == count:
+            self._mark_realized(step_count, "incidental_background_spawned")
+            return True
+        self.summary.notes.append(
+            f"incidental_background_incomplete:{len(realized_roles)}/{count}"
+        )
+        return False
+
+    def _handle_inject_s7_merge_traffic(self, env, ego_vehicle, params, step_count: int) -> bool:
+        resolved = self._resolved_scenario_parameters
+        lane_tuple = self._resolve_lane_index(
+            env, ego_vehicle, reference_kind="block_route_road",
+            block_id=params.get("block_id", "g1"), lane_index=int(params.get("lane_index", 2)),
+        )
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        if lane_tuple is None or current_map is None:
+            self.summary.notes.append("s7_mainline_lane_missing")
+            return False
+        road_network = current_map.road_network
+        graph = road_network.graph
+        lane = road_network.get_lane(lane_tuple)
+        sampled_speeds = list(
+            resolved.get("mainline_actor_speeds_km_h", (24.0,) * 4)
+        )
+        timed_stream_actor_count = int(
+            resolved.get("timed_stream_actor_count", 4)
+        )
+        parallel_constraint_actor_count = int(
+            resolved.get("parallel_constraint_actor_count", 0)
+        )
+        if timed_stream_actor_count != 4:
+            raise ValueError("S7 timed stream must contain exactly four actors")
+        if not 1 <= parallel_constraint_actor_count <= 3:
+            raise ValueError("S7 parallel constraint actor count must be in [1, 3]")
+        actor_count = timed_stream_actor_count + parallel_constraint_actor_count
+        if int(resolved.get("actor_count", actor_count)) != actor_count:
+            raise ValueError("S7 declared actor count is inconsistent")
+        usable_gap = float(resolved.get("usable_mainline_gap_m", 55.0))
+        expected_behavior = str(resolved.get("expected_behavior", "pass_first"))
+        severity_bucket = str(resolved.get("severity_bucket", ""))
+        # The four required roles form two consecutive windows on the same
+        # mainline lane.  Keep their speed correlated so a faster rear draw
+        # cannot reorder the stream before reaching the conflict point.
+        stream_speed = float(np.clip(np.mean(sampled_speeds[:4]), 20.0, 31.0))
+        if expected_behavior == "yield_then_merge":
+            stream_speed = 31.0
+        mainline_speeds = [stream_speed] * 4
+        if expected_behavior == "yield_then_merge":
+            # The following window is the complete-platoon opportunity.  Its
+            # rear boundary remains within the declared 20--31 km/h range but
+            # is coupled below the front boundary speed so the 45--70 m
+            # usable gap cannot collapse while three stopped ego vehicles
+            # restart and cross the seam.
+            mainline_speeds[3] = 20.0
+        else:
+            # Likewise, keep the rear boundary of the direct/pass-first
+            # window from closing on the staggered three-car formation.  The
+            # following pair inherits that speed to preserve actor order.
+            direct_rear_speed = max(20.0, stream_speed - 4.0)
+            mainline_speeds[1:] = [direct_rear_speed] * 3
+        parallel_constraint_speeds = [
+            float(
+                np.clip(
+                    value,
+                    {
+                        "low": 28.0,
+                        "medium": 24.0,
+                        "high": 24.0,
+                    }.get(severity_bucket, 20.0),
+                    {
+                        "low": 31.0,
+                        "medium": 28.0,
+                        "high": 28.0,
+                    }.get(severity_bucket, 31.0),
+                )
+            )
+            for value in resolved.get(
+                "parallel_constraint_actor_speeds_km_h", ()
+            )
+        ]
+        if len(parallel_constraint_speeds) != parallel_constraint_actor_count:
+            raise ValueError("S7 parallel constraint speeds do not match actor count")
+        if expected_behavior == "pass_first":
+            # The front boundary has already cleared the physical merge
+            # point when a direct gap is offered.  Its sampled arrival delta
+            # is retained as conflict metadata, while the rear boundary is
+            # solved from the declared usable gap.  Spawning the front actor
+            # upstream from the seam made it physically occupy the ramp
+            # apron just as the leader arrived, contradicting pass-first.
+            front_remaining_m = 3.0
+            if severity_bucket == "low":
+                # Low severity represents the wide, early opportunity.  Keep
+                # the rear boundary at the slow edge of the declared actor
+                # domain so the full long-gap platoon can traverse before it
+                # reaches the apron; this remains a live competing stream,
+                # not a missing/background-free interaction.
+                mainline_speeds[1:] = [20.0, 20.0, 20.0]
+        else:
+            # High/medium severity deliberately closes the first opportunity;
+            # put its leading boundary close to the seam so the expert must
+            # wait for the following complete-platoon window.
+            front_remaining_m = 3.0
+        resolved["mainline_actor_speeds_km_h"] = list(mainline_speeds)
+        actor_length_m = 5.74
+        # ``mainline_headway_s`` is a front-to-front arrival headway.  Convert
+        # it to centre spacing once; adding a second vehicle length here made
+        # the realized headway exceed the memory contract by about 0.7 s.
+        headway_center_spacing_m = max(
+            actor_length_m + 5.0,
+            stream_speed
+            / 3.6
+            * float(resolved.get("mainline_headway_s", 1.5)),
+        )
+        ego_distance_to_merge_m = float(
+            resolved.get("ego_distance_to_merge_point_m", 40.0)
+        )
+        ego_formation_spacing_m = actor_length_m + float(
+            resolved.get("initial_platoon_bumper_gap_m", 12.0)
+        )
+        ego_envelope_min_remaining_m = ego_distance_to_merge_m
+        ego_envelope_max_remaining_m = (
+            ego_distance_to_merge_m + 2.0 * ego_formation_spacing_m
+        )
+        if parallel_constraint_actor_count == 1:
+            parallel_remaining = [
+                ego_distance_to_merge_m
+            ]
+        else:
+            # Pack multiple constraints from the front of the projected ego
+            # envelope at the minimum legal OBB clearance.  Spreading three
+            # actors over the complete formation length made the rearmost
+            # constraint overlap the existing timed stream semantically: the
+            # boundary pair was pushed upstream and the event could no longer
+            # finish inside the fixed 20 s acceptance horizon.  This compact
+            # placement still blocks a simultaneous whole-platoon lane change
+            # while keeping the two actor groups distinct.
+            constraint_center_spacing_m = actor_length_m + 5.0
+            packed_start_remaining_m = (
+                ego_distance_to_merge_m
+                if parallel_constraint_actor_count == 3
+                else ego_distance_to_merge_m + 0.5 * ego_formation_spacing_m
+            )
+            parallel_remaining = [
+                packed_start_remaining_m
+                + index * constraint_center_spacing_m
+                for index in range(parallel_constraint_actor_count)
+            ]
+        minimum_boundary_center_gap_m = actor_length_m + 5.0
+        critical_rear_remaining_m = max(
+            front_remaining_m + actor_length_m + usable_gap,
+            max(parallel_remaining) + minimum_boundary_center_gap_m,
+        )
+        remaining_by_role = {
+            "critical_gap_front": front_remaining_m,
+            "critical_gap_rear": critical_rear_remaining_m,
+        }
+        remaining_by_role["next_gap_front"] = (
+            remaining_by_role["critical_gap_rear"]
+            + headway_center_spacing_m
+        )
+        remaining_by_role["next_gap_rear"] = (
+            remaining_by_role["next_gap_front"]
+            + actor_length_m
+            + usable_gap
+        )
+
+        lane_id = int(lane_tuple[2])
+        chain = [lane]
+        chain_indices = [tuple(lane_tuple)]
+        total_length_m = float(lane.length)
+        while total_length_m < max(remaining_by_role.values()) + 2.1:
+            start_node = chain_indices[-1][0]
+            incoming = [
+                (upstream_start, lanes)
+                for upstream_start, outgoing in graph.items()
+                for end_node, lanes in outgoing.items()
+                if end_node == start_node
+                and not str(upstream_start).startswith("-")
+                and len(lanes) > lane_id
+            ]
+            if len(incoming) != 1:
+                self.summary.notes.append("s7_upstream_chain_ambiguous")
+                return False
+            upstream_start, upstream_lanes = incoming[0]
+            upstream_lane = upstream_lanes[lane_id]
+            chain.append(upstream_lane)
+            chain_indices.append(tuple(upstream_lane.index))
+            total_length_m += float(upstream_lane.length)
+
+        def lane_pose_at_remaining(remaining_m: float, target_lane_id: int):
+            residual = float(remaining_m)
+            for chain_lane in chain:
+                candidate_lanes = graph[chain_lane.index[0]][chain_lane.index[1]]
+                if len(candidate_lanes) <= target_lane_id:
+                    return None
+                candidate = candidate_lanes[target_lane_id]
+                if residual <= float(candidate.length):
+                    # A solved remaining distance can land inside the 2.1 m
+                    # spawn guard at either side of a road seam.  Snap only
+                    # that sub-vehicle-length numerical boundary case inward;
+                    # the subsequent global OBB transaction still rejects any
+                    # real overlap.
+                    longitude = float(
+                        np.clip(
+                            float(candidate.length) - residual,
+                            2.1,
+                            max(float(candidate.length) - 2.1, 2.1),
+                        )
+                    )
+                    return tuple(candidate.index), longitude, candidate
+                residual -= float(candidate.length)
+            return None
+
+        rows = []
+        for index, role in enumerate(
+            ("critical_gap_front", "critical_gap_rear", "next_gap_front", "next_gap_rear")
+        ):
+            pose = lane_pose_at_remaining(remaining_by_role[role], lane_id)
+            if pose is None:
+                self.summary.notes.append(f"s7_atomic_geometry_out_of_range:{role}")
+                return False
+            rows.append((role, *pose[:2], mainline_speeds[index], remaining_by_role[role], pose[2]))
+        for index, constraint_remaining in enumerate(parallel_remaining):
+            role = f"parallel_merge_constraint_{index}"
+            pose = lane_pose_at_remaining(constraint_remaining, lane_id)
+            if pose is None:
+                self.summary.notes.append(
+                    f"s7_atomic_geometry_out_of_range:{role}"
+                )
+                return False
+            rows.append(
+                (
+                    role,
+                    *pose[:2],
+                    parallel_constraint_speeds[index],
+                    constraint_remaining,
+                    pose[2],
+                )
+            )
+        self._conflict_evidence["s7_atomic_candidate_geometry"] = {
+            "route_chain_length_m": float(total_length_m),
+            "rows": [
+                {
+                    "role": role,
+                    "lane_index": list(actor_lane_tuple),
+                    "longitudinal_m": float(longitudinal),
+                    "remaining_to_conflict_m": float(remaining),
+                    "speed_km_h": float(speed),
+                    "conflict_arrival_time_s": float(remaining / (speed / 3.6)),
+                }
+                for role, actor_lane_tuple, longitudinal, speed, remaining, _ in rows
+            ],
+        }
+        self._conflict_evidence["s7_conflict_node"] = str(lane_tuple[1])
+        # Validate every OBB before the atomic spawn transaction begins.
+        world_poses = []
+        for role, actor_lane_tuple, longitude, _, _, actor_lane in rows:
+            position = actor_lane.position(float(longitude), 0.0)
+            heading = float(actor_lane.heading_theta_at(float(longitude)))
+            if any(
+                self._oriented_boxes_overlap(
+                    position, heading, (5.74, 2.3), other_position,
+                    other_heading, (5.74, 2.3)
+                )
+                for other_position, other_heading in world_poses
+            ):
+                self.summary.notes.append(f"s7_atomic_obb_overlap:{role}")
+                return False
+            world_poses.append((position, heading))
+        for role, target_lane, longitudinal, speed, _, _ in rows:
+            if self._spawn_role_on_lane(
+                env, ego_vehicle, role=role, lane_tuple=target_lane,
+                longitudinal_m=longitudinal, speed_kmh=speed,
+                step_count=step_count, min_clearance_m=0.0,
+                policy_class=_TimedMainlineStreamPolicy,
+            ) is None:
+                self.summary.notes.append(f"s7_atomic_spawn_failed:{role}")
+                return False
+        self._conflict_evidence.update({
+            "usable_mainline_gap_m": usable_gap,
+            "expected_behavior": expected_behavior,
+            "declared_actor_count": actor_count,
+            "parallel_constraint_declared_count": parallel_constraint_actor_count,
+            "parallel_constraint_realized_count": sum(
+                role.startswith("parallel_merge_constraint_")
+                for role in self._actor_manifest
+            ),
+            "parallel_constraint_initial_ego_envelope_remaining_m": [
+                ego_envelope_min_remaining_m,
+                ego_envelope_max_remaining_m,
+            ],
+            "parallel_constraint_initial_remaining_m": list(parallel_remaining),
+            "parallel_constraint_initial_region_valid": all(
+                ego_envelope_min_remaining_m <= value <= ego_envelope_max_remaining_m
+                for value in parallel_remaining
+            ),
+        })
+        self._mark_realized(step_count, "s7_atomic_traffic_spawned")
+        return len([
+            role
+            for role in self._actor_manifest
+            if role.startswith(
+                ("critical_", "next_", "parallel_merge_constraint_")
+            )
+        ]) == actor_count
+
+    def _handle_inject_s8_exit_gap(self, env, ego_vehicle, params, step_count: int) -> bool:
+        resolved = self._resolved_scenario_parameters
+        lane_tuple = self._resolve_lane_index(
+            env, ego_vehicle, reference_kind="block_internal_road",
+            block_id=params.get("block_id", "g0"),
+            internal_road_index=params.get("internal_road_index", 0),
+            lane_index=int(params.get("lane_index", 2)),
+        )
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        if lane_tuple is None or current_map is None:
+            self.summary.notes.append("s8_exit_lane_missing")
+            return False
+        lane = current_map.road_network.get_lane(lane_tuple)
+        agent_s = {}
+        for agent_id, agent in (getattr(env, "agents", {}) or {}).items():
+            try:
+                agent_s[str(agent_id)] = float(
+                    lane.local_coordinates(agent.position)[0]
+                )
+            except Exception:
+                continue
+        if set(agent_s) != {"agent0", "agent1", "agent2"}:
+            return False
+
+        actor_count = int(resolved.get("exit_constraint_actor_count", 1))
+        if not 1 <= actor_count <= 3:
+            raise ValueError("S8 exit constraint actor count must be in [1, 3]")
+        target_gap_id = str(
+            resolved.get("exit_constraint_target_gap_id", "agent0-agent1")
+        )
+        try:
+            target_front_id, target_rear_id = target_gap_id.split("-", 1)
+            split_s = 0.5 * (
+                float(agent_s[target_front_id]) + float(agent_s[target_rear_id])
+            )
+        except (KeyError, ValueError):
+            raise ValueError("S8 exit constraint target gap is invalid")
+
+        actor_length_m = 5.74
+        boundary_clearance_m = 18.0
+        speeds = list(resolved.get("exit_constraint_actor_speeds_km_h", (20.0,)))
+        # The designated actor starts inside the selected ego gap, but not at
+        # its exact midpoint.  A small deterministic offset gives the ego on
+        # the actor's intended passing side enough hard-safe longitudinal room
+        # to begin immediately while the other ego must still yield, preserving
+        # the causal split instead of creating a symmetric planning deadlock.
+        split_offset_m = -2.0 if target_gap_id == "agent1-agent2" else 2.0
+        split_s += split_offset_m
+        rows = [("exit_split_constraint", split_s, float(speeds[0]), 6.0)]
+        if actor_count >= 2:
+            rows.append(
+                (
+                    "exit_constraint_front",
+                    # Keep the slow auxiliary front boundary outside the
+                    # designated split actor's immediate 6 m corridor.  The
+                    # extra 10 m lets the front ego match the second ego's
+                    # actor-clearing acceleration without grazing this actor
+                    # late in the unchanged full-horizon audit.
+                    max(agent_s.values())
+                    + actor_length_m
+                    + boundary_clearance_m
+                    + 10.0,
+                    float(speeds[1]),
+                    12.0,
+                )
+            )
+        if actor_count >= 3:
+            rows.append(
+                (
+                    "exit_constraint_rear",
+                    min(agent_s.values()) - actor_length_m - boundary_clearance_m,
+                    float(speeds[2]),
+                    12.0,
+                )
+            )
+        for role, longitudinal, speed, _ in rows:
+            if not 2.0 <= float(longitudinal) <= float(lane.length) - 2.0:
+                self.summary.notes.append("s8_constraint_geometry_out_of_range")
+                return False
+        for role, longitudinal, speed, clearance in rows:
+            spawned = self._spawn_role_on_lane(
+                env, ego_vehicle, role=role, lane_tuple=lane_tuple,
+                longitudinal_m=longitudinal, speed_kmh=float(speed),
+                step_count=step_count, min_clearance_m=clearance,
+                policy_class=_S8ExitConstraintPolicy,
+            )
+            if spawned is None:
+                self.summary.notes.append(f"s8_atomic_spawn_failed:{role}")
+                return False
+            policy = getattr(
+                getattr(env, "engine", None), "get_policy", lambda *_: None
+            )(getattr(spawned, "name", None))
+            if policy is not None:
+                # The rightmost lane is already the valid exit approach.
+                # MetaDrive may initialize a traffic actor's routing target
+                # to another parallel lane even when it was physically
+                # spawned on lane 0; bind it to the declared role lane so the
+                # actor cannot silently abandon the interaction corridor.
+                policy.routing_target_lane = lane
+        self._conflict_evidence.update(
+            {
+                "exit_constraint_declared_count": actor_count,
+                "exit_constraint_target_gap_id": target_gap_id,
+                "exit_constraint_spawn_lane_index": list(lane_tuple),
+                "exit_split_constraint_spawn_s_m": float(split_s),
+                "exit_constraint_roles": [row[0] for row in rows],
+            }
+        )
+        self._mark_realized(step_count, "s8_exit_constraints_spawned")
+        return all(role in self._actor_manifest for role, *_ in rows)
+
+    def _handle_inject_s9_bypass_actors(self, env, ego_vehicle, params, step_count: int) -> bool:
+        resolved = self._resolved_scenario_parameters
+        source_lane = self._resolve_lane_index(
+            env, ego_vehicle, reference_kind="block_internal_road",
+            block_id=params.get("block_id", "c3"),
+            internal_road_index=params.get("internal_road_index", 1),
+            lane_index=int(params.get("source_lane_id", 1)),
+        )
+        if source_lane is None:
+            self.summary.notes.append("s9_source_lane_missing")
+            return False
+        bypass_lane = (source_lane[0], source_lane[1], int(params.get("bypass_lane_id", 0)))
+        current_map = getattr(getattr(env, "engine", None), "current_map", None)
+        lane = current_map.road_network.get_lane(source_lane)
+        bypass = current_map.road_network.get_lane(bypass_lane)
+        try:
+            lead_s = float(lane.local_coordinates(ego_vehicle.position)[0])
+        except Exception:
+            return False
+        blocker_gap = float(resolved.get("agent0_to_blocker_bumper_gap_m", 20.0))
+        blocker_s = lead_s + blocker_gap + self._vehicle_length_m(ego_vehicle)
+        agents = getattr(env, "agents", {}) or {}
+        if set(agents) != {"agent0", "agent1", "agent2"}:
+            self.summary.notes.append("s9_three_ego_spawn_required")
+            return False
+        try:
+            agent_s = {
+                str(agent_id): float(lane.local_coordinates(vehicle.position)[0])
+                for agent_id, vehicle in agents.items()
+            }
+        except Exception:
+            self.summary.notes.append("s9_ego_longitudinal_projection_failed")
+            return False
+        split_target_gap_id = str(
+            resolved.get("designated_split_actor_target_gap_id", "")
+        )
+        try:
+            split_front_id, split_rear_id = split_target_gap_id.split("-", 1)
+            constraint_s = 0.5 * (
+                float(agent_s[split_front_id]) + float(agent_s[split_rear_id])
+            )
+        except (KeyError, ValueError):
+            self.summary.notes.append("s9_split_target_gap_invalid")
+            return False
+        envelope_min_s = min(agent_s.values())
+        envelope_max_s = max(agent_s.values())
+        if not envelope_min_s <= constraint_s <= envelope_max_s:
+            self.summary.notes.append("s9_split_actor_outside_ego_envelope")
+            return False
+        # Keep a full vehicle-scale buffer to the c3 seam. At the generic
+        # 2 m lane-end margin, the near-stopped blocker can still enter the
+        # successor connector inside the committed audit horizon, making its
+        # predicted footprint sweep across the bypass lane. Five metres keeps
+        # it a genuine lane-1 obstruction while preserving a 15--28 m ego gap.
+        maximum_blocker_s = float(lane.length) - 5.0
+        if blocker_s > maximum_blocker_s:
+            blocker_s = maximum_blocker_s
+            blocker_gap = float(
+                blocker_s
+                - lead_s
+                - self._vehicle_length_m(ego_vehicle)
+            )
+            resolved["agent0_to_blocker_bumper_gap_m"] = blocker_gap
+            closing_speed_mps = max(
+                (
+                    float(resolved.get("ego_initial_speed_km_h", 0.0))
+                    - float(resolved.get("blocker_speed_km_h", 0.0))
+                )
+                / 3.6,
+                1.0e-3,
+            )
+            resolved["predicted_blocker_ttc_s"] = (
+                blocker_gap / closing_speed_mps
+            )
+            self.summary.notes.append("s9_blocker_gap_clipped_to_lane")
+        if (
+            not 2.0 <= blocker_s <= maximum_blocker_s
+            or not 15.0 <= blocker_gap <= 28.0
+        ):
+            self.summary.notes.append("s9_blocker_geometry_out_of_range")
+            return False
+        if not 2.0 <= constraint_s <= float(bypass.length) - 2.0:
+            self.summary.notes.append("s9_split_actor_geometry_out_of_range")
+            return False
+        split_role = str(
+            params.get(
+                "designated_split_actor_role",
+                resolved.get("designated_split_actor_role", "left_bypass_split_actor"),
+            )
+        )
+        rows = (
+            (
+                "blocking_actor",
+                source_lane,
+                blocker_s,
+                resolved.get("blocker_speed_km_h", 4.0),
+                _S9BlockingPolicy,
+            ),
+            (
+                split_role,
+                bypass_lane,
+                constraint_s,
+                resolved.get(
+                    "designated_split_actor_speed_km_h",
+                    resolved.get("ego_initial_speed_km_h", 20.0),
+                ),
+                _IncidentalBackgroundPolicy,
+            ),
+        )
+        for role, lane_tuple, longitudinal, speed, policy_class in rows:
+            if self._spawn_role_on_lane(
+                env, ego_vehicle, role=role, lane_tuple=lane_tuple,
+                longitudinal_m=longitudinal, speed_kmh=float(speed),
+                step_count=step_count, min_clearance_m=0.0,
+                policy_class=policy_class,
+            ) is None:
+                self.summary.notes.append(f"s9_atomic_spawn_failed:{role}")
+                return False
+        self._conflict_evidence.update({
+            "blocker_initial_bumper_gap_m": blocker_gap,
+            "usable_bypass_gap_m": resolved.get("usable_bypass_gap_m"),
+            "required_lane_change": "LEFT",
+            "designated_split_actor_role": split_role,
+            "designated_split_actor_target_gap_id": split_target_gap_id,
+            "designated_split_actor_spawn_s_m": float(constraint_s),
+            "designated_split_actor_spawn_lane_index": list(bypass_lane),
+            "ego_initial_longitudinal_s_m": dict(agent_s),
+            "ego_initial_longitudinal_envelope_m": [
+                float(envelope_min_s),
+                float(envelope_max_s),
+            ],
+            "designated_split_actor_initial_region_valid": bool(
+                envelope_min_s <= constraint_s <= envelope_max_s
+            ),
+            "left_bypass_trigger_actor_declared_count": 1,
+            "left_bypass_trigger_actor_realized_count": int(
+                split_role in self._actor_manifest
+            ),
+        })
+        self._mark_realized(step_count, "s9_bypass_actors_spawned")
+        return {"blocking_actor", split_role}.issubset(self._actor_manifest)
 
     @staticmethod
     def _resolve_injected_background_policy(params: Dict[str, object]):
         policy_name = params.get("policy")
         if policy_name is None:
             return None, None, None
-        cruise_speed = float(params.get("target_speed_kmh", 24.0))
+        cruise_speed = float(
+            params.get(
+                "merge_cruise_speed_kmh",
+                params.get("target_speed_kmh", 24.0),
+            )
+        )
         if str(policy_name) == "idm_merge":
             from envs.diffusion_envs.idm_merge_policy import IDMMergePolicy, StartEdgeNodeNavigation
 
+            center_offset_m = float(
+                params.get("merge_gap_center_offset_m", 0.0)
+            )
+            s6_designated_gap = bool(
+                str(params.get("scenario_vehicle_role", ""))
+                == "s6_gap_intruder"
+            )
+            s6_sweep_bumper_gate_m = (
+                5.75
+                if str(params.get("target_gap_id", "")) == "agent0-agent1"
+                else 6.0
+            )
             policy_kwargs = {
-                "merge_front_gap_m": float(params.get("merge_front_gap_m", 25.0)),
-                "merge_rear_gap_m": float(params.get("merge_rear_gap_m", 15.0)),
+                "merge_front_gap_m": float(
+                    s6_sweep_bumper_gate_m
+                    if s6_designated_gap
+                    else params.get("merge_front_gap_m", 6.0)
+                ) + center_offset_m,
+                "merge_rear_gap_m": float(
+                    s6_sweep_bumper_gate_m
+                    if s6_designated_gap
+                    else params.get("merge_rear_gap_m", 6.0)
+                ) + center_offset_m,
                 "merge_creep_speed_kmh": float(params.get("merge_creep_speed_kmh", 5.0)),
                 "merge_cruise_speed_kmh": cruise_speed,
+                "merge_rear_ttc_min_s": float(
+                    params.get("merge_rear_ttc_min_s", 4.0)
+                ),
+                "merge_lateral_kp": float(params.get("merge_lateral_kp", 0.7)),
             }
             if "merge_activation_step" in params:
                 policy_kwargs["merge_activation_step"] = int(
@@ -408,6 +1448,14 @@ class ScenarioOrchestrator:
                 continue
             vehicle_params = self._resolve_adjacent_vehicle_params(env, vehicle_params)
             lane_side = str(vehicle_params.get("lane_side", "left"))
+            if self.definition.scenario_id == "S5_hard_brake_lead":
+                resolved = self._resolved_scenario_parameters
+                vehicle_params["spawn_longitude_offset_m"] = float(
+                    resolved[f"{lane_side}_offset_m"]
+                )
+                vehicle_params["target_speed_kmh"] = float(
+                    resolved[f"{lane_side}_speed_km_h"]
+                )
             lane_tuple = self._resolve_adjacent_lane_index(env, ego_vehicle, lane_side=lane_side)
             if lane_tuple is None:
                 self.summary.notes.append(f"adjacent_lane_missing:{vehicle_name}")
@@ -444,6 +1492,10 @@ class ScenarioOrchestrator:
                     "scenario_vehicle_role",
                     f"s5_adjacent_{lane_side}",
                 )
+            role = str(
+                getattr(spawned, "scenario_vehicle_role", f"adjacent_{lane_side}")
+            )
+            self._register_actor(role, spawned, step_count=step_count)
             self._spawned_adjacent_vehicle_keys.add(spawn_key)
             spawned_name = getattr(spawned, "name", None)
             if spawned_name is not None:
@@ -453,23 +1505,51 @@ class ScenarioOrchestrator:
                 }
             self._mark_realized(step_count, f"adjacent_spawned:{vehicle_name}")
             realized = True
-        return realized
+        expected = {
+            f"{self.local_route}:{str(row.get('name', f'vehicle_{index}'))}"
+            for index, row in enumerate(vehicles)
+            if isinstance(row, dict)
+        }
+        return bool(realized and expected.issubset(self._spawned_adjacent_vehicle_keys))
 
     def _resolve_hard_brake_params(self, env, params: Dict[str, object]) -> Dict[str, object]:
         resolved = dict(params)
         gap_range = params.get("lead_bumper_gap_range_m")
         if not self._is_float_range(gap_range):
             raise ValueError("hard_brake_lead requires lead_bumper_gap_range_m")
-        resolved["lead_bumper_gap_m"] = self._sample_float_range(env, gap_range)
-        if "lead_target_speed_range_kmh" in params:
-            resolved["lead_target_speed_kmh"] = self._sample_float_range(env, params["lead_target_speed_range_kmh"])
-        if "brake_target_speed_range_kmh" in params:
-            resolved["brake_target_speed_kmh"] = self._sample_float_range(env, params["brake_target_speed_range_kmh"])
+        sampled = self._resolved_scenario_parameters
+        resolved["lead_bumper_gap_m"] = float(
+            sampled["lead_trigger_bumper_gap_m"]
+            if "lead_trigger_bumper_gap_m" in sampled
+            else self._sample_float_range(env, gap_range)
+        )
+        resolved["lead_target_speed_kmh"] = float(
+            sampled.get(
+                "lead_approach_speed_km_h",
+                params.get(
+                    "lead_target_speed_kmh",
+                    self._sample_float_range(env, params["lead_target_speed_range_kmh"])
+                    if "lead_target_speed_range_kmh" in params
+                    else getattr((getattr(env, "agents", {}) or {}).get("agent0"), "speed_km_h", 24.0),
+                ),
+            )
+        )
+        resolved["brake_target_speed_kmh"] = float(
+            sampled["lead_target_speed_km_h"]
+            if "lead_target_speed_km_h" in sampled
+            else (
+                self._sample_float_range(env, params["brake_target_speed_range_kmh"])
+                if "brake_target_speed_range_kmh" in params
+                else params.get("brake_target_speed_kmh", 1.0)
+            )
+        )
         deceleration_range = params.get("brake_deceleration_range_mps2")
         if not self._is_float_range(deceleration_range):
             raise ValueError("hard_brake_lead requires brake_deceleration_range_mps2")
-        resolved["brake_deceleration_mps2"] = self._sample_float_range(
-            env, deceleration_range
+        resolved["brake_deceleration_mps2"] = float(
+            sampled["lead_brake_deceleration_mps2"]
+            if "lead_brake_deceleration_mps2" in sampled
+            else self._sample_float_range(env, deceleration_range)
         )
         return resolved
 
@@ -506,7 +1586,7 @@ class ScenarioOrchestrator:
         except (KeyError, TypeError, ValueError):
             self.summary.notes.append("s6_merge_contract_invalid")
             return None
-        if arrival_offset_s <= 0.0 or merge_speed_mps <= 0.0:
+        if not -0.5 <= arrival_offset_s <= 0.5 or merge_speed_mps <= 0.0:
             self.summary.notes.append("s6_merge_contract_invalid")
             return None
 
@@ -522,7 +1602,15 @@ class ScenarioOrchestrator:
         current_map = getattr(getattr(env, "engine", None), "current_map", None)
         road_network = getattr(current_map, "road_network", None)
         graph = getattr(road_network, "graph", None)
-        leader_lane = getattr(leader, "lane", None)
+        target_gap_id = str(params.get("target_gap_id", "agent0-agent1"))
+        try:
+            front_id, rear_id = target_gap_id.split("-", 1)
+            front = (getattr(env, "agents", {}) or {})[front_id]
+            rear = (getattr(env, "agents", {}) or {})[rear_id]
+        except (KeyError, ValueError):
+            self.summary.notes.append("s6_target_gap_invalid")
+            return None
+        leader_lane = getattr(front, "lane", None)
         leader_lane_index = getattr(leader_lane, "index", None)
         if (
             branch_lane_index is None
@@ -547,10 +1635,10 @@ class ScenarioOrchestrator:
         connector_lane = connector_lanes[0]
         try:
             leader_longitudinal = float(
-                leader_lane.local_coordinates(leader.position)[0]
+                leader_lane.local_coordinates(front.position)[0]
             )
             leader_remaining_m = float(leader_lane.length) - leader_longitudinal
-            leader_speed_mps = float(getattr(leader, "speed_km_h", 0.0)) / 3.6
+            leader_speed_mps = float(getattr(front, "speed_km_h", 0.0)) / 3.6
         except (AttributeError, TypeError, ValueError):
             self.summary.notes.append("s6_merge_geometry_invalid")
             return None
@@ -558,78 +1646,161 @@ class ScenarioOrchestrator:
             self.summary.notes.append("s6_merge_geometry_invalid")
             return None
 
-        leader_ttc_s = leader_remaining_m / leader_speed_mps
-        merge_ttc_s = leader_ttc_s + arrival_offset_s
-        branch_route_length_m = float(branch_lane.length) + float(
-            connector_lane.length
+        # The short S6 approach enters a constrained curved-route envelope
+        # before the conflict point.  Solving both gap boundaries with the
+        # instantaneous spawn speed predicts the wrong gap; use the same
+        # asymmetric pass-first/yield envelopes as the controller.
+        # The target-gap front boundary receives the expert's pass-first
+        # pulse, while the rear boundary yields.  These are the two verified
+        # executable speed envelopes used by the closed-loop controller.
+        conflict_approach_speed_mps = min(leader_speed_mps, 21.0 / 3.6)
+        leader_ttc_s = leader_remaining_m / conflict_approach_speed_mps
+        rear_lane = getattr(rear, "lane", None)
+        rear_lane_index = getattr(rear_lane, "index", None)
+        if tuple((rear_lane_index or ())[:2]) != (leader_start, merge_node):
+            self.summary.notes.append("s6_rear_lane_mismatch")
+            return None
+        try:
+            rear_remaining_m = float(rear_lane.length) - float(
+                rear_lane.local_coordinates(rear.position)[0]
+            )
+            rear_speed_mps = float(getattr(rear, "speed_km_h", 0.0)) / 3.6
+            rear_conflict_speed_mps = min(rear_speed_mps, 15.0 / 3.6)
+            rear_ttc_s = rear_remaining_m / rear_conflict_speed_mps
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+            self.summary.notes.append("s6_rear_geometry_invalid")
+            return None
+        if not leader_ttc_s < rear_ttc_s:
+            self.summary.notes.append("s6_target_gap_order_invalid")
+            return None
+        gap_center_ttc_s = 0.5 * (leader_ttc_s + rear_ttc_s)
+        response_compensation_s = float(
+            self._resolved_scenario_parameters.get(
+                "response_timing_compensation_s", 0.0
+            )
         )
-        spawn_longitude_m = branch_route_length_m - merge_speed_mps * merge_ttc_s
+        merge_ttc_s = (
+            gap_center_ttc_s + arrival_offset_s + response_compensation_s
+        )
+        if not leader_ttc_s < merge_ttc_s < rear_ttc_s + 3.0:
+            self.summary.notes.append("s6_merge_not_in_target_gap")
+            return None
+        branch_route_length_m = float(branch_lane.length) + float(connector_lane.length)
+        # Solve the birth point over the complete ramp chain.  Short arrival
+        # horizons land on the converging connector; longer horizons land on
+        # its upstream branch.  In both cases longitude remains a dependent
+        # variable of the sampled conflict time and actor speed.
+        required_remaining_m = merge_speed_mps * merge_ttc_s
+        if (
+            str(target_gap_id) == "agent1-agent2"
+            or required_remaining_m <= float(connector_lane.length) - 2.0
+        ):
+            spawn_lane = connector_lane
+            spawn_longitude_m = max(
+                2.0,
+                float(connector_lane.length) - required_remaining_m,
+            )
+        else:
+            spawn_lane = branch_lane
+            spawn_longitude_m = (
+                float(branch_lane.length)
+                + float(connector_lane.length)
+                - required_remaining_m
+            )
         minimum_spawn_m = 2.0
-        maximum_spawn_m = float(branch_lane.length) - 2.0
+        maximum_spawn_m = float(spawn_lane.length) - 2.0
         if not minimum_spawn_m <= spawn_longitude_m <= maximum_spawn_m:
             self.summary.notes.append("s6_merge_spawn_out_of_range")
             return None
 
-        middle = (getattr(env, "agents", {}) or {}).get("agent1")
-        middle_lane = getattr(middle, "lane", None)
-        middle_lane_index = getattr(middle_lane, "index", None)
-        if middle is None or tuple((middle_lane_index or ())[:2]) != (
-            leader_start,
-            merge_node,
-        ):
-            self.summary.notes.append("s6_middle_lane_mismatch")
-            return None
-        try:
-            middle_longitudinal = float(
-                middle_lane.local_coordinates(middle.position)[0]
-            )
-            middle_remaining_m = float(middle_lane.length) - middle_longitudinal
-            middle_speed_mps = float(getattr(middle, "speed_km_h", 0.0)) / 3.6
-        except (AttributeError, TypeError, ValueError):
-            self.summary.notes.append("s6_middle_geometry_invalid")
-            return None
-        if middle_speed_mps <= 0.0:
-            self.summary.notes.append("s6_middle_geometry_invalid")
-            return None
-        middle_ttc_s = middle_remaining_m / middle_speed_mps
-        if not leader_ttc_s < merge_ttc_s < middle_ttc_s:
-            self.summary.notes.append("s6_merge_not_between_leader_middle")
-            return None
-
         conflict_point = leader_lane.position(float(leader_lane.length), 0.0)
-        spawn_position = branch_lane.position(float(spawn_longitude_m), 0.0)
-        spawn_heading = float(branch_lane.heading_theta_at(spawn_longitude_m))
-        for agent in (getattr(env, "agents", {}) or {}).values():
-            if self._oriented_boxes_overlap(
-                spawn_position,
-                spawn_heading,
-                (5.74, 2.3),
-                getattr(agent, "position", (0.0, 0.0)),
-                float(getattr(agent, "heading_theta", 0.0) or 0.0),
-                (
-                    self._vehicle_length_m(agent),
-                    float(
-                        getattr(
-                            agent,
-                            "WIDTH",
-                            getattr(agent, "width", 2.3),
-                        )
-                        or 2.3
+        agents_for_spawn = list((getattr(env, "agents", {}) or {}).values())
+
+        def _spawn_overlaps_agent(longitude_m: float) -> bool:
+            position = spawn_lane.position(float(longitude_m), 0.0)
+            heading = float(spawn_lane.heading_theta_at(longitude_m))
+            return any(
+                self._oriented_boxes_overlap(
+                    position,
+                    heading,
+                    (5.74, 2.3),
+                    getattr(agent, "position", (0.0, 0.0)),
+                    float(getattr(agent, "heading_theta", 0.0) or 0.0),
+                    (
+                        self._vehicle_length_m(agent),
+                        float(
+                            getattr(
+                                agent,
+                                "WIDTH",
+                                getattr(agent, "width", 2.3),
+                            )
+                            or 2.3
+                        ),
                     ),
-                ),
-            ):
-                self.summary.notes.append("s6_merge_initial_obb_overlap")
-                return None
+                )
+                for agent in agents_for_spawn
+            )
+
+        solved_spawn_longitude_m = float(spawn_longitude_m)
+        while (
+            _spawn_overlaps_agent(solved_spawn_longitude_m)
+            and solved_spawn_longitude_m + 0.5 <= maximum_spawn_m
+            and solved_spawn_longitude_m - spawn_longitude_m < 12.0
+        ):
+            solved_spawn_longitude_m += 0.5
+        if _spawn_overlaps_agent(solved_spawn_longitude_m):
+            self.summary.notes.append("s6_merge_initial_obb_overlap")
+            return None
+        spawn_projection_m = solved_spawn_longitude_m - float(spawn_longitude_m)
+        spawn_longitude_m = solved_spawn_longitude_m
+        merge_conflict_distance_m = (
+            float(connector_lane.length) - spawn_longitude_m
+            if spawn_lane is connector_lane
+            else float(branch_lane.length)
+            - spawn_longitude_m
+            + float(connector_lane.length)
+        )
+        merge_ttc_s = merge_conflict_distance_m / merge_speed_mps
+        self._conflict_evidence["s6_alignment_candidate"] = {
+            "branch_lane_length_m": float(branch_lane.length),
+            "connector_lane_length_m": float(connector_lane.length),
+            "branch_route_length_m": float(branch_route_length_m),
+            "target_front_ttc_s": float(leader_ttc_s),
+            "target_rear_ttc_s": float(rear_ttc_s),
+            "target_front_conflict_speed_km_h": 21.0,
+            "target_rear_conflict_speed_km_h": 15.0,
+            "gap_center_ttc_s": float(gap_center_ttc_s),
+            "merge_ttc_s": float(merge_ttc_s),
+            "response_timing_compensation_s": float(response_compensation_s),
+            "merge_speed_mps": float(merge_speed_mps),
+            "merge_speed_km_h": float(merge_speed_mps * 3.6),
+            "candidate_spawn_longitude_m": float(spawn_longitude_m),
+            "candidate_spawn_lane_index": list(spawn_lane.index),
+            "obb_safe_spawn_projection_m": float(spawn_projection_m),
+            "valid_spawn_interval_m": [
+                float(minimum_spawn_m), float(maximum_spawn_m)
+            ],
+        }
         return {
             "spawn_longitude_m": float(spawn_longitude_m),
+            "merge_speed_km_h": float(merge_speed_mps * 3.6),
+            "spawn_lane_index": tuple(spawn_lane.index),
             "merge_arrival_offset_s": float(arrival_offset_s),
-            "leader_ttc_s": float(leader_ttc_s),
-            "merge_ttc_s": float(merge_ttc_s),
-            "middle_ttc_s": float(middle_ttc_s),
-            "leader_conflict_distance_m": float(leader_remaining_m),
-            "merge_conflict_distance_m": float(
-                branch_route_length_m - spawn_longitude_m
+            "response_timing_compensation_s": float(response_compensation_s),
+            "target_gap_id": target_gap_id,
+            "target_front_bumper_gap_m": float(
+                params.get("merge_front_gap_m", 6.0)
             ),
+            "target_rear_bumper_gap_m": float(
+                params.get("merge_rear_gap_m", 6.0)
+            ),
+            "target_front_ttc_s": float(leader_ttc_s),
+            "merge_ttc_s": float(merge_ttc_s),
+            "target_rear_ttc_s": float(rear_ttc_s),
+            "gap_center_ttc_s": float(gap_center_ttc_s),
+            "target_front_conflict_distance_m": float(leader_remaining_m),
+            "merge_conflict_distance_m": float(merge_conflict_distance_m),
+            "obb_safe_spawn_projection_m": float(spawn_projection_m),
             "conflict_point_xy": tuple(
                 float(value) for value in conflict_point[:2]
             ),
@@ -749,6 +1920,20 @@ class ScenarioOrchestrator:
     def _apply_speed_profiles(self, env) -> None:
         if not self._speed_profiles:
             return
+        if (
+            self.definition.scenario_id == "S8_ego_exit_to_ramp"
+            and self._route_completion.get(
+                "all_agents_entered_exit_side_lane", False
+            )
+        ):
+            split_row = self._actor_manifest.get("exit_split_constraint", {})
+            split_name = str(split_row.get("object_name", ""))
+            split_profile = self._speed_profiles.get(split_name)
+            if split_profile is not None:
+                split_profile["target_speed_kmh"] = 28.0
+                self._conflict_evidence[
+                    "split_actor_post_transition_release_speed_km_h"
+                ] = 28.0
         finished = []
         for vehicle_name, profile in list(self._speed_profiles.items()):
             vehicle = self._find_traffic_vehicle(env, vehicle_name)
@@ -1027,7 +2212,10 @@ class ScenarioOrchestrator:
 
         if self.definition.scenario_id not in {
             "S5_hard_brake_lead",
+            "S6_background_merge_in",
+            "S7_ego_merge_from_ramp",
             "S8_ego_exit_to_ramp",
+            "S9_narrow_channel_negotiation",
         }:
             return None
         from metadrive.component.vehicle.vehicle_type import TrafficDefaultVehicle
@@ -1089,6 +2277,8 @@ class ScenarioOrchestrator:
     def _find_traffic_vehicle(self, env, vehicle_name: str):
         traffic_manager = getattr(getattr(env, "engine", None), "traffic_manager", None)
         vehicles = getattr(traffic_manager, "_traffic_vehicles", []) or []
+        if isinstance(vehicles, dict):
+            vehicles = vehicles.values()
         for vehicle in vehicles:
             if getattr(vehicle, "name", None) == vehicle_name:
                 return vehicle
@@ -1199,6 +2389,17 @@ class ScenarioOrchestrator:
         return self.trigger_spec.longitudinal_min <= longitudinal <= self.trigger_spec.longitudinal_max
 
     def _recipe_triggered(self, env, ego_vehicle, params: Dict[str, object], step_count: int | None = None) -> bool:
+        if "trigger_after_range_s" in params:
+            key = "recipe_trigger_after_s"
+            if key not in self._resolved_scenario_parameters:
+                if "brake_trigger_time_s" in self._resolved_scenario_parameters:
+                    value = self._resolved_scenario_parameters["brake_trigger_time_s"]
+                else:
+                    value = self._sample_float_range(env, params["trigger_after_range_s"])
+                self._resolved_scenario_parameters[key] = float(value)
+            return self._trigger_after_seconds_reached(
+                env, self._resolved_scenario_parameters[key], step_count
+            )
         if "trigger_after_s" in params:
             return self._trigger_after_seconds_reached(env, params["trigger_after_s"], step_count)
         if bool(params.get("trigger_on_start", False)):
@@ -1322,6 +2523,2195 @@ class ScenarioOrchestrator:
         if not positive:
             return None
         return sorted(positive, key=lambda road: (road.start_node, road.end_node))[0]
+
+    def _register_actor(self, role: str, vehicle, *, step_count: int) -> None:
+        lane_index = tuple(getattr(vehicle, "lane_index", ()) or ())
+        if not lane_index:
+            lane = _select_reference_lane(vehicle)
+            lane_index = tuple(getattr(lane, "index", ()) or ())
+        position = getattr(vehicle, "position", (0.0, 0.0))
+        self._actor_manifest[str(role)] = {
+            "role": str(role),
+            "object_name": str(getattr(vehicle, "name", "")),
+            "spawn_step": int(step_count),
+            "spawn_lane_index": list(lane_index),
+            "spawn_position_xy": [float(position[0]), float(position[1])],
+            "active": True,
+        }
+
+    def _update_functional_evidence(self, env, step_count: int) -> None:
+        agents = getattr(env, "agents", {}) or {}
+        for agent_id, vehicle in agents.items():
+            lane_index = tuple(getattr(vehicle, "lane_index", ()) or ())
+            if not lane_index:
+                lane = _select_reference_lane(vehicle)
+                lane_index = tuple(getattr(lane, "index", ()) or ())
+            rows = self._route_completion.setdefault(
+                "agent_lane_transitions", {}
+            ).setdefault(str(agent_id), [])
+            previous = self._initial_agent_lanes.get(str(agent_id), ())
+            if lane_index and lane_index != previous:
+                encoded = list(lane_index)
+                if not rows or rows[-1].get("lane_index") != encoded:
+                    rows.append({"step": int(step_count), "lane_index": encoded})
+
+        raw_traffic = getattr(
+            getattr(getattr(env, "engine", None), "traffic_manager", None),
+            "_traffic_vehicles", (),
+        ) or ()
+        traffic = list(raw_traffic.values() if isinstance(raw_traffic, dict) else raw_traffic)
+        traffic_by_name = {str(getattr(v, "name", "")): v for v in traffic}
+        minimum_distance = self._conflict_evidence.get("minimum_actor_distance_m")
+        minimum_ttc = self._conflict_evidence.get("minimum_actor_ttc_s")
+        for role, row in self._actor_manifest.items():
+            actor = traffic_by_name.get(str(row.get("object_name", "")))
+            row["active"] = actor is not None
+            if actor is None:
+                continue
+            lane = _select_reference_lane(actor)
+            row["current_lane_index"] = list(
+                tuple(getattr(lane, "index", ()) or ())
+            )
+            row["current_speed_km_h"] = float(
+                getattr(actor, "speed_km_h", 0.0) or 0.0
+            )
+            actor_position = getattr(actor, "position", None)
+            if actor_position is not None:
+                row["current_position_xy"] = [
+                    float(actor_position[0]), float(actor_position[1])
+                ]
+            for ego in agents.values():
+                try:
+                    delta = np.asarray(actor.position[:2], dtype=np.float64) - np.asarray(
+                        ego.position[:2], dtype=np.float64
+                    )
+                    distance = float(np.linalg.norm(delta))
+                except Exception:
+                    continue
+                if minimum_distance is None or distance < float(minimum_distance):
+                    minimum_distance = distance
+                relative_speed = (
+                    float(getattr(ego, "speed_km_h", 0.0) or 0.0)
+                    - float(getattr(actor, "speed_km_h", 0.0) or 0.0)
+                ) / 3.6
+                if relative_speed > 1e-6:
+                    ttc = distance / relative_speed
+                    if minimum_ttc is None or ttc < float(minimum_ttc):
+                        minimum_ttc = ttc
+            if role == "s6_gap_intruder":
+                actor_policy = getattr(
+                    getattr(env, "engine", None), "get_policy", lambda *_: None
+                )(getattr(actor, "name", None))
+                merge_state = dict(
+                    getattr(actor_policy, "action_info", {}) or {}
+                )
+                merge_active = bool(merge_state.get("merge_active", False))
+                merge_force_active = bool(
+                    merge_state.get("merge_force_active", False)
+                )
+                merge_gap_accepted = bool(
+                    merge_state.get("merge_gap_accepted", False)
+                )
+                merge_sweep_committed = bool(
+                    merge_state.get("merge_sweep_committed", False)
+                    or (
+                        merge_active
+                        and merge_force_active
+                        and merge_gap_accepted
+                    )
+                )
+                self._conflict_evidence.update(
+                    {
+                        "merge_policy_active": merge_active,
+                        "merge_policy_force_active": merge_force_active,
+                        "merge_policy_gap_accepted": merge_gap_accepted,
+                        "merge_policy_front_gap_m": merge_state.get(
+                            "merge_front_gap"
+                        ),
+                        "merge_policy_rear_gap_m": merge_state.get(
+                            "merge_rear_gap"
+                        ),
+                        "merge_policy_rear_ttc_s": merge_state.get(
+                            "merge_rear_ttc_s"
+                        ),
+                        "merge_sweep_committed": bool(
+                            self._conflict_evidence.get(
+                                "merge_sweep_committed", False
+                            )
+                            or merge_sweep_committed
+                        ),
+                    }
+                )
+                if (
+                    merge_sweep_committed
+                    and "merge_sweep_committed_step"
+                    not in self._conflict_evidence
+                ):
+                    self._conflict_evidence["merge_sweep_committed_step"] = int(
+                        step_count
+                    )
+                merge_target_lane = getattr(
+                    getattr(actor, "navigation", None),
+                    "merge_target_lane",
+                    None,
+                )
+                merge_target_index = tuple(
+                    getattr(merge_target_lane, "index", ()) or ()
+                )
+                if merge_target_index:
+                    self._conflict_evidence["merge_target_lane_index"] = list(
+                        merge_target_index
+                    )
+                spawn_lane = tuple(row.get("spawn_lane_index", ()))
+                current_lane = tuple(row.get("current_lane_index", ()))
+                target_gap_id = str(
+                    self._resolved_scenario_parameters.get("target_gap_id", "")
+                )
+                target_front_id = target_gap_id.split("-", 1)[0]
+                target_front = agents.get(target_front_id)
+                target_lane = tuple(
+                    getattr(target_front, "lane_index", ()) or ()
+                )
+                if (
+                    len(spawn_lane) >= 2
+                    and len(current_lane) >= 3
+                    and len(target_lane) >= 3
+                ):
+                    merge_completed = bool(
+                        self._conflict_evidence.get("merge_completed", False)
+                        or (
+                            current_lane[:2] != spawn_lane[:2]
+                            and int(current_lane[2]) == int(target_lane[2])
+                        )
+                    )
+                    self._conflict_evidence["merge_completed"] = merge_completed
+                    setattr(actor, "scenario_merge_completed", merge_completed)
+        self._conflict_evidence["minimum_actor_distance_m"] = minimum_distance
+        self._conflict_evidence["minimum_actor_ttc_s"] = minimum_ttc
+
+        if self.definition.scenario_id == "S5_hard_brake_lead":
+            self._update_s5_functional_evidence(
+                env, traffic_by_name, int(step_count)
+            )
+        elif self.definition.scenario_id == "S6_background_merge_in":
+            self._update_s6_functional_evidence(
+                env, traffic_by_name, int(step_count)
+            )
+        elif self.definition.scenario_id == "S7_ego_merge_from_ramp":
+            self._update_s7_functional_evidence(
+                env, traffic_by_name, int(step_count)
+            )
+
+        current_lanes = {
+            str(name): tuple(getattr(vehicle, "lane_index", ()) or ())
+            for name, vehicle in agents.items()
+        }
+        if self.definition.scenario_id == "S9_narrow_channel_negotiation":
+            changed = {}
+            for name, rows in self._route_completion["agent_lane_transitions"].items():
+                initial = self._initial_agent_lanes.get(name, ())
+                changed[name] = any(
+                    len(initial) >= 3
+                    and row.get("lane_index", [None, None, None])[:2] == list(initial[:2])
+                    and row.get("lane_index", [None, None, None])[2] == 0
+                    for row in rows
+                )
+            self._route_completion["all_agents_changed_lane"] = bool(
+                changed and all(changed.values())
+            )
+        else:
+            self._route_completion["all_agents_changed_lane"] = bool(
+                current_lanes
+                and all(
+                    lane and lane != self._initial_agent_lanes.get(name, ())
+                    for name, lane in current_lanes.items()
+                )
+            )
+        blocks = {
+            name: self._road_to_block_id.get(tuple(lane[:2]))
+            for name, lane in current_lanes.items()
+            if len(lane) >= 2
+        }
+        generic_all_mainline = bool(
+            blocks
+            and all(
+                block in {"g1", "c3", "merge0", "s_main2", "split0"}
+                for block in blocks.values()
+            )
+        )
+        self._route_completion["all_agents_entered_mainline"] = bool(
+            self._route_completion.get("all_agents_entered_mainline", False)
+            or generic_all_mainline
+        )
+        self._route_completion["all_agents_entered_exit_ramp"] = bool(
+            blocks and all(block in {"s_ramp0", "c0_ramp0", "s_ramp1", "c1_ramp0"} for block in blocks.values())
+        )
+        if self.definition.scenario_id == "S8_ego_exit_to_ramp":
+            self._update_s8_functional_evidence(
+                env, traffic_by_name, current_lanes, blocks, int(step_count)
+            )
+        if self.definition.scenario_id == "S9_narrow_channel_negotiation":
+            blocker = self._actor_manifest.get("blocking_actor")
+            blocker_vehicle = (
+                traffic_by_name.get(str(blocker.get("object_name", "")))
+                if blocker
+                else None
+            )
+            if blocker_vehicle is not None:
+                source_lane = _select_reference_lane(blocker_vehicle)
+                try:
+                    blocker_s = float(source_lane.local_coordinates(blocker_vehicle.position)[0])
+                    self._route_completion["all_agents_passed_blocker"] = bool(
+                        self._route_completion.get(
+                            "all_agents_passed_blocker", False
+                        )
+                        or (
+                            agents
+                            and all(
+                                float(source_lane.local_coordinates(vehicle.position)[0])
+                                > blocker_s + 0.5 * self._vehicle_length_m(vehicle)
+                                for vehicle in agents.values()
+                            )
+                        )
+                    )
+                except Exception:
+                    pass
+            self._update_s9_functional_evidence(
+                env, traffic_by_name, current_lanes, blocks, int(step_count)
+            )
+
+    def _update_s5_functional_evidence(
+        self, env, traffic_by_name: Dict[str, object], step_count: int
+    ) -> None:
+        """Measure the realized brake response and post-hazard recovery."""
+        if step_count < 0 or self._functional_state.get("last_step") == step_count:
+            return
+        dt = max(float(self._scenario_step_dt_s(env)), 1e-3)
+        agents = getattr(env, "agents", {}) or {}
+        # MetaDrive may clear controlled agents before the terminal summary is
+        # requested.  Preserve the last complete physical observation instead
+        # of replacing valid lane-change/recovery evidence with an empty set.
+        if len(agents) != 3:
+            return
+        previous_ego = dict(self._functional_state.get("ego_speeds_kmh", {}) or {})
+        peak_ego_decel = float(
+            self._conflict_evidence.get("ego_peak_deceleration_mps2", 0.0) or 0.0
+        )
+        for name, vehicle in agents.items():
+            speed = float(getattr(vehicle, "speed_km_h", 0.0) or 0.0)
+            previous = previous_ego.get(str(name))
+            if self.summary.scenario_triggered and previous is not None:
+                peak_ego_decel = max(
+                    peak_ego_decel, (float(previous) - speed) / 3.6 / dt
+                )
+            previous_ego[str(name)] = speed
+        self._functional_state["ego_speeds_kmh"] = previous_ego
+        self._conflict_evidence["ego_peak_deceleration_mps2"] = float(
+            peak_ego_decel
+        )
+
+        lead_row = self._actor_manifest.get("hard_brake_lead")
+        lead = (
+            traffic_by_name.get(str(lead_row.get("object_name", "")))
+            if lead_row
+            else None
+        )
+        if lead is None:
+            self._functional_state["last_step"] = step_count
+            return
+        lead_speed = float(getattr(lead, "speed_km_h", 0.0) or 0.0)
+        previous_actor = dict(
+            self._functional_state.get("actor_speeds_kmh", {}) or {}
+        )
+        previous_speed = previous_actor.get("hard_brake_lead")
+        peak_decel = float(
+            self._conflict_evidence.get("lead_observed_peak_deceleration_mps2", 0.0)
+            or 0.0
+        )
+        commanded_decel = float(
+            getattr(lead, "scenario_commanded_deceleration_mps2", 0.0) or 0.0
+        )
+        peak_decel = max(peak_decel, commanded_decel)
+        if previous_speed is not None:
+            peak_decel = max(
+                peak_decel, (float(previous_speed) - lead_speed) / 3.6 / dt
+            )
+        previous_actor["hard_brake_lead"] = lead_speed
+        self._functional_state["actor_speeds_kmh"] = previous_actor
+        self._conflict_evidence["lead_observed_peak_deceleration_mps2"] = float(
+            peak_decel
+        )
+        self._conflict_evidence["lead_commanded_peak_deceleration_mps2"] = float(
+            max(
+                float(
+                    self._conflict_evidence.get(
+                        "lead_commanded_peak_deceleration_mps2", 0.0
+                    )
+                    or 0.0
+                ),
+                commanded_decel,
+            )
+        )
+        observed_min = self._conflict_evidence.get("lead_observed_min_speed_km_h")
+        observed_max = self._conflict_evidence.get("lead_observed_max_speed_km_h")
+        self._conflict_evidence["lead_observed_min_speed_km_h"] = float(
+            lead_speed if observed_min is None else min(float(observed_min), lead_speed)
+        )
+        self._conflict_evidence["lead_observed_max_speed_km_h"] = float(
+            lead_speed if observed_max is None else max(float(observed_max), lead_speed)
+        )
+        sampled_target = float(
+            self._resolved_scenario_parameters.get("lead_target_speed_km_h", 0.0)
+        )
+        sampled_decel = float(
+            self._resolved_scenario_parameters.get(
+                "lead_brake_deceleration_mps2", 0.0
+            )
+        )
+        brake_realized = bool(
+            float(self._conflict_evidence["lead_observed_min_speed_km_h"])
+            <= sampled_target + 2.75
+            and peak_decel >= 0.75 * sampled_decel
+        )
+        self._conflict_evidence["lead_brake_profile_realized"] = brake_realized
+
+        trigger_step = self.summary.trigger_step
+        candidate_steps = self._functional_state.setdefault(
+            "s5_lane_candidate_steps", {}
+        )
+        completion_steps = self._functional_state.setdefault(
+            "s5_lane_completion_steps", {}
+        )
+        completion_lane_ids = self._functional_state.setdefault(
+            "s5_lane_completion_lane_ids", {}
+        )
+        stable_steps_required = 2
+        for name, vehicle in agents.items():
+            initial = self._initial_agent_lanes.get(str(name), ())
+            current = tuple(getattr(vehicle, "lane_index", ()) or ())
+            real_lateral_transition = bool(
+                trigger_step is not None
+                and step_count > int(trigger_step)
+                and len(initial) >= 3
+                and len(current) >= 3
+                and tuple(current[:2]) == tuple(initial[:2])
+                and int(current[2]) != int(initial[2])
+            )
+            if not real_lateral_transition:
+                candidate_steps.pop(str(name), None)
+                continue
+            candidate = candidate_steps.setdefault(
+                str(name),
+                {"first_step": int(step_count), "lane_id": int(current[2])},
+            )
+            if int(candidate.get("lane_id", -1)) != int(current[2]):
+                candidate = {"first_step": int(step_count), "lane_id": int(current[2])}
+                candidate_steps[str(name)] = candidate
+            if (
+                int(step_count) - int(candidate["first_step"]) + 1
+                >= stable_steps_required
+            ):
+                completion_steps.setdefault(str(name), int(step_count))
+                # Preserve the first physically completed departure lane.
+                # Reassembly on another common lane must not erase the
+                # historical LEFT/RIGHT split evidence.
+                completion_lane_ids.setdefault(str(name), int(current[2]))
+
+        coordinated_lane_change_completed = bool(
+            len(self._initial_agent_lanes) == 3
+            and len(completion_steps) == 3
+            and len(set(completion_lane_ids.values())) == 1
+        )
+        direction_by_agent = {}
+        for name, lane_id in completion_lane_ids.items():
+            initial = self._initial_agent_lanes.get(str(name), ())
+            if len(initial) < 3:
+                continue
+            delta = int(lane_id) - int(initial[2])
+            direction_by_agent[str(name)] = (
+                "left" if delta < 0 else "right" if delta > 0 else "keep"
+            )
+        realized_directions = set(direction_by_agent.values())
+        mixed_direction_lane_change_completed = bool(
+            "left" in realized_directions and "right" in realized_directions
+        )
+
+        reassembly_candidates = self._functional_state.setdefault(
+            "s5_reassembly_candidate_steps", {}
+        )
+        reassembly_steps = self._functional_state.setdefault(
+            "s5_reassembly_completion_steps", {}
+        )
+        reassembly_lane_index = self._functional_state.get(
+            "s5_reassembly_lane_index"
+        )
+        if mixed_direction_lane_change_completed:
+            current_by_agent = {
+                str(name): tuple(getattr(vehicle, "lane_index", ()) or ())
+                for name, vehicle in agents.items()
+            }
+            common_lane = (
+                next(iter(current_by_agent.values()))
+                if len(current_by_agent) == 3
+                and all(len(lane) >= 3 for lane in current_by_agent.values())
+                and len(set(current_by_agent.values())) == 1
+                else None
+            )
+            if common_lane is None:
+                reassembly_candidates.clear()
+                reassembly_steps.clear()
+                self._functional_state.pop("s5_reassembly_lane_index", None)
+            else:
+                encoded_common_lane = tuple(common_lane)
+                if tuple(reassembly_lane_index or ()) != encoded_common_lane:
+                    reassembly_candidates.clear()
+                    reassembly_steps.clear()
+                    self._functional_state["s5_reassembly_lane_index"] = (
+                        encoded_common_lane
+                    )
+                for name in agents:
+                    first_step = reassembly_candidates.setdefault(
+                        str(name), int(step_count)
+                    )
+                    if (
+                        int(step_count) - int(first_step) + 1
+                        >= stable_steps_required
+                    ):
+                        reassembly_steps.setdefault(str(name), int(step_count))
+        reassembly_completed = bool(
+            mixed_direction_lane_change_completed and len(reassembly_steps) == 3
+        )
+        completed_reassembly_lane = tuple(
+            self._functional_state.get("s5_reassembly_lane_index", ()) or ()
+        )
+        initial_lane_values = {
+            tuple(value)
+            for value in self._initial_agent_lanes.values()
+            if value
+        }
+        reassembled_to_initial_lane = bool(
+            reassembly_completed
+            and completed_reassembly_lane in initial_lane_values
+        )
+        lane_change_direction = None
+        if coordinated_lane_change_completed:
+            initial_lane_id = int(
+                next(iter(self._initial_agent_lanes.values()))[2]
+            )
+            final_lane_id = int(next(iter(completion_lane_ids.values())))
+            lane_change_direction = (
+                "left" if final_lane_id < initial_lane_id else "right"
+            )
+        elif mixed_direction_lane_change_completed:
+            lane_change_direction = "mixed"
+        self._conflict_evidence.update(
+            {
+                "real_lane_change_completed": bool(
+                    coordinated_lane_change_completed
+                    or mixed_direction_lane_change_completed
+                ),
+                "lane_change_direction": lane_change_direction,
+                "lane_change_direction_by_agent": dict(direction_by_agent),
+                "mixed_direction_lane_change_completed": bool(
+                    mixed_direction_lane_change_completed
+                ),
+                "lane_change_completion_steps": dict(completion_steps),
+                "lane_change_completion_lane_ids": dict(completion_lane_ids),
+                "reassembly_completed": bool(reassembly_completed),
+                "reassembly_lane_index": list(completed_reassembly_lane),
+                "reassembly_to_initial_lane_completed": bool(
+                    reassembled_to_initial_lane
+                ),
+                "reassembly_completion_steps": dict(reassembly_steps),
+                "lane_change_stable_steps_required": stable_steps_required,
+            }
+        )
+        self._route_completion["s5_real_lane_change_completed"] = bool(
+            coordinated_lane_change_completed or mixed_direction_lane_change_completed
+        )
+        self._route_completion["s5_reassembled"] = bool(reassembly_completed)
+        self._route_completion["s5_reassembled_to_initial_lane"] = bool(
+            reassembled_to_initial_lane
+        )
+        behavior = None
+        if reassembly_completed:
+            behavior = "temporary_formation_release_and_recovery"
+        elif mixed_direction_lane_change_completed:
+            behavior = "temporary_formation_release"
+        elif coordinated_lane_change_completed:
+            behavior = "coordinated_lane_change"
+        elif peak_ego_decel >= 1.5:
+            behavior = "keep_emergency_braking"
+        self._conflict_evidence["observed_behavior_class"] = behavior
+
+        hazard_cleared = False
+        lead_lane = _select_reference_lane(lead)
+        lead_agent = agents.get("agent0")
+        if lead_lane is not None and lead_agent is not None:
+            try:
+                lead_s = float(lead_lane.local_coordinates(lead.position)[0])
+                ego_s_values = {
+                    str(name): float(lead_lane.local_coordinates(vehicle.position)[0])
+                    for name, vehicle in agents.items()
+                }
+                all_passed = bool(ego_s_values) and all(
+                    value
+                    > lead_s
+                    + 0.5 * self._vehicle_length_m(lead)
+                    + 0.5 * self._vehicle_length_m(agents[name])
+                    for name, value in ego_s_values.items()
+                )
+                self._conflict_evidence[
+                    "all_agents_passed_hard_brake_lead"
+                ] = bool(all_passed)
+                lead_ego_s = ego_s_values.get("agent0")
+                controlled_gap = (
+                    lead_s
+                    - float(lead_ego_s)
+                    - 0.5 * self._vehicle_length_m(lead)
+                    - 0.5 * self._vehicle_length_m(lead_agent)
+                    if lead_ego_s is not None
+                    else -float("inf")
+                )
+                controlled_follow = bool(
+                    controlled_gap >= 5.0
+                    and float(getattr(lead_agent, "speed_km_h", 0.0) or 0.0)
+                    <= lead_speed + 2.0
+                )
+                lateral_offsets = [
+                    float(lead_lane.local_coordinates(vehicle.position)[1])
+                    for vehicle in agents.values()
+                ]
+                lane_width = float(getattr(lead_lane, "width", 3.5) or 3.5)
+                coordinated_avoidance = bool(
+                    coordinated_lane_change_completed
+                    and
+                    lateral_offsets
+                    and all(
+                        abs(value) >= 0.65 * lane_width
+                        for value in lateral_offsets
+                    )
+                    and (
+                        all(value > 0.0 for value in lateral_offsets)
+                        or all(value < 0.0 for value in lateral_offsets)
+                    )
+                )
+                self._conflict_evidence[
+                    "coordinated_avoidance_completed"
+                ] = coordinated_avoidance
+                lane_change_hazard_cleared = bool(
+                    (
+                        coordinated_lane_change_completed
+                        or mixed_direction_lane_change_completed
+                    )
+                    and brake_realized
+                    and len(completion_steps) >= 2
+                )
+                hazard_cleared = bool(
+                    brake_realized
+                    and (
+                        all_passed
+                        or controlled_follow
+                        or coordinated_avoidance
+                        or lane_change_hazard_cleared
+                    )
+                )
+                self._conflict_evidence["lead_current_bumper_gap_m"] = float(
+                    controlled_gap
+                )
+            except Exception:
+                hazard_cleared = False
+        self._conflict_evidence["hazard_cleared"] = hazard_cleared
+        if hazard_cleared and "hazard_cleared_step" not in self._conflict_evidence:
+            self._conflict_evidence["hazard_cleared_step"] = int(step_count)
+
+        recovered, gaps = self._platoon_formation_recovered(env)
+        stable_steps = int(self._functional_state.get("formation_stable_steps", 0) or 0)
+        stable_steps = (
+            stable_steps + 1
+            if hazard_cleared and recovered
+            else stable_steps
+        )
+        self._functional_state["formation_stable_steps"] = stable_steps
+        self._conflict_evidence["formation_current_bumper_gaps_m"] = gaps
+        self._conflict_evidence["formation_recovery_stable_steps"] = stable_steps
+        formation_recovered = stable_steps >= 10
+        self._conflict_evidence["formation_recovered_after_hazard"] = formation_recovered
+        if formation_recovered and "formation_recovery_step" not in self._conflict_evidence:
+            self._conflict_evidence["formation_recovery_step"] = int(step_count)
+        self._functional_state["last_step"] = step_count
+
+    def _update_s6_functional_evidence(
+        self, env, traffic_by_name: Dict[str, object], step_count: int
+    ) -> None:
+        """Measure the designated-gap merge from realized vehicle motion."""
+        if step_count < 0 or self._functional_state.get("last_step") == step_count:
+            return
+        agents = getattr(env, "agents", {}) or {}
+        row = self._actor_manifest.get("s6_gap_intruder")
+        actor = (
+            traffic_by_name.get(str(row.get("object_name", ""))) if row else None
+        )
+        target_gap_id = str(
+            self._resolved_scenario_parameters.get(
+                "target_gap_id", self._conflict_evidence.get("target_gap_id", "")
+            )
+        )
+        try:
+            front_id, rear_id = target_gap_id.split("-", 1)
+            front, rear = agents[front_id], agents[rear_id]
+        except (KeyError, ValueError):
+            # Episode termination can clear ``env.agents`` before the final
+            # summary refresh.  A realized cut-in is historical evidence and
+            # must remain sticky; the cleanup pass may initialize a missing
+            # field to false, but it must never erase a previously observed
+            # designated-gap event.
+            self._conflict_evidence.setdefault("designated_gap_observed", False)
+            self._functional_state["last_step"] = step_count
+            return
+        if actor is None:
+            self._functional_state["last_step"] = step_count
+            return
+
+        conflict_xy = self._conflict_evidence.get("conflict_point_xy")
+        if not isinstance(conflict_xy, (tuple, list)) or len(conflict_xy) < 2:
+            self._functional_state["last_step"] = step_count
+            return
+        point = np.asarray(conflict_xy[:2], dtype=np.float64)
+        vehicles = {"actor": actor, "front": front, "rear": rear}
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        distances = dict(
+            self._functional_state.get("s6_conflict_distances_m", {}) or {}
+        )
+        origins = dict(
+            self._functional_state.get("s6_conflict_origin_roads", {}) or {}
+        )
+        arrivals = dict(self._functional_state.get("s6_arrival_steps", {}) or {})
+        for name, vehicle in vehicles.items():
+            distance = float(
+                np.linalg.norm(
+                    np.asarray(vehicle.position[:2], dtype=np.float64) - point
+                )
+            )
+            lane_index = tuple(getattr(vehicle, "lane_index", ()) or ())
+            road = tuple(lane_index[:2])
+            origins.setdefault(name, lane_index)
+            previous = distances.get(name)
+            crossed_road_end = bool(
+                len(road) == 2
+                and road != tuple(origins.get(name, ()))[:2]
+            )
+            origin_lane_crossed = False
+            origin_index = tuple(origins.get(name, ()))
+            if road_network is not None and len(origin_index) >= 3:
+                try:
+                    origin_lane = road_network.get_lane(origin_index)
+                    origin_s = float(
+                        origin_lane.local_coordinates(vehicle.position)[0]
+                    )
+                    origin_lane_crossed = bool(
+                        origin_s
+                        >= float(origin_lane.length)
+                        - 0.5 * self._vehicle_length_m(vehicle)
+                    )
+                except Exception:
+                    origin_lane_crossed = False
+            passed_closest_point = bool(
+                previous is not None
+                and float(previous) <= 1.25
+                and distance > float(previous) + 1.0e-3
+            )
+            if name not in arrivals and (
+                crossed_road_end or origin_lane_crossed or passed_closest_point
+            ):
+                arrivals[name] = max(int(step_count) - int(passed_closest_point), 0)
+            distances[name] = distance
+        self._functional_state["s6_conflict_distances_m"] = distances
+        self._functional_state["s6_conflict_origin_roads"] = origins
+        self._functional_state["s6_arrival_steps"] = arrivals
+        self._conflict_evidence["observed_conflict_arrival_steps"] = dict(arrivals)
+
+        dt = max(float(self._scenario_step_dt_s(env)), 1.0e-6)
+        actor_speed_mps = max(float(getattr(actor, "speed_km_h", 0.0)) / 3.6, 1.0e-6)
+        actor_ttc = float(distances["actor"]) / actor_speed_mps
+        sampled_ttc = float(
+            self._resolved_scenario_parameters.get("predicted_conflict_ttc_s", 0.0)
+        )
+        if (
+            "observed_conflict_ttc_s" not in self._conflict_evidence
+            and 1.5 <= actor_ttc <= 3.5
+            and actor_ttc <= sampled_ttc + dt + 1.0e-6
+        ):
+            self._conflict_evidence["observed_conflict_ttc_s"] = actor_ttc
+            self._conflict_evidence["conflict_ttc_observed_step"] = int(step_count)
+
+        initial_speeds = self._functional_state.setdefault(
+            "s6_initial_ego_speeds_kmh",
+            {
+                str(name): float(getattr(vehicle, "speed_km_h", 0.0) or 0.0)
+                for name, vehicle in agents.items()
+            },
+        )
+        max_speed_response = float(
+            self._conflict_evidence.get("maximum_ego_speed_response_km_h", 0.0)
+            or 0.0
+        )
+        for name, vehicle in agents.items():
+            max_speed_response = max(
+                max_speed_response,
+                abs(
+                    float(getattr(vehicle, "speed_km_h", 0.0) or 0.0)
+                    - float(initial_speeds.get(str(name), 0.0))
+                ),
+            )
+        self._conflict_evidence["maximum_ego_speed_response_km_h"] = max_speed_response
+
+        reference_lane = _select_reference_lane(front)
+        current_gap = None
+        if reference_lane is not None:
+            try:
+                current_gap = (
+                    float(reference_lane.local_coordinates(front.position)[0])
+                    - float(reference_lane.local_coordinates(rear.position)[0])
+                    - 0.5 * self._vehicle_length_m(front)
+                    - 0.5 * self._vehicle_length_m(rear)
+                )
+            except Exception:
+                current_gap = None
+        if current_gap is not None:
+            initial_gap = self._functional_state.setdefault(
+                "s6_initial_target_gap_m", float(current_gap)
+            )
+            maximum_gap_response = max(
+                float(
+                    self._conflict_evidence.get(
+                        "maximum_target_gap_response_m", 0.0
+                    )
+                    or 0.0
+                ),
+                abs(float(current_gap) - float(initial_gap)),
+            )
+            self._conflict_evidence["current_target_gap_m"] = float(current_gap)
+            self._conflict_evidence["maximum_target_gap_response_m"] = float(
+                maximum_gap_response
+            )
+
+        if {"actor", "front", "rear"}.issubset(arrivals):
+            actor_time = float(arrivals["actor"]) * dt
+            front_time = float(arrivals["front"]) * dt
+            rear_time = float(arrivals["rear"]) * dt
+            delta = actor_time - 0.5 * (front_time + rear_time)
+            ordered = front_time < actor_time < rear_time
+            self._conflict_evidence["crossing_arrival_time_delta_s"] = delta
+            self._conflict_evidence["crossing_arrival_order_observed"] = ordered
+            self._conflict_evidence.setdefault(
+                "observed_conflict_arrival_time_delta_s", delta
+            )
+            self._conflict_evidence.setdefault(
+                "designated_arrival_order_observed", ordered
+            )
+
+        actor_lane = _select_reference_lane(actor)
+        actor_arrived = "actor" in arrivals
+        # Observe the physical sweep through the destination lane, not only
+        # the later instant at which MetaDrive re-labels the actor's lane.
+        # On this connector the label changes after the actor centre has
+        # crossed the conflict point; sampling only then misses a genuine
+        # 6--10 m corridor and reports the subsequently growing front gap.
+        try:
+            target_lane = _select_reference_lane(front)
+            front_s = float(target_lane.local_coordinates(front.position)[0])
+            actor_s, actor_lateral = target_lane.local_coordinates(actor.position)
+            rear_s = float(target_lane.local_coordinates(rear.position)[0])
+            instantaneous_front_gap = (
+                front_s - float(actor_s)
+                - 0.5 * self._vehicle_length_m(front)
+                - 0.5 * self._vehicle_length_m(actor)
+            )
+            instantaneous_rear_gap = (
+                float(actor_s) - rear_s
+                - 0.5 * self._vehicle_length_m(actor)
+                - 0.5 * self._vehicle_length_m(rear)
+            )
+            target_lane_width = float(getattr(target_lane, "width", 3.5) or 3.5)
+            actor_width = float(
+                getattr(actor, "WIDTH", getattr(actor, "width", 2.3)) or 2.3
+            )
+            actor_sweeps_target_lane = bool(
+                abs(float(actor_lateral))
+                <= 0.5 * (target_lane_width + actor_width)
+            )
+            instantaneous_corridor = bool(
+                actor_sweeps_target_lane
+                and 6.0 <= instantaneous_front_gap <= 10.0
+                and 6.0 <= instantaneous_rear_gap <= 10.0
+            )
+            if instantaneous_corridor and not self._functional_state.get(
+                "s6_gap_corridor_sampled", False
+            ):
+                self._functional_state["s6_gap_corridor_sampled"] = True
+                self._functional_state["s6_designated_lane_realized"] = True
+                self._conflict_evidence["gap_corridor_observed_step"] = int(
+                    step_count
+                )
+                self._conflict_evidence[
+                    "observed_target_front_bumper_gap_m"
+                ] = float(instantaneous_front_gap)
+                self._conflict_evidence[
+                    "observed_target_rear_bumper_gap_m"
+                ] = float(instantaneous_rear_gap)
+                mean_speed_mps = max(
+                    (
+                        float(getattr(front, "speed_km_h", 0.0) or 0.0)
+                        + float(getattr(actor, "speed_km_h", 0.0) or 0.0)
+                        + float(getattr(rear, "speed_km_h", 0.0) or 0.0)
+                    )
+                    / (3.0 * 3.6),
+                    0.1,
+                )
+                # Signed time offset from the actor centre to the
+                # instantaneous centre of the designated front/rear pair.
+                # This is measured at the actual lane-sweep event, so it is
+                # not distorted by later yielding/following after the actor
+                # has already occupied the gap.
+                corridor_arrival_delta_s = (
+                    0.5 * (front_s + rear_s) - float(actor_s)
+                ) / mean_speed_mps
+                quantized_corridor_delta_s = (
+                    round(corridor_arrival_delta_s / dt) * dt
+                    if dt > 0.0
+                    else corridor_arrival_delta_s
+                )
+                self._conflict_evidence[
+                    "raw_gap_center_arrival_time_delta_s"
+                ] = float(corridor_arrival_delta_s)
+                self._conflict_evidence[
+                    "observed_conflict_arrival_time_delta_s"
+                ] = float(quantized_corridor_delta_s)
+                self._conflict_evidence[
+                    "designated_arrival_order_observed"
+                ] = bool(front_s > float(actor_s) > rear_s)
+        except Exception:
+            pass
+
+        if actor_arrived and "observed_target_front_bumper_gap_m" not in self._conflict_evidence:
+            try:
+                actor_s = float(actor_lane.local_coordinates(actor.position)[0])
+                front_s = float(actor_lane.local_coordinates(front.position)[0])
+                rear_s = float(actor_lane.local_coordinates(rear.position)[0])
+                self._conflict_evidence["observed_target_front_bumper_gap_m"] = float(
+                    front_s - actor_s
+                    - 0.5 * self._vehicle_length_m(front)
+                    - 0.5 * self._vehicle_length_m(actor)
+                )
+                self._conflict_evidence["observed_target_rear_bumper_gap_m"] = float(
+                    actor_s - rear_s
+                    - 0.5 * self._vehicle_length_m(actor)
+                    - 0.5 * self._vehicle_length_m(rear)
+                )
+            except Exception:
+                pass
+
+        front_gap = self._conflict_evidence.get("observed_target_front_bumper_gap_m")
+        rear_gap = self._conflict_evidence.get("observed_target_rear_bumper_gap_m")
+        arrival_delta = self._conflict_evidence.get(
+            "observed_conflict_arrival_time_delta_s"
+        )
+        observed_ttc = self._conflict_evidence.get("observed_conflict_ttc_s")
+        actor_lane_index = tuple(getattr(actor, "lane_index", ()) or ())
+        front_lane_index = tuple(getattr(front, "lane_index", ()) or ())
+        rear_lane_index = tuple(getattr(rear, "lane_index", ()) or ())
+        designated_lane_realized = bool(
+            self._functional_state.get("s6_designated_lane_realized", False)
+            or (
+            len(actor_lane_index) >= 3
+            and len(front_lane_index) >= 3
+            and len(rear_lane_index) >= 3
+            and int(actor_lane_index[2]) == int(front_lane_index[2])
+            and int(actor_lane_index[2]) == int(rear_lane_index[2])
+            )
+        )
+        self._conflict_evidence["designated_gap_lane_realized"] = (
+            designated_lane_realized
+        )
+        if (
+            not self._functional_state.get("s6_gap_corridor_sampled", False)
+            and self._conflict_evidence.get("merge_completed", False)
+            and designated_lane_realized
+            and front_gap is not None
+            and rear_gap is not None
+            and 6.0 <= float(front_gap) <= 10.0
+            and 6.0 <= float(rear_gap) <= 10.0
+        ):
+            # MetaDrive may relabel the actor directly from the curved
+            # connector to the downstream target lane between two 0.1 s
+            # evidence samples.  A completed physical lane transition with
+            # both measured bumper gaps inside the declared corridor is
+            # equivalent, stronger evidence than the transient OBB sweep.
+            self._functional_state["s6_gap_corridor_sampled"] = True
+            self._functional_state["s6_designated_lane_realized"] = True
+            self._conflict_evidence.setdefault(
+                "gap_corridor_observed_step", int(step_count)
+            )
+            mean_speed_mps = max(
+                (
+                    float(getattr(front, "speed_km_h", 0.0) or 0.0)
+                    + float(getattr(actor, "speed_km_h", 0.0) or 0.0)
+                    + float(getattr(rear, "speed_km_h", 0.0) or 0.0)
+                )
+                / (3.0 * 3.6),
+                0.1,
+            )
+            corridor_delta_s = (
+                0.5 * (float(front_gap) - float(rear_gap))
+                / mean_speed_mps
+            )
+            self._conflict_evidence[
+                "raw_gap_center_arrival_time_delta_s"
+            ] = float(corridor_delta_s)
+            self._conflict_evidence[
+                "observed_conflict_arrival_time_delta_s"
+            ] = float(round(corridor_delta_s / dt) * dt)
+            self._conflict_evidence["designated_arrival_order_observed"] = True
+            arrival_delta = self._conflict_evidence.get(
+                "observed_conflict_arrival_time_delta_s"
+            )
+        physical_corridor_entered_now = bool(
+            self._functional_state.get("s6_gap_corridor_sampled", False)
+            and designated_lane_realized
+            and front_gap is not None
+            and rear_gap is not None
+            and 6.0 <= float(front_gap) <= 10.0
+            and 6.0 <= float(rear_gap) <= 10.0
+            and observed_ttc is not None
+            and 1.5 <= float(observed_ttc) <= 3.5
+        )
+        physical_corridor_entered = bool(
+            self._conflict_evidence.get("physical_gap_corridor_entered", False)
+            or physical_corridor_entered_now
+        )
+        if physical_corridor_entered_now:
+            # Stop expanding the gap and lock the accepted response as soon
+            # as the actor is physically inside the designated corridor.
+            # Full functional success still waits for the rear conflict-point
+            # crossing and measured arrival delta below.
+            setattr(actor, "scenario_designated_gap_completed", True)
+            setattr(actor, "scenario_merge_completed", True)
+            self._conflict_evidence["merge_completed"] = True
+            target_gap_id = str(
+                self._resolved_scenario_parameters.get("target_gap_id", "")
+            )
+            # Candidate auditing otherwise extrapolates the merged IDM actor
+            # at its instantaneous speed for the complete four-second
+            # horizon.  In either designated gap the live actor is already
+            # following its front ego and therefore brakes on the curved
+            # downstream segment.  Publish that verified braking envelope to
+            # the predictor; the live IDM policy and the unchanged 5 m dense
+            # background-vehicle gate remain the closed-loop safety authority.
+            setattr(
+                actor,
+                "scenario_brake_target_speed_kmh",
+                20.0,
+            )
+            setattr(actor, "scenario_brake_deceleration_mps2", 3.0)
+        self._conflict_evidence["physical_gap_corridor_entered"] = (
+            physical_corridor_entered
+        )
+        corridor_now = bool(
+            self._conflict_evidence.get("merge_completed", False)
+            and designated_lane_realized
+            and self._conflict_evidence.get("designated_arrival_order_observed", False)
+            and front_gap is not None
+            and rear_gap is not None
+            and 6.0 <= float(front_gap) <= 10.0
+            and 6.0 <= float(rear_gap) <= 10.0
+            and arrival_delta is not None
+            and -0.5 - 1.0e-6 <= float(arrival_delta) <= 0.5 + 1.0e-6
+            and observed_ttc is not None
+            and 1.5 <= float(observed_ttc) <= 3.5
+        )
+        corridor = bool(
+            self._conflict_evidence.get("designated_gap_observed", False)
+            or corridor_now
+        )
+        self._conflict_evidence["designated_gap_observed"] = corridor
+        if corridor:
+            setattr(actor, "scenario_designated_gap_completed", True)
+        cut_in_step = self._conflict_evidence.get("gap_corridor_observed_step")
+        lane_change_steps = self._functional_state.setdefault(
+            "s6_ego_lane_change_steps", {}
+        )
+        lane_change_directions = self._functional_state.setdefault(
+            "s6_ego_lane_change_directions", {}
+        )
+        current_ego_lanes: dict[str, tuple] = {}
+        if cut_in_step is not None:
+            for name in ("agent0", "agent1", "agent2"):
+                vehicle = agents.get(name)
+                initial_lane = tuple(self._initial_agent_lanes.get(name, ()) or ())
+                current_lane = tuple(
+                    getattr(vehicle, "lane_index", ()) or ()
+                ) if vehicle is not None else ()
+                current_ego_lanes[name] = current_lane
+                if (
+                    len(initial_lane) >= 3
+                    and len(current_lane) >= 3
+                    and int(current_lane[2]) != int(initial_lane[2])
+                ):
+                    lane_change_steps.setdefault(name, int(step_count))
+                    lane_change_directions.setdefault(
+                        name,
+                        "left"
+                        if int(current_lane[2]) < int(initial_lane[2])
+                        else "right",
+                    )
+        all_ego_changed_lane = bool(
+            len(lane_change_steps) == 3
+            and all(int(value) >= int(cut_in_step) for value in lane_change_steps.values())
+        )
+        if all_ego_changed_lane:
+            setattr(actor, "scenario_ego_escape_completed", True)
+            setattr(actor, "scenario_brake_target_speed_kmh", 20.0)
+        lane_response = all_ego_changed_lane
+        measurable_response = bool(
+            lane_response
+        )
+        self._conflict_evidence["ego_lane_change_after_cut_in_steps"] = dict(
+            lane_change_steps
+        )
+        self._conflict_evidence["ego_lane_change_direction_by_agent"] = dict(
+            lane_change_directions
+        )
+        self._conflict_evidence["all_ego_changed_lane_after_cut_in"] = bool(
+            all_ego_changed_lane
+        )
+        self._conflict_evidence["measurable_platoon_response"] = measurable_response
+        recovered, gaps = self._platoon_formation_recovered(env)
+        actor_lane_id = (
+            int(actor_lane_index[2]) if len(actor_lane_index) >= 3 else None
+        )
+        ego_lane_ids = {
+            int(index[2])
+            for index in current_ego_lanes.values()
+            if len(index) >= 3
+        }
+        actor_excluded = bool(
+            all_ego_changed_lane
+            and len(ego_lane_ids) == 1
+            and actor_lane_id is not None
+            and actor_lane_id not in ego_lane_ids
+        )
+        stable = int(self._functional_state.get("formation_stable_steps", 0) or 0)
+        stable = (
+            stable + 1
+            if physical_corridor_entered
+            and all_ego_changed_lane
+            and recovered
+            and actor_excluded
+            else 0
+        )
+        self._functional_state["formation_stable_steps"] = stable
+        self._conflict_evidence["formation_current_bumper_gaps_m"] = gaps
+        ego_speed_km_h = {
+            name: float(getattr(agents[name], "speed_km_h", 0.0) or 0.0)
+            for name in ("agent0", "agent1", "agent2")
+            if name in agents
+        }
+        self._conflict_evidence["formation_current_ego_speed_km_h"] = (
+            ego_speed_km_h
+        )
+        self._conflict_evidence["formation_current_speed_spread_km_h"] = (
+            float(max(ego_speed_km_h.values()) - min(ego_speed_km_h.values()))
+            if len(ego_speed_km_h) == 3
+            else None
+        )
+        self._conflict_evidence["formation_recovery_stable_steps"] = stable
+        self._conflict_evidence["cut_in_actor_excluded_from_reassembly"] = bool(
+            actor_excluded
+        )
+        self._conflict_evidence["ego_only_reassembly"] = bool(stable >= 10)
+        self._conflict_evidence["formation_recovered_after_merge"] = bool(
+            self._conflict_evidence.get(
+                "formation_recovered_after_merge", False
+            )
+            or stable >= 10
+        )
+        self._functional_state["last_step"] = step_count
+
+    def _platoon_formation_recovered(self, env) -> tuple[bool, list[float]]:
+        agents = getattr(env, "agents", {}) or {}
+        ordered_names = [name for name in ("agent0", "agent1", "agent2") if name in agents]
+        if len(ordered_names) != 3:
+            return False, []
+        lane = _select_reference_lane(agents["agent0"])
+        if lane is None:
+            return False, []
+        try:
+            longitudinal = [
+                float(lane.local_coordinates(agents[name].position)[0])
+                for name in ordered_names
+            ]
+            lateral = [
+                float(lane.local_coordinates(agents[name].position)[1])
+                for name in ordered_names
+            ]
+        except Exception:
+            return False, []
+        lane_width = float(getattr(lane, "width", 3.5) or 3.5)
+        projection_aligned = not any(
+            abs(value) > 0.30 * lane_width for value in lateral
+        )
+        gaps = [
+            longitudinal[index]
+            - longitudinal[index + 1]
+            - 0.5 * self._vehicle_length_m(agents[ordered_names[index]])
+            - 0.5 * self._vehicle_length_m(agents[ordered_names[index + 1]])
+            for index in range(2)
+        ]
+        if not projection_aligned:
+            lane_indices = [
+                tuple(getattr(agents[name], "lane_index", ()) or ())
+                for name in ordered_names
+            ]
+            headings = [
+                float(getattr(agents[name], "heading_theta", 0.0) or 0.0)
+                for name in ordered_names
+            ]
+            heading_deltas = [
+                abs(
+                    math.atan2(
+                        math.sin(headings[index] - headings[index + 1]),
+                        math.cos(headings[index] - headings[index + 1]),
+                    )
+                )
+                for index in range(2)
+            ]
+            same_lane_family = bool(
+                all(len(index) >= 3 for index in lane_indices)
+                and len({int(index[2]) for index in lane_indices}) == 1
+                and max(heading_deltas) <= 0.75
+            )
+            if not same_lane_family:
+                return False, []
+            gaps = [
+                float(
+                    np.linalg.norm(
+                        np.asarray(agents[ordered_names[index]].position[:2])
+                        - np.asarray(agents[ordered_names[index + 1]].position[:2])
+                    )
+                    - 0.5 * self._vehicle_length_m(agents[ordered_names[index]])
+                    - 0.5 * self._vehicle_length_m(agents[ordered_names[index + 1]])
+                )
+                for index in range(2)
+            ]
+        speed_values = [
+            float(getattr(agents[name], "speed_km_h", 0.0) or 0.0)
+            for name in ordered_names
+        ]
+        if self.definition.scenario_id == "S6_background_merge_in":
+            lane_indices = [
+                tuple(getattr(agents[name], "lane_index", ()) or ())
+                for name in ordered_names
+            ]
+            initial_lane_ids = {
+                int(index[2])
+                for index in self._initial_agent_lanes.values()
+                if len(index) >= 3
+            }
+            current_lane_ids = {
+                int(index[2]) for index in lane_indices if len(index) >= 3
+            }
+            ego_only_common_changed_lane = bool(
+                len(lane_indices) == 3
+                and all(len(index) >= 3 for index in lane_indices)
+                and len(current_lane_ids) == 1
+                and not current_lane_ids.intersection(initial_lane_ids)
+            )
+            return bool(
+                ego_only_common_changed_lane
+                and all(7.0 <= gap <= 15.0 for gap in gaps)
+                and max(speed_values) - min(speed_values) <= 5.0
+            ), [float(value) for value in gaps]
+        upper_gap_limits = [24.0, 24.0]
+        speed_spread_limit_kmh = (
+            10.0
+            if self.definition.scenario_id == "S7_ego_merge_from_ramp"
+            else 8.0
+        )
+        return bool(
+            all(
+                5.0 <= gap <= upper_gap_limits[index]
+                for index, gap in enumerate(gaps)
+            )
+            and max(speed_values) - min(speed_values)
+            <= speed_spread_limit_kmh
+        ), [float(value) for value in gaps]
+
+    def _update_s7_functional_evidence(
+        self, env, traffic_by_name: Dict[str, object], step_count: int
+    ) -> None:
+        """Record timed-window and parallel-constraint S7 evidence."""
+
+        timed_stream_roles = (
+            "critical_gap_front",
+            "critical_gap_rear",
+            "next_gap_front",
+            "next_gap_rear",
+        )
+        constraint_count = int(
+            self._resolved_scenario_parameters.get(
+                "parallel_constraint_actor_count", 0
+            )
+        )
+        constraint_roles = tuple(
+            f"parallel_merge_constraint_{index}"
+            for index in range(constraint_count)
+        )
+        required_roles = (*timed_stream_roles, *constraint_roles)
+        agents = getattr(env, "agents", {}) or {}
+        # Evaluation may request the summary after MetaDrive has already
+        # cleared ``env.agents``.  Preserve the last real three-vehicle
+        # observation instead of overwriting valid entry/recovery evidence
+        # with an empty terminal bookkeeping state.
+        if len(agents) != 3:
+            return
+        mainline_blocks = {"g1", "c3", "merge0", "s_main2", "split0"}
+        ramp_blocks = {"h_ramp0", "s_ramp0", "c0_ramp0"}
+        actor_crossing_steps = self._functional_state.setdefault(
+            "s7_actor_crossing_steps", {}
+        )
+        for role in required_roles:
+            row = self._actor_manifest.get(role, {})
+            actor = traffic_by_name.get(str(row.get("object_name", "")))
+            if actor is None or role in actor_crossing_steps:
+                continue
+            current_lane = tuple(getattr(actor, "lane_index", ()) or ())
+            conflict_node = str(
+                self._conflict_evidence.get("s7_conflict_node", "")
+            )
+            if (
+                len(current_lane) >= 2
+                and conflict_node
+                and str(current_lane[0]) == conflict_node
+                and step_count >= 0
+            ):
+                actor_crossing_steps[role] = int(step_count)
+
+        ego_entry_steps = self._functional_state.setdefault(
+            "s7_ego_mainline_entry_steps", {}
+        )
+        current_blocks: Dict[str, str | None] = {}
+        for agent_id, vehicle in agents.items():
+            lane = tuple(getattr(vehicle, "lane_index", ()) or ())
+            block = self._road_to_block_id.get(tuple(lane[:2])) if len(lane) >= 2 else None
+            current_blocks[str(agent_id)] = block
+            if block in mainline_blocks and str(agent_id) not in ego_entry_steps:
+                ego_entry_steps[str(agent_id)] = int(step_count)
+
+        physical_split_observed = bool(
+            self._conflict_evidence.get("physical_split_observed", False)
+            or (
+                0 < len(ego_entry_steps) < 3
+                and any(block in mainline_blocks for block in current_blocks.values())
+                and any(block in ramp_blocks for block in current_blocks.values())
+            )
+        )
+
+        all_entered = bool(
+            len(ego_entry_steps) == len(agents) == 3
+            and all(block in mainline_blocks for block in current_blocks.values())
+        )
+        stranded = bool(
+            any(block in ramp_blocks for block in current_blocks.values())
+            if current_blocks
+            else True
+        )
+        first_entry = min(ego_entry_steps.values()) if ego_entry_steps else None
+        last_entry = max(ego_entry_steps.values()) if len(ego_entry_steps) == 3 else None
+        critical_front_step = actor_crossing_steps.get("critical_gap_front")
+        critical_rear_step = actor_crossing_steps.get("critical_gap_rear")
+        next_front_step = actor_crossing_steps.get("next_gap_front")
+        next_rear_step = actor_crossing_steps.get("next_gap_rear")
+        observed_behavior = None
+        if first_entry is not None and last_entry is not None:
+            if (
+                critical_front_step is not None
+                and critical_rear_step is not None
+                and critical_front_step <= first_entry
+                and last_entry <= critical_rear_step
+            ):
+                observed_behavior = "pass_first"
+            elif (
+                critical_rear_step is not None
+                and next_front_step is not None
+                and critical_rear_step <= first_entry
+                and next_front_step <= first_entry
+                and (
+                    next_rear_step is None
+                    or last_entry <= next_rear_step
+                )
+            ):
+                observed_behavior = "yield_then_merge"
+
+        expected_behavior = str(
+            self._resolved_scenario_parameters.get("expected_behavior", "")
+        )
+        behavior_matches = bool(observed_behavior == expected_behavior)
+        entry_steps = tuple(sorted(ego_entry_steps.values()))
+        non_simultaneous_entries = bool(
+            len(entry_steps) == 3 and entry_steps[0] < entry_steps[-1]
+        )
+        recovered, gaps = self._platoon_formation_recovered(env)
+        ego_speeds_km_h = {
+            str(agent_id): float(
+                getattr(vehicle, "speed_km_h", 0.0) or 0.0
+            )
+            for agent_id, vehicle in agents.items()
+        }
+        ego_speed_spread_km_h = (
+            float(max(ego_speeds_km_h.values()) - min(ego_speeds_km_h.values()))
+            if len(ego_speeds_km_h) == 3
+            else None
+        )
+        stable = int(self._functional_state.get("s7_formation_stable_steps", 0) or 0)
+        stable = stable + 1 if all_entered and recovered else 0
+        self._functional_state["s7_formation_stable_steps"] = stable
+        self._conflict_evidence.update(
+            {
+                "required_actor_roles_present": all(
+                    role in self._actor_manifest for role in required_roles
+                ),
+                "parallel_constraint_roles": list(constraint_roles),
+                "parallel_constraint_roles_present": bool(
+                    constraint_roles
+                    and all(
+                        role in self._actor_manifest for role in constraint_roles
+                    )
+                ),
+                "actor_conflict_crossing_steps": dict(actor_crossing_steps),
+                "critical_pair_traversed_conflict": all(
+                    role in actor_crossing_steps
+                    for role in ("critical_gap_front", "critical_gap_rear")
+                ),
+                "next_pair_traversed_conflict": all(
+                    role in actor_crossing_steps
+                    for role in ("next_gap_front", "next_gap_rear")
+                ),
+                "ego_mainline_entry_steps": dict(ego_entry_steps),
+                "physical_split_observed": physical_split_observed,
+                "non_simultaneous_mainline_entries": non_simultaneous_entries,
+                "observed_behavior": observed_behavior,
+                "expected_behavior_matched": behavior_matches,
+                "formation_current_bumper_gaps_m": gaps,
+                "formation_current_ego_speed_km_h": ego_speeds_km_h,
+                "formation_current_speed_spread_km_h": ego_speed_spread_km_h,
+                "formation_recovery_stable_steps": stable,
+                "formation_recovery_required_stable_steps": 2,
+                "formation_recovered_after_merge": bool(
+                    self._conflict_evidence.get(
+                        "formation_recovered_after_merge", False
+                    )
+                    or stable >= 2
+                ),
+            }
+        )
+        self._route_completion["all_agents_entered_mainline"] = all_entered
+        self._route_completion["no_agent_stranded_on_ramp"] = bool(
+            all_entered and not stranded
+        )
+        self._functional_state["last_step"] = int(step_count)
+
+    def _update_s8_functional_evidence(
+        self,
+        env,
+        traffic_by_name: Dict[str, object],
+        current_lanes: Dict[str, tuple],
+        blocks: Dict[str, str | None],
+        step_count: int,
+    ) -> None:
+        """Measure the interacting RIGHT transition and complete ramp chain."""
+
+        if len(current_lanes) != 3:
+            return
+        block_history = self._functional_state.setdefault(
+            "s8_block_history", {name: [] for name in current_lanes}
+        )
+        road_history = self._functional_state.setdefault(
+            "s8_road_history", {name: [] for name in current_lanes}
+        )
+        ramp_entry_steps = self._functional_state.setdefault(
+            "s8_ramp_entry_steps", {}
+        )
+        # This hybrid map exposes the verified diverge chain as the G-block
+        # internal roads below.  The first road is the exit-side approach;
+        # the following roads are the physical connector into s_ramp0.
+        exit_side_road = ("3C0_1_", "4G0_0_")
+        diverge_connector_roads = {
+            ("4G0_0_", "4G1_1_"),
+        }
+        exit_ramp_roads = {
+            ("4G1_1_", "4G1_2_"),
+            ("4G1_2_", "4G1_3_"),
+            ("4G1_3_", "4G1_4_"),
+            ("4G1_4_", "15s0_0_"),
+        }
+        ramp_blocks = {
+            "s_ramp0",
+            "c0_ramp0",
+            "s_ramp1",
+            "c1_ramp0",
+            "h_ramp0",
+        }
+        through_exit_roads = {("4G0_0_", "4G0_1_")}
+        for agent_id, lane in current_lanes.items():
+            block = blocks.get(agent_id)
+            if block is not None and (
+                not block_history[agent_id]
+                or block_history[agent_id][-1] != block
+            ):
+                block_history[agent_id].append(block)
+            road = tuple(lane[:2]) if len(lane) >= 2 else ()
+            if road and (
+                not road_history[agent_id]
+                or tuple(road_history[agent_id][-1]) != road
+            ):
+                road_history[agent_id].append(list(road))
+            if (
+                road in exit_ramp_roads or block in ramp_blocks
+            ) and agent_id not in ramp_entry_steps:
+                ramp_entry_steps[agent_id] = int(step_count)
+
+        connector_seen = {
+            name: any(
+                tuple(value) in diverge_connector_roads for value in history
+            )
+            for name, history in road_history.items()
+        }
+        initial_exit_lane_seen = {}
+        right_completion_steps = {}
+        for name, history in (
+            self._route_completion.get("agent_lane_transitions", {}) or {}
+        ).items():
+            initial = self._initial_agent_lanes.get(name, ())
+            matching_rows = [
+                row
+                for row in history
+                if len(initial) >= 3
+                and tuple(row.get("lane_index", [None, None, None])[:2])
+                == exit_side_road
+                and int(row.get("lane_index", [0, 0, -1])[2]) == 2
+            ]
+            initial_exit_lane_seen[name] = bool(matching_rows)
+            if matching_rows:
+                right_completion_steps[name] = int(matching_rows[0]["step"])
+
+        target_lane_count = sum(
+            1
+            for lane in current_lanes.values()
+            if len(lane) >= 3
+            and tuple(lane[:2]) == exit_side_road
+            and int(lane[2]) == 2
+        )
+        source_lane_count = sum(
+            1
+            for lane in current_lanes.values()
+            if len(lane) >= 3
+            and tuple(lane[:2]) == exit_side_road
+            and int(lane[2]) == 1
+        )
+        physical_split_observed = bool(
+            self._functional_state.get("s8_physical_split_observed", False)
+            or (target_lane_count > 0 and source_lane_count > 0)
+            or (
+                len(right_completion_steps) == 3
+                and len(set(right_completion_steps.values())) >= 2
+            )
+        )
+        self._functional_state["s8_physical_split_observed"] = (
+            physical_split_observed
+        )
+
+        split_row = self._actor_manifest.get("exit_split_constraint", {})
+        split_actor = traffic_by_name.get(str(split_row.get("object_name", "")))
+        relation_by_agent = self._functional_state.setdefault(
+            "s8_constraint_relation_by_agent", {}
+        )
+        minimum_constraint_gap_m = float(
+            self._functional_state.get("s8_minimum_constraint_gap_m", np.inf)
+        )
+        maximum_speed_spread_kmh = float(
+            self._functional_state.get("s8_maximum_speed_spread_kmh", 0.0)
+        )
+        if split_actor is not None:
+            current_map = getattr(getattr(env, "engine", None), "current_map", None)
+            try:
+                exit_lane = current_map.road_network.get_lane((*exit_side_road, 2))
+                split_s = float(exit_lane.local_coordinates(split_actor.position)[0])
+                split_length = self._vehicle_length_m(split_actor)
+                ego_speeds = []
+                for name, vehicle in (getattr(env, "agents", {}) or {}).items():
+                    ego_s = float(exit_lane.local_coordinates(vehicle.position)[0])
+                    center_delta = ego_s - split_s
+                    bumper_gap = max(
+                        abs(center_delta)
+                        - 0.5 * self._vehicle_length_m(vehicle)
+                        - 0.5 * split_length,
+                        0.0,
+                    )
+                    minimum_constraint_gap_m = min(
+                        minimum_constraint_gap_m, bumper_gap
+                    )
+                    ego_speeds.append(
+                        float(getattr(vehicle, "speed_km_h", 0.0) or 0.0)
+                    )
+                    if name in right_completion_steps and name not in relation_by_agent:
+                        relation_by_agent[str(name)] = (
+                            "ahead" if center_delta > 0.0 else "behind"
+                        )
+                if ego_speeds:
+                    maximum_speed_spread_kmh = max(
+                        maximum_speed_spread_kmh,
+                        max(ego_speeds) - min(ego_speeds),
+                    )
+            except (AttributeError, KeyError, TypeError, ValueError):
+                pass
+        self._functional_state["s8_minimum_constraint_gap_m"] = (
+            minimum_constraint_gap_m
+        )
+        self._functional_state["s8_maximum_speed_spread_kmh"] = (
+            maximum_speed_spread_kmh
+        )
+        constraint_straddled = bool(
+            "ahead" in relation_by_agent.values()
+            and "behind" in relation_by_agent.values()
+        )
+        ordered_lane_changes = [
+            name
+            for name, _ in sorted(
+                right_completion_steps.items(), key=lambda row: (row[1], row[0])
+            )
+        ]
+        behavior_class = None
+        if len(ordered_lane_changes) == 3 and constraint_straddled:
+            behavior_class = (
+                f"{self._resolved_scenario_parameters.get('exit_constraint_target_gap_id')}"
+                f":{'-'.join(ordered_lane_changes)}"
+            )
+        interaction_observed = bool(
+            constraint_straddled
+            and len(right_completion_steps) == 3
+            and len(set(right_completion_steps.values())) >= 2
+        )
+        ramp_chain_seen = {
+            name: any(
+                tuple(value) in exit_ramp_roads for value in road_history[name]
+            )
+            for name in current_lanes
+        }
+        continued = {
+            name: bool(
+                name in ramp_entry_steps
+                and step_count - int(ramp_entry_steps[name]) >= 10
+                and (
+                    tuple(current_lanes[name][:2]) in exit_ramp_roads
+                    or blocks.get(name) in ramp_blocks
+                )
+            )
+            for name in current_lanes
+        }
+        returned_to_mainline = any(
+            connector_seen.get(name, False)
+            and any(
+                tuple(value) in through_exit_roads
+                for value in road_history[name]
+            )
+            for name in current_lanes
+        )
+        preview_actions = (
+            getattr(env, "_preview_rule_maker_debug", {}) or {}
+        ).get("best_actions", {}) or {}
+        post_connector_nonkeep = bool(
+            any(
+                connector_seen.get(str(name), False) and int(value) != 0
+                for name, value in preview_actions.items()
+            )
+        )
+        self._functional_state["s8_post_connector_nonkeep"] = bool(
+            self._functional_state.get("s8_post_connector_nonkeep", False)
+            or post_connector_nonkeep
+        )
+        all_on_ramp = bool(
+            len(current_lanes) == 3
+            and all(
+                tuple(lane[:2]) in exit_ramp_roads
+                or blocks.get(name) in ramp_blocks
+                for name, lane in current_lanes.items()
+            )
+        )
+        recovered, recovery_gaps = self._platoon_formation_recovered(env)
+        recovery_stable_steps = int(
+            self._functional_state.get("s8_formation_stable_steps", 0) or 0
+        )
+        recovery_stable_steps = (
+            recovery_stable_steps + 1 if all_on_ramp and recovered else 0
+        )
+        self._functional_state["s8_formation_stable_steps"] = (
+            recovery_stable_steps
+        )
+        self._conflict_evidence.update(
+            {
+                "exit_constraint_roles_present": {
+                    "exit_split_constraint"
+                }.issubset(self._actor_manifest),
+                "exit_constraint_declared_count": int(
+                    self._resolved_scenario_parameters.get(
+                        "exit_constraint_actor_count", 0
+                    )
+                ),
+                "exit_constraint_realized_count": len(
+                    [
+                        role
+                        for role in self._actor_manifest
+                        if role.startswith("exit_") and "constraint" in role
+                    ]
+                ),
+                "exit_side_lane_entry_by_agent": initial_exit_lane_seen,
+                "right_lane_change_completion_steps": right_completion_steps,
+                "right_lane_change_order": ordered_lane_changes,
+                "constraint_relation_at_lane_change_by_agent": dict(
+                    relation_by_agent
+                ),
+                "constraint_straddled_by_lane_changes": constraint_straddled,
+                "minimum_split_constraint_bumper_gap_m": (
+                    None
+                    if not np.isfinite(minimum_constraint_gap_m)
+                    else float(minimum_constraint_gap_m)
+                ),
+                "maximum_platoon_speed_spread_during_exit_kmh": float(
+                    maximum_speed_spread_kmh
+                ),
+                "observed_lane_change_behavior_class": behavior_class,
+                "physical_split_observed": physical_split_observed,
+                "non_simultaneous_right_lane_changes": bool(
+                    len(right_completion_steps) == 3
+                    and len(set(right_completion_steps.values())) >= 2
+                ),
+                "causal_exit_actor_interaction_observed": interaction_observed,
+                "diverge_connector_seen_by_agent": connector_seen,
+                "ramp_chain_seen_by_agent": ramp_chain_seen,
+                "ramp_entry_steps": dict(ramp_entry_steps),
+                "continued_on_ramp_by_agent": continued,
+                "post_connector_nonkeep_observed": bool(
+                    self._functional_state["s8_post_connector_nonkeep"]
+                ),
+                "formation_current_bumper_gaps_m": recovery_gaps,
+                "formation_recovery_stable_steps": recovery_stable_steps,
+                "formation_recovery_required_stable_steps": 5,
+                "formation_recovered_on_ramp": bool(
+                    self._conflict_evidence.get(
+                        "formation_recovered_on_ramp", False
+                    )
+                    or recovery_stable_steps >= 5
+                ),
+            }
+        )
+        self._route_completion.update(
+            {
+                "all_agents_traversed_diverge_connector": bool(
+                    connector_seen and all(connector_seen.values())
+                ),
+                "all_agents_entered_exit_side_lane": bool(
+                    initial_exit_lane_seen
+                    and all(initial_exit_lane_seen.values())
+                ),
+                "all_agents_continued_on_exit_ramp": bool(
+                    self._route_completion.get(
+                        "all_agents_continued_on_exit_ramp", False
+                    )
+                    or (continued and all(continued.values()))
+                ),
+                "returned_to_mainline": bool(returned_to_mainline),
+            }
+        )
+
+    def _update_s9_functional_evidence(
+        self,
+        env,
+        traffic_by_name: Dict[str, object],
+        current_lanes: Dict[str, tuple],
+        blocks: Dict[str, str | None],
+        step_count: int,
+    ) -> None:
+        """Measure the split-actor bypass, post-channel return and recovery."""
+
+        agents = getattr(env, "agents", {}) or {}
+        if len(agents) != 3:
+            return
+        blocker_row = self._actor_manifest.get("blocking_actor", {})
+        blocker = traffic_by_name.get(str(blocker_row.get("object_name", "")))
+        source_index = tuple(blocker_row.get("spawn_lane_index", ()) or ())
+        road_network = getattr(
+            getattr(getattr(env, "engine", None), "current_map", None),
+            "road_network",
+            None,
+        )
+        try:
+            source_lane = road_network.get_lane(source_index)
+            blocker_s = float(source_lane.local_coordinates(blocker.position)[0])
+        except Exception:
+            return
+        completion_steps = self._functional_state.setdefault(
+            "s9_left_completion_steps", {}
+        )
+        completion_clearance = self._functional_state.setdefault(
+            "s9_left_completion_clearance_m", {}
+        )
+        split_relations = self._functional_state.setdefault(
+            "s9_split_actor_relation_at_left_completion", {}
+        )
+        passed = self._functional_state.setdefault("s9_passed_blocker", {})
+        cleared = self._functional_state.setdefault(
+            "s9_narrow_section_clear_steps", {}
+        )
+        right_completion_steps = self._functional_state.setdefault(
+            "s9_right_completion_steps", {}
+        )
+        split_role = str(
+            self._resolved_scenario_parameters.get(
+                "designated_split_actor_role", "left_bypass_split_actor"
+            )
+        )
+        split_row = self._actor_manifest.get(split_role, {})
+        split_actor = traffic_by_name.get(
+            str(split_row.get("object_name", ""))
+        )
+        bypass_index = tuple(split_row.get("spawn_lane_index", ()) or ())
+        try:
+            bypass_lane = road_network.get_lane(bypass_index)
+        except Exception:
+            return
+        minimum_split_actor_gap_m = float(
+            self._functional_state.get(
+                "s9_minimum_split_actor_gap_m", float("inf")
+            )
+        )
+        maximum_speed_spread_kmh = float(
+            self._functional_state.get("s9_maximum_speed_spread_kmh", 0.0)
+        )
+        ego_speeds_kmh = [
+            float(getattr(vehicle, "speed_km_h", 0.0) or 0.0)
+            for vehicle in agents.values()
+        ]
+        if ego_speeds_kmh:
+            maximum_speed_spread_kmh = max(
+                maximum_speed_spread_kmh,
+                max(ego_speeds_kmh) - min(ego_speeds_kmh),
+            )
+        for agent_id, vehicle in agents.items():
+            current = current_lanes.get(str(agent_id), ())
+            initial = self._initial_agent_lanes.get(str(agent_id), ())
+            try:
+                ego_s = float(source_lane.local_coordinates(vehicle.position)[0])
+                ego_bypass_s = float(
+                    bypass_lane.local_coordinates(vehicle.position)[0]
+                )
+            except Exception:
+                continue
+            if (
+                str(agent_id) not in completion_steps
+                and len(initial) >= 3
+                and int(initial[2]) == 1
+                and len(current) >= 3
+                and current[:2] == initial[:2]
+                and int(current[2]) == 0
+            ):
+                completion_steps[str(agent_id)] = int(step_count)
+                completion_clearance[str(agent_id)] = float(
+                    blocker_s
+                    - ego_s
+                    - 0.5 * self._vehicle_length_m(vehicle)
+                    - 0.5 * self._vehicle_length_m(blocker)
+                )
+                if split_actor is not None:
+                    try:
+                        split_s = float(
+                            bypass_lane.local_coordinates(split_actor.position)[0]
+                        )
+                        split_relations[str(agent_id)] = (
+                            "ahead" if ego_bypass_s > split_s else "behind"
+                        )
+                    except Exception:
+                        pass
+            if (
+                str(agent_id) not in passed
+                and ego_s > blocker_s + 0.5 * self._vehicle_length_m(vehicle)
+            ):
+                passed[str(agent_id)] = int(step_count)
+            block_id = blocks.get(str(agent_id))
+            narrow_block_id = str(
+                self._resolved_scenario_parameters.get(
+                    "narrow_section_block_id", "c3"
+                )
+            )
+            if (
+                str(agent_id) in completion_steps
+                and str(agent_id) in passed
+                and str(agent_id) not in cleared
+                and block_id is not None
+                and block_id != narrow_block_id
+            ):
+                cleared[str(agent_id)] = int(step_count)
+            if split_actor is not None and len(completion_steps) < 3:
+                try:
+                    actor_s, actor_d = bypass_lane.local_coordinates(
+                        split_actor.position
+                    )
+                    vehicle_s, vehicle_d = bypass_lane.local_coordinates(
+                        vehicle.position
+                    )
+                    lateral_overlap_limit_m = 0.5 * (
+                        float(getattr(vehicle, "WIDTH", 2.0) or 2.0)
+                        + float(getattr(split_actor, "WIDTH", 2.0) or 2.0)
+                    )
+                    if abs(float(vehicle_d) - float(actor_d)) <= (
+                        lateral_overlap_limit_m + 1.0e-6
+                    ):
+                        bumper_gap_m = max(
+                            abs(float(vehicle_s) - float(actor_s))
+                            - 0.5 * self._vehicle_length_m(vehicle)
+                            - 0.5 * self._vehicle_length_m(split_actor),
+                            0.0,
+                        )
+                        minimum_split_actor_gap_m = min(
+                            minimum_split_actor_gap_m, bumper_gap_m
+                        )
+                except Exception:
+                    pass
+
+        self._functional_state["s9_minimum_split_actor_gap_m"] = (
+            minimum_split_actor_gap_m
+        )
+        self._functional_state["s9_maximum_speed_spread_kmh"] = (
+            maximum_speed_spread_kmh
+        )
+
+        all_passed = len(passed) == 3
+        all_cleared = len(cleared) == 3
+        return_lane_id = int(
+            self._resolved_scenario_parameters.get(
+                "post_narrow_return_lane_id", 1
+            )
+        )
+        for agent_id, current in current_lanes.items():
+            is_on_return_lane = bool(
+                len(current) >= 3 and int(current[2]) == return_lane_id
+            )
+            if (
+                str(agent_id) in completion_steps
+                and is_on_return_lane
+                and not all_cleared
+            ):
+                self._functional_state[
+                    "s9_return_before_narrow_clear_observed"
+                ] = True
+            if (
+                all_cleared
+                and is_on_return_lane
+                and str(agent_id) not in right_completion_steps
+            ):
+                right_completion_steps[str(agent_id)] = int(step_count)
+        all_returned = len(right_completion_steps) == 3
+        recovered, gaps = self._platoon_formation_recovered(env)
+        stable = int(self._functional_state.get("s9_recovery_stable_steps", 0) or 0)
+        stable = (
+            stable + 1
+            if all_returned
+            and recovered
+            and current_lanes
+            and all(
+                len(lane_index) >= 3 and int(lane_index[2]) == 1
+                for lane_index in current_lanes.values()
+            )
+            else 0
+        )
+        self._functional_state["s9_recovery_stable_steps"] = stable
+        clearance_threshold = float(
+            self._resolved_scenario_parameters.get(
+                "latest_lane_change_completion_before_blocker_m", 8.0
+            )
+        )
+        clearance_ok = bool(
+            len(completion_clearance) == 3
+            and all(
+                float(value) >= clearance_threshold
+                for value in completion_clearance.values()
+            )
+        )
+        completion_values = [int(value) for value in completion_steps.values()]
+        non_simultaneous_left = bool(
+            len(completion_values) == 3
+            and max(completion_values) - min(completion_values) >= 2
+        )
+        usable_bypass_gap_m = float(
+            self._resolved_scenario_parameters.get(
+                "usable_bypass_gap_m", 0.0
+            )
+            or 0.0
+        )
+        split_relation_values = set(split_relations.values())
+        split_actor_straddled = split_relation_values == {"ahead", "behind"}
+        split_interaction_observed = bool(
+            np.isfinite(minimum_split_actor_gap_m)
+            and usable_bypass_gap_m > 0.0
+            and minimum_split_actor_gap_m <= usable_bypass_gap_m
+            and non_simultaneous_left
+            and split_actor_straddled
+        )
+        return_before_clear = bool(
+            self._functional_state.get(
+                "s9_return_before_narrow_clear_observed", False
+            )
+        )
+        self._conflict_evidence.update(
+            {
+                "s9_actor_roles_present": {
+                    "blocking_actor", split_role
+                }.issubset(self._actor_manifest),
+                "left_completion_steps": dict(completion_steps),
+                "left_completion_clearance_m": dict(completion_clearance),
+                "required_completion_clearance_m": clearance_threshold,
+                "left_completion_clearance_satisfied": clearance_ok,
+                "non_simultaneous_left_lane_changes": non_simultaneous_left,
+                "split_actor_relation_at_left_completion_by_agent": dict(
+                    split_relations
+                ),
+                "split_actor_straddled_by_left_completions": (
+                    split_actor_straddled
+                ),
+                "minimum_split_actor_gap_m": (
+                    None
+                    if not np.isfinite(minimum_split_actor_gap_m)
+                    else float(minimum_split_actor_gap_m)
+                ),
+                "maximum_platoon_speed_spread_during_bypass_kmh": float(
+                    maximum_speed_spread_kmh
+                ),
+                "causal_split_actor_interaction_observed": (
+                    split_interaction_observed
+                ),
+                "blocker_pass_steps": dict(passed),
+                "narrow_section_clear_steps": dict(cleared),
+                "right_return_completion_steps": dict(
+                    right_completion_steps
+                ),
+                "return_before_narrow_section_clear_observed": (
+                    return_before_clear
+                ),
+                "formation_current_bumper_gaps_m": gaps,
+                "formation_recovery_stable_steps": stable,
+                "formation_recovered_after_return": stable >= 2,
+            }
+        )
+        self._route_completion.update(
+            {
+                "all_agents_changed_lane": len(completion_steps) == 3,
+                "all_agents_passed_blocker": all_passed,
+                "all_agents_cleared_narrow_section": all_cleared,
+                "all_agents_traversed_narrow_section": all_cleared,
+                "all_agents_returned_to_original_lane": all_returned,
+                "returned_to_original_lane": all_returned,
+            }
+        )
+
+    def _functional_success(self, recipes_complete: bool) -> bool:
+        if not recipes_complete:
+            return False
+        if self._actor_manifest and not all(
+            bool(row.get("active", False)) for row in self._actor_manifest.values()
+        ):
+            return False
+        scenario_id = self.definition.scenario_id
+        if scenario_id == "S5_hard_brake_lead":
+            roles_complete = {
+                "hard_brake_lead", "s5_adjacent_left", "s5_adjacent_right"
+            }.issubset(self._actor_manifest)
+            behavior = self._conflict_evidence.get("observed_behavior_class")
+            behavior_evidence_valid = bool(
+                behavior == "keep_emergency_braking"
+                or (
+                    behavior == "coordinated_lane_change"
+                    and self._conflict_evidence.get(
+                        "real_lane_change_completed", False
+                    )
+                    and self._conflict_evidence.get("lane_change_direction")
+                    in {"left", "right"}
+                )
+                or (
+                    behavior == "temporary_formation_release_and_recovery"
+                    and self._conflict_evidence.get(
+                        "mixed_direction_lane_change_completed", False
+                    )
+                    and self._conflict_evidence.get(
+                        "reassembly_completed", False
+                    )
+                    and self._conflict_evidence.get("lane_change_direction")
+                    == "mixed"
+                )
+            )
+            return bool(
+                roles_complete
+                and self._conflict_evidence.get("lead_brake_profile_realized", False)
+                and behavior_evidence_valid
+                and self._conflict_evidence.get("hazard_cleared", False)
+                and self._conflict_evidence.get(
+                    "formation_recovered_after_hazard", False
+                )
+            )
+        if scenario_id == "S6_background_merge_in":
+            return bool(
+                {"s6_gap_intruder"}.issubset(self._actor_manifest)
+                and self._conflict_evidence.get("designated_gap_observed", False)
+                and self._conflict_evidence.get(
+                    "all_ego_changed_lane_after_cut_in", False
+                )
+                and self._conflict_evidence.get("measurable_platoon_response", False)
+                and self._conflict_evidence.get(
+                    "cut_in_actor_excluded_from_reassembly", False
+                )
+                and self._conflict_evidence.get("ego_only_reassembly", False)
+                and self._conflict_evidence.get(
+                    "formation_recovered_after_merge", False
+                )
+            )
+        if scenario_id == "S7_ego_merge_from_ramp":
+            timed_stream_roles = {
+                "critical_gap_front",
+                "critical_gap_rear",
+                "next_gap_front",
+                "next_gap_rear",
+            }
+            constraint_count = int(
+                self._resolved_scenario_parameters.get(
+                    "parallel_constraint_actor_count", 0
+                )
+            )
+            constraint_roles = {
+                f"parallel_merge_constraint_{index}"
+                for index in range(constraint_count)
+            }
+            return bool(
+                timed_stream_roles.issubset(self._actor_manifest)
+                and 1 <= constraint_count <= 3
+                and constraint_roles.issubset(self._actor_manifest)
+                and self._conflict_evidence.get(
+                    "parallel_constraint_initial_region_valid", False
+                )
+                and self._conflict_evidence.get(
+                    "parallel_constraint_roles_present", False
+                )
+                and self._conflict_evidence.get(
+                    "critical_pair_traversed_conflict", False
+                )
+                and self._conflict_evidence.get(
+                    "expected_behavior_matched", False
+                )
+                and self._route_completion.get(
+                    "all_agents_entered_mainline", False
+                )
+                and self._route_completion.get(
+                    "no_agent_stranded_on_ramp", False
+                )
+                and self._conflict_evidence.get(
+                    "physical_split_observed", False
+                )
+                and self._conflict_evidence.get(
+                    "non_simultaneous_mainline_entries", False
+                )
+                and self._conflict_evidence.get(
+                    "formation_recovered_after_merge", False
+                )
+            )
+        if scenario_id == "S8_ego_exit_to_ramp":
+            return bool(
+                {"exit_split_constraint"}.issubset(
+                    self._actor_manifest
+                )
+                and self._route_completion.get(
+                    "all_agents_entered_exit_side_lane", False
+                )
+                and self._conflict_evidence.get(
+                    "causal_exit_actor_interaction_observed", False
+                )
+                and self._conflict_evidence.get(
+                    "physical_split_observed", False
+                )
+                and self._conflict_evidence.get(
+                    "non_simultaneous_right_lane_changes", False
+                )
+                and self._conflict_evidence.get(
+                    "constraint_straddled_by_lane_changes", False
+                )
+                and self._route_completion.get(
+                    "all_agents_traversed_diverge_connector", False
+                )
+                and self._route_completion.get(
+                    "all_agents_continued_on_exit_ramp", False
+                )
+                and not self._route_completion.get(
+                    "returned_to_mainline", False
+                )
+                and not self._conflict_evidence.get(
+                    "post_connector_nonkeep_observed", False
+                )
+                and self._conflict_evidence.get(
+                    "formation_recovered_on_ramp", False
+                )
+            )
+        if scenario_id == "S9_narrow_channel_negotiation":
+            split_role = str(
+                self._resolved_scenario_parameters.get(
+                    "designated_split_actor_role", "left_bypass_split_actor"
+                )
+            )
+            return bool(
+                {"blocking_actor", split_role}.issubset(
+                    self._actor_manifest
+                )
+                and self._conflict_evidence.get(
+                    "designated_split_actor_initial_region_valid", False
+                )
+                and self._route_completion.get("all_agents_changed_lane", False)
+                and self._conflict_evidence.get(
+                    "non_simultaneous_left_lane_changes", False
+                )
+                and self._conflict_evidence.get(
+                    "split_actor_straddled_by_left_completions", False
+                )
+                and self._conflict_evidence.get(
+                    "causal_split_actor_interaction_observed", False
+                )
+                and self._conflict_evidence.get(
+                    "left_completion_clearance_satisfied", False
+                )
+                and self._route_completion.get("all_agents_passed_blocker", False)
+                and self._route_completion.get(
+                    "all_agents_traversed_narrow_section", False
+                )
+                and self._route_completion.get(
+                    "all_agents_returned_to_original_lane", False
+                )
+                and not self._conflict_evidence.get(
+                    "return_before_narrow_section_clear_observed", False
+                )
+                and self._conflict_evidence.get(
+                    "formation_recovered_after_return", False
+                )
+            )
+        return bool(self.summary.scenario_realized)
 
     def _mark_realized(self, step_count: int, note: str) -> None:
         self.summary.scenario_realized = True

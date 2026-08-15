@@ -1,0 +1,94 @@
+{
+  "format": "s5_s9_candidate_v3_definition_implementation_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-13T16:03:23+08:00",
+  "status": "implementation_and_short_physical_smoke_passed_pending_full_fixed_five_seed_acceptance",
+  "source_git_commit": "3e15c2a5d0297a2dd0bfb62e8374df89d9e1fe8d",
+  "worktree_state": "uncommitted_candidate_revision_changes_preserved",
+  "scope": {
+    "candidate_revision": "v3",
+    "formal_v1_contract_changed": false,
+    "formal_50k_dataset_or_checkpoint_metadata_changed": false,
+    "candidate_contract_frozen": false
+  },
+  "implemented_definition": {
+    "S8_ego_exit_to_ramp": {
+      "exit_constraint_actor_count_range": [1, 3],
+      "designated_split_actor": "exit_split_constraint",
+      "target_ego_gap_choices": [
+        "agent0-agent1",
+        "agent1-agent2"
+      ],
+      "required_physical_evidence": [
+        "at least one ego completes RIGHT ahead of the designated split actor",
+        "at least one ego completes RIGHT behind the same designated split actor",
+        "the three ego vehicles do not all complete the RIGHT lane change simultaneously",
+        "the fixed five-seed suite contains at least two behavior classes based on target gap and completion order",
+        "all ego vehicles continue on the ramp and recover longitudinal platoon spacing"
+      ]
+    },
+    "S5_to_S9_incidental_background_traffic": {
+      "actor_count_range_per_episode": [3, 6],
+      "applies_to_every_scenario": true,
+      "policy": "lane_keeping_ground_truth_idm",
+      "minimum_initial_ego_clearance_m": 60.0,
+      "minimum_inter_actor_clearance_m": 18.0,
+      "causal_scenario_role": false,
+      "exact_declared_count_must_be_realized": true
+    }
+  },
+  "implementation_files": [
+    "scenarios/definitions.py",
+    "scenarios/s5_s9_sampling.py",
+    "scenarios/orchestrator.py",
+    "models/platoon_planner/platoon_normal_planner.py",
+    "evaluation/run_s5_s9_candidate_revision.py",
+    "docs/project/s5_s9_functional_scenario_design.json"
+  ],
+  "verification": {
+    "focused_regression": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_s5_s9_sampling.py tests/test_scenario_definitions.py tests/test_scenario_orchestrator_adjacent_vehicles.py tests/test_s5_candidate_runner_gate.py tests/test_bev_round13_scenario_contract.py tests/test_platoon_normal_planner.py tests/test_route_spawn_manager_fixed_platoon_spawn.py -q",
+      "result": "148 passed, 15 warnings"
+    },
+    "S8_seed17_40_step_physical_smoke": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m evaluation.preview_and_evaluation --scenario-id S8_ego_exit_to_ramp --local-route R6_exit_to_ramp --num-agents 3 --num-episodes 1 --seeds 17 --horizon 40 --traffic-density 0 --output-root /tmp/s8_candidate_v3_transition_smoke2 --no-topdown-video --no-semantic-bev-video --no-trajectory-data",
+      "native_joint_planning_steps": "40/40",
+      "collision": false,
+      "out_of_road": false,
+      "exit_constraint_actor_count": 1,
+      "incidental_background_actor_count": 4,
+      "right_lane_change_completion_steps": {
+        "agent0": 30,
+        "agent1": 30,
+        "agent2": 26
+      },
+      "constraint_relation_at_completion": {
+        "agent0": "ahead",
+        "agent1": "ahead",
+        "agent2": "behind"
+      },
+      "constraint_straddled_by_lane_changes": true,
+      "non_simultaneous_right_lane_changes": true,
+      "minimum_split_constraint_bumper_gap_m": 6.2301091067113,
+      "behavior_class": "agent1-agent2:agent2-agent0-agent1",
+      "expected_short_horizon_result": "scenario_functional_gate_failed because the 40-step smoke intentionally ends before connector traversal, ramp continuation, and formation recovery",
+      "artifact": "/tmp/s8_candidate_v3_transition_smoke2/S8_ego_exit_to_ramp/metrices/episode_0000/expert_episode.json"
+    }
+  },
+  "hard_gate_status": {
+    "passed": false,
+    "active_gate": "complete_new_s5_s9_fixed_five_seed_physical_safety_video_and_artifact_validation",
+    "remaining": [
+      "rerun S5-S9 on seeds 17, 23, 31, 47, and 59 for the full 200-step horizon",
+      "prove every episode realizes exactly three to six incidental background actors",
+      "prove S8 front/behind split-actor crossing in all five episodes and at least two cross-seed behavior classes",
+      "verify connector traversal, ramp continuation, longitudinal reassembly, safety, native planning, videos, and persisted artifacts",
+      "complete the combined candidate-v3 review before freezing a new contract"
+    ]
+  },
+  "evidence_compatibility": {
+    "formal_v1_evidence_remains_valid": true,
+    "previous_candidate_v2_per_scenario_acceptance": "historical_only_and_superseded_for_candidate_v3",
+    "reason": "The new explicit background-actor contract changes every S5-S9 candidate episode and the S8 split-actor gate is stronger than the previous S8 definition."
+  }
+}

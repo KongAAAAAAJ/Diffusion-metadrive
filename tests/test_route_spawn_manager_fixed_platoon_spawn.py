@@ -6,6 +6,7 @@ import pytest
 
 from envs.diffusion_envs import route_spawn_manager as route_spawn_module
 from envs.diffusion_envs.route_spawn_manager import RouteAwareSpawnManager
+from scenarios.s5_s9_sampling import resolve_s5_s9_parameters
 
 
 class _FakeRoad:
@@ -120,6 +121,69 @@ def test_fixed_route_spawn_configs_are_deterministic_and_near_route_start(monkey
     assert configs["agent0"]["destination"] == "B"
 
 
+def test_s8_fixed_route_spawn_uses_resolved_ego_speed(monkeypatch):
+    lanes = [
+        _FakeLane(index=("A", "B", lane_id), length=130.0)
+        for lane_id in range(3)
+    ]
+    manager = _manager_with_fixed_spawn(
+        monkeypatch,
+        lanes=lanes,
+        scenario_id="S8_ego_exit_to_ramp",
+    )
+    manager.engine.global_config.update(
+        local_route="R6_exit_to_ramp",
+        initial_speed_km_h=22.0,
+    )
+    manager._fixed_route_seed = 23
+
+    assert manager._apply_fixed_route_spawn_configs() is True
+
+    configs = manager.engine.global_config["agent_configs"]
+    assert configs["agent0"]["spawn_velocity"][0] * 3.6 == pytest.approx(
+        25.0
+    )
+    assert all(
+        config["spawn_velocity"] == configs["agent0"]["spawn_velocity"]
+        for config in configs.values()
+    )
+
+
+def test_s9_fixed_route_spawn_uses_resolved_speed_and_narrow_entry_distance(
+    monkeypatch,
+):
+    lanes = [
+        _FakeLane(index=("A", "B", lane_id), length=100.0)
+        for lane_id in range(3)
+    ]
+    manager = _manager_with_fixed_spawn(
+        monkeypatch,
+        lanes=lanes,
+        scenario_id="S9_narrow_channel_negotiation",
+    )
+    manager.engine.global_config.update(
+        local_route="R8_narrow_channel",
+        initial_speed_km_h=16.0,
+    )
+    manager._fixed_route_seed = 59
+    resolved = resolve_s5_s9_parameters(
+        spawn_seed=59,
+        scenario_id="S9_narrow_channel_negotiation",
+        local_route="R8_narrow_channel",
+        ego_initial_speed_km_h=16.0,
+    )
+
+    assert manager._apply_fixed_route_spawn_configs() is True
+
+    lead = manager.engine.global_config["agent_configs"]["agent0"]
+    assert lead["spawn_longitude"] == pytest.approx(
+        100.0 - resolved["ego_distance_to_narrow_entry_m"]
+    )
+    assert lead["spawn_velocity"][0] * 3.6 == pytest.approx(
+        resolved["ego_initial_speed_km_h"]
+    )
+
+
 def test_fixed_route_spawn_zones_match_final_agent_configs(monkeypatch):
     manager = _manager_with_fixed_spawn(monkeypatch)
 
@@ -161,6 +225,35 @@ def test_fixed_route_spawn_can_use_scenario_distance_on_first_route_road(monkeyp
     assert configs["agent0"]["spawn_longitude"] == pytest.approx(100.0)
     assert configs["agent1"]["spawn_longitude"] == pytest.approx(90.0)
     assert configs["agent2"]["spawn_longitude"] == pytest.approx(80.0)
+
+
+def test_fixed_route_spawn_samples_scenario_distance_range_from_road_end(monkeypatch):
+    lanes = [
+        _FakeLane(index=("A", "B", 0), length=200.0),
+        _FakeLane(index=("A", "B", 1), length=200.0),
+        _FakeLane(index=("A", "B", 2), length=200.0),
+    ]
+    scenario = SimpleNamespace(
+        ego_spawn_lane_preference="rightmost",
+        ego_spawn_lane_probabilities=None,
+        ego_spawn_longitude_m=None,
+        ego_spawn_distance_to_route_end_m=(25.0, 50.0),
+        ego_spawn_reference_block_id=None,
+    )
+    manager = _manager_with_fixed_spawn(
+        monkeypatch,
+        lanes=lanes,
+        scenario_id="test_distance_range_on_first_road",
+        scenario=scenario,
+    )
+    manager.np_random = _FixedUniformRng(37.5)
+
+    assert manager._apply_fixed_route_spawn_configs() is True
+
+    configs = manager.engine.global_config["agent_configs"]
+    assert configs["agent0"]["spawn_longitude"] == pytest.approx(162.5)
+    assert configs["agent1"]["spawn_longitude"] == pytest.approx(152.5)
+    assert configs["agent2"]["spawn_longitude"] == pytest.approx(142.5)
 
 
 def test_fixed_route_spawn_can_use_middle_lane_preference(monkeypatch):

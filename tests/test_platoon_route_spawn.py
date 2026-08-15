@@ -16,10 +16,29 @@ class _FakeLane:
     def position(self, longitudinal: float, lateral: float) -> np.ndarray:
         return np.asarray([float(longitudinal), float(lateral)], dtype=np.float32)
 
+    def heading_theta_at(self, longitudinal: float) -> float:  # noqa: ARG002
+        return 0.0
+
 
 class _FakeTrafficVehicle:
     def __init__(self, x: float, y: float = 0.0) -> None:
         self.position = np.asarray([float(x), float(y)], dtype=np.float32)
+
+
+class _RepositionVehicle:
+    def __init__(self) -> None:
+        self.velocity = None
+        self.navigation = None
+
+    def set_position(self, position) -> None:
+        self.position = np.asarray(position, dtype=np.float32)
+
+    def set_heading_theta(self, heading: float) -> None:
+        self.heading_theta = float(heading)
+
+    def set_velocity(self, velocity, *, in_local_frame: bool) -> None:
+        assert in_local_frame is False
+        self.velocity = np.asarray(velocity, dtype=np.float64)
 
 
 class _FixedUniformRng:
@@ -69,6 +88,55 @@ def test_route_spawn_bounds_keep_tail_away_from_lane_start() -> None:
     assert round(max_lead, 1) == 72.0
 
 
+def test_route_reposition_preserves_fixed_spawn_manager_speed(
+    monkeypatch,
+) -> None:
+    env = PlatoonEnv.__new__(PlatoonEnv)
+    env.config = {
+        "local_route": "R6_exit_to_ramp",
+        "scenario_id": "S8_ego_exit_to_ramp",
+        "platoon_fixed_route_spawn": True,
+        "platoon_spawn_gap_m": 10.0,
+        "platoon_route_spawn_lane_index": 0,
+        "initial_speed_km_h": 22.0,
+    }
+    env._agent_ids = ["agent0", "agent1", "agent2"]
+    active_agents = {
+        agent_id: _RepositionVehicle() for agent_id in env._agent_ids
+    }
+    env.agent_manager = SimpleNamespace(active_agents=active_agents)
+    lane = _FakeLane(length=130.0)
+    road = SimpleNamespace(start_node="A", end_node="B")
+    fixed_configs = {
+        agent_id: {
+            "spawn_lane_index": ("A", "B", 0),
+            "spawn_longitude": 60.0 - index * 10.0,
+            "spawn_velocity": (26.0 / 3.6, 0.0),
+            "spawn_velocity_car_frame": True,
+        }
+        for index, agent_id in enumerate(env._agent_ids)
+    }
+    engine = SimpleNamespace(
+        agent_manager=SimpleNamespace(active_agents=active_agents),
+        spawn_manager=SimpleNamespace(
+            get_main_route_spawn_roads=lambda _current_map: [road]
+        ),
+        current_map=SimpleNamespace(
+            road_network=SimpleNamespace(graph={"A": {"B": [lane]}})
+        ),
+        global_config={"agent_configs": fixed_configs},
+    )
+    monkeypatch.setattr(engine_utils, "get_engine", lambda: engine)
+    env._select_route_spawn_lead_long = lambda _lane, _gap: 60.0
+
+    env._reposition_platoon_on_route()
+
+    assert all(
+        np.linalg.norm(vehicle.velocity) * 3.6 == pytest.approx(26.0)
+        for vehicle in active_agents.values()
+    )
+
+
 def test_select_route_spawn_lead_moves_away_from_nearby_traffic() -> None:
     env = _build_env(traffic_positions=[20.0, 21.0, 22.0])
     lane = _FakeLane(length=80.0)
@@ -85,6 +153,7 @@ def _build_runtime_route_env(monkeypatch, *, explicit_initial_speed: bool = Fals
         scenario_id="S5_hard_brake_lead",
         local_route="R1_entry_straight",
         initial_speed_km_h=31.0 if explicit_initial_speed else 24.0,
+        vehicle_length_m=5.74,
     )
     env.config = {
         "scenario_id": "S5_hard_brake_lead",
@@ -115,8 +184,20 @@ def test_runtime_scenario_route_replaces_route_and_invalidates_old_destinations(
 
     assert env.platoon_config.scenario_id == "S6_background_merge_in"
     assert env.platoon_config.local_route == "R6_mainline_merge_approach"
-    assert env.config["ego_main_route_block_ids"] == ("c2", "g1", "c3")
-    assert env.engine.global_config["ego_main_route_block_ids"] == ("c2", "g1", "c3")
+    assert env.config["ego_main_route_block_ids"] == (
+        "c2",
+        "g1",
+        "c3",
+        "merge0",
+        "s_main2",
+    )
+    assert env.engine.global_config["ego_main_route_block_ids"] == (
+        "c2",
+        "g1",
+        "c3",
+        "merge0",
+        "s_main2",
+    )
     assert env.config["route_preset"] == "mainline"
     assert env.platoon_config.initial_speed_km_h == pytest.approx(24.5)
     assert env.engine.global_config["initial_speed_km_h"] == pytest.approx(24.5)

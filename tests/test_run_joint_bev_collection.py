@@ -157,6 +157,16 @@ def test_load_config_is_strict_and_fingerprint_excludes_run_target(
         runner.load_run_config(_write_config(tmp_path, "unexpected: {}\n"))
 
 
+def test_candidate_v3_config_binds_current_contract_and_s9_horizon() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_diagnostic10k_20260814.yaml")
+    )
+    assert config.scenario_contract_id == "candidate_v3"
+    assert config.scenario_contract()["format"] == "bev_primary_s5_s9_contract_v2"
+    assert config.episode_step_limit("S7_ego_merge_from_ramp") == 200
+    assert config.episode_step_limit("S9_narrow_channel_negotiation") == 800
+
+
 def test_config_rejects_sensor_or_non_boolean_resume(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     text = config_path.read_text(encoding="utf-8").replace(
@@ -259,6 +269,164 @@ def test_formal_pilot_config_and_quota_clipping_are_strict() -> None:
     selected, steps = runner._select_formal_quota_samples(rollout, remaining=3)
     assert len(selected) == 3
     assert steps == (1, 3, 5)
+
+
+def test_candidate_v3_formal50k_freezes_diversity_contract() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_formal50k.yaml")
+    )
+    requirements = config.formal_diversity
+    assert config.target_joint_steps == 50_000
+    assert tuple(config.formal_scenario_quotas.values()) == (10_000,) * 5
+    assert requirements is not None
+    assert requirements.min_episodes_per_scenario == 50
+    assert requirements.max_samples_per_episode == 200
+    assert requirements.require_all_scenarios_in_each_split is True
+    assert requirements.required_spawn_seeds == (17, 23, 31, 47, 59)
+    assert requirements.required_incidental_background_actor_counts == (
+        3,
+        4,
+        5,
+        6,
+    )
+    assert set(requirements.required_behavior_categories) == set(
+        config.formal_scenario_quotas
+    )
+    assert requirements.behavior_rule_maker_profiles == {
+        "S5_hard_brake_lead": {
+            "keep_emergency_braking": "brake_first",
+            "temporary_formation_release_and_recovery": "balanced",
+        }
+    }
+    assert config.episode_step_limit("S9_narrow_channel_negotiation") == 800
+
+    forced = runner.sample_episode_spec_for_scenario(
+        config,
+        0,
+        "S9_narrow_channel_negotiation",
+        spawn_seed=17,
+    )
+    assert forced.spawn_seed == 17
+
+
+def test_formal_diversity_capacity_reserves_the_last_sample() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_formal50k.yaml")
+    )
+    requirements = config.formal_diversity
+    scenario_id = "S5_hard_brake_lead"
+    row = {
+        "joint_samples": 9_800,
+        "episodes": 49,
+        "spawn_seeds": set(requirements.required_spawn_seeds),
+        "splits": set(runner.FORMAL_SPLITS),
+        "incidental_background_actor_counts": set(
+            requirements.required_incidental_background_actor_counts
+        ),
+        "behavior_categories": {"keep_emergency_braking"},
+    }
+    capacity = runner._formal_sample_capacity(
+        scenario_id=scenario_id,
+        remaining=200,
+        row=row,
+        requirements=requirements,
+        split="train",
+        spawn_seed=1001,
+        coverage={
+            "incidental_background_actor_count": 3,
+            "behavior_category": "keep_emergency_braking",
+        },
+    )
+    assert capacity == 199
+    row["behavior_categories"].add(
+        "temporary_formation_release_and_recovery"
+    )
+    assert runner._formal_sample_capacity(
+        scenario_id=scenario_id,
+        remaining=200,
+        row=row,
+        requirements=requirements,
+        split="train",
+        spawn_seed=1001,
+        coverage={
+            "incidental_background_actor_count": 3,
+            "behavior_category": "keep_emergency_braking",
+        },
+    ) == 200
+
+
+def test_formal_rule_profile_targets_the_first_missing_behavior() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_formal50k.yaml")
+    )
+    requirements = config.formal_diversity
+    row = {"behavior_categories": set()}
+    assert runner._formal_rule_maker_profile(
+        scenario_id="S5_hard_brake_lead",
+        row=row,
+        requirements=requirements,
+    ) == "brake_first"
+    row["behavior_categories"].add("keep_emergency_braking")
+    assert runner._formal_rule_maker_profile(
+        scenario_id="S5_hard_brake_lead",
+        row=row,
+        requirements=requirements,
+    ) == "balanced"
+    assert runner._formal_rule_maker_profile(
+        scenario_id="S7_ego_merge_from_ramp",
+        row={"behavior_categories": set()},
+        requirements=requirements,
+    ) is None
+
+
+def test_formal_coverage_requires_realized_background_and_behavior() -> None:
+    summary = {
+        "resolved_scenario_parameters": {
+            "incidental_background_actor_count": 4,
+        },
+        "conflict_evidence": {
+            "incidental_background_realized_count": 4,
+            "observed_behavior_class": "keep_emergency_braking",
+        },
+    }
+    assert runner._formal_episode_coverage(
+        "S5_hard_brake_lead", summary
+    ) == {
+        "incidental_background_actor_count": 4,
+        "behavior_category": "keep_emergency_braking",
+    }
+    summary["conflict_evidence"]["incidental_background_realized_count"] = 3
+    with pytest.raises(runner.JointCollectionError) as exc_info:
+        runner._formal_episode_coverage("S5_hard_brake_lead", summary)
+    assert exc_info.value.reason_code == "formal_pilot_coverage_metadata_missing"
+
+
+def test_formal_completion_rejects_missing_split_and_accepts_full_coverage() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_formal50k.yaml")
+    )
+    requirements = config.formal_diversity
+    progress = runner._empty_formal_progress(config.formal_scenario_quotas)
+    for scenario_id, row in progress.items():
+        row["joint_samples"] = 10_000
+        row["episodes"] = 50
+        row["spawn_seeds"].update(requirements.required_spawn_seeds)
+        row["spawn_seeds"].update(range(1000, 1045))
+        row["splits"].update(runner.FORMAL_SPLITS)
+        row["incidental_background_actor_counts"].update((3, 4, 5, 6))
+        row["behavior_categories"].update(
+            requirements.required_behavior_categories[scenario_id]
+        )
+    runner._validate_formal_completion(
+        progress, config.formal_scenario_quotas, requirements
+    )
+
+    progress["S9_narrow_channel_negotiation"]["splits"].remove("test")
+    with pytest.raises(runner.JointCollectionError) as exc_info:
+        runner._validate_formal_completion(
+            progress, config.formal_scenario_quotas, requirements
+        )
+    assert exc_info.value.reason_code == "formal_pilot_split_coverage_incomplete"
 
 
 def test_resume_true_creates_fresh_bundle_but_rejects_partial_initialization(

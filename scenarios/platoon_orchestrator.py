@@ -69,11 +69,23 @@ class PlatoonScenarioOrchestrator(ScenarioOrchestrator):
     # Recipe execution guard
     # ------------------------------------------------------------------
 
-    def _execute_recipe(self, env, ego_vehicle, step_count: int) -> None:
+    def _execute_recipe(
+        self,
+        env,
+        ego_vehicle,
+        step_count: int,
+        *,
+        startup_only: bool = False,
+    ) -> None:
         if self._platoon_is_split(env):
             self.summary.notes.append("recipe_skipped:platoon_split")
             return
-        super()._execute_recipe(env, ego_vehicle, step_count)
+        super()._execute_recipe(
+            env,
+            ego_vehicle,
+            step_count,
+            startup_only=startup_only,
+        )
 
     def _platoon_is_split(self, env) -> bool:
         """Returns True if any platoon agent is no longer active in the env."""

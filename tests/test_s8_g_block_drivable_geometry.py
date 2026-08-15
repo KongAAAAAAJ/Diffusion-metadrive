@@ -62,6 +62,8 @@ def test_s8_g_block_has_non_routing_drivable_junction_surface() -> None:
         assert not any(overlays[0] is lane for lane in network.get_all_lanes())
         assert tuple(lanes[0].junction_drivable_surfaces) == overlays
         assert tuple(lanes[1].junction_drivable_surfaces) == overlays
+        assert lanes[0].route_seam_transition_m == 12.0
+        assert lanes[1].route_seam_transition_m == 12.0
         drivable_candidates = BaseMultiEnv._get_candidate_drivable_lanes(
             SimpleNamespace(
                 lane=lanes[0],
@@ -70,14 +72,27 @@ def test_s8_g_block_has_non_routing_drivable_junction_surface() -> None:
         )
         assert overlays[0] in drivable_candidates
 
-        path = build_continuous_lane_chain_path(
+        full_path = build_continuous_lane_chain_path(
             lanes,
             start_s=float(lanes[0].length) - 12.0,
             step_m=0.1,
-            seam_transition_m=8.0,
-        )[:450]
+            seam_transition_m=12.0,
+        )
+        path = full_path[:450]
         valid, detail = audit_dense_footprint_on_lanes(
             path,
+            lanes,
+            (5.74, 2.3),
+            dense_dt_s=0.1,
+        )
+        assert valid, detail
+
+        # Audit a vehicle that actually followed the canonical apron into the
+        # seam; remaining on the old lane centre until only 3 m remain would
+        # no longer describe the physical S8 exit trajectory.
+        inside_transition_path = full_path[90:450]
+        valid, detail = audit_dense_footprint_on_lanes(
+            inside_transition_path,
             lanes,
             (5.74, 2.3),
             dense_dt_s=0.1,
