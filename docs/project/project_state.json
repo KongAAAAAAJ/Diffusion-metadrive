@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-15T08:49:15+08:00",
+  "updated_at": "2026-08-15T09:18:58+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "2d2266623626594e0fb8762ecc35b5576b353581",
+    "git_commit": "a1d32944b2528568de524b475d798827ef0c3cd8",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": true,
     "uncommitted_plan_update_present": false,
@@ -21,10 +21,10 @@
     "uncommitted_combined_acceptance_evidence_present": false
   },
   "current": {
-    "phase": "candidate_v3_bev_integration",
-    "round": "candidate-v3-merge-to-bev-20260815",
-    "status": "candidate_v3_merged_into_bev_post_merge_exact_path_smoke_pending",
-    "active_hard_gate": "post_merge_exact_path_smoke"
+    "phase": "candidate_v3_formal_data_collection",
+    "round": "post-merge-exact-path-smoke-20260815",
+    "status": "post_merge_exact_path_smoke_passed_formal50k_not_started",
+    "active_hard_gate": "candidate_v3_formal50k_collection"
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
@@ -276,8 +276,8 @@
       }
     },
     "candidate_v3_data_refresh": {
-      "status": "merged_into_bev_post_merge_exact_path_smoke_pending",
-      "active_task": "post_merge_exact_path_smoke",
+      "status": "post_merge_exact_path_smoke_passed_formal50k_not_started",
+      "active_task": "candidate_v3_formal50k_collection",
       "pilot_target_joint_steps": 10000,
       "pilot_per_scenario_quota": 2000,
       "pilot_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
@@ -318,6 +318,13 @@
       "exact_path_smoke_attempted_episodes": 6,
       "exact_path_smoke_base_samples": 5,
       "exact_path_smoke_sidecar_only_episodes": 1,
+      "post_merge_exact_path_smoke_passed": true,
+      "post_merge_exact_path_smoke_source_head": "a1d32944b2528568de524b475d798827ef0c3cd8",
+      "post_merge_exact_path_smoke_root": "/tmp/candidate_v3_post_merge_exact_path_smoke5_bev_a1d32944_20260815_v1",
+      "post_merge_exact_path_smoke_attempted_episodes": 7,
+      "post_merge_exact_path_smoke_base_samples": 5,
+      "post_merge_exact_path_smoke_sidecar_only_episodes": 2,
+      "post_merge_exact_path_smoke_quality_gate_passed": true,
       "fresh_reauthorization_smoke_root": "/tmp/candidate_v3_reauth_smoke_20260814_1351",
       "fresh_reauthorization_smoke_passed_at": "2026-08-14T14:08:59+08:00",
       "merge_target": "BEV",
@@ -369,7 +376,7 @@
     "current_bev_merge_authorized": true,
     "candidate_v3_s6_background_enrichment_authorized_by_user": true,
     "candidate_v3_s6_background_enrichment_recorded_on": "2026-08-14",
-    "note": "The user explicitly authorized merging candidate-v3 into BEV on 2026-08-15. Merge commit 2d226662 records the integration. The measured remediation9999 failures remain unchanged; formal collection stays blocked only by the separate post-merge exact-path smoke, and formal training eligibility remains false."
+    "note": "The user explicitly authorized and ran the candidate-v3 post-merge exact-path smoke on 2026-08-15. It passed complete base, sidecar and bundle verification plus statistical quality gates from BEV source HEAD a1d32944. Formal candidate-v3 50k collection may start in a separate hard-gate thread; formal training eligibility remains false."
   },
   "source_of_truth": {
     "candidate_v3_s5_s9_combined_acceptance_report": {
@@ -397,11 +404,17 @@
     },
     "candidate_v3_bev_merge_report": {
       "path": "evaluation/CANDIDATE_V3_BEV_MERGE_REPORT.json",
-      "role": "Records the authorized candidate-v3 integration into BEV, merge parents, conflict resolutions, focused validation, and the pending post-merge exact-path smoke boundary"
+      "sha256": "a61eea4f50017c906aa7e29df0511d3be4c02d48c68931fac029ae3c6f12db99",
+      "role": "Records the authorized candidate-v3 integration into BEV, merge parents, conflict resolutions, focused validation, and the passed post-merge exact-path smoke boundary"
+    },
+    "candidate_v3_post_merge_exact_path_smoke_report": {
+      "path": "evaluation/CANDIDATE_V3_POST_MERGE_EXACT_PATH_SMOKE_REPORT.json",
+      "sha256": "6560bbdf3fee015c905ae33dd1aff122a54e5ca086b386680189f400f237207a",
+      "role": "Records the fresh BEV post-merge 5-sample S5-S9 smoke, immutable fingerprints, complete base/sidecar/bundle verification, accepted quality audit, and formal50k collection-start decision"
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "d61ba7e037031da350ceb2bfefd8b1959e494e962123e7b3e87a974a333686be",
+      "sha256": "37fe6b2f7ae85c26606bb72db6e5f1e0ca2789b0e3ad014feb29ed2e179a02d6",
       "role": "Freezes the candidate-v3 formal-data mainline and the explicit nonformal Stage1-A smoke waiver without representing dataset acceptance as passed"
     },
     "candidate_v3_remediation9999_acceptance_report": {
@@ -713,6 +726,7 @@
       "source_branch": "BEV",
       "source_merge_commit": "2d2266623626594e0fb8762ecc35b5576b353581",
       "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+      "collection_authorized": true,
       "collection_complete": false,
       "full_verifier_passed": false,
       "quality_gate_passed": false,
@@ -720,7 +734,7 @@
       "base_dataset_fingerprint": null,
       "sidecar_dataset_fingerprint": null,
       "bundle_index_sha256": null,
-      "blocker": "post_merge_exact_path_smoke_pending"
+      "blocker": null
     },
     "collection_performance_pilot": {
       "serial_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v1",
@@ -779,21 +793,19 @@
       "blocked_until": "real_trucksim_surrogate_gate_passes"
     }
   },
-  "blockers": [
-    "Candidate-v3 is merged into BEV at 2d226662, but the required post-merge exact-path smoke has not run; formal50k collection and training must not start before that separate gate is recorded."
-  ],
+  "blockers": [],
   "future_hard_gates": [
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
     "The user requested formal candidate-v3 50k collection on 2026-08-14, but this does not waive failed quality gates or authorize BEV merge or training.",
     "Bind the collector and both strict verifiers to candidate_v3 SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860 and retain the S6=260 and S9=800 evaluation horizons.",
     "The formal candidate-v3 50k is incomplete unless all frozen sample, episode, split, seed, incidental-background-count, and behavior-category postconditions pass.",
-    "The explicit user risk waiver supersedes the failed remediation9999 diagnostic gates only as a formal50k collection precondition; the BEV merge is recorded, while the post-merge exact-path smoke remains mandatory.",
+    "The explicit user risk waiver supersedes the failed remediation9999 diagnostic gates only as a formal50k collection precondition; the BEV merge and post-merge exact-path smoke are recorded, while all formal50k completion gates remain mandatory.",
     "Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen."
   ],
   "next_actions": [
-    "In a separate hard-gate thread, run and record the candidate-v3 post-merge exact-path smoke from BEV merge commit 2d226662 before starting formal50k collection.",
+    "In a separate hard-gate thread, start and monitor the formal candidate-v3 50k collection from the frozen BEV source and launcher; do not modify code or configuration during collection.",
     "Preserve the 9999 observed samples and the explicit quota revision. Do not relabel them as 10000/2000 or waive the remaining bundle, split, and actor-scoped safety failures.",
     "Do not start training in the waiver-recording round. On a future explicit request, the next permitted training action is a bounded Stage1-A smoke run on the named 9999-sample remediation-v2 base dataset.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",

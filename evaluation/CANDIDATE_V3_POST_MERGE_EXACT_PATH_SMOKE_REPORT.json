@@ -1,0 +1,110 @@
+{
+  "format": "candidate_v3_post_merge_exact_path_smoke_report_v1",
+  "recorded_at": "2026-08-15T09:18:58+08:00",
+  "status": "passed",
+  "source": {
+    "branch": "BEV",
+    "git_head": "a1d32944b2528568de524b475d798827ef0c3cd8",
+    "candidate_v3_merge_commit": "2d2266623626594e0fb8762ecc35b5576b353581",
+    "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860"
+  },
+  "runtime": {
+    "config": "/tmp/candidate_v3_post_merge_exact_path_smoke5_bev_a1d32944_20260815.yaml",
+    "config_sha256": "c24af6afaf4b7d6149b13c9e517363bfa59d725b28f3d15b0440fd87b8afdceb",
+    "bundle_root": "/tmp/candidate_v3_post_merge_exact_path_smoke5_bev_a1d32944_20260815_v1",
+    "log": "/tmp/candidate_v3_post_merge_exact_path_smoke5_bev_a1d32944_20260815.log",
+    "log_sha256": "670b6ccb8c198c4ecd762f69fa40b9f50722a7610b44143831e00326ee508e28",
+    "resume_requested": true,
+    "resume_active": false,
+    "fresh_root": true,
+    "initial_config_parse_attempt": {
+      "passed": false,
+      "reason": "formal_pilot collection requires resume=true",
+      "data_root_created": false,
+      "resolution": "Set resume=true in the temporary config; the fresh root still started with resume_active=false."
+    }
+  },
+  "collection": {
+    "attempted_episodes": 7,
+    "committed_base_episodes": 5,
+    "committed_sidecar_episodes": 7,
+    "sidecar_only_episodes": 2,
+    "base_joint_samples": 5,
+    "sidecar_raw_steps": 1910,
+    "scenario_joint_samples": {
+      "S5_hard_brake_lead": 1,
+      "S6_background_merge_in": 1,
+      "S7_ego_merge_from_ramp": 1,
+      "S8_ego_exit_to_ramp": 1,
+      "S9_narrow_channel_negotiation": 1
+    },
+    "rejected_attempts": {
+      "crash_sidewalk:agent0": 1,
+      "all_rule_proposals_infeasible": 1
+    },
+    "base_dataset_fingerprint": "ce5a9360fe4486f815f94582c53369fd79a3a742f59fb8540dccbc069bb5b529",
+    "sidecar_dataset_fingerprint": "f028b046c03bac2cb3a84f10852ae8d14190c5e046e82c443c5e3bf7434fb6c3",
+    "bundle_sha256": "e2007651d6eac7e8d0ecd1dc4d3f58d4569ca760ab2f3acf7b37fd5b2222fa3d",
+    "bundle_manifest_sha256": "f470d54f0619f733e9e35649ca8da5ef25d18a663cc4db11cb3a601d6e1ee536"
+  },
+  "verification": {
+    "base": {
+      "passed": true,
+      "complete_scan": true,
+      "joint_samples": 5,
+      "scanned_joint_samples": 5,
+      "episodes": 5,
+      "decode_joint_samples_per_s": 935.9235279935442,
+      "expert_trajectory_valid": "15/15",
+      "hard_valid_anchor_valid": "135/135",
+      "stop_valid": "15/15",
+      "report": "/tmp/candidate_v3_post_merge_smoke_base_verify.json",
+      "report_sha256": "b711f0a64917703f29607bbe1f788559e4305ccedff80109b25ac8bf39a3e6f8"
+    },
+    "sidecar": {
+      "passed": true,
+      "complete_scan": true,
+      "episodes": 7,
+      "base_samples": 5,
+      "raw_steps": 1910,
+      "report": "/tmp/candidate_v3_post_merge_smoke_sidecar_verify.json",
+      "report_sha256": "45bc53df5689259c5fb114bd536beb9e500c5f98b356f41b12db0ea2b328f2eb"
+    },
+    "bundle": {
+      "passed": true,
+      "attempted_episodes": 7,
+      "committed_base_episodes": 5,
+      "committed_sidecar_episodes": 7,
+      "sidecar_only_episodes": 2,
+      "report": "/tmp/candidate_v3_post_merge_smoke_bundle_verify.json",
+      "report_sha256": "d6dcff0c591dcff391d9020cef2e6affe0a7114c60434bcb6c8e6a2cd6a9b38e"
+    },
+    "quality": {
+      "passed": true,
+      "status": "statistical_quality_accepted",
+      "allow_empty_splits": true,
+      "gates": {
+        "required_scenarios_present": true,
+        "required_splits_non_empty": true,
+        "sidecar_no_platoon_collision_events": true,
+        "sidecar_no_platoon_out_of_road_events": true,
+        "s7_stop_fraction": true,
+        "s7_low_speed_fraction": true,
+        "s7_lateral_mode_fraction": true
+      },
+      "s7_lateral_mode_fraction": 0.3333333333333333,
+      "base_committed_platoon_collision_events": 0,
+      "base_committed_platoon_out_of_road_events": 0,
+      "sidecar_only_platoon_collision_events_retained": 1,
+      "report": "/tmp/candidate_v3_post_merge_smoke_quality.json",
+      "report_sha256": "1c41e7bfb67cbe63937aaeb2c1c53450d6596d897c5b57e084a9e25ed435ac20"
+    }
+  },
+  "decision": {
+    "post_merge_exact_path_smoke_passed": true,
+    "formal50k_collection_start_allowed": true,
+    "formal50k_collection_started": false,
+    "training_started": false,
+    "next_hard_gate": "candidate_v3_formal50k_collection"
+  }
+}
