@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-15T00:05:51+08:00",
+  "updated_at": "2026-08-15T17:35:00+08:00",
   "repository": {
     "branch": "s5-s9-scenario-revision",
-    "git_commit": "52b6195db3c10d2c1b3ab592e96c8d87f6c786be",
+    "git_commit": "9c5ef5a0765813994d31e3af7293c696ceb61e83",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": false,
@@ -21,8 +21,8 @@
   "current": {
     "phase": "candidate_v3_data_quality_remediation",
     "round": "diagnostic10k-quality-remediation-and-recollection-20260815",
-    "status": "remediation_smoke_passed_new_isolated_diagnostic_pending",
-    "active_hard_gate": "candidate_v3_remediation_diagnostic10k_complete_verification"
+    "status": "remediation_v2_collection_stopped_by_user_incomplete_unverified",
+    "active_hard_gate": null
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
@@ -688,7 +688,7 @@
   },
   "blockers": [
     "The original candidate-v3 diagnostic 10k remains quality-failed and immutable; it cannot be reused or relabeled.",
-    "The remediation exact-path smoke passed, but the new isolated 10k has not yet completed the full base, sidecar, bundle, diversity, S7-label, and actor-scoped safety gates."
+    "The remediation exact-path smoke and focused tests passed, but the v2 isolated diagnostic was stopped by the user at 9,999/10,000 with episode 95 pending; no complete base, sidecar, bundle, or statistical quality gate was run."
   ],
   "future_hard_gates": [
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
@@ -703,7 +703,7 @@
   "next_actions": [
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
     "Preserve the accepted candidate-v3 combined manifest and all 140 hashed artifacts without rerunning, relabeling or overwriting them unless the frozen scenario contract changes.",
-    "Commit the verified remediation baseline, collect the new isolated candidate-v3 remediation 10k, and rerun the complete base, sidecar, bundle, diversity, S7-label, and actor-scoped safety gates before requesting BEV merge or starting formal 50k."
+    "The user requested moving to the next stage without completing validation. Any BEV merge or formal 50k start must be a separate hard gate that explicitly records the incomplete diagnostic waiver and must not label the v2 diagnostic as passed."
   ],
   "invariants": {
     "metadata_override_forbidden": true,

@@ -1,7 +1,7 @@
 {
   "format": "candidate_v3_diagnostic10k_collection_report_v1",
-  "updated_at": "2026-08-15T00:05:51+08:00",
-  "status": "remediation_implemented_smoke_passed_new_isolated_diagnostic_pending",
+  "updated_at": "2026-08-15T17:35:00+08:00",
+  "status": "remediation_v2_collection_stopped_by_user_incomplete_unverified",
   "authorization": "User explicitly reauthorized the isolated candidate-v3 10k dataset collection on 2026-08-14 after the earlier cancellation.",
   "scope": {
     "target_joint_samples": 10000,
@@ -247,6 +247,65 @@
       "bev_merge_allowed": false,
       "formal50k_collection_start_allowed": false,
       "next_required_action": "Commit the verified remediation baseline, collect the new isolated 10k, and rerun complete base, sidecar, bundle, diversity, S7-label, and actor-scoped safety gates."
+    }
+  },
+  "remediation_v2_interrupted_handoff": {
+    "recorded_at": "2026-08-15T17:35:00+08:00",
+    "source_git_commit": "9c5ef5a0765813994d31e3af7293c696ceb61e83",
+    "config": "configs/dataset/data_collect_candidate_v3_remediation_diagnostic10k_20260815_v2.yaml",
+    "config_sha256": "7187db25190c579a81a5433496e0eb63db8a7539949868fc75db9de4109de533",
+    "output_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260815_v2",
+    "stop_reason": "user_requested_stop_before_complete_verification",
+    "process_exit": "KeyboardInterrupt",
+    "target_joint_samples": 10000,
+    "committed_joint_samples": 9999,
+    "committed_split_joint_samples": {
+      "train": 8268,
+      "val": 1349,
+      "test": 382
+    },
+    "committed_base_episodes": 56,
+    "fully_indexed_attempted_episodes": 95,
+    "pending_episode": {
+      "episode_index": 95,
+      "scenario_id": "S9_narrow_channel_negotiation",
+      "split": "test",
+      "committed": false,
+      "pending_marker_preserved": true
+    },
+    "scenario_joint_samples": {
+      "S5_hard_brake_lead": 2000,
+      "S6_background_merge_in": 2000,
+      "S7_ego_merge_from_ramp": 2000,
+      "S8_ego_exit_to_ramp": 2000,
+      "S9_narrow_channel_negotiation": 1999
+    },
+    "observed_remediation_evidence": {
+      "focused_tests": "67 passed",
+      "first_s7_episode_lateral_mode_fraction": 0.5280701754385965,
+      "first_s7_episode_stop_fraction": 0.0017543859649122807,
+      "s5_required_behavior_classes_observed": [
+        "keep_emergency_braking",
+        "temporary_formation_release_and_recovery"
+      ],
+      "required_fixed_seeds_observed_in_every_scenario": true,
+      "minimum_independent_episode_count_reached_in_every_scenario": true,
+      "sidecar_only_safety_events_retained": true
+    },
+    "strict_verification": {
+      "base_verifier_run": false,
+      "sidecar_verifier_run": false,
+      "bundle_verifier_run": false,
+      "statistical_quality_audit_run": false,
+      "quality_gate_passed": false
+    },
+    "decision": {
+      "dataset_complete": false,
+      "eligible_for_bev_merge_evidence": false,
+      "eligible_for_formal_50k_evidence": false,
+      "bev_merge_performed": false,
+      "formal50k_collection_started": false,
+      "handoff": "The user requested stopping validation and moving to the next stage. Any subsequent BEV merge or formal 50k start must explicitly record that this incomplete, unverified diagnostic gate was waived; it must not be represented as passed."
     }
   }
 }
