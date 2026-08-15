@@ -1,0 +1,50 @@
+{
+  "format": "candidate_v3_exploratory_training_waiver_report_v1",
+  "schema_version": 1,
+  "recorded_on": "2026-08-15",
+  "status": "explicit_nonformal_waiver_recorded_training_not_started",
+  "authorization": {
+    "requested_by_user": true,
+    "request": "Advance the later training workflow without performing dataset acceptance, but do not start training in this round.",
+    "representation_as_passed_rejected": true,
+    "authorized_scope": "Exploratory Stage1-A smoke preparation only"
+  },
+  "dataset": {
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260815_v2",
+    "base_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260815_v2/platoon_joint_bev",
+    "observed_joint_samples": 9999,
+    "target_joint_samples": 10000,
+    "structural_contract_readable": true,
+    "base_dataset_fingerprint": "8a0caa07385c198594126a1ac7904a902f6824b25b121bcdafc2f50bee124501",
+    "sidecar_dataset_fingerprint": "b2bb352e260186a54c583f91b1eb6afc30725d2461d5dc9c06718038d3833726",
+    "acceptance_performed": false,
+    "acceptance_passed": false,
+    "quality_gate_passed": false,
+    "eligible_for_formal_training": false
+  },
+  "exploratory_training_contract": {
+    "variant": "A",
+    "allowed_run_mode": "smoke",
+    "max_optimizer_steps_required": true,
+    "training_started": false,
+    "checkpoint_diagnostic_only": true,
+    "checkpoint_eligible_for_formal_training": false,
+    "may_feed_formal_grpo": false,
+    "may_feed_formal_evaluation": false,
+    "may_support_paper_claims": false
+  },
+  "formal_mainline": {
+    "dataset_gate_changed": false,
+    "stage1_gate_changed": false,
+    "grpo_gate_changed": false,
+    "formal_candidate_v3_50k_still_required": true,
+    "metadata_override_forbidden": true
+  },
+  "verification": {
+    "dataset_structural_contract_check_passed": true,
+    "plan_and_state_json_validation_passed": true,
+    "training_run_mode_boundary_check_passed": true,
+    "training_process_started": false,
+    "git_diff_check_passed": true
+  }
+}

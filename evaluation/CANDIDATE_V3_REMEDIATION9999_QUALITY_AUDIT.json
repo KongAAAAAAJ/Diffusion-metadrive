@@ -1,0 +1,480 @@
+{
+  "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260815_v2",
+  "eligible_for_formal_50k_collection": false,
+  "formal_collection_contract": {
+    "config": "/tmp/diffusion-metadrive-s5-s9-revision/configs/dataset/data_collect_candidate_v3_remediation_diagnostic10k_20260815_v2.yaml",
+    "diversity_requirements": {
+      "behavior_rule_maker_profiles": {
+        "S5_hard_brake_lead": {
+          "keep_emergency_braking": "brake_first",
+          "temporary_formation_release_and_recovery": "balanced"
+        }
+      },
+      "max_samples_per_episode": 200,
+      "min_episodes_per_scenario": 10,
+      "require_all_scenarios_in_each_split": true,
+      "required_behavior_categories": {
+        "S5_hard_brake_lead": [
+          "keep_emergency_braking",
+          "temporary_formation_release_and_recovery"
+        ],
+        "S6_background_merge_in": [
+          "agent0-agent1",
+          "agent1-agent2"
+        ],
+        "S7_ego_merge_from_ramp": [
+          "pass_first",
+          "yield_then_merge"
+        ],
+        "S8_ego_exit_to_ramp": [
+          "agent0-agent1",
+          "agent1-agent2"
+        ],
+        "S9_narrow_channel_negotiation": [
+          "agent0-agent1",
+          "agent1-agent2"
+        ]
+      },
+      "required_incidental_background_actor_counts": [
+        3,
+        4,
+        5,
+        6
+      ],
+      "required_spawn_seeds": [
+        17,
+        23,
+        31,
+        47,
+        59
+      ]
+    },
+    "observed": {
+      "S5_hard_brake_lead": {
+        "behavior_categories": [
+          "keep_emergency_braking",
+          "temporary_formation_release_and_recovery"
+        ],
+        "episodes": 11,
+        "incidental_background_actor_counts": [
+          3,
+          4,
+          5,
+          6
+        ],
+        "joint_samples": 2000,
+        "max_samples_per_episode": 190,
+        "required_spawn_seeds_observed": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "splits": [
+          "test",
+          "train",
+          "val"
+        ],
+        "unique_spawn_seeds": 11
+      },
+      "S6_background_merge_in": {
+        "behavior_categories": [
+          "agent0-agent1",
+          "agent1-agent2"
+        ],
+        "episodes": 12,
+        "incidental_background_actor_counts": [
+          3,
+          4,
+          5,
+          6
+        ],
+        "joint_samples": 2000,
+        "max_samples_per_episode": 190,
+        "required_spawn_seeds_observed": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "splits": [
+          "test",
+          "train",
+          "val"
+        ],
+        "unique_spawn_seeds": 12
+      },
+      "S7_ego_merge_from_ramp": {
+        "behavior_categories": [
+          "pass_first",
+          "yield_then_merge"
+        ],
+        "episodes": 11,
+        "incidental_background_actor_counts": [
+          3,
+          4,
+          5,
+          6
+        ],
+        "joint_samples": 2000,
+        "max_samples_per_episode": 190,
+        "required_spawn_seeds_observed": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "splits": [
+          "test",
+          "train",
+          "val"
+        ],
+        "unique_spawn_seeds": 11
+      },
+      "S8_ego_exit_to_ramp": {
+        "behavior_categories": [
+          "agent0-agent1",
+          "agent1-agent2"
+        ],
+        "episodes": 12,
+        "incidental_background_actor_counts": [
+          3,
+          4,
+          5,
+          6
+        ],
+        "joint_samples": 2000,
+        "max_samples_per_episode": 190,
+        "required_spawn_seeds_observed": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "splits": [
+          "test",
+          "train",
+          "val"
+        ],
+        "unique_spawn_seeds": 12
+      },
+      "S9_narrow_channel_negotiation": {
+        "behavior_categories": [
+          "agent0-agent1",
+          "agent1-agent2"
+        ],
+        "episodes": 10,
+        "incidental_background_actor_counts": [
+          3,
+          4,
+          5,
+          6
+        ],
+        "joint_samples": 1999,
+        "max_samples_per_episode": 200,
+        "required_spawn_seeds_observed": [
+          17,
+          23,
+          31,
+          47,
+          59
+        ],
+        "splits": [
+          "train",
+          "val"
+        ],
+        "unique_spawn_seeds": 10
+      }
+    },
+    "scenario_quotas": {
+      "S5_hard_brake_lead": 2000,
+      "S6_background_merge_in": 2000,
+      "S7_ego_merge_from_ramp": 2000,
+      "S8_ego_exit_to_ramp": 2000,
+      "S9_narrow_channel_negotiation": 2000
+    }
+  },
+  "format": "bev_shared_bundle_statistical_quality_v1",
+  "gates": {
+    "formal_all_scenarios_in_each_split": false,
+    "formal_background_count_coverage": true,
+    "formal_background_counts_in_contract": true,
+    "formal_behavior_category_coverage": true,
+    "formal_coverage_metadata_valid": true,
+    "formal_episode_sample_cap": true,
+    "formal_minimum_independent_episodes": true,
+    "formal_required_seed_coverage": true,
+    "formal_scenario_joint_sample_quotas": false,
+    "required_scenarios_present": true,
+    "required_splits_non_empty": true,
+    "s7_lateral_mode_fraction": true,
+    "s7_low_speed_fraction": true,
+    "s7_stop_fraction": true,
+    "sidecar_no_platoon_collision_events": true,
+    "sidecar_no_platoon_out_of_road_events": false
+  },
+  "global_gt_mode_counts": {
+    "KEEP_HIGH": 7406,
+    "KEEP_LOW": 2746,
+    "KEEP_MEDIUM": 14014,
+    "LEFT_HIGH": 1956,
+    "LEFT_LOW": 5,
+    "LEFT_MEDIUM": 832,
+    "RIGHT_HIGH": 600,
+    "RIGHT_LOW": 198,
+    "RIGHT_MEDIUM": 952,
+    "STOP": 1288
+  },
+  "infrastructure_report_status": null,
+  "mode_valid_rate": {
+    "KEEP_HIGH": 0.9454945494549455,
+    "KEEP_LOW": 0.9441277461079441,
+    "KEEP_MEDIUM": 0.9594292762609594,
+    "LEFT_HIGH": 0.7269393606027269,
+    "LEFT_LOW": 0.725939260592726,
+    "LEFT_MEDIUM": 0.7587425409207588,
+    "RIGHT_HIGH": 0.6153281994866153,
+    "RIGHT_LOW": 0.5836917025035837,
+    "RIGHT_MEDIUM": 0.6285961929526286,
+    "STOP": 1.0
+  },
+  "role_gt_mode_counts": {
+    "leader": {
+      "KEEP_HIGH": 4062,
+      "KEEP_LOW": 467,
+      "KEEP_MEDIUM": 3667,
+      "LEFT_HIGH": 780,
+      "LEFT_LOW": 5,
+      "LEFT_MEDIUM": 57,
+      "RIGHT_HIGH": 342,
+      "RIGHT_LOW": 20,
+      "RIGHT_MEDIUM": 312,
+      "STOP": 287
+    },
+    "middle": {
+      "KEEP_HIGH": 1883,
+      "KEEP_LOW": 1097,
+      "KEEP_MEDIUM": 4989,
+      "LEFT_HIGH": 786,
+      "LEFT_MEDIUM": 209,
+      "RIGHT_HIGH": 211,
+      "RIGHT_LOW": 20,
+      "RIGHT_MEDIUM": 383,
+      "STOP": 421
+    },
+    "rear": {
+      "KEEP_HIGH": 1461,
+      "KEEP_LOW": 1182,
+      "KEEP_MEDIUM": 5358,
+      "LEFT_HIGH": 390,
+      "LEFT_MEDIUM": 566,
+      "RIGHT_HIGH": 47,
+      "RIGHT_LOW": 158,
+      "RIGHT_MEDIUM": 257,
+      "STOP": 580
+    }
+  },
+  "round": "13.97g",
+  "scenario_statistics": {
+    "S5_hard_brake_lead": {
+      "episodes": 11,
+      "expert_terminal_displacement_m": {
+        "p05": 1.1534210205078126,
+        "p50": 4.748332977294922,
+        "p95": 34.30786266326905
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 595,
+        "KEEP_LOW": 1076,
+        "KEEP_MEDIUM": 4066,
+        "LEFT_HIGH": 89,
+        "RIGHT_HIGH": 57,
+        "RIGHT_MEDIUM": 30,
+        "STOP": 87
+      },
+      "joint_samples": 2000,
+      "lateral_mode_fraction": 0.029333333333333333,
+      "role_labels": 6000,
+      "speed_below_0_3_fraction": 0.01633333333333333,
+      "speed_mps": {
+        "p05": 0.4449369966983795,
+        "p50": 1.8716807961463928,
+        "p95": 6.277149510383608
+      },
+      "stop_fraction": 0.0145
+    },
+    "S6_background_merge_in": {
+      "episodes": 12,
+      "expert_terminal_displacement_m": {
+        "p05": 8.239065504074096,
+        "p50": 25.21690082550049,
+        "p95": 33.50760059356689
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 2907,
+        "KEEP_LOW": 477,
+        "KEEP_MEDIUM": 1583,
+        "LEFT_HIGH": 313,
+        "LEFT_MEDIUM": 189,
+        "RIGHT_HIGH": 123,
+        "RIGHT_LOW": 1,
+        "RIGHT_MEDIUM": 174,
+        "STOP": 233
+      },
+      "joint_samples": 2000,
+      "lateral_mode_fraction": 0.13333333333333333,
+      "role_labels": 6000,
+      "speed_below_0_3_fraction": 0.0055,
+      "speed_mps": {
+        "p05": 1.2866054475307465,
+        "p50": 5.107658386230469,
+        "p95": 8.68424735069275
+      },
+      "stop_fraction": 0.03883333333333333
+    },
+    "S7_ego_merge_from_ramp": {
+      "episodes": 11,
+      "expert_terminal_displacement_m": {
+        "p05": 6.750111770629883,
+        "p50": 22.932931900024414,
+        "p95": 35.03978366851807
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 644,
+        "KEEP_LOW": 521,
+        "KEEP_MEDIUM": 2087,
+        "LEFT_HIGH": 1467,
+        "LEFT_LOW": 5,
+        "LEFT_MEDIUM": 544,
+        "RIGHT_HIGH": 152,
+        "RIGHT_LOW": 39,
+        "RIGHT_MEDIUM": 348,
+        "STOP": 193
+      },
+      "joint_samples": 2000,
+      "lateral_mode_fraction": 0.42583333333333334,
+      "role_labels": 6000,
+      "speed_below_0_3_fraction": 0.08266666666666667,
+      "speed_mps": {
+        "p05": 0.18048133999109267,
+        "p50": 5.240896701812744,
+        "p95": 8.18850474357605
+      },
+      "stop_fraction": 0.03216666666666667
+    },
+    "S8_ego_exit_to_ramp": {
+      "episodes": 12,
+      "expert_terminal_displacement_m": {
+        "p05": 13.249496126174927,
+        "p50": 30.812854766845703,
+        "p95": 37.385354614257814
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 2023,
+        "KEEP_LOW": 493,
+        "KEEP_MEDIUM": 2186,
+        "RIGHT_HIGH": 234,
+        "RIGHT_LOW": 89,
+        "RIGHT_MEDIUM": 290,
+        "STOP": 685
+      },
+      "joint_samples": 2000,
+      "lateral_mode_fraction": 0.10216666666666667,
+      "role_labels": 6000,
+      "speed_below_0_3_fraction": 0.0,
+      "speed_mps": {
+        "p05": 3.8563406229019166,
+        "p50": 6.574481964111328,
+        "p95": 10.264001798629762
+      },
+      "stop_fraction": 0.11416666666666667
+    },
+    "S9_narrow_channel_negotiation": {
+      "episodes": 10,
+      "expert_terminal_displacement_m": {
+        "p05": 3.1021637439727785,
+        "p50": 18.120559692382812,
+        "p95": 38.97969055175779
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 1237,
+        "KEEP_LOW": 179,
+        "KEEP_MEDIUM": 4092,
+        "LEFT_HIGH": 87,
+        "LEFT_MEDIUM": 99,
+        "RIGHT_HIGH": 34,
+        "RIGHT_LOW": 69,
+        "RIGHT_MEDIUM": 110,
+        "STOP": 90
+      },
+      "joint_samples": 1999,
+      "lateral_mode_fraction": 0.06653326663331666,
+      "role_labels": 5997,
+      "speed_below_0_3_fraction": 0.030015007503751877,
+      "speed_mps": {
+        "p05": 0.8636146783828735,
+        "p50": 2.4149327278137207,
+        "p95": 9.292470359802246
+      },
+      "stop_fraction": 0.015007503751875938
+    }
+  },
+  "sidecar_event_actor_types": {
+    "actor_despawn": {
+      "platoon": 207
+    },
+    "collision_sidewalk": {
+      "external": 158,
+      "platoon": 1
+    },
+    "collision_vehicle": {
+      "external": 29
+    },
+    "out_of_road": {
+      "external": 172,
+      "platoon": 1
+    },
+    "out_of_route": {
+      "external": 147,
+      "platoon": 79
+    },
+    "terminated": {
+      "platoon": 207
+    },
+    "truncated": {
+      "platoon": 207
+    }
+  },
+  "sidecar_safety_audit": {
+    "base_committed_platoon_collision_events": 0,
+    "base_committed_platoon_out_of_road_events": 1,
+    "external_collision_events_retained_as_context": 187,
+    "external_out_of_road_events_retained_as_context": 172,
+    "interpretation": "Raw external-actor events remain losslessly retained for RiskEntry; formal BEV safety eligibility is gated on platoon actors from base-committed episodes only. Sidecar-only failures remain evidence.",
+    "sidecar_only_platoon_collision_events_retained": 1,
+    "sidecar_only_platoon_out_of_road_events_retained": 0
+  },
+  "split_joint_samples": {
+    "test": 382,
+    "train": 8268,
+    "val": 1349
+  },
+  "status": "statistical_quality_blocked",
+  "thresholds": {
+    "require_all_splits": true,
+    "required_scenarios": [
+      "S5_hard_brake_lead",
+      "S6_background_merge_in",
+      "S7_ego_merge_from_ramp",
+      "S8_ego_exit_to_ramp",
+      "S9_narrow_channel_negotiation"
+    ],
+    "s7_max_low_speed_fraction": 0.4,
+    "s7_max_stop_fraction": 0.4,
+    "s7_min_lateral_mode_fraction": 0.1
+  }
+}

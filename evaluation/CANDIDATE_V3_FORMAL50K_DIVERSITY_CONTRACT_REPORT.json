@@ -2,11 +2,12 @@
   "format": "candidate_v3_formal50k_diversity_contract_report_v1",
   "schema_version": 1,
   "recorded_at": "2026-08-14T22:21:52+08:00",
-  "status": "implemented_and_unit_verified_collection_not_started",
+  "status": "implemented_unit_verified_launcher_bound_collection_not_started",
   "source_git_commit": "12dd114034fef164c5202fe1b77bfdf6c72159c2",
+  "updated_at": "2026-08-15T08:19:49+08:00",
   "formal_collection_config": {
     "path": "configs/dataset/data_collect_candidate_v3_formal50k.yaml",
-    "sha256": "7a7250ce9c49967128e37fc2bbaa23ec3e949d95d6ddf2c33b71cb6ed31247d4",
+    "sha256": "f430f26f0304af09375f1f7da450731ca9d6a8dea9b5f69a4fd80ff9ff62ef99",
     "output_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
     "scenario_contract_id": "candidate_v3",
     "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860"
@@ -46,6 +47,19 @@
     "result": "31 passed",
     "python_compile_passed": true,
     "git_diff_check_passed": true
+  },
+  "launcher_binding": {
+    "path": "scripts/run_bundle_v2_formal_collection.sh",
+    "sha256": "85b102746e3e71f94db75a94182e1f1c58105383238466b96bf1cb1e24589dd8",
+    "base_git_commit": "c199f6aac329f69a508fcb133d75a9958afb4be7",
+    "default_config": "configs/dataset/data_collect_candidate_v3_formal50k.yaml",
+    "module": "expert_dataset.run_joint_bev_collection",
+    "optional_episode_limit": "MAX_EPISODES -> --max-episodes",
+    "shell_syntax_passed": true,
+    "config_parse_passed": true,
+    "focused_tests": "17 passed",
+    "collection_started": false,
+    "formal_output_root_exists": false
   },
   "scope_boundary": {
     "formal50k_collection_started": false,

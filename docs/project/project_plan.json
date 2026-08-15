@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-14T22:21:52+08:00",
-  "status": "frozen_candidate_v3_data_refresh_with_formal50k_diversity_contract",
+  "updated_at": "2026-08-15T17:35:00+08:00",
+  "status": "candidate_v3_remediation9999_user_accepted_pending_bev_merge",
   "purpose": "Machine-readable memory for the candidate-v3 data refresh, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
@@ -161,6 +161,63 @@
       "eligible_for_formal_training": false,
       "collection_policy": "Collect into the named new empty root from the clean merged BEV commit using the frozen candidate-v3 formal50k config. Resume is allowed only for this new root with exact fingerprint and diversity metadata agreement. Do not append, copy, relabel, or mix samples from the historical v1 dataset or the 10k diagnostic collection. Reaching 50000 samples is not completion unless every diversity postcondition passes."
     }
+  },
+  "temporary_exploratory_training_waiver": {
+    "authorization_recorded_on": "2026-08-15",
+    "purpose": "Prepare and later exercise the Stage1-A training path before formal dataset acceptance is complete.",
+    "dataset": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_remediation_diagnostic10k_20260815_v2/platoon_joint_bev",
+      "observed_joint_samples": 9999,
+      "target_joint_samples": 10000,
+      "dataset_fingerprint": "8a0caa07385c198594126a1ac7904a902f6824b25b121bcdafc2f50bee124501",
+      "structural_contract_readable": true,
+      "acceptance_performed": false,
+      "acceptance_passed": false,
+      "quality_gate_passed": false,
+      "eligible_for_formal_training": false
+    },
+    "allowed_training": {
+      "variant": "A",
+      "run_mode": "smoke",
+      "max_optimizer_steps_required": true,
+      "training_started": false
+    },
+    "output_contract": {
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false,
+      "formal_grpo_source_allowed": false,
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false
+    },
+    "formal_mainline_unchanged": true,
+    "evidence": "evaluation/CANDIDATE_V3_EXPLORATORY_TRAINING_WAIVER_REPORT.json"
+  },
+  "remediation9999_acceptance_revision": {
+    "authorized_on": "2026-08-15",
+    "effective_total_joint_samples": 9999,
+    "effective_scenario_quotas": {
+      "S5_hard_brake_lead": 2000,
+      "S6_background_merge_in": 2000,
+      "S7_ego_merge_from_ramp": 2000,
+      "S8_ego_exit_to_ramp": 2000,
+      "S9_narrow_channel_negotiation": 1999
+    },
+    "quota_gate_passed": true,
+    "other_gates_waived": false,
+    "base_complete_verifier_passed": true,
+    "sidecar_complete_verifier_passed": true,
+    "bundle_verifier_passed": false,
+    "quality_gate_passed": false,
+    "measured_dataset_acceptance_passed": false,
+    "dataset_acceptance_decision": "accepted_by_user_with_explicit_risk_waivers",
+    "accepted_for_formal50k_collection_precondition": true,
+    "eligible_for_formal_training": false,
+    "waived_measured_failures": [
+      "unfinished bundle pending transaction",
+      "S9 absent from test split",
+      "one base-committed platoon out-of-road event"
+    ],
+    "evidence": "evaluation/CANDIDATE_V3_REMEDIATION9999_ACCEPTANCE_REPORT.json"
   },
   "trajectory_domains": {
     "tau_d": {
@@ -361,7 +418,8 @@
     "Do not treat the 10k diagnostic dataset as formal or training-eligible, and do not merge into BEV or start the new 50k collection, unless the remaining S5, S6, S8 and combined-contract gates plus both complete verifiers and the pre-frozen quality gate pass.",
     "Do not reuse 10k diagnostic samples in the formal 50k root, and do not mix candidate-v3 samples with the historical v1 dataset.",
     "Do not change scenario, expert-policy, collector, schema, split, or quality-threshold semantics while pilot or formal collection is running.",
-    "Do not start Stage1-A until the new candidate-v3 50k dataset is complete, fully verified, quality accepted, fingerprinted, and eligible.",
+    "Do not start formal Stage1-A until the new candidate-v3 50k dataset is complete, fully verified, quality accepted, fingerprinted, and eligible.",
+    "The temporary waiver permits only Stage1-A run_mode=smoke on the named 9999-sample dataset; every resulting checkpoint must remain diagnostic_only=true and ineligible for formal GRPO, formal evaluation, or paper evidence.",
     "Do not start formal GRPO before the Stage1-A checkpoint is eligible.",
     "Do not start formal GRPO-Exec with a synthetic-only surrogate.",
     "Do not compare branches whose source checkpoint, seeds, budget, reward semantics, or trajectory optimizer differ.",
@@ -369,5 +427,5 @@
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision."
   ],
-  "current_next_action": "The candidate-v3 10k collection was cancelled by the user before its formal data root was created. Preserve the completed smoke evidence and wait for explicit authorization before any future dataset collection."
+  "current_next_action": "The remediation9999 dataset is accepted by explicit user risk waiver as the formal50k collection precondition, while measured failures remain recorded. Before collection, commit the current evidence, explicitly authorize and merge candidate-v3 into BEV, record the merge commit, and pass the post-merge exact-path smoke."
 }
