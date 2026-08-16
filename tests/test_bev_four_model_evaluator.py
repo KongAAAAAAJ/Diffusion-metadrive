@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,53 +7,35 @@ import torch
 
 from evaluation.bev_four_model_evaluator import (
     DIAGNOSTIC_EVAL_SCENARIOS,
-    FourModelEvaluationConfig,
-    FourModelEvaluationError,
+    ModelEvaluationConfig,
+    ModelEvaluationError,
     ReproducibilityToleranceConfig,
-    _file_sha256,
     _configure_deterministic_inference,
     _behavior_sha256,
     _initial_state_signature,
     _initial_scene_sha256,
-    _load_manifest,
-    _validate_checkpoint_hash,
     _summarize,
+    compare_models,
     compare_repeated_reports,
 )
+from evaluation.bev_model_manifest import ComparisonSpec
 from scenarios.bev_round13_contract import HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS
 
 
-def test_evaluation_config_and_manifest_are_strict(tmp_path: Path) -> None:
-    with pytest.raises(FourModelEvaluationError):
-        FourModelEvaluationConfig(device="auto")
-    with pytest.raises(FourModelEvaluationError):
-        FourModelEvaluationConfig(max_steps=0)
-    config = FourModelEvaluationConfig(device="cpu")
+def test_evaluation_config_is_strict() -> None:
+    with pytest.raises(ModelEvaluationError):
+        ModelEvaluationConfig(device="auto")
+    with pytest.raises(ModelEvaluationError):
+        ModelEvaluationConfig(max_steps=0)
+    config = ModelEvaluationConfig(device="cpu")
     assert config.scenarios == PRIMARY_S5_S9_SCENARIOS
     assert config.seeds == HOLDOUT_SEEDS
     assert DIAGNOSTIC_EVAL_SCENARIOS == PRIMARY_S5_S9_SCENARIOS
-    with pytest.raises(FourModelEvaluationError):
-        FourModelEvaluationConfig(
+    with pytest.raises(ModelEvaluationError):
+        ModelEvaluationConfig(
             device="cpu",
             scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),),
         )
-
-    bad = tmp_path / "bad.json"
-    bad.write_text(json.dumps({"format": "bev_four_model_manifest_v1", "models": {}}))
-    with pytest.raises(FourModelEvaluationError, match="exactly"):
-        _load_manifest(bad)
-
-    models = {
-        "A": {},
-        "B": {},
-        "A_GRPO": {},
-        "B_GRPO": {},
-    }
-    good = tmp_path / "good.json"
-    good.write_text(
-        json.dumps({"format": "bev_four_model_manifest_v1", "models": models})
-    )
-    assert _load_manifest(good)["models"].keys() == models.keys()
 
 
 def test_metric_aggregation_computes_rates_and_p95() -> None:
@@ -105,26 +85,9 @@ def test_metric_aggregation_computes_rates_and_p95() -> None:
     )
 
 
-def test_checkpoint_hash_is_strict(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "checkpoint.pt"
-    checkpoint.write_bytes(b"round13.93")
-    digest = _file_sha256(checkpoint)
-    assert _validate_checkpoint_hash(
-        {"checkpoint": str(checkpoint), "checkpoint_sha256": digest},
-        "checkpoint",
-        "checkpoint_sha256",
-    ) == checkpoint
-    with pytest.raises(FourModelEvaluationError, match="SHA256 mismatch"):
-        _validate_checkpoint_hash(
-            {"checkpoint": str(checkpoint), "checkpoint_sha256": "0" * 64},
-            "checkpoint",
-            "checkpoint_sha256",
-        )
-
-
 def test_deterministic_inference_requires_process_hash_seed(monkeypatch) -> None:
     monkeypatch.delenv("PYTHONHASHSEED", raising=False)
-    with pytest.raises(FourModelEvaluationError, match="PYTHONHASHSEED=0"):
+    with pytest.raises(ModelEvaluationError, match="PYTHONHASHSEED=0"):
         _configure_deterministic_inference(torch.device("cpu"))
     monkeypatch.setenv("PYTHONHASHSEED", "0")
     _configure_deterministic_inference(torch.device("cpu"))
@@ -146,7 +109,7 @@ def test_initial_state_signature_is_joint_first_and_strict() -> None:
     assert signature.shape == (3, 4)
     assert signature[2].tolist() == pytest.approx([2.0, -2.0, 0.2, 22.0])
     del env.agents["agent1"]
-    with pytest.raises(FourModelEvaluationError, match="agent1"):
+    with pytest.raises(ModelEvaluationError, match="agent1"):
         _initial_state_signature(env)
 
 
@@ -181,22 +144,29 @@ def test_initial_scene_hash_includes_background_but_not_unstable_name() -> None:
 
 
 def test_behavior_hash_excludes_timing_but_not_policy_metrics() -> None:
+    model_order = ["stage1_a", "grpo_open", "grpo_exec"]
     report = {
+        "model_order": model_order,
         "models": {
             name: {"joint_safety": {"collision_rate": 0.0}, "timing": {"p95": 1.0}}
-            for name in ("A", "B", "A_GRPO", "B_GRPO")
+            for name in model_order
         }
     }
     baseline = _behavior_sha256(report)
-    report["models"]["A"]["timing"]["p95"] = 99.0
+    report["models"]["stage1_a"]["timing"]["p95"] = 99.0
     assert _behavior_sha256(report) == baseline
-    report["models"]["A"]["joint_safety"]["collision_rate"] = 1.0
+    report["models"]["stage1_a"]["joint_safety"]["collision_rate"] = 1.0
     assert _behavior_sha256(report) != baseline
 
 
-def _repeat_report(*, gap_m: float, collision: bool = False) -> dict:
+def _repeat_report(
+    *,
+    gap_m: float,
+    collision: bool = False,
+    model_order: tuple[str, ...] = ("stage1_a", "grpo_open", "grpo_exec"),
+) -> dict:
     models = {}
-    for index, name in enumerate(("A", "B", "A_GRPO", "B_GRPO")):
+    for index, name in enumerate(model_order):
         roles = {
             agent_id: {
                 "collision_rate": float(collision),
@@ -264,11 +234,28 @@ def _repeat_report(*, gap_m: float, collision: bool = False) -> dict:
             },
             "timing": {"planning_tick_ms": {"p95_ms": 100.0}},
         }
+    comparisons = (
+        ComparisonSpec("open_vs_stage1", "stage1_a", "grpo_open"),
+        ComparisonSpec("exec_vs_open", "grpo_open", "grpo_exec"),
+    ) if len(model_order) > 1 else ()
     return {
         "initial_state_sha256": "c" * 64,
         "initial_scene_sha256": "d" * 64,
+        "model_order": list(model_order),
         "models": models,
+        "comparisons": compare_models(models, comparisons),
     }
+
+
+def test_single_model_and_explicit_pairwise_comparisons() -> None:
+    single = _repeat_report(gap_m=6.0, model_order=("stage1_a",))
+    assert single["comparisons"] == {}
+    result = _repeat_report(gap_m=6.0)
+    open_reward = result["comparisons"]["open_vs_stage1"]["metrics"][
+        "efficiency.joint_reward_mean"
+    ]
+    assert open_reward["candidate_minus_baseline"] == pytest.approx(0.2)
+    assert open_reward["conclusion"] == "better"
 
 
 def test_tolerance_repeat_gate_accepts_near_threshold_physics_drift() -> None:
@@ -292,7 +279,7 @@ def test_tolerance_repeat_gate_rejects_collision_or_large_metric_change() -> Non
     assert collision_result["tolerance_gate_passed"] is False
 
     changed = _repeat_report(gap_m=6.0)
-    changed["models"]["A"]["formation"]["mean_error_m"] = 1.5
+    changed["models"]["stage1_a"]["formation"]["mean_error_m"] = 1.5
     metric_result = compare_repeated_reports(
         [_repeat_report(gap_m=6.0), changed],
         ReproducibilityToleranceConfig(distance_m=0.1),

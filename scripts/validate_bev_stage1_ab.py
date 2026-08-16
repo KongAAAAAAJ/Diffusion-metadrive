@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open-loop and one-step sensorless closed-loop validation for Stage 1 A/B."""
+"""Open-loop and one-step closed-loop validation for one or more Stage 1 models."""
 
 # flake8: noqa: E402
 
@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from evaluation.bev_model_manifest import file_sha256, load_model_manifest
 from expert_dataset.collect_joint_bev import (
     JointBEVModelInputs,
     JointBEVSampleBuilder,
@@ -50,6 +51,14 @@ from train.train_bev_diffusion_stage1 import (
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
 VARIANT_CONDITION = {"A": "none", "B": "predicted_detached"}
+OPEN_LOOP_COMPARISON_POLICY = {
+    "loss/total": ("lower", 1.0e-4),
+    "metric/mode_accuracy": ("higher", 1.0e-3),
+    "metric/gt_mode_ade": ("lower", 1.0e-2),
+    "metric/gt_mode_fde": ("lower", 1.0e-2),
+    "metric/selected_ade": ("lower", 1.0e-2),
+    "metric/selected_fde": ("lower", 1.0e-2),
+}
 
 
 def _checkpoint_header(path: Path) -> Mapping[str, object]:
@@ -301,10 +310,51 @@ def validate_closed_loop(
         env.close()
 
 
+def _comparison_label(improvement: float, tolerance: float) -> str:
+    if improvement > tolerance:
+        return "better"
+    if improvement < -tolerance:
+        return "worse"
+    return "equivalent"
+
+
+def compare_open_loop_models(
+    models: Mapping[str, object], comparisons: tuple[object, ...]
+) -> dict[str, object]:
+    results = {}
+    for comparison in comparisons:
+        baseline_id = comparison.baseline
+        candidate_id = comparison.candidate
+        baseline = models[baseline_id]
+        candidate = models[candidate_id]
+        baseline_metrics = baseline["open_loop"]["metrics"]
+        candidate_metrics = candidate["open_loop"]["metrics"]
+        metric_results = {}
+        for metric, (direction, tolerance) in OPEN_LOOP_COMPARISON_POLICY.items():
+            baseline_value = float(baseline_metrics[metric])
+            candidate_value = float(candidate_metrics[metric])
+            raw_delta = candidate_value - baseline_value
+            improvement = raw_delta if direction == "higher" else -raw_delta
+            metric_results[metric] = {
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "candidate_minus_baseline": raw_delta,
+                "improvement": improvement,
+                "direction": direction,
+                "equivalence_tolerance": tolerance,
+                "conclusion": _comparison_label(improvement, tolerance),
+            }
+        results[comparison.comparison_id] = {
+            "baseline": baseline_id,
+            "candidate": candidate_id,
+            "metrics": metric_results,
+        }
+    return results
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint-a", type=Path, required=True)
-    parser.add_argument("--checkpoint-b", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--output", type=Path, required=True)
@@ -314,18 +364,32 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
-    report: dict[str, object] = {"seed": 17, "device": str(device), "variants": {}}
-    for variant, checkpoint in (
-        ("A", args.checkpoint_a),
-        ("B", args.checkpoint_b),
-    ):
-        planner, payload = load_planner(checkpoint, device)
-        if payload["variant"] != variant:
+    manifest = load_model_manifest(args.manifest)
+    non_stage1 = [model.model_id for model in manifest.models if model.kind != "stage1"]
+    if non_stage1:
+        raise Stage1TrainingError(
+            "Stage 1 validation manifest contains non-Stage1 models: "
+            + ", ".join(non_stage1)
+        )
+    models: dict[str, object] = {}
+    for model in manifest.models:
+        planner, payload = load_planner(model.checkpoint, device)
+        if payload["variant"] != model.variant:
             raise Stage1TrainingError(
-                f"checkpoint-{variant.lower()} does not contain variant {variant}"
+                f"model {model.model_id} checkpoint variant does not match manifest"
             )
-        report["variants"][variant] = {
-            "checkpoint": str(checkpoint),
+        models[model.model_id] = {
+            "kind": model.kind,
+            "variant": model.variant,
+            "checkpoint": str(model.checkpoint),
+            "checkpoint_sha256": model.checkpoint_sha256,
+            "checkpoint_metadata": {
+                "run_mode": payload.get("run_mode"),
+                "diagnostic_only": payload.get("diagnostic_only"),
+                "eligible_for_formal_training": payload.get(
+                    "eligible_for_formal_training"
+                ),
+            },
             "open_loop": validate_open_loop(
                 planner,
                 payload,
@@ -337,6 +401,22 @@ def main() -> None:
         del planner
         if device.type == "cuda":
             torch.cuda.empty_cache()
+    report: dict[str, object] = {
+        "format": "bev_stage1_model_validation_v2",
+        "seed": 17,
+        "device": str(device),
+        "diagnostic_only": True,
+        "eligible_for_formal_conclusions": False,
+        "manifest": str(manifest.path),
+        "manifest_sha256": file_sha256(manifest.path),
+        "model_order": list(manifest.model_ids),
+        "comparison_policy": {
+            metric: {"direction": value[0], "equivalence_tolerance": value[1]}
+            for metric, value in OPEN_LOOP_COMPARISON_POLICY.items()
+        },
+        "models": models,
+        "comparisons": compare_open_loop_models(models, manifest.comparisons),
+    }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"

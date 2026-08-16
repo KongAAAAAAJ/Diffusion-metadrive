@@ -1,4 +1,4 @@
-"""Fair closed-loop evaluation for Stage 1 and GRPO Variants A/B."""
+"""Fair closed-loop evaluation for one or more Stage 1 and GRPO models."""
 
 from __future__ import annotations
 
@@ -26,6 +26,12 @@ from expert_dataset.collect_joint_bev import (
     JointBEVSampleBuilder,
     SensorlessJointBEVPlatoonEnv,
     simulator_decision_dt_s,
+)
+from evaluation.bev_model_manifest import (
+    ComparisonSpec,
+    ModelSpec,
+    file_sha256,
+    load_model_manifest,
 )
 from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
 from train.bev_joint_grpo import (
@@ -58,18 +64,17 @@ from scenarios.bev_round13_contract import (
 )
 
 
-MODEL_NAMES = ("A", "B", "A_GRPO", "B_GRPO")
 DIAGNOSTIC_EVAL_SCENARIOS = PRIMARY_S5_S9_SCENARIOS
 FORMAL_EVAL_SCENARIOS = PRIMARY_S5_S9_SCENARIOS
 FORMAL_EVAL_SEEDS = (17, 23, 31, 47, 59)
 
 
-class FourModelEvaluationError(RuntimeError):
-    """Raised when a four-model evaluation is incomplete or unfair."""
+class ModelEvaluationError(RuntimeError):
+    """Raised when a model evaluation is incomplete or unfair."""
 
 
 @dataclass(frozen=True)
-class FourModelEvaluationConfig:
+class ModelEvaluationConfig:
     run_mode: Literal["diagnostic", "formal"] = "diagnostic"
     device: str = "cuda"
     seeds: tuple[int, ...] = HOLDOUT_SEEDS
@@ -79,29 +84,29 @@ class FourModelEvaluationConfig:
 
     def __post_init__(self) -> None:
         if self.run_mode not in ("diagnostic", "formal"):
-            raise FourModelEvaluationError(
+            raise ModelEvaluationError(
                 "evaluation run_mode must be diagnostic or formal"
             )
         if self.device not in ("cpu", "cuda"):
-            raise FourModelEvaluationError("evaluation device must be cpu or cuda")
+            raise ModelEvaluationError("evaluation device must be cpu or cuda")
         if (
             not self.seeds
             or any(isinstance(value, bool) or not isinstance(value, int) for value in self.seeds)
         ):
-            raise FourModelEvaluationError("evaluation seeds must be integers")
+            raise ModelEvaluationError("evaluation seeds must be integers")
         if not self.scenarios:
-            raise FourModelEvaluationError("evaluation scenarios cannot be empty")
+            raise ModelEvaluationError("evaluation scenarios cannot be empty")
         try:
             primary_scenario_contract(self.scenarios)
         except BEVScenarioContractError as exc:
-            raise FourModelEvaluationError(str(exc)) from exc
+            raise ModelEvaluationError(str(exc)) from exc
         if isinstance(self.max_steps, bool) or self.max_steps <= 0:
-            raise FourModelEvaluationError("max_steps must be positive")
+            raise ModelEvaluationError("max_steps must be positive")
         if (
             not math.isfinite(self.inference_p95_limit_ms)
             or self.inference_p95_limit_ms <= 0.0
         ):
-            raise FourModelEvaluationError(
+            raise ModelEvaluationError(
                 "inference_p95_limit_ms must be positive and finite"
             )
 
@@ -126,7 +131,7 @@ class ReproducibilityToleranceConfig:
         for field in dataclasses.fields(self):
             value = getattr(self, field.name)
             if not math.isfinite(value) or value < 0.0:
-                raise FourModelEvaluationError(
+                raise ModelEvaluationError(
                     f"reproducibility tolerance {field.name} must be finite and non-negative"
                 )
 
@@ -138,8 +143,8 @@ def _sync(device: torch.device) -> None:
 
 def _configure_deterministic_inference(device: torch.device) -> None:
     if os.environ.get("PYTHONHASHSEED") != "0":
-        raise FourModelEvaluationError(
-            "four-model evaluation requires PYTHONHASHSEED=0 at process startup"
+        raise ModelEvaluationError(
+            "model evaluation requires PYTHONHASHSEED=0 at process startup"
         )
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(0)
@@ -155,66 +160,20 @@ def _percentile(values: list[float], q: float) -> float:
     return float(np.percentile(values, q)) if values else 0.0
 
 
-def _load_manifest(path: Path) -> dict[str, object]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise FourModelEvaluationError(f"invalid model manifest: {path}") from exc
-    if not isinstance(payload, dict) or payload.get("format") != "bev_four_model_manifest_v1":
-        raise FourModelEvaluationError("four-model manifest format mismatch")
-    models = payload.get("models")
-    if not isinstance(models, Mapping) or set(models) != set(MODEL_NAMES):
-        raise FourModelEvaluationError(
-            "manifest must contain exactly A, B, A_GRPO and B_GRPO"
-        )
-    return payload
-
-
-def _file_sha256(path: Path) -> str:
-    try:
-        stream = path.open("rb")
-    except OSError as exc:
-        raise FourModelEvaluationError(f"unable to read checkpoint: {path}") from exc
-    digest = hashlib.sha256()
-    with stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _validate_checkpoint_hash(
-    spec: Mapping[str, object], field: str, hash_field: str
-) -> Path:
-    path = Path(str(spec.get(field, "")))
-    expected = spec.get(hash_field)
-    if not isinstance(expected, str) or len(expected) != 64:
-        raise FourModelEvaluationError(f"manifest {hash_field} is invalid")
-    if _file_sha256(path) != expected:
-        raise FourModelEvaluationError(f"manifest {field} SHA256 mismatch")
-    return path
-
-
 def _load_policy(
-    name: str,
-    spec: Mapping[str, object],
+    spec: ModelSpec,
     *,
     device: torch.device,
     formal: bool,
 ):
-    expected_variant = "A" if name.startswith("A") else "B"
-    expected_kind = "grpo" if name.endswith("_GRPO") else "stage1"
-    if spec.get("variant") != expected_variant or spec.get("kind") != expected_kind:
-        raise FourModelEvaluationError(f"{name} manifest type mismatch")
-    checkpoint = _validate_checkpoint_hash(
-        spec, "checkpoint", "checkpoint_sha256"
-    )
+    expected_variant = spec.variant
+    expected_kind = spec.kind
+    checkpoint = spec.checkpoint
     source_checkpoint = (
-        checkpoint
-        if expected_kind == "stage1"
-        else _validate_checkpoint_hash(
-            spec, "source_checkpoint", "source_checkpoint_sha256"
-        )
+        checkpoint if expected_kind == "stage1" else spec.source_checkpoint
     )
+    if source_checkpoint is None:
+        raise ModelEvaluationError(f"{spec.model_id} source checkpoint is missing")
     loader = (
         load_stage1_a_for_grpo
         if expected_variant == "A"
@@ -226,8 +185,8 @@ def _load_policy(
         allow_diagnostic_source=not formal,
     )
     if formal and source_payload.get("eligible_for_formal_training") is not True:
-        raise FourModelEvaluationError(
-            f"{name} source is not eligible for formal evaluation"
+        raise ModelEvaluationError(
+            f"{spec.model_id} source is not eligible for formal evaluation"
         )
     if expected_kind == "grpo":
         checkpoint_loader = (
@@ -251,8 +210,8 @@ def _load_policy(
             "trajectory_optimizer_sha256",
         ):
             if field not in grpo_payload:
-                raise FourModelEvaluationError(
-                    f"{name} is not an online-calibrated GRPO checkpoint"
+                raise ModelEvaluationError(
+                    f"{spec.model_id} is not an online-calibrated GRPO checkpoint"
                 )
         optimizer_config = KinematicTrajectoryOptimizerConfig()
         if (
@@ -261,20 +220,20 @@ def _load_policy(
             or grpo_payload.get("trajectory_optimizer_sha256")
             != optimizer_config.sha256()
         ):
-            raise FourModelEvaluationError(
-                f"{name} trajectory optimizer contract mismatch"
+            raise ModelEvaluationError(
+                f"{spec.model_id} trajectory optimizer contract mismatch"
             )
         if formal and grpo_payload.get("eligible_for_formal_training") is not True:
-            raise FourModelEvaluationError(
-                f"{name} checkpoint is diagnostic-only"
+            raise ModelEvaluationError(
+                f"{spec.model_id} checkpoint is diagnostic-only"
             )
         expected_contract = primary_scenario_contract()
         if (
             grpo_payload.get("scenario_contract_sha256")
             != expected_contract["sha256"]
         ):
-            raise FourModelEvaluationError(
-                f"{name} scenario contract no longer matches frozen S5--S9"
+            raise ModelEvaluationError(
+                f"{spec.model_id} scenario contract no longer matches frozen S5--S9"
             )
     trainer.planner.eval()
     return trainer.planner
@@ -428,7 +387,7 @@ def _initial_state_signature(env: object) -> np.ndarray:
     rows = []
     for agent_id in AGENT_IDS:
         if agent_id not in env.agents:
-            raise FourModelEvaluationError(
+            raise ModelEvaluationError(
                 f"initial state is missing required agent {agent_id}"
             )
         vehicle = env.agents[agent_id]
@@ -443,7 +402,7 @@ def _initial_state_signature(env: object) -> np.ndarray:
         )
     signature = np.asarray(rows, dtype=np.float64)
     if signature.shape != (3, 4) or not np.isfinite(signature).all():
-        raise FourModelEvaluationError("initial vehicle state is invalid")
+        raise ModelEvaluationError("initial vehicle state is invalid")
     return signature
 
 
@@ -472,7 +431,7 @@ def _initial_scene_sha256(env: object) -> str:
     for _, vehicle in helper._surrounding_vehicles(env):
         position = np.asarray(getattr(vehicle, "position", ()), dtype=np.float64)
         if position.shape[0] < 2 or not np.isfinite(position[:2]).all():
-            raise FourModelEvaluationError("initial scene vehicle position is invalid")
+            raise ModelEvaluationError("initial scene vehicle position is invalid")
         lane = getattr(vehicle, "lane", None)
         lane_index = getattr(lane, "index", getattr(vehicle, "lane_index", None))
         policy = None
@@ -535,25 +494,24 @@ def _tensor_mapping_exact(
 
 
 @torch.no_grad()
-def evaluate_four_models(
+def evaluate_models(
     manifest_path: Path,
     output_path: Path,
-    config: FourModelEvaluationConfig | None = None,
+    config: ModelEvaluationConfig | None = None,
 ) -> dict[str, object]:
-    cfg = config or FourModelEvaluationConfig()
+    cfg = config or ModelEvaluationConfig()
     if cfg.device == "cuda" and not torch.cuda.is_available():
-        raise FourModelEvaluationError("CUDA evaluation requested but unavailable")
+        raise ModelEvaluationError("CUDA evaluation requested but unavailable")
     device = torch.device(cfg.device)
     _configure_deterministic_inference(device)
-    manifest = _load_manifest(Path(manifest_path))
+    manifest = load_model_manifest(Path(manifest_path))
     models = {
-        name: _load_policy(
-            name,
-            manifest["models"][name],
+        spec.model_id: _load_policy(
+            spec,
             device=device,
             formal=cfg.run_mode == "formal",
         )
-        for name in MODEL_NAMES
+        for spec in manifest.models
     }
     model_reports = {}
     episode_count = len(cfg.scenarios) * len(cfg.seeds)
@@ -598,7 +556,7 @@ def evaluate_four_models(
                     rtol=0.0,
                     atol=1.0e-8,
                 ):
-                    raise FourModelEvaluationError(
+                    raise ModelEvaluationError(
                         "models did not receive identical reset state for "
                         f"scenario={scenario[0]} seed={seed}"
                     )
@@ -607,7 +565,7 @@ def evaluate_four_models(
                     initial_key, initial_scene
                 )
                 if initial_scene != reference_initial_scene:
-                    raise FourModelEvaluationError(
+                    raise ModelEvaluationError(
                         "models did not receive identical initial scene for "
                         f"scenario={scenario[0]} seed={seed}"
                     )
@@ -686,7 +644,7 @@ def evaluate_four_models(
                                     ),
                                 }
                                 if not deterministic_probe["identical_replay"]:
-                                    raise FourModelEvaluationError(
+                                    raise ModelEvaluationError(
                                         f"{name} is not exact for identical input and noise"
                                     )
                             raw_trajectories = (
@@ -735,14 +693,14 @@ def evaluate_four_models(
                                         agent_id, action[agent_id]
                                     )
                                 except Exception as exc:
-                                    raise FourModelEvaluationError(
+                                    raise ModelEvaluationError(
                                         "trajectory control failed for "
                                         f"model={name} scenario={scenario[0]} "
                                         f"seed={seed} step={step_index} "
                                         f"agent={agent_id}: {exc}"
                                     ) from exc
                                 if not np.isfinite(control).all():
-                                    raise FourModelEvaluationError(
+                                    raise ModelEvaluationError(
                                         "trajectory control is non-finite"
                                     )
                             control_ms = (
@@ -939,19 +897,19 @@ def evaluate_four_models(
         summary = _summarize(raw, episode_count)
         inference_p95 = summary["timing"]["model_inference_ms"]["p95_ms"]
         if inference_p95 > cfg.inference_p95_limit_ms:
-            raise FourModelEvaluationError(
+            raise ModelEvaluationError(
                 f"{name} three-role inference P95 {inference_p95:.2f}ms exceeds "
                 f"{cfg.inference_p95_limit_ms:.2f}ms"
             )
         if deterministic_probe is None:
-            raise FourModelEvaluationError(
+            raise ModelEvaluationError(
                 f"{name} evaluation never reached a model-ready state"
             )
         summary["deterministic_probe"] = deterministic_probe
         model_reports[name] = summary
 
     report = {
-        "format": "bev_four_model_evaluation_v1",
+        "format": "bev_model_evaluation_v2",
         "run_mode": cfg.run_mode,
         "diagnostic_only": cfg.run_mode != "formal",
         "eligible_for_formal_conclusions": cfg.run_mode == "formal",
@@ -975,20 +933,22 @@ def evaluate_four_models(
             "tf32": False,
         },
         "scenario_contract": primary_scenario_contract(cfg.scenarios),
-        "manifest": str(Path(manifest_path).resolve()),
-        "manifest_sha256": _file_sha256(Path(manifest_path)),
+        "manifest": str(manifest.path),
+        "manifest_sha256": file_sha256(manifest.path),
+        "model_order": list(manifest.model_ids),
         "model_checkpoints": {
-            name: {
-                "checkpoint": str(
-                    Path(str(manifest["models"][name]["checkpoint"])).resolve()
-                ),
-                "checkpoint_sha256": manifest["models"][name][
-                    "checkpoint_sha256"
-                ],
+            spec.model_id: {
+                "kind": spec.kind,
+                "variant": spec.variant,
+                "reward_domain": spec.reward_domain,
+                "checkpoint": str(spec.checkpoint),
+                "checkpoint_sha256": spec.checkpoint_sha256,
             }
-            for name in MODEL_NAMES
+            for spec in manifest.models
         },
         "models": model_reports,
+        "comparison_policy": _closed_loop_metric_policy(),
+        "comparisons": compare_models(model_reports, manifest.comparisons),
     }
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1001,12 +961,20 @@ def evaluate_four_models(
 def _behavior_sha256(report: Mapping[str, object]) -> str:
     models = report.get("models")
     if not isinstance(models, Mapping):
-        raise FourModelEvaluationError("evaluation report has no model metrics")
+        raise ModelEvaluationError("evaluation report has no model metrics")
+    model_order = report.get("model_order")
+    if (
+        not isinstance(model_order, list)
+        or not model_order
+        or any(not isinstance(name, str) for name in model_order)
+        or set(model_order) != set(models)
+    ):
+        raise ModelEvaluationError("evaluation report model_order is invalid")
     behavior = {}
-    for name in MODEL_NAMES:
+    for name in model_order:
         value = models.get(name)
         if not isinstance(value, Mapping):
-            raise FourModelEvaluationError(f"evaluation report is missing {name}")
+            raise ModelEvaluationError(f"evaluation report is missing {name}")
         behavior[name] = {
             key: item for key, item in value.items() if key != "timing"
         }
@@ -1020,17 +988,17 @@ def _nested_float(value: Mapping[str, object], path: Sequence[str]) -> float:
     current: object = value
     for key in path:
         if not isinstance(current, Mapping) or key not in current:
-            raise FourModelEvaluationError(
+            raise ModelEvaluationError(
                 f"repeat report is missing metric {'.'.join(path)}"
             )
         current = current[key]
     if isinstance(current, bool) or not isinstance(current, (int, float)):
-        raise FourModelEvaluationError(
+        raise ModelEvaluationError(
             f"repeat metric {'.'.join(path)} is not numeric"
         )
     result = float(current)
     if not math.isfinite(result):
-        raise FourModelEvaluationError(
+        raise ModelEvaluationError(
             f"repeat metric {'.'.join(path)} is non-finite"
         )
     return result
@@ -1041,10 +1009,10 @@ def _normalized_mode_distribution(
 ) -> dict[str, float]:
     roles = model.get("roles")
     if not isinstance(roles, Mapping) or not isinstance(roles.get(agent_id), Mapping):
-        raise FourModelEvaluationError(f"repeat report is missing role {agent_id}")
+        raise ModelEvaluationError(f"repeat report is missing role {agent_id}")
     distribution = roles[agent_id].get("mode_distribution")
     if not isinstance(distribution, Mapping):
-        raise FourModelEvaluationError("mode_distribution is missing")
+        raise ModelEvaluationError("mode_distribution is missing")
     counts = {str(key): int(value) for key, value in distribution.items()}
     total = sum(counts.values())
     return {
@@ -1058,18 +1026,18 @@ def _episode_outcome_index(
 ) -> dict[tuple[str, str, int], Mapping[str, object]]:
     outcomes = model.get("episode_outcomes")
     if not isinstance(outcomes, list):
-        raise FourModelEvaluationError("repeat report has no episode outcomes")
+        raise ModelEvaluationError("repeat report has no episode outcomes")
     indexed = {}
     for item in outcomes:
         if not isinstance(item, Mapping):
-            raise FourModelEvaluationError("episode outcome must be an object")
+            raise ModelEvaluationError("episode outcome must be an object")
         key = (
             str(item.get("scenario")),
             str(item.get("route")),
             int(item.get("seed")),
         )
         if key in indexed:
-            raise FourModelEvaluationError(f"duplicate episode outcome {key}")
+            raise ModelEvaluationError(f"duplicate episode outcome {key}")
         indexed[key] = item
     return indexed
 
@@ -1088,42 +1056,119 @@ def _exceeds_tolerance(delta: float, tolerance: float) -> bool:
     return delta > tolerance + epsilon
 
 
+def _closed_loop_metric_policy(
+    tolerance: ReproducibilityToleranceConfig | None = None,
+) -> dict[str, dict[str, object]]:
+    cfg = tolerance or ReproducibilityToleranceConfig()
+    return {
+        "joint_safety.collision_rate": {
+            "path": ("joint_safety", "collision_rate"),
+            "direction": "lower",
+            "equivalence_tolerance": 0.0,
+        },
+        "joint_safety.out_of_road_rate": {
+            "path": ("joint_safety", "out_of_road_rate"),
+            "direction": "lower",
+            "equivalence_tolerance": 0.0,
+        },
+        "joint_safety.gap_5m_violation_rate": {
+            "path": ("joint_safety", "gap_5m_violation_rate"),
+            "direction": "lower",
+            "equivalence_tolerance": cfg.rate,
+        },
+        "joint_safety.gap_7m_violation_rate": {
+            "path": ("joint_safety", "gap_7m_violation_rate"),
+            "direction": "lower",
+            "equivalence_tolerance": cfg.rate,
+        },
+        "formation.mean_error_m": {
+            "path": ("formation", "mean_error_m"),
+            "direction": "lower",
+            "equivalence_tolerance": cfg.distance_m,
+        },
+        "efficiency.completion_rate": {
+            "path": ("efficiency", "completion_rate"),
+            "direction": "higher",
+            "equivalence_tolerance": cfg.rate,
+        },
+        "efficiency.joint_reward_mean": {
+            "path": ("efficiency", "joint_reward_mean"),
+            "direction": "higher",
+            "equivalence_tolerance": cfg.reward,
+        },
+    }
+
+
+def compare_models(
+    models: Mapping[str, object],
+    comparisons: Sequence[ComparisonSpec],
+    tolerance: ReproducibilityToleranceConfig | None = None,
+) -> dict[str, object]:
+    policy = _closed_loop_metric_policy(tolerance)
+    results = {}
+    for comparison in comparisons:
+        baseline = models.get(comparison.baseline)
+        candidate = models.get(comparison.candidate)
+        if not isinstance(baseline, Mapping) or not isinstance(candidate, Mapping):
+            raise ModelEvaluationError("comparison model set is incomplete")
+        metric_results = {}
+        for metric, rule in policy.items():
+            path = rule["path"]
+            direction = str(rule["direction"])
+            equivalence_tolerance = float(rule["equivalence_tolerance"])
+            baseline_value = _nested_float(baseline, path)
+            candidate_value = _nested_float(candidate, path)
+            raw_delta = candidate_value - baseline_value
+            improvement = raw_delta if direction == "higher" else -raw_delta
+            metric_results[metric] = {
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "candidate_minus_baseline": raw_delta,
+                "improvement": improvement,
+                "direction": direction,
+                "equivalence_tolerance": equivalence_tolerance,
+                "conclusion": _conclusion_label(
+                    improvement, equivalence_tolerance
+                ),
+            }
+        results[comparison.comparison_id] = {
+            "baseline": comparison.baseline,
+            "candidate": comparison.candidate,
+            "metrics": metric_results,
+        }
+    return results
+
+
+def _report_comparison_specs(
+    report: Mapping[str, object],
+) -> tuple[ComparisonSpec, ...]:
+    values = report.get("comparisons")
+    if not isinstance(values, Mapping):
+        raise ModelEvaluationError("evaluation report comparisons are missing")
+    specs = []
+    for comparison_id, value in values.items():
+        if not isinstance(comparison_id, str) or not isinstance(value, Mapping):
+            raise ModelEvaluationError("evaluation report comparison is invalid")
+        baseline = value.get("baseline")
+        candidate = value.get("candidate")
+        if not isinstance(baseline, str) or not isinstance(candidate, str):
+            raise ModelEvaluationError("evaluation report comparison ids are invalid")
+        specs.append(ComparisonSpec(comparison_id, baseline, candidate))
+    return tuple(specs)
+
+
 def _report_conclusions(
     report: Mapping[str, object], cfg: ReproducibilityToleranceConfig
 ) -> dict[str, str]:
     models = report.get("models")
     if not isinstance(models, Mapping):
-        raise FourModelEvaluationError("repeat report has no models")
-    comparisons = (
-        ("A_GRPO_vs_A", "A_GRPO", "A"),
-        ("B_GRPO_vs_B", "B_GRPO", "B"),
-        ("B_vs_A", "B", "A"),
-        ("B_GRPO_vs_A_GRPO", "B_GRPO", "A_GRPO"),
-    )
-    # Direction is +1 when larger is better and -1 when smaller is better.
-    metrics = (
-        (("joint_safety", "collision_rate"), -1.0, 0.0),
-        (("joint_safety", "out_of_road_rate"), -1.0, 0.0),
-        (("joint_safety", "gap_5m_violation_rate"), -1.0, cfg.rate),
-        (("joint_safety", "gap_7m_violation_rate"), -1.0, cfg.rate),
-        (("formation", "mean_error_m"), -1.0, cfg.distance_m),
-        (("efficiency", "completion_rate"), 1.0, cfg.rate),
-        (("efficiency", "joint_reward_mean"), 1.0, cfg.reward),
-    )
-    conclusions = {}
-    for prefix, candidate_name, baseline_name in comparisons:
-        candidate = models.get(candidate_name)
-        baseline = models.get(baseline_name)
-        if not isinstance(candidate, Mapping) or not isinstance(baseline, Mapping):
-            raise FourModelEvaluationError("repeat report model set is incomplete")
-        for path, direction, tolerance in metrics:
-            raw_delta = _nested_float(candidate, path) - _nested_float(
-                baseline, path
-            )
-            conclusions[f"{prefix}/{'.'.join(path)}"] = _conclusion_label(
-                direction * raw_delta, tolerance
-            )
-    return conclusions
+        raise ModelEvaluationError("repeat report has no models")
+    comparisons = compare_models(models, _report_comparison_specs(report), cfg)
+    return {
+        f"{comparison_id}/{metric}": str(metric_result["conclusion"])
+        for comparison_id, comparison in comparisons.items()
+        for metric, metric_result in comparison["metrics"].items()
+    }
 
 
 def compare_repeated_reports(
@@ -1133,12 +1178,31 @@ def compare_repeated_reports(
     """Compare closed-loop repeats without requiring bit-exact physics."""
 
     if len(reports) < 2:
-        raise FourModelEvaluationError("repeat comparison requires at least two reports")
+        raise ModelEvaluationError("repeat comparison requires at least two reports")
     cfg = tolerance or ReproducibilityToleranceConfig()
     baseline = reports[0]
     baseline_models = baseline.get("models")
     if not isinstance(baseline_models, Mapping):
-        raise FourModelEvaluationError("repeat report has no models")
+        raise ModelEvaluationError("repeat report has no models")
+    model_order = baseline.get("model_order")
+    if (
+        not isinstance(model_order, list)
+        or not model_order
+        or any(not isinstance(name, str) for name in model_order)
+        or set(model_order) != set(baseline_models)
+    ):
+        raise ModelEvaluationError("baseline model_order is invalid")
+    for repeat_index, report in enumerate(reports[1:], start=2):
+        if report.get("model_order") != model_order:
+            raise ModelEvaluationError(
+                f"repeat {repeat_index} model_order does not match baseline"
+            )
+        if set(_report_conclusions(report, cfg)) != set(
+            _report_conclusions(baseline, cfg)
+        ):
+            raise ModelEvaluationError(
+                f"repeat {repeat_index} comparison set does not match baseline"
+            )
 
     initial_hashes = [str(report.get("initial_state_sha256", "")) for report in reports]
     initial_scene_hashes = [
@@ -1179,20 +1243,20 @@ def compare_repeated_reports(
         ("steering_change_abs_mean", cfg.comfort),
     )
 
-    for model_name in MODEL_NAMES:
+    for model_name in model_order:
         baseline_model = baseline_models.get(model_name)
         if not isinstance(baseline_model, Mapping):
-            raise FourModelEvaluationError(f"baseline is missing {model_name}")
+            raise ModelEvaluationError(f"baseline is missing {model_name}")
         baseline_outcomes = _episode_outcome_index(baseline_model)
         baseline_probe = baseline_model.get("deterministic_probe")
         if not isinstance(baseline_probe, Mapping):
-            raise FourModelEvaluationError("deterministic probe is missing")
+            raise ModelEvaluationError("deterministic probe is missing")
         probe_rows = [baseline_probe]
         for repeat_index, report in enumerate(reports[1:], start=2):
             models = report.get("models")
             model = models.get(model_name) if isinstance(models, Mapping) else None
             if not isinstance(model, Mapping):
-                raise FourModelEvaluationError(
+                raise ModelEvaluationError(
                     f"repeat {repeat_index} is missing {model_name}"
                 )
             outcomes = _episode_outcome_index(model)
@@ -1287,7 +1351,7 @@ def compare_repeated_reports(
                     )
             probe = model.get("deterministic_probe")
             if not isinstance(probe, Mapping):
-                raise FourModelEvaluationError("deterministic probe is missing")
+                raise ModelEvaluationError("deterministic probe is missing")
             probe_rows.append(probe)
         input_hashes = [str(value.get("input_and_noise_sha256", "")) for value in probe_rows]
         output_hashes = [str(value.get("output_sha256", "")) for value in probe_rows]
@@ -1337,10 +1401,10 @@ def compare_repeated_reports(
     }
 
 
-def evaluate_four_models_repeated(
+def evaluate_models_repeated(
     manifest_path: Path,
     output_path: Path,
-    config: FourModelEvaluationConfig,
+    config: ModelEvaluationConfig,
     *,
     repeats: int,
     tolerance: ReproducibilityToleranceConfig | None = None,
@@ -1348,7 +1412,7 @@ def evaluate_four_models_repeated(
     """Run complete evaluations sequentially inside one fixed process."""
 
     if isinstance(repeats, bool) or repeats < 2:
-        raise FourModelEvaluationError("fixed-process repeats must be at least two")
+        raise ModelEvaluationError("fixed-process repeats must be at least two")
     output = Path(output_path)
     reports = []
     hashes = []
@@ -1356,13 +1420,13 @@ def evaluate_four_models_repeated(
         repeat_output = output.with_name(
             f"{output.stem}.repeat_{repeat_index + 1}{output.suffix}"
         )
-        report = evaluate_four_models(manifest_path, repeat_output, config)
+        report = evaluate_models(manifest_path, repeat_output, config)
         reports.append(report)
         hashes.append(_behavior_sha256(report))
     exact_match = len(set(hashes)) == 1
     tolerance_comparison = compare_repeated_reports(reports, tolerance)
     combined = {
-        "format": "bev_four_model_fixed_process_repeat_v2",
+        "format": "bev_model_fixed_process_repeat_v2",
         "run_mode": config.run_mode,
         "diagnostic_only": config.run_mode != "formal",
         "eligible_for_formal_conclusions": config.run_mode == "formal",
@@ -1373,7 +1437,10 @@ def evaluate_four_models_repeated(
             "timing_excluded_from_hash": True,
             "tolerance_comparison": tolerance_comparison,
         },
+        "model_order": reports[0]["model_order"],
         "models": reports[0]["models"],
+        "comparison_policy": reports[0]["comparison_policy"],
+        "comparisons": reports[0]["comparisons"],
         "repeat_reports": reports,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1393,7 +1460,7 @@ def main() -> int:
     parser.add_argument("--max-steps", type=int, default=100)
     parser.add_argument("--repeats", type=int, default=1)
     arguments = parser.parse_args()
-    config = FourModelEvaluationConfig(
+    config = ModelEvaluationConfig(
         run_mode=arguments.run_mode,
         device=arguments.device,
         seeds=(
@@ -1409,13 +1476,13 @@ def main() -> int:
         max_steps=arguments.max_steps,
     )
     report = (
-        evaluate_four_models(
+        evaluate_models(
             arguments.manifest,
             arguments.output,
             config,
         )
         if arguments.repeats == 1
-        else evaluate_four_models_repeated(
+        else evaluate_models_repeated(
             arguments.manifest,
             arguments.output,
             config,
