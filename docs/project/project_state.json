@@ -1,13 +1,14 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-16T09:41:23+08:00",
+  "updated_at": "2026-08-16T10:02:51+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "c0c5b204a4a3e6663b1c7ea83379a79ebb259e9a",
-    "worktree_clean_before_this_update": true,
+    "git_commit": "885189a08d833c8a2fe27c4b021800de62ac0a26",
+    "worktree_clean_before_this_update": false,
     "project_state_update_committed": true,
     "uncommitted_plan_update_present": false,
+    "uncommitted_stage1_epoch_override_present": true,
     "uncommitted_exploratory_training_waiver_present": false,
     "uncommitted_formal50k_diversity_contract_present": false,
     "uncommitted_formal50k_launcher_update_present": false,
@@ -346,6 +347,7 @@
       "formal50k_observed_joint_samples": 50000,
       "formal50k_acceptance_skipped_by_user": true,
       "formal50k_allowed_for_at_risk_stage1": true,
+      "stage1_formal50k_dataset_path_preflight_passed": true,
       "exploratory_stage1_smoke_authorized": true,
       "exploratory_stage1_smoke_started": false,
       "exploratory_dataset_acceptance_passed": false,
@@ -424,6 +426,11 @@
       "path": "evaluation/CANDIDATE_V3_FORMAL50K_ACCEPTANCE_WAIVER_PLAN_REVISION_REPORT.json",
       "sha256": "5f9ddb9208dac6e200b58c0b8d858b442537e841e5400f835edc0b68e044f3ca",
       "role": "Records the observed 50000-sample collection counters and immutable fingerprints, the explicit decision to skip complete acceptance, the unresolved validation risks, and the bounded at-risk Stage1-A plan without claiming formal eligibility or starting training"
+    },
+    "stage1_formal50k_dataset_path_fix_report": {
+      "path": "evaluation/STAGE1_FORMAL50K_DATASET_PATH_FIX_REPORT.json",
+      "sha256": "0df83943ba95dbaa0583bc49363d3f72e00d9827b735e784342310133569c05a",
+      "role": "Records the Stage1 dataset-root correction from the bundle root to platoon_joint_bev, strict contract and sample-read preflight, focused tests, and the no-training boundary"
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
@@ -795,6 +802,7 @@
       "bounded_max_optimizer_steps_required": true,
       "source_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev",
       "source_dataset_fingerprint": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
+      "dataset_path_preflight_passed": true,
       "diagnostic_only": true,
       "formal_grpo_source_allowed": false
     },

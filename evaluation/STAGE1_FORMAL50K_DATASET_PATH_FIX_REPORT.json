@@ -1,0 +1,34 @@
+{
+  "format": "stage1_formal50k_dataset_path_fix_v1",
+  "recorded_at": "2026-08-16T10:02:51+08:00",
+  "status": "passed_training_not_started",
+  "source_commit": "885189a08d833c8a2fe27c4b021800de62ac0a26",
+  "problem": "Stage 1 was configured with the bundle root, so strict validation attempted to read a non-existent top-level dataset_contract.json.",
+  "fix": {
+    "file": "configs/train/bev_diffusion_stage1.yaml",
+    "dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev",
+    "automatic_fallback_added": false,
+    "strict_contract_validation_preserved": true
+  },
+  "verification": {
+    "dataset_contract_passed": true,
+    "dataset_fingerprint": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
+    "train_samples": 39330,
+    "validation_samples": 5880,
+    "first_train_sample_fields_and_finiteness_passed": true,
+    "focused_tests": {
+      "command": "python -m pytest tests/test_joint_bev_dataset.py -q -k 'not multi_worker_loader_does_not_share_parent_mmap_cache'",
+      "passed": 5,
+      "deselected": 1,
+      "note": "The multi-worker test was deselected after hanging under the command sandbox; the production dataset was opened and one sample was read directly without training."
+    },
+    "git_diff_check_passed": true,
+    "training_started": false
+  },
+  "scope_boundary": {
+    "complete_dataset_acceptance_run": false,
+    "formal_dataset_acceptance_passed": false,
+    "eligible_for_formal_training": false,
+    "next_gate": "stage1_a_at_risk_training_smoke"
+  }
+}
