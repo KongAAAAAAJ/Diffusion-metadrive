@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-15T09:18:58+08:00",
+  "updated_at": "2026-08-16T09:41:23+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "a1d32944b2528568de524b475d798827ef0c3cd8",
+    "git_commit": "c0c5b204a4a3e6663b1c7ea83379a79ebb259e9a",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": true,
     "uncommitted_plan_update_present": false,
@@ -21,10 +21,10 @@
     "uncommitted_combined_acceptance_evidence_present": false
   },
   "current": {
-    "phase": "candidate_v3_formal_data_collection",
-    "round": "post-merge-exact-path-smoke-20260815",
-    "status": "post_merge_exact_path_smoke_passed_formal50k_not_started",
-    "active_hard_gate": "candidate_v3_formal50k_collection"
+    "phase": "stage1_a_at_risk_planning",
+    "round": "formal50k-acceptance-waiver-plan-revision-20260816",
+    "status": "formal50k_acceptance_skipped_at_risk_stage1_planned_training_not_started",
+    "active_hard_gate": "stage1_a_at_risk_training_smoke"
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
@@ -276,8 +276,8 @@
       }
     },
     "candidate_v3_data_refresh": {
-      "status": "post_merge_exact_path_smoke_passed_formal50k_not_started",
-      "active_task": "candidate_v3_formal50k_collection",
+      "status": "formal50k_counter_reached_acceptance_skipped_at_risk_stage1_planned",
+      "active_task": "stage1_a_at_risk_training_smoke",
       "pilot_target_joint_steps": 10000,
       "pilot_per_scenario_quota": 2000,
       "pilot_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
@@ -332,7 +332,7 @@
       "merge_requires_fresh_user_authorization": false,
       "merge_completed": true,
       "merge_commit": "2d2266623626594e0fb8762ecc35b5576b353581",
-      "new_formal_50k_collection_started": false,
+      "new_formal_50k_collection_started": true,
       "new_formal_50k_eligible": false,
       "formal50k_diversity_constraints_authorized_by_user": true,
       "formal50k_diversity_constraints_recorded_on": "2026-08-14",
@@ -340,7 +340,12 @@
       "formal50k_collection_config": "configs/dataset/data_collect_candidate_v3_formal50k.yaml",
       "formal50k_launcher": "scripts/run_bundle_v2_formal_collection.sh",
       "formal50k_launcher_bound": true,
-      "formal50k_collection_started": false,
+      "formal50k_collection_started": true,
+      "formal50k_collection_process_finished": true,
+      "formal50k_collection_counter_reached": true,
+      "formal50k_observed_joint_samples": 50000,
+      "formal50k_acceptance_skipped_by_user": true,
+      "formal50k_allowed_for_at_risk_stage1": true,
       "exploratory_stage1_smoke_authorized": true,
       "exploratory_stage1_smoke_started": false,
       "exploratory_dataset_acceptance_passed": false,
@@ -364,6 +369,9 @@
     "candidate_v3_formal50k_collection_requested_by_user": true,
     "candidate_v3_formal50k_collection_requested_on": "2026-08-14T23:34:18+08:00",
     "candidate_v3_formal50k_collection_gate_bypass_authorized": true,
+    "candidate_v3_formal50k_acceptance_skipped_by_user": true,
+    "candidate_v3_formal50k_acceptance_skip_recorded_on": "2026-08-16",
+    "candidate_v3_formal50k_acceptance_skip_scope": "Allow only a bounded at-risk diagnostic Stage1-A Variant A run with run_mode=smoke; no formal dataset acceptance, formal training eligibility, GRPO source eligibility, formal evaluation, or paper evidence",
     "candidate_v3_dataset_acceptance_bypass_for_exploratory_training_authorized": true,
     "candidate_v3_dataset_acceptance_bypass_recorded_on": "2026-08-15",
     "candidate_v3_dataset_acceptance_bypass_scope": "Stage1-A run_mode=smoke only; no formal eligibility, GRPO, formal evaluation, or paper evidence",
@@ -376,7 +384,7 @@
     "current_bev_merge_authorized": true,
     "candidate_v3_s6_background_enrichment_authorized_by_user": true,
     "candidate_v3_s6_background_enrichment_recorded_on": "2026-08-14",
-    "note": "The user explicitly authorized and ran the candidate-v3 post-merge exact-path smoke on 2026-08-15. It passed complete base, sidecar and bundle verification plus statistical quality gates from BEV source HEAD a1d32944. Formal candidate-v3 50k collection may start in a separate hard-gate thread; formal training eligibility remains false."
+    "note": "The candidate-v3 formal50k collection counter reached 50000 samples. On 2026-08-16 the user explicitly chose to skip the complete base, sidecar, bundle, and statistical quality acceptance runs and asked only to revise the plan. This decision permits a future bounded at-risk diagnostic Stage1-A Variant A smoke run, but it does not mark acceptance as passed or grant formal training eligibility. No training was started in this round."
   },
   "source_of_truth": {
     "candidate_v3_s5_s9_combined_acceptance_report": {
@@ -412,10 +420,15 @@
       "sha256": "6560bbdf3fee015c905ae33dd1aff122a54e5ca086b386680189f400f237207a",
       "role": "Records the fresh BEV post-merge 5-sample S5-S9 smoke, immutable fingerprints, complete base/sidecar/bundle verification, accepted quality audit, and formal50k collection-start decision"
     },
+    "candidate_v3_formal50k_acceptance_waiver_plan_revision_report": {
+      "path": "evaluation/CANDIDATE_V3_FORMAL50K_ACCEPTANCE_WAIVER_PLAN_REVISION_REPORT.json",
+      "sha256": "5f9ddb9208dac6e200b58c0b8d858b442537e841e5400f835edc0b68e044f3ca",
+      "role": "Records the observed 50000-sample collection counters and immutable fingerprints, the explicit decision to skip complete acceptance, the unresolved validation risks, and the bounded at-risk Stage1-A plan without claiming formal eligibility or starting training"
+    },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "37fe6b2f7ae85c26606bb72db6e5f1e0ca2789b0e3ad014feb29ed2e179a02d6",
-      "role": "Freezes the candidate-v3 formal-data mainline and the explicit nonformal Stage1-A smoke waiver without representing dataset acceptance as passed"
+      "sha256": "db0941ffbd555b1d86dbe95119b4f484159fe80655b86c16ab9b8c159fb2a951",
+      "role": "Records the skipped formal50K acceptance boundary and plans a bounded at-risk diagnostic Stage1-A Variant A smoke while keeping formal eligibility false"
     },
     "candidate_v3_remediation9999_acceptance_report": {
       "path": "evaluation/CANDIDATE_V3_REMEDIATION9999_ACCEPTANCE_REPORT.json",
@@ -727,14 +740,31 @@
       "source_merge_commit": "2d2266623626594e0fb8762ecc35b5576b353581",
       "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
       "collection_authorized": true,
+      "collection_process_finished": true,
+      "collection_counter_reached": true,
+      "observed_joint_samples": 50000,
+      "observed_attempted_episodes": 362,
+      "observed_stored_episodes": 262,
+      "observed_rejected_episodes": 100,
+      "observed_joint_samples_per_scenario": {
+        "S5_hard_brake_lead": 10000,
+        "S6_background_merge_in": 10000,
+        "S7_ego_merge_from_ramp": 10000,
+        "S8_ego_exit_to_ramp": 10000,
+        "S9_narrow_channel_negotiation": 10000
+      },
       "collection_complete": false,
+      "acceptance_skipped_by_user": true,
+      "acceptance_passed": false,
+      "acceptance_result": "not_measured_by_user_decision",
       "full_verifier_passed": false,
       "quality_gate_passed": false,
       "eligible_for_formal_training": false,
-      "base_dataset_fingerprint": null,
-      "sidecar_dataset_fingerprint": null,
-      "bundle_index_sha256": null,
-      "blocker": null
+      "allowed_for_at_risk_stage1": true,
+      "base_dataset_fingerprint": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
+      "sidecar_dataset_fingerprint": "8f0d6e0bbc75b144c072d3f0685365e9453cd06ef604aebae50bf322ab0f2245",
+      "bundle_index_sha256": "5403bca52214e77a93867ca7c245605a4d04bc2f747321626eb22fc890ad2420",
+      "blocker": "complete_acceptance_skipped_formal_eligibility_unavailable"
     },
     "collection_performance_pilot": {
       "serial_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/riskentry_bundle_v2_performance_pilot_serial_v1",
@@ -761,7 +791,10 @@
       "eligible": false,
       "training_started": false,
       "allowed_run_mode": "smoke",
-      "source_dataset_fingerprint": "8a0caa07385c198594126a1ac7904a902f6824b25b121bcdafc2f50bee124501",
+      "planned_variant": "A",
+      "bounded_max_optimizer_steps_required": true,
+      "source_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev",
+      "source_dataset_fingerprint": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
       "diagnostic_only": true,
       "formal_grpo_source_allowed": false
     },
@@ -769,7 +802,8 @@
       "available": false,
       "eligible": false,
       "required_by_current_plan": true,
-      "blocked_until": "candidate_v3_formal_s5_s9_50k_is_complete_verified_quality_accepted_and_fingerprinted"
+      "blocked_until": "candidate_v3_formal_s5_s9_50k_is_complete_verified_quality_accepted_and_fingerprinted",
+      "acceptance_waiver_does_not_satisfy_formal_gate": true
     },
     "stage1_b_formal": {
       "available": false,
@@ -793,24 +827,27 @@
       "blocked_until": "real_trucksim_surrogate_gate_passes"
     }
   },
-  "blockers": [],
+  "blockers": [
+    "Formal Stage1-A remains blocked because complete formal50K base, sidecar, bundle, and statistical quality acceptance was skipped and therefore was not measured as passed. This does not block the separately labeled bounded at-risk diagnostic Stage1-A smoke."
+  ],
   "future_hard_gates": [
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
-    "The user requested formal candidate-v3 50k collection on 2026-08-14, but this does not waive failed quality gates or authorize BEV merge or training.",
+    "The formal candidate-v3 50k collection counter reached 50000 samples, but complete acceptance was explicitly skipped on 2026-08-16; formal acceptance and eligibility remain false.",
     "Bind the collector and both strict verifiers to candidate_v3 SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860 and retain the S6=260 and S9=800 evaluation horizons.",
-    "The formal candidate-v3 50k is incomplete unless all frozen sample, episode, split, seed, incidental-background-count, and behavior-category postconditions pass.",
+    "The formal candidate-v3 50k remains formally incomplete unless all frozen sample, episode, split, seed, incidental-background-count, transaction, safety, and behavior-category postconditions pass.",
     "The explicit user risk waiver supersedes the failed remediation9999 diagnostic gates only as a formal50k collection precondition; the BEV merge and post-merge exact-path smoke are recorded, while all formal50k completion gates remain mandatory.",
-    "Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded.",
+    "Formal Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded; the only currently planned exception is a bounded at-risk diagnostic Variant A smoke using run_mode=smoke and explicit max optimizer steps.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen."
   ],
   "next_actions": [
-    "In a separate hard-gate thread, start and monitor the formal candidate-v3 50k collection from the frozen BEV source and launcher; do not modify code or configuration during collection.",
-    "Preserve the 9999 observed samples and the explicit quota revision. Do not relabel them as 10000/2000 or waive the remaining bundle, split, and actor-scoped safety failures.",
-    "Do not start training in the waiver-recording round. On a future explicit request, the next permitted training action is a bounded Stage1-A smoke run on the named 9999-sample remediation-v2 base dataset.",
+    "Do not start training in this plan-revision round. In a separate future hard-gate thread and only on explicit user request, run a bounded at-risk diagnostic Stage1-A Variant A smoke on the named formal50K base dataset using run_mode=smoke and an explicit maximum optimizer-step limit.",
+    "Bind the at-risk Stage1-A run manifest to base dataset fingerprint 4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c and label every resulting checkpoint diagnostic_only=true and eligible_for_formal_training=false.",
+    "Do not use an at-risk checkpoint as a formal GRPO source, formal evaluation artifact, or paper result. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
+    "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
     "Preserve the accepted candidate-v3 combined manifest and all 140 hashed artifacts without rerunning, relabeling or overwriting them unless the frozen scenario contract changes.",
-    "The user requested moving to the next stage without completing validation. Any BEV merge or formal 50k start must be a separate hard gate that explicitly records the incomplete diagnostic waiver and must not label the v2 diagnostic as passed."
+    "The decision to skip formal50K acceptance must never be represented as an acceptance pass."
   ],
   "invariants": {
     "metadata_override_forbidden": true,

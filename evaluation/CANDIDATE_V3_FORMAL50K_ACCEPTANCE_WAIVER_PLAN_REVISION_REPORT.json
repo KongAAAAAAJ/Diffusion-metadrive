@@ -1,0 +1,65 @@
+{
+  "format": "candidate_v3_formal50k_acceptance_waiver_plan_revision_v1",
+  "recorded_at": "2026-08-16T09:41:23+08:00",
+  "status": "user_waiver_recorded_training_not_started",
+  "user_decision": {
+    "skip_complete_dataset_acceptance": true,
+    "proceed_to_subsequent_training": true,
+    "direct_training_start_requested_in_this_round": false,
+    "scope": "Modify the plan only; do not start training in this round."
+  },
+  "dataset": {
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+    "base_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev",
+    "lightweight_observed_total_joint_samples": 50000,
+    "lightweight_observed_stored_base_episodes": 262,
+    "lightweight_observed_attempted_episodes": 362,
+    "lightweight_observed_rejected_episodes": 100,
+    "lightweight_observed_base_samples_per_scenario": {
+      "S5_hard_brake_lead": 10000,
+      "S6_background_merge_in": 10000,
+      "S7_ego_merge_from_ramp": 10000,
+      "S8_ego_exit_to_ramp": 10000,
+      "S9_narrow_channel_negotiation": 10000
+    },
+    "base_dataset_fingerprint_from_manifest": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
+    "sidecar_dataset_fingerprint_from_manifest": "8f0d6e0bbc75b144c072d3f0685365e9453cd06ef604aebae50bf322ab0f2245",
+    "bundle_index_sha256": "5403bca52214e77a93867ca7c245605a4d04bc2f747321626eb22fc890ad2420",
+    "collection_state_sha256": "a8ce3204e081f2e9fa5a664ed166ce82205a66d217eb8e2cf2d5d960aa9b4ac1",
+    "bundle_manifest_sha256": "90478ad88741f017fa275f30f3b7881ecbe74094232654a0b8ecbe9d1a5105f3",
+    "scenario_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860"
+  },
+  "acceptance_status": {
+    "complete_base_verifier_run": false,
+    "complete_sidecar_verifier_run": false,
+    "complete_bundle_verifier_run": false,
+    "complete_quality_audit_run": false,
+    "acceptance_passed": false,
+    "acceptance_result": "not_measured_by_user_decision",
+    "eligible_for_formal_training": false,
+    "unresolved_risks": [
+      "undetected corrupt, malformed, non-finite, or inconsistent samples",
+      "unfinished cross-store transactions not detected by lightweight filename inspection",
+      "split, seed, background-count, and behavior-category diversity postconditions not verified",
+      "actor-scoped safety and S7 distribution thresholds not measured on the complete 50k dataset",
+      "manifest fingerprints are observed but not independently recomputed by complete verifiers"
+    ]
+  },
+  "revised_training_plan": {
+    "variant": "A",
+    "classification": "at_risk_diagnostic",
+    "required_run_mode": "smoke",
+    "max_optimizer_steps_required": true,
+    "dataset_binding": "Bind every output to the observed base dataset fingerprint from the manifest.",
+    "formal_grpo_source_allowed": false,
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false,
+    "training_started": false,
+    "next_hard_gate": "stage1_a_at_risk_training_smoke"
+  },
+  "formal_mainline": {
+    "status": "paused_at_dataset_acceptance",
+    "formal_stage1_a_allowed": false,
+    "resume_condition": "Run and pass complete base, sidecar, bundle and quality acceptance, then freeze verified fingerprints and eligibility."
+  }
+}
