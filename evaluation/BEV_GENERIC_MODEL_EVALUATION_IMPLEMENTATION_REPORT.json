@@ -1,0 +1,113 @@
+{
+  "format": "bev_generic_model_evaluation_implementation_report_v1",
+  "recorded_at": "2026-08-16T16:00:00+08:00",
+  "source_commit": "b48d1e2",
+  "status": "implemented_and_diagnostic_smoke_passed",
+  "scope": {
+    "shared_manifest": "evaluation/bev_model_manifest.py",
+    "stage1_entry": "scripts/validate_bev_stage1_ab.py",
+    "closed_loop_entry": "evaluation/bev_four_model_evaluator.py",
+    "training_changed": false,
+    "checkpoint_format_changed": false,
+    "dataset_acceptance_changed": false
+  },
+  "interface": {
+    "manifest_format": "bev_model_evaluation_manifest_v2",
+    "minimum_model_count": 1,
+    "model_kinds": [
+      "stage1",
+      "grpo"
+    ],
+    "variants": [
+      "A",
+      "B"
+    ],
+    "grpo_reward_domains": [
+      "tau_cmd",
+      "tau_a"
+    ],
+    "explicit_comparisons": true,
+    "legacy_v1_manifest_rejected": true,
+    "legacy_stage1_checkpoint_cli_rejected": true,
+    "public_closed_loop_api": [
+      "ModelEvaluationConfig",
+      "ModelEvaluationError",
+      "evaluate_models",
+      "evaluate_models_repeated"
+    ]
+  },
+  "verification": {
+    "focused_and_regression_tests": {
+      "result": "49 passed",
+      "command": "PYTHONPYCACHEPREFIX=/tmp/bev_eval_final_pycache PYTHONHASHSEED=0 /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_model_manifest.py tests/test_validate_bev_stage1_models.py tests/test_bev_four_model_evaluator.py tests/test_bev_stage1_ab_integration.py tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py -q"
+    },
+    "diff_check": "passed",
+    "stage1_single_model_smoke": {
+      "model_ids": [
+        "stage1_best"
+      ],
+      "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
+      "checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
+      "output": "/tmp/stage1_best_single_validation_v2.json",
+      "output_sha256": "ed77d030fcd21bb18d4464196f88c102b5b19096f62b93e7a8fd2700831502ce",
+      "open_loop_samples": 8,
+      "open_loop_deterministic": true,
+      "s1_single_step_terminated": false,
+      "s1_single_step_truncated": false,
+      "comparisons": []
+    },
+    "stage1_two_model_smoke": {
+      "model_ids": [
+        "stage1_best",
+        "stage1_last"
+      ],
+      "best_checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
+      "last_checkpoint_sha256": "ed691aaa7384d3791fc5c493a12c4f15fd3c2ea46d0ef45064f2c7e56e739d82",
+      "output": "/tmp/stage1_best_last_validation_v2.json",
+      "output_sha256": "a582910d9e99b1e1edaba4b457a56694cd337f9fa86962aa4522b8fe29aef40a",
+      "comparison_ids": [
+        "last_vs_best"
+      ],
+      "open_loop_samples_per_model": 8,
+      "s1_single_step_passed_per_model": true
+    },
+    "closed_loop_single_model_smoke": {
+      "model_ids": [
+        "stage1_best"
+      ],
+      "scenarios": [
+        "S5_hard_brake_lead",
+        "S6_background_merge_in",
+        "S7_ego_merge_from_ramp",
+        "S8_ego_exit_to_ramp",
+        "S9_narrow_channel_negotiation"
+      ],
+      "seeds": [
+        31,
+        47
+      ],
+      "max_steps": 12,
+      "episodes": 10,
+      "device": "cpu",
+      "output": "/tmp/stage1_best_s5_s9_short_eval_v2.json",
+      "output_sha256": "d83ef24ebe47d10a78a48e238a203d882532d4df0d940e81c02c98d655fe4747",
+      "collision_rate": 0.0,
+      "out_of_road_rate": 0.0,
+      "identical_replay": true,
+      "comparisons": []
+    }
+  },
+  "evidence_classification": {
+    "diagnostic_only": true,
+    "eligible_for_formal_conclusions": false,
+    "checkpoint_embedded_eligibility_can_promote_report": false,
+    "reason": "The candidate-v3 formal50K dataset acceptance was skipped and the smokes were bounded CPU diagnostics."
+  },
+  "remaining_risks": [
+    "The Stage1-A, GRPO-Open and GRPO-Exec three-model path has unit coverage but awaits real GRPO checkpoints for an end-to-end smoke.",
+    "Full-horizon S5-S9 evaluation was not run in this implementation round.",
+    "GPU inference latency was not measured; CPU timing is not performance evidence.",
+    "Formal conclusions remain blocked by the unperformed formal50K dataset acceptance."
+  ],
+  "implementation_note": "The first closed-loop smoke exposed a stale comparison-policy function name while building the report. It was corrected, the focused regression suite was rerun, and the same smoke then completed successfully."
+}
