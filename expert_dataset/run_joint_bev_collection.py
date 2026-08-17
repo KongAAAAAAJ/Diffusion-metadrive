@@ -5,7 +5,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import multiprocessing as mp
+import os
 import time
+import traceback
+import uuid
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
@@ -26,6 +32,7 @@ from expert_dataset.joint_risk_bundle_storage import (
     JointRiskBundleStorageError,
 )
 from expert_dataset.joint_bev_storage import (
+    EpisodeSplitAssigner,
     EpisodeSplitConfig,
     JointBEVDatasetStore,
     fingerprint_payload,
@@ -52,6 +59,7 @@ TOP_LEVEL_KEYS = {
     "env_config",
     "diagnostic_64",
     "formal_pilot",
+    "targeted_supplement",
 }
 SECTION_KEYS = {
     "dataset": {"name", "sidecar_name", "output_root", "scenario_contract"},
@@ -84,6 +92,21 @@ SECTION_KEYS = {
         "required_incidental_background_actor_counts",
         "required_behavior_categories",
         "behavior_rule_maker_profiles",
+    },
+    "targeted_supplement": {
+        "enabled",
+        "scenario_id",
+        "behavior_category",
+        "rule_maker_profile_id",
+        "accepted_episode_quotas",
+        "required_samples_per_episode",
+        "max_simulator_attempts",
+        "initial_feasibility_attempts",
+        "minimum_lateral_range_m",
+        "maximum_return_error_m",
+        "accepted_background_count_quotas",
+        "bootstrap_spawn_seeds",
+        "parallel_workers",
     },
 }
 
@@ -136,6 +159,45 @@ class FormalDiversityRequirements:
 
 
 @dataclass(frozen=True)
+class TargetedSupplementRequirements:
+    scenario_id: str
+    behavior_category: str
+    rule_maker_profile_id: str
+    accepted_episode_quotas: Mapping[str, int]
+    required_samples_per_episode: int
+    max_simulator_attempts: int
+    initial_feasibility_attempts: int
+    minimum_lateral_range_m: float
+    maximum_return_error_m: float
+    accepted_background_count_quotas: Mapping[int, int]
+    bootstrap_spawn_seeds: tuple[int, ...] = ()
+    parallel_workers: int = 1
+
+    @property
+    def target_episodes(self) -> int:
+        return sum(int(value) for value in self.accepted_episode_quotas.values())
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "scenario_id": self.scenario_id,
+            "behavior_category": self.behavior_category,
+            "rule_maker_profile_id": self.rule_maker_profile_id,
+            "accepted_episode_quotas": dict(self.accepted_episode_quotas),
+            "required_samples_per_episode": self.required_samples_per_episode,
+            "max_simulator_attempts": self.max_simulator_attempts,
+            "initial_feasibility_attempts": self.initial_feasibility_attempts,
+            "minimum_lateral_range_m": self.minimum_lateral_range_m,
+            "maximum_return_error_m": self.maximum_return_error_m,
+            "accepted_background_count_quotas": {
+                str(key): int(value)
+                for key, value in self.accepted_background_count_quotas.items()
+            },
+            "bootstrap_spawn_seeds": list(self.bootstrap_spawn_seeds),
+            "parallel_workers": self.parallel_workers,
+        }
+
+
+@dataclass(frozen=True)
 class JointCollectionRunConfig:
     config_path: Path
     bundle_root: Path
@@ -158,6 +220,7 @@ class JointCollectionRunConfig:
     formal_scenario_quotas: Mapping[str, int] | None = None
     formal_max_attempts_per_scenario: int = 0
     formal_diversity: FormalDiversityRequirements | None = None
+    targeted_supplement: TargetedSupplementRequirements | None = None
     scenario_contract_id: str = FORMAL_V1_CONTRACT_ID
 
     def __post_init__(self) -> None:
@@ -282,8 +345,14 @@ class JointCollectionRunConfig:
                 int(self.diagnostic_max_attempts_per_scenario),
             )
         formal_quotas = self.formal_scenario_quotas
-        if quotas is not None and formal_quotas is not None:
-            raise ValueError("diagnostic_64 and formal_pilot are mutually exclusive")
+        enabled_modes = sum(
+            value is not None
+            for value in (quotas, formal_quotas, self.targeted_supplement)
+        )
+        if enabled_modes > 1:
+            raise ValueError(
+                "diagnostic_64, formal_pilot and targeted_supplement are mutually exclusive"
+            )
         if formal_quotas is not None:
             expected = tuple(value[0] for value in PRIMARY_S5_S9_SCENARIOS)
             if tuple(formal_quotas) != expected:
@@ -404,6 +473,91 @@ class JointCollectionRunConfig:
             raise ValueError(
                 "formal_pilot diversity constraints require formal_pilot.enabled=true"
             )
+        targeted = self.targeted_supplement
+        if targeted is not None:
+            if targeted.scenario_id != "S5_hard_brake_lead":
+                raise ValueError("targeted_supplement supports only S5_hard_brake_lead")
+            if set(self.scenario_weights) != {targeted.scenario_id}:
+                raise ValueError(
+                    "targeted_supplement scenario_weights must contain only its scenario"
+                )
+            if targeted.behavior_category != (
+                "temporary_formation_release_and_recovery"
+            ):
+                raise ValueError(
+                    "targeted_supplement behavior_category is outside the frozen contract"
+                )
+            if targeted.rule_maker_profile_id != "balanced":
+                raise ValueError("targeted_supplement requires the balanced profile")
+            if tuple(targeted.accepted_episode_quotas) != FORMAL_SPLITS:
+                raise ValueError(
+                    "targeted_supplement accepted_episode_quotas must use train/val/test order"
+                )
+            if any(
+                isinstance(value, bool) or int(value) < 0
+                for value in targeted.accepted_episode_quotas.values()
+            ) or targeted.target_episodes <= 0:
+                raise ValueError(
+                    "targeted_supplement split quotas must be non-negative and non-empty"
+                )
+            if targeted.required_samples_per_episode <= 0:
+                raise ValueError(
+                    "targeted_supplement required_samples_per_episode must be positive"
+                )
+            if self.target_joint_steps != (
+                targeted.target_episodes * targeted.required_samples_per_episode
+            ):
+                raise ValueError(
+                    "targeted_supplement episode/sample quotas must equal target_joint_steps"
+                )
+            if targeted.initial_feasibility_attempts <= 0:
+                raise ValueError(
+                    "targeted_supplement initial_feasibility_attempts must be positive"
+                )
+            if (
+                targeted.max_simulator_attempts
+                < targeted.initial_feasibility_attempts
+            ):
+                raise ValueError(
+                    "targeted_supplement max attempts must cover the feasibility gate"
+                )
+            if not self.resume:
+                raise ValueError("targeted_supplement collection requires resume=true")
+            if (
+                not np.isfinite(targeted.minimum_lateral_range_m)
+                or targeted.minimum_lateral_range_m <= 0.0
+                or not np.isfinite(targeted.maximum_return_error_m)
+                or targeted.maximum_return_error_m < 0.0
+            ):
+                raise ValueError("targeted_supplement physical thresholds are invalid")
+            background_quotas = dict(targeted.accepted_background_count_quotas)
+            if (
+                not background_quotas
+                or any(key not in (3, 4, 5, 6) for key in background_quotas)
+                or any(
+                    isinstance(value, bool) or int(value) <= 0
+                    for value in background_quotas.values()
+                )
+                or sum(background_quotas.values()) != targeted.target_episodes
+            ):
+                raise ValueError(
+                    "targeted_supplement background quotas must cover all accepted episodes"
+                )
+            if (
+                len(set(targeted.bootstrap_spawn_seeds))
+                != len(targeted.bootstrap_spawn_seeds)
+                or any(value < 0 for value in targeted.bootstrap_spawn_seeds)
+            ):
+                raise ValueError(
+                    "targeted_supplement bootstrap seeds must be unique non-negative integers"
+                )
+            if (
+                isinstance(targeted.parallel_workers, bool)
+                or not 1 <= int(targeted.parallel_workers) <= 4
+            ):
+                raise ValueError(
+                    "targeted_supplement parallel_workers must be an integer in [1, 4]"
+                )
 
     def immutable_fingerprint(self) -> str:
         return fingerprint_payload(
@@ -448,6 +602,11 @@ class JointCollectionRunConfig:
                             else {"diversity": self.formal_diversity.as_dict()}
                         ),
                     }
+                ),
+                "targeted_supplement": (
+                    None
+                    if self.targeted_supplement is None
+                    else self.targeted_supplement.as_dict()
                 ),
             }
         )
@@ -520,6 +679,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
         payload, "diagnostic_64", required=False
     )
     formal = _strict_section(payload, "formal_pilot", required=False)
+    targeted = _strict_section(
+        payload, "targeted_supplement", required=False
+    )
 
     dataset_name = str(_required(dataset, "dataset", "name")).strip()
     if not dataset_name or Path(dataset_name).name != dataset_name:
@@ -678,6 +840,96 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
                 behavior_rule_maker_profiles=behavior_profiles,
             )
 
+    targeted_enabled = targeted.get("enabled", False)
+    if not isinstance(targeted_enabled, bool):
+        raise ValueError("targeted_supplement.enabled must be bool")
+    targeted_requirements = None
+    if targeted_enabled:
+        raw_split_quotas = _required(
+            targeted, "targeted_supplement", "accepted_episode_quotas"
+        )
+        raw_background_quotas = _required(
+            targeted,
+            "targeted_supplement",
+            "accepted_background_count_quotas",
+        )
+        raw_bootstrap_seeds = targeted.get("bootstrap_spawn_seeds", [])
+        if not isinstance(raw_split_quotas, Mapping):
+            raise ValueError(
+                "targeted_supplement.accepted_episode_quotas must be a mapping"
+            )
+        if not isinstance(raw_background_quotas, Mapping):
+            raise ValueError(
+                "targeted_supplement.accepted_background_count_quotas must be a mapping"
+            )
+        if not isinstance(raw_bootstrap_seeds, (list, tuple)):
+            raise ValueError(
+                "targeted_supplement.bootstrap_spawn_seeds must be a list"
+            )
+        targeted_requirements = TargetedSupplementRequirements(
+            scenario_id=str(
+                _required(targeted, "targeted_supplement", "scenario_id")
+            ),
+            behavior_category=str(
+                _required(
+                    targeted, "targeted_supplement", "behavior_category"
+                )
+            ),
+            rule_maker_profile_id=str(
+                _required(
+                    targeted, "targeted_supplement", "rule_maker_profile_id"
+                )
+            ),
+            accepted_episode_quotas={
+                str(name): int(value) for name, value in raw_split_quotas.items()
+            },
+            required_samples_per_episode=int(
+                _required(
+                    targeted,
+                    "targeted_supplement",
+                    "required_samples_per_episode",
+                )
+            ),
+            max_simulator_attempts=int(
+                _required(
+                    targeted,
+                    "targeted_supplement",
+                    "max_simulator_attempts",
+                )
+            ),
+            initial_feasibility_attempts=int(
+                _required(
+                    targeted,
+                    "targeted_supplement",
+                    "initial_feasibility_attempts",
+                )
+            ),
+            minimum_lateral_range_m=float(
+                _required(
+                    targeted,
+                    "targeted_supplement",
+                    "minimum_lateral_range_m",
+                )
+            ),
+            maximum_return_error_m=float(
+                _required(
+                    targeted,
+                    "targeted_supplement",
+                    "maximum_return_error_m",
+                )
+            ),
+            accepted_background_count_quotas={
+                int(name): int(value)
+                for name, value in raw_background_quotas.items()
+            },
+            bootstrap_spawn_seeds=tuple(
+                int(value) for value in raw_bootstrap_seeds
+            ),
+            parallel_workers=int(
+                targeted.get("parallel_workers", 1)
+            ),
+        )
+
     return JointCollectionRunConfig(
         config_path=config_path,
         bundle_root=bundle_root,
@@ -717,6 +969,7 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
         formal_scenario_quotas=formal_quotas,
         formal_max_attempts_per_scenario=formal_max_attempts,
         formal_diversity=formal_diversity,
+        targeted_supplement=targeted_requirements,
         scenario_contract_id=str(
             dataset.get("scenario_contract", FORMAL_V1_CONTRACT_ID)
         ),
@@ -1248,6 +1501,396 @@ def _formal_rule_maker_profile(
     return None
 
 
+TARGETED_SAFETY_EVENTS = frozenset(
+    {"collision_vehicle", "collision_object", "collision_sidewalk", "out_of_road"}
+)
+TARGETED_LATERAL_MODES = frozenset(range(3, 9))
+TARGETED_LEFT_MODES = frozenset(range(3, 6))
+TARGETED_RIGHT_MODES = frozenset(range(6, 9))
+
+
+def _count_true_runs(mask: np.ndarray) -> int:
+    values = np.asarray(mask, dtype=bool).reshape(-1)
+    if values.size == 0:
+        return 0
+    return int(values[0]) + int(np.count_nonzero(~values[:-1] & values[1:]))
+
+
+def _lateral_run_directions(modes: np.ndarray) -> list[str]:
+    values = np.asarray(modes, dtype=np.int64).reshape(-1)
+    lateral = np.isin(values, tuple(TARGETED_LATERAL_MODES))
+    starts = np.flatnonzero(lateral & np.concatenate(([True], ~lateral[:-1])))
+    stops = np.flatnonzero(lateral & np.concatenate((~lateral[1:], [True]))) + 1
+    directions = []
+    for start, stop in zip(starts, stops):
+        run = set(int(value) for value in values[start:stop])
+        if run <= TARGETED_LEFT_MODES:
+            directions.append("left")
+        elif run <= TARGETED_RIGHT_MODES:
+            directions.append("right")
+        else:
+            directions.append("mixed")
+    return directions
+
+
+def _validate_targeted_rollout(
+    rollout,
+    requirements: TargetedSupplementRequirements,
+) -> dict[str, object]:
+    """Validate label, physical motion and safety before any base commit."""
+
+    if rollout.failure_reason is not None:
+        raise JointCollectionError(
+            f"targeted rollout failed: {rollout.failure_reason}",
+            reason_code="targeted_trajectory_infeasible",
+        )
+    if len(rollout.samples) != requirements.required_samples_per_episode:
+        raise JointCollectionError(
+            "targeted rollout does not contain one complete episode",
+            reason_code="targeted_incomplete_joint_episode",
+        )
+    if len(rollout.sample_step_indices) != len(rollout.samples):
+        raise JointCollectionError(
+            "targeted rollout sample/step metadata are misaligned",
+            reason_code="targeted_incomplete_joint_episode",
+        )
+    summary = dict(rollout.scenario_summary)
+    evidence = summary.get("conflict_evidence", {})
+    if not isinstance(evidence, Mapping):
+        raise JointCollectionError(
+            "targeted rollout has no conflict evidence",
+            reason_code="targeted_scenario_not_realized",
+        )
+    observed = evidence.get("observed_behavior_class")
+    if observed != requirements.behavior_category:
+        if bool(evidence.get("mixed_direction_lane_change_completed", False)):
+            reason = "targeted_release_without_recovery"
+        elif observed == "keep_emergency_braking":
+            reason = "targeted_sustained_emergency_braking"
+        else:
+            reason = "targeted_scenario_not_realized"
+        raise JointCollectionError(
+            f"targeted behavior mismatch: observed={observed!r}",
+            reason_code=reason,
+        )
+    if rollout.sidecar is None:
+        raise JointCollectionError(
+            "targeted rollout has no sidecar timeline",
+            reason_code="targeted_safety_evidence_missing",
+        )
+    unsafe_events = []
+    for capture in rollout.sidecar.captures:
+        for event in capture.events:
+            if event.event_type in TARGETED_SAFETY_EVENTS and any(
+                actor_id in {"P0", "P1", "P2"} for actor_id in event.actor_ids
+            ):
+                unsafe_events.append(event.event_type)
+    if unsafe_events:
+        raise JointCollectionError(
+            f"targeted rollout has platoon safety events: {sorted(set(unsafe_events))}",
+            reason_code="targeted_safety_rejected",
+        )
+    required_flags = (
+        "mixed_direction_lane_change_completed",
+        "reassembly_completed",
+        "reassembly_to_initial_lane_completed",
+        "hazard_cleared",
+        "formation_recovered_after_hazard",
+    )
+    if not all(bool(evidence.get(name, False)) for name in required_flags):
+        raise JointCollectionError(
+            "targeted rollout released formation but did not complete recovery",
+            reason_code="targeted_release_without_recovery",
+        )
+
+    gt_mode = np.stack(
+        [np.asarray(sample.gt_mode, dtype=np.int64) for sample in rollout.samples]
+    )
+    pose = np.stack(
+        [
+            np.asarray(sample.ego_pose_global, dtype=np.float64)
+            for sample in rollout.samples
+        ]
+    )
+    if gt_mode.shape != (len(rollout.samples), 3) or pose.shape != (
+        len(rollout.samples),
+        3,
+        3,
+    ):
+        raise JointCollectionError(
+            "targeted rollout has malformed physical evidence",
+            reason_code="targeted_physical_evidence_invalid",
+        )
+    lateral_runs = []
+    lateral_directions = []
+    lateral_ranges = []
+    return_errors = []
+    for role_index in range(3):
+        lateral = np.isin(gt_mode[:, role_index], tuple(TARGETED_LATERAL_MODES))
+        lateral_runs.append(_count_true_runs(lateral))
+        lateral_directions.append(
+            _lateral_run_directions(gt_mode[:, role_index])
+        )
+        y = pose[:, role_index, 1]
+        lateral_ranges.append(float(np.ptp(y)))
+        return_errors.append(float(abs(y[-1] - y[0])))
+    if lateral_runs != [2, 2, 2]:
+        raise JointCollectionError(
+            f"targeted gt_mode lateral runs are {lateral_runs}, expected [2, 2, 2]",
+            reason_code="targeted_lateral_mode_segments_invalid",
+        )
+    if (
+        any(
+            len(directions) != 2
+            or directions[0] == directions[1]
+            or "mixed" in directions
+            for directions in lateral_directions
+        )
+        or len({directions[0] for directions in lateral_directions}) < 2
+    ):
+        raise JointCollectionError(
+            f"targeted lateral directions are not mixed release/return: {lateral_directions}",
+            reason_code="targeted_lateral_directions_invalid",
+        )
+    if any(
+        value < requirements.minimum_lateral_range_m
+        for value in lateral_ranges
+    ) or any(
+        value > requirements.maximum_return_error_m
+        for value in return_errors
+    ):
+        raise JointCollectionError(
+            "targeted lateral displacement/recovery threshold was not met",
+            reason_code="targeted_physical_displacement_invalid",
+        )
+    coverage = _formal_episode_coverage(
+        requirements.scenario_id, rollout.scenario_summary
+    )
+    return {
+        "behavior_category": str(coverage["behavior_category"]),
+        "incidental_background_actor_count": int(
+            coverage["incidental_background_actor_count"]
+        ),
+        "lateral_mode_runs_by_role": lateral_runs,
+        "lateral_run_directions_by_role": lateral_directions,
+        "lateral_range_m_by_role": lateral_ranges,
+        "return_error_m_by_role": return_errors,
+        "platoon_safety_events": [],
+    }
+
+
+def _empty_targeted_progress(
+    requirements: TargetedSupplementRequirements,
+) -> dict[str, object]:
+    return {
+        "accepted_episodes": 0,
+        "split_counts": {name: 0 for name in FORMAL_SPLITS},
+        "background_count_counts": {
+            int(name): 0
+            for name in requirements.accepted_background_count_quotas
+        },
+        "spawn_seeds": set(),
+    }
+
+
+def _stored_targeted_progress(
+    store: JointBEVDatasetStore,
+    requirements: TargetedSupplementRequirements,
+) -> dict[str, object]:
+    progress = _empty_targeted_progress(requirements)
+    for writer in store.writers.values():
+        for episode in writer.episodes.values():
+            attributes = episode.attributes
+            evidence = attributes.get("targeted_supplement_evidence")
+            if (
+                attributes.get("scenario_id") != requirements.scenario_id
+                or attributes.get("rule_maker_profile_id")
+                != requirements.rule_maker_profile_id
+                or not isinstance(evidence, Mapping)
+                or evidence.get("behavior_category")
+                != requirements.behavior_category
+                or int(episode.joint_samples)
+                != requirements.required_samples_per_episode
+            ):
+                raise JointCollectionError(
+                    "stored targeted episode violates the frozen supplement contract",
+                    reason_code="targeted_resume_mismatch",
+                )
+            seed = attributes.get("spawn_seed")
+            if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)):
+                raise JointCollectionError(
+                    "stored targeted episode has no valid spawn seed",
+                    reason_code="targeted_resume_mismatch",
+                )
+            if int(seed) in progress["spawn_seeds"]:
+                raise JointCollectionError(
+                    f"targeted supplement reuses spawn seed {seed}",
+                    reason_code="targeted_duplicate_spawn_seed",
+                )
+            background_count = evidence.get("incidental_background_actor_count")
+            if background_count not in progress["background_count_counts"]:
+                raise JointCollectionError(
+                    "stored targeted episode has an out-of-contract background count",
+                    reason_code="targeted_resume_mismatch",
+                )
+            progress["accepted_episodes"] += 1
+            progress["split_counts"][episode.split] += 1
+            progress["background_count_counts"][int(background_count)] += 1
+            progress["spawn_seeds"].add(int(seed))
+    if int(progress["accepted_episodes"]) * (
+        requirements.required_samples_per_episode
+    ) != store.total_joint_samples:
+        raise JointCollectionError(
+            "targeted episode count does not match stored sample count",
+            reason_code="targeted_resume_mismatch",
+        )
+    for split, count in progress["split_counts"].items():
+        if count > int(requirements.accepted_episode_quotas[split]):
+            raise JointCollectionError(
+                f"targeted split {split} exceeds its quota",
+                reason_code="targeted_resume_mismatch",
+            )
+    for background, count in progress["background_count_counts"].items():
+        if count > int(requirements.accepted_background_count_quotas[background]):
+            raise JointCollectionError(
+                f"targeted background count {background} exceeds its quota",
+                reason_code="targeted_resume_mismatch",
+            )
+    return progress
+
+
+def _targeted_simulator_attempts(bundle: JointRiskBundleIndex) -> int:
+    return sum(row.outcome != "scheduler_skip" for row in bundle.rows)
+
+
+def _serializable_targeted_progress(
+    progress: Mapping[str, object], simulator_attempts: int
+) -> dict[str, object]:
+    return {
+        "accepted_episodes": int(progress["accepted_episodes"]),
+        "simulator_attempts": int(simulator_attempts),
+        "split_counts": dict(progress["split_counts"]),
+        "background_count_counts": {
+            str(key): int(value)
+            for key, value in progress["background_count_counts"].items()
+        },
+        "spawn_seeds": sorted(progress["spawn_seeds"]),
+    }
+
+
+def _validate_targeted_completion(
+    progress: Mapping[str, object],
+    requirements: TargetedSupplementRequirements,
+) -> None:
+    if dict(progress["split_counts"]) != dict(
+        requirements.accepted_episode_quotas
+    ):
+        raise JointCollectionError(
+            "targeted supplement split quotas are incomplete",
+            reason_code="targeted_split_quota_incomplete",
+        )
+    if dict(progress["background_count_counts"]) != dict(
+        requirements.accepted_background_count_quotas
+    ):
+        raise JointCollectionError(
+            "targeted supplement background quotas are incomplete",
+            reason_code="targeted_background_quota_incomplete",
+        )
+
+
+def _targeted_hard_stop_reason(
+    *,
+    simulator_attempts: int,
+    accepted_episodes: int,
+    requirements: TargetedSupplementRequirements,
+) -> str | None:
+    if (
+        simulator_attempts >= requirements.initial_feasibility_attempts
+        and accepted_episodes == 0
+    ):
+        return "targeted_initial_feasibility_failed"
+    if simulator_attempts >= requirements.max_simulator_attempts:
+        return "targeted_max_simulator_attempts_exhausted"
+    return None
+
+
+def _plan_targeted_parallel_batch(
+    config: JointCollectionRunConfig,
+    *,
+    start_episode_index: int,
+    progress: Mapping[str, object],
+    bundle: JointRiskBundleIndex,
+    simulator_attempts: int,
+) -> tuple[tuple[JointEpisodeSpec, ...], list[dict[str, object]]]:
+    requirements = config.targeted_supplement
+    if requirements is None:
+        return (), []
+    batch_limit = min(
+        requirements.parallel_workers,
+        requirements.max_simulator_attempts - simulator_attempts,
+    )
+    if config.max_episodes > 0:
+        batch_limit = min(
+            batch_limit, config.max_episodes - start_episode_index
+        )
+    if (
+        int(progress["accepted_episodes"]) == 0
+        and simulator_attempts < requirements.initial_feasibility_attempts
+    ):
+        batch_limit = min(
+            batch_limit,
+            requirements.initial_feasibility_attempts - simulator_attempts,
+        )
+    if batch_limit <= 0:
+        return (), []
+    used_seeds = set(progress["spawn_seeds"])
+    used_seeds.update(row.spawn_seed for row in bundle.rows)
+    reserved_by_split: Counter[str] = Counter()
+    assigner = EpisodeSplitAssigner(config.split_config)
+    specs = []
+    entries = []
+    for offset in range(batch_limit):
+        episode_index = start_episode_index + offset
+        split_name = assigner.split_for_episode(episode_index)
+        remaining_split = (
+            requirements.accepted_episode_quotas[split_name]
+            - progress["split_counts"][split_name]
+            - reserved_by_split[split_name]
+        )
+        if remaining_split <= 0:
+            break
+        forced_seed = (
+            requirements.bootstrap_spawn_seeds[simulator_attempts + offset]
+            if simulator_attempts + offset
+            < len(requirements.bootstrap_spawn_seeds)
+            else None
+        )
+        spec = sample_episode_spec_for_scenario(
+            config,
+            episode_index,
+            requirements.scenario_id,
+            spawn_seed=forced_seed,
+        )
+        unique_seed = spec.spawn_seed
+        while unique_seed in used_seeds:
+            unique_seed = (unique_seed + 1) % (2**31 - 1)
+        if unique_seed != spec.spawn_seed:
+            spec = replace(spec, spawn_seed=unique_seed)
+        used_seeds.add(spec.spawn_seed)
+        reserved_by_split[split_name] += 1
+        specs.append(spec)
+        entries.append(
+            {
+                "episode_index": episode_index,
+                "split": split_name,
+                "scenario_id": spec.scenario_id,
+                "local_route": spec.local_route,
+                "spawn_seed": spec.spawn_seed,
+            }
+        )
+    return tuple(specs), entries
+
+
 def _configure_episode(
     env: SensorlessJointBEVPlatoonEnv,
     spec: JointEpisodeSpec,
@@ -1271,6 +1914,205 @@ def _configure_episode(
     spawn_manager = getattr(getattr(env, "engine", None), "spawn_manager", None)
     if spawn_manager is not None and hasattr(spawn_manager, "set_episode_spawn_seed"):
         spawn_manager.set_episode_spawn_seed(spec.spawn_seed)
+
+
+TARGETED_BATCH_PENDING_FILE = ".targeted_batch_pending.json"
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
+    temporary = path.parent / f".{path.name}.tmp-{uuid.uuid4().hex}"
+    encoded = (
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    with temporary.open("wb") as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def _isolated_targeted_rollout_worker(
+    sender,
+    config: JointCollectionRunConfig,
+    spec: JointEpisodeSpec,
+) -> None:
+    env = None
+    try:
+        requirements = config.targeted_supplement
+        if requirements is None:
+            raise JointCollectionError(
+                "isolated targeted worker received a non-targeted config",
+                reason_code="targeted_worker_contract",
+            )
+        episode_step_limit = config.episode_step_limit(spec.scenario_id)
+        episode_env_config = dict(config.env_config)
+        episode_env_config.update(
+            {
+                "rule_maker_profile_id": requirements.rule_maker_profile_id,
+                "start_seed": int(spec.spawn_seed),
+                "num_scenarios": 1,
+                "horizon": episode_step_limit,
+            }
+        )
+        env = SensorlessJointBEVPlatoonEnv(episode_env_config)
+        _configure_episode(env, spec)
+        rollout = collect_joint_episode(
+            env,
+            max_steps=episode_step_limit,
+            reset_seed=spec.spawn_seed,
+        )
+        sender.send(("ok", rollout, simulator_decision_dt_s(env)))
+    except BaseException as exc:
+        sender.send(
+            (
+                "error",
+                getattr(exc, "reason_code", "collection_contract"),
+                f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            )
+        )
+    finally:
+        if env is not None:
+            env.close()
+        sender.close()
+
+
+def _collect_one_targeted_isolated(
+    config: JointCollectionRunConfig,
+    spec: JointEpisodeSpec,
+) -> tuple[str, object, object]:
+    context = mp.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_isolated_targeted_rollout_worker,
+        args=(sender, config, spec),
+    )
+    try:
+        process.start()
+        sender.close()
+        payload = receiver.recv()
+        process.join()
+        if process.exitcode != 0 and payload[0] == "ok":
+            return (
+                "error",
+                "targeted_worker_process_failed",
+                f"targeted worker exited with code {process.exitcode}",
+            )
+        return payload
+    except (EOFError, OSError) as exc:
+        return (
+            "error",
+            "targeted_worker_process_failed",
+            f"targeted worker IPC failed: {exc}",
+        )
+    finally:
+        receiver.close()
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+
+def _collect_targeted_batch(
+    config: JointCollectionRunConfig,
+    specs: tuple[JointEpisodeSpec, ...],
+) -> tuple[tuple[str, object, object], ...]:
+    requirements = config.targeted_supplement
+    if requirements is None or not specs:
+        raise JointCollectionError(
+            "targeted parallel batch is empty or disabled",
+            reason_code="targeted_worker_contract",
+        )
+    worker_count = min(requirements.parallel_workers, len(specs))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(_collect_one_targeted_isolated, config, spec)
+            for spec in specs
+        ]
+        return tuple(future.result() for future in futures)
+
+
+def _targeted_batch_path(config: JointCollectionRunConfig) -> Path:
+    return config.bundle_root / TARGETED_BATCH_PENDING_FILE
+
+
+def _write_targeted_batch_pending(
+    config: JointCollectionRunConfig,
+    entries: list[Mapping[str, object]],
+) -> None:
+    path = _targeted_batch_path(config)
+    if entries:
+        _atomic_write_json(
+            path,
+            {"format": "targeted-parallel-batch-v1", "entries": entries},
+        )
+    elif path.exists():
+        path.unlink()
+
+
+def _complete_targeted_batch_entry(
+    config: JointCollectionRunConfig,
+    entries: list[dict[str, object]],
+    episode_index: int,
+) -> list[dict[str, object]]:
+    remaining = [
+        entry
+        for entry in entries
+        if int(entry["episode_index"]) != int(episode_index)
+    ]
+    _write_targeted_batch_pending(config, remaining)
+    return remaining
+
+
+def _recover_targeted_batch_pending(
+    config: JointCollectionRunConfig,
+    bundle: JointRiskBundleIndex,
+    base_store: JointBEVDatasetStore,
+) -> None:
+    path = _targeted_batch_path(config)
+    if not path.exists():
+        return
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    entries = payload.get("entries") if isinstance(payload, Mapping) else None
+    if not isinstance(entries, list):
+        raise JointRiskBundleStorageError("invalid targeted parallel batch intent")
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise JointRiskBundleStorageError("invalid targeted batch entry")
+        episode_index = int(entry["episode_index"])
+        if episode_index < bundle.next_episode_index:
+            continue
+        if episode_index != bundle.next_episode_index:
+            raise JointRiskBundleStorageError(
+                "targeted batch recovery is not contiguous"
+            )
+        split = str(entry["split"])
+        reason = "interrupted_parallel_rollout"
+        bundle.begin_attempt(
+            BundleEpisodeAttempt(
+                episode_index=episode_index,
+                split=split,
+                scenario_id=str(entry["scenario_id"]),
+                local_route=str(entry["local_route"]),
+                spawn_seed=int(entry["spawn_seed"]),
+            )
+        )
+        base_store.record_rejected_episode(episode_index, reason)
+        bundle.finalize(
+            BundleEpisodeResult(
+                episode_index=episode_index,
+                split=split,
+                scenario_id=str(entry["scenario_id"]),
+                local_route=str(entry["local_route"]),
+                spawn_seed=int(entry["spawn_seed"]),
+                base_status="rejected",
+                base_rejection_reason=reason,
+                sidecar_status="rejected",
+                sidecar_rejection_reason=reason,
+                raw_steps=0,
+                base_samples=0,
+                outcome=reason,
+            )
+        )
+    _write_targeted_batch_pending(config, [])
 
 
 def _stored_component_episode(store, episode_index: int):
@@ -1412,8 +2254,15 @@ def _sidecar_start(
     base_dataset_fingerprint: str,
     decision_dt_s: float,
     scenario_contract_sha256: str | None = None,
+    rule_maker_profile_id: str | None = None,
 ) -> SidecarEpisodeStart:
     summary = dict(rollout.scenario_summary)
+    conflict_evidence = summary.get("conflict_evidence", {})
+    resolved = summary.get("resolved_scenario_parameters", {})
+    if not isinstance(conflict_evidence, Mapping):
+        conflict_evidence = {}
+    if not isinstance(resolved, Mapping):
+        resolved = {}
     return SidecarEpisodeStart(
         episode_index=episode_index,
         split=split,
@@ -1432,6 +2281,30 @@ def _sidecar_start(
             "initial_speed_km_h": spec.initial_speed_km_h,
             "scenario_trigger_step": summary.get("scenario_trigger_step"),
             "scenario_realized_step": summary.get("scenario_realized_step"),
+            "rule_maker_profile_id": rule_maker_profile_id,
+            "observed_behavior_class": conflict_evidence.get(
+                "observed_behavior_class"
+            ),
+            "mixed_direction_lane_change_completed": conflict_evidence.get(
+                "mixed_direction_lane_change_completed"
+            ),
+            "reassembly_completed": conflict_evidence.get(
+                "reassembly_completed"
+            ),
+            "reassembly_to_initial_lane_completed": conflict_evidence.get(
+                "reassembly_to_initial_lane_completed"
+            ),
+            "hazard_cleared": conflict_evidence.get("hazard_cleared"),
+            "formation_recovered_after_hazard": conflict_evidence.get(
+                "formation_recovered_after_hazard"
+            ),
+            "incidental_background_actor_count": resolved.get(
+                "incidental_background_actor_count"
+            ),
+            "incidental_background_realized_count": conflict_evidence.get(
+                "incidental_background_realized_count"
+            ),
+            "rollout_failure_reason": rollout.failure_reason,
         },
     )
 
@@ -1485,6 +2358,8 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
         resume=effective_resume,
     ) as bundle:
         _recover_pending_bundle_attempt(bundle, store, sidecar_store)
+        if config.targeted_supplement is not None:
+            _recover_targeted_batch_pending(config, bundle, store)
         _validate_bundle_resume_state(bundle, store, sidecar_store)
         starting_joint_samples = store.total_joint_samples
         print(
@@ -1525,6 +2400,20 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         else config.formal_diversity.as_dict()
                     ),
                     "diversity_observed": _serializable_formal_progress(progress),
+                }
+            if config.targeted_supplement is not None:
+                targeted_progress = _stored_targeted_progress(
+                    store, config.targeted_supplement
+                )
+                _validate_targeted_completion(
+                    targeted_progress, config.targeted_supplement
+                )
+                summary["targeted_supplement"] = {
+                    "requirements": config.targeted_supplement.as_dict(),
+                    "observed": _serializable_targeted_progress(
+                        targeted_progress,
+                        _targeted_simulator_attempts(bundle),
+                    ),
                 }
             print("[INFO] target already satisfied; no simulator started", flush=True)
             return summary
@@ -1576,12 +2465,136 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
             }
         )
         formal_order = () if formal_quotas is None else tuple(formal_quotas)
+        targeted_requirements = config.targeted_supplement
+        targeted_progress = (
+            None
+            if targeted_requirements is None
+            else _stored_targeted_progress(store, targeted_requirements)
+        )
+        targeted_simulator_attempts = (
+            0
+            if targeted_requirements is None
+            else _targeted_simulator_attempts(bundle)
+        )
+        targeted_precollected: dict[
+            int, tuple[JointEpisodeSpec, tuple[str, object, object]]
+        ] = {}
+        targeted_pending_entries: list[dict[str, object]] = []
         try:
             while store.total_joint_samples < config.target_joint_steps:
                 episode_index = store.next_episode_index
                 if config.max_episodes > 0 and episode_index >= config.max_episodes:
                     break
-                if diagnostic_quotas is None and formal_quotas is None:
+                if targeted_requirements is not None:
+                    hard_stop_reason = _targeted_hard_stop_reason(
+                        simulator_attempts=targeted_simulator_attempts,
+                        accepted_episodes=int(
+                            targeted_progress["accepted_episodes"]
+                        ),
+                        requirements=targeted_requirements,
+                    )
+                    if hard_stop_reason is not None:
+                        raise JointCollectionError(
+                            "targeted supplement reached a production stop condition",
+                            reason_code=hard_stop_reason,
+                        )
+                    if (
+                        targeted_requirements.parallel_workers > 1
+                        and not targeted_precollected
+                        and targeted_progress["split_counts"][
+                            store.assigner.split_for_episode(episode_index)
+                        ]
+                        < targeted_requirements.accepted_episode_quotas[
+                            store.assigner.split_for_episode(episode_index)
+                        ]
+                    ):
+                        batch_specs, targeted_pending_entries = (
+                            _plan_targeted_parallel_batch(
+                                config,
+                                start_episode_index=episode_index,
+                                progress=targeted_progress,
+                                bundle=bundle,
+                                simulator_attempts=targeted_simulator_attempts,
+                            )
+                        )
+                        if batch_specs:
+                            _write_targeted_batch_pending(
+                                config, targeted_pending_entries
+                            )
+                            batch_results = _collect_targeted_batch(
+                                config, batch_specs
+                            )
+                            targeted_precollected = {
+                                episode_index + offset: (spec, result)
+                                for offset, (spec, result) in enumerate(
+                                    zip(batch_specs, batch_results)
+                                )
+                            }
+                    scenario_id = targeted_requirements.scenario_id
+                    split = store.assigner.split_for_episode(episode_index)
+                    precollected = targeted_precollected.get(episode_index)
+                    if precollected is not None:
+                        spec = precollected[0]
+                    else:
+                        forced_spawn_seed = (
+                            targeted_requirements.bootstrap_spawn_seeds[
+                                targeted_simulator_attempts
+                            ]
+                            if targeted_simulator_attempts
+                            < len(targeted_requirements.bootstrap_spawn_seeds)
+                            else None
+                        )
+                        spec = sample_episode_spec_for_scenario(
+                            config,
+                            episode_index,
+                            scenario_id,
+                            spawn_seed=forced_spawn_seed,
+                        )
+                        used_seeds = set(targeted_progress["spawn_seeds"])
+                        used_seeds.update(row.spawn_seed for row in bundle.rows)
+                        unique_seed = spec.spawn_seed
+                        while unique_seed in used_seeds:
+                            unique_seed = (unique_seed + 1) % (2**31 - 1)
+                        if unique_seed != spec.spawn_seed:
+                            spec = replace(spec, spawn_seed=unique_seed)
+                    if (
+                        targeted_progress["split_counts"][split]
+                        >= targeted_requirements.accepted_episode_quotas[split]
+                    ):
+                        bundle.begin_attempt(
+                            BundleEpisodeAttempt(
+                                episode_index=episode_index,
+                                split=split,
+                                scenario_id=spec.scenario_id,
+                                local_route=spec.local_route,
+                                spawn_seed=spec.spawn_seed,
+                            )
+                        )
+                        reason = "targeted_split_quota_satisfied"
+                        store.record_rejected_episode(episode_index, reason)
+                        bundle.finalize(
+                            BundleEpisodeResult(
+                                episode_index=episode_index,
+                                split=split,
+                                scenario_id=spec.scenario_id,
+                                local_route=spec.local_route,
+                                spawn_seed=spec.spawn_seed,
+                                base_status="rejected",
+                                base_rejection_reason=reason,
+                                sidecar_status="rejected",
+                                sidecar_rejection_reason=reason,
+                                raw_steps=0,
+                                base_samples=0,
+                                outcome="scheduler_skip",
+                            )
+                        )
+                        print(
+                            f"[INFO] episode={episode_index} split={split} "
+                            "scheduler_skip=targeted_split_quota_satisfied",
+                            flush=True,
+                        )
+                        continue
+                elif diagnostic_quotas is None and formal_quotas is None:
                     spec = sample_episode_spec(config, episode_index)
                 elif diagnostic_quotas is not None:
                     incomplete = [
@@ -1677,9 +2690,14 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 # to which scenarios ran before it.
                 if env is not None:
                     env.close()
+                    env = None
                 episode_env_config = dict(config.env_config)
                 rule_maker_profile_id = None
-                if config.formal_diversity is not None:
+                if targeted_requirements is not None:
+                    rule_maker_profile_id = (
+                        targeted_requirements.rule_maker_profile_id
+                    )
+                elif config.formal_diversity is not None:
                     rule_maker_profile_id = _formal_rule_maker_profile(
                         scenario_id=spec.scenario_id,
                         row=formal_progress[spec.scenario_id],
@@ -1694,14 +2712,33 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         "horizon": episode_step_limit,
                     }
                 )
-                env = SensorlessJointBEVPlatoonEnv(episode_env_config)
-                _configure_episode(env, spec)
+                precollected_payload = (
+                    None
+                    if targeted_requirements is None
+                    else targeted_precollected.get(episode_index)
+                )
+                episode_decision_dt_s = 0.1
+                if precollected_payload is None:
+                    env = SensorlessJointBEVPlatoonEnv(episode_env_config)
+                    _configure_episode(env, spec)
+                if targeted_requirements is not None:
+                    targeted_simulator_attempts += 1
                 try:
-                    rollout = collect_joint_episode(
-                        env,
-                        max_steps=episode_step_limit,
-                        reset_seed=spec.spawn_seed,
-                    )
+                    if precollected_payload is None:
+                        rollout = collect_joint_episode(
+                            env,
+                            max_steps=episode_step_limit,
+                            reset_seed=spec.spawn_seed,
+                        )
+                        episode_decision_dt_s = simulator_decision_dt_s(env)
+                    else:
+                        status, first, second = precollected_payload[1]
+                        if status != "ok":
+                            raise JointCollectionError(
+                                str(second), reason_code=str(first)
+                            )
+                        rollout = first
+                        episode_decision_dt_s = float(second)
                 except JointCollectionError as exc:
                     reason = getattr(exc, "reason_code", "collection_contract")
                     store.record_rejected_episode(episode_index, reason)
@@ -1727,6 +2764,27 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         f"scenario={spec.scenario_id} rejected={reason}: {exc}",
                         flush=True,
                     )
+                    if targeted_requirements is not None:
+                        targeted_precollected.pop(episode_index, None)
+                        targeted_pending_entries = (
+                            _complete_targeted_batch_entry(
+                                config,
+                                targeted_pending_entries,
+                                episode_index,
+                            )
+                        )
+                        hard_stop_reason = _targeted_hard_stop_reason(
+                            simulator_attempts=targeted_simulator_attempts,
+                            accepted_episodes=int(
+                                targeted_progress["accepted_episodes"]
+                            ),
+                            requirements=targeted_requirements,
+                        )
+                        if hard_stop_reason is not None:
+                            raise JointCollectionError(
+                                "targeted supplement reached a production stop condition",
+                                reason_code=hard_stop_reason,
+                            )
                     continue
 
                 samples_to_store = rollout.samples
@@ -1738,6 +2796,24 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     "scenario_trigger_step"
                 )
                 base_rejection_reason = rollout.failure_reason
+                if (
+                    targeted_requirements is not None
+                    and base_rejection_reason is not None
+                ):
+                    raw_failure = str(base_rejection_reason).lower()
+                    base_rejection_reason = (
+                        "targeted_safety_rejected"
+                        if any(
+                            token in raw_failure
+                            for token in (
+                                "collision",
+                                "crash",
+                                "out_of_road",
+                                "out_of_route",
+                            )
+                        )
+                        else "targeted_trajectory_infeasible"
+                    )
                 if base_rejection_reason is None and not rollout.samples:
                     base_rejection_reason = "no_joint_samples"
                 if diagnostic_quotas is not None and base_rejection_reason is None:
@@ -1797,9 +2873,44 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         )
                     except JointCollectionError as exc:
                         base_rejection_reason = exc.reason_code
+                targeted_evidence = None
+                if (
+                    targeted_requirements is not None
+                    and base_rejection_reason is None
+                ):
+                    try:
+                        targeted_evidence = _validate_targeted_rollout(
+                            rollout, targeted_requirements
+                        )
+                        background_count = int(
+                            targeted_evidence[
+                                "incidental_background_actor_count"
+                            ]
+                        )
+                        if background_count not in (
+                            targeted_requirements.accepted_background_count_quotas
+                        ):
+                            raise JointCollectionError(
+                                "targeted background count is outside the frozen quotas",
+                                reason_code="targeted_background_count_invalid",
+                            )
+                        if (
+                            targeted_progress["background_count_counts"][
+                                background_count
+                            ]
+                            >= targeted_requirements.accepted_background_count_quotas[
+                                background_count
+                            ]
+                        ):
+                            raise JointCollectionError(
+                                "targeted background-count quota is already satisfied",
+                                reason_code="targeted_background_quota_satisfied",
+                            )
+                    except JointCollectionError as exc:
+                        base_rejection_reason = exc.reason_code
                 base_eligible = base_rejection_reason is None
                 mapping = selected_steps if base_eligible else ()
-                decision_dt_s = simulator_decision_dt_s(env)
+                decision_dt_s = episode_decision_dt_s
                 try:
                     sidecar_prepared = _prepare_rollout_sidecar(
                         sidecar_store,
@@ -1811,6 +2922,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             base_dataset_fingerprint=base_fingerprint,
                             decision_dt_s=decision_dt_s,
                             scenario_contract_sha256=scenario_contract_sha256,
+                            rule_maker_profile_id=rule_maker_profile_id,
                         ),
                         rollout=rollout,
                         base_sample_step_indices=mapping,
@@ -1853,11 +2965,33 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             outcome="sidecar_data_integrity_invalid",
                         )
                     )
+                    if targeted_requirements is not None:
+                        targeted_precollected.pop(episode_index, None)
+                        targeted_pending_entries = (
+                            _complete_targeted_batch_entry(
+                                config,
+                                targeted_pending_entries,
+                                episode_index,
+                            )
+                        )
                     print(
                         f"[WARNING] episode={episode_index} scenario={spec.scenario_id} "
                         f"rejected={reason}: {exc}",
                         flush=True,
                     )
+                    if targeted_requirements is not None:
+                        hard_stop_reason = _targeted_hard_stop_reason(
+                            simulator_attempts=targeted_simulator_attempts,
+                            accepted_episodes=int(
+                                targeted_progress["accepted_episodes"]
+                            ),
+                            requirements=targeted_requirements,
+                        )
+                        if hard_stop_reason is not None:
+                            raise JointCollectionError(
+                                "targeted supplement reached a production stop condition",
+                                reason_code=hard_stop_reason,
+                            )
                     continue
 
                 stored = None
@@ -1899,6 +3033,10 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                                 and len(samples_to_store) < len(rollout.samples)
                             ),
                             "formal_coverage": formal_coverage,
+                            "targeted_supplement": (
+                                targeted_requirements is not None
+                            ),
+                            "targeted_supplement_evidence": targeted_evidence,
                             "rule_maker_profile_id": rule_maker_profile_id,
                             "scenario_contract_sha256": scenario_contract_sha256,
                         },
@@ -1928,12 +3066,32 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         outcome=sidecar_episode.outcome,
                     )
                 )
+                if targeted_requirements is not None:
+                    targeted_precollected.pop(episode_index, None)
+                    targeted_pending_entries = _complete_targeted_batch_entry(
+                        config,
+                        targeted_pending_entries,
+                        episode_index,
+                    )
                 if stored is None:
                     print(
                         f"[WARNING] episode={episode_index} scenario={spec.scenario_id} "
                         f"base_rejected={base_rejection_reason} sidecar=committed",
                         flush=True,
                     )
+                    if targeted_requirements is not None:
+                        hard_stop_reason = _targeted_hard_stop_reason(
+                            simulator_attempts=targeted_simulator_attempts,
+                            accepted_episodes=int(
+                                targeted_progress["accepted_episodes"]
+                            ),
+                            requirements=targeted_requirements,
+                        )
+                        if hard_stop_reason is not None:
+                            raise JointCollectionError(
+                                "targeted supplement reached a production stop condition",
+                                reason_code=hard_stop_reason,
+                            )
                     continue
                 if diagnostic_counts is not None:
                     diagnostic_counts[spec.scenario_id] += stored.joint_samples
@@ -1941,6 +3099,10 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                     formal_counts[spec.scenario_id] += stored.joint_samples
                     formal_progress = _stored_formal_progress(
                         store, formal_quotas, config.formal_diversity
+                    )
+                if targeted_requirements is not None:
+                    targeted_progress = _stored_targeted_progress(
+                        store, targeted_requirements
                     )
                 elapsed = max(time.perf_counter() - wall_start, 1e-6)
                 rate = (
@@ -1995,6 +3157,19 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
             _validate_formal_completion(
                 formal_progress, formal_quotas, config.formal_diversity
             )
+        if targeted_requirements is not None:
+            targeted_progress = _stored_targeted_progress(
+                store, targeted_requirements
+            )
+            summary["targeted_supplement"] = {
+                "requirements": targeted_requirements.as_dict(),
+                "observed": _serializable_targeted_progress(
+                    targeted_progress, targeted_simulator_attempts
+                ),
+            }
+            _validate_targeted_completion(
+                targeted_progress, targeted_requirements
+            )
 
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     return summary
@@ -2039,7 +3214,26 @@ def parse_args(argv: list[str] | None = None) -> JointCollectionRunConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
-    run_collection(parse_args(argv))
+    config = parse_args(argv)
+    try:
+        run_collection(config)
+    except JointCollectionError as exc:
+        if config.targeted_supplement is not None:
+            from expert_dataset.finalize_s5_targeted_supplement import (
+                write_targeted_supplement_report,
+            )
+
+            report = write_targeted_supplement_report(
+                config, stop_reason=getattr(exc, "reason_code", None)
+            )
+            print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
+        raise
+    if config.targeted_supplement is not None:
+        from expert_dataset.finalize_s5_targeted_supplement import (
+            build_composition_manifest,
+        )
+
+        build_composition_manifest(config)
     return 0
 
 

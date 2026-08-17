@@ -1,0 +1,94 @@
+{
+  "format": "s5_targeted_supplement_implementation_report_v1",
+  "recorded_on": "2026-08-17",
+  "status": "parallel_collection_code_ready_production_not_started",
+  "repository_head_before_changes": "4682e661ccec447eafe33ce391b474b10782a55c",
+  "source_bundle": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+    "joint_samples": 50000,
+    "episodes": 262,
+    "base_dataset_fingerprint": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
+    "bundle_index_sha256": "5403bca52214e77a93867ca7c245605a4d04bc2f747321626eb22fc890ad2420",
+    "modified": false,
+    "formal_acceptance_status": "skipped_by_user_unchanged"
+  },
+  "supplement_contract": {
+    "config": "configs/dataset/data_collect_candidate_v3_s5_release20.yaml",
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_s5_release20_v1",
+    "dataset_fingerprint": "627b2a52b88842aaa4c27f6fa91e60255b8561b6271d30a08702cccf8415f9de",
+    "scenario_id": "S5_hard_brake_lead",
+    "behavior_category": "temporary_formation_release_and_recovery",
+    "rule_maker_profile_id": "balanced",
+    "accepted_episode_quotas": {
+      "train": 16,
+      "val": 2,
+      "test": 2
+    },
+    "required_samples_per_episode": 190,
+    "target_joint_samples": 3800,
+    "accepted_background_count_quotas": {
+      "3": 5,
+      "4": 5,
+      "5": 5,
+      "6": 5
+    },
+    "initial_feasibility_attempts": 10,
+    "max_simulator_attempts": 200,
+    "parallel_workers": 4,
+    "first_gate_batch_ceiling": "4+4+2; episode 11 is never dispatched before the first ten outcomes are committed",
+    "commit_model": "isolated spawn rollout workers plus one ordered parent writer",
+    "parallel_resume_policy": "persisted batch intent; uncommitted in-flight rollouts recover as interrupted_parallel_rollout actual attempts"
+  },
+  "acceptance_contract": {
+    "all_three_roles_exact_lateral_runs": 2,
+    "all_roles_reverse_direction_on_second_run": true,
+    "first_run_mixed_left_and_right_across_roles": true,
+    "minimum_lateral_range_m": 2.5,
+    "maximum_return_error_m": 0.5,
+    "platoon_collision_or_out_of_road_allowed": false,
+    "base_sidecar_bundle_atomic_commit_required": true,
+    "rejected_rollout_retention": "sidecar_only_when_raw_timeline_exists"
+  },
+  "verification": {
+    "unit_and_transaction_tests": "27 passed",
+    "test_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_run_joint_bev_collection.py -q",
+    "bash_syntax_check_passed": true,
+    "python_compile_check_passed": true,
+    "parallel_smoke": {
+      "root": "/tmp/s5_release20_parallel_smoke",
+      "episodes_dispatched_concurrently": 2,
+      "approximate_wall_seconds": 111.5,
+      "attempted_episodes": 2,
+      "committed_base_episodes": 0,
+      "committed_sidecar_episodes": 2,
+      "sidecar_only_episodes": 2,
+      "observed_behavior_category_counts": {
+        "keep_emergency_braking": 2
+      },
+      "rejection_reason_counts": {
+        "targeted_sustained_emergency_braking": 2
+      },
+      "bundle_verification_passed": true,
+      "pending_transaction": false
+    }
+  },
+  "composition": {
+    "output": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_plus_s5_release20_v1/dataset_composition.json",
+    "generated": false,
+    "generation_gate": "20 accepted episodes plus strict source, physical, split, seed, background, safety and transaction verification",
+    "training_eligibility": "not_automatically_granted"
+  },
+  "production_collection": {
+    "started": false,
+    "must_run_in_separate_thread": true,
+    "command": "CONFIG=\"$PWD/configs/dataset/data_collect_candidate_v3_s5_release20.yaml\" bash scripts/run_bundle_v2_formal_collection.sh",
+    "external_log_directory": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/bev_joint_risk_candidate_v3_s5_release20_v1"
+  },
+  "file_sha256": {
+    "expert_dataset/run_joint_bev_collection.py": "6856d951416bcd1520c8783e28346b06968a429f7e34cb403db1d372d7f761ce",
+    "expert_dataset/finalize_s5_targeted_supplement.py": "2a14bc961b1baed8219758f72317192b86ccfbe91527f9296007571995ca1b07",
+    "configs/dataset/data_collect_candidate_v3_s5_release20.yaml": "8cdfff075795e513fb3dd24ebd3b101591f1e16d3c9083cce7455888c9857c5d",
+    "scripts/run_bundle_v2_formal_collection.sh": "f15a554fd3277f88024edfc4b90cc02d516faebcbc83998419c5db23f63333d8",
+    "tests/test_run_joint_bev_collection.py": "e5c01d11b302791a984f32a0c480ff3b2d41569c2bce739b8ed9e631fffcc332"
+  }
+}

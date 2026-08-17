@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -140,6 +142,87 @@ def _sidecar(
     )
 
 
+def _targeted_requirements(
+    *,
+    split_quotas: dict[str, int] | None = None,
+    samples: int = 190,
+    background_quotas: dict[int, int] | None = None,
+) -> runner.TargetedSupplementRequirements:
+    return runner.TargetedSupplementRequirements(
+        scenario_id="S5_hard_brake_lead",
+        behavior_category="temporary_formation_release_and_recovery",
+        rule_maker_profile_id="balanced",
+        accepted_episode_quotas=(
+            {"train": 16, "val": 2, "test": 2}
+            if split_quotas is None
+            else split_quotas
+        ),
+        required_samples_per_episode=samples,
+        max_simulator_attempts=200,
+        initial_feasibility_attempts=10,
+        minimum_lateral_range_m=2.5,
+        maximum_return_error_m=0.5,
+        accepted_background_count_quotas=(
+            {3: 5, 4: 5, 5: 5, 6: 5}
+            if background_quotas is None
+            else background_quotas
+        ),
+        bootstrap_spawn_seeds=(23,),
+    )
+
+
+def _targeted_rollout(*, unsafe: bool = False) -> JointEpisodeRollout:
+    samples = []
+    y = np.zeros(190, dtype=np.float32)
+    y[20:50] = np.linspace(0.1, 3.0, 30)
+    y[50:100] = 3.0
+    y[100:130] = np.linspace(2.9, 0.0, 30)
+    for step in range(190):
+        modes = np.full(3, int(ModeIndex.STOP), dtype=np.int64)
+        if 20 <= step < 50:
+            modes[:] = (
+                int(ModeIndex.LEFT_LOW),
+                int(ModeIndex.RIGHT_LOW),
+                int(ModeIndex.LEFT_LOW),
+            )
+        elif 100 <= step < 130:
+            modes[:] = (
+                int(ModeIndex.RIGHT_LOW),
+                int(ModeIndex.LEFT_LOW),
+                int(ModeIndex.RIGHT_LOW),
+            )
+        pose = np.zeros((3, 3), dtype=np.float32)
+        pose[:, 1] = (y[step], -y[step], y[step])
+        samples.append(SimpleNamespace(gt_mode=modes, ego_pose_global=pose))
+    return JointEpisodeRollout(
+        samples=tuple(samples),
+        simulator_steps=200,
+        rejected_joint_steps=0,
+        failure_reason=None,
+        terminated=False,
+        truncated=True,
+        sample_step_indices=tuple(range(10, 200)),
+        scenario_summary={
+            "resolved_scenario_parameters": {
+                "incidental_background_actor_count": 4,
+            },
+            "conflict_evidence": {
+                "incidental_background_realized_count": 4,
+                "observed_behavior_class": (
+                    "temporary_formation_release_and_recovery"
+                ),
+                "mixed_direction_lane_change_completed": True,
+                "reassembly_completed": True,
+                "reassembly_to_initial_lane_completed": True,
+                "hazard_cleared": True,
+                "formation_recovered_after_hazard": True,
+            },
+        },
+        sidecar=_sidecar(
+            200,
+            terminal_event="collision_vehicle" if unsafe else None,
+        ),
+    )
 def test_load_config_is_strict_and_fingerprint_excludes_run_target(
     tmp_path: Path,
 ) -> None:
@@ -165,6 +248,122 @@ def test_candidate_v3_config_binds_current_contract_and_s9_horizon() -> None:
     assert config.scenario_contract()["format"] == "bev_primary_s5_s9_contract_v2"
     assert config.episode_step_limit("S7_ego_merge_from_ramp") == 200
     assert config.episode_step_limit("S9_narrow_channel_negotiation") == 800
+
+
+def test_targeted_supplement_config_freezes_all_production_gates() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_s5_release20.yaml")
+    )
+    requirements = config.targeted_supplement
+    assert requirements is not None
+    assert config.formal_scenario_quotas is None
+    assert config.diagnostic_scenario_quotas is None
+    assert requirements.rule_maker_profile_id == "balanced"
+    assert requirements.accepted_episode_quotas == {
+        "train": 16,
+        "val": 2,
+        "test": 2,
+    }
+    assert requirements.accepted_background_count_quotas == {
+        3: 5,
+        4: 5,
+        5: 5,
+        6: 5,
+    }
+    assert requirements.required_samples_per_episode == 190
+    assert requirements.initial_feasibility_attempts == 10
+    assert requirements.max_simulator_attempts == 200
+    assert requirements.parallel_workers == 4
+    assert requirements.bootstrap_spawn_seeds == ()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        runner.replace(
+            config,
+            formal_scenario_quotas={
+                name: 760 for name, _ in runner.PRIMARY_S5_S9_SCENARIOS
+            },
+        )
+    with pytest.raises(ValueError, match="balanced"):
+        runner.replace(
+            config,
+            targeted_supplement=runner.replace(
+                requirements, rule_maker_profile_id="brake_first"
+            ),
+        )
+
+
+def test_targeted_physical_validator_requires_two_runs_recovery_and_safety() -> None:
+    requirements = _targeted_requirements()
+    evidence = runner._validate_targeted_rollout(
+        _targeted_rollout(), requirements
+    )
+    assert evidence["lateral_mode_runs_by_role"] == [2, 2, 2]
+    assert evidence["behavior_category"] == (
+        "temporary_formation_release_and_recovery"
+    )
+    with pytest.raises(runner.JointCollectionError) as exc_info:
+        runner._validate_targeted_rollout(
+            _targeted_rollout(unsafe=True), requirements
+        )
+    assert exc_info.value.reason_code == "targeted_safety_rejected"
+
+
+def test_targeted_initial_gate_counts_only_real_attempts_and_unlocks_on_success() -> None:
+    requirements = _targeted_requirements()
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=9,
+        accepted_episodes=0,
+        requirements=requirements,
+    ) is None
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=10,
+        accepted_episodes=0,
+        requirements=requirements,
+    ) == "targeted_initial_feasibility_failed"
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=10,
+        accepted_episodes=1,
+        requirements=requirements,
+    ) is None
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=200,
+        accepted_episodes=19,
+        requirements=requirements,
+    ) == "targeted_max_simulator_attempts_exhausted"
+
+
+def test_targeted_parallel_batch_never_crosses_the_first_ten_gate() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_s5_release20.yaml")
+    )
+    requirements = config.targeted_supplement
+    progress = runner._empty_targeted_progress(requirements)
+    bundle = SimpleNamespace(rows=[])
+    specs, entries = runner._plan_targeted_parallel_batch(
+        config,
+        start_episode_index=0,
+        progress=progress,
+        bundle=bundle,
+        simulator_attempts=0,
+    )
+    assert len(specs) == len(entries) == 4
+    assert len({spec.spawn_seed for spec in specs}) == 4
+    specs, _ = runner._plan_targeted_parallel_batch(
+        config,
+        start_episode_index=8,
+        progress=progress,
+        bundle=bundle,
+        simulator_attempts=8,
+    )
+    assert len(specs) == 2
+    progress["accepted_episodes"] = 1
+    specs, _ = runner._plan_targeted_parallel_batch(
+        config,
+        start_episode_index=10,
+        progress=progress,
+        bundle=bundle,
+        simulator_attempts=10,
+    )
+    assert len(specs) == 4
 
 
 def test_config_rejects_sensor_or_non_boolean_resume(tmp_path: Path) -> None:
@@ -485,6 +684,309 @@ def test_cli_overrides_only_operational_collection_limits(tmp_path: Path) -> Non
     assert config.max_episodes == 1
     assert config.max_episode_steps == 11
     assert config.resume is True
+
+
+def _targeted_test_config(
+    tmp_path: Path,
+    *,
+    split_quotas: dict[str, int],
+    max_episodes: int,
+) -> runner.JointCollectionRunConfig:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_s5_release20.yaml")
+    )
+    requirements = _targeted_requirements(
+        split_quotas=split_quotas,
+        samples=1,
+        background_quotas={4: sum(split_quotas.values())},
+    )
+    return runner.replace(
+        config,
+        bundle_root=tmp_path / "bundle",
+        dataset_root=tmp_path / "bundle/platoon_joint_bev",
+        sidecar_root=tmp_path / "bundle/riskentry_actor_sidecar",
+        target_joint_steps=sum(split_quotas.values()),
+        max_episodes=max_episodes,
+        max_episode_steps=1,
+        targeted_supplement=requirements,
+    )
+
+
+def _install_targeted_fake_env(monkeypatch, collect_fn):
+    env_configs = []
+
+    class _Spawn:
+        def set_episode_spawn_seed(self, seed):
+            del seed
+
+    class _FakeEnv:
+        def __init__(self, env_config):
+            self.config = dict(env_config)
+            env_configs.append(self.config)
+            self.platoon_config = type(
+                "Config",
+                (),
+                {"traffic_density": 0.0, "initial_speed_km_h": 0.0},
+            )()
+            self.engine = type(
+                "Engine",
+                (),
+                {"global_config": {}, "spawn_manager": _Spawn()},
+            )()
+
+        def set_runtime_scenario_route(self, scenario_id, local_route):
+            self.config.update(
+                {"scenario_id": scenario_id, "local_route": local_route}
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runner, "SensorlessJointBEVPlatoonEnv", _FakeEnv)
+    monkeypatch.setattr(runner, "collect_joint_episode", collect_fn)
+    return env_configs
+
+
+def _failed_targeted_rollout(max_steps: int) -> JointEpisodeRollout:
+    return JointEpisodeRollout(
+        samples=(_sample(),),
+        simulator_steps=max_steps,
+        rejected_joint_steps=0,
+        failure_reason="trajectory_failed",
+        terminated=False,
+        truncated=True,
+        sample_step_indices=(0,),
+        scenario_summary={
+            "resolved_scenario_parameters": {
+                "incidental_background_actor_count": 4,
+            },
+            "conflict_evidence": {
+                "incidental_background_realized_count": 4,
+                "observed_behavior_class": "keep_emergency_braking",
+            },
+        },
+        sidecar=_sidecar(max_steps),
+    )
+
+
+def test_targeted_scheduler_skips_do_not_count_as_simulator_attempts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _targeted_test_config(
+        tmp_path,
+        split_quotas={"train": 0, "val": 1, "test": 0},
+        max_episodes=5,
+    )
+    calls = []
+
+    def _collect(env, *, max_steps, reset_seed=None):
+        calls.append(reset_seed)
+        return _failed_targeted_rollout(max_steps)
+
+    env_configs = _install_targeted_fake_env(monkeypatch, _collect)
+    with pytest.raises(runner.JointCollectionError) as exc_info:
+        runner.run_collection(config)
+    assert exc_info.value.reason_code == "targeted_split_quota_incomplete"
+    rows = [
+        json.loads(line)
+        for line in (config.bundle_root / "bundle_episode_index.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["outcome"] for row in rows[:4]] == ["scheduler_skip"] * 4
+    assert len(calls) == 1
+    assert runner._targeted_simulator_attempts(
+        type("Bundle", (), {"rows": [runner.BundleEpisodeResult.from_mapping(row) for row in rows]})()
+    ) == 1
+    assert env_configs[0]["rule_maker_profile_id"] == "balanced"
+
+
+def test_targeted_first_ten_zero_success_stops_and_keeps_sidecars(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _targeted_test_config(
+        tmp_path,
+        split_quotas={"train": 1, "val": 0, "test": 0},
+        max_episodes=100,
+    )
+    calls = []
+
+    def _collect(env, *, max_steps, reset_seed=None):
+        calls.append(reset_seed)
+        return _failed_targeted_rollout(max_steps)
+
+    _install_targeted_fake_env(monkeypatch, _collect)
+    with pytest.raises(runner.JointCollectionError) as exc_info:
+        runner.run_collection(config)
+    assert exc_info.value.reason_code == "targeted_initial_feasibility_failed"
+    assert len(calls) == 10
+    assert len(calls) == len(set(calls))
+    report = verify_joint_risk_bundle(
+        config.bundle_root, scenario_contract_id="candidate_v3"
+    )
+    assert report["committed_base_episodes"] == 0
+    assert report["committed_sidecar_episodes"] == 10
+    assert report["sidecar_only_episodes"] == 10
+
+
+def test_targeted_parallel_coordinator_stops_before_attempt_eleven(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _targeted_test_config(
+        tmp_path,
+        split_quotas={"train": 20, "val": 0, "test": 0},
+        max_episodes=100,
+    )
+    config = runner.replace(
+        config,
+        targeted_supplement=runner.replace(
+            config.targeted_supplement, parallel_workers=4
+        ),
+    )
+    batch_sizes = []
+
+    def _batch(config, specs):
+        batch_sizes.append(len(specs))
+        return tuple(
+            ("ok", _failed_targeted_rollout(1), 0.1) for _ in specs
+        )
+
+    monkeypatch.setattr(runner, "_collect_targeted_batch", _batch)
+    monkeypatch.setattr(
+        runner,
+        "SensorlessJointBEVPlatoonEnv",
+        lambda config: pytest.fail("precollected parallel rollout created an env"),
+    )
+    with pytest.raises(runner.JointCollectionError) as exc_info:
+        runner.run_collection(config)
+    assert exc_info.value.reason_code == "targeted_initial_feasibility_failed"
+    assert sum(batch_sizes) == 10
+    assert max(batch_sizes) == 4
+    assert not (config.bundle_root / runner.TARGETED_BATCH_PENDING_FILE).exists()
+
+
+def test_targeted_parallel_pending_batch_recovers_as_actual_attempts(
+    tmp_path: Path,
+) -> None:
+    config = _targeted_test_config(
+        tmp_path,
+        split_quotas={"train": 2, "val": 0, "test": 0},
+        max_episodes=2,
+    )
+    fingerprint = config.immutable_fingerprint()
+    with runner.JointBEVDatasetStore(
+        config.dataset_root,
+        split_config=config.split_config,
+        dataset_fingerprint=fingerprint,
+        resume=False,
+    ) as base, runner.RiskEntrySidecarDatasetStore(
+        config.sidecar_root,
+        base_dataset_fingerprint=fingerprint,
+        resume=False,
+    ) as sidecar, runner.JointRiskBundleIndex(
+        config.bundle_root,
+        base_directory=config.dataset_root.name,
+        sidecar_directory=config.sidecar_root.name,
+        base_dataset_fingerprint=fingerprint,
+        sidecar_dataset_fingerprint=sidecar.dataset_fingerprint,
+        scenario_contract_sha256=config.scenario_contract()["sha256"],
+        split_seed=17,
+        resume=False,
+    ) as bundle:
+        specs, entries = runner._plan_targeted_parallel_batch(
+            runner.replace(
+                config,
+                targeted_supplement=runner.replace(
+                    config.targeted_supplement, parallel_workers=2
+                ),
+            ),
+            start_episode_index=0,
+            progress=runner._empty_targeted_progress(
+                config.targeted_supplement
+            ),
+            bundle=bundle,
+            simulator_attempts=0,
+        )
+        assert len(specs) == 2
+        runner._write_targeted_batch_pending(config, entries)
+        runner._recover_targeted_batch_pending(config, bundle, base)
+        runner._validate_bundle_resume_state(bundle, base, sidecar)
+        assert runner._targeted_simulator_attempts(bundle) == 2
+        assert {row.outcome for row in bundle.rows} == {
+            "interrupted_parallel_rollout"
+        }
+        assert not (
+            config.bundle_root / runner.TARGETED_BATCH_PENDING_FILE
+        ).exists()
+
+
+def test_targeted_resume_restores_actual_attempt_count_and_unique_seeds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls = []
+
+    def _collect(env, *, max_steps, reset_seed=None):
+        calls.append(reset_seed)
+        return _failed_targeted_rollout(max_steps)
+
+    _install_targeted_fake_env(monkeypatch, _collect)
+    first = _targeted_test_config(
+        tmp_path,
+        split_quotas={"train": 1, "val": 0, "test": 0},
+        max_episodes=1,
+    )
+    with pytest.raises(runner.JointCollectionError):
+        runner.run_collection(first)
+    second = runner.replace(first, max_episodes=2)
+    with pytest.raises(runner.JointCollectionError):
+        runner.run_collection(second)
+    assert calls[0] == 23
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+
+
+def test_targeted_category_mismatch_is_sidecar_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _targeted_test_config(
+        tmp_path,
+        split_quotas={"train": 1, "val": 0, "test": 0},
+        max_episodes=1,
+    )
+
+    def _collect(env, *, max_steps, reset_seed=None):
+        rollout = _failed_targeted_rollout(max_steps)
+        return runner.replace(rollout, failure_reason=None)
+
+    _install_targeted_fake_env(monkeypatch, _collect)
+    with pytest.raises(runner.JointCollectionError):
+        runner.run_collection(config)
+    report = verify_joint_risk_bundle(
+        config.bundle_root, scenario_contract_id="candidate_v3"
+    )
+    assert report["committed_base_episodes"] == 0
+    assert report["sidecar_only_episodes"] == 1
+    row = json.loads(
+        (config.bundle_root / "bundle_episode_index.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert row["base_rejection_reason"] == (
+        "targeted_sustained_emergency_braking"
+    )
+    from expert_dataset.finalize_s5_targeted_supplement import (
+        audit_targeted_supplement,
+    )
+
+    audit = audit_targeted_supplement(config)
+    assert audit["complete"] is False
+    assert audit["simulator_attempts"] == 1
+    assert audit["behavior_category_counts"] == {
+        "keep_emergency_braking": 1
+    }
+    assert audit["rejection_reason_counts"] == {
+        "targeted_sustained_emergency_braking": 1
+    }
 
 
 def test_run_collection_commits_joint_episode_with_real_store(
