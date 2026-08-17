@@ -1,15 +1,17 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-17T11:17:49+08:00",
+  "updated_at": "2026-08-17T12:20:00+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "41d7194e7cd1a3dee1d96d9c499a9b683f320f2c",
+    "git_commit": "8a14fd9a80301bd78313962caf61e356aab178bc",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
     "uncommitted_stage2_at_risk_grpo_launcher_present": true,
     "uncommitted_stage2_calibration_bypass_present": true,
+    "uncommitted_stage2_bare_launcher_fix_present": true,
+    "uncommitted_stage1_evaluation_artifact_parity_present": true,
     "uncommitted_stage1_epoch_override_present": true,
     "uncommitted_exploratory_training_waiver_present": false,
     "uncommitted_formal50k_diversity_contract_present": false,
@@ -25,8 +27,8 @@
   },
   "current": {
     "phase": "stage2_at_risk_grpo_open",
-    "round": "stage2-at-risk-grpo-open-calibration-bypass-20260817",
-    "status": "calibration_bypass_implemented_bounded_training_ready",
+    "round": "stage2-at-risk-grpo-open-bare-launcher-fix-20260817",
+    "status": "bare_launcher_defaults_to_bypass_bounded_training_ready",
     "active_hard_gate": "stage2_at_risk_grpo_open_bounded_training"
   },
   "active_workstreams": {
@@ -279,7 +281,7 @@
       }
     },
     "candidate_v3_data_refresh": {
-      "status": "stage2_calibration_bypass_implemented_bounded_training_ready",
+      "status": "stage2_bare_launcher_defaults_to_bypass_bounded_training_ready",
       "active_task": "stage2_at_risk_grpo_open_bounded_training",
       "pilot_target_joint_steps": 10000,
       "pilot_per_scenario_quota": 2000,
@@ -443,10 +445,20 @@
       "sha256": "0df83943ba95dbaa0583bc49363d3f72e00d9827b735e784342310133569c05a",
       "role": "Records the Stage1 dataset-root correction from the bundle root to platoon_joint_bev, strict contract and sample-read preflight, focused tests, and the no-training boundary"
     },
+    "stage1_evaluation_legacy_artifact_parity_report": {
+      "path": "evaluation/STAGE1_EVALUATION_LEGACY_ARTIFACT_PARITY_REPORT.json",
+      "sha256": "95dd13dd90b312b919e46b14d72580c84af18c8b5c871a378053118878eecca9",
+      "role": "Records the shared Stage1 open/S1/S5-S9 metric and BEV-only visualization bundle, S1 pose-source fix, strict STOP mask rejection recording, passed exact failed-state replay, focused regressions, diagnostic-only boundary, and no-long-evaluation handoff"
+    },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "c2b34cd500e19151974a204b054a94f29f097a66c4d6d9c03896b44ee6567313",
-      "role": "Records the explicit failed-calibration bypass for bounded at-risk diagnostic GRPO-Open while keeping the failed report and all formal ineligibility boundaries"
+      "sha256": "cec017a48d3502c9387c5f7aeeda3a6d8bf776b738e4ae32749e69a95b790ca8",
+      "role": "Records the dedicated bare launcher default to bounded at-risk diagnostic GRPO-Open bypass while retaining a strict calibration opt-in and all formal ineligibility boundaries"
+    },
+    "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
+      "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
+      "sha256": "9ab1918bd11b495651d494399a86fb408758eb527626f0370137e90e59751015",
+      "role": "Records the bare-launcher strict-path failure, overwritten calibration report hash, launcher default correction, 36-test regression, and no-training boundary"
     },
     "stage2_at_risk_grpo_open_calibration_bypass_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_CALIBRATION_BYPASS_REPORT.json",
@@ -843,6 +855,9 @@
       "project_use_diagnostic_only": true,
       "formal_grpo_source_allowed": false,
       "at_risk_diagnostic_grpo_open_source_allowed": true,
+      "evaluation_launcher": "scripts/run_stage1_a_evaluation.sh",
+      "legacy_metric_and_visual_artifact_parity_implemented": true,
+      "full_evaluation_completed": false,
       "checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
       "checkpoint_sha256_status": "bound_by_completed_failed_holdout_calibration; passed=true waived only for bounded at-risk diagnostic GRPO-Open"
     },
@@ -886,11 +901,12 @@
       "holdout_calibration_complete": true,
       "fresh_holdout_calibration_passed": false,
       "failed_holdout_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-holdout.json",
-      "failed_holdout_report_sha256": "816297adb04786d0c80c8651a9be00a9c9989958df86a4e3e4561a11aaec7255",
+      "failed_holdout_report_sha256": "28d43c1b22427bc84c85468f0eeee7ce643d17a509931010702cb5587c69ebfb",
       "failed_holdout_blockers": ["stop_terminal_speed"],
       "failed_holdout_maximum_stop_terminal_speed_mps": 0.36297077992826854,
       "calibration_gate_bypass_authorized": true,
       "calibration_gate_bypass_implemented": true,
+      "bare_launcher_bypass_default_implemented": true,
       "diagnostic_only": true,
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false,
@@ -919,10 +935,10 @@
     "Formal Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded; the only currently planned exception is a bounded at-risk diagnostic Variant A smoke using run_mode=smoke and explicit max optimizer steps.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen.",
-    "At-risk GRPO-Open may run only as Variant A, run_mode=smoke, with an explicit positive max_optimizer_steps and ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1. The failed source-bound holdout report remains mandatory and its outputs remain formally ineligible."
+    "At-risk GRPO-Open may run only as Variant A, run_mode=smoke, with an explicit positive max_optimizer_steps. The dedicated launcher defaults internally to train+bypass under the recorded authorization; the failed source-bound holdout report remains mandatory and outputs remain formally ineligible."
   ],
   "next_actions": [
-    "In a separate training thread, run scripts/run_bev_joint_grpo.sh with PIPELINE_STAGE=train, RUN_MODE=smoke, ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1, and an explicit positive MAX_OPTIMIZER_STEPS. Every checkpoint must record the bypass, failed report hash, blocker list, diagnostic_only=true, and eligible_for_formal_training=false.",
+    "In a separate training thread, run bash scripts/run_bev_joint_grpo.sh. The dedicated launcher now defaults to PIPELINE_STAGE=train, RUN_MODE=smoke, ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1, and MAX_OPTIMIZER_STEPS=20. Every checkpoint must record the bypass, failed report hash, blocker list, diagnostic_only=true, and eligible_for_formal_training=false.",
     "Monitor the bounded run for finite loss/gradients, informative groups, simulator safety, and checkpoint round-trip; stop on runtime or numerical failure rather than increasing the diagnostic budget.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",

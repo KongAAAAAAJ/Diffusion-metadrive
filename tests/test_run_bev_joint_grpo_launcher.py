@@ -60,6 +60,8 @@ def test_all_runs_development_holdout_then_bounded_training(
     tmp_path: Path,
 ) -> None:
     environment = _environment(tmp_path)
+    environment["PIPELINE_STAGE"] = "all"
+    environment["ALLOW_FAILED_CALIBRATION_DIAGNOSTIC"] = "0"
     subprocess.run(
         ["bash", str(LAUNCHER)],
         cwd=ROOT,
@@ -113,19 +115,17 @@ def test_train_stage_requires_holdout_report(tmp_path: Path) -> None:
     assert not Path(environment["CALL_LOG"]).exists()
 
 
-def test_explicit_bypass_runs_only_training_with_auditable_flag(
+def test_bare_launcher_defaults_to_bypass_training_with_auditable_flag(
     tmp_path: Path,
 ) -> None:
     environment = _environment(tmp_path)
-    environment["PIPELINE_STAGE"] = "train"
-    environment["ALLOW_FAILED_CALIBRATION_DIAGNOSTIC"] = "1"
     calibration_report = (
         Path(environment["ARTIFACT_ROOT"]) / "calibration" / "A-holdout.json"
     )
     calibration_report.parent.mkdir(parents=True)
     calibration_report.write_text('{"passed":false}\n', encoding="utf-8")
 
-    subprocess.run(
+    result = subprocess.run(
         ["bash", str(LAUNCHER)],
         cwd=ROOT,
         env=environment,
@@ -139,11 +139,13 @@ def test_explicit_bypass_runs_only_training_with_auditable_flag(
     assert "-m train.train_bev_joint_grpo_online" in calls[0]
     assert "--allow-failed-calibration-diagnostic" in calls[0]
     assert "training_calibration_bypass" in calls[0]
+    assert "pipeline_stage=train" in result.stdout
+    assert "calibration_bypass=1" in result.stdout
 
 
 def test_bypass_rejects_calibration_or_all_pipeline(tmp_path: Path) -> None:
     environment = _environment(tmp_path)
-    environment["ALLOW_FAILED_CALIBRATION_DIAGNOSTIC"] = "1"
+    environment["PIPELINE_STAGE"] = "all"
     result = subprocess.run(
         ["bash", str(LAUNCHER)],
         cwd=ROOT,

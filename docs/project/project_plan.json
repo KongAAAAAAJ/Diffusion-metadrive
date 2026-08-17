@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-17T11:17:49+08:00",
-  "status": "at_risk_diagnostic_grpo_open_calibration_bypass_authorized",
+  "updated_at": "2026-08-17T11:38:28+08:00",
+  "status": "at_risk_diagnostic_grpo_open_bare_launcher_ready",
   "purpose": "Machine-readable memory for the candidate-v3 data refresh, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
@@ -314,12 +314,12 @@
     "calibration_gate_bypass_authorized": true,
     "calibration_gate_bypass_scope": "This at-risk diagnostic Variant-A smoke only. The failed holdout report remains mandatory as immutable audit and reward-configuration context, but passed=true is waived. Formal GRPO still requires passed calibration.",
     "failed_holdout_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-holdout.json",
-    "failed_holdout_report_sha256": "816297adb04786d0c80c8651a9be00a9c9989958df86a4e3e4561a11aaec7255",
+    "failed_holdout_report_sha256": "28d43c1b22427bc84c85468f0eeee7ce643d17a509931010702cb5587c69ebfb",
     "failed_holdout_observed_blockers": [
       "stop_terminal_speed"
     ],
     "required_sequence": [
-      "explicit ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1 authorization switch",
+      "the dedicated scripts/run_bev_joint_grpo.sh launcher defaults internally to PIPELINE_STAGE=train and ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1 under the recorded user authorization",
       "existing failed independent holdout report retained and bound to the exact source checkpoint SHA256",
       "all holdout report format, scenario, seed, trajectory-optimizer, reward-configuration, and source-checkpoint checks remain mandatory except passed=true",
       "bounded GRPO-Open training with an explicit maximum optimizer-step limit"
@@ -502,8 +502,8 @@
     "Do not convert diagnostic artifacts into formal artifacts by editing metadata.",
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision.",
-    "The 2026-08-17 at-risk GRPO-Open calibration waiver permits only Variant A with run_mode=smoke, an explicit bounded max_optimizer_steps, and ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1. The existing failed holdout report must remain source-bound and auditable; only its passed=true gate is waived.",
+    "The 2026-08-17 at-risk GRPO-Open calibration waiver permits only Variant A with run_mode=smoke and an explicit bounded max_optimizer_steps. The dedicated launcher defaults to the recorded train+bypass authorization; strict recalibration remains an explicit ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=0 and PIPELINE_STAGE=all opt-in. The existing failed holdout report must remain source-bound and auditable; only its passed=true gate is waived.",
     "Every at-risk GRPO-Open output remains diagnostic_only=true and eligible_for_formal_training=false; never use it for formal evaluation, GRPO-Exec, paper evidence, or metadata promotion."
   ],
-  "current_next_action": "After the explicit bypass implementation and focused tests pass, start a separate bounded Variant-A GRPO-Open training thread with PIPELINE_STAGE=train, RUN_MODE=smoke, ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1, and an explicit positive MAX_OPTIMIZER_STEPS. Preserve the failed holdout report and its blocker in every artifact. Formal Stage1, formal GRPO, formal evaluation, GRPO-Exec, and paper evidence remain blocked."
+  "current_next_action": "After the dedicated launcher default fix and focused tests pass, start a separate bounded Variant-A GRPO-Open training thread with bash scripts/run_bev_joint_grpo.sh; MAX_OPTIMIZER_STEPS remains a positive bounded override. Preserve the failed holdout report and its blocker in every artifact. Formal Stage1, formal GRPO, formal evaluation, GRPO-Exec, and paper evidence remain blocked."
 }

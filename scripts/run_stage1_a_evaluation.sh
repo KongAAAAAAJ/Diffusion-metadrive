@@ -17,9 +17,14 @@ MANIFEST_PATH="${MANIFEST_PATH:-${OUTPUT_ROOT}/manifest_v2.json}"
 OPEN_S1_OUTPUT="${OPEN_S1_OUTPUT:-${OUTPUT_ROOT}/open_loop_s1.json}"
 CLOSED_OUTPUT="${CLOSED_OUTPUT:-${OUTPUT_ROOT}/s5_s9_closed_loop.json}"
 LOG_ROOT="${LOG_ROOT:-${OUTPUT_ROOT}/logs}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-${OUTPUT_ROOT}/artifacts}"
 DEVICE="${DEVICE:-cuda}"
-MAX_STEPS="${MAX_STEPS:-100}"
+MAX_STEPS="${MAX_STEPS:-200}"
 REPEATS="${REPEATS:-1}"
+OPEN_LOOP_NUM_SAMPLES="${OPEN_LOOP_NUM_SAMPLES:-1500}"
+VIDEO_FPS="${VIDEO_FPS:-10}"
+VISUALIZATION_INTERVAL="${VISUALIZATION_INTERVAL:-1}"
+SAVE_VISUALIZATIONS="${SAVE_VISUALIZATIONS:-1}"
 EVAL_STAGE="${EVAL_STAGE:-all}"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -44,6 +49,22 @@ if [[ ! "${MAX_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [[ ! "${REPEATS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "REPEATS must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "${OPEN_LOOP_NUM_SAMPLES}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "OPEN_LOOP_NUM_SAMPLES must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "${VIDEO_FPS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "VIDEO_FPS must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "${VISUALIZATION_INTERVAL}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "VISUALIZATION_INTERVAL must be a positive integer" >&2
+  exit 2
+fi
+if [[ "${SAVE_VISUALIZATIONS}" != "0" && "${SAVE_VISUALIZATIONS}" != "1" ]]; then
+  echo "SAVE_VISUALIZATIONS must be 0 or 1" >&2
   exit 2
 fi
 if [[ "${EVAL_STAGE}" != "all" && "${EVAL_STAGE}" != "open_s1" && "${EVAL_STAGE}" != "s5_s9" ]]; then
@@ -82,15 +103,26 @@ run_logged() {
 }
 
 run_open_s1() {
+  local visualization_args=()
+  if [[ "${SAVE_VISUALIZATIONS}" == "1" ]]; then
+    visualization_args+=(--save-visualizations)
+  fi
   run_logged open_loop_s1 \
     "${PYTHON_BIN}" "${PROJECT_ROOT}/scripts/validate_bev_stage1_ab.py" \
       --manifest "${MANIFEST_PATH}" \
       --dataset-root "${DATASET_ROOT}" \
       --device "${DEVICE}" \
+      --artifact-root "${ARTIFACT_ROOT}" \
+      --open-loop-num-samples "${OPEN_LOOP_NUM_SAMPLES}" \
+      "${visualization_args[@]}" \
       --output "${OPEN_S1_OUTPUT}"
 }
 
 run_s5_s9() {
+  local visualization_args=()
+  if [[ "${SAVE_VISUALIZATIONS}" == "1" ]]; then
+    visualization_args+=(--save-visualizations)
+  fi
   run_logged s5_s9_closed_loop \
     "${PYTHON_BIN}" -m evaluation.bev_four_model_evaluator \
       --manifest "${MANIFEST_PATH}" \
@@ -98,6 +130,10 @@ run_s5_s9() {
       --device "${DEVICE}" \
       --max-steps "${MAX_STEPS}" \
       --repeats "${REPEATS}" \
+      --artifact-root "${ARTIFACT_ROOT}/s5_s9_closed_loop" \
+      --video-fps "${VIDEO_FPS}" \
+      --visualization-interval "${VISUALIZATION_INTERVAL}" \
+      "${visualization_args[@]}" \
       --output "${CLOSED_OUTPUT}"
 }
 
@@ -105,7 +141,9 @@ echo "[stage1-a-evaluation] checkpoint=${CHECKPOINT_PATH}"
 echo "[stage1-a-evaluation] checkpoint_sha256=${CHECKPOINT_SHA256}"
 echo "[stage1-a-evaluation] dataset_root=${DATASET_ROOT}"
 echo "[stage1-a-evaluation] output_root=${OUTPUT_ROOT}"
+echo "[stage1-a-evaluation] artifact_root=${ARTIFACT_ROOT}"
 echo "[stage1-a-evaluation] eval_stage=${EVAL_STAGE} device=${DEVICE} max_steps=${MAX_STEPS} repeats=${REPEATS}"
+echo "[stage1-a-evaluation] open_loop_num_samples=${OPEN_LOOP_NUM_SAMPLES} save_visualizations=${SAVE_VISUALIZATIONS} video_fps=${VIDEO_FPS} visualization_interval=${VISUALIZATION_INTERVAL}"
 echo "[stage1-a-evaluation] classification=diagnostic_only"
 
 case "${EVAL_STAGE}" in

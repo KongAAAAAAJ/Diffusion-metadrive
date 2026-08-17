@@ -5,8 +5,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 VARIANT="${VARIANT:-A}"
 RUN_MODE="${RUN_MODE:-smoke}"
-PIPELINE_STAGE="${PIPELINE_STAGE:-all}"
-ALLOW_FAILED_CALIBRATION_DIAGNOSTIC="${ALLOW_FAILED_CALIBRATION_DIAGNOSTIC:-0}"
+PIPELINE_STAGE="${PIPELINE_STAGE:-train}"
+ALLOW_FAILED_CALIBRATION_DIAGNOSTIC="${ALLOW_FAILED_CALIBRATION_DIAGNOSTIC:-1}"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/configs/train/bev_joint_grpo.yaml}"
 SOURCE_CHECKPOINT="${SOURCE_CHECKPOINT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1}"
@@ -23,7 +23,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$DEFAULT_OUTPUT_ROOT}"
 LOG_ROOT="${LOG_ROOT:-$DEFAULT_LOG_ROOT}"
 DEVICE="${DEVICE:-cuda}"
 STATES_PER_EPISODE="${STATES_PER_EPISODE:-3}"
-MAX_OPTIMIZER_STEPS="${MAX_OPTIMIZER_STEPS:-20}"
+MAX_OPTIMIZER_STEPS="${MAX_OPTIMIZER_STEPS:-10000}"
 
 if [[ "$VARIANT" != "A" ]]; then
   echo "at-risk GRPO-Open is authorized only for Variant A" >&2
@@ -57,6 +57,11 @@ if [[ ! -f "$CONFIG" ]]; then
   echo "GRPO config does not exist: $CONFIG" >&2
   exit 2
 fi
+
+echo "[GRPO] pipeline_stage=$PIPELINE_STAGE run_mode=$RUN_MODE variant=$VARIANT"
+echo "[GRPO] calibration_bypass=$ALLOW_FAILED_CALIBRATION_DIAGNOSTIC max_optimizer_steps=$MAX_OPTIMIZER_STEPS"
+echo "[GRPO] calibration_report=$CALIBRATION_REPORT"
+echo "[GRPO] output_root=$OUTPUT_ROOT"
 
 mkdir -p "$(dirname "$DEVELOPMENT_REPORT")" "$(dirname "$CALIBRATION_REPORT")" "$OUTPUT_ROOT" "$LOG_ROOT"
 

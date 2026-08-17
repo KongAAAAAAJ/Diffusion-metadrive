@@ -12,6 +12,8 @@ from evaluation.bev_four_model_evaluator import (
     ReproducibilityToleranceConfig,
     _configure_deterministic_inference,
     _behavior_sha256,
+    _empty_metrics,
+    _execution_mask_or_record_rejection,
     _initial_state_signature,
     _initial_scene_sha256,
     _summarize,
@@ -19,6 +21,7 @@ from evaluation.bev_four_model_evaluator import (
     compare_repeated_reports,
 )
 from evaluation.bev_model_manifest import ComparisonSpec
+from models.bev_planner.trajectory_optimizer import TrajectoryOptimizationError
 from scenarios.bev_round13_contract import HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS
 
 
@@ -27,6 +30,10 @@ def test_evaluation_config_is_strict() -> None:
         ModelEvaluationConfig(device="auto")
     with pytest.raises(ModelEvaluationError):
         ModelEvaluationConfig(max_steps=0)
+    with pytest.raises(ModelEvaluationError):
+        ModelEvaluationConfig(device="cpu", save_visualizations=True)
+    with pytest.raises(ModelEvaluationError):
+        ModelEvaluationConfig(device="cpu", video_fps=0)
     config = ModelEvaluationConfig(device="cpu")
     assert config.scenarios == PRIMARY_S5_S9_SCENARIOS
     assert config.seeds == HOLDOUT_SEEDS
@@ -83,6 +90,44 @@ def test_metric_aggregation_computes_rates_and_p95() -> None:
     assert result["timing"]["model_inference_ms"]["p95_ms"] == pytest.approx(
         19.5
     )
+
+
+def test_execution_mask_failure_is_recorded_as_episode_rejection() -> None:
+    class RejectingOptimizer:
+        def execution_mode_valid_mask(self, *args):
+            raise TrajectoryOptimizationError(
+                "calibrated execution contract rejected STOP"
+            )
+
+    values = SimpleNamespace(
+        coarse_trajectories=torch.zeros((3, 10, 8, 3)).numpy(),
+        ego_state=torch.zeros((3, 8)).numpy(),
+        mode_valid_mask=torch.ones((3, 10), dtype=torch.bool).numpy(),
+    )
+    raw = _empty_metrics()
+
+    result = _execution_mask_or_record_rejection(
+        values,
+        optimizer=RejectingOptimizer(),
+        raw=raw,
+        model_id="stage1_a",
+        scenario=("S6_background_merge_in", "R6_mainline_merge_approach"),
+        seed=31,
+        step_index=92,
+    )
+
+    assert result is None
+    assert raw["execution_rejections"] == [
+        {
+            "model": "stage1_a",
+            "scenario": "S6_background_merge_in",
+            "route": "R6_mainline_merge_approach",
+            "seed": 31,
+            "step": 92,
+            "stage": "execution_mode_mask",
+            "reason": "calibrated execution contract rejected STOP",
+        }
+    ]
 
 
 def test_deterministic_inference_requires_process_hash_seed(monkeypatch) -> None:
@@ -154,6 +199,8 @@ def test_behavior_hash_excludes_timing_but_not_policy_metrics() -> None:
     }
     baseline = _behavior_sha256(report)
     report["models"]["stage1_a"]["timing"]["p95"] = 99.0
+    assert _behavior_sha256(report) == baseline
+    report["models"]["stage1_a"]["artifacts"] = {"root": "/tmp/repeat_2"}
     assert _behavior_sha256(report) == baseline
     report["models"]["stage1_a"]["joint_safety"]["collision_rate"] = 1.0
     assert _behavior_sha256(report) != baseline

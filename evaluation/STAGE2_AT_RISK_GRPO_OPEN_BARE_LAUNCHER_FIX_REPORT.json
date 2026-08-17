@@ -1,0 +1,68 @@
+{
+  "format": "bev_stage2_at_risk_grpo_open_bare_launcher_fix_report_v1",
+  "recorded_at": "2026-08-17T11:38:28+08:00",
+  "source_git_head_at_failure": "ee5a44b8c5d546126b1681a6905a1c9c6b9541e5",
+  "git_head_at_final_validation": "8a14fd9a80301bd78313962caf61e356aab178bc",
+  "failure": {
+    "command": "bash scripts/run_bev_joint_grpo.sh",
+    "log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/logs/grpo-open-training.log",
+    "exception": "OnlineGRPOError: proxy calibration failed; online GRPO is intentionally blocked",
+    "root_cause": "The dedicated launcher still defaulted to PIPELINE_STAGE=all and ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=0, so a bare invocation reran calibration and called training without --allow-failed-calibration-diagnostic.",
+    "training_started": false
+  },
+  "overwritten_calibration_evidence": {
+    "holdout_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-holdout.json",
+    "holdout_report_sha256": "28d43c1b22427bc84c85468f0eeee7ce643d17a509931010702cb5587c69ebfb",
+    "source_stage1_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
+    "passed": false,
+    "blockers": [
+      "stop_terminal_speed"
+    ],
+    "maximum_stop_terminal_speed_mps": 0.36297077992826854
+  },
+  "fix": {
+    "bare_launcher_defaults": {
+      "PIPELINE_STAGE": "train",
+      "ALLOW_FAILED_CALIBRATION_DIAGNOSTIC": "1",
+      "RUN_MODE": "smoke",
+      "MAX_OPTIMIZER_STEPS": 20
+    },
+    "bare_invocation_processes": [
+      "python -m train.train_bev_joint_grpo_online --allow-failed-calibration-diagnostic"
+    ],
+    "calibration_rerun_on_bare_invocation": false,
+    "startup_summary_printed": true,
+    "strict_calibration_opt_in": "ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=0 PIPELINE_STAGE=all bash scripts/run_bev_joint_grpo.sh",
+    "launcher": {
+      "path": "scripts/run_bev_joint_grpo.sh",
+      "sha256": "16a9ce3a38bba36e220c4c059d2532466beecc54a6c2edfaa9fc85fa90f3d9c8"
+    },
+    "project_plan": {
+      "path": "docs/project/project_plan.json",
+      "sha256": "cec017a48d3502c9387c5f7aeeda3a6d8bf776b738e4ae32749e69a95b790ca8"
+    }
+  },
+  "verification": {
+    "focused_launcher_tests": {
+      "passed": 5,
+      "failed": 0
+    },
+    "related_regression_tests": {
+      "command": "python -m pytest tests/test_bev_joint_grpo_online.py tests/test_run_bev_joint_grpo_launcher.py tests/test_bev_joint_reward.py tests/test_joint_simulator_branch.py -q",
+      "passed": 36,
+      "failed": 0
+    },
+    "bash_syntax_passed": true
+  },
+  "output_contract": {
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "formal_evaluation_allowed": false,
+    "grpo_exec_source_allowed": false,
+    "paper_evidence_allowed": false
+  },
+  "execution_boundary": {
+    "real_training_started_in_this_fix_thread": false,
+    "next_command": "bash scripts/run_bev_joint_grpo.sh"
+  }
+}

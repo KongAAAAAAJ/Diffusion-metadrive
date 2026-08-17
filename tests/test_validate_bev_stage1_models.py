@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from scripts.validate_bev_stage1_ab import (
     OPEN_LOOP_COMPARISON_POLICY,
+    _global_agent_poses,
     compare_open_loop_models,
     parse_args,
 )
@@ -63,3 +65,22 @@ def test_legacy_checkpoint_arguments_are_rejected(monkeypatch) -> None:
     )
     with pytest.raises(SystemExit):
         parse_args()
+
+
+def test_s1_global_poses_are_read_from_environment_in_joint_role_order() -> None:
+    env = SimpleNamespace(
+        agents={
+            "agent2": SimpleNamespace(position=(30.0, -2.0), heading_theta=0.3),
+            "agent0": SimpleNamespace(position=(10.0, 0.0), heading_theta=0.1),
+            "agent1": SimpleNamespace(position=(20.0, -1.0), heading_theta=0.2),
+        }
+    )
+
+    poses = _global_agent_poses(env)
+
+    np.testing.assert_allclose(
+        poses,
+        np.asarray(
+            [[10.0, 0.0, 0.1], [20.0, -1.0, 0.2], [30.0, -2.0, 0.3]]
+        ),
+    )

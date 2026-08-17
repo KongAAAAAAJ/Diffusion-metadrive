@@ -20,6 +20,10 @@ import torch
 from torch import Tensor
 
 from evaluation.bev_model_manifest import file_sha256, load_model_manifest
+from evaluation.bev_evaluation_artifacts import (
+    ClosedLoopArtifactWriter,
+    OpenLoopArtifactCollector,
+)
 from expert_dataset.collect_joint_bev import (
     JointBEVModelInputs,
     JointBEVSampleBuilder,
@@ -86,10 +90,12 @@ def load_planner(path: Path, device: torch.device) -> tuple[BEVOnlyDiffusionPlan
     return planner, payload
 
 
-def _explicit_noise(batch: Mapping[str, Tensor], device: torch.device) -> Tensor:
+def _explicit_noise(
+    batch: Mapping[str, Tensor], device: torch.device, *, seed: int = 17
+) -> Tensor:
     shape = (*batch["coarse_trajectories"].shape[:-1], 2)
     generator = torch.Generator(device=device)
-    generator.manual_seed(17)
+    generator.manual_seed(int(seed))
     return torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
 
 
@@ -100,12 +106,25 @@ def validate_open_loop(
     *,
     dataset_root: Path,
     device: torch.device,
+    max_samples: int = 1500,
+    artifact_root: Path | None = None,
+    save_visualizations: bool = False,
 ) -> dict[str, object]:
     dataset = JointBEVDataset(JointBEVDatasetConfig(dataset_root, "val"))
     loader_dataset = None
+    collector = (
+        OpenLoopArtifactCollector(
+            artifact_root, save_visualizations=save_visualizations
+        )
+        if artifact_root is not None
+        else None
+    )
     try:
         if len(dataset) <= 0:
             raise Stage1TrainingError("open-loop validation requires a non-empty val split")
+        sample_limit = min(int(max_samples), len(dataset))
+        if sample_limit <= 0:
+            raise Stage1TrainingError("open-loop max_samples must be positive")
         loader = build_joint_bev_dataloader(
             dataset_root,
             "val",
@@ -118,50 +137,75 @@ def validate_open_loop(
         )
         loader_dataset = loader.dataset
         dataset_fingerprint = loader_dataset.contract["dataset_fingerprint"]
-        batch = move_joint_batch(next(iter(loader)), device)
+        if payload.get("dataset_fingerprint") != dataset_fingerprint:
+            raise Stage1TrainingError(
+                "checkpoint and open-loop dataset fingerprints do not match"
+            )
+        training_config = payload.get("training_config")
+        if not isinstance(training_config, Mapping) or not isinstance(
+            training_config.get("loss"), Mapping
+        ):
+            raise Stage1TrainingError("checkpoint loss config is invalid")
+        loss_module = JointStage1Loss(
+            Stage1LossConfig(**dict(training_config["loss"]))
+        ).to(device)
+        processed = 0
+        metric_totals: dict[str, float] = {}
+        selected_modes: list[object] = []
+        deterministic = False
+        for batch_index, raw_batch in enumerate(loader):
+            remaining = sample_limit - processed
+            if remaining <= 0:
+                break
+            batch = move_joint_batch(raw_batch, device)
+            batch_size = int(batch["bev"].shape[0])
+            if batch_size > remaining:
+                batch = {name: value[:remaining] for name, value in batch.items()}
+                batch_size = remaining
+            noise = _explicit_noise(batch, device, seed=17 + processed)
+            first = planner_forward_from_batch(planner, batch, diffusion_noise=noise)
+            if batch_index == 0:
+                second = planner_forward_from_batch(planner, batch, diffusion_noise=noise)
+                for name in (
+                    "trajectory_candidates",
+                    "mode_logits",
+                    "selected_mode",
+                    "selected_trajectory",
+                ):
+                    torch.testing.assert_close(first[name], second[name], rtol=0.0, atol=0.0)
+                deterministic = True
+            if not bool(torch.isfinite(first["trajectory_candidates"]).all()):
+                raise Stage1TrainingError("open-loop trajectory candidates are non-finite")
+            selected_valid = batch["mode_valid_mask"].gather(
+                -1, first["selected_mode"].unsqueeze(-1)
+            )
+            if not bool(selected_valid.all()):
+                raise Stage1TrainingError(
+                    "open-loop planner selected an invalid hard-mask mode"
+                )
+            result = loss_from_batch(loss_module, first, batch)
+            for name, value in result.scalar_metrics().items():
+                metric_totals[name] = metric_totals.get(name, 0.0) + float(value) * batch_size
+            selected_modes.extend(first["selected_mode"].detach().cpu().tolist())
+            if collector is not None:
+                collector.add_batch(batch, first)
+            processed += batch_size
+        if processed != sample_limit:
+            raise Stage1TrainingError(
+                f"open-loop processed {processed} samples, expected {sample_limit}"
+            )
     finally:
         dataset.close()
         close_loader_dataset = getattr(loader_dataset, "close", None)
         if callable(close_loader_dataset):
             close_loader_dataset()
 
-    if payload.get("dataset_fingerprint") != dataset_fingerprint:
-        raise Stage1TrainingError(
-            "checkpoint and open-loop dataset fingerprints do not match"
-        )
-    noise = _explicit_noise(batch, device)
-    first = planner_forward_from_batch(planner, batch, diffusion_noise=noise)
-    second = planner_forward_from_batch(planner, batch, diffusion_noise=noise)
-    for name in (
-        "trajectory_candidates",
-        "mode_logits",
-        "selected_mode",
-        "selected_trajectory",
-    ):
-        torch.testing.assert_close(first[name], second[name], rtol=0.0, atol=0.0)
-    if not bool(torch.isfinite(first["trajectory_candidates"]).all()):
-        raise Stage1TrainingError("open-loop trajectory candidates are non-finite")
-    selected_valid = batch["mode_valid_mask"].gather(
-        -1, first["selected_mode"].unsqueeze(-1)
-    )
-    if not bool(selected_valid.all()):
-        raise Stage1TrainingError("open-loop planner selected an invalid hard-mask mode")
-
-    training_config = payload.get("training_config")
-    if not isinstance(training_config, Mapping) or not isinstance(
-        training_config.get("loss"), Mapping
-    ):
-        raise Stage1TrainingError("checkpoint loss config is invalid")
-    result = loss_from_batch(
-        JointStage1Loss(Stage1LossConfig(**dict(training_config["loss"]))).to(device),
-        first,
-        batch,
-    )
     return {
-        "samples": int(batch["bev"].shape[0]),
-        "selected_mode": first["selected_mode"].detach().cpu().tolist(),
-        "metrics": result.scalar_metrics(),
-        "deterministic": True,
+        "samples": processed,
+        "selected_mode": selected_modes,
+        "metrics": {name: total / processed for name, total in metric_totals.items()},
+        "deterministic": deterministic,
+        "legacy_open_loop": collector.finalize() if collector is not None else None,
     }
 
 
@@ -193,11 +237,29 @@ def _has_failure(info: Mapping[str, object]) -> bool:
     return False
 
 
+def _global_agent_poses(env: object) -> np.ndarray:
+    poses = np.asarray(
+        [
+            [
+                *np.asarray(env.agents[agent_id].position, dtype=np.float64)[:2],
+                float(env.agents[agent_id].heading_theta),
+            ]
+            for agent_id in AGENT_IDS
+        ],
+        dtype=np.float64,
+    )
+    if poses.shape != (3, 3) or not np.isfinite(poses).all():
+        raise Stage1TrainingError("sensorless S1 agent poses are invalid")
+    return poses
+
+
 @torch.no_grad()
 def validate_closed_loop(
     planner: BEVOnlyDiffusionPlanner,
     *,
     device: torch.device,
+    artifact_root: Path | None = None,
+    model_id: str = "stage1",
 ) -> dict[str, object]:
     env = SensorlessJointBEVPlatoonEnv(
         {
@@ -259,6 +321,7 @@ def validate_closed_loop(
             agent_id: np.ascontiguousarray(trajectories[index], dtype=np.float32)
             for index, agent_id in enumerate(AGENT_IDS)
         }
+        pre_poses = _global_agent_poses(env)
         started = time.perf_counter()
         observation, reward, terminated, truncated, info = env.step(actions)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -290,6 +353,27 @@ def validate_closed_loop(
             raise Stage1TrainingError(
                 "sensorless S1 trajectory controller produced invalid controls"
             )
+        artifact_report = None
+        if artifact_root is not None:
+            writer = ClosedLoopArtifactWriter(artifact_root, model_id)
+            episode_id = writer.start_episode(
+                ("S1_free_cruise_straight", "R3_mainline_straight"), 17
+            )
+            post_poses = _global_agent_poses(env)
+            writer.record_step(
+                episode_id,
+                step_index=step_index,
+                dt_s=dt_s,
+                pre_poses=pre_poses,
+                post_poses=post_poses,
+                trajectories=trajectories,
+                selected_modes=selected_modes.tolist(),
+                rewards=reward,
+                controls=low_level,
+                bev=inputs.bev,
+            )
+            writer.finish_episode(episode_id)
+            artifact_report = writer.finalize()
         return {
             "warmup_steps": step_index,
             "selected_mode": output["selected_mode"].squeeze(0).cpu().tolist(),
@@ -305,6 +389,7 @@ def validate_closed_loop(
                 "intervention_fde_m": optimization.intervention_fde_m.tolist(),
                 "retained_raw_fraction": optimization.retained_raw_fraction.tolist(),
             },
+            "artifacts": artifact_report,
         }
     finally:
         env.close()
@@ -358,6 +443,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--artifact-root", type=Path)
+    parser.add_argument("--open-loop-num-samples", type=int, default=1500)
+    parser.add_argument("--save-visualizations", action="store_true")
     return parser.parse_args()
 
 
@@ -365,6 +453,7 @@ def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
     manifest = load_model_manifest(args.manifest)
+    artifact_root = args.artifact_root or args.output.parent / "artifacts"
     non_stage1 = [model.model_id for model in manifest.models if model.kind != "stage1"]
     if non_stage1:
         raise Stage1TrainingError(
@@ -395,8 +484,16 @@ def main() -> None:
                 payload,
                 dataset_root=args.dataset_root,
                 device=device,
+                max_samples=args.open_loop_num_samples,
+                artifact_root=artifact_root / "open_loop" / model.model_id,
+                save_visualizations=args.save_visualizations,
             ),
-            "closed_loop": validate_closed_loop(planner, device=device),
+            "closed_loop": validate_closed_loop(
+                planner,
+                device=device,
+                artifact_root=artifact_root / "s1_closed_loop",
+                model_id=model.model_id,
+            ),
         }
         del planner
         if device.type == "cuda":

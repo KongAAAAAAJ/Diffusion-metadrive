@@ -33,6 +33,7 @@ from evaluation.bev_model_manifest import (
     file_sha256,
     load_model_manifest,
 )
+from evaluation.bev_evaluation_artifacts import ClosedLoopArtifactWriter
 from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
 from train.bev_joint_grpo import (
     load_grpo_b_checkpoint,
@@ -81,6 +82,10 @@ class ModelEvaluationConfig:
     scenarios: tuple[tuple[str, str], ...] = DIAGNOSTIC_EVAL_SCENARIOS
     max_steps: int = 100
     inference_p95_limit_ms: float = 100.0
+    artifact_root: Path | None = None
+    save_visualizations: bool = False
+    video_fps: int = 10
+    visualization_interval: int = 1
 
     def __post_init__(self) -> None:
         if self.run_mode not in ("diagnostic", "formal"):
@@ -109,6 +114,17 @@ class ModelEvaluationConfig:
             raise ModelEvaluationError(
                 "inference_p95_limit_ms must be positive and finite"
             )
+        if self.save_visualizations and self.artifact_root is None:
+            raise ModelEvaluationError(
+                "save_visualizations requires an artifact_root"
+            )
+        if isinstance(self.video_fps, bool) or self.video_fps <= 0:
+            raise ModelEvaluationError("video_fps must be positive")
+        if (
+            isinstance(self.visualization_interval, bool)
+            or self.visualization_interval <= 0
+        ):
+            raise ModelEvaluationError("visualization_interval must be positive")
 
 
 @dataclass(frozen=True)
@@ -267,6 +283,8 @@ def _empty_metrics() -> dict[str, object]:
         "formation_spread": [],
         "recovery_time_s": [],
         "joint_reward": [],
+        "episode_lengths": [],
+        "mode_rewards": {},
         "timing": {
             "bev_build_ms": [],
             "model_inference_ms": [],
@@ -308,6 +326,14 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
             "p95_ms": _percentile(values, 95),
         }
         for name, values in raw["timing"].items()
+    }
+    joint_reward = list(raw["joint_reward"])
+    legacy_mode_rewards = {
+        str(mode): {
+            "count": len(values),
+            "mean_reward": float(np.mean(values)) if values else 0.0,
+        }
+        for mode, values in sorted(raw.get("mode_rewards", {}).items())
     }
     return {
         "episodes": episode_count,
@@ -357,6 +383,21 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
         },
         "episode_outcomes": list(raw.get("episode_outcomes", ())),
         "timing": timing,
+        "legacy_closed_loop": {
+            "num_episodes": episode_count,
+            "success_rate": raw["episode_completed"] / episode_count,
+            "crash_rate": raw["episode_collision"] / episode_count,
+            "out_of_road_rate": raw["episode_out_of_road"] / episode_count,
+            "average_reward_per_step": (
+                float(np.mean(joint_reward)) if joint_reward else 0.0
+            ),
+            "average_episode_length": (
+                float(np.mean(raw.get("episode_lengths", ())))
+                if raw.get("episode_lengths")
+                else 0.0
+            ),
+            "mode_reward_stats": legacy_mode_rewards,
+        },
     }
 
 
@@ -493,6 +534,33 @@ def _tensor_mapping_exact(
     return all(torch.equal(first[name], second[name]) for name in tensor_keys)
 
 
+def _execution_mask_or_record_rejection(
+    values: object,
+    *,
+    optimizer: KinematicTrajectoryOptimizer,
+    raw: dict[str, object],
+    model_id: str,
+    scenario: Sequence[str],
+    seed: int,
+    step_index: int,
+) -> np.ndarray | None:
+    try:
+        return execution_mode_valid_mask(values, optimizer=optimizer)
+    except TrajectoryOptimizationError as exc:
+        raw["execution_rejections"].append(
+            {
+                "model": model_id,
+                "scenario": str(scenario[0]),
+                "route": str(scenario[1]),
+                "seed": int(seed),
+                "step": int(step_index),
+                "stage": "execution_mode_mask",
+                "reason": str(exc),
+            }
+        )
+        return None
+
+
 @torch.no_grad()
 def evaluate_models(
     manifest_path: Path,
@@ -522,6 +590,16 @@ def evaluate_models(
         raw = _empty_metrics()
         trajectory_optimizer = KinematicTrajectoryOptimizer()
         deterministic_probe: dict[str, object] | None = None
+        artifact_writer = (
+            ClosedLoopArtifactWriter(
+                cfg.artifact_root,
+                name,
+                video_fps=cfg.video_fps,
+                frame_interval=cfg.visualization_interval,
+            )
+            if cfg.save_visualizations and cfg.artifact_root is not None
+            else None
+        )
         for scenario in cfg.scenarios:
             for seed in cfg.seeds:
                 env = SensorlessJointBEVPlatoonEnv(
@@ -590,8 +668,26 @@ def evaluate_models(
                     agent_id: float(env.agents[agent_id].heading_theta)
                     for agent_id in AGENT_IDS
                 }
+                executed_steps = 0
+                artifact_episode_id = (
+                    artifact_writer.start_episode(scenario, int(seed))
+                    if artifact_writer is not None
+                    else None
+                )
                 try:
                     for step_index in range(cfg.max_steps):
+                        pre_poses = np.asarray(
+                            [
+                                [
+                                    *np.asarray(env.agents[agent_id].position, dtype=np.float64)[:2],
+                                    float(env.agents[agent_id].heading_theta),
+                                ]
+                                for agent_id in AGENT_IDS
+                            ],
+                            dtype=np.float64,
+                        )
+                        trajectories = None
+                        step_bev = None
                         builder.capture_state(env, step_index * dt_s)
                         if not builder.history_ready():
                             action = constant_velocity_actions(env)
@@ -600,10 +696,20 @@ def evaluate_models(
                             tick_start = time.perf_counter()
                             bev_start = tick_start
                             values = builder.build_model_inputs(env)
+                            step_bev = values.bev
                             bev_ms = (time.perf_counter() - bev_start) * 1000.0
-                            execution_mask = execution_mode_valid_mask(
-                                values, optimizer=trajectory_optimizer
+                            execution_mask = _execution_mask_or_record_rejection(
+                                values,
+                                optimizer=trajectory_optimizer,
+                                raw=raw,
+                                model_id=name,
+                                scenario=scenario,
+                                seed=int(seed),
+                                step_index=step_index,
                             )
+                            if execution_mask is None:
+                                episode_execution_rejected = True
+                                break
                             raw["execution_modes_removed"] += int(
                                 np.count_nonzero(
                                     values.mode_valid_mask & ~execution_mask
@@ -730,6 +836,7 @@ def evaluate_models(
                             )
 
                         _, reward, terminated, truncated, info = env.step(action)
+                        executed_steps += 1
                         live_agents = dict(env.agents)
                         poses = {
                             agent_id: np.asarray(
@@ -827,6 +934,9 @@ def evaluate_models(
                                 mode = int(selected_modes[role])
                                 role_values["selected_modes"].append(mode)
                                 role_values["stop"] += int(mode == 9)
+                                raw["mode_rewards"].setdefault(mode, []).append(
+                                    float(reward.get(agent_id, 0.0))
+                                )
                         raw["formation_error"].extend(formation_values)
                         raw["formation_spread"].append(
                             float(max(formation_values, default=0.0))
@@ -845,6 +955,36 @@ def evaluate_models(
                                 )
                             )
                         )
+                        if artifact_writer is not None and artifact_episode_id is not None:
+                            post_poses = np.asarray(
+                                [
+                                    [
+                                        *np.asarray(
+                                            live_agents.get(agent_id, env.agents.get(agent_id)).position,
+                                            dtype=np.float64,
+                                        )[:2],
+                                        float(
+                                            live_agents.get(agent_id, env.agents.get(agent_id)).heading_theta
+                                        ),
+                                    ]
+                                    if live_agents.get(agent_id, env.agents.get(agent_id)) is not None
+                                    else pre_poses[role].tolist()
+                                    for role, agent_id in enumerate(AGENT_IDS)
+                                ],
+                                dtype=np.float64,
+                            )
+                            artifact_writer.record_step(
+                                artifact_episode_id,
+                                step_index=step_index,
+                                dt_s=dt_s,
+                                pre_poses=pre_poses,
+                                post_poses=post_poses,
+                                trajectories=trajectories,
+                                selected_modes=selected_modes,
+                                rewards=reward,
+                                controls=getattr(env, "_pending_low_level_actions", {}),
+                                bev=step_bev,
+                            )
                         if episode_has_ended(terminated, truncated, info):
                             if all(
                                 bool(info.get(agent_id, {}).get("arrive_dest", False))
@@ -856,6 +996,7 @@ def evaluate_models(
                     raw["recovery_time_s"].append(
                         float(recovered_at if recovered_at is not None else cfg.max_steps * dt_s)
                     )
+                    raw["episode_lengths"].append(executed_steps)
                     raw["episode_collision"] += int(episode_collision)
                     raw["episode_out_of_road"] += int(episode_out)
                     raw["gap_5m_violation"] += int(episode_gap5)
@@ -892,9 +1033,13 @@ def evaluate_models(
                             ),
                         }
                     )
+                    if artifact_writer is not None and artifact_episode_id is not None:
+                        artifact_writer.finish_episode(artifact_episode_id)
                 finally:
                     env.close()
         summary = _summarize(raw, episode_count)
+        if artifact_writer is not None:
+            summary["artifacts"] = artifact_writer.finalize()
         inference_p95 = summary["timing"]["model_inference_ms"]["p95_ms"]
         if inference_p95 > cfg.inference_p95_limit_ms:
             raise ModelEvaluationError(
@@ -976,7 +1121,9 @@ def _behavior_sha256(report: Mapping[str, object]) -> str:
         if not isinstance(value, Mapping):
             raise ModelEvaluationError(f"evaluation report is missing {name}")
         behavior[name] = {
-            key: item for key, item in value.items() if key != "timing"
+            key: item
+            for key, item in value.items()
+            if key not in ("timing", "artifacts")
         }
     encoded = json.dumps(
         behavior, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -1420,7 +1567,16 @@ def evaluate_models_repeated(
         repeat_output = output.with_name(
             f"{output.stem}.repeat_{repeat_index + 1}{output.suffix}"
         )
-        report = evaluate_models(manifest_path, repeat_output, config)
+        repeat_config = (
+            dataclasses.replace(
+                config,
+                artifact_root=Path(config.artifact_root)
+                / f"repeat_{repeat_index + 1}",
+            )
+            if config.artifact_root is not None
+            else config
+        )
+        report = evaluate_models(manifest_path, repeat_output, repeat_config)
         reports.append(report)
         hashes.append(_behavior_sha256(report))
     exact_match = len(set(hashes)) == 1
@@ -1459,6 +1615,10 @@ def main() -> int:
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--max-steps", type=int, default=100)
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--artifact-root", type=Path)
+    parser.add_argument("--save-visualizations", action="store_true")
+    parser.add_argument("--video-fps", type=int, default=10)
+    parser.add_argument("--visualization-interval", type=int, default=1)
     arguments = parser.parse_args()
     config = ModelEvaluationConfig(
         run_mode=arguments.run_mode,
@@ -1474,6 +1634,10 @@ def main() -> int:
             else DIAGNOSTIC_EVAL_SCENARIOS
         ),
         max_steps=arguments.max_steps,
+        artifact_root=arguments.artifact_root,
+        save_visualizations=arguments.save_visualizations,
+        video_fps=arguments.video_fps,
+        visualization_interval=arguments.visualization_interval,
     )
     report = (
         evaluate_models(

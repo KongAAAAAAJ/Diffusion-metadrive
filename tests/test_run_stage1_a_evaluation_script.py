@@ -94,10 +94,15 @@ def test_all_writes_single_model_manifest_and_runs_both_evaluations(
     assert "scripts/validate_bev_stage1_ab.py" in calls[0]
     assert f"--dataset-root {environment['DATASET_ROOT']}" in calls[0]
     assert "--device cpu" in calls[0]
+    assert "--open-loop-num-samples 1500" in calls[0]
+    assert "--save-visualizations" in calls[0]
     assert "-m evaluation.bev_four_model_evaluator" in calls[1]
     assert "--run-mode diagnostic" in calls[1]
     assert "--max-steps 37" in calls[1]
     assert "--repeats 2" in calls[1]
+    assert "--video-fps 10" in calls[1]
+    assert "--visualization-interval 1" in calls[1]
+    assert "--save-visualizations" in calls[1]
 
 
 def test_stage_selector_and_checkpoint_hash_are_strict(tmp_path: Path) -> None:

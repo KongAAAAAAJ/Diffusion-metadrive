@@ -1,0 +1,96 @@
+{
+  "format": "stage1_evaluation_legacy_artifact_parity_report_v1",
+  "recorded_at": "2026-08-17T12:20:00+08:00",
+  "classification": "diagnostic_only",
+  "eligible_for_formal_conclusions": false,
+  "request": "Include the metrics and visual evidence previously produced by run_baseline_open_test.sh and run_baseline_closed_test.sh in the Stage1 open-loop, S1 one-step closed-loop, and S5-S9 closed-loop evaluation results.",
+  "implementation": {
+    "shared_artifact_module": "evaluation/bev_evaluation_artifacts.py",
+    "stage1_validator": "scripts/validate_bev_stage1_ab.py",
+    "s5_s9_evaluator": "evaluation/bev_four_model_evaluator.py",
+    "launcher": "scripts/run_stage1_a_evaluation.sh",
+    "open_loop_default_joint_samples": 1500,
+    "visualizations_enabled_by_default_in_launcher": true,
+    "closed_loop_video_fps": 10,
+    "closed_loop_visualization_interval_steps": 1
+  },
+  "runtime_fix": {
+    "observed_error": "AttributeError: JointBEVModelInputs has no attribute ego_pose_global",
+    "root_cause": "ego_pose_global belongs to persisted JointBEVSample metadata and is intentionally excluded from label-free online JointBEVModelInputs.",
+    "correction": "Capture pre-step and post-step global x/y/heading directly from env.agents in frozen agent0/agent1/agent2 order and validate a finite (3,3) pose array.",
+    "real_smoke": {
+      "command": "OUTPUT_ROOT=/tmp/stage1_a_pose_fix_smoke_cpu EVAL_STAGE=open_s1 OPEN_LOOP_NUM_SAMPLES=1 DEVICE=cpu SAVE_VISUALIZATIONS=1 MPLCONFIGDIR=/tmp/stage1-pose-fix-real-mpl bash scripts/run_stage1_a_evaluation.sh",
+      "result": "passed",
+      "open_loop_joint_samples": 1,
+      "s1_warmup_steps": 10,
+      "s1_model_steps": 1,
+      "output": "/tmp/stage1_a_pose_fix_smoke_cpu",
+      "visual_artifacts_verified": true
+    },
+    "full_evaluation_restarted_by_codex": false
+  },
+  "closed_loop_stop_rejection_fix": {
+    "observed_error": "TrajectoryOptimizationError: calibrated execution contract rejected STOP",
+    "observed_state": {
+      "scenario": "S6_background_merge_in",
+      "route": "R6_mainline_merge_approach",
+      "seed": 31,
+      "step": 92,
+      "role": "agent1",
+      "speed_mps": 1.4553945064544678
+    },
+    "policy": "Do not remove STOP, relax the actuator contract, or execute a fallback. Record the mask-construction failure as an episode execution_rejection and continue evaluating the remaining common scenarios and seeds.",
+    "exact_state_replay": {
+      "source": "The failed run's saved trajectory_data steps 0-91",
+      "result": "passed",
+      "process_exception": false,
+      "recorded_stage": "execution_mode_mask",
+      "recorded_reason": "calibrated execution contract rejected STOP"
+    },
+    "focused_regression": "34 passed: evaluator, trajectory optimizer, online GRPO, and Stage1 launcher tests",
+    "full_s5_s9_evaluation_restarted_by_codex": false
+  },
+  "open_loop_outputs": [
+    "Existing v2 Stage1 loss, mode accuracy, GT-mode ADE/FDE, and selected ADE/FDE metrics",
+    "Legacy-equivalent trajectory L1, final L2, ADE/FDE, signed final-y error, final-y bias, mode histograms, lateral accuracy, per-slot accuracy, and named confusion matrix",
+    "Per-role open_loop_samples.json and open_loop_samples.csv",
+    "Per-joint-sample semantic BEV images",
+    "Per-joint-sample multimodal candidate, selected, and expert trajectory plots"
+  ],
+  "closed_loop_outputs": [
+    "Existing v2 role, joint safety, formation, efficiency, execution, optimizer, timing, outcome, deterministic replay, and comparison metrics",
+    "Legacy-equivalent success, crash, out-of-road, reward-per-step, episode-length, and per-mode reward summary",
+    "Per-step local and world trajectory JSON",
+    "Combined step_records.jsonl for downstream audit and tabulation",
+    "Per-step coordinate audit JSONL",
+    "Lateral, longitudinal, and speed tracking error metrics and plots",
+    "Control-command plots and time-aligned reference-versus-actual trajectory plots",
+    "Per-step combined top-down trajectory frames and semantic BEV images",
+    "Per-episode top-down trajectory and semantic BEV MP4 videos"
+  ],
+  "bev_only_boundary": "The legacy optional 3D camera video is not recreated because the frozen evaluator is sensorless and BEV-only. It is replaced by top-down trajectory and semantic BEV videos; no camera or LiDAR modality is introduced.",
+  "verification": {
+    "focused_tests": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 MPLCONFIGDIR=/tmp/bev-eval-mpl /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -o cache_dir=/tmp/bev-eval-pytest-cache tests/test_bev_evaluation_artifacts.py tests/test_validate_bev_stage1_models.py tests/test_bev_four_model_evaluator.py tests/test_run_stage1_a_evaluation_script.py -q",
+      "result": "17 passed after adding the S1 environment-pose regression"
+    },
+    "shell_syntax": {
+      "command": "bash -n scripts/run_stage1_a_evaluation.sh",
+      "result": "passed"
+    },
+    "python_syntax": {
+      "result": "passed via in-memory compile for all three changed Python modules"
+    },
+    "format_check": {
+      "command": "/home/kong/anaconda3/bin/black --check evaluation/bev_evaluation_artifacts.py evaluation/bev_four_model_evaluator.py scripts/validate_bev_stage1_ab.py tests/test_bev_evaluation_artifacts.py",
+      "result": "passed before the final step-record addition; two final reruns emitted no formatting error but did not terminate and were interrupted. Final Python syntax, focused tests, JSON validation, and git diff checks passed."
+    },
+    "git_diff_check": "passed"
+  },
+  "execution_boundary": {
+    "full_evaluation_started": false,
+    "reason": "This implementation thread intentionally did not start the long 1500-sample and complete S5-S9 evaluation.",
+    "next_command": "bash scripts/run_stage1_a_evaluation.sh"
+  },
+  "eligibility_boundary": "The source Stage1-A checkpoint and skipped formal50K acceptance remain diagnostic/at-risk. Adding metrics and visual evidence does not promote checkpoint, dataset, or evaluation eligibility."
+}
