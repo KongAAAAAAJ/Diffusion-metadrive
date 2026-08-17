@@ -502,6 +502,11 @@ class JointTrajectoryProxyReward:
         model_inputs: object,
         trajectories: np.ndarray,
     ) -> JointRewardResult:
+        from models.platoon_planner.platoon_normal_planner import (
+            minimum_dense_background_gap,
+            minimum_dense_pair_gap,
+        )
+
         trajectory_values = _validate_trajectories(trajectories)
         bev = _as_numpy_model_field(model_inputs, "bev")
         relation = _as_numpy_model_field(
@@ -598,7 +603,6 @@ class JointTrajectoryProxyReward:
                     )
                 )
 
-                minimum_background_gap = float("inf")
                 for _, predicted, other_dimensions in background:
                     if self._prediction_planner._obb_overlap_series(
                         world,
@@ -608,15 +612,11 @@ class JointTrajectoryProxyReward:
                         0.0,
                     ):
                         collision[group] = True
-                    center_distance = np.linalg.norm(
-                        world[:, :2] - predicted[:, :2], axis=1
-                    )
-                    bumper = center_distance - 0.5 * (
-                        dimensions[0] + other_dimensions[0]
-                    )
-                    minimum_background_gap = min(
-                        minimum_background_gap, float(bumper.min())
-                    )
+                minimum_background_gap = minimum_dense_background_gap(
+                    world,
+                    dimensions,
+                    background,
+                )
                 background_deficit = (
                     0.0
                     if not math.isfinite(minimum_background_gap)
@@ -647,20 +647,26 @@ class JointTrajectoryProxyReward:
                     first, dimensions, second, dimensions, 0.0
                 ):
                     collision[group] = True
+                minimum_pair_gap = minimum_dense_pair_gap(
+                    first,
+                    dimensions,
+                    second,
+                    dimensions,
+                )
                 center_distance = np.linalg.norm(
                     first[:, :2] - second[:, :2], axis=1
                 )
-                bumper = center_distance - dimensions[0]
                 minimum_platoon_by_group[group] = min(
-                    minimum_platoon_by_group[group], float(bumper.min())
+                    minimum_platoon_by_group[group], minimum_pair_gap
                 )
-                if float(bumper.min()) < self.config.platoon_safe_gap_m:
+                if minimum_pair_gap < self.config.platoon_safe_gap_m:
                     clearance_violation[group] = True
                 if follower == leader + 1:
                     deficit = np.maximum(
-                        self.config.platoon_safe_gap_m - bumper, 0.0
+                        self.config.platoon_safe_gap_m - minimum_pair_gap,
+                        0.0,
                     ) / self.config.platoon_safe_gap_m
-                    platoon_deficits.append(float(np.mean(np.clip(deficit, 0, 1))))
+                    platoon_deficits.append(float(np.clip(deficit, 0, 1)))
 
                     target_gap = abs(float(relation[follower, leader * 6 + 4]))
                     if target_gap <= 0.0:

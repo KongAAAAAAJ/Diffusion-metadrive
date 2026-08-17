@@ -1,0 +1,46 @@
+{
+  "format": "stage2_at_risk_grpo_open_empty_tracking_fix_v1",
+  "recorded_at": "2026-08-16T16:20:27+08:00",
+  "status": "implementation_passed_calibration_not_rerun",
+  "failed_gate": "stage2_at_risk_grpo_open_development_calibration",
+  "observed_failure": {
+    "exception": "evaluation.tracking_diagnostics.TrackingDiagnosticError: tracking report has no rows",
+    "callsite": "train/train_bev_joint_grpo_online.py: run_joint_reward_calibration",
+    "log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/logs/development-calibration.log",
+    "development_report_written": false,
+    "holdout_calibration_started": false,
+    "grpo_training_started": false
+  },
+  "root_cause": {
+    "tracking_row_policy": "Only trajectories from simulator groups with reward.unsafe=false may establish the controller tracking envelope.",
+    "observed_condition": "No closed-loop-safe group existed, so tracking_rows was empty after calibration sampling completed.",
+    "software_defect": "The caller invoked the strict non-empty tracking aggregator before converting the empty-safe-group condition into a failed calibration report.",
+    "model_or_policy_risk": "The exact collision, out-of-drivable, gap, or termination causes remain unmeasured in a persisted report until calibration is rerun with this fix."
+  },
+  "fix": {
+    "source": "train/train_bev_joint_grpo_online.py",
+    "tests": "tests/test_bev_joint_grpo_online.py",
+    "behavior": [
+      "Represent zero safe groups as tracking.blocked_reason=no_closed_loop_safe_group.",
+      "Set tracking envelope within_controller_limits=false and tracking gate passed=false.",
+      "Record null rather than fabricated or non-finite tracking metrics.",
+      "Record the same condition as a longitudinal and top-level calibration blocker.",
+      "Write the complete failed development report so candidate failure details remain inspectable."
+    ],
+    "safety_thresholds_changed": false,
+    "reward_semantics_changed": false,
+    "unsafe_groups_reclassified_as_safe": false
+  },
+  "verification": {
+    "focused_tracking_and_grpo_tests": "21 passed",
+    "python_compile": "passed",
+    "git_diff_check": "passed"
+  },
+  "acceptance": {
+    "empty_tracking_failure_reporting_gate": "passed",
+    "development_calibration_gate": "not_rerun",
+    "holdout_calibration_gate": "not_started",
+    "grpo_training_gate": "not_started"
+  },
+  "next_hard_gate": "Rerun PIPELINE_STAGE=calibrate. If the development report still records no_closed_loop_safe_group, stop and diagnose its persisted per-state failure reasons; do not start GRPO."
+}

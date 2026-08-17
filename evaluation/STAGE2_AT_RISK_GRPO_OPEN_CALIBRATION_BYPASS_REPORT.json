@@ -1,0 +1,83 @@
+{
+  "format": "bev_stage2_at_risk_grpo_open_calibration_bypass_report_v1",
+  "recorded_at": "2026-08-17T11:17:49+08:00",
+  "authorization": {
+    "authorized_by_user": true,
+    "decision": "Skip the calibration passed=true gate and proceed directly to bounded Stage 2 training.",
+    "scope": "Variant A GRPO-Open, run_mode=smoke, explicit positive maximum optimizer steps only"
+  },
+  "source": {
+    "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
+    "checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
+    "project_classification": "at-risk diagnostic only"
+  },
+  "calibration_audit": {
+    "report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-holdout.json",
+    "report_sha256": "816297adb04786d0c80c8651a9be00a9c9989958df86a4e3e4561a11aaec7255",
+    "calibration_phase": "holdout",
+    "passed": false,
+    "blockers": [
+      "stop_terminal_speed"
+    ],
+    "maximum_stop_terminal_speed_mps": 0.36297077992826854,
+    "report_is_retained_and_required": true,
+    "waived_field": "passed=true only"
+  },
+  "implementation": {
+    "cli_flag": "--allow-failed-calibration-diagnostic",
+    "launcher_environment_switch": "ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1",
+    "launcher_requires_pipeline_stage": "train",
+    "default_bypass_output_subdirectory": "training_calibration_bypass",
+    "unchanged_checks": [
+      "calibration report format",
+      "Variant A identity",
+      "independent holdout phase",
+      "complete ordered S5-S9 scenario contract and SHA256",
+      "holdout seeds [31,47]",
+      "trajectory optimizer configuration and SHA256",
+      "reward configuration",
+      "exact source checkpoint SHA256"
+    ],
+    "persisted_metadata": [
+      "calibration_gate_bypassed=true",
+      "calibration_report_passed=false",
+      "calibration_blockers=[stop_terminal_speed]",
+      "diagnostic_only=true",
+      "eligible_for_formal_training=false"
+    ]
+  },
+  "files": {
+    "project_plan": {
+      "path": "docs/project/project_plan.json",
+      "sha256": "c2b34cd500e19151974a204b054a94f29f097a66c4d6d9c03896b44ee6567313"
+    },
+    "training_entry": {
+      "path": "train/train_bev_joint_grpo_online.py",
+      "sha256": "d0c2d0c2658c3080c8ba429e5b3b60f3f97ca2e3b49452741966f2d361e22ea4"
+    },
+    "launcher": {
+      "path": "scripts/run_bev_joint_grpo.sh",
+      "sha256": "188002e85ce1df11fbc9797168d97e2ee0e6948ffbb4f47dfbc503e9acf16864"
+    }
+  },
+  "verification": {
+    "focused_pytest": {
+      "command": "python -m pytest tests/test_bev_joint_grpo_online.py tests/test_run_bev_joint_grpo_launcher.py tests/test_bev_joint_reward.py tests/test_joint_simulator_branch.py -q",
+      "passed": 36,
+      "failed": 0
+    },
+    "python_compile_passed": true,
+    "bash_syntax_passed": true,
+    "json_validation_passed": true,
+    "git_diff_check_passed": true
+  },
+  "execution_boundary": {
+    "training_started_in_this_change_thread": false,
+    "long_training_must_run_in_a_separate_thread": true,
+    "formal_stage1_allowed": false,
+    "formal_grpo_allowed": false,
+    "formal_evaluation_allowed": false,
+    "grpo_exec_source_allowed": false,
+    "paper_evidence_allowed": false
+  }
+}

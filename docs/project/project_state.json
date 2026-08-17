@@ -1,13 +1,15 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-16T10:02:51+08:00",
+  "updated_at": "2026-08-17T11:17:49+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "885189a08d833c8a2fe27c4b021800de62ac0a26",
+    "git_commit": "41d7194e7cd1a3dee1d96d9c499a9b683f320f2c",
     "worktree_clean_before_this_update": false,
-    "project_state_update_committed": true,
-    "uncommitted_plan_update_present": false,
+    "project_state_update_committed": false,
+    "uncommitted_plan_update_present": true,
+    "uncommitted_stage2_at_risk_grpo_launcher_present": true,
+    "uncommitted_stage2_calibration_bypass_present": true,
     "uncommitted_stage1_epoch_override_present": true,
     "uncommitted_exploratory_training_waiver_present": false,
     "uncommitted_formal50k_diversity_contract_present": false,
@@ -22,10 +24,10 @@
     "uncommitted_combined_acceptance_evidence_present": false
   },
   "current": {
-    "phase": "stage1_a_at_risk_planning",
-    "round": "formal50k-acceptance-waiver-plan-revision-20260816",
-    "status": "formal50k_acceptance_skipped_at_risk_stage1_planned_training_not_started",
-    "active_hard_gate": "stage1_a_at_risk_training_smoke"
+    "phase": "stage2_at_risk_grpo_open",
+    "round": "stage2-at-risk-grpo-open-calibration-bypass-20260817",
+    "status": "calibration_bypass_implemented_bounded_training_ready",
+    "active_hard_gate": "stage2_at_risk_grpo_open_bounded_training"
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
@@ -277,8 +279,8 @@
       }
     },
     "candidate_v3_data_refresh": {
-      "status": "formal50k_counter_reached_acceptance_skipped_at_risk_stage1_planned",
-      "active_task": "stage1_a_at_risk_training_smoke",
+      "status": "stage2_calibration_bypass_implemented_bounded_training_ready",
+      "active_task": "stage2_at_risk_grpo_open_bounded_training",
       "pilot_target_joint_steps": 10000,
       "pilot_per_scenario_quota": 2000,
       "pilot_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_diagnostic10k_20260814_v1",
@@ -349,7 +351,10 @@
       "formal50k_allowed_for_at_risk_stage1": true,
       "stage1_formal50k_dataset_path_preflight_passed": true,
       "exploratory_stage1_smoke_authorized": true,
-      "exploratory_stage1_smoke_started": false,
+      "exploratory_stage1_smoke_started": true,
+      "at_risk_stage1_training_finished": true,
+      "at_risk_grpo_open_authorized": true,
+      "at_risk_grpo_open_launcher_ready": true,
       "exploratory_dataset_acceptance_passed": false,
       "remediation9999_quota_revision_authorized": true,
       "remediation9999_quota_gate_passed": true,
@@ -377,6 +382,12 @@
     "candidate_v3_dataset_acceptance_bypass_for_exploratory_training_authorized": true,
     "candidate_v3_dataset_acceptance_bypass_recorded_on": "2026-08-15",
     "candidate_v3_dataset_acceptance_bypass_scope": "Stage1-A run_mode=smoke only; no formal eligibility, GRPO, formal evaluation, or paper evidence",
+    "stage2_at_risk_grpo_open_authorized": true,
+    "stage2_at_risk_grpo_open_authorized_on": "2026-08-17",
+    "stage2_at_risk_grpo_open_scope": "Use the completed Stage1-A run_1 best.pt only for bounded Variant-A GRPO-Open with run_mode=smoke and an explicit positive optimizer-step cap; all outputs remain diagnostic-only and excluded from formal evaluation, GRPO-Exec, and paper evidence",
+    "stage2_failed_calibration_bypass_authorized": true,
+    "stage2_failed_calibration_bypass_recorded_on": "2026-08-17",
+    "stage2_failed_calibration_bypass_scope": "Waive only holdout passed=true for the named at-risk diagnostic run. Retain and validate the failed holdout report, blocker list, reward configuration, scenario/seed contract, trajectory optimizer contract, and exact source checkpoint SHA256.",
     "remediation9999_quota_revision_authorized": true,
     "remediation9999_quota_revision_recorded_on": "2026-08-15",
     "remediation9999_quota_revision_scope": "Accept total_joint_samples=9999 and S9 joint_samples=1999 only; no other gate is waived",
@@ -386,7 +397,7 @@
     "current_bev_merge_authorized": true,
     "candidate_v3_s6_background_enrichment_authorized_by_user": true,
     "candidate_v3_s6_background_enrichment_recorded_on": "2026-08-14",
-    "note": "The candidate-v3 formal50k collection counter reached 50000 samples. On 2026-08-16 the user explicitly chose to skip the complete base, sidecar, bundle, and statistical quality acceptance runs and asked only to revise the plan. This decision permits a future bounded at-risk diagnostic Stage1-A Variant A smoke run, but it does not mark acceptance as passed or grant formal training eligibility. No training was started in this round."
+    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. On 2026-08-17 the user explicitly waived only the failed holdout passed=true gate for bounded diagnostic GRPO-Open; the failed report and stop_terminal_speed blocker remain auditable, no formal eligibility was granted, and no GRPO training was started in this code-change round."
   },
   "source_of_truth": {
     "candidate_v3_s5_s9_combined_acceptance_report": {
@@ -434,8 +445,28 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "db0941ffbd555b1d86dbe95119b4f484159fe80655b86c16ab9b8c159fb2a951",
-      "role": "Records the skipped formal50K acceptance boundary and plans a bounded at-risk diagnostic Stage1-A Variant A smoke while keeping formal eligibility false"
+      "sha256": "c2b34cd500e19151974a204b054a94f29f097a66c4d6d9c03896b44ee6567313",
+      "role": "Records the explicit failed-calibration bypass for bounded at-risk diagnostic GRPO-Open while keeping the failed report and all formal ineligibility boundaries"
+    },
+    "stage2_at_risk_grpo_open_calibration_bypass_report": {
+      "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_CALIBRATION_BYPASS_REPORT.json",
+      "sha256": "96843e6f2f8129d08c3bca3ec010a5ea91c10505a831e716d37689e84d36a971",
+      "role": "Records the explicit user waiver, immutable failed holdout and source hashes, strict bypass scope, implementation, 36-test regression, diagnostic output metadata, and no-training boundary"
+    },
+    "stage2_at_risk_grpo_open_launcher_report": {
+      "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_LAUNCHER_REPORT.json",
+      "sha256": "61a7baba5c3ad24f07290c973fe98ba96e580f669d3f7833a8f9cd20bcc9ca05",
+      "role": "Records the user authorization, source checkpoint classification, ordered calibration-to-training launcher, focused tests, diagnostic output boundary, and no-training handoff"
+    },
+    "stage2_at_risk_grpo_open_empty_tracking_fix_report": {
+      "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_EMPTY_TRACKING_FIX_REPORT.json",
+      "sha256": "2b9ffa5c003c0f87ee19c5c9b493d7f9a6f075623c1fe0b912549cfb47c2baaf",
+      "role": "Records the development calibration crash caused by zero closed-loop-safe tracking groups, the strict failed-report fix, focused tests, unchanged safety gates, and the calibration-rerun boundary"
+    },
+    "stage2_at_risk_grpo_open_gap_geometry_fix_report": {
+      "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_GAP_GEOMETRY_FIX_REPORT.json",
+      "sha256": "128b1a33ae4bf10598fd363cb9a25c9af2098a8090f5d6de252f914c5e9f4a3b",
+      "role": "Records the persisted 120-of-120 unsafe development result, the adjacent-lane radial-gap root cause, alignment with the frozen same-corridor gap geometry, focused tests, unchanged 5 m and 7 m gates, and the calibration-rerun boundary"
     },
     "candidate_v3_remediation9999_acceptance_report": {
       "path": "evaluation/CANDIDATE_V3_REMEDIATION9999_ACCEPTANCE_REPORT.json",
@@ -794,17 +825,26 @@
   },
   "checkpoints": {
     "stage1_a_exploratory": {
-      "available": false,
+      "available": true,
       "eligible": false,
-      "training_started": false,
+      "training_started": true,
+      "training_finished": true,
       "allowed_run_mode": "smoke",
       "planned_variant": "A",
       "bounded_max_optimizer_steps_required": true,
+      "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
+      "run_metadata": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/run_metadata.json",
+      "summary": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/summary.json",
       "source_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev",
       "source_dataset_fingerprint": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
       "dataset_path_preflight_passed": true,
-      "diagnostic_only": true,
-      "formal_grpo_source_allowed": false
+      "embedded_run_mode": "formal",
+      "embedded_eligible_for_formal_training": true,
+      "project_use_diagnostic_only": true,
+      "formal_grpo_source_allowed": false,
+      "at_risk_diagnostic_grpo_open_source_allowed": true,
+      "checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
+      "checkpoint_sha256_status": "bound_by_completed_failed_holdout_calibration; passed=true waived only for bounded at-risk diagnostic GRPO-Open"
     },
     "stage1_a_formal": {
       "available": false,
@@ -826,6 +866,38 @@
       "source": "stage1_a_formal",
       "reward_domain": "tau_cmd"
     },
+    "grpo_open_at_risk": {
+      "available": false,
+      "eligible": false,
+      "authorized": true,
+      "training_started": false,
+      "source": "stage1_a_exploratory",
+      "variant": "A",
+      "reward_domain": "tau_cmd",
+      "required_run_mode": "smoke",
+      "bounded_max_optimizer_steps_required": true,
+      "fresh_development_calibration_complete": true,
+      "development_calibration_attempted": true,
+      "development_calibration_last_failure": null,
+      "empty_tracking_failure_report_fix_ready": true,
+      "gap_geometry_fix_ready": true,
+      "failed_development_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-development.json",
+      "failed_development_report_sha256": "fd2ab1edf5f007a8eb1bd0b4a456a32583e243d1946e2bf556bdf0d9b2765197",
+      "holdout_calibration_complete": true,
+      "fresh_holdout_calibration_passed": false,
+      "failed_holdout_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-holdout.json",
+      "failed_holdout_report_sha256": "816297adb04786d0c80c8651a9be00a9c9989958df86a4e3e4561a11aaec7255",
+      "failed_holdout_blockers": ["stop_terminal_speed"],
+      "failed_holdout_maximum_stop_terminal_speed_mps": 0.36297077992826854,
+      "calibration_gate_bypass_authorized": true,
+      "calibration_gate_bypass_implemented": true,
+      "diagnostic_only": true,
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false,
+      "launcher": "scripts/run_bev_joint_grpo.sh",
+      "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1",
+      "bypass_training_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/training_calibration_bypass"
+    },
     "grpo_exec_formal": {
       "available": false,
       "eligible": false,
@@ -836,7 +908,7 @@
     }
   },
   "blockers": [
-    "Formal Stage1-A remains blocked because complete formal50K base, sidecar, bundle, and statistical quality acceptance was skipped and therefore was not measured as passed. This does not block the separately labeled bounded at-risk diagnostic Stage1-A smoke."
+    "Formal Stage1-A remains blocked because complete formal50K base, sidecar, bundle, and statistical quality acceptance was skipped and therefore was not measured as passed. This does not block the explicitly authorized bounded at-risk diagnostic GRPO-Open path."
   ],
   "future_hard_gates": [
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
@@ -846,12 +918,13 @@
     "The explicit user risk waiver supersedes the failed remediation9999 diagnostic gates only as a formal50k collection precondition; the BEV merge and post-merge exact-path smoke are recorded, while all formal50k completion gates remain mandatory.",
     "Formal Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded; the only currently planned exception is a bounded at-risk diagnostic Variant A smoke using run_mode=smoke and explicit max optimizer steps.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
-    "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen."
+    "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen.",
+    "At-risk GRPO-Open may run only as Variant A, run_mode=smoke, with an explicit positive max_optimizer_steps and ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1. The failed source-bound holdout report remains mandatory and its outputs remain formally ineligible."
   ],
   "next_actions": [
-    "Do not start training in this plan-revision round. In a separate future hard-gate thread and only on explicit user request, run a bounded at-risk diagnostic Stage1-A Variant A smoke on the named formal50K base dataset using run_mode=smoke and an explicit maximum optimizer-step limit.",
-    "Bind the at-risk Stage1-A run manifest to base dataset fingerprint 4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c and label every resulting checkpoint diagnostic_only=true and eligible_for_formal_training=false.",
-    "Do not use an at-risk checkpoint as a formal GRPO source, formal evaluation artifact, or paper result. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
+    "In a separate training thread, run scripts/run_bev_joint_grpo.sh with PIPELINE_STAGE=train, RUN_MODE=smoke, ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1, and an explicit positive MAX_OPTIMIZER_STEPS. Every checkpoint must record the bypass, failed report hash, blocker list, diagnostic_only=true, and eligible_for_formal_training=false.",
+    "Monitor the bounded run for finite loss/gradients, informative groups, simulator safety, and checkpoint round-trip; stop on runtime or numerical failure rather than increasing the diagnostic budget.",
+    "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
     "Preserve the accepted candidate-v3 combined manifest and all 140 hashed artifacts without rerunning, relabeling or overwriting them unless the frozen scenario contract changes.",

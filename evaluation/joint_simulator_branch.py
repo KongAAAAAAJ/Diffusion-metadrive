@@ -19,7 +19,10 @@ from models.bev_planner.joint_reward import (
     JointRewardResult,
     compose_joint_reward,
 )
-from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
+from models.platoon_planner.platoon_normal_planner import (
+    PlatoonNormalPlanner,
+    minimum_dense_pair_gap,
+)
 from models.controller.longitudinal_reference import (
     LongitudinalTrackingReference,
     signed_longitudinal_speed_mps,
@@ -500,12 +503,60 @@ class JointSimulatorBranchEvaluator:
         agents = getattr(env, "agents", {}) or {}
         platoon_gap = float("inf")
         for leader, follower in zip(AGENT_IDS[:-1], AGENT_IDS[1:]):
-            first = np.asarray(agents[leader].position, dtype=np.float64)[:2]
-            second = np.asarray(agents[follower].position, dtype=np.float64)[:2]
+            first_vehicle = agents[leader]
+            second_vehicle = agents[follower]
+            first = np.asarray(
+                [[
+                    *np.asarray(first_vehicle.position, dtype=np.float64)[:2],
+                    float(first_vehicle.heading_theta),
+                ]],
+                dtype=np.float64,
+            )
+            second = np.asarray(
+                [[
+                    *np.asarray(second_vehicle.position, dtype=np.float64)[:2],
+                    float(second_vehicle.heading_theta),
+                ]],
+                dtype=np.float64,
+            )
             platoon_gap = min(
                 platoon_gap,
-                float(np.linalg.norm(first - second))
-                - self.config.vehicle_length_m,
+                minimum_dense_pair_gap(
+                    first,
+                    (
+                        float(
+                            getattr(
+                                first_vehicle,
+                                "LENGTH",
+                                self.config.vehicle_length_m,
+                            )
+                        ),
+                        float(
+                            getattr(
+                                first_vehicle,
+                                "WIDTH",
+                                self.config.vehicle_width_m,
+                            )
+                        ),
+                    ),
+                    second,
+                    (
+                        float(
+                            getattr(
+                                second_vehicle,
+                                "LENGTH",
+                                self.config.vehicle_length_m,
+                            )
+                        ),
+                        float(
+                            getattr(
+                                second_vehicle,
+                                "WIDTH",
+                                self.config.vehicle_width_m,
+                            )
+                        ),
+                    ),
+                ),
             )
 
         background_gap = float("inf")
@@ -516,7 +567,17 @@ class JointSimulatorBranchEvaluator:
         platoon_objects = {id(vehicle) for vehicle in agents.values()}
         for agent_id in AGENT_IDS:
             vehicle = agents[agent_id]
-            position = np.asarray(vehicle.position, dtype=np.float64)[:2]
+            pose = np.asarray(
+                [[
+                    *np.asarray(vehicle.position, dtype=np.float64)[:2],
+                    float(vehicle.heading_theta),
+                ]],
+                dtype=np.float64,
+            )
+            dimensions = (
+                float(getattr(vehicle, "LENGTH", self.config.vehicle_length_m)),
+                float(getattr(vehicle, "WIDTH", self.config.vehicle_width_m)),
+            )
             for other in vehicles:
                 if id(other) in platoon_objects:
                     continue
@@ -527,13 +588,37 @@ class JointSimulatorBranchEvaluator:
                     other_position[:2]
                 ).all():
                     continue
-                other_length = float(
-                    getattr(other, "LENGTH", self.config.vehicle_length_m)
+                other_pose = np.asarray(
+                    [[
+                        other_position[0],
+                        other_position[1],
+                        float(getattr(other, "heading_theta", 0.0)),
+                    ]],
+                    dtype=np.float64,
                 )
                 background_gap = min(
                     background_gap,
-                    float(np.linalg.norm(position - other_position[:2]))
-                    - 0.5 * (self.config.vehicle_length_m + other_length),
+                    minimum_dense_pair_gap(
+                        pose,
+                        dimensions,
+                        other_pose,
+                        (
+                            float(
+                                getattr(
+                                    other,
+                                    "LENGTH",
+                                    self.config.vehicle_length_m,
+                                )
+                            ),
+                            float(
+                                getattr(
+                                    other,
+                                    "WIDTH",
+                                    self.config.vehicle_width_m,
+                                )
+                            ),
+                        ),
+                    ),
                 )
         return platoon_gap, background_gap
 

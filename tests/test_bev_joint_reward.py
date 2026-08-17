@@ -132,6 +132,39 @@ def test_background_prediction_participates_in_collision() -> None:
     assert result.rewards[0] < -20.0
 
 
+def test_background_gap_uses_shared_corridor_not_radial_center_distance() -> None:
+    reward = JointTrajectoryProxyReward()
+    times = np.arange(0.1, 4.01, 0.1)
+    adjacent = np.zeros((len(times), 3), dtype=np.float64)
+    adjacent[:, 0] = 4.0 * times
+    adjacent[:, 1] = 3.5
+    reward._prediction_planner._predicted_obstacles = (
+        lambda *args, **kwargs: [("adjacent", adjacent, (5.74, 2.3))]
+    )
+    group = np.stack([_trajectory(4.0)] * 3)[None]
+
+    adjacent_result = reward.score(_env(), _model_inputs(), group)
+
+    assert adjacent_result.components["minimum_background_gap_m"][0] == pytest.approx(
+        1.0e6
+    )
+    assert not adjacent_result.clearance_violation[0]
+
+    same_corridor = adjacent.copy()
+    same_corridor[:, 0] += 10.0
+    same_corridor[:, 1] = 0.0
+    reward._prediction_planner._predicted_obstacles = (
+        lambda *args, **kwargs: [("ahead", same_corridor, (5.74, 2.3))]
+    )
+
+    close_result = reward.score(_env(), _model_inputs(), group)
+
+    assert close_result.components["minimum_background_gap_m"][0] == pytest.approx(
+        4.26, abs=1.0e-5
+    )
+    assert close_result.clearance_violation[0]
+
+
 def test_reward_rejects_labels_and_invalid_contracts() -> None:
     values = _model_inputs()
     values.gt_mode = np.zeros(3, dtype=np.int64)

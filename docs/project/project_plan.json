@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-16T09:41:23+08:00",
-  "status": "candidate_v3_formal50k_acceptance_skipped_at_risk_stage1_planned",
+  "updated_at": "2026-08-17T11:17:49+08:00",
+  "status": "at_risk_diagnostic_grpo_open_calibration_bypass_authorized",
   "purpose": "Machine-readable memory for the candidate-v3 data refresh, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
@@ -302,6 +302,38 @@
     "paper_evidence_allowed": false,
     "first_hard_gate": "Run a bounded Stage1-A smoke in a separate thread before any long at-risk training run."
   },
+  "stage2_at_risk_grpo_open": {
+    "name": "At-risk diagnostic GRPO-Open",
+    "authorization_recorded_on": "2026-08-17",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
+    "source_checkpoint_classification": "user-authorized at-risk diagnostic source; embedded formal eligibility metadata does not override the unaccepted dataset boundary",
+    "reward_domain": "tau_cmd",
+    "run_mode": "smoke",
+    "variant": "A",
+    "bounded_max_optimizer_steps_required": true,
+    "calibration_gate_bypass_authorized": true,
+    "calibration_gate_bypass_scope": "This at-risk diagnostic Variant-A smoke only. The failed holdout report remains mandatory as immutable audit and reward-configuration context, but passed=true is waived. Formal GRPO still requires passed calibration.",
+    "failed_holdout_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-holdout.json",
+    "failed_holdout_report_sha256": "816297adb04786d0c80c8651a9be00a9c9989958df86a4e3e4561a11aaec7255",
+    "failed_holdout_observed_blockers": [
+      "stop_terminal_speed"
+    ],
+    "required_sequence": [
+      "explicit ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1 authorization switch",
+      "existing failed independent holdout report retained and bound to the exact source checkpoint SHA256",
+      "all holdout report format, scenario, seed, trajectory-optimizer, reward-configuration, and source-checkpoint checks remain mandatory except passed=true",
+      "bounded GRPO-Open training with an explicit maximum optimizer-step limit"
+    ],
+    "output_contract": {
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false,
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false,
+      "formal_grpo_exec_source_allowed": false
+    },
+    "formal_mainline_unchanged": true,
+    "formal_calibration_gate_still_required": true
+  },
   "stage2_common_contract": {
     "name": "Formal joint GRPO refinement",
     "source_checkpoint": "the same frozen eligible Stage1-A checkpoint",
@@ -469,7 +501,9 @@
     "Do not compare branches whose source checkpoint, seeds, budget, reward semantics, or trajectory optimizer differ.",
     "Do not convert diagnostic artifacts into formal artifacts by editing metadata.",
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
-    "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision."
+    "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision.",
+    "The 2026-08-17 at-risk GRPO-Open calibration waiver permits only Variant A with run_mode=smoke, an explicit bounded max_optimizer_steps, and ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1. The existing failed holdout report must remain source-bound and auditable; only its passed=true gate is waived.",
+    "Every at-risk GRPO-Open output remains diagnostic_only=true and eligible_for_formal_training=false; never use it for formal evaluation, GRPO-Exec, paper evidence, or metadata promotion."
   ],
-  "current_next_action": "The candidate-v3 dataset reached an observed 50000 joint samples, but complete base, sidecar, bundle and quality acceptance is skipped by explicit user risk decision and formal eligibility remains false. In a separate thread, run a bounded Stage1-A Variant A smoke with run_mode=smoke on the 50k base root; do not start formal training or GRPO."
+  "current_next_action": "After the explicit bypass implementation and focused tests pass, start a separate bounded Variant-A GRPO-Open training thread with PIPELINE_STAGE=train, RUN_MODE=smoke, ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1, and an explicit positive MAX_OPTIMIZER_STEPS. Preserve the failed holdout report and its blocker in every artifact. Formal Stage1, formal GRPO, formal evaluation, GRPO-Exec, and paper evidence remain blocked."
 }

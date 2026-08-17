@@ -21,6 +21,7 @@ from train.train_bev_joint_grpo_online import (
     run_joint_grpo_training,
     _joint_rewards_are_informative,
     _round_robin_training_buckets,
+    _summarize_calibration_tracking,
     _validate_calibration_trajectory_optimizer_contract,
     _scenario_ready_for_primary_sampling,
 )
@@ -40,6 +41,7 @@ def _calibration(path: Path, *, variant: str = "A", passed: bool = False) -> Pat
                 "calibration_phase": "holdout",
                 "variant": variant,
                 "passed": passed,
+                "blockers": [] if passed else ["stop_terminal_speed"],
                 "reward_config": {},
                 "scenario_contract": primary_scenario_contract(),
                 "scenario_contract_sha256": primary_scenario_contract()["sha256"],
@@ -93,6 +95,83 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
             output_root=tmp_path / "output",
             max_optimizer_steps=20,
         )
+
+
+def test_failed_calibration_bypass_is_explicit_and_smoke_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _calibration(tmp_path / "failed.json")
+    config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
+
+    def reached_source_loader(*args, **kwargs):
+        raise OnlineGRPOError("source loader reached")
+
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online._load_trainer",
+        reached_source_loader,
+    )
+    with pytest.raises(OnlineGRPOError, match="source loader reached"):
+        run_joint_grpo_training(
+            config,
+            variant="A",
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "does-not-exist.pt",
+            output_root=tmp_path / "output",
+            max_optimizer_steps=1,
+            allow_failed_calibration_diagnostic=True,
+        )
+    with pytest.raises(OnlineGRPOError, match="restricted to Variant A smoke"):
+        run_joint_grpo_training(
+            config,
+            variant="A",
+            run_mode="formal",
+            source_checkpoint=tmp_path / "does-not-exist.pt",
+            output_root=tmp_path / "output",
+            allow_failed_calibration_diagnostic=True,
+        )
+
+    passed_report = _calibration(tmp_path / "passed.json", passed=True)
+    passed_config = JointGRPOOnlineConfig(
+        device="cpu", calibration_report=passed_report
+    )
+    with pytest.raises(OnlineGRPOError, match="requires a failed"):
+        run_joint_grpo_training(
+            passed_config,
+            variant="A",
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "does-not-exist.pt",
+            output_root=tmp_path / "output",
+            max_optimizer_steps=1,
+            allow_failed_calibration_diagnostic=True,
+        )
+
+
+def test_empty_safe_group_tracking_becomes_an_explicit_failed_gate() -> None:
+    tracking, lateral_p95, heading_p95, passed = (
+        _summarize_calibration_tracking([])
+    )
+    assert tracking["row_count"] == 0
+    assert tracking["blocked_reason"] == "no_closed_loop_safe_group"
+    assert tracking["overall"] is None
+    assert tracking["recommended_envelope"]["within_controller_limits"] is False
+    assert lateral_p95 is None
+    assert heading_p95 is None
+    assert passed is False
+
+    safe_row = {
+        "scenario": "S5_hard_brake_lead",
+        "role": 0,
+        "longitudinal_errors_m": [0.1, 0.2],
+        "lateral_errors_m": [0.05, 0.1],
+        "heading_errors_rad": [0.01, 0.02],
+    }
+    tracking, lateral_p95, heading_p95, passed = (
+        _summarize_calibration_tracking([safe_row])
+    )
+    assert tracking["row_count"] == 1
+    assert lateral_p95 == pytest.approx(0.0975)
+    assert heading_p95 == pytest.approx(0.0195)
+    assert passed is True
 
 
 def test_calibration_scenario_routes_match_runtime_contract() -> None:

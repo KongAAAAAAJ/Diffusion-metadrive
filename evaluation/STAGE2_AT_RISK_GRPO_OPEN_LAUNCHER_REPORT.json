@@ -1,0 +1,61 @@
+{
+  "format": "stage2_at_risk_grpo_open_launcher_v1",
+  "recorded_at": "2026-08-16T15:53:30+08:00",
+  "status": "launcher_gate_passed_training_not_started",
+  "user_authorization": {
+    "authorized_on": "2026-08-16",
+    "scope": "Use the completed Stage1-A best.pt as the source for at-risk diagnostic GRPO-Open training.",
+    "formal_eligibility_granted": false
+  },
+  "source_stage1": {
+    "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
+    "run_metadata": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/run_metadata.json",
+    "summary": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/summary.json",
+    "variant": "A",
+    "dataset_fingerprint": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
+    "embedded_run_mode": "formal",
+    "embedded_eligible_for_formal_training": true,
+    "project_classification": "at_risk_diagnostic_source",
+    "classification_note": "The embedded run-mode-derived eligibility flag does not override the skipped dataset acceptance boundary. The source is authorized only for diagnostic GRPO-Open."
+  },
+  "launcher_contract": {
+    "path": "scripts/run_bev_joint_grpo.sh",
+    "variant": "A",
+    "run_mode": "smoke",
+    "reward_domain": "tau_cmd",
+    "default_pipeline_stage": "all",
+    "ordered_stages": [
+      "development calibration on seeds 17 and 23",
+      "independent holdout calibration on seeds 31 and 47 using the development tracking envelope",
+      "bounded GRPO-Open training after the holdout report passes the trainer's strict gates"
+    ],
+    "default_max_optimizer_steps": 20,
+    "explicit_positive_step_bound_required": true,
+    "formal_mode_rejected_before_process_start": true,
+    "variant_b_rejected_before_process_start": true,
+    "long_run_logs_outside_git": true
+  },
+  "default_artifacts": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1",
+    "development_calibration": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-development.json",
+    "holdout_calibration": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-holdout.json",
+    "training_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/training",
+    "logs": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/logs"
+  },
+  "verification": {
+    "shell_syntax": "passed",
+    "launcher_tests": "3 passed",
+    "joint_grpo_regression_tests": "18 passed",
+    "project_plan_json_parse": "passed",
+    "git_diff_check": "passed"
+  },
+  "output_contract": {
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false,
+    "grpo_exec_source_allowed": false
+  },
+  "training_started": false,
+  "next_hard_gate": "Run the fresh development calibration in a separate training thread; stop if controller-envelope or calibration gates fail."
+}

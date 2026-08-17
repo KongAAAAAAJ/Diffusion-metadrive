@@ -1,0 +1,64 @@
+{
+  "format": "stage2_at_risk_grpo_open_gap_geometry_fix_v1",
+  "recorded_at": "2026-08-16T19:11:01+08:00",
+  "status": "implementation_passed_calibration_rerun_pending",
+  "hard_gate": "stage2_at_risk_grpo_open_development_calibration",
+  "source_checkpoint": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
+    "sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
+    "classification": "user_authorized_at_risk_diagnostic_only"
+  },
+  "failed_development_report": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/calibration/A-development.json",
+    "sha256": "bf1e316519c5a59f9e14dbecb71f94979d7eb173bca8d9c59b44c5a410c55580",
+    "passed": false,
+    "blockers": [
+      "no_closed_loop_safe_group"
+    ],
+    "states": 30,
+    "candidate_groups": 120,
+    "unsafe_candidate_groups": 120,
+    "collision_candidate_groups": 25,
+    "out_of_drivable_candidate_groups": 0,
+    "background_gap_below_5m_candidate_groups": 120,
+    "maximum_reported_background_gap_m": 2.204768419265747
+  },
+  "root_cause": {
+    "description": "The proxy reward and simulator branch computed safety clearance as Euclidean center distance minus longitudinal vehicle half-lengths. Vehicles in adjacent 3.5 m lanes were therefore assigned negative bumper gaps even when their oriented boxes did not overlap.",
+    "contract_mismatch": "The production PlatoonNormalPlanner defines the frozen 5 m background and 7 m platoon gaps as longitudinal bumper clearance only while vehicles occupy the same lateral corridor.",
+    "effect": "All development candidates were classified unsafe before tracking aggregation, so no tracking envelope could be derived and holdout calibration correctly stopped."
+  },
+  "implementation": {
+    "safety_thresholds_changed": false,
+    "reward_weights_changed": false,
+    "scenario_or_seed_contract_changed": false,
+    "grpo_update_changed": false,
+    "changes": [
+      "Use minimum_dense_background_gap for proxy background clearance.",
+      "Use minimum_dense_pair_gap for proxy platoon clearance.",
+      "Use minimum_dense_pair_gap for instantaneous simulator background and platoon clearance.",
+      "Retain oriented-box collision, out-of-road, 5 m background and 7 m platoon hard gates."
+    ],
+    "files": [
+      "models/bev_planner/joint_reward.py",
+      "evaluation/joint_simulator_branch.py",
+      "tests/test_bev_joint_reward.py",
+      "tests/test_joint_simulator_branch.py"
+    ]
+  },
+  "verification": {
+    "focused_command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_online.py tests/test_bev_tracking_diagnostics.py tests/test_bev_joint_grpo_a.py tests/test_run_bev_joint_grpo_launcher.py tests/test_bev_joint_reward.py tests/test_joint_simulator_branch.py -q",
+    "result": "49 passed, 15 warnings in 4.27s",
+    "python_compile": "passed",
+    "launcher_shell_syntax": "passed",
+    "git_diff_check": "passed",
+    "warnings": "Existing NumPy alias, Gym deprecation, matplotlib pyparsing and pygame pkg_resources warnings only."
+  },
+  "gate_result": {
+    "development_calibration_rerun": false,
+    "holdout_calibration_started": false,
+    "grpo_training_started": false,
+    "stage2_training_authorized_now": false
+  },
+  "next_hard_gate": "Rerun PIPELINE_STAGE=calibrate. Proceed to bounded diagnostic GRPO-Open only if the fresh independent holdout report records passed=true and the exact source checkpoint SHA256."
+}

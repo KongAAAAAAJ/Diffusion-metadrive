@@ -370,6 +370,44 @@ def _joint_rewards_are_informative(
     return float(np.ptp(values.astype(np.float64, copy=False))) > minimum_span
 
 
+def _summarize_calibration_tracking(
+    rows: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, object], float | None, float | None, bool]:
+    """Return an explicit failed tracking gate when no safe group exists."""
+
+    if not rows:
+        return (
+            {
+                "row_count": 0,
+                "blocked_reason": "no_closed_loop_safe_group",
+                "overall": None,
+                "by_scenario_role": {},
+                "recommended_envelope": {
+                    "longitudinal_margin_m": None,
+                    "lateral_margin_m": None,
+                    "heading_margin_rad": None,
+                    "raw_longitudinal_p99_m": None,
+                    "raw_lateral_p99_m": None,
+                    "raw_heading_p99_rad": None,
+                    "within_controller_limits": False,
+                },
+            },
+            None,
+            None,
+            False,
+        )
+    tracking = aggregate_tracking_rows(rows)
+    tracking["row_count"] = len(rows)
+    lateral_p95 = float(tracking["overall"]["lateral_m"]["p95"])
+    heading_p95 = float(tracking["overall"]["heading_rad"]["p95"])
+    return (
+        tracking,
+        lateral_p95,
+        heading_p95,
+        lateral_p95 <= 0.5 and heading_p95 <= 0.1,
+    )
+
+
 def _round_robin_training_buckets(
     scenarios: Sequence[tuple[str, str]], seeds: Sequence[int]
 ) -> tuple[tuple[tuple[str, str], int], ...]:
@@ -1125,7 +1163,9 @@ def run_joint_reward_calibration(
         simulator_bad,
         min_informative_groups=15,
     )
-    tracking = aggregate_tracking_rows(tracking_rows)
+    tracking, lateral_p95, heading_p95, tracking_passed = (
+        _summarize_calibration_tracking(tracking_rows)
+    )
     longitudinal_audit = summarize_trajectory_audits(
         longitudinal_audit_rows
     )
@@ -1136,6 +1176,8 @@ def run_joint_reward_calibration(
             for blocker in state_report.blockers
         }
     )
+    if not longitudinal_state_reports:
+        longitudinal_blockers.append("no_closed_loop_safe_group")
     longitudinal_clean_samples = sum(
         report.clean_sample_count for report in longitudinal_state_reports
     )
@@ -1149,13 +1191,39 @@ def run_joint_reward_calibration(
     target_speed_delta_array = np.asarray(
         longitudinal_target_speed_delta, dtype=np.float64
     )
-    lateral_p95 = float(tracking["overall"]["lateral_m"]["p95"])
-    heading_p95 = float(tracking["overall"]["heading_rad"]["p95"])
-    tracking_passed = lateral_p95 <= 0.5 and heading_p95 <= 0.1
-
-    longitudinal_control_decomposition = summarize_longitudinal_control(
-        longitudinal_control_by_role
-    )
+    if longitudinal_state_reports:
+        longitudinal_control_decomposition = summarize_longitudinal_control(
+            longitudinal_control_by_role
+        )
+        maximum_state_longitudinal_p95 = max(
+            report.longitudinal_error_p95_m
+            for report in longitudinal_state_reports
+        )
+        maximum_state_longitudinal_p99 = max(
+            report.longitudinal_error_p99_m
+            for report in longitudinal_state_reports
+        )
+        maximum_target_speed_delta_p95 = max(
+            report.target_reference_speed_delta_p95_mps
+            for report in longitudinal_state_reports
+        )
+        maximum_continuous_saturation = max(
+            report.maximum_continuous_saturation_s
+            for report in longitudinal_state_reports
+        )
+        maximum_stop_terminal_speed = max(
+            report.maximum_stop_terminal_speed_mps
+            for report in longitudinal_state_reports
+        )
+    else:
+        longitudinal_control_decomposition = {
+            "blocked_reason": "no_closed_loop_safe_group"
+        }
+        maximum_state_longitudinal_p95 = None
+        maximum_state_longitudinal_p99 = None
+        maximum_target_speed_delta_p95 = None
+        maximum_continuous_saturation = None
+        maximum_stop_terminal_speed = None
     passed = bool(
         calibration_phase == "holdout"
         and result.passed
@@ -1202,19 +1270,18 @@ def run_joint_reward_calibration(
             "states_without_closed_loop_safe_group": (
                 longitudinal_states_without_safe_group
             ),
-            "maximum_state_longitudinal_p95_m": max(
-                report.longitudinal_error_p95_m
-                for report in longitudinal_state_reports
+            "maximum_state_longitudinal_p95_m": (
+                maximum_state_longitudinal_p95
             ),
             "overall_longitudinal_p95_m": (
                 float(np.percentile(clean_longitudinal_array, 95))
                 if clean_longitudinal_array.size
-                else float("inf")
+                else None
             ),
             "overall_longitudinal_p99_m": (
                 float(np.percentile(clean_longitudinal_array, 99))
                 if clean_longitudinal_array.size
-                else float("inf")
+                else None
             ),
             "overall_target_reference_speed_delta_p95_mps": (
                 float(
@@ -1223,31 +1290,26 @@ def run_joint_reward_calibration(
                     )
                 )
                 if target_speed_delta_array.size
-                else float("inf")
+                else None
             ),
             "control_decomposition": (
                 longitudinal_control_decomposition
             ),
-            "maximum_state_longitudinal_p99_m": max(
-                report.longitudinal_error_p99_m
-                for report in longitudinal_state_reports
+            "maximum_state_longitudinal_p99_m": (
+                maximum_state_longitudinal_p99
             ),
-            "maximum_target_reference_speed_delta_p95_mps": max(
-                report.target_reference_speed_delta_p95_mps
-                for report in longitudinal_state_reports
+            "maximum_target_reference_speed_delta_p95_mps": (
+                maximum_target_speed_delta_p95
             ),
-            "maximum_continuous_saturation_s": max(
-                report.maximum_continuous_saturation_s
-                for report in longitudinal_state_reports
+            "maximum_continuous_saturation_s": (
+                maximum_continuous_saturation
             ),
-            "maximum_stop_terminal_speed_mps": max(
-                report.maximum_stop_terminal_speed_mps
-                for report in longitudinal_state_reports
-            ),
+            "maximum_stop_terminal_speed_mps": maximum_stop_terminal_speed,
             "blockers": longitudinal_blockers,
             "passed": not longitudinal_blockers,
         },
         "false_safe_causes": dict(sorted(false_safe_causes.items())),
+        "blockers": longitudinal_blockers,
         "passed": passed,
         "details": details,
     }
@@ -1285,6 +1347,9 @@ def _checkpoint_payload(
     run_mode: str,
     reward_config: JointRewardConfig,
     calibration_sha: str,
+    calibration_gate_bypassed: bool,
+    calibration_report_passed: bool,
+    calibration_blockers: Sequence[str],
     scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
     environment_steps: int,
@@ -1304,6 +1369,9 @@ def _checkpoint_payload(
             "run_mode": run_mode,
             "reward_config": dataclasses.asdict(reward_config),
             "calibration_report_sha256": calibration_sha,
+            "calibration_gate_bypassed": calibration_gate_bypassed,
+            "calibration_report_passed": calibration_report_passed,
+            "calibration_blockers": list(calibration_blockers),
             "scenario_contract_sha256": scenario_contract_sha,
             "scenario_seeds": [int(value) for value in scenario_seeds],
             "environment_steps": int(environment_steps),
@@ -1324,6 +1392,9 @@ def _validate_online_checkpoint_metadata(
     run_mode: str,
     reward_config: JointRewardConfig,
     calibration_sha: str,
+    calibration_gate_bypassed: bool,
+    calibration_report_passed: bool,
+    calibration_blockers: Sequence[str],
     scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
 ) -> None:
@@ -1331,6 +1402,9 @@ def _validate_online_checkpoint_metadata(
         "run_mode": run_mode,
         "reward_config": dataclasses.asdict(reward_config),
         "calibration_report_sha256": calibration_sha,
+        "calibration_gate_bypassed": calibration_gate_bypassed,
+        "calibration_report_passed": calibration_report_passed,
+        "calibration_blockers": list(calibration_blockers),
         "scenario_contract_sha256": scenario_contract_sha,
         "scenario_seeds": [int(value) for value in scenario_seeds],
         "trajectory_optimizer_config": dataclasses.asdict(
@@ -1467,6 +1541,7 @@ def run_joint_grpo_training(
     source_checkpoint: Path,
     output_root: Path,
     max_optimizer_steps: int | None = None,
+    allow_failed_calibration_diagnostic: bool = False,
 ) -> dict[str, object]:
     if variant not in ("A", "B"):
         raise OnlineGRPOError("online GRPO variant must be A or B")
@@ -1486,6 +1561,12 @@ def run_joint_grpo_training(
         target_steps = config.total_optimizer_steps
     else:
         raise OnlineGRPOError("run_mode must be formal or smoke")
+    if allow_failed_calibration_diagnostic and (
+        variant != "A" or run_mode != "smoke"
+    ):
+        raise OnlineGRPOError(
+            "failed-calibration bypass is restricted to Variant A smoke"
+        )
     if config.calibration_report is None:
         raise OnlineGRPOError("online GRPO requires a calibration report")
     calibration, calibration_sha = _json_sha256(config.calibration_report)
@@ -1493,10 +1574,21 @@ def run_joint_grpo_training(
         raise OnlineGRPOError("calibration report format mismatch")
     if calibration.get("variant") != variant:
         raise OnlineGRPOError("calibration report variant mismatch")
-    if calibration.get("passed") is not True:
+    calibration_report_passed = calibration.get("passed") is True
+    if not calibration_report_passed and not allow_failed_calibration_diagnostic:
         raise OnlineGRPOError(
             "proxy calibration failed; online GRPO is intentionally blocked"
         )
+    if calibration_report_passed and allow_failed_calibration_diagnostic:
+        raise OnlineGRPOError(
+            "failed-calibration bypass requires a failed calibration report"
+        )
+    calibration_gate_bypassed = bool(
+        allow_failed_calibration_diagnostic and not calibration_report_passed
+    )
+    calibration_blockers = tuple(
+        str(value) for value in calibration.get("blockers", ())
+    )
     if calibration.get("calibration_phase") != "holdout":
         raise OnlineGRPOError("online GRPO requires an independent holdout calibration")
     try:
@@ -1547,6 +1639,9 @@ def run_joint_grpo_training(
             run_mode=run_mode,
             reward_config=reward_config,
             calibration_sha=calibration_sha,
+            calibration_gate_bypassed=calibration_gate_bypassed,
+            calibration_report_passed=calibration_report_passed,
+            calibration_blockers=calibration_blockers,
             scenario_contract_sha=scenario_contract_sha,
             scenario_seeds=config.scenario_seeds,
         )
@@ -1567,6 +1662,9 @@ def run_joint_grpo_training(
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
         "eligible_for_formal_training": run_mode == "formal",
+        "calibration_gate_bypassed": calibration_gate_bypassed,
+        "calibration_report_passed": calibration_report_passed,
+        "calibration_blockers": list(calibration_blockers),
         "online_config": {
             **dataclasses.asdict(config),
             "calibration_report": str(config.calibration_report),
@@ -1815,6 +1913,9 @@ def run_joint_grpo_training(
                     run_mode=run_mode,
                     reward_config=reward_config,
                     calibration_sha=calibration_sha,
+                    calibration_gate_bypassed=calibration_gate_bypassed,
+                    calibration_report_passed=calibration_report_passed,
+                    calibration_blockers=calibration_blockers,
                     scenario_contract_sha=scenario_contract_sha,
                     scenario_seeds=config.scenario_seeds,
                     environment_steps=environment_steps,
@@ -1839,6 +1940,9 @@ def run_joint_grpo_training(
         run_mode=run_mode,
         reward_config=reward_config,
         calibration_sha=calibration_sha,
+        calibration_gate_bypassed=calibration_gate_bypassed,
+        calibration_report_passed=calibration_report_passed,
+        calibration_blockers=calibration_blockers,
         scenario_contract_sha=scenario_contract_sha,
         scenario_seeds=config.scenario_seeds,
         environment_steps=environment_steps,
@@ -1861,6 +1965,9 @@ def run_joint_grpo_training(
         run_mode=run_mode,
         reward_config=reward_config,
         calibration_sha=calibration_sha,
+        calibration_gate_bypassed=calibration_gate_bypassed,
+        calibration_report_passed=calibration_report_passed,
+        calibration_blockers=calibration_blockers,
         scenario_contract_sha=scenario_contract_sha,
         scenario_seeds=config.scenario_seeds,
     )
@@ -1871,6 +1978,9 @@ def run_joint_grpo_training(
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
         "eligible_for_formal_training": run_mode == "formal",
+        "calibration_gate_bypassed": calibration_gate_bypassed,
+        "calibration_report_passed": calibration_report_passed,
+        "calibration_blockers": list(calibration_blockers),
         "optimizer_steps": trainer.optimizer_step,
         "environment_steps": environment_steps,
         "sampled_rollouts": sampled_rollouts,
@@ -1952,6 +2062,14 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--max-optimizer-steps", type=int)
     parser.add_argument("--calibration-report", type=Path)
+    parser.add_argument(
+        "--allow-failed-calibration-diagnostic",
+        action="store_true",
+        help=(
+            "Explicitly waive passed=true only for bounded Variant-A smoke; "
+            "all other calibration bindings remain enforced."
+        ),
+    )
     arguments = parser.parse_args()
     config = _config_from_yaml(arguments.config)
     if arguments.calibration_report is not None:
@@ -1965,6 +2083,9 @@ def main() -> int:
         source_checkpoint=arguments.source_checkpoint,
         output_root=arguments.output_root,
         max_optimizer_steps=arguments.max_optimizer_steps,
+        allow_failed_calibration_diagnostic=(
+            arguments.allow_failed_calibration_diagnostic
+        ),
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

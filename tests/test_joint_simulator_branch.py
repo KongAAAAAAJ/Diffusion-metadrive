@@ -120,8 +120,8 @@ def _spec(reference=None) -> JointEpisodeSpec:
             dtype=np.float64,
         )
     return JointEpisodeSpec(
-        "S1_free_cruise_straight",
-        "R3_mainline_straight",
+        "S5_hard_brake_lead",
+        "R1_entry_straight",
         17,
         reference,
     )
@@ -214,6 +214,36 @@ def test_branch_is_deterministic_and_does_not_mutate_inputs() -> None:
     second = _evaluator().evaluate(_spec(), (), candidates)
     np.testing.assert_array_equal(candidates, before)
     np.testing.assert_array_equal(first.reward.rewards, second.reward.rewards)
+
+
+def test_instant_gaps_ignore_adjacent_lane_radial_proximity() -> None:
+    evaluator = JointSimulatorBranchEvaluator(env_factory=_BranchEnv)
+    env = _BranchEnv({})
+    adjacent = SimpleNamespace(
+        position=np.asarray([0.0, 3.5], dtype=np.float64),
+        heading_theta=0.0,
+        LENGTH=5.74,
+        WIDTH=2.3,
+    )
+    evaluator._vehicle_helper._surrounding_vehicles = (
+        lambda _env: [("adjacent", adjacent)]
+    )
+
+    platoon_gap, adjacent_gap = evaluator._instant_gaps(env)
+
+    assert platoon_gap == pytest.approx(10.0)
+    assert adjacent_gap == float("inf")
+
+    env.agents["agent1"].position = np.asarray([0.0, 3.5])
+    env.agents["agent2"].position = np.asarray([0.0, 7.0])
+    adjacent_platoon_gap, _ = evaluator._instant_gaps(env)
+
+    assert adjacent_platoon_gap == float("inf")
+
+    adjacent.position = np.asarray([10.0, 0.0], dtype=np.float64)
+    _, close_gap = evaluator._instant_gaps(env)
+
+    assert close_gap == pytest.approx(4.26)
 
 
 def test_branch_rejects_replay_drift_and_invalid_prefix() -> None:
