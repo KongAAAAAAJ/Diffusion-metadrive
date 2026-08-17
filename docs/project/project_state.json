@@ -1,18 +1,19 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-17T12:20:00+08:00",
+  "updated_at": "2026-08-17T20:30:26+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "8a14fd9a80301bd78313962caf61e356aab178bc",
-    "worktree_clean_before_this_update": false,
+    "git_commit": "b836f332f20b4dc9cd5944daad4790549bc44c8d",
+    "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
-    "uncommitted_plan_update_present": true,
-    "uncommitted_stage2_at_risk_grpo_launcher_present": true,
-    "uncommitted_stage2_calibration_bypass_present": true,
-    "uncommitted_stage2_bare_launcher_fix_present": true,
-    "uncommitted_stage1_evaluation_artifact_parity_present": true,
-    "uncommitted_stage1_epoch_override_present": true,
+    "uncommitted_plan_update_present": false,
+    "uncommitted_stage2_at_risk_grpo_launcher_present": false,
+    "uncommitted_stage2_calibration_bypass_present": false,
+    "uncommitted_stage2_bare_launcher_fix_present": false,
+    "uncommitted_stage1_evaluation_artifact_parity_present": false,
+    "uncommitted_stage1_metadrive_topdown_video_present": true,
+    "uncommitted_stage1_epoch_override_present": false,
     "uncommitted_exploratory_training_waiver_present": false,
     "uncommitted_formal50k_diversity_contract_present": false,
     "uncommitted_formal50k_launcher_update_present": false,
@@ -450,6 +451,11 @@
       "sha256": "95dd13dd90b312b919e46b14d72580c84af18c8b5c871a378053118878eecca9",
       "role": "Records the shared Stage1 open/S1/S5-S9 metric and BEV-only visualization bundle, S1 pose-source fix, strict STOP mask rejection recording, passed exact failed-state replay, focused regressions, diagnostic-only boundary, and no-long-evaluation handoff"
     },
+    "stage1_metadrive_topdown_video_report": {
+      "path": "evaluation/STAGE1_METADRIVE_TOPDOWN_VIDEO_REPORT.json",
+      "sha256": "a495d29a3bd57868dd18a41292cbe203f9d3a6b5a985260265c3bb95cb4f8454",
+      "role": "Records the renderer-native MetaDrive topdown trajectory video implementation, focused regressions, real S1/S5 renderer smoke, Stage1-A checkpoint S1 smoke, diagnostic-only boundary, and no-full-evaluation handoff"
+    },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
       "sha256": "cec017a48d3502c9387c5f7aeeda3a6d8bf776b738e4ae32749e69a95b790ca8",
@@ -857,6 +863,8 @@
       "at_risk_diagnostic_grpo_open_source_allowed": true,
       "evaluation_launcher": "scripts/run_stage1_a_evaluation.sh",
       "legacy_metric_and_visual_artifact_parity_implemented": true,
+      "metadrive_renderer_topdown_video_implemented": true,
+      "metadrive_renderer_topdown_checkpoint_smoke_passed": true,
       "full_evaluation_completed": false,
       "checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
       "checkpoint_sha256_status": "bound_by_completed_failed_holdout_calibration; passed=true waived only for bounded at-risk diagnostic GRPO-Open"

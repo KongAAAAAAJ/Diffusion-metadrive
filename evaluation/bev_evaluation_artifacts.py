@@ -17,11 +17,22 @@ from models.bev_planner.mode_contract import MODE_NAMES
 
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
+TOPDOWN_AGENT_COLORS = (
+    (37, 99, 235),
+    (5, 150, 105),
+    (220, 38, 38),
+)
+
+
+class EvaluationArtifactError(RuntimeError):
+    """Raised when a requested evaluation artifact cannot be produced."""
 
 
 def _json_dump(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _mode_name(index: int) -> str:
@@ -71,9 +82,11 @@ def _semantic_bev_rgb(bev: np.ndarray) -> np.ndarray:
 def _figure_rgb(fig: object) -> np.ndarray:
     fig.canvas.draw()
     width, height = fig.canvas.get_width_height()
-    return np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(
-        height, width, 4
-    )[..., :3].copy()
+    return (
+        np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        .reshape(height, width, 4)[..., :3]
+        .copy()
+    )
 
 
 def _write_png(path: Path, image: np.ndarray) -> None:
@@ -90,6 +103,115 @@ def _write_video(path: Path, frames: Sequence[np.ndarray], fps: int) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     mediapy.write_video(str(path), list(frames), fps=fps)
+
+
+def _capture_metadrive_topdown_frame(
+    env: object,
+    overlays: Sequence[Mapping[str, object]],
+    *,
+    camera_position: Sequence[float],
+    screen_size: int,
+    film_size: int,
+) -> np.ndarray:
+    """Draw world-space trajectory geometry on MetaDrive's renderer canvas."""
+
+    import pygame
+    from metadrive.engine.top_down_renderer import WorldSurface
+
+    camera = (float(camera_position[0]), float(camera_position[1]))
+    main_camera = getattr(getattr(env, "engine", None), "main_camera", None)
+    original_track = (
+        getattr(main_camera, "current_track_agent", None)
+        if main_camera is not None
+        else None
+    )
+    if main_camera is not None:
+        main_camera.current_track_agent = None
+    try:
+        env.render(
+            mode="top_down",
+            window=False,
+            screen_size=(int(screen_size), int(screen_size)),
+            film_size=(int(film_size), int(film_size)),
+            target_agent_heading_up=False,
+            camera_position=camera,
+        )
+    except Exception as exc:
+        raise EvaluationArtifactError(
+            f"MetaDrive topdown render failed: {exc}"
+        ) from exc
+    finally:
+        if main_camera is not None:
+            main_camera.current_track_agent = original_track
+
+    # A sensorless environment creates this renderer during its first render call.
+    renderer = getattr(env, "top_down_renderer", None)
+    if renderer is None:
+        raise EvaluationArtifactError(
+            "MetaDrive topdown render did not create top_down_renderer"
+        )
+    renderer.position = camera
+    try:
+        field = renderer._screen_canvas.get_size()
+        position_px = renderer._frame_canvas.pos2pix(*camera)
+        offset = (
+            position_px[0] - field[0] / 2,
+            position_px[1] - field[1] / 2,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise EvaluationArtifactError(
+            "MetaDrive topdown renderer canvas contract is unavailable"
+        ) from exc
+
+    for overlay in overlays:
+        color = tuple(int(value) for value in overlay["color"])
+        if overlay["type"] == "line":
+            screen_points = []
+            for world_point in np.asarray(overlay["world_points"], dtype=np.float64):
+                screen_point = renderer._world_to_screen_position(
+                    world_point[:2], offset
+                )
+                if screen_point is not None:
+                    screen_points.append((int(screen_point[0]), int(screen_point[1])))
+            if len(screen_points) >= 2:
+                pygame.draw.lines(
+                    renderer._screen_canvas,
+                    color,
+                    False,
+                    screen_points,
+                    int(overlay["width_px"]),
+                )
+        elif overlay["type"] == "circle":
+            world_point = np.asarray(overlay["world_point"], dtype=np.float64)
+            screen_point = renderer._world_to_screen_position(world_point[:2], offset)
+            if screen_point is not None:
+                pygame.draw.circle(
+                    renderer._screen_canvas,
+                    color,
+                    (int(screen_point[0]), int(screen_point[1])),
+                    int(overlay["radius_px"]),
+                )
+        else:
+            raise EvaluationArtifactError(
+                f"unknown topdown overlay type: {overlay['type']}"
+            )
+
+    try:
+        frame = np.asarray(WorldSurface.to_cv2_image(renderer._screen_canvas))
+    except Exception as exc:
+        raise EvaluationArtifactError(
+            f"MetaDrive topdown frame extraction failed: {exc}"
+        ) from exc
+    if (
+        frame.ndim != 3
+        or frame.shape[2] < 3
+        or frame.shape[0] <= 0
+        or frame.shape[1] <= 0
+    ):
+        raise EvaluationArtifactError(
+            f"MetaDrive topdown frame has invalid shape {frame.shape}"
+        )
+    return np.ascontiguousarray(frame[:, :, :3], dtype=np.uint8)
 
 
 def _world_from_local(pose: np.ndarray, local_xy: np.ndarray) -> np.ndarray:
@@ -126,7 +248,9 @@ class OpenLoopArtifactCollector:
         batch: Mapping[str, torch.Tensor],
         output: Mapping[str, torch.Tensor],
     ) -> None:
-        cpu_batch = {name: value.detach().cpu().numpy() for name, value in batch.items()}
+        cpu_batch = {
+            name: value.detach().cpu().numpy() for name, value in batch.items()
+        }
         cpu_output = {
             name: value.detach().cpu().numpy()
             for name, value in output.items()
@@ -168,7 +292,10 @@ class OpenLoopArtifactCollector:
                             np.linalg.norm(pred[-1, :2] - gt[-1, :2])
                         ),
                         "topk_mode_logits": [
-                            {"mode_idx": int(index), "logit": float(logits[role, index])}
+                            {
+                                "mode_idx": int(index),
+                                "logit": float(logits[role, index]),
+                            }
                             for index in top
                         ],
                     }
@@ -210,7 +337,9 @@ class OpenLoopArtifactCollector:
             axis.axis("off")
         fig.suptitle(f"Stage1 open-loop semantic BEV sample {sample_index}")
         fig.tight_layout()
-        _write_png(self.root / "images" / f"sample_{sample_index:05d}.png", _figure_rgb(fig))
+        _write_png(
+            self.root / "images" / f"sample_{sample_index:05d}.png", _figure_rgb(fig)
+        )
         plt.close(fig)
 
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -218,7 +347,9 @@ class OpenLoopArtifactCollector:
             for mode in range(candidates.shape[1]):
                 path = candidates[role, mode]
                 axis.plot(path[:, 0], path[:, 1], color="#94A3B8", alpha=0.35)
-            axis.plot(selected[role, :, 0], selected[role, :, 1], "-o", label="selected")
+            axis.plot(
+                selected[role, :, 0], selected[role, :, 1], "-o", label="selected"
+            )
             axis.plot(expert[role, :, 0], expert[role, :, 1], "-o", label="expert")
             axis.set_title(AGENT_IDS[role])
             axis.set_aspect("equal", adjustable="box")
@@ -256,7 +387,8 @@ class OpenLoopArtifactCollector:
             writer = csv.DictWriter(handle, fieldnames=scalar_fields)
             writer.writeheader()
             writer.writerows(
-                {name: record[name] for name in scalar_fields} for record in self.records
+                {name: record[name] for name in scalar_fields}
+                for record in self.records
             )
         summary = {
             "joint_samples": self.joint_samples,
@@ -265,7 +397,9 @@ class OpenLoopArtifactCollector:
             "artifacts": {
                 "samples_json": str(self.root / "open_loop_samples.json"),
                 "samples_csv": str(csv_path),
-                "images": str(self.root / "images") if self.save_visualizations else None,
+                "images": (
+                    str(self.root / "images") if self.save_visualizations else None
+                ),
                 "trajectory_plots": (
                     str(self.root / "trajectory_plots")
                     if self.save_visualizations
@@ -277,7 +411,9 @@ class OpenLoopArtifactCollector:
         return summary
 
 
-def summarize_open_loop_records(records: Sequence[Mapping[str, object]]) -> dict[str, object]:
+def summarize_open_loop_records(
+    records: Sequence[Mapping[str, object]]
+) -> dict[str, object]:
     pred_modes = [int(record["pred_mode_idx"]) for record in records]
     gt_modes = [int(record["gt_mode_idx"]) for record in records]
     confusion: dict[str, dict[str, int]] = defaultdict(dict)
@@ -293,8 +429,12 @@ def summarize_open_loop_records(records: Sequence[Mapping[str, object]]) -> dict
     for gt_mode, pred_mode in zip(gt_modes, pred_modes):
         row = confusion.setdefault(_mode_name(gt_mode), {})
         row[_mode_name(pred_mode)] = row.get(_mode_name(pred_mode), 0) + 1
-    pred_y = np.asarray([record["pred_final_xy"][1] for record in records], dtype=np.float64)
-    gt_y = np.asarray([record["gt_final_xy"][1] for record in records], dtype=np.float64)
+    pred_y = np.asarray(
+        [record["pred_final_xy"][1] for record in records], dtype=np.float64
+    )
+    gt_y = np.asarray(
+        [record["gt_final_xy"][1] for record in records], dtype=np.float64
+    )
     metric = lambda name: float(np.mean([float(record[name]) for record in records]))
     mode_matches = sum(first == second for first, second in zip(pred_modes, gt_modes))
     lateral_matches = sum(
@@ -304,7 +444,15 @@ def summarize_open_loop_records(records: Sequence[Mapping[str, object]]) -> dict
     pred_hist = {str(key): value for key, value in sorted(Counter(pred_modes).items())}
     gt_hist = {str(key): value for key, value in sorted(Counter(gt_modes).items())}
     mode_final_y_mean = {
-        str(mode): float(np.mean([pred_y[index] for index, value in enumerate(pred_modes) if value == mode]))
+        str(mode): float(
+            np.mean(
+                [
+                    pred_y[index]
+                    for index, value in enumerate(pred_modes)
+                    if value == mode
+                ]
+            )
+        )
         for mode in sorted(set(pred_modes))
     }
     return {
@@ -335,6 +483,7 @@ def summarize_open_loop_records(records: Sequence[Mapping[str, object]]) -> dict
 @dataclass
 class _EpisodeArtifacts:
     frames_topdown: list[np.ndarray] = field(default_factory=list)
+    frames_trajectory_plot: list[np.ndarray] = field(default_factory=list)
     frames_bev: list[np.ndarray] = field(default_factory=list)
     positions: dict[str, list[list[float]]] = field(
         default_factory=lambda: {agent_id: [] for agent_id in AGENT_IDS}
@@ -354,10 +503,22 @@ class ClosedLoopArtifactWriter:
         *,
         video_fps: int = 10,
         frame_interval: int = 1,
+        topdown_screen_size: int = 800,
+        topdown_film_size: int = 3000,
     ) -> None:
         self.root = Path(root) / model_id
         self.video_fps = int(video_fps)
         self.frame_interval = int(frame_interval)
+        self.topdown_screen_size = int(topdown_screen_size)
+        self.topdown_film_size = int(topdown_film_size)
+        if self.video_fps <= 0 or self.frame_interval <= 0:
+            raise EvaluationArtifactError(
+                "video_fps and frame_interval must be positive"
+            )
+        if self.topdown_screen_size <= 0 or self.topdown_film_size <= 0:
+            raise EvaluationArtifactError(
+                "topdown screen and film sizes must be positive"
+            )
         self.episodes: dict[str, _EpisodeArtifacts] = {}
 
     @staticmethod
@@ -368,6 +529,76 @@ class ClosedLoopArtifactWriter:
         episode_id = self.episode_id(scenario, seed)
         self.episodes[episode_id] = _EpisodeArtifacts()
         return episode_id
+
+    def capture_topdown_frame(
+        self,
+        episode_id: str,
+        *,
+        env: object,
+        step_index: int,
+        pre_poses: np.ndarray,
+        trajectories: np.ndarray | None,
+    ) -> None:
+        """Capture the pre-step simulator view with renderer-native trajectories."""
+
+        if step_index % self.frame_interval != 0:
+            return
+        pre = np.asarray(pre_poses, dtype=np.float64)
+        if pre.shape != (len(AGENT_IDS), 3) or not np.isfinite(pre).all():
+            raise EvaluationArtifactError(
+                f"topdown pre_poses must have shape (3, 3), got {pre.shape}"
+            )
+        selected = None
+        if trajectories is not None:
+            selected = np.asarray(trajectories, dtype=np.float64)
+            if (
+                selected.ndim != 3
+                or selected.shape[0] != len(AGENT_IDS)
+                or selected.shape[2] < 2
+                or not np.isfinite(selected).all()
+            ):
+                raise EvaluationArtifactError(
+                    "topdown trajectories must be finite with shape (3, T, >=2)"
+                )
+
+        overlays: list[dict[str, object]] = []
+        if selected is not None:
+            for role, color in enumerate(TOPDOWN_AGENT_COLORS):
+                planned_world = _world_from_local(pre[role], selected[role, :, :2])
+                overlays.append(
+                    {
+                        "type": "line",
+                        "world_points": np.vstack((pre[role, :2], planned_world)),
+                        "color": color,
+                        "width_px": 3,
+                    }
+                )
+                overlays.extend(
+                    {
+                        "type": "circle",
+                        "world_point": waypoint,
+                        "color": color,
+                        "radius_px": 5,
+                    }
+                    for waypoint in planned_world
+                )
+        camera_position = np.mean(pre[:, :2], axis=0)
+        frame = _capture_metadrive_topdown_frame(
+            env,
+            overlays,
+            camera_position=camera_position,
+            screen_size=self.topdown_screen_size,
+            film_size=self.topdown_film_size,
+        )
+        episode = self.episodes[episode_id]
+        episode.frames_topdown.append(frame)
+        _write_png(
+            self.root
+            / "combined_traj_frames"
+            / episode_id
+            / f"step_{step_index:05d}.png",
+            frame,
+        )
 
     def record_step(
         self,
@@ -399,7 +630,11 @@ class ClosedLoopArtifactWriter:
             planned_world.append(planned)
             actual_local = _local_from_world(pre[role], post[role, :2])
             error = actual_local - reference_local
-            control = None if controls is None else np.asarray(controls.get(agent_id, ()), dtype=np.float64)
+            control = (
+                None
+                if controls is None
+                else np.asarray(controls.get(agent_id, ()), dtype=np.float64)
+            )
             actual_speed_km_h = float(
                 np.linalg.norm(post[role, :2] - pre[role, :2])
                 / max(float(dt_s), 1.0e-6)
@@ -424,8 +659,12 @@ class ClosedLoopArtifactWriter:
                 "longitudinal_error_m": float(error[0]),
                 "abs_lateral_error_m": float(abs(error[1])),
                 "abs_longitudinal_error_m": float(abs(error[0])),
-                "reference_world_x": float(_world_from_local(pre[role], reference_local)[0]),
-                "reference_world_y": float(_world_from_local(pre[role], reference_local)[1]),
+                "reference_world_x": float(
+                    _world_from_local(pre[role], reference_local)[0]
+                ),
+                "reference_world_y": float(
+                    _world_from_local(pre[role], reference_local)[1]
+                ),
                 "actual_world_x": float(post[role, 0]),
                 "actual_world_y": float(post[role, 1]),
                 "speed_km_h": actual_speed_km_h,
@@ -438,8 +677,16 @@ class ClosedLoopArtifactWriter:
                     if prior is not None
                     else None
                 ),
-                "steering": float(control[0]) if control is not None and control.size >= 2 else None,
-                "throttle": float(control[1]) if control is not None and control.size >= 2 else None,
+                "steering": (
+                    float(control[0])
+                    if control is not None and control.size >= 2
+                    else None
+                ),
+                "throttle": (
+                    float(control[1])
+                    if control is not None and control.size >= 2
+                    else None
+                ),
             }
             episode.control_records.append(record)
             step_records.append(
@@ -448,7 +695,9 @@ class ClosedLoopArtifactWriter:
                     "pre_pose": pre[role].tolist(),
                     "post_pose": post[role].tolist(),
                     "selected_mode": (
-                        int(selected_modes[role]) if selected_modes is not None else None
+                        int(selected_modes[role])
+                        if selected_modes is not None
+                        else None
                     ),
                     "reward": float(rewards.get(agent_id, 0.0)),
                     "planned_trajectory_local": (
@@ -456,7 +705,9 @@ class ClosedLoopArtifactWriter:
                         if trajectories is not None
                         else None
                     ),
-                    "planned_trajectory_world": planned.tolist() if planned is not None else None,
+                    "planned_trajectory_world": (
+                        planned.tolist() if planned is not None else None
+                    ),
                 }
             )
             episode.coordinate_records.append(
@@ -470,7 +721,9 @@ class ClosedLoopArtifactWriter:
                         if trajectories is not None
                         else None
                     ),
-                    "planned_world_xy": planned.tolist() if planned is not None else None,
+                    "planned_world_xy": (
+                        planned.tolist() if planned is not None else None
+                    ),
                     "actual_post_world_xy": post[role, :2].tolist(),
                 }
             )
@@ -486,21 +739,31 @@ class ClosedLoopArtifactWriter:
             step_payload,
         )
         if step_index % self.frame_interval == 0:
-            topdown = self._render_topdown(episode_id, step_index, planned_world, selected_modes)
-            episode.frames_topdown.append(topdown)
+            trajectory_plot = self._render_trajectory_plot(
+                episode_id, step_index, planned_world, selected_modes
+            )
+            episode.frames_trajectory_plot.append(trajectory_plot)
             _write_png(
-                self.root / "combined_traj_frames" / episode_id / f"step_{step_index:05d}.png",
-                topdown,
+                self.root
+                / "trajectory_plot_frames"
+                / episode_id
+                / f"step_{step_index:05d}.png",
+                trajectory_plot,
             )
             if bev is not None:
-                bev_frame = self._render_bev(episode_id, step_index, bev, selected_modes)
+                bev_frame = self._render_bev(
+                    episode_id, step_index, bev, selected_modes
+                )
                 episode.frames_bev.append(bev_frame)
                 _write_png(
-                    self.root / "step_images" / episode_id / f"step_{step_index:05d}.png",
+                    self.root
+                    / "step_images"
+                    / episode_id
+                    / f"step_{step_index:05d}.png",
                     bev_frame,
                 )
 
-    def _render_topdown(
+    def _render_trajectory_plot(
         self,
         episode_id: str,
         step_index: int,
@@ -518,13 +781,26 @@ class ClosedLoopArtifactWriter:
         for role, agent_id in enumerate(AGENT_IDS):
             positions = np.asarray(episode.positions[agent_id], dtype=np.float64)
             if positions.size:
-                axis.plot(positions[:, 0], positions[:, 1], "-o", color=colors[role], label=f"{agent_id} actual")
+                axis.plot(
+                    positions[:, 0],
+                    positions[:, 1],
+                    "-o",
+                    color=colors[role],
+                    label=f"{agent_id} actual",
+                )
             planned = planned_world[role]
             if planned is not None:
                 label = f"{agent_id} plan"
                 if selected_modes is not None:
                     label += f" ({_mode_name(int(selected_modes[role]))})"
-                axis.plot(planned[:, 0], planned[:, 1], "--", color=colors[role], alpha=0.8, label=label)
+                axis.plot(
+                    planned[:, 0],
+                    planned[:, 1],
+                    "--",
+                    color=colors[role],
+                    alpha=0.8,
+                    label=label,
+                )
         axis.set_title(f"{episode_id} step {step_index}: planned vs actual")
         axis.set_xlabel("world x (m)")
         axis.set_ylabel("world y (m)")
@@ -551,7 +827,11 @@ class ClosedLoopArtifactWriter:
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
         for role, axis in enumerate(axes):
             axis.imshow(_semantic_bev_rgb(bev[role]))
-            mode = "warmup" if selected_modes is None else _mode_name(int(selected_modes[role]))
+            mode = (
+                "warmup"
+                if selected_modes is None
+                else _mode_name(int(selected_modes[role]))
+            )
             axis.set_title(f"{AGENT_IDS[role]}: {mode}")
             axis.axis("off")
         fig.suptitle(f"{episode_id} step {step_index}: semantic BEV")
@@ -570,6 +850,11 @@ class ClosedLoopArtifactWriter:
         _write_video(
             self.root / "videos_2d" / f"{episode_id}.mp4",
             episode.frames_topdown,
+            self.video_fps,
+        )
+        _write_video(
+            self.root / "videos_trajectory_plot" / f"{episode_id}.mp4",
+            episode.frames_trajectory_plot,
             self.video_fps,
         )
         _write_video(
@@ -598,7 +883,9 @@ class ClosedLoopArtifactWriter:
         ):
             fig, axis = plt.subplots(figsize=(10, 4))
             for agent_id in AGENT_IDS:
-                subset = [record for record in records if record["agent_id"] == agent_id]
+                subset = [
+                    record for record in records if record["agent_id"] == agent_id
+                ]
                 axis.plot(
                     [record["step_idx"] for record in subset],
                     [record[metric] for record in subset],
@@ -617,8 +904,17 @@ class ClosedLoopArtifactWriter:
         fig, axis = plt.subplots(figsize=(10, 4))
         for agent_id in AGENT_IDS:
             subset = [record for record in records if record["agent_id"] == agent_id]
-            axis.plot([record["step_idx"] for record in subset], [record["throttle"] for record in subset], label=f"{agent_id} throttle")
-            axis.plot([record["step_idx"] for record in subset], [record["steering"] for record in subset], "--", label=f"{agent_id} steer")
+            axis.plot(
+                [record["step_idx"] for record in subset],
+                [record["throttle"] for record in subset],
+                label=f"{agent_id} throttle",
+            )
+            axis.plot(
+                [record["step_idx"] for record in subset],
+                [record["steering"] for record in subset],
+                "--",
+                label=f"{agent_id} steer",
+            )
         axis.set_title(f"{episode_id}: control commands")
         axis.set_xlabel("step")
         axis.grid(True, alpha=0.3)
@@ -653,15 +949,23 @@ class ClosedLoopArtifactWriter:
         plt.close(fig)
 
     def finalize(self) -> dict[str, object]:
-        records = [record for episode in self.episodes.values() for record in episode.control_records]
+        records = [
+            record
+            for episode in self.episodes.values()
+            for record in episode.control_records
+        ]
         step_records_path = self.root / "step_records.jsonl"
         step_records_path.parent.mkdir(parents=True, exist_ok=True)
         with step_records_path.open("w", encoding="utf-8") as handle:
             for episode in self.episodes.values():
                 for record in episode.step_records:
                     handle.write(json.dumps(record, sort_keys=True) + "\n")
-        lateral = np.asarray([record["abs_lateral_error_m"] for record in records], dtype=np.float64)
-        longitudinal = np.asarray([record["abs_longitudinal_error_m"] for record in records], dtype=np.float64)
+        lateral = np.asarray(
+            [record["abs_lateral_error_m"] for record in records], dtype=np.float64
+        )
+        longitudinal = np.asarray(
+            [record["abs_longitudinal_error_m"] for record in records], dtype=np.float64
+        )
         summary = {
             "definition": (
                 "Actual post-step pose is transformed into the pre-step ego frame and "
@@ -670,10 +974,18 @@ class ClosedLoopArtifactWriter:
             "num_role_steps": len(records),
             "mean_abs_lateral_error_m": float(lateral.mean()) if lateral.size else None,
             "max_abs_lateral_error_m": float(lateral.max()) if lateral.size else None,
-            "p95_abs_lateral_error_m": float(np.percentile(lateral, 95)) if lateral.size else None,
-            "mean_abs_longitudinal_error_m": float(longitudinal.mean()) if longitudinal.size else None,
-            "max_abs_longitudinal_error_m": float(longitudinal.max()) if longitudinal.size else None,
-            "p95_abs_longitudinal_error_m": float(np.percentile(longitudinal, 95)) if longitudinal.size else None,
+            "p95_abs_lateral_error_m": (
+                float(np.percentile(lateral, 95)) if lateral.size else None
+            ),
+            "mean_abs_longitudinal_error_m": (
+                float(longitudinal.mean()) if longitudinal.size else None
+            ),
+            "max_abs_longitudinal_error_m": (
+                float(longitudinal.max()) if longitudinal.size else None
+            ),
+            "p95_abs_longitudinal_error_m": (
+                float(np.percentile(longitudinal, 95)) if longitudinal.size else None
+            ),
             "episodes": {
                 episode_id: {"records": episode.control_records}
                 for episode_id, episode in sorted(self.episodes.items())
@@ -689,8 +1001,12 @@ class ClosedLoopArtifactWriter:
             "step_records_jsonl": str(step_records_path),
             "coordinate_audit": str(self.root / "coordinate_audit"),
             "combined_trajectory_frames": str(self.root / "combined_traj_frames"),
+            "trajectory_plot_frames": str(self.root / "trajectory_plot_frames"),
             "semantic_bev_images": str(self.root / "step_images"),
             "topdown_videos": str(self.root / "videos_2d"),
+            "trajectory_plot_videos": str(self.root / "videos_trajectory_plot"),
             "semantic_bev_videos": str(self.root / "videos_semantic_bev"),
-            "control_error_metrics": {key: value for key, value in summary.items() if key != "episodes"},
+            "control_error_metrics": {
+                key: value for key, value in summary.items() if key != "episodes"
+            },
         }

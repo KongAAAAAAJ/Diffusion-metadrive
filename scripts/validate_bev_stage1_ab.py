@@ -75,7 +75,9 @@ def _checkpoint_header(path: Path) -> Mapping[str, object]:
     return payload
 
 
-def load_planner(path: Path, device: torch.device) -> tuple[BEVOnlyDiffusionPlanner, dict]:
+def load_planner(
+    path: Path, device: torch.device
+) -> tuple[BEVOnlyDiffusionPlanner, dict]:
     header = _checkpoint_header(path)
     variant = header.get("variant")
     if variant not in VARIANT_CONDITION:
@@ -121,7 +123,9 @@ def validate_open_loop(
     )
     try:
         if len(dataset) <= 0:
-            raise Stage1TrainingError("open-loop validation requires a non-empty val split")
+            raise Stage1TrainingError(
+                "open-loop validation requires a non-empty val split"
+            )
         sample_limit = min(int(max_samples), len(dataset))
         if sample_limit <= 0:
             raise Stage1TrainingError("open-loop max_samples must be positive")
@@ -165,17 +169,23 @@ def validate_open_loop(
             noise = _explicit_noise(batch, device, seed=17 + processed)
             first = planner_forward_from_batch(planner, batch, diffusion_noise=noise)
             if batch_index == 0:
-                second = planner_forward_from_batch(planner, batch, diffusion_noise=noise)
+                second = planner_forward_from_batch(
+                    planner, batch, diffusion_noise=noise
+                )
                 for name in (
                     "trajectory_candidates",
                     "mode_logits",
                     "selected_mode",
                     "selected_trajectory",
                 ):
-                    torch.testing.assert_close(first[name], second[name], rtol=0.0, atol=0.0)
+                    torch.testing.assert_close(
+                        first[name], second[name], rtol=0.0, atol=0.0
+                    )
                 deterministic = True
             if not bool(torch.isfinite(first["trajectory_candidates"]).all()):
-                raise Stage1TrainingError("open-loop trajectory candidates are non-finite")
+                raise Stage1TrainingError(
+                    "open-loop trajectory candidates are non-finite"
+                )
             selected_valid = batch["mode_valid_mask"].gather(
                 -1, first["selected_mode"].unsqueeze(-1)
             )
@@ -185,7 +195,9 @@ def validate_open_loop(
                 )
             result = loss_from_batch(loss_module, first, batch)
             for name, value in result.scalar_metrics().items():
-                metric_totals[name] = metric_totals.get(name, 0.0) + float(value) * batch_size
+                metric_totals[name] = (
+                    metric_totals.get(name, 0.0) + float(value) * batch_size
+                )
             selected_modes.extend(first["selected_mode"].detach().cpu().tolist())
             if collector is not None:
                 collector.add_batch(batch, first)
@@ -260,6 +272,8 @@ def validate_closed_loop(
     device: torch.device,
     artifact_root: Path | None = None,
     model_id: str = "stage1",
+    topdown_screen_size: int = 800,
+    topdown_film_size: int = 3000,
 ) -> dict[str, object]:
     env = SensorlessJointBEVPlatoonEnv(
         {
@@ -316,12 +330,33 @@ def validate_closed_loop(
         )
         trajectories = optimization.optimized_trajectories
         if trajectories.shape != (3, 8, 3) or not np.isfinite(trajectories).all():
-            raise Stage1TrainingError("closed-loop planner produced invalid trajectories")
+            raise Stage1TrainingError(
+                "closed-loop planner produced invalid trajectories"
+            )
         actions = {
             agent_id: np.ascontiguousarray(trajectories[index], dtype=np.float32)
             for index, agent_id in enumerate(AGENT_IDS)
         }
         pre_poses = _global_agent_poses(env)
+        writer = None
+        episode_id = None
+        if artifact_root is not None:
+            writer = ClosedLoopArtifactWriter(
+                artifact_root,
+                model_id,
+                topdown_screen_size=topdown_screen_size,
+                topdown_film_size=topdown_film_size,
+            )
+            episode_id = writer.start_episode(
+                ("S1_free_cruise_straight", "R3_mainline_straight"), 17
+            )
+            writer.capture_topdown_frame(
+                episode_id,
+                env=env,
+                step_index=step_index,
+                pre_poses=pre_poses,
+                trajectories=trajectories,
+            )
         started = time.perf_counter()
         observation, reward, terminated, truncated, info = env.step(actions)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -329,7 +364,9 @@ def validate_closed_loop(
             isinstance(value, Mapping)
             for value in (observation, reward, terminated, truncated, info)
         ):
-            raise Stage1TrainingError("closed-loop environment returned invalid mappings")
+            raise Stage1TrainingError(
+                "closed-loop environment returned invalid mappings"
+            )
         if _has_failure(info):
             raise Stage1TrainingError(
                 "sensorless S1 model step produced crash/out-of-road"
@@ -354,11 +391,7 @@ def validate_closed_loop(
                 "sensorless S1 trajectory controller produced invalid controls"
             )
         artifact_report = None
-        if artifact_root is not None:
-            writer = ClosedLoopArtifactWriter(artifact_root, model_id)
-            episode_id = writer.start_episode(
-                ("S1_free_cruise_straight", "R3_mainline_straight"), 17
-            )
+        if writer is not None and episode_id is not None:
             post_poses = _global_agent_poses(env)
             writer.record_step(
                 episode_id,
@@ -446,7 +479,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-root", type=Path)
     parser.add_argument("--open-loop-num-samples", type=int, default=1500)
     parser.add_argument("--save-visualizations", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--topdown-screen-size", type=int, default=800)
+    parser.add_argument("--topdown-film-size", type=int, default=3000)
+    args = parser.parse_args()
+    if args.topdown_screen_size <= 0:
+        parser.error("--topdown-screen-size must be positive")
+    if args.topdown_film_size <= 0:
+        parser.error("--topdown-film-size must be positive")
+    return args
 
 
 def main() -> None:
@@ -493,6 +533,8 @@ def main() -> None:
                 device=device,
                 artifact_root=artifact_root / "s1_closed_loop",
                 model_id=model.model_id,
+                topdown_screen_size=args.topdown_screen_size,
+                topdown_film_size=args.topdown_film_size,
             ),
         }
         del planner

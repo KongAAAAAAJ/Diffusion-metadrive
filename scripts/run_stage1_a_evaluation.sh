@@ -24,6 +24,8 @@ REPEATS="${REPEATS:-1}"
 OPEN_LOOP_NUM_SAMPLES="${OPEN_LOOP_NUM_SAMPLES:-1500}"
 VIDEO_FPS="${VIDEO_FPS:-10}"
 VISUALIZATION_INTERVAL="${VISUALIZATION_INTERVAL:-1}"
+TOPDOWN_SCREEN_SIZE="${TOPDOWN_SCREEN_SIZE:-800}"
+TOPDOWN_FILM_SIZE="${TOPDOWN_FILM_SIZE:-3000}"
 SAVE_VISUALIZATIONS="${SAVE_VISUALIZATIONS:-1}"
 EVAL_STAGE="${EVAL_STAGE:-all}"
 
@@ -61,6 +63,14 @@ if [[ ! "${VIDEO_FPS}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [[ ! "${VISUALIZATION_INTERVAL}" =~ ^[1-9][0-9]*$ ]]; then
   echo "VISUALIZATION_INTERVAL must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "${TOPDOWN_SCREEN_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "TOPDOWN_SCREEN_SIZE must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "${TOPDOWN_FILM_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "TOPDOWN_FILM_SIZE must be a positive integer" >&2
   exit 2
 fi
 if [[ "${SAVE_VISUALIZATIONS}" != "0" && "${SAVE_VISUALIZATIONS}" != "1" ]]; then
@@ -114,6 +124,8 @@ run_open_s1() {
       --device "${DEVICE}" \
       --artifact-root "${ARTIFACT_ROOT}" \
       --open-loop-num-samples "${OPEN_LOOP_NUM_SAMPLES}" \
+      --topdown-screen-size "${TOPDOWN_SCREEN_SIZE}" \
+      --topdown-film-size "${TOPDOWN_FILM_SIZE}" \
       "${visualization_args[@]}" \
       --output "${OPEN_S1_OUTPUT}"
 }
@@ -133,6 +145,8 @@ run_s5_s9() {
       --artifact-root "${ARTIFACT_ROOT}/s5_s9_closed_loop" \
       --video-fps "${VIDEO_FPS}" \
       --visualization-interval "${VISUALIZATION_INTERVAL}" \
+      --topdown-screen-size "${TOPDOWN_SCREEN_SIZE}" \
+      --topdown-film-size "${TOPDOWN_FILM_SIZE}" \
       "${visualization_args[@]}" \
       --output "${CLOSED_OUTPUT}"
 }
@@ -144,6 +158,7 @@ echo "[stage1-a-evaluation] output_root=${OUTPUT_ROOT}"
 echo "[stage1-a-evaluation] artifact_root=${ARTIFACT_ROOT}"
 echo "[stage1-a-evaluation] eval_stage=${EVAL_STAGE} device=${DEVICE} max_steps=${MAX_STEPS} repeats=${REPEATS}"
 echo "[stage1-a-evaluation] open_loop_num_samples=${OPEN_LOOP_NUM_SAMPLES} save_visualizations=${SAVE_VISUALIZATIONS} video_fps=${VIDEO_FPS} visualization_interval=${VISUALIZATION_INTERVAL}"
+echo "[stage1-a-evaluation] topdown_screen_size=${TOPDOWN_SCREEN_SIZE} topdown_film_size=${TOPDOWN_FILM_SIZE}"
 echo "[stage1-a-evaluation] classification=diagnostic_only"
 
 case "${EVAL_STAGE}" in

@@ -29,7 +29,10 @@ def _model(*, loss: float, accuracy: float, ade: float) -> dict:
 
 
 def test_single_model_has_no_comparisons() -> None:
-    assert compare_open_loop_models({"only": _model(loss=1.0, accuracy=0.8, ade=0.5)}, ()) == {}
+    assert (
+        compare_open_loop_models({"only": _model(loss=1.0, accuracy=0.8, ade=0.5)}, ())
+        == {}
+    )
 
 
 def test_multiple_models_use_frozen_direction_and_tolerance() -> None:
@@ -67,6 +70,25 @@ def test_legacy_checkpoint_arguments_are_rejected(monkeypatch) -> None:
         parse_args()
 
 
+def test_topdown_sizes_are_strict(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "validate_bev_stage1_ab.py",
+            "--manifest",
+            "manifest.json",
+            "--dataset-root",
+            "dataset",
+            "--output",
+            "report.json",
+            "--topdown-screen-size",
+            "0",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 def test_s1_global_poses_are_read_from_environment_in_joint_role_order() -> None:
     env = SimpleNamespace(
         agents={
@@ -80,7 +102,5 @@ def test_s1_global_poses_are_read_from_environment_in_joint_role_order() -> None
 
     np.testing.assert_allclose(
         poses,
-        np.asarray(
-            [[10.0, 0.0, 0.1], [20.0, -1.0, 0.2], [30.0, -2.0, 0.3]]
-        ),
+        np.asarray([[10.0, 0.0, 0.1], [20.0, -1.0, 0.2], [30.0, -2.0, 0.3]]),
     )

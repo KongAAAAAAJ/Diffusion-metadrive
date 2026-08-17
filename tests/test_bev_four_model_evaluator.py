@@ -34,6 +34,10 @@ def test_evaluation_config_is_strict() -> None:
         ModelEvaluationConfig(device="cpu", save_visualizations=True)
     with pytest.raises(ModelEvaluationError):
         ModelEvaluationConfig(device="cpu", video_fps=0)
+    with pytest.raises(ModelEvaluationError):
+        ModelEvaluationConfig(device="cpu", topdown_screen_size=0)
+    with pytest.raises(ModelEvaluationError):
+        ModelEvaluationConfig(device="cpu", topdown_film_size=0)
     config = ModelEvaluationConfig(device="cpu")
     assert config.scenarios == PRIMARY_S5_S9_SCENARIOS
     assert config.seeds == HOLDOUT_SEEDS
@@ -87,9 +91,7 @@ def test_metric_aggregation_computes_rates_and_p95() -> None:
     assert result["roles"]["agent0"]["stop_rate"] == pytest.approx(0.5)
     assert result["execution"]["rejection_count"] == 1
     assert result["execution"]["rejection_rate"] == pytest.approx(0.5)
-    assert result["timing"]["model_inference_ms"]["p95_ms"] == pytest.approx(
-        19.5
-    )
+    assert result["timing"]["model_inference_ms"]["p95_ms"] == pytest.approx(19.5)
 
 
 def test_execution_mask_failure_is_recorded_as_episode_rejection() -> None:
@@ -195,7 +197,7 @@ def test_behavior_hash_excludes_timing_but_not_policy_metrics() -> None:
         "models": {
             name: {"joint_safety": {"collision_rate": 0.0}, "timing": {"p95": 1.0}}
             for name in model_order
-        }
+        },
     }
     baseline = _behavior_sha256(report)
     report["models"]["stage1_a"]["timing"]["p95"] = 99.0
@@ -282,9 +284,13 @@ def _repeat_report(
             "timing": {"planning_tick_ms": {"p95_ms": 100.0}},
         }
     comparisons = (
-        ComparisonSpec("open_vs_stage1", "stage1_a", "grpo_open"),
-        ComparisonSpec("exec_vs_open", "grpo_open", "grpo_exec"),
-    ) if len(model_order) > 1 else ()
+        (
+            ComparisonSpec("open_vs_stage1", "stage1_a", "grpo_open"),
+            ComparisonSpec("exec_vs_open", "grpo_open", "grpo_exec"),
+        )
+        if len(model_order) > 1
+        else ()
+    )
     return {
         "initial_state_sha256": "c" * 64,
         "initial_scene_sha256": "d" * 64,

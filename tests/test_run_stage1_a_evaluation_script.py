@@ -81,9 +81,7 @@ def test_all_writes_single_model_manifest_and_runs_both_evaluations(
                 "kind": "stage1",
                 "variant": "A",
                 "checkpoint": environment["CHECKPOINT_PATH"],
-                "checkpoint_sha256": environment[
-                    "EXPECTED_CHECKPOINT_SHA256"
-                ],
+                "checkpoint_sha256": environment["EXPECTED_CHECKPOINT_SHA256"],
             }
         ],
         "comparisons": [],
@@ -96,6 +94,8 @@ def test_all_writes_single_model_manifest_and_runs_both_evaluations(
     assert "--device cpu" in calls[0]
     assert "--open-loop-num-samples 1500" in calls[0]
     assert "--save-visualizations" in calls[0]
+    assert "--topdown-screen-size 800" in calls[0]
+    assert "--topdown-film-size 3000" in calls[0]
     assert "-m evaluation.bev_four_model_evaluator" in calls[1]
     assert "--run-mode diagnostic" in calls[1]
     assert "--max-steps 37" in calls[1]
@@ -103,6 +103,8 @@ def test_all_writes_single_model_manifest_and_runs_both_evaluations(
     assert "--video-fps 10" in calls[1]
     assert "--visualization-interval 1" in calls[1]
     assert "--save-visualizations" in calls[1]
+    assert "--topdown-screen-size 800" in calls[1]
+    assert "--topdown-film-size 3000" in calls[1]
 
 
 def test_stage_selector_and_checkpoint_hash_are_strict(tmp_path: Path) -> None:

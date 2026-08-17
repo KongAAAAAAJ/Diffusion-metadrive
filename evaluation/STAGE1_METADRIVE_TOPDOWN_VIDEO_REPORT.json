@@ -1,0 +1,64 @@
+{
+  "format": "stage1_metadrive_topdown_video_report_v1",
+  "generated_at": "2026-08-17T20:30:26+08:00",
+  "classification": "diagnostic_only",
+  "formal_eligibility_changed": false,
+  "outcome": "passed",
+  "source": {
+    "branch": "BEV",
+    "base_git_commit": "b836f332f20b4dc9cd5944daad4790549bc44c8d",
+    "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
+    "checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc"
+  },
+  "implementation": {
+    "videos_2d_source": "MetaDrive top_down renderer canvas captured before env.step",
+    "camera": "north-up at the mean pre-step XY position of agent0, agent1 and agent2",
+    "trajectory_overlay": "three selected optimized trajectories converted from ego-local to world coordinates and drawn as per-agent lines plus eight waypoint circles on renderer._screen_canvas before WorldSurface.to_cv2_image",
+    "renderer_failure_policy": "fail-fast without Matplotlib or image-space trajectory fallback",
+    "legacy_trajectory_plot_frames": "trajectory_plot_frames",
+    "legacy_trajectory_plot_videos": "videos_trajectory_plot",
+    "default_topdown_screen_size": 800,
+    "default_topdown_film_size": 3000
+  },
+  "verification": [
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -o cache_dir=/tmp/bev-topdown-final-pytest-cache tests/test_bev_evaluation_artifacts.py tests/test_bev_four_model_evaluator.py tests/test_validate_bev_stage1_models.py tests/test_run_stage1_a_evaluation_script.py tests/test_topdown_capture_rule_maker_overlay.py -q",
+      "result": "passed",
+      "summary": "24 passed"
+    },
+    {
+      "command": "bash -n scripts/run_stage1_a_evaluation.sh",
+      "result": "passed"
+    },
+    {
+      "command": "/home/kong/anaconda3/bin/black --workers 1 --check evaluation/bev_evaluation_artifacts.py evaluation/bev_four_model_evaluator.py scripts/validate_bev_stage1_ab.py tests/test_bev_evaluation_artifacts.py tests/test_bev_four_model_evaluator.py tests/test_run_stage1_a_evaluation_script.py tests/test_validate_bev_stage1_models.py",
+      "result": "passed_after_format"
+    },
+    {
+      "command": "SensorlessJointBEVPlatoonEnv S1 and S5 renderer-native frame smoke with three synthetic selected trajectories",
+      "result": "passed",
+      "artifact_root": "/tmp/bev_topdown_renderer_smoke_20260817",
+      "observed_frame_shape": [800, 800, 3]
+    },
+    {
+      "command": "OUTPUT_ROOT=/tmp/stage1_a_topdown_checkpoint_cpu_smoke_20260817 EVAL_STAGE=open_s1 OPEN_LOOP_NUM_SAMPLES=1 SAVE_VISUALIZATIONS=1 DEVICE=cpu bash scripts/run_stage1_a_evaluation.sh",
+      "result": "passed",
+      "report": "/tmp/stage1_a_topdown_checkpoint_cpu_smoke_20260817/open_loop_s1.json",
+      "report_sha256": "a02d37899403e932476b79e4e692ccb24678a7e63fd68112ffce3bb2bdc4c7cd",
+      "topdown_frame_sha256": "8a9e406825276d6c66f31bfb9a1072f295952e232a929a75d8af62eace262981",
+      "topdown_video_sha256": "278f4bcf563dedd877d7efed8a174172a8a9e887f815c8ceb644164ef3ff4a6b",
+      "trajectory_plot_video_sha256": "36e59394f03510fdc677b12b7a8ec5de074d150d59b329d68685d1e2ad4cd2d2",
+      "selected_modes": [6, 7, 2],
+      "warmup_steps": 10,
+      "manual_frame_inspection": "MetaDrive road, all three vehicles, and all three colored selected waypoint sequences were visible"
+    }
+  ],
+  "non_blocking_environment_note": "The initial CUDA smoke was rejected before evaluation because CUDA is unavailable in the isolated execution environment; the explicit CPU smoke passed.",
+  "boundaries": {
+    "full_s5_s9_evaluation_run": false,
+    "training_started": false,
+    "dataset_acceptance_changed": false,
+    "checkpoint_eligibility_changed": false
+  },
+  "maintainability_gap": "AGENTS.md references docs/phases/phase6.md, but that file is absent in this BEV commit; the existing evaluator contracts and project state were used."
+}

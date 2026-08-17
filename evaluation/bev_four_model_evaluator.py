@@ -86,6 +86,8 @@ class ModelEvaluationConfig:
     save_visualizations: bool = False
     video_fps: int = 10
     visualization_interval: int = 1
+    topdown_screen_size: int = 800
+    topdown_film_size: int = 3000
 
     def __post_init__(self) -> None:
         if self.run_mode not in ("diagnostic", "formal"):
@@ -94,9 +96,9 @@ class ModelEvaluationConfig:
             )
         if self.device not in ("cpu", "cuda"):
             raise ModelEvaluationError("evaluation device must be cpu or cuda")
-        if (
-            not self.seeds
-            or any(isinstance(value, bool) or not isinstance(value, int) for value in self.seeds)
+        if not self.seeds or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in self.seeds
         ):
             raise ModelEvaluationError("evaluation seeds must be integers")
         if not self.scenarios:
@@ -115,9 +117,7 @@ class ModelEvaluationConfig:
                 "inference_p95_limit_ms must be positive and finite"
             )
         if self.save_visualizations and self.artifact_root is None:
-            raise ModelEvaluationError(
-                "save_visualizations requires an artifact_root"
-            )
+            raise ModelEvaluationError("save_visualizations requires an artifact_root")
         if isinstance(self.video_fps, bool) or self.video_fps <= 0:
             raise ModelEvaluationError("video_fps must be positive")
         if (
@@ -125,6 +125,10 @@ class ModelEvaluationConfig:
             or self.visualization_interval <= 0
         ):
             raise ModelEvaluationError("visualization_interval must be positive")
+        if isinstance(self.topdown_screen_size, bool) or self.topdown_screen_size <= 0:
+            raise ModelEvaluationError("topdown_screen_size must be positive")
+        if isinstance(self.topdown_film_size, bool) or self.topdown_film_size <= 0:
+            raise ModelEvaluationError("topdown_film_size must be positive")
 
 
 @dataclass(frozen=True)
@@ -191,9 +195,7 @@ def _load_policy(
     if source_checkpoint is None:
         raise ModelEvaluationError(f"{spec.model_id} source checkpoint is missing")
     loader = (
-        load_stage1_a_for_grpo
-        if expected_variant == "A"
-        else load_stage1_b_for_grpo
+        load_stage1_a_for_grpo if expected_variant == "A" else load_stage1_b_for_grpo
     )
     trainer, source_payload, source_sha = loader(
         source_checkpoint,
@@ -206,9 +208,7 @@ def _load_policy(
         )
     if expected_kind == "grpo":
         checkpoint_loader = (
-            load_grpo_checkpoint
-            if expected_variant == "A"
-            else load_grpo_b_checkpoint
+            load_grpo_checkpoint if expected_variant == "A" else load_grpo_b_checkpoint
         )
         grpo_payload = checkpoint_loader(
             checkpoint,
@@ -240,14 +240,9 @@ def _load_policy(
                 f"{spec.model_id} trajectory optimizer contract mismatch"
             )
         if formal and grpo_payload.get("eligible_for_formal_training") is not True:
-            raise ModelEvaluationError(
-                f"{spec.model_id} checkpoint is diagnostic-only"
-            )
+            raise ModelEvaluationError(f"{spec.model_id} checkpoint is diagnostic-only")
         expected_contract = primary_scenario_contract()
-        if (
-            grpo_payload.get("scenario_contract_sha256")
-            != expected_contract["sha256"]
-        ):
+        if grpo_payload.get("scenario_contract_sha256") != expected_contract["sha256"]:
             raise ModelEvaluationError(
                 f"{spec.model_id} scenario contract no longer matches frozen S5--S9"
             )
@@ -308,17 +303,35 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
         roles[agent_id] = {
             "collision_rate": values["collision"] / episode_count,
             "out_of_road_rate": values["out_of_road"] / episode_count,
-            "progress_mean_m": float(np.mean(values["progress"])) if values["progress"] else 0.0,
-            "speed_mean_km_h": float(np.mean(values["speed_km_h"])) if values["speed_km_h"] else 0.0,
+            "progress_mean_m": (
+                float(np.mean(values["progress"])) if values["progress"] else 0.0
+            ),
+            "speed_mean_km_h": (
+                float(np.mean(values["speed_km_h"])) if values["speed_km_h"] else 0.0
+            ),
             "minimum_gap_m": min(values["minimum_gap_m"], default=1.0e6),
             "mode_distribution": {
                 str(mode): int(modes.count(mode)) for mode in sorted(set(modes))
             },
             "stop_rate": values["stop"] / max(len(modes), 1),
-            "acceleration_abs_mean_mps2": float(np.mean(np.abs(values["acceleration_mps2"]))) if values["acceleration_mps2"] else 0.0,
-            "jerk_abs_mean": float(np.mean(np.abs(values["jerk"]))) if values["jerk"] else 0.0,
-            "yaw_rate_abs_mean_rad_s": float(np.mean(np.abs(values["yaw_rate_rad_s"]))) if values["yaw_rate_rad_s"] else 0.0,
-            "steering_change_abs_mean": float(np.mean(np.abs(values["steering_change"]))) if values["steering_change"] else 0.0,
+            "acceleration_abs_mean_mps2": (
+                float(np.mean(np.abs(values["acceleration_mps2"])))
+                if values["acceleration_mps2"]
+                else 0.0
+            ),
+            "jerk_abs_mean": (
+                float(np.mean(np.abs(values["jerk"]))) if values["jerk"] else 0.0
+            ),
+            "yaw_rate_abs_mean_rad_s": (
+                float(np.mean(np.abs(values["yaw_rate_rad_s"])))
+                if values["yaw_rate_rad_s"]
+                else 0.0
+            ),
+            "steering_change_abs_mean": (
+                float(np.mean(np.abs(values["steering_change"])))
+                if values["steering_change"]
+                else 0.0
+            ),
         }
     timing = {
         name: {
@@ -345,19 +358,28 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
             "gap_7m_violation_rate": raw["gap_7m_violation"] / episode_count,
         },
         "formation": {
-            "mean_error_m": float(np.mean(raw["formation_error"])) if raw["formation_error"] else 0.0,
+            "mean_error_m": (
+                float(np.mean(raw["formation_error"]))
+                if raw["formation_error"]
+                else 0.0
+            ),
             "p95_error_m": _percentile(raw["formation_error"], 95),
             "maximum_spread_m": max(raw["formation_spread"], default=0.0),
-            "recovery_time_mean_s": float(np.mean(raw["recovery_time_s"])) if raw["recovery_time_s"] else 0.0,
+            "recovery_time_mean_s": (
+                float(np.mean(raw["recovery_time_s"]))
+                if raw["recovery_time_s"]
+                else 0.0
+            ),
         },
         "efficiency": {
             "completion_rate": raw["episode_completed"] / episode_count,
-            "joint_reward_mean": float(np.mean(raw["joint_reward"])) if raw["joint_reward"] else 0.0,
+            "joint_reward_mean": (
+                float(np.mean(raw["joint_reward"])) if raw["joint_reward"] else 0.0
+            ),
         },
         "execution": {
             "rejection_count": len(raw.get("execution_rejections", ())),
-            "rejection_rate": len(raw.get("execution_rejections", ()))
-            / episode_count,
+            "rejection_rate": len(raw.get("execution_rejections", ())) / episode_count,
             "rejections": list(raw.get("execution_rejections", ())),
             "mean_modes_removed_per_joint_state": (
                 raw.get("execution_modes_removed", 0)
@@ -365,21 +387,21 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
             ),
         },
         "trajectory_optimization": {
-            "intervention_ade_mean_m": float(
-                np.mean(raw.get("trajectory_intervention_ade_m", ()))
-            )
-            if raw.get("trajectory_intervention_ade_m")
-            else 0.0,
-            "intervention_fde_mean_m": float(
-                np.mean(raw.get("trajectory_intervention_fde_m", ()))
-            )
-            if raw.get("trajectory_intervention_fde_m")
-            else 0.0,
-            "retained_raw_fraction_mean": float(
-                np.mean(raw.get("trajectory_retained_raw_fraction", ()))
-            )
-            if raw.get("trajectory_retained_raw_fraction")
-            else 0.0,
+            "intervention_ade_mean_m": (
+                float(np.mean(raw.get("trajectory_intervention_ade_m", ())))
+                if raw.get("trajectory_intervention_ade_m")
+                else 0.0
+            ),
+            "intervention_fde_mean_m": (
+                float(np.mean(raw.get("trajectory_intervention_fde_m", ())))
+                if raw.get("trajectory_intervention_fde_m")
+                else 0.0
+            ),
+            "retained_raw_fraction_mean": (
+                float(np.mean(raw.get("trajectory_retained_raw_fraction", ())))
+                if raw.get("trajectory_retained_raw_fraction")
+                else 0.0
+            ),
         },
         "episode_outcomes": list(raw.get("episode_outcomes", ())),
         "timing": timing,
@@ -413,9 +435,7 @@ def _minimum_background_gap(env: object) -> float:
         for agent_id in AGENT_IDS:
             if agent_id not in env.agents:
                 continue
-            position = np.asarray(
-                env.agents[agent_id].position, dtype=np.float64
-            )[:2]
+            position = np.asarray(env.agents[agent_id].position, dtype=np.float64)[:2]
             minimum = min(
                 minimum,
                 float(np.linalg.norm(position - other_position))
@@ -596,6 +616,8 @@ def evaluate_models(
                 name,
                 video_fps=cfg.video_fps,
                 frame_interval=cfg.visualization_interval,
+                topdown_screen_size=cfg.topdown_screen_size,
+                topdown_film_size=cfg.topdown_film_size,
             )
             if cfg.save_visualizations and cfg.artifact_root is not None
             else None
@@ -617,9 +639,7 @@ def evaluate_models(
                 spawn_manager = getattr(
                     getattr(env, "engine", None), "spawn_manager", None
                 )
-                set_spawn_seed = getattr(
-                    spawn_manager, "set_episode_spawn_seed", None
-                )
+                set_spawn_seed = getattr(spawn_manager, "set_episode_spawn_seed", None)
                 if callable(set_spawn_seed):
                     set_spawn_seed(int(seed))
                 env.reset(seed=int(seed))
@@ -679,7 +699,9 @@ def evaluate_models(
                         pre_poses = np.asarray(
                             [
                                 [
-                                    *np.asarray(env.agents[agent_id].position, dtype=np.float64)[:2],
+                                    *np.asarray(
+                                        env.agents[agent_id].position, dtype=np.float64
+                                    )[:2],
                                     float(env.agents[agent_id].heading_theta),
                                 ]
                                 for agent_id in AGENT_IDS
@@ -754,16 +776,10 @@ def evaluate_models(
                                         f"{name} is not exact for identical input and noise"
                                     )
                             raw_trajectories = (
-                                output["selected_trajectory"][0]
-                                .detach()
-                                .cpu()
-                                .numpy()
+                                output["selected_trajectory"][0].detach().cpu().numpy()
                             )
                             selected_mode_array = (
-                                output["selected_mode"][0]
-                                .detach()
-                                .cpu()
-                                .numpy()
+                                output["selected_mode"][0].detach().cpu().numpy()
                             )
                             try:
                                 optimization = optimize_selected_model_trajectories(
@@ -809,16 +825,10 @@ def evaluate_models(
                                     raise ModelEvaluationError(
                                         "trajectory control is non-finite"
                                     )
-                            control_ms = (
-                                time.perf_counter() - control_start
-                            ) * 1000.0
+                            control_ms = (time.perf_counter() - control_start) * 1000.0
                             raw["timing"]["bev_build_ms"].append(bev_ms)
-                            raw["timing"]["model_inference_ms"].append(
-                                inference_ms
-                            )
-                            raw["timing"]["control_mapping_ms"].append(
-                                control_ms
-                            )
+                            raw["timing"]["model_inference_ms"].append(inference_ms)
+                            raw["timing"]["control_mapping_ms"].append(control_ms)
                             raw["timing"]["planning_tick_ms"].append(
                                 (time.perf_counter() - tick_start) * 1000.0
                             )
@@ -835,6 +845,17 @@ def evaluate_models(
                                 optimization.retained_raw_fraction.tolist()
                             )
 
+                        if (
+                            artifact_writer is not None
+                            and artifact_episode_id is not None
+                        ):
+                            artifact_writer.capture_topdown_frame(
+                                artifact_episode_id,
+                                env=env,
+                                step_index=step_index,
+                                pre_poses=pre_poses,
+                                trajectories=trajectories,
+                            )
                         _, reward, terminated, truncated, info = env.step(action)
                         executed_steps += 1
                         live_agents = dict(env.agents)
@@ -896,7 +917,9 @@ def evaluate_models(
                             speed = float(
                                 agent_info.get(
                                     "speed_km_h",
-                                    getattr(live_agents.get(agent_id), "speed_km_h", 0.0),
+                                    getattr(
+                                        live_agents.get(agent_id), "speed_km_h", 0.0
+                                    ),
                                 )
                             )
                             role_values["speed_km_h"].append(speed)
@@ -941,9 +964,10 @@ def evaluate_models(
                         raw["formation_spread"].append(
                             float(max(formation_values, default=0.0))
                         )
-                        if recovered_at is None and max(
-                            formation_values, default=0.0
-                        ) <= 2.0:
+                        if (
+                            recovered_at is None
+                            and max(formation_values, default=0.0) <= 2.0
+                        ):
                             recovered_at = step_index * dt_s
                         raw["joint_reward"].append(
                             float(
@@ -955,20 +979,32 @@ def evaluate_models(
                                 )
                             )
                         )
-                        if artifact_writer is not None and artifact_episode_id is not None:
+                        if (
+                            artifact_writer is not None
+                            and artifact_episode_id is not None
+                        ):
                             post_poses = np.asarray(
                                 [
-                                    [
-                                        *np.asarray(
-                                            live_agents.get(agent_id, env.agents.get(agent_id)).position,
-                                            dtype=np.float64,
-                                        )[:2],
-                                        float(
-                                            live_agents.get(agent_id, env.agents.get(agent_id)).heading_theta
-                                        ),
-                                    ]
-                                    if live_agents.get(agent_id, env.agents.get(agent_id)) is not None
-                                    else pre_poses[role].tolist()
+                                    (
+                                        [
+                                            *np.asarray(
+                                                live_agents.get(
+                                                    agent_id, env.agents.get(agent_id)
+                                                ).position,
+                                                dtype=np.float64,
+                                            )[:2],
+                                            float(
+                                                live_agents.get(
+                                                    agent_id, env.agents.get(agent_id)
+                                                ).heading_theta
+                                            ),
+                                        ]
+                                        if live_agents.get(
+                                            agent_id, env.agents.get(agent_id)
+                                        )
+                                        is not None
+                                        else pre_poses[role].tolist()
+                                    )
                                     for role, agent_id in enumerate(AGENT_IDS)
                                 ],
                                 dtype=np.float64,
@@ -994,7 +1030,11 @@ def evaluate_models(
                                 episode_completed = True
                             break
                     raw["recovery_time_s"].append(
-                        float(recovered_at if recovered_at is not None else cfg.max_steps * dt_s)
+                        float(
+                            recovered_at
+                            if recovered_at is not None
+                            else cfg.max_steps * dt_s
+                        )
                     )
                     raw["episode_lengths"].append(executed_steps)
                     raw["episode_collision"] += int(episode_collision)
@@ -1005,9 +1045,7 @@ def evaluate_models(
                         raw["roles"][agent_id]["collision"] += int(
                             role_collision[agent_id]
                         )
-                        raw["roles"][agent_id]["out_of_road"] += int(
-                            role_out[agent_id]
-                        )
+                        raw["roles"][agent_id]["out_of_road"] += int(role_out[agent_id])
                     raw["episode_outcomes"].append(
                         {
                             "scenario": scenario[0],
@@ -1016,9 +1054,7 @@ def evaluate_models(
                             "collision": bool(episode_collision),
                             "out_of_road": bool(episode_out),
                             "completed": bool(episode_completed),
-                            "execution_rejected": bool(
-                                episode_execution_rejected
-                            ),
+                            "execution_rejected": bool(episode_execution_rejected),
                             "gap_5m_violation": bool(episode_gap5),
                             "gap_7m_violation": bool(episode_gap7),
                             "minimum_background_gap_m": (
@@ -1062,9 +1098,7 @@ def evaluate_models(
         "common_seeds": list(cfg.seeds),
         "common_noise_seed_by_episode": True,
         "common_initial_state_verified": True,
-        "initial_state_sha256": _initial_states_sha256(
-            reference_initial_states
-        ),
+        "initial_state_sha256": _initial_states_sha256(reference_initial_states),
         "initial_scene_sha256": hashlib.sha256(
             json.dumps(
                 sorted(reference_initial_scenes.items()),
@@ -1140,14 +1174,10 @@ def _nested_float(value: Mapping[str, object], path: Sequence[str]) -> float:
             )
         current = current[key]
     if isinstance(current, bool) or not isinstance(current, (int, float)):
-        raise ModelEvaluationError(
-            f"repeat metric {'.'.join(path)} is not numeric"
-        )
+        raise ModelEvaluationError(f"repeat metric {'.'.join(path)} is not numeric")
     result = float(current)
     if not math.isfinite(result):
-        raise ModelEvaluationError(
-            f"repeat metric {'.'.join(path)} is non-finite"
-        )
+        raise ModelEvaluationError(f"repeat metric {'.'.join(path)} is non-finite")
     return result
 
 
@@ -1162,10 +1192,7 @@ def _normalized_mode_distribution(
         raise ModelEvaluationError("mode_distribution is missing")
     counts = {str(key): int(value) for key, value in distribution.items()}
     total = sum(counts.values())
-    return {
-        key: value / max(total, 1)
-        for key, value in counts.items()
-    }
+    return {key: value / max(total, 1) for key, value in counts.items()}
 
 
 def _episode_outcome_index(
@@ -1274,9 +1301,7 @@ def compare_models(
                 "improvement": improvement,
                 "direction": direction,
                 "equivalence_tolerance": equivalence_tolerance,
-                "conclusion": _conclusion_label(
-                    improvement, equivalence_tolerance
-                ),
+                "conclusion": _conclusion_label(improvement, equivalence_tolerance),
             }
         results[comparison.comparison_id] = {
             "baseline": comparison.baseline,
@@ -1440,7 +1465,11 @@ def compare_repeated_reports(
                             and abs(float(value) - threshold) <= cfg.distance_m
                             for value in values
                         )
-                        target = boundary_disagreements if near_boundary else critical_mismatches
+                        target = (
+                            boundary_disagreements
+                            if near_boundary
+                            else critical_mismatches
+                        )
                         target.append(
                             f"{model_name}/repeat_{repeat_index}/{key}/{field}"
                         )
@@ -1465,8 +1494,7 @@ def compare_repeated_reports(
                         )
             for path, allowed in scalar_metrics:
                 delta = abs(
-                    _nested_float(model, path)
-                    - _nested_float(baseline_model, path)
+                    _nested_float(model, path) - _nested_float(baseline_model, path)
                 )
                 if _exceeds_tolerance(delta, allowed):
                     continuous_violations.append(
@@ -1476,16 +1504,13 @@ def compare_repeated_reports(
                 for metric, allowed in role_metrics:
                     path = ("roles", agent_id, metric)
                     delta = abs(
-                        _nested_float(model, path)
-                        - _nested_float(baseline_model, path)
+                        _nested_float(model, path) - _nested_float(baseline_model, path)
                     )
                     if _exceeds_tolerance(delta, allowed):
                         continuous_violations.append(
                             f"{model_name}/repeat_{repeat_index}/{'.'.join(path)}={delta:.6g}>{allowed:.6g}"
                         )
-                first_modes = _normalized_mode_distribution(
-                    baseline_model, agent_id
-                )
+                first_modes = _normalized_mode_distribution(baseline_model, agent_id)
                 second_modes = _normalized_mode_distribution(model, agent_id)
                 total_variation = 0.5 * sum(
                     abs(first_modes.get(mode, 0.0) - second_modes.get(mode, 0.0))
@@ -1500,7 +1525,9 @@ def compare_repeated_reports(
             if not isinstance(probe, Mapping):
                 raise ModelEvaluationError("deterministic probe is missing")
             probe_rows.append(probe)
-        input_hashes = [str(value.get("input_and_noise_sha256", "")) for value in probe_rows]
+        input_hashes = [
+            str(value.get("input_and_noise_sha256", "")) for value in probe_rows
+        ]
         output_hashes = [str(value.get("output_sha256", "")) for value in probe_rows]
         probe_evidence[model_name] = {
             "identical_replay_in_every_run": all(
@@ -1570,8 +1597,7 @@ def evaluate_models_repeated(
         repeat_config = (
             dataclasses.replace(
                 config,
-                artifact_root=Path(config.artifact_root)
-                / f"repeat_{repeat_index + 1}",
+                artifact_root=Path(config.artifact_root) / f"repeat_{repeat_index + 1}",
             )
             if config.artifact_root is not None
             else config
@@ -1611,7 +1637,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--run-mode", choices=("diagnostic", "formal"), default="diagnostic")
+    parser.add_argument(
+        "--run-mode", choices=("diagnostic", "formal"), default="diagnostic"
+    )
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--max-steps", type=int, default=100)
     parser.add_argument("--repeats", type=int, default=1)
@@ -1619,15 +1647,13 @@ def main() -> int:
     parser.add_argument("--save-visualizations", action="store_true")
     parser.add_argument("--video-fps", type=int, default=10)
     parser.add_argument("--visualization-interval", type=int, default=1)
+    parser.add_argument("--topdown-screen-size", type=int, default=800)
+    parser.add_argument("--topdown-film-size", type=int, default=3000)
     arguments = parser.parse_args()
     config = ModelEvaluationConfig(
         run_mode=arguments.run_mode,
         device=arguments.device,
-        seeds=(
-            FORMAL_EVAL_SEEDS
-            if arguments.run_mode == "formal"
-            else HOLDOUT_SEEDS
-        ),
+        seeds=(FORMAL_EVAL_SEEDS if arguments.run_mode == "formal" else HOLDOUT_SEEDS),
         scenarios=(
             FORMAL_EVAL_SCENARIOS
             if arguments.run_mode == "formal"
@@ -1638,6 +1664,8 @@ def main() -> int:
         save_visualizations=arguments.save_visualizations,
         video_fps=arguments.video_fps,
         visualization_interval=arguments.visualization_interval,
+        topdown_screen_size=arguments.topdown_screen_size,
+        topdown_film_size=arguments.topdown_film_size,
     )
     report = (
         evaluate_models(
