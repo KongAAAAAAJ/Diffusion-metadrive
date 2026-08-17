@@ -1,0 +1,50 @@
+{
+  "format": "stage1_a_evaluation_launcher_report_v1",
+  "recorded_at": "2026-08-17T11:27:01+08:00",
+  "source_head_before_change": "41d7194e7cd1a3dee1d96d9c499a9b683f320f2c",
+  "status": "launcher_implemented_real_evaluation_not_started",
+  "launcher": {
+    "path": "scripts/run_stage1_a_evaluation.sh",
+    "sha256": "43994de2617a98ea191ebabab0fa2034c642288560df7bbfc87b47be564ec500",
+    "default_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
+    "checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
+    "default_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev",
+    "manifest_format": "bev_model_evaluation_manifest_v2",
+    "model_id": "stage1_a",
+    "comparison_count": 0,
+    "evaluation_stages": [
+      "open_s1",
+      "s5_s9",
+      "all"
+    ],
+    "default_closed_loop_max_steps": 100,
+    "default_repeats": 1,
+    "run_mode": "diagnostic"
+  },
+  "commands": {
+    "open_loop_and_s1_single_step": "scripts/validate_bev_stage1_ab.py --manifest ... --dataset-root ... --device ... --output ...",
+    "s5_s9_closed_loop": "python -m evaluation.bev_four_model_evaluator --manifest ... --run-mode diagnostic --device ... --max-steps ... --repeats ... --output ..."
+  },
+  "verification": {
+    "shell_syntax": "passed",
+    "focused_tests": "21 passed",
+    "tests": [
+      "tests/test_run_stage1_a_evaluation_script.py",
+      "tests/test_bev_model_manifest.py",
+      "tests/test_validate_bev_stage1_models.py",
+      "tests/test_bev_four_model_evaluator.py"
+    ],
+    "git_diff_check": "passed_for_launcher_and_test",
+    "real_evaluation_started": false
+  },
+  "evidence_classification": {
+    "diagnostic_only": true,
+    "eligible_for_formal_conclusions": false,
+    "reason": "The candidate-v3 formal50K dataset acceptance was skipped."
+  },
+  "remaining_risks": [
+    "The full evaluation can be long and was intentionally not started in this implementation round.",
+    "The closed-loop evaluator currently applies one uniform max_steps value to all S5-S9 scenarios; MAX_STEPS=800 may be supplied when the S9-length diagnostic is desired.",
+    "GPU availability and runtime latency must be measured during the actual evaluation run."
+  ]
+}
