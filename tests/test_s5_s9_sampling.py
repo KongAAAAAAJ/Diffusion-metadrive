@@ -22,6 +22,16 @@ def _resolve(scenario_id: str, seed: int) -> dict:
     )
 
 
+def _resolve_v4(seed: int) -> dict:
+    return resolve_s5_s9_parameters(
+        spawn_seed=seed,
+        scenario_id="S5_hard_brake_lead",
+        local_route=ROUTES["S5_hard_brake_lead"],
+        ego_initial_speed_km_h=24.0,
+        scenario_contract_id="candidate_v4",
+    )
+
+
 def test_sampler_is_deterministic_and_finite() -> None:
     for scenario_id in ROUTES:
         for seed in SEEDS:
@@ -77,6 +87,53 @@ def test_s5_fixed_seeds_couple_lead_pressure_to_adjacent_windows() -> None:
         assert -3.0 <= value["lead_speed_delta_from_ego_km_h"] <= 3.0
         assert 4.5 <= value["lead_brake_deceleration_mps2"] <= 7.0
         assert 0.0 <= value["lead_target_speed_km_h"] <= 3.0
+
+
+def test_candidate_v3_explicit_contract_keeps_legacy_samples_identical() -> None:
+    for seed in SEEDS:
+        assert _resolve("S5_hard_brake_lead", seed) == resolve_s5_s9_parameters(
+            spawn_seed=seed,
+            scenario_id="S5_hard_brake_lead",
+            local_route=ROUTES["S5_hard_brake_lead"],
+            ego_initial_speed_km_h=24.0,
+            scenario_contract_id="candidate_v3",
+        )
+
+
+def test_candidate_v4_s5_has_exact_deterministic_eighty_percent_target_layer() -> None:
+    assert sum(
+        bool(_resolve_v4(seed)["target_background_condition_sampled"])
+        for seed in range(10000)
+    ) == 8000
+    for start in range(100):
+        assert sum(
+            bool(_resolve_v4(seed)["target_background_condition_sampled"])
+            for seed in range(start, start + 10)
+        ) == 8
+
+
+def test_candidate_v4_target_and_control_geometry_are_disjoint() -> None:
+    target_patterns = set()
+    control_patterns = set()
+    for seed in range(200):
+        value = _resolve_v4(seed)
+        pattern = (value["left_relation"], value["right_relation"])
+        if value["target_background_condition_sampled"]:
+            target_patterns.add(pattern)
+            assert set(pattern) == {"ahead", "behind"}
+            for side, relation in zip(("left", "right"), pattern):
+                offset = value[f"{side}_offset_m"]
+                if relation == "ahead":
+                    assert 19.0 <= offset <= 22.0
+                else:
+                    assert -20.0 <= offset <= -12.0
+            assert value["lead_pressure_bucket"] == "high"
+        else:
+            control_patterns.add(pattern)
+            assert pattern in {("ahead", "ahead"), ("behind", "behind")}
+            assert value["lead_pressure_bucket"] == "moderate"
+    assert target_patterns == {("ahead", "behind"), ("behind", "ahead")}
+    assert control_patterns == {("ahead", "ahead"), ("behind", "behind")}
 
 
 def test_s6_fixed_seeds_cover_both_internal_platoon_gaps() -> None:

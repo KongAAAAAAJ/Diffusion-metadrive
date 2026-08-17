@@ -6,6 +6,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG="${CONFIG:-${REPO_ROOT}/configs/dataset/data_collect_candidate_v3_formal50k.yaml}"
 
 ARGS=(--config "${CONFIG}")
+if [[ "${STOP_AFTER_INITIAL_GATE:-0}" != "0" ]] && [[ "${STOP_AFTER_INITIAL_GATE:-0}" != "1" ]]; then
+  echo "STOP_AFTER_INITIAL_GATE must be 0 or 1" >&2
+  exit 2
+fi
+export STOP_AFTER_INITIAL_GATE="${STOP_AFTER_INITIAL_GATE:-0}"
 if [[ -n "${MAX_EPISODES:-}" ]]; then
   ARGS+=(--max-episodes "${MAX_EPISODES}")
 fi
@@ -17,8 +22,11 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp}"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
-if [[ -z "${LOG_FILE:-}" ]] && [[ "$(basename "${CONFIG}")" == "data_collect_candidate_v3_s5_release20.yaml" ]]; then
-  LOG_DIR="/media/kong/Elements_SE/Diffusion_Data/collection_logs/bev_joint_risk_candidate_v3_s5_release20_v1"
+CONFIG_BASENAME="$(basename "${CONFIG}")"
+if [[ -z "${LOG_FILE:-}" ]] && [[ "${CONFIG_BASENAME}" =~ ^data_collect_candidate_v[34]_s5_release20\.yaml$ ]]; then
+  BUNDLE_VERSION="${CONFIG_BASENAME#data_collect_}"
+  BUNDLE_VERSION="${BUNDLE_VERSION%.yaml}"
+  LOG_DIR="/media/kong/Elements_SE/Diffusion_Data/collection_logs/bev_joint_risk_${BUNDLE_VERSION}_v1"
   mkdir -p "${LOG_DIR}"
   LOG_FILE="${LOG_DIR}/collection_$(date +%Y%m%d_%H%M%S).log"
 fi

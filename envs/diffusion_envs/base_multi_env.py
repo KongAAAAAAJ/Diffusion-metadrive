@@ -133,6 +133,7 @@ class BaseMultiEnv(MultiAgentMetaDrive):
                 scenario_id=None,   # e.g. "S5_hard_brake_lead"
                 local_route=None,   # e.g. "R3_mainline_straight"
                 rule_maker_profile_id=None,
+                scenario_contract_id="candidate_v3",
                 # 手动指定 ego 走的主线（graph_block_id 顺序列表）。
                 # 起点 = 第一个 block_id 的第一条正向 respawn road，
                 # 终点 = 最后一个 block_id 的第一条正向 respawn road 的 end_node。

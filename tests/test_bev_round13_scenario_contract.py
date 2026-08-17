@@ -11,6 +11,7 @@ from scenarios.bev_round13_contract import (
     INTERFACE_SMOKE_SCENARIOS,
     PRIMARY_S5_S9_SCENARIOS,
     candidate_scenario_contract_v2,
+    candidate_scenario_contract_v4,
     primary_scenario_contract,
     validate_primary_scenario_contract,
 )
@@ -41,6 +42,14 @@ def test_primary_contract_is_complete_stable_and_separate_from_smoke() -> None:
     candidate = candidate_scenario_contract_v2()
     assert candidate["format"] == "bev_primary_s5_s9_contract_v2_candidate"
     assert candidate["sha256"] != first["sha256"]
+    candidate_v4 = candidate_scenario_contract_v4()
+    assert candidate_v4["format"] == (
+        "bev_primary_s5_s9_contract_v3_candidate_v4"
+    )
+    assert candidate_v4["sha256"] != candidate["sha256"]
+    assert candidate_v4["sampling_policies"]["S5_hard_brake_lead"][
+        "target_selector"
+    ] == "spawn_seed % 10 < 8"
 
 
 def test_contract_rejects_partial_or_tampered_scenario_sets() -> None:

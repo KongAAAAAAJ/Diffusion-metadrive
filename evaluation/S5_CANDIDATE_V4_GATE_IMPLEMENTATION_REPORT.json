@@ -1,0 +1,94 @@
+{
+  "format": "s5_candidate_v4_gate_implementation_report_v1",
+  "recorded_on": "2026-08-17",
+  "status": "code_ready_production_gate_not_started",
+  "repository_head_before_changes": "59180d51ea1983589876cebd83a5d75110fa28a5",
+  "preserved_inputs": {
+    "candidate_v3_formal50k_modified": false,
+    "candidate_v3_formal50k_fingerprint": "4060c643aa15ece2936f98b641c78b6ff75309114ebc58f915d9ce3bb4bfa32c",
+    "candidate_v3_contract_sha256": "0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860",
+    "candidate_v3_supplement_modified": false,
+    "candidate_v3_supplement_fingerprint": "627b2a52b88842aaa4c27f6fa91e60255b8561b6271d30a08702cccf8415f9de"
+  },
+  "candidate_v4_contract": {
+    "contract_id": "candidate_v4",
+    "contract_sha256": "1003ccf55ec4131e8b89e2a65611f582df4c04ec124016fe63cc5f5119917d84",
+    "dataset_fingerprint": "8e19b181f504bbabd96a93cad2259eba6348ea60f4b7aefa118108f26d8488e1",
+    "sampling_policy_id": "s5_release_enriched_80_v1",
+    "target_selector": "spawn_seed % 10 < 8",
+    "target_ahead_offset_m": [19.0, 22.0],
+    "target_behind_offset_m": [-20.0, -12.0],
+    "control_patterns": [
+      ["ahead", "ahead"],
+      ["behind", "behind"]
+    ],
+    "config": "configs/dataset/data_collect_candidate_v4_s5_release20.yaml",
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v1"
+  },
+  "initial_gate": {
+    "actual_simulator_attempts": 10,
+    "minimum_strictly_accepted_episodes": 8,
+    "target_background_episodes_required": 8,
+    "all_target_background_episodes_must_be_strictly_accepted": true,
+    "parallel_workers": 4,
+    "batch_schedule": [4, 4, 2],
+    "bootstrap_spawn_seeds": [
+      82017,
+      82018,
+      82019,
+      82020,
+      82021,
+      82022,
+      82023,
+      82024,
+      82025,
+      82026
+    ],
+    "stop_after_pass_switch": "STOP_AFTER_INITIAL_GATE=1",
+    "attempt_11_before_gate_resolution_forbidden": true,
+    "composition_on_initial_gate_forbidden": true
+  },
+  "verification": {
+    "focused_tests": "42 passed",
+    "candidate_v3_fingerprint_unchanged": true,
+    "candidate_v4_seed_distribution": "8000/10000 target; every consecutive 10 seeds contain exactly 8 target seeds",
+    "runtime_gate_test": "8 target accepts stop after attempt 10; resume begins at attempt 11 with unique seed",
+    "real_four_worker_smoke": {
+      "root": "/tmp/s5_candidate_v4_smoke.4IeIj9",
+      "production_gate_counted": false,
+      "attempted_episodes": 4,
+      "committed_base_episodes": 1,
+      "committed_sidecar_episodes": 4,
+      "sidecar_only_episodes": 3,
+      "base_joint_samples": 190,
+      "target_background_sampled": 2,
+      "target_background_realized": 2,
+      "strictly_accepted_target_episodes": 1,
+      "behavior_category_counts": {
+        "keep_emergency_braking": 2,
+        "temporary_formation_release": 1,
+        "temporary_formation_release_and_recovery": 1
+      },
+      "rejection_reason_counts": {
+        "targeted_sustained_emergency_braking": 2,
+        "targeted_trajectory_infeasible": 1
+      },
+      "pending_transaction": false,
+      "bundle_verification_passed": true,
+      "bundle_sha256": "baefa9f2af49778dfa08ae68576c6df0949292031a18ecf4e28159eabed60266"
+    },
+    "expanded_test_note": "90 passed; 2 pre-existing platoon_env_map_config tests fail because they monkeypatch SCENARIO_BY_ID while production code has long used ALL_SCENARIO_BY_ID"
+  },
+  "production_collection": {
+    "started": false,
+    "must_run_in_separate_collection_thread": true,
+    "command": "STOP_AFTER_INITIAL_GATE=1 CONFIG=\"$PWD/configs/dataset/data_collect_candidate_v4_s5_release20.yaml\" bash scripts/run_bundle_v2_formal_collection.sh",
+    "warning": "The non-production smoke already showed seed 82017 (a target-layer seed) failing strict recovery while seed 82020 passed. Because production reuses the same deterministic seeds, the 8-of-10 gate is at material risk of failing and should not be represented as passed before the formal run."
+  },
+  "eligibility": {
+    "candidate_v4_initial_gate_passed": false,
+    "candidate_v4_supplement_complete": false,
+    "composition_generated": false,
+    "eligible_for_formal_training": false
+  }
+}

@@ -196,6 +196,11 @@ class ScenarioOrchestrator:
             local_route=self.local_route,
             ego_initial_speed_km_h=ego_speed,
             decision_dt_s=self._scenario_step_dt_s(env),
+            scenario_contract_id=str(
+                getattr(env, "config", {}).get(
+                    "scenario_contract_id", "candidate_v3"
+                )
+            ),
         )
         self._actor_manifest = {}
         self._conflict_evidence = {
@@ -1496,6 +1501,75 @@ class ScenarioOrchestrator:
                 getattr(spawned, "scenario_vehicle_role", f"adjacent_{lane_side}")
             )
             self._register_actor(role, spawned, step_count=step_count)
+            if self.definition.scenario_id == "S5_hard_brake_lead":
+                current_map = getattr(
+                    getattr(env, "engine", None), "current_map", None
+                )
+                realized_offset_m = None
+                if current_map is not None:
+                    try:
+                        lane = current_map.road_network.get_lane(lane_tuple)
+                        realized_offset_m = float(
+                            lane.local_coordinates(spawned.position)[0]
+                            - lane.local_coordinates(ego_vehicle.position)[0]
+                        )
+                    except Exception:
+                        realized_offset_m = None
+                relation = str(
+                    self._resolved_scenario_parameters.get(
+                        f"{lane_side}_relation", "unknown"
+                    )
+                )
+                realization = self._conflict_evidence.setdefault(
+                    "s5_adjacent_background_realization", {}
+                )
+                if isinstance(realization, dict):
+                    realization[lane_side] = {
+                        "actor_role": role,
+                        "sampled_relation": relation,
+                        "sampled_offset_m": float(
+                            self._resolved_scenario_parameters.get(
+                                f"{lane_side}_offset_m", 0.0
+                            )
+                        ),
+                        "realized_offset_m": realized_offset_m,
+                    }
+                    if set(realization) >= {"left", "right"}:
+                        relations = {
+                            side: str(realization[side]["sampled_relation"])
+                            for side in ("left", "right")
+                        }
+                        offsets = {
+                            side: realization[side]["realized_offset_m"]
+                            for side in ("left", "right")
+                        }
+                        ahead_side = next(
+                            (
+                                side
+                                for side, value in relations.items()
+                                if value == "ahead"
+                            ),
+                            None,
+                        )
+                        behind_side = next(
+                            (
+                                side
+                                for side, value in relations.items()
+                                if value == "behind"
+                            ),
+                            None,
+                        )
+                        self._conflict_evidence[
+                            "s5_target_background_condition_realized"
+                        ] = bool(
+                            ahead_side is not None
+                            and behind_side is not None
+                            and ahead_side != behind_side
+                            and offsets[ahead_side] is not None
+                            and offsets[behind_side] is not None
+                            and float(offsets[ahead_side]) >= 19.0
+                            and float(offsets[behind_side]) <= -12.0
+                        )
             self._spawned_adjacent_vehicle_keys.add(spawn_key)
             spawned_name = getattr(spawned, "name", None)
             if spawned_name is not None:

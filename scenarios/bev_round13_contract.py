@@ -27,6 +27,23 @@ HOLDOUT_SEEDS: tuple[int, ...] = (31, 47)
 _V1_SNAPSHOT = Path(__file__).resolve().parent / "contracts" / "bev_primary_s5_s9_v1.json"
 FORMAL_V1_CONTRACT_ID = "formal_v1"
 CANDIDATE_V3_CONTRACT_ID = "candidate_v3"
+CANDIDATE_V4_CONTRACT_ID = "candidate_v4"
+
+S5_CANDIDATE_V4_SAMPLING_POLICY: dict[str, object] = {
+    "policy_id": "s5_release_enriched_80_v1",
+    "target_selector": "spawn_seed % 10 < 8",
+    "target_fraction": 0.8,
+    "target_relations": [
+        ["ahead", "behind"],
+        ["behind", "ahead"],
+    ],
+    "target_ahead_offset_m": [19.0, 22.0],
+    "target_behind_offset_m": [-20.0, -12.0],
+    "control_relations": [
+        ["ahead", "ahead"],
+        ["behind", "behind"],
+    ],
+}
 
 
 class BEVScenarioContractError(RuntimeError):
@@ -105,6 +122,24 @@ def candidate_scenario_contract_v2(
     return payload
 
 
+def candidate_scenario_contract_v4(
+    scenarios: Sequence[tuple[str, str]] = PRIMARY_S5_S9_SCENARIOS,
+) -> dict[str, object]:
+    """Return the candidate-v4 contract with its isolated S5 sampling policy."""
+
+    payload = candidate_scenario_contract_v2(scenarios, frozen=True)
+    payload.pop("sha256", None)
+    payload["format"] = "bev_primary_s5_s9_contract_v3_candidate_v4"
+    payload["sampling_policies"] = {
+        "S5_hard_brake_lead": _normalise(S5_CANDIDATE_V4_SAMPLING_POLICY)
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    payload["sha256"] = hashlib.sha256(canonical).hexdigest()
+    return payload
+
+
 def scenario_contract_for_id(contract_id: str) -> dict[str, object]:
     """Resolve an explicit dataset binding without weakening the v1 default."""
 
@@ -113,6 +148,8 @@ def scenario_contract_for_id(contract_id: str) -> dict[str, object]:
         return primary_scenario_contract()
     if normalized == CANDIDATE_V3_CONTRACT_ID:
         return candidate_scenario_contract_v2(frozen=True)
+    if normalized == CANDIDATE_V4_CONTRACT_ID:
+        return candidate_scenario_contract_v4()
     raise BEVScenarioContractError(
         f"unknown S5--S9 scenario contract id: {normalized!r}"
     )
@@ -180,11 +217,14 @@ def _deterministic_speed_from_definition(definition, scenario_id: str, seed: int
 __all__ = [
     "BEVScenarioContractError",
     "CANDIDATE_V3_CONTRACT_ID",
+    "CANDIDATE_V4_CONTRACT_ID",
     "DEVELOPMENT_SEEDS",
     "FORMAL_V1_CONTRACT_ID",
     "HOLDOUT_SEEDS",
     "INTERFACE_SMOKE_SCENARIOS",
     "PRIMARY_S5_S9_SCENARIOS",
+    "S5_CANDIDATE_V4_SAMPLING_POLICY",
+    "candidate_scenario_contract_v4",
     "primary_scenario_contract",
     "scenario_contract_for_id",
     "candidate_scenario_contract_v2",

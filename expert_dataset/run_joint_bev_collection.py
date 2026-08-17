@@ -44,6 +44,7 @@ from expert_dataset.riskentry_sidecar_storage import (
 )
 from scenarios.definitions import SCENARIO_BY_ID, get_scenario_definition
 from scenarios.bev_round13_contract import (
+    CANDIDATE_V4_CONTRACT_ID,
     FORMAL_V1_CONTRACT_ID,
     PRIMARY_S5_S9_SCENARIOS,
     primary_scenario_contract,
@@ -102,6 +103,7 @@ SECTION_KEYS = {
         "required_samples_per_episode",
         "max_simulator_attempts",
         "initial_feasibility_attempts",
+        "initial_feasibility_min_accepted_episodes",
         "minimum_lateral_range_m",
         "maximum_return_error_m",
         "accepted_background_count_quotas",
@@ -170,6 +172,7 @@ class TargetedSupplementRequirements:
     minimum_lateral_range_m: float
     maximum_return_error_m: float
     accepted_background_count_quotas: Mapping[int, int]
+    initial_feasibility_min_accepted_episodes: int = 1
     bootstrap_spawn_seeds: tuple[int, ...] = ()
     parallel_workers: int = 1
 
@@ -178,7 +181,7 @@ class TargetedSupplementRequirements:
         return sum(int(value) for value in self.accepted_episode_quotas.values())
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "scenario_id": self.scenario_id,
             "behavior_category": self.behavior_category,
             "rule_maker_profile_id": self.rule_maker_profile_id,
@@ -195,6 +198,12 @@ class TargetedSupplementRequirements:
             "bootstrap_spawn_seeds": list(self.bootstrap_spawn_seeds),
             "parallel_workers": self.parallel_workers,
         }
+        # Omitting the historical default preserves candidate-v3 fingerprints.
+        if self.initial_feasibility_min_accepted_episodes != 1:
+            payload["initial_feasibility_min_accepted_episodes"] = (
+                self.initial_feasibility_min_accepted_episodes
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -514,6 +523,15 @@ class JointCollectionRunConfig:
                 raise ValueError(
                     "targeted_supplement initial_feasibility_attempts must be positive"
                 )
+            if not (
+                1
+                <= targeted.initial_feasibility_min_accepted_episodes
+                <= targeted.initial_feasibility_attempts
+            ):
+                raise ValueError(
+                    "targeted_supplement initial feasibility minimum must be "
+                    "within the initial attempt window"
+                )
             if (
                 targeted.max_simulator_attempts
                 < targeted.initial_feasibility_attempts
@@ -558,6 +576,24 @@ class JointCollectionRunConfig:
                 raise ValueError(
                     "targeted_supplement parallel_workers must be an integer in [1, 4]"
                 )
+            if self.scenario_contract_id == CANDIDATE_V4_CONTRACT_ID:
+                expected_bootstrap = tuple(
+                    range(
+                        self.start_seed,
+                        self.start_seed + targeted.initial_feasibility_attempts,
+                    )
+                )
+                if (
+                    targeted.initial_feasibility_attempts != 10
+                    or targeted.initial_feasibility_min_accepted_episodes != 8
+                    or targeted.parallel_workers != 4
+                    or targeted.bootstrap_spawn_seeds != expected_bootstrap
+                    or sum(seed % 10 < 8 for seed in expected_bootstrap) != 8
+                ):
+                    raise ValueError(
+                        "candidate-v4 targeted collection requires the frozen "
+                        "10-attempt, 8-accepted, 4-worker bootstrap gate"
+                    )
 
     def immutable_fingerprint(self) -> str:
         return fingerprint_payload(
@@ -902,6 +938,11 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
                     targeted,
                     "targeted_supplement",
                     "initial_feasibility_attempts",
+                )
+            ),
+            initial_feasibility_min_accepted_episodes=int(
+                targeted.get(
+                    "initial_feasibility_min_accepted_episodes", 1
                 )
             ),
             minimum_lateral_range_m=float(
@@ -1536,6 +1577,8 @@ def _lateral_run_directions(modes: np.ndarray) -> list[str]:
 def _validate_targeted_rollout(
     rollout,
     requirements: TargetedSupplementRequirements,
+    *,
+    scenario_contract_id: str = "candidate_v3",
 ) -> dict[str, object]:
     """Validate label, physical motion and safety before any base commit."""
 
@@ -1556,11 +1599,31 @@ def _validate_targeted_rollout(
         )
     summary = dict(rollout.scenario_summary)
     evidence = summary.get("conflict_evidence", {})
+    resolved = summary.get("resolved_scenario_parameters", {})
     if not isinstance(evidence, Mapping):
         raise JointCollectionError(
             "targeted rollout has no conflict evidence",
             reason_code="targeted_scenario_not_realized",
         )
+    if not isinstance(resolved, Mapping):
+        resolved = {}
+    sampled_target = resolved.get("target_background_condition_sampled")
+    realized_target = evidence.get(
+        "s5_target_background_condition_realized"
+    )
+    if scenario_contract_id == CANDIDATE_V4_CONTRACT_ID:
+        if not isinstance(sampled_target, bool) or not isinstance(
+            realized_target, bool
+        ):
+            raise JointCollectionError(
+                "candidate-v4 rollout lacks sampled/realized traffic evidence",
+                reason_code="targeted_scenario_not_realized",
+            )
+        if sampled_target != realized_target:
+            raise JointCollectionError(
+                "candidate-v4 sampled traffic condition was not realized exactly",
+                reason_code="targeted_scenario_not_realized",
+            )
     observed = evidence.get("observed_behavior_class")
     if observed != requirements.behavior_category:
         if bool(evidence.get("mixed_direction_lane_change_completed", False)):
@@ -1676,6 +1739,16 @@ def _validate_targeted_rollout(
         "lateral_range_m_by_role": lateral_ranges,
         "return_error_m_by_role": return_errors,
         "platoon_safety_events": [],
+        "sampling_policy_id": resolved.get("sampling_policy_id"),
+        "target_background_condition_sampled": sampled_target,
+        "target_background_condition_realized": realized_target,
+        "left_relation": resolved.get("left_relation"),
+        "right_relation": resolved.get("right_relation"),
+        "left_offset_m": resolved.get("left_offset_m"),
+        "right_offset_m": resolved.get("right_offset_m"),
+        "s5_adjacent_background_realization": evidence.get(
+            "s5_adjacent_background_realization"
+        ),
     }
 
 
@@ -1806,7 +1879,8 @@ def _targeted_hard_stop_reason(
 ) -> str | None:
     if (
         simulator_attempts >= requirements.initial_feasibility_attempts
-        and accepted_episodes == 0
+        and accepted_episodes
+        < requirements.initial_feasibility_min_accepted_episodes
     ):
         return "targeted_initial_feasibility_failed"
     if simulator_attempts >= requirements.max_simulator_attempts:
@@ -1833,10 +1907,7 @@ def _plan_targeted_parallel_batch(
         batch_limit = min(
             batch_limit, config.max_episodes - start_episode_index
         )
-    if (
-        int(progress["accepted_episodes"]) == 0
-        and simulator_attempts < requirements.initial_feasibility_attempts
-    ):
+    if simulator_attempts < requirements.initial_feasibility_attempts:
         batch_limit = min(
             batch_limit,
             requirements.initial_feasibility_attempts - simulator_attempts,
@@ -1889,6 +1960,54 @@ def _plan_targeted_parallel_batch(
             }
         )
     return tuple(specs), entries
+
+
+def _targeted_initial_gate_status(
+    *,
+    bundle: JointRiskBundleIndex,
+    requirements: TargetedSupplementRequirements,
+    scenario_contract_id: str,
+) -> dict[str, object]:
+    """Audit the completed initial window before attempt 11 is schedulable."""
+
+    rows = [row for row in bundle.rows if row.outcome != "scheduler_skip"]
+    initial_rows = rows[: requirements.initial_feasibility_attempts]
+    seeds = [int(row.spawn_seed) for row in initial_rows]
+    accepted_rows = [row for row in initial_rows if row.base_status == "committed"]
+    status: dict[str, object] = {
+        "attempts": len(initial_rows),
+        "accepted_episodes": len(accepted_rows),
+        "minimum_accepted_episodes": (
+            requirements.initial_feasibility_min_accepted_episodes
+        ),
+        "unique_spawn_seeds": len(seeds) == len(set(seeds)),
+        "spawn_seeds": seeds,
+    }
+    passed = bool(
+        len(initial_rows) == requirements.initial_feasibility_attempts
+        and len(accepted_rows)
+        >= requirements.initial_feasibility_min_accepted_episodes
+        and status["unique_spawn_seeds"]
+    )
+    if scenario_contract_id == CANDIDATE_V4_CONTRACT_ID:
+        target_rows = [row for row in initial_rows if int(row.spawn_seed) % 10 < 8]
+        target_accepted = [
+            row for row in target_rows if row.base_status == "committed"
+        ]
+        status.update(
+            {
+                "expected_target_background_episodes": 8,
+                "target_background_episodes": len(target_rows),
+                "accepted_target_background_episodes": len(target_accepted),
+            }
+        )
+        passed = bool(
+            passed
+            and len(target_rows) == 8
+            and len(target_accepted) == 8
+        )
+    status["passed"] = passed
+    return status
 
 
 def _configure_episode(
@@ -1949,6 +2068,7 @@ def _isolated_targeted_rollout_worker(
         episode_env_config.update(
             {
                 "rule_maker_profile_id": requirements.rule_maker_profile_id,
+                "scenario_contract_id": config.scenario_contract_id,
                 "start_seed": int(spec.spawn_seed),
                 "num_scenarios": 1,
                 "horizon": episode_step_limit,
@@ -2254,6 +2374,7 @@ def _sidecar_start(
     base_dataset_fingerprint: str,
     decision_dt_s: float,
     scenario_contract_sha256: str | None = None,
+    scenario_contract_id: str = FORMAL_V1_CONTRACT_ID,
     rule_maker_profile_id: str | None = None,
 ) -> SidecarEpisodeStart:
     summary = dict(rollout.scenario_summary)
@@ -2272,6 +2393,7 @@ def _sidecar_start(
         decision_dt_s=decision_dt_s,
         base_dataset_fingerprint=base_dataset_fingerprint,
         scenario_parameters={
+            "scenario_contract_id": str(scenario_contract_id),
             "scenario_contract_sha256": (
                 scenario_contract_for_id(FORMAL_V1_CONTRACT_ID)["sha256"]
                 if scenario_contract_sha256 is None
@@ -2282,6 +2404,20 @@ def _sidecar_start(
             "scenario_trigger_step": summary.get("scenario_trigger_step"),
             "scenario_realized_step": summary.get("scenario_realized_step"),
             "rule_maker_profile_id": rule_maker_profile_id,
+            "sampling_policy_id": resolved.get("sampling_policy_id"),
+            "target_background_condition_sampled": resolved.get(
+                "target_background_condition_sampled"
+            ),
+            "left_relation": resolved.get("left_relation"),
+            "right_relation": resolved.get("right_relation"),
+            "left_offset_m": resolved.get("left_offset_m"),
+            "right_offset_m": resolved.get("right_offset_m"),
+            "s5_adjacent_background_realization": conflict_evidence.get(
+                "s5_adjacent_background_realization"
+            ),
+            "target_background_condition_realized": conflict_evidence.get(
+                "s5_target_background_condition_realized"
+            ),
             "observed_behavior_class": conflict_evidence.get(
                 "observed_behavior_class"
             ),
@@ -2332,7 +2468,11 @@ def _prepare_rollout_sidecar(
     )
 
 
-def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
+def run_collection(
+    config: JointCollectionRunConfig,
+    *,
+    stop_after_initial_gate: bool = False,
+) -> dict[str, object]:
     wall_start = time.perf_counter()
     scenario_contract = config.scenario_contract()
     scenario_contract_sha256 = str(scenario_contract["sha256"])
@@ -2480,12 +2620,36 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
             int, tuple[JointEpisodeSpec, tuple[str, object, object]]
         ] = {}
         targeted_pending_entries: list[dict[str, object]] = []
+        stopped_after_initial_gate = False
+        initial_gate_status: dict[str, object] | None = None
         try:
             while store.total_joint_samples < config.target_joint_steps:
                 episode_index = store.next_episode_index
                 if config.max_episodes > 0 and episode_index >= config.max_episodes:
                     break
                 if targeted_requirements is not None:
+                    if (
+                        targeted_simulator_attempts
+                        >= targeted_requirements.initial_feasibility_attempts
+                    ):
+                        initial_gate_status = _targeted_initial_gate_status(
+                            bundle=bundle,
+                            requirements=targeted_requirements,
+                            scenario_contract_id=config.scenario_contract_id,
+                        )
+                        if not bool(initial_gate_status["passed"]):
+                            raise JointCollectionError(
+                                "targeted supplement failed its initial acceptance gate",
+                                reason_code="targeted_initial_feasibility_failed",
+                            )
+                        if stop_after_initial_gate:
+                            stopped_after_initial_gate = True
+                            print(
+                                "[INFO] targeted initial gate passed; stopping "
+                                "before attempt 11 as requested",
+                                flush=True,
+                            )
+                            break
                     hard_stop_reason = _targeted_hard_stop_reason(
                         simulator_attempts=targeted_simulator_attempts,
                         accepted_episodes=int(
@@ -2704,6 +2868,9 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                         requirements=config.formal_diversity,
                     )
                 episode_env_config["rule_maker_profile_id"] = rule_maker_profile_id
+                episode_env_config["scenario_contract_id"] = (
+                    config.scenario_contract_id
+                )
                 episode_step_limit = config.episode_step_limit(spec.scenario_id)
                 episode_env_config.update(
                     {
@@ -2880,7 +3047,9 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 ):
                     try:
                         targeted_evidence = _validate_targeted_rollout(
-                            rollout, targeted_requirements
+                            rollout,
+                            targeted_requirements,
+                            scenario_contract_id=config.scenario_contract_id,
                         )
                         background_count = int(
                             targeted_evidence[
@@ -2922,6 +3091,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             base_dataset_fingerprint=base_fingerprint,
                             decision_dt_s=decision_dt_s,
                             scenario_contract_sha256=scenario_contract_sha256,
+                            scenario_contract_id=config.scenario_contract_id,
                             rule_maker_profile_id=rule_maker_profile_id,
                         ),
                         rollout=rollout,
@@ -3038,6 +3208,7 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                             ),
                             "targeted_supplement_evidence": targeted_evidence,
                             "rule_maker_profile_id": rule_maker_profile_id,
+                            "scenario_contract_id": config.scenario_contract_id,
                             "scenario_contract_sha256": scenario_contract_sha256,
                         },
                     )
@@ -3166,10 +3337,21 @@ def run_collection(config: JointCollectionRunConfig) -> dict[str, object]:
                 "observed": _serializable_targeted_progress(
                     targeted_progress, targeted_simulator_attempts
                 ),
+                "initial_gate": (
+                    initial_gate_status
+                    if initial_gate_status is not None
+                    else _targeted_initial_gate_status(
+                        bundle=bundle,
+                        requirements=targeted_requirements,
+                        scenario_contract_id=config.scenario_contract_id,
+                    )
+                ),
+                "stopped_after_initial_gate": stopped_after_initial_gate,
             }
-            _validate_targeted_completion(
-                targeted_progress, targeted_requirements
-            )
+            if not stopped_after_initial_gate:
+                _validate_targeted_completion(
+                    targeted_progress, targeted_requirements
+                )
 
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     return summary
@@ -3215,8 +3397,18 @@ def parse_args(argv: list[str] | None = None) -> JointCollectionRunConfig:
 
 def main(argv: list[str] | None = None) -> int:
     config = parse_args(argv)
+    raw_stop_after_gate = os.environ.get("STOP_AFTER_INITIAL_GATE", "0")
+    if raw_stop_after_gate not in {"0", "1"}:
+        raise ValueError("STOP_AFTER_INITIAL_GATE must be 0 or 1")
+    stop_after_initial_gate = raw_stop_after_gate == "1"
+    if stop_after_initial_gate and config.targeted_supplement is None:
+        raise ValueError(
+            "STOP_AFTER_INITIAL_GATE=1 requires targeted_supplement mode"
+        )
     try:
-        run_collection(config)
+        summary = run_collection(
+            config, stop_after_initial_gate=stop_after_initial_gate
+        )
     except JointCollectionError as exc:
         if config.targeted_supplement is not None:
             from expert_dataset.finalize_s5_targeted_supplement import (
@@ -3228,7 +3420,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
         raise
-    if config.targeted_supplement is not None:
+    if config.targeted_supplement is not None and stop_after_initial_gate:
+        from expert_dataset.finalize_s5_targeted_supplement import (
+            write_targeted_supplement_report,
+        )
+
+        report = write_targeted_supplement_report(config)
+        print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
+        if not bool(report.get("initial_gate", {}).get("passed", False)):
+            return 1
+        if not bool(
+            summary.get("targeted_supplement", {}).get(
+                "stopped_after_initial_gate", False
+            )
+        ):
+            return 1
+    elif config.targeted_supplement is not None:
         from expert_dataset.finalize_s5_targeted_supplement import (
             build_composition_manifest,
         )

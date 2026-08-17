@@ -22,6 +22,10 @@ from expert_dataset.run_joint_bev_collection import (
     load_run_config,
 )
 from expert_dataset.verify_joint_risk_bundle import verify_joint_risk_bundle
+from scenarios.bev_round13_contract import (
+    CANDIDATE_V3_CONTRACT_ID,
+    CANDIDATE_V4_CONTRACT_ID,
+)
 
 
 DEFAULT_ORIGINAL_BUNDLE = Path(
@@ -31,6 +35,11 @@ DEFAULT_ORIGINAL_BUNDLE = Path(
 DEFAULT_COMPOSITION_PATH = Path(
     "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/"
     "bev_joint_risk_candidate_v3_formal50k_plus_s5_release20_v1/"
+    "dataset_composition.json"
+)
+DEFAULT_CANDIDATE_V4_COMPOSITION_PATH = Path(
+    "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/"
+    "bev_joint_risk_candidate_v3_formal50k_plus_candidate_v4_s5_release20_v1/"
     "dataset_composition.json"
 )
 
@@ -154,16 +163,23 @@ def audit_targeted_supplement(
     rows = _read_rows(config.bundle_root)
     rejection_reasons: Counter[str] = Counter()
     behavior_categories: Counter[str] = Counter()
+    safety_event_counts: Counter[str] = Counter()
     split_counts: Counter[str] = Counter()
     background_counts: Counter[int] = Counter()
     seeds: list[int] = []
+    attempt_seeds: list[int] = []
+    attempt_audit_rows: list[dict[str, object]] = []
+    initial_gate_rows: list[dict[str, object]] = []
     physical_rows = []
     accepted_contract_rows = []
     simulator_attempts = 0
     for row in rows:
         if row.get("outcome") == "scheduler_skip":
             continue
+        episode_safety_events: set[str] = set()
         simulator_attempts += 1
+        attempt_seed = int(row["spawn_seed"])
+        attempt_seeds.append(attempt_seed)
         if row.get("base_status") != "committed":
             rejection_reasons[str(row.get("base_rejection_reason"))] += 1
         sidecar_metadata = None
@@ -181,6 +197,60 @@ def audit_targeted_supplement(
             if isinstance(parameters, Mapping):
                 observed = parameters.get("observed_behavior_class")
                 behavior_categories[str(observed or "unknown")] += 1
+            events = sidecar_metadata.get("events", [])
+            if isinstance(events, list):
+                for event in events:
+                    if isinstance(event, Mapping):
+                        actor_ids = event.get("actor_ids", [])
+                        if isinstance(actor_ids, list) and any(
+                            actor_id in {"P0", "P1", "P2"}
+                            for actor_id in actor_ids
+                        ):
+                            episode_safety_events.add(
+                                str(event.get("event_type"))
+                            )
+            safety_event_counts.update(episode_safety_events)
+        parameters = (
+            sidecar_metadata.get("scenario_parameters", {})
+            if isinstance(sidecar_metadata, Mapping)
+            else {}
+        )
+        if not isinstance(parameters, Mapping):
+            parameters = {}
+        attempt_audit_row = {
+            "attempt": simulator_attempts,
+            "episode_index": int(row["episode_index"]),
+            "spawn_seed": attempt_seed,
+            "base_committed": row.get("base_status") == "committed",
+            "sidecar_committed": row.get("sidecar_status") == "committed",
+            "target_background_condition_sampled": parameters.get(
+                "target_background_condition_sampled"
+            ),
+            "scenario_contract_id": parameters.get("scenario_contract_id"),
+            "sampling_policy_id": parameters.get("sampling_policy_id"),
+            "target_background_condition_realized": parameters.get(
+                "target_background_condition_realized"
+            ),
+            "left_relation": parameters.get("left_relation"),
+            "right_relation": parameters.get("right_relation"),
+            "left_offset_m": parameters.get("left_offset_m"),
+            "right_offset_m": parameters.get("right_offset_m"),
+            "actual_background_evidence": parameters.get(
+                "s5_adjacent_background_realization"
+            ),
+            "behavior_category": parameters.get("observed_behavior_class"),
+            "mixed_direction_lane_change_completed": parameters.get(
+                "mixed_direction_lane_change_completed"
+            ),
+            "reassembly_completed": parameters.get("reassembly_completed"),
+            "formation_recovered_after_hazard": parameters.get(
+                "formation_recovered_after_hazard"
+            ),
+            "rejection_reason": row.get("base_rejection_reason"),
+        }
+        attempt_audit_rows.append(attempt_audit_row)
+        if simulator_attempts <= requirements.initial_feasibility_attempts:
+            initial_gate_rows.append(attempt_audit_row)
         if row.get("base_status") != "committed":
             continue
         split = str(row["split"])
@@ -249,6 +319,9 @@ def audit_targeted_supplement(
                 == requirements.behavior_category,
                 evidence.get("platoon_safety_events") == [],
                 not unsafe_sidecar_events,
+                config.scenario_contract_id != CANDIDATE_V4_CONTRACT_ID
+                or attributes.get("scenario_contract_id")
+                == CANDIDATE_V4_CONTRACT_ID,
             )
         )
         accepted_contract_rows.append(contract_passed)
@@ -280,8 +353,110 @@ def audit_targeted_supplement(
             not pending_transaction,
         )
     )
+    gate_attempts_complete = (
+        len(initial_gate_rows) == requirements.initial_feasibility_attempts
+    )
+    initial_attempt_seeds = attempt_seeds[
+        : requirements.initial_feasibility_attempts
+    ]
+    gate_seed_unique = len(initial_attempt_seeds) == len(
+        set(initial_attempt_seeds)
+    )
+    gate_accepted = sum(
+        bool(row["base_committed"]) for row in initial_gate_rows
+    )
+    initial_gate_passed = bool(
+        gate_attempts_complete
+        and gate_seed_unique
+        and gate_accepted
+        >= requirements.initial_feasibility_min_accepted_episodes
+        and not pending_transaction
+    )
+    if config.scenario_contract_id == CANDIDATE_V4_CONTRACT_ID:
+        sampled_target_rows = [
+            row
+            for row in initial_gate_rows
+            if row["target_background_condition_sampled"] is True
+        ]
+        realized_target_rows = [
+            row
+            for row in initial_gate_rows
+            if row["target_background_condition_realized"] is True
+        ]
+        expected_seeds = list(
+            requirements.bootstrap_spawn_seeds[
+                : requirements.initial_feasibility_attempts
+            ]
+        )
+        evidence_complete = all(
+            isinstance(row["target_background_condition_sampled"], bool)
+            and isinstance(row["target_background_condition_realized"], bool)
+            and row["target_background_condition_sampled"]
+            == row["target_background_condition_realized"]
+            and row["scenario_contract_id"] == CANDIDATE_V4_CONTRACT_ID
+            and row["sampling_policy_id"] == "s5_release_enriched_80_v1"
+            for row in initial_gate_rows
+        )
+        all_target_rows_accepted = all(
+            bool(row["base_committed"]) for row in sampled_target_rows
+        )
+        initial_gate_passed = bool(
+            initial_gate_passed
+            and len(sampled_target_rows) == 8
+            and len(realized_target_rows) == 8
+            and all_target_rows_accepted
+            and evidence_complete
+            and initial_attempt_seeds == expected_seeds
+        )
+    else:
+        sampled_target_rows = []
+        realized_target_rows = []
+    complete = bool(complete and initial_gate_passed)
+
+    failure_categories = {
+        "scenario_not_realized": int(
+            rejection_reasons["targeted_scenario_not_realized"]
+        ),
+        "sustained_emergency_braking": int(
+            rejection_reasons["targeted_sustained_emergency_braking"]
+        ),
+        "release_without_recovery": int(
+            sum(
+                1
+                for row in attempt_audit_rows
+                if row["mixed_direction_lane_change_completed"] is True
+                and row["reassembly_completed"] is not True
+            )
+        ),
+        "formation_not_stable": sum(
+            1
+            for row in attempt_audit_rows
+            if row["behavior_category"]
+            == "temporary_formation_release_and_recovery"
+            and row["reassembly_completed"] is True
+            and row["formation_recovered_after_hazard"] is not True
+        ),
+        "collision": sum(
+            int(safety_event_counts[name])
+            for name in (
+                "collision_vehicle",
+                "collision_object",
+                "collision_sidewalk",
+            )
+        ),
+        "out_of_road": int(safety_event_counts["out_of_road"]),
+        "safety_rejected": int(rejection_reasons["targeted_safety_rejected"]),
+        "trajectory_infeasible": int(
+            rejection_reasons["targeted_trajectory_infeasible"]
+        ),
+        "transaction_failure": sum(
+            1
+            for row in attempt_audit_rows
+            if not bool(row["sidecar_committed"])
+        ),
+    }
     return {
-        "format": "s5-targeted-supplement-audit-v1",
+        "format": "s5-targeted-supplement-audit-v2",
         "bundle_root": str(config.bundle_root),
         "dataset_fingerprint": config.immutable_fingerprint(),
         "stop_reason": stop_reason,
@@ -299,6 +474,20 @@ def audit_targeted_supplement(
         ),
         "behavior_category_counts": dict(sorted(behavior_categories.items())),
         "rejection_reason_counts": dict(sorted(rejection_reasons.items())),
+        "failure_category_counts": failure_categories,
+        "initial_gate": {
+            "passed": initial_gate_passed,
+            "attempts": len(initial_gate_rows),
+            "required_attempts": requirements.initial_feasibility_attempts,
+            "accepted_episodes": gate_accepted,
+            "minimum_accepted_episodes": (
+                requirements.initial_feasibility_min_accepted_episodes
+            ),
+            "unique_spawn_seeds": gate_seed_unique,
+            "target_background_episodes_sampled": len(sampled_target_rows),
+            "target_background_episodes_realized": len(realized_target_rows),
+            "rows": initial_gate_rows,
+        },
         "physical_episode_audit": physical_rows,
         "pending_transaction": pending_transaction,
         "requirements": requirements.as_dict(),
@@ -376,15 +565,21 @@ def build_composition_manifest(
     config: JointCollectionRunConfig,
     *,
     original_bundle: Path = DEFAULT_ORIGINAL_BUNDLE,
-    output_path: Path = DEFAULT_COMPOSITION_PATH,
+    output_path: Path | None = None,
 ) -> dict[str, object]:
     report = write_targeted_supplement_report(config)
     if not report["complete"]:
         raise TargetedSupplementAuditError(
             "targeted supplement is incomplete; composition was not generated"
         )
+    if output_path is None:
+        output_path = (
+            DEFAULT_CANDIDATE_V4_COMPOSITION_PATH
+            if config.scenario_contract_id == CANDIDATE_V4_CONTRACT_ID
+            else DEFAULT_COMPOSITION_PATH
+        )
     original_verification = verify_joint_risk_bundle(
-        original_bundle, scenario_contract_id=config.scenario_contract_id
+        original_bundle, scenario_contract_id=CANDIDATE_V3_CONTRACT_ID
     )
     supplement_verification = verify_joint_risk_bundle(
         config.bundle_root, scenario_contract_id=config.scenario_contract_id
@@ -461,7 +656,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--original-bundle", type=Path, default=DEFAULT_ORIGINAL_BUNDLE)
-    parser.add_argument("--composition-output", type=Path, default=DEFAULT_COMPOSITION_PATH)
+    parser.add_argument("--composition-output", type=Path)
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--stop-reason")
     return parser.parse_args(argv)

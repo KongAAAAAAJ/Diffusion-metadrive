@@ -12,6 +12,8 @@ from typing import Mapping
 
 import numpy as np
 
+from scenarios.bev_round13_contract import CANDIDATE_V4_CONTRACT_ID
+
 
 SEVERITY_WEIGHTS: Mapping[str, float] = {
     "low": 0.3,
@@ -62,6 +64,7 @@ def resolve_s5_s9_parameters(
     local_route: str,
     ego_initial_speed_km_h: float,
     decision_dt_s: float = 0.1,
+    scenario_contract_id: str = "candidate_v3",
 ) -> dict[str, object]:
     """Resolve one finite, JSON-compatible logical scenario parameter set."""
 
@@ -76,16 +79,36 @@ def resolve_s5_s9_parameters(
     if scenario_id == "S5_hard_brake_lead":
         # Four admissible patterns keep each side and relation non-degenerate
         # without defining discrete lane-availability variants.
-        patterns = (
-            ("ahead", "behind"),
-            ("behind", "ahead"),
-            ("ahead", "ahead"),
-            ("behind", "behind"),
-        )
-        left_relation, right_relation = patterns[int(rng.randint(0, len(patterns)))]
+        candidate_v4 = str(scenario_contract_id) == CANDIDATE_V4_CONTRACT_ID
+        target_background = bool(int(spawn_seed) % 10 < 8) if candidate_v4 else None
+        if candidate_v4:
+            relation_rng = _purpose_rng(
+                spawn_seed, scenario_id, local_route, "candidate_v4_s5_relations"
+            )
+            patterns = (
+                (("ahead", "behind"), ("behind", "ahead"))
+                if target_background
+                else (("ahead", "ahead"), ("behind", "behind"))
+            )
+            left_relation, right_relation = patterns[
+                int(relation_rng.randint(0, len(patterns)))
+            ]
+        else:
+            patterns = (
+                ("ahead", "behind"),
+                ("behind", "ahead"),
+                ("ahead", "ahead"),
+                ("behind", "behind"),
+            )
+            left_relation, right_relation = patterns[
+                int(rng.randint(0, len(patterns)))
+            ]
 
         def offset(relation: str) -> float:
-            bounds = (-20.0, -10.0) if relation == "behind" else (10.0, 22.0)
+            if candidate_v4 and target_background:
+                bounds = (-20.0, -12.0) if relation == "behind" else (19.0, 22.0)
+            else:
+                bounds = (-20.0, -10.0) if relation == "behind" else (10.0, 22.0)
             return _uniform(rng, bounds)
 
         # Draw the complete logical tuple first and then couple the braking
@@ -156,6 +179,12 @@ def resolve_s5_s9_parameters(
             left_speed_km_h=float(left_speed),
             right_speed_km_h=float(right_speed),
         )
+        if candidate_v4:
+            result.update(
+                scenario_contract_id=CANDIDATE_V4_CONTRACT_ID,
+                sampling_policy_id="s5_release_enriched_80_v1",
+                target_background_condition_sampled=target_background,
+            )
     elif scenario_id == "S6_background_merge_in":
         # A separate digest bit avoids the all-odd fixed evaluation seeds
         # collapsing onto one target gap.
