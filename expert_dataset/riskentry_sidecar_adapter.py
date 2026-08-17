@@ -711,15 +711,38 @@ class MetaDriveRiskEntrySidecarAdapter:
                 for _, keys in event_flags
                 for key in keys
             }
-            if agent_id is not None and not raw_flags["out_of_road"]:
+            out_of_road_source: str | None = None
+            if agent_id is not None and bool(agent_info.get("out_of_road", False)):
+                out_of_road_source = "transition_info"
+            elif agent_id is not None:
                 out_checker = getattr(env, "_agent_is_out_of_road", None)
                 if callable(out_checker):
                     try:
                         raw_flags["out_of_road"] = bool(out_checker(agent_id))
-                    except Exception:
-                        pass
-            if not raw_flags["out_of_road"] and getattr(vehicle, "on_lane", None) is False:
-                raw_flags["out_of_road"] = True
+                    except Exception as exc:
+                        raise RiskEntrySidecarAdapterError(
+                            f"platoon out-of-road geometry check failed for {agent_id}"
+                        ) from exc
+                    if raw_flags["out_of_road"]:
+                        out_of_road_source = "agent_geometry_checker"
+                else:
+                    raw_flags["out_of_road"] = bool(
+                        getattr(vehicle, "out_of_road", False)
+                    )
+                    if raw_flags["out_of_road"]:
+                        out_of_road_source = "vehicle_flag"
+                    elif getattr(vehicle, "on_lane", None) is False:
+                        raw_flags["out_of_road"] = True
+                        out_of_road_source = "on_lane_fallback"
+            else:
+                raw_flags["out_of_road"] = bool(
+                    getattr(vehicle, "out_of_road", False)
+                )
+                if raw_flags["out_of_road"]:
+                    out_of_road_source = "vehicle_flag"
+                elif getattr(vehicle, "on_lane", None) is False:
+                    raw_flags["out_of_road"] = True
+                    out_of_road_source = "on_lane_fallback"
             agent_terminal = agent_id is not None and (
                 _mapping_flag(terminated, agent_id)
                 or _mapping_flag(truncated, agent_id)
@@ -731,6 +754,13 @@ class MetaDriveRiskEntrySidecarAdapter:
                 if event_key in self._emitted_agent_events:
                     continue
                 self._emitted_agent_events.add(event_key)
+                details = {
+                    "source_agent_id": agent_id,
+                    "source_object_id": source,
+                    "raw_flags": {key: raw_flags[key] for key in keys},
+                }
+                if event_type == "out_of_road" and out_of_road_source is not None:
+                    details["out_of_road_source"] = out_of_road_source
                 events.append(
                     SidecarRawEvent(
                         event_type=event_type,
@@ -738,11 +768,7 @@ class MetaDriveRiskEntrySidecarAdapter:
                         timestamp_s=timestamp_s,
                         actor_ids=(actor_id,),
                         terminal=agent_terminal,
-                        details={
-                            "source_agent_id": agent_id,
-                            "source_object_id": source,
-                            "raw_flags": {key: raw_flags[key] for key in keys},
-                        },
+                        details=details,
                     )
                 )
 

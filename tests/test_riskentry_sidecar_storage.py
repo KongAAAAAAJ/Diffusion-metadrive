@@ -129,6 +129,15 @@ def _append_episode(
         if collision and step == 2:
             store.append_event(
                 SidecarRawEvent(
+                    "out_of_road",
+                    2,
+                    0.2,
+                    actor_ids=("P0",),
+                    details={"out_of_road_source": "agent_geometry_checker"},
+                )
+            )
+            store.append_event(
+                SidecarRawEvent(
                     "collision_vehicle",
                     2,
                     0.2,
@@ -187,6 +196,12 @@ def test_atomic_writer_persists_exact_schema_mmap_arrays_and_manifests(tmp_path:
     assert collision_metadata["key_actor_ids"] == {"lead_braker": "V000"}
     assert collision_metadata["actors"][0]["actor_id"] == "P0"
     assert collision_metadata["actors"][3]["actor_id"] == "V000"
+    out_event = next(
+        event
+        for event in collision_metadata["events"]
+        if event["event_type"] == "out_of_road"
+    )
+    assert out_event["details"]["out_of_road_source"] == "agent_geometry_checker"
 
     report = verify_riskentry_sidecar_dataset(root)
     assert report["episodes"] == 2
@@ -194,6 +209,7 @@ def test_atomic_writer_persists_exact_schema_mmap_arrays_and_manifests(tmp_path:
     assert report["base_samples"] == 2
     assert report["outcomes"] == {"collision": 1, "success": 1}
     assert report["events"]["collision_vehicle"] == 1
+    assert report["events"]["out_of_road"] == 1
     assert report["scenario_contract_sha256"] == SCENARIO_HASH
 
 

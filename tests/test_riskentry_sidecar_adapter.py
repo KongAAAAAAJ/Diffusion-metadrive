@@ -278,6 +278,7 @@ def test_transition_and_scenario_events_belong_to_result_state_and_are_deduplica
     assert all(event.timestamp_s == pytest.approx(0.1) for event in capture.events)
     assert by_type["collision_vehicle"].actor_ids == ("P0",)
     assert by_type["collision_vehicle"].terminal is True
+    assert by_type["out_of_road"].details["out_of_road_source"] == "transition_info"
     assert by_type["terminated"].actor_ids == ("P0", "P1")
 
     repeated = adapter.capture_frame(
@@ -288,6 +289,76 @@ def test_transition_and_scenario_events_belong_to_result_state_and_are_deduplica
         terminated={"__all__": True},
     )
     assert not repeated.events
+
+
+def test_platoon_geometry_checker_is_authoritative_over_on_lane_fallback():
+    env = _env()
+    env.agents["agent1"].on_lane = False
+    env._agent_is_out_of_road = lambda agent_id: False
+    adapter = MetaDriveRiskEntrySidecarAdapter()
+    adapter.capture_frame(env, step_index=0, timestamp_s=0.0)
+
+    result = adapter.capture_frame(env, step_index=1, timestamp_s=0.1)
+
+    assert not [event for event in result.events if event.event_type == "out_of_road"]
+
+
+def test_platoon_geometry_checker_true_emits_sourced_out_of_road_event():
+    env = _env()
+    env._agent_is_out_of_road = lambda agent_id: agent_id == "agent2"
+    adapter = MetaDriveRiskEntrySidecarAdapter()
+    result = adapter.capture_frame(env, step_index=0, timestamp_s=0.0)
+    events = [event for event in result.events if event.event_type == "out_of_road"]
+
+    assert len(events) == 1
+    assert events[0].actor_ids == ("P2",)
+    assert events[0].details["out_of_road_source"] == "agent_geometry_checker"
+
+
+def test_platoon_geometry_checker_failure_is_not_silently_downgraded():
+    env = _env()
+
+    def _raise(_agent_id):
+        raise RuntimeError("geometry unavailable")
+
+    env._agent_is_out_of_road = _raise
+    adapter = MetaDriveRiskEntrySidecarAdapter()
+
+    with pytest.raises(RiskEntrySidecarAdapterError, match="geometry check failed"):
+        adapter.capture_frame(env, step_index=0, timestamp_s=0.0)
+
+
+def test_external_actor_preserves_on_lane_fallback():
+    traffic = _Vehicle("traffic", lane=_Lane())
+    traffic.on_lane = False
+    env = _env(externals=(("traffic-key", traffic),))
+    env._agent_is_out_of_road = lambda _agent_id: False
+    adapter = MetaDriveRiskEntrySidecarAdapter()
+
+    result = adapter.capture_frame(env, step_index=0, timestamp_s=0.0)
+    events = [event for event in result.events if event.event_type == "out_of_road"]
+
+    assert len(events) == 1
+    assert events[0].actor_ids == ("V000",)
+    assert events[0].details["out_of_road_source"] == "on_lane_fallback"
+
+
+def test_platoon_without_geometry_checker_records_compatible_fallback_sources():
+    env = _env()
+    env.agents["agent0"].out_of_road = True
+    env.agents["agent1"].on_lane = False
+    adapter = MetaDriveRiskEntrySidecarAdapter()
+
+    result = adapter.capture_frame(env, step_index=0, timestamp_s=0.0)
+    events = {
+        event.actor_ids[0]: event
+        for event in result.events
+        if event.event_type == "out_of_road"
+    }
+
+    assert set(events) == {"P0", "P1"}
+    assert events["P0"].details["out_of_road_source"] == "vehicle_flag"
+    assert events["P1"].details["out_of_road_source"] == "on_lane_fallback"
 
 
 def test_truncation_and_out_of_route_are_raw_events():

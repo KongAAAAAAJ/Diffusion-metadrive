@@ -1,0 +1,125 @@
+{
+  "format": "s5_candidate_v4_sidecar_out_of_road_fix_report_v1",
+  "recorded_at": "2026-08-18T07:21:38+08:00",
+  "status": "sidecar_fix_verified_formal_gate_not_rerun",
+  "repository_head_before_changes": "2437e2646cb8c4061c310eadd6e074d40b5cc37f",
+  "scope": {
+    "sidecar_out_of_road_precedence_only": true,
+    "scenario_modified": false,
+    "rule_maker_modified": false,
+    "controller_modified": false,
+    "collection_quota_modified": false,
+    "strict_validator_modified": false,
+    "event_schema_version_modified": false,
+    "dataset_fingerprint_modified": false
+  },
+  "root_cause": {
+    "summary": "For platoon actors, vehicle.on_lane=false was appended after a safe environment geometry result and produced false out_of_road events.",
+    "old_false_positive_seeds": [82021, 82022, 82024],
+    "old_false_positive_actors": {
+      "82021": ["P0"],
+      "82022": ["P0", "P1"],
+      "82024": ["P1"]
+    }
+  },
+  "implemented_precedence": [
+    "transition_info",
+    "agent_geometry_checker",
+    "vehicle_flag_when_no_agent_geometry_checker",
+    "on_lane_fallback_when_no_agent_geometry_checker"
+  ],
+  "fail_fast": {
+    "geometry_checker_exception": "RiskEntrySidecarAdapterError",
+    "silent_on_lane_fallback_after_geometry_exception": false
+  },
+  "event_sources": [
+    "transition_info",
+    "agent_geometry_checker",
+    "vehicle_flag",
+    "on_lane_fallback"
+  ],
+  "preserved_candidate_v4_bundle": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v1",
+    "modified": false,
+    "rewrite_or_relabel_performed": false,
+    "resume_performed": false,
+    "base_dataset_fingerprint": "8e19b181f504bbabd96a93cad2259eba6348ea60f4b7aefa118108f26d8488e1",
+    "sidecar_dataset_fingerprint": "1f8f16d43f5abbdb5146f584eb56429fbf2e770d94f4fd08128e682a24dfd0eb",
+    "bundle_manifest_sha256": "2adc69316bb7c4bfe021e8d3423699cea02f42a405bb509dc83f002825ecc2a6",
+    "initial_gate_report": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v1/targeted_supplement_report.json",
+    "initial_gate_report_sha256": "6c14034d6a5bcf2814f2f73eabeb6ee08e81129e3ce61ca507ee4f117dcf2458",
+    "historical_gate_result": {
+      "attempted_episodes": 10,
+      "strictly_accepted_episodes": 4,
+      "minimum_required": 8,
+      "passed": false
+    }
+  },
+  "tests": {
+    "adapter": {
+      "command": "pytest tests/test_riskentry_sidecar_adapter.py -q",
+      "result": "15 passed"
+    },
+    "storage_and_collector": {
+      "command": "pytest tests/test_riskentry_sidecar_storage.py tests/test_run_joint_bev_collection.py -q",
+      "result": "39 passed"
+    },
+    "covered_behaviors": [
+      "safe_geometry_overrides_transient_platoon_on_lane_false",
+      "true_geometry_and_transition_info_still_emit_out_of_road",
+      "geometry_checker_exception_fails_fast",
+      "external_actor_on_lane_fallback_is_preserved",
+      "platoon_vehicle_flag_and_on_lane_compatibility_without_geometry_checker",
+      "event_source_deduplication_and_storage_round_trip"
+    ]
+  },
+  "in_memory_replay": {
+    "config": "configs/dataset/data_collect_candidate_v4_s5_release20.yaml",
+    "mode": "sequential_exact_worker_path_without_bundle_persistence",
+    "log": "/tmp/s5_sidecar_oor_fix_20260818.log",
+    "config_fingerprint": "8e19b181f504bbabd96a93cad2259eba6348ea60f4b7aefa118108f26d8488e1",
+    "results": [
+      {
+        "episode_index": 4,
+        "spawn_seed": 82021,
+        "simulator_steps": 200,
+        "platoon_out_of_road_events": 0,
+        "formation_recovered_after_hazard": true,
+        "strict_acceptance_passed": true,
+        "strict_rejection_reason": null
+      },
+      {
+        "episode_index": 5,
+        "spawn_seed": 82022,
+        "simulator_steps": 200,
+        "platoon_out_of_road_events": 0,
+        "formation_recovered_after_hazard": false,
+        "strict_acceptance_passed": false,
+        "strict_rejection_reason": "targeted_release_without_recovery"
+      },
+      {
+        "episode_index": 7,
+        "spawn_seed": 82024,
+        "simulator_steps": 200,
+        "platoon_out_of_road_events": 0,
+        "formation_recovered_after_hazard": true,
+        "strict_acceptance_passed": true,
+        "strict_rejection_reason": null
+      }
+    ],
+    "authoritative_geometry_still_reported_out_of_road": false,
+    "replay_passed": true
+  },
+  "maintenance_gap": {
+    "missing_file": "docs/phases/phase2.md",
+    "action": "recorded_only_not_reconstructed_in_this_scope"
+  },
+  "eligibility": {
+    "sidecar_fix_verified": true,
+    "candidate_v4_initial_gate_passed": false,
+    "candidate_v4_supplement_complete": false,
+    "composition_generated": false,
+    "eligible_for_formal_training": false
+  },
+  "next_boundary": "Any formal first-ten rerun must use a new bundle root in a separate collection thread; the preserved failed candidate-v4 root must not be rewritten, relabeled, or resumed."
+}

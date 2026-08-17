@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-17T23:45:41+08:00",
+  "updated_at": "2026-08-18T07:22:19+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "59180d51ea1983589876cebd83a5d75110fa28a5",
+    "git_commit": "2437e2646cb8c4061c310eadd6e074d40b5cc37f",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": false,
@@ -25,7 +25,8 @@
     "uncommitted_s9_definition_update_present": false,
     "uncommitted_s9_implementation_present": false,
     "uncommitted_combined_acceptance_evidence_present": false,
-    "uncommitted_s5_targeted_supplement_present": true
+    "uncommitted_s5_targeted_supplement_present": true,
+    "uncommitted_s5_sidecar_out_of_road_fix_present": true
   },
   "current": {
     "phase": "stage2_at_risk_grpo_open",
@@ -367,9 +368,9 @@
       "remediation9999_accepted_for_formal50k_collection_precondition": true
     },
     "s5_targeted_supplement": {
-      "status": "candidate_v4_gate_code_ready_production_not_started",
-      "active_task": "run_candidate_v4_production_initial_gate_in_separate_thread",
-      "active_hard_gate": "first_10_actual_simulator_attempts_require_8_target_background_episodes_and_all_8_strictly_accepted",
+      "status": "candidate_v4_initial_gate_failed_sidecar_out_of_road_fix_verified",
+      "active_task": null,
+      "active_hard_gate": null,
       "scenario_id": "S5_hard_brake_lead",
       "behavior_category": "temporary_formation_release_and_recovery",
       "rule_maker_profile_id": "balanced",
@@ -391,14 +392,38 @@
       "config": "configs/dataset/data_collect_candidate_v4_s5_release20.yaml",
       "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v1",
       "dataset_fingerprint": "8e19b181f504bbabd96a93cad2259eba6348ea60f4b7aefa118108f26d8488e1",
-      "production_collection_started": false,
+      "production_collection_started": true,
+      "production_collection_finished": true,
+      "production_attempted_episodes": 10,
+      "production_accepted_episodes": 4,
+      "production_rejected_episodes": 6,
+      "production_target_background_episodes": 8,
+      "production_accepted_target_background_episodes": 4,
+      "production_initial_gate_passed": false,
+      "production_rejection_reason_counts": {
+        "targeted_trajectory_infeasible": 1,
+        "targeted_sustained_emergency_braking": 2,
+        "targeted_safety_rejected": 3
+      },
+      "production_report": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v1/targeted_supplement_report.json",
+      "production_preservation_policy": "preserve_failed_gate_bundle_without_rewrite_relabel_or_resume",
+      "sidecar_out_of_road_fix_verified": true,
+      "sidecar_out_of_road_fix_report": "evaluation/S5_CANDIDATE_V4_SIDECAR_OUT_OF_ROAD_FIX_REPORT.json",
+      "sidecar_out_of_road_fix_report_sha256": "cc851895ed7d2bfed8a29c919d918b43dbff044f27c1e9890e835a617d488491",
+      "sidecar_out_of_road_fix_replay_seeds": [82021, 82022, 82024],
+      "sidecar_out_of_road_fix_replay_platoon_out_of_road_events": 0,
+      "sidecar_out_of_road_fix_replay_strict_passed_seeds": [82021, 82024],
+      "sidecar_out_of_road_fix_replay_release_without_recovery_seeds": [82022],
+      "sidecar_out_of_road_fix_focused_tests_passed": 54,
+      "formal_rerun_requires_new_bundle_root": true,
+      "maintenance_gap": "docs/phases/phase2.md is missing; recorded without reconstruction in this scoped fix",
       "parallel_smoke_passed": true,
       "parallel_smoke_attempted_episodes": 4,
       "parallel_smoke_committed_base_episodes": 1,
       "parallel_smoke_committed_sidecar_episodes": 4,
       "parallel_smoke_pending_transaction": false,
       "parallel_smoke_root": "/tmp/s5_candidate_v4_smoke.4IeIj9",
-      "parallel_smoke_warning": "seed 82017 target layer failed strict recovery while seed 82020 passed; production 8-of-10 gate remains unmeasured and at material risk",
+      "parallel_smoke_warning": "Historical pre-production warning: seed 82017 target layer failed strict recovery while seed 82020 passed; the later production gate measured 4/10 and failed",
       "focused_tests_passed": 42,
       "composition_generated": false,
       "eligible_for_formal_training": false,
@@ -446,6 +471,11 @@
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. On 2026-08-17 the user explicitly waived only the failed holdout passed=true gate for bounded diagnostic GRPO-Open; the failed report and stop_terminal_speed blocker remain auditable, no formal eligibility was granted, and no GRPO training was started in this code-change round."
   },
   "source_of_truth": {
+    "s5_candidate_v4_sidecar_out_of_road_fix_report": {
+      "path": "evaluation/S5_CANDIDATE_V4_SIDECAR_OUT_OF_ROAD_FIX_REPORT.json",
+      "sha256": "cc851895ed7d2bfed8a29c919d918b43dbff044f27c1e9890e835a617d488491",
+      "role": "Records the platoon out-of-road source precedence fix, 54 passing focused tests, exact in-memory replay of seeds 82021/82022/82024 with zero platoon out-of-road events, preserved real recovery rejection for 82022, and the new-root boundary for any future formal rerun"
+    },
     "s5_targeted_supplement_implementation_report": {
       "path": "evaluation/S5_TARGETED_SUPPLEMENT_IMPLEMENTATION_REPORT.json",
       "sha256": "cd9f5107c09e1e9487e04f59d55f07661b7eeaa31c6ebb2fa29fdf773af05b70",
@@ -912,8 +942,29 @@
       "initial_gate_minimum_accepted_episodes": 8,
       "initial_gate_target_background_episodes": 8,
       "stop_after_initial_gate": true,
-      "production_collection_started": false,
+      "production_collection_started": true,
+      "production_collection_finished": true,
+      "observed_attempted_episodes": 10,
+      "observed_accepted_episodes": 4,
+      "observed_rejected_episodes": 6,
+      "observed_target_background_episodes": 8,
+      "observed_accepted_target_background_episodes": 4,
+      "rejection_reason_counts": {
+        "targeted_trajectory_infeasible": 1,
+        "targeted_sustained_emergency_braking": 2,
+        "targeted_safety_rejected": 3
+      },
       "initial_gate_passed": false,
+      "initial_gate_report": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v1/targeted_supplement_report.json",
+      "preservation_policy": "preserve_failed_gate_bundle_without_rewrite_relabel_or_resume",
+      "sidecar_out_of_road_fix_verified": true,
+      "sidecar_out_of_road_fix_report": "evaluation/S5_CANDIDATE_V4_SIDECAR_OUT_OF_ROAD_FIX_REPORT.json",
+      "sidecar_replay_results": {
+        "82021": "strictly_accepted_without_platoon_out_of_road",
+        "82022": "targeted_release_without_recovery_without_platoon_out_of_road",
+        "82024": "strictly_accepted_without_platoon_out_of_road"
+      },
+      "formal_rerun_requires_new_bundle_root": true,
       "collection_complete": false,
       "composition_generated": false,
       "eligible_for_formal_training": false
@@ -1042,8 +1093,9 @@
     "At-risk GRPO-Open may run only as Variant A, run_mode=smoke, with an explicit positive max_optimizer_steps. The dedicated launcher defaults internally to train+bypass under the recorded authorization; the failed source-bound holdout report remains mandatory and outputs remain formally ineligible."
   ],
   "next_actions": [
-    "In a separate collection thread, run STOP_AFTER_INITIAL_GATE=1 CONFIG=\"$PWD/configs/dataset/data_collect_candidate_v4_s5_release20.yaml\" bash scripts/run_bundle_v2_formal_collection.sh. Do not change code or config while the four-worker production collection is active.",
-    "Resolve the candidate-v4 first-ten S5 hard gate before attempt 11: exactly eight target-background episodes must be realized and all eight must pass strict acceptance. On either pass or failure stop at ten and generate no composition manifest; if fewer than eight pass, discuss traffic/expert changes with the user.",
+    "Preserve the failed candidate-v4 S5 supplement root as immutable historical evidence; do not rewrite, relabel, or resume it after the sidecar out-of-road fix.",
+    "If the user authorizes a formal first-ten S5 rerun, assign a new bundle root and run it in a separate collection thread with the unchanged candidate-v4 scenario contract, RuleMaker, controller, 4+4+2 schedule, and 8-of-10 hard gate. Do not start that rerun in this sidecar-fix round.",
+    "Treat seed 82022 targeted_release_without_recovery and seed 82017 targeted_trajectory_infeasible as remaining expert-behavior issues; the verified sidecar fix must not be represented as an S5 8-of-10 gate pass.",
     "In a separate training thread, run bash scripts/run_bev_joint_grpo.sh. The dedicated launcher now defaults to PIPELINE_STAGE=train, RUN_MODE=smoke, ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1, and MAX_OPTIMIZER_STEPS=20. Every checkpoint must record the bypass, failed report hash, blocker list, diagnostic_only=true, and eligible_for_formal_training=false.",
     "Monitor the bounded run for finite loss/gradients, informative groups, simulator safety, and checkpoint round-trip; stop on runtime or numerical failure rather than increasing the diagnostic budget.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
