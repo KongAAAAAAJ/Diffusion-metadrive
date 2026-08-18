@@ -1,0 +1,42 @@
+{
+  "format": "s5-candidate-v4-v2-user-stop-evidence-v1",
+  "recorded_at": "2026-08-18T11:02:10+08:00",
+  "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v2",
+  "dataset_fingerprint": "8e19b181f504bbabd96a93cad2259eba6348ea60f4b7aefa118108f26d8488e1",
+  "collection_log": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/bev_joint_risk_candidate_v4_s5_release20_v2/continuation_20260818_084736.log",
+  "collection_log_sha256": "a19902d1868812f83bf459b2102ec677e77b44be0da5eee0188ebb4f7cf1b0a3",
+  "bundle_episode_index_sha256": "b310fe8eb5a65ad41aa8c6ff8a3e076dbc4eb68b3b9566f37c6125e225a9c66f",
+  "user_stopped_collection": true,
+  "observed_episode_index_rows": 376,
+  "observed_simulator_rollouts": 90,
+  "observed_scheduler_skips": 286,
+  "accepted_episodes": 18,
+  "accepted_joint_samples": 3420,
+  "accepted_split_counts": {
+    "train": 16,
+    "val": 2,
+    "test": 0
+  },
+  "accepted_background_count_counts": {
+    "3": 5,
+    "4": 3,
+    "5": 5,
+    "6": 5
+  },
+  "accepted_behavior_category_counts": {
+    "temporary_formation_release_and_recovery": 18
+  },
+  "accepted_spawn_seeds_unique": true,
+  "pending_transaction": {
+    "present": true,
+    "episode_index": 376,
+    "split": "test",
+    "spawn_seed": 340309086,
+    "sha256": "d2ea9d2276c1c928a9d8ed7e30291e7dad118f92b4d124477e6d42b5caae2216"
+  },
+  "preservation_decision": "preserve_the_18_committed_episodes_and_leave_the_interrupted_pending_record_untouched",
+  "background_quota_decision": "the_user_no_longer_wants_background_actor_count_to_be_a_hard_gate_for_future_completion_but_requested_no_runtime_waiver_implementation_in_this_round",
+  "collection_complete": false,
+  "composition_generated": false,
+  "eligible_for_formal_training": false
+}

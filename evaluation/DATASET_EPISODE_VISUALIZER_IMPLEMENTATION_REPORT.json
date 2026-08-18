@@ -1,0 +1,94 @@
+{
+  "format": "dataset-episode-visualizer-implementation-report-v1",
+  "recorded_at": "2026-08-18T11:09:44+08:00",
+  "source_git_head": "3a45c7fbf28dfd022ebc524d7cb3669333107f18",
+  "implementation": {
+    "entrypoint": "tools/visualize_dataset_episode.py",
+    "entrypoint_sha256": "7a7dd9f15fc4ee7671a3eab91430e5b045e57ee37d7e107aa4deb1d7fde5b03b",
+    "offline_only": true,
+    "metadrive_started": false,
+    "dataset_mutated": false,
+    "selection_order": "committed_base_episodes_with_complete_matching_sidecar_sorted_by_global_episode_index",
+    "scenario_episode_numbering": "one_based",
+    "supported_dataset_roots": [
+      "bundle_root",
+      "platoon_joint_bev_root"
+    ],
+    "camera_modes": [
+      "follow",
+      "episode"
+    ],
+    "default_video": {
+      "codec": "h264",
+      "fps": 10.0,
+      "width": 1280,
+      "height": 720,
+      "history_seconds": 5.0
+    },
+    "terminal_invalid_pose_policy": "hide_invalid_actors_and_hold_the_last_valid_platoon_camera_center_without_interpolating_actor_state"
+  },
+  "tests": {
+    "path": "tests/test_visualize_dataset_episode.py",
+    "sha256": "c1ee51865f2db5e45747ec8ae07bf2d377f0de2d3f5540ae5788ec52173a43b4",
+    "command": "pytest tests/test_visualize_dataset_episode.py -q",
+    "passed": 8,
+    "failed": 0,
+    "coverage": [
+      "cross_split_global_index_sort_and_one_based_selection",
+      "sidecar_only_episode_exclusion",
+      "bundle_and_base_root_resolution",
+      "unknown_scenario_and_episode_range_errors",
+      "contract_fingerprint_rejection",
+      "vehicle_geometry_and_world_pixel_conversion",
+      "scenario_and_episode_listing",
+      "valid_mask_and_missing_terminal_platoon_pose_handling",
+      "streaming_h264_frame_count_resolution_fps_and_overwrite_protection",
+      "invalid_sidecar_shape_and_non_finite_valid_pose_rejection"
+    ]
+  },
+  "formal50k_smoke": {
+    "dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+    "scenario_id": "S5_hard_brake_lead",
+    "scenario_episode_number": 1,
+    "scenario_episode_count": 53,
+    "global_episode_index": 0,
+    "split": "train",
+    "spawn_seed": 17,
+    "raw_frames": 201,
+    "output": "/tmp/s5_episode_001.mp4",
+    "output_sha256": "241e59e843928b31b9ccf541933fc7ac3e181df8a8d24a772e912f6940de0d3b",
+    "output_bytes": 146849,
+    "decoded_width": 1280,
+    "decoded_height": 720,
+    "decoded_fps": 10.0,
+    "decoded_duration_s": 20.1,
+    "opencv_decodable": true,
+    "middle_frame_visually_reviewed": true
+  },
+  "s5_collection_boundary": {
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v2",
+    "collector_stopped_by_user": true,
+    "committed_episodes_preserved": 18,
+    "accepted_behavior_category": "temporary_formation_release_and_recovery",
+    "original_background_count_quotas": {
+      "3": 5,
+      "4": 5,
+      "5": 5,
+      "6": 5
+    },
+    "observed_background_count_counts": {
+      "3": 5,
+      "4": 3,
+      "5": 5,
+      "6": 5
+    },
+    "original_background_quota_treated_as_hard_gate": false,
+    "explicit_background_quota_waiver_switch_added": false,
+    "pending_transaction_modified": false,
+    "collection_completion_claimed": false
+  },
+  "verification": {
+    "git_diff_check_passed": true,
+    "formal_training_eligibility_changed": false
+  }
+}

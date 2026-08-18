@@ -23,6 +23,7 @@ from train.train_bev_joint_grpo_online import (
     _round_robin_training_buckets,
     _summarize_calibration_tracking,
     _validate_calibration_trajectory_optimizer_contract,
+    _validation_reward_comparison_metrics,
     _scenario_ready_for_primary_sampling,
 )
 from models.bev_planner.trajectory_optimizer import (
@@ -275,6 +276,97 @@ def test_calibration_variant_is_checked_before_source_load(tmp_path: Path) -> No
             output_root=tmp_path / "output",
             max_optimizer_steps=1,
         )
+
+
+def test_validation_reward_comparison_metrics_are_exact_and_reusable() -> None:
+    baseline = -10.5
+    first = _validation_reward_comparison_metrics(
+        {"validation/simulator_reward_mean": -8.0}, baseline
+    )
+    second = _validation_reward_comparison_metrics(
+        {"validation/simulator_reward_mean": -11.25}, baseline
+    )
+
+    assert set(first) == {
+        "validation/pretrain_reward",
+        "validation/reward_gain",
+    }
+    assert first["validation/pretrain_reward"] == pytest.approx(-10.5)
+    assert first["validation/reward_gain"] == pytest.approx(2.5)
+    assert second["validation/pretrain_reward"] == pytest.approx(-10.5)
+    assert second["validation/reward_gain"] == pytest.approx(-0.75)
+
+
+@pytest.mark.parametrize(
+    ("current", "pretrain"),
+    [
+        ({}, -10.0),
+        ({"validation/simulator_reward_mean": None}, -10.0),
+        ({"validation/simulator_reward_mean": float("nan")}, -10.0),
+        ({"validation/simulator_reward_mean": -10.0}, None),
+        ({"validation/simulator_reward_mean": -10.0}, float("inf")),
+    ],
+)
+def test_validation_reward_comparison_rejects_missing_or_nonfinite_rewards(
+    current: dict[str, object], pretrain: object
+) -> None:
+    with pytest.raises(OnlineGRPOError, match="missing|required|finite"):
+        _validation_reward_comparison_metrics(current, pretrain)
+
+
+def test_pretrain_baseline_uses_stage1_source_once_before_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_sha = "a" * 64
+    report = _calibration(tmp_path / "passed.json", passed=True)
+    calibration = json.loads(report.read_text(encoding="utf-8"))
+    calibration["source_stage1_sha256"] = source_sha
+    report.write_text(json.dumps(calibration), encoding="utf-8")
+
+    source_planner = object()
+    resumed_planner = object()
+    trainer = SimpleNamespace(planner=source_planner)
+    validation_planners = []
+
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online._load_trainer",
+        lambda *args, **kwargs: (trainer, {}, source_sha),
+    )
+
+    def fixed_validation(planner, **kwargs):
+        validation_planners.append(planner)
+        return {"validation/simulator_reward_mean": -10.0}
+
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online._fixed_simulator_validation",
+        fixed_validation,
+    )
+
+    def resume_loader(*args, **kwargs):
+        assert validation_planners == [source_planner]
+        trainer.planner = resumed_planner
+        raise OnlineGRPOError("resume loader reached")
+
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.load_grpo_checkpoint",
+        resume_loader,
+    )
+    config = JointGRPOOnlineConfig(
+        device="cpu",
+        calibration_report=report,
+        resume_checkpoint=tmp_path / "resume.pt",
+    )
+
+    with pytest.raises(OnlineGRPOError, match="resume loader reached"):
+        run_joint_grpo_training(
+            config,
+            variant="A",
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "stage1.pt",
+            output_root=tmp_path / "output",
+            max_optimizer_steps=1,
+        )
+    assert validation_planners == [source_planner]
 
 
 def test_json_optimizer_contract_is_canonicalized_without_relaxing_hash() -> None:

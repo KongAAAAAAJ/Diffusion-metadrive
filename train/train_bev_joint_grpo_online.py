@@ -1533,6 +1533,32 @@ def _fixed_simulator_validation(
     }
 
 
+def _validation_reward_comparison_metrics(
+    current_validation: Mapping[str, object],
+    pretrain_reward: object,
+) -> dict[str, float]:
+    reward_tag = "validation/simulator_reward_mean"
+    if reward_tag not in current_validation:
+        raise OnlineGRPOError(
+            f"fixed validation is missing required metric {reward_tag}"
+        )
+    try:
+        current_reward = float(current_validation[reward_tag])
+        baseline_reward = float(pretrain_reward)
+    except (TypeError, ValueError) as exc:
+        raise OnlineGRPOError(
+            "validation current and pretrain rewards must be finite scalars"
+        ) from exc
+    if not math.isfinite(current_reward) or not math.isfinite(baseline_reward):
+        raise OnlineGRPOError(
+            "validation current and pretrain rewards must be finite scalars"
+        )
+    return {
+        "validation/pretrain_reward": baseline_reward,
+        "validation/reward_gain": current_reward - baseline_reward,
+    }
+
+
 def run_joint_grpo_training(
     config: JointGRPOOnlineConfig,
     *,
@@ -1620,6 +1646,17 @@ def run_joint_grpo_training(
         "eligible_for_formal_training"
     ) is not True:
         raise OnlineGRPOError("formal GRPO requires an eligible Stage 1 source")
+    pretrain_validation = _fixed_simulator_validation(
+        trainer.planner,
+        device=torch_device,
+        reward_config=reward_config,
+        scenarios=config.scenarios,
+        seeds=HOLDOUT_SEEDS,
+    )
+    pretrain_reward = _validation_reward_comparison_metrics(
+        pretrain_validation,
+        pretrain_validation.get("validation/simulator_reward_mean"),
+    )["validation/pretrain_reward"]
 
     checkpoint_loader = (
         load_grpo_checkpoint if variant == "A" else load_grpo_b_checkpoint
@@ -1893,6 +1930,11 @@ def run_joint_grpo_training(
                     reward_config=reward_config,
                     scenarios=config.scenarios,
                     seeds=HOLDOUT_SEEDS,
+                )
+                validation.update(
+                    _validation_reward_comparison_metrics(
+                        validation, pretrain_reward
+                    )
                 )
                 last_metrics.update(validation)
                 for metric_name, metric_value in validation.items():

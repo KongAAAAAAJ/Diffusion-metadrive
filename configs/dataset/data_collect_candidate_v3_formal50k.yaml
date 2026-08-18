@@ -67,7 +67,7 @@ env_config:
   horizon: 200
   observation_mode: bev_gt
   use_render: false
-  image_observation: false
+  image_observation: falseStage 2 TensorBoard 增加预训练基线与收益增益
   image_on_cuda: false
   sensors: {}
   target_speed_km_h: 30.0

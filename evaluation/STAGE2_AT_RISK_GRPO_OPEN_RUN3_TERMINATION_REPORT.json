@@ -1,0 +1,44 @@
+{
+  "format": "stage2_at_risk_grpo_open_run_termination_v1",
+  "recorded_at": "2026-08-18T11:11:38+08:00",
+  "run": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/training_calibration_bypass/run_3",
+    "requested_optimizer_steps": 10000,
+    "last_metrics_optimizer_step": 4532,
+    "last_checkpoint_optimizer_step": 4500,
+    "last_checkpoint_environment_steps": 234493,
+    "completed_requested_budget": false,
+    "report_json_present": false,
+    "active_process_present_at_audit": false,
+    "termination_classification": "user_terminated_incomplete_diagnostic_run"
+  },
+  "artifacts": {
+    "last_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/training_calibration_bypass/run_3/checkpoints/last.pt",
+    "last_checkpoint_sha256": "714c530eb44f3bf96f733ba674c93a78ceef28bfea6e7a19706b2cb8000e42d1",
+    "best_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/training_calibration_bypass/run_3/checkpoints/best.pt",
+    "best_checkpoint_sha256": "10d6044cfa5a01a7d7f9833fca9850638b6114ea7cdffbc2bd0f856d63d5102b",
+    "metrics_jsonl": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/training_calibration_bypass/run_3/metrics.jsonl",
+    "tensorboard_event": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1/training_calibration_bypass/run_3/tb/events.out.tfevents.1786938532.Server.1691577.0"
+  },
+  "last_checkpoint_contract": {
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false,
+    "calibration_gate_bypassed": true,
+    "calibration_report_sha256": "28d43c1b22427bc84c85468f0eeee7ce643d17a509931010702cb5587c69ebfb",
+    "calibration_blockers": [
+      "stop_terminal_speed"
+    ]
+  },
+  "tensorboard_baseline_status": {
+    "validation_pretrain_reward_present": false,
+    "validation_reward_gain_present": false,
+    "run_3_backfill_authorized": false
+  },
+  "decision": {
+    "training_complete": false,
+    "stage2_gate_passed": false,
+    "calibration_gate_passed": false,
+    "formal_eligibility_changed": false,
+    "next_action": "Implement the requested TensorBoard-only pretrain baseline and reward-gain logging for subsequent new or resumed processes without modifying run_3."
+  }
+}

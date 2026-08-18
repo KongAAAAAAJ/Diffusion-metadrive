@@ -1,0 +1,82 @@
+{
+  "format": "stage2_pretrain_reward_tensorboard_implementation_v1",
+  "recorded_at": "2026-08-18T11:16:23+08:00",
+  "scope": {
+    "change": "Add a fixed Stage1 simulator-validation reward baseline and reward gain to Stage 2 TensorBoard validation and checkpoint metrics.",
+    "tensorboard_tags": [
+      "validation/pretrain_reward",
+      "validation/reward_gain"
+    ],
+    "reward_gain_definition": "validation/simulator_reward_mean - validation/pretrain_reward",
+    "baseline_lifetime": "once per training process",
+    "baseline_model": "original Stage1 source planner before any GRPO resume checkpoint is loaded",
+    "validation_scope": "the existing fixed S5-S9 simulator validation with HOLDOUT_SEEDS, explicit diffusion noise, trajectory optimizer, and calibrated reward config",
+    "run_3_backfilled": false
+  },
+  "implementation": {
+    "files": [
+      "train/train_bev_joint_grpo_online.py",
+      "tests/test_bev_joint_grpo_online.py"
+    ],
+    "comparison_helper": "_validation_reward_comparison_metrics",
+    "finite_contract": "Missing, non-numeric, NaN, or infinite current/pretrain rewards raise OnlineGRPOError.",
+    "logging_contract": "Comparison metrics are merged only after fixed validation, written by the existing SummaryWriter, and included in last.pt/best.pt metrics.",
+    "unchanged_contracts": [
+      "metrics.jsonl contains training-update metrics only",
+      "training sampling and action selection",
+      "training torch.Generator seed and rollout noise path",
+      "optimizer and update semantics",
+      "best-checkpoint key",
+      "calibration bypass and diagnostic-only metadata",
+      "formal eligibility fields"
+    ],
+    "maintenance_gap": "No dedicated Stage 2 training specialist skill exists; implementation followed the frozen project plan and train/train_bev_joint_grpo_online.py contract."
+  },
+  "verification": {
+    "focused_unit_command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_online.py -q",
+    "focused_unit_result": "20 passed",
+    "focused_regression_command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_online.py tests/test_bev_joint_grpo_a.py -q",
+    "focused_regression_result": "27 passed",
+    "smoke_command": "OUTPUT_ROOT=/tmp/stage2_pretrain_tb_smoke MAX_OPTIMIZER_STEPS=1 bash scripts/run_bev_joint_grpo.sh",
+    "smoke_result": {
+      "passed": true,
+      "run_dir": "/tmp/stage2_pretrain_tb_smoke/run_1",
+      "optimizer_step": 1,
+      "validation_step": 1,
+      "validation_simulator_reward_mean": -6.349323223531246,
+      "validation_pretrain_reward": -6.3218946749344465,
+      "validation_reward_gain": -0.02742854859679955,
+      "reward_gain_matches_current_minus_pretrain": true,
+      "tensorboard_tags_present": true,
+      "checkpoint_metrics_present": true,
+      "metrics_jsonl_has_validation_tags": false,
+      "checkpoint_round_trip": true,
+      "calibration_gate_bypassed": true,
+      "calibration_report_passed": false,
+      "calibration_blockers": [
+        "stop_terminal_speed"
+      ],
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false
+    },
+    "artifacts": {
+      "last_checkpoint": "/tmp/stage2_pretrain_tb_smoke/run_1/checkpoints/last.pt",
+      "last_checkpoint_sha256": "22ed22fe529e466270f3a4d1fe28771ff08590c35178f53e005ab31a8e3b128c",
+      "best_checkpoint": "/tmp/stage2_pretrain_tb_smoke/run_1/checkpoints/best.pt",
+      "best_checkpoint_sha256": "b32c917c0bf484bedf1c8e441d41c18355eea9bdbf3159e82ba2be763f2649fc",
+      "report": "/tmp/stage2_pretrain_tb_smoke/run_1/report.json",
+      "report_sha256": "5ae57b67095dce2c2eebc1bde5d338b40eb8c50da2d7978ddba4cc3a916caac1",
+      "tensorboard_event": "/tmp/stage2_pretrain_tb_smoke/run_1/tb/events.out.tfevents.1787022915.Server.4155133.0",
+      "tensorboard_event_sha256": "3c5d1e7b0408a5de3305c1f5bb815c9f891cdc3cc4721b5a21c26397fbf863f5",
+      "full_log": "/tmp/stage2_pretrain_tb_smoke_20260818.log"
+    }
+  },
+  "gate_result": {
+    "tensorboard_logging_enhancement_passed": true,
+    "stage2_training_completed": false,
+    "calibration_gate_passed": false,
+    "formal_qualification_passed": false,
+    "formal_eligibility_changed": false,
+    "next_permitted_action": "A future new or resumed bounded diagnostic Stage 2 process may use the new tags while retaining all existing diagnostic and formal-ineligibility boundaries."
+  }
+}
