@@ -35,7 +35,9 @@ BASE_FINGERPRINT = hashlib.sha256(b"base-joint-bev-fixture").hexdigest()
 SCENARIO_HASH = hashlib.sha256(b"scenario-contract-fixture").hexdigest()
 
 
-def _metadata(index: int, split: str = "train") -> SidecarEpisodeStart:
+def _metadata(
+    index: int, split: str = "train", scenario_hash: str = SCENARIO_HASH
+) -> SidecarEpisodeStart:
     return SidecarEpisodeStart(
         episode_index=index,
         split=split,
@@ -45,7 +47,7 @@ def _metadata(index: int, split: str = "train") -> SidecarEpisodeStart:
         decision_dt_s=0.1,
         base_dataset_fingerprint=BASE_FINGERPRINT,
         scenario_parameters={
-            "scenario_contract_sha256": SCENARIO_HASH,
+            "scenario_contract_sha256": scenario_hash,
             "brake_deceleration_mps2": 6.0,
         },
     )
@@ -211,6 +213,33 @@ def test_atomic_writer_persists_exact_schema_mmap_arrays_and_manifests(tmp_path:
     assert report["events"]["collision_vehicle"] == 1
     assert report["events"]["out_of_road"] == 1
     assert report["scenario_contract_sha256"] == SCENARIO_HASH
+
+
+def test_curated_verifier_requires_exact_declared_scenario_contract_set(
+    tmp_path: Path,
+):
+    root = tmp_path / "mixed_sidecar"
+    second_hash = hashlib.sha256(b"second-scenario-contract").hexdigest()
+    with RiskEntrySidecarDatasetStore(
+        root, base_dataset_fingerprint=BASE_FINGERPRINT, resume=False
+    ) as store:
+        _append_episode(store, _metadata(0, "train", SCENARIO_HASH))
+        _append_episode(store, _metadata(1, "val", second_hash))
+
+    with pytest.raises(RiskEntrySidecarVerificationError, match="more than one"):
+        verify_riskentry_sidecar_dataset(root)
+    with pytest.raises(RiskEntrySidecarVerificationError, match="allowlist"):
+        verify_riskentry_sidecar_dataset(
+            root, allowed_scenario_contract_sha256s=[SCENARIO_HASH]
+        )
+    report = verify_riskentry_sidecar_dataset(
+        root,
+        allowed_scenario_contract_sha256s=[second_hash, SCENARIO_HASH],
+    )
+    assert report["scenario_contract_sha256"] is None
+    assert report["scenario_contract_sha256s"] == sorted(
+        [SCENARIO_HASH, second_hash]
+    )
 
 
 def test_dense_masks_preserve_disappearance_and_reappearance(tmp_path: Path):

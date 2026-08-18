@@ -96,6 +96,7 @@ def verify_riskentry_sidecar_dataset(
     dataset_root: Path | str,
     *,
     splits: Sequence[str] = SPLIT_NAMES,
+    allowed_scenario_contract_sha256s: Sequence[str] | None = None,
 ) -> dict[str, object]:
     root = Path(dataset_root).expanduser()
     if not root.is_dir():
@@ -110,6 +111,23 @@ def verify_riskentry_sidecar_dataset(
     ):
         raise RiskEntrySidecarVerificationError(
             f"splits must be unique values from {SPLIT_NAMES}"
+        )
+    allowed_scenario_hashes = (
+        None
+        if allowed_scenario_contract_sha256s is None
+        else {str(value) for value in allowed_scenario_contract_sha256s}
+    )
+    if allowed_scenario_hashes is not None and (
+        not allowed_scenario_hashes
+        or any(
+            len(value) != 64
+            or value != value.lower()
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in allowed_scenario_hashes
+        )
+    ):
+        raise RiskEntrySidecarVerificationError(
+            "allowed scenario contract hashes must be lowercase SHA256 digests"
         )
     contract = validate_sidecar_dataset_contract(root)
     allowed_root = {"dataset_contract.json", ".writer.lock", *SPLIT_NAMES}
@@ -278,11 +296,18 @@ def verify_riskentry_sidecar_dataset(
         global_outcomes.update(split_outcomes)
         global_events.update(split_events)
 
-    if len(scenario_hashes) > 1:
+    if allowed_scenario_hashes is None and len(scenario_hashes) > 1:
         raise RiskEntrySidecarVerificationError(
             "episodes use more than one scenario contract SHA256"
         )
-    return {
+    if (
+        allowed_scenario_hashes is not None
+        and scenario_hashes != allowed_scenario_hashes
+    ):
+        raise RiskEntrySidecarVerificationError(
+            "observed scenario contract hashes do not match the curated allowlist"
+        )
+    report = {
         "format": SIDECAR_FORMAT,
         "schema_version": SIDECAR_SCHEMA_VERSION,
         "dataset_root": str(root.resolve()),
@@ -305,6 +330,10 @@ def verify_riskentry_sidecar_dataset(
         "payload_bytes": total_payload_bytes,
         "splits": report_splits,
     }
+    if allowed_scenario_hashes is not None:
+        report["scenario_contract_sha256"] = None
+        report["scenario_contract_sha256s"] = sorted(scenario_hashes)
+    return report
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

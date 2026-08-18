@@ -1,12 +1,12 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-18T11:16:23+08:00",
+  "updated_at": "2026-08-18T11:46:21+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "3a45c7fbf28dfd022ebc524d7cb3669333107f18",
+    "git_commit": "8859a1b34a413a345297f0a0df25d553139c7d0d",
     "worktree_clean_before_this_update": true,
-    "project_state_update_committed": false,
+    "project_state_update_committed": true,
     "uncommitted_plan_update_present": false,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
     "uncommitted_stage2_calibration_bypass_present": false,
@@ -29,10 +29,10 @@
     "uncommitted_s5_sidecar_out_of_road_fix_present": false,
     "uncommitted_s5_candidate_v4_v2_gate_config_present": false,
     "uncommitted_s5_candidate_v4_v2_gate_waiver_present": false,
-    "uncommitted_s5_candidate_v4_v2_user_stop_evidence_present": true,
-    "uncommitted_dataset_episode_visualizer_present": true,
-    "uncommitted_stage2_run3_termination_evidence_present": true,
-    "uncommitted_stage2_pretrain_reward_tb_present": true
+    "uncommitted_s5_candidate_v4_v2_user_stop_evidence_present": false,
+    "uncommitted_dataset_episode_visualizer_present": false,
+    "uncommitted_stage2_run3_termination_evidence_present": false,
+    "uncommitted_stage2_pretrain_reward_tb_present": false
   },
   "current": {
     "phase": "stage2_at_risk_grpo_open",
