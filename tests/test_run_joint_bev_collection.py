@@ -353,9 +353,21 @@ def test_candidate_v4_config_freezes_eight_of_ten_gate_and_seed_window() -> None
     ) == "targeted_initial_feasibility_failed"
     assert runner._targeted_hard_stop_reason(
         simulator_attempts=10,
+        accepted_episodes=6,
+        requirements=requirements,
+        allow_failed_initial_gate_continue=True,
+    ) is None
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=10,
         accepted_episodes=8,
         requirements=requirements,
     ) is None
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=200,
+        accepted_episodes=19,
+        requirements=requirements,
+        allow_failed_initial_gate_continue=True,
+    ) == "targeted_max_simulator_attempts_exhausted"
 
     rows = [
         SimpleNamespace(
@@ -380,6 +392,50 @@ def test_candidate_v4_config_freezes_eight_of_ten_gate_and_seed_window() -> None
     )
     assert status["accepted_episodes"] == 8
     assert status["passed"] is False
+
+
+def test_main_routes_explicit_candidate_v4_failed_gate_waiver(monkeypatch) -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v4_s5_release20.yaml")
+    )
+    observed = {}
+
+    def _run_collection(config, **kwargs):
+        observed["run"] = kwargs
+        return {}
+
+    def _build_composition(config, **kwargs):
+        observed["composition"] = kwargs
+        return {}
+
+    from expert_dataset import finalize_s5_targeted_supplement as finalizer
+
+    monkeypatch.setattr(runner, "parse_args", lambda argv: config)
+    monkeypatch.setattr(runner, "run_collection", _run_collection)
+    monkeypatch.setattr(finalizer, "build_composition_manifest", _build_composition)
+    monkeypatch.setenv("STOP_AFTER_INITIAL_GATE", "0")
+    monkeypatch.setenv("ALLOW_FAILED_INITIAL_GATE_CONTINUE", "1")
+
+    assert runner.main([]) == 0
+    assert observed["run"] == {
+        "stop_after_initial_gate": False,
+        "allow_failed_initial_gate_continue": True,
+    }
+    assert observed["composition"] == {
+        "initial_gate_failure_waived": True,
+    }
+
+
+def test_main_rejects_conflicting_targeted_gate_switches(monkeypatch) -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v4_s5_release20.yaml")
+    )
+    monkeypatch.setattr(runner, "parse_args", lambda argv: config)
+    monkeypatch.setenv("STOP_AFTER_INITIAL_GATE", "1")
+    monkeypatch.setenv("ALLOW_FAILED_INITIAL_GATE_CONTINUE", "1")
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        runner.main([])
 
 
 def test_targeted_parallel_batch_never_crosses_the_first_ten_gate() -> None:
@@ -904,6 +960,31 @@ def _small_candidate_v4_success_rollout() -> JointEpisodeRollout:
     )
 
 
+def _small_candidate_v4_control_rollout() -> JointEpisodeRollout:
+    rollout = _failed_targeted_rollout(6)
+    return runner.replace(
+        rollout,
+        scenario_summary={
+            "resolved_scenario_parameters": {
+                "incidental_background_actor_count": 4,
+                "sampling_policy_id": "s5_release_enriched_80_v1",
+                "target_background_condition_sampled": False,
+                "left_relation": "ahead",
+                "right_relation": "ahead",
+                "left_offset_m": 12.0,
+                "right_offset_m": 14.0,
+            },
+            "conflict_evidence": {
+                "incidental_background_realized_count": 4,
+                "observed_behavior_class": "keep_emergency_braking",
+                "s5_target_background_condition_realized": False,
+                "s5_adjacent_background_realization": {},
+            },
+        },
+        sidecar=_sidecar(6),
+    )
+
+
 def test_targeted_scheduler_skips_do_not_count_as_simulator_attempts(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1023,30 +1104,6 @@ def test_candidate_v4_stop_flag_passes_at_eight_and_resume_starts_at_attempt_ele
     )
     batch_sizes = []
 
-    def _control_rollout():
-        rollout = _failed_targeted_rollout(6)
-        return runner.replace(
-            rollout,
-            scenario_summary={
-                "resolved_scenario_parameters": {
-                    "incidental_background_actor_count": 4,
-                    "sampling_policy_id": "s5_release_enriched_80_v1",
-                    "target_background_condition_sampled": False,
-                    "left_relation": "ahead",
-                    "right_relation": "ahead",
-                    "left_offset_m": 12.0,
-                    "right_offset_m": 14.0,
-                },
-                "conflict_evidence": {
-                    "incidental_background_realized_count": 4,
-                    "observed_behavior_class": "keep_emergency_braking",
-                    "s5_target_background_condition_realized": False,
-                    "s5_adjacent_background_realization": {},
-                },
-            },
-            sidecar=_sidecar(6),
-        )
-
     def _batch(_config, specs):
         batch_sizes.append(len(specs))
         return tuple(
@@ -1055,7 +1112,7 @@ def test_candidate_v4_stop_flag_passes_at_eight_and_resume_starts_at_attempt_ele
                 (
                     _small_candidate_v4_success_rollout()
                     if spec.spawn_seed % 10 < 8
-                    else _control_rollout()
+                    else _small_candidate_v4_control_rollout()
                 ),
                 0.1,
             )
@@ -1099,6 +1156,96 @@ def test_candidate_v4_stop_flag_passes_at_eight_and_resume_starts_at_attempt_ele
     ]
     assert len(rows) == 11
     assert len({int(row["spawn_seed"]) for row in rows}) == 11
+
+
+def test_candidate_v4_explicit_failed_gate_waiver_resumes_at_attempt_eleven(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v4_s5_release20.yaml")
+    )
+    requirements = runner.replace(
+        config.targeted_supplement,
+        required_samples_per_episode=6,
+        accepted_background_count_quotas={4: 20},
+    )
+    config = runner.replace(
+        config,
+        bundle_root=tmp_path / "candidate_v4_waived_bundle",
+        dataset_root=tmp_path / "candidate_v4_waived_bundle/platoon_joint_bev",
+        sidecar_root=(
+            tmp_path / "candidate_v4_waived_bundle/riskentry_actor_sidecar"
+        ),
+        target_joint_steps=120,
+        max_episode_steps=6,
+        targeted_supplement=requirements,
+    )
+    batch_sizes = []
+    initial_failures = {82017, 82022}
+
+    def _batch(_config, specs):
+        batch_sizes.append(len(specs))
+        payloads = []
+        for spec in specs:
+            if spec.spawn_seed in {82018, 82019}:
+                rollout = _small_candidate_v4_control_rollout()
+            elif spec.spawn_seed in initial_failures:
+                rollout = runner.replace(
+                    _small_candidate_v4_success_rollout(),
+                    failure_reason="committed_trajectory_tracking_deviation",
+                )
+            else:
+                rollout = _small_candidate_v4_success_rollout()
+            payloads.append(("ok", rollout, 0.1))
+        return tuple(payloads)
+
+    monkeypatch.setattr(runner, "_collect_targeted_batch", _batch)
+    monkeypatch.setattr(
+        runner,
+        "SensorlessJointBEVPlatoonEnv",
+        lambda env_config: pytest.fail("parallel rollout created a serial env"),
+    )
+
+    with pytest.raises(runner.JointCollectionError) as initial_error:
+        runner.run_collection(config)
+    assert initial_error.value.reason_code == "targeted_initial_feasibility_failed"
+    assert batch_sizes == [4, 4, 2]
+
+    with pytest.raises(runner.JointCollectionError) as default_resume_error:
+        runner.run_collection(runner.replace(config, max_episodes=11))
+    assert default_resume_error.value.reason_code == (
+        "targeted_initial_feasibility_failed"
+    )
+    assert batch_sizes == [4, 4, 2]
+
+    with pytest.raises(runner.JointCollectionError) as waived_resume_error:
+        runner.run_collection(
+            runner.replace(config, max_episodes=11),
+            allow_failed_initial_gate_continue=True,
+        )
+    assert waived_resume_error.value.reason_code == "targeted_split_quota_incomplete"
+    assert batch_sizes == [4, 4, 2, 1]
+    rows = [
+        json.loads(line)
+        for line in (config.bundle_root / "bundle_episode_index.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if json.loads(line)["outcome"] != "scheduler_skip"
+    ]
+    assert len(rows) == 11
+    assert len({int(row["spawn_seed"]) for row in rows}) == 11
+    from expert_dataset.finalize_s5_targeted_supplement import (
+        audit_targeted_supplement,
+    )
+
+    audit = audit_targeted_supplement(
+        config,
+        initial_gate_failure_waived=True,
+    )
+    assert audit["initial_gate"]["passed"] is False
+    assert audit["initial_gate"]["failure_waiver_applied"] is True
+    assert audit["initial_gate"]["effective_passed"] is True
+    assert audit["complete"] is False
 
 
 def test_targeted_parallel_pending_batch_recovers_as_actual_attempts(

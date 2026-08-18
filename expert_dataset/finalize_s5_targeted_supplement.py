@@ -156,6 +156,7 @@ def audit_targeted_supplement(
     config: JointCollectionRunConfig,
     *,
     stop_reason: str | None = None,
+    initial_gate_failure_waived: bool = False,
 ) -> dict[str, object]:
     requirements = config.targeted_supplement
     if requirements is None:
@@ -411,7 +412,14 @@ def audit_targeted_supplement(
     else:
         sampled_target_rows = []
         realized_target_rows = []
-    complete = bool(complete and initial_gate_passed)
+    initial_gate_waiver_applied = bool(
+        initial_gate_failure_waived
+        and gate_attempts_complete
+        and not initial_gate_passed
+    )
+    complete = bool(
+        complete and (initial_gate_passed or initial_gate_waiver_applied)
+    )
 
     failure_categories = {
         "scenario_not_realized": int(
@@ -477,6 +485,10 @@ def audit_targeted_supplement(
         "failure_category_counts": failure_categories,
         "initial_gate": {
             "passed": initial_gate_passed,
+            "failure_waiver_applied": initial_gate_waiver_applied,
+            "effective_passed": bool(
+                initial_gate_passed or initial_gate_waiver_applied
+            ),
             "attempts": len(initial_gate_rows),
             "required_attempts": requirements.initial_feasibility_attempts,
             "accepted_episodes": gate_accepted,
@@ -498,8 +510,13 @@ def write_targeted_supplement_report(
     config: JointCollectionRunConfig,
     *,
     stop_reason: str | None = None,
+    initial_gate_failure_waived: bool = False,
 ) -> dict[str, object]:
-    report = audit_targeted_supplement(config, stop_reason=stop_reason)
+    report = audit_targeted_supplement(
+        config,
+        stop_reason=stop_reason,
+        initial_gate_failure_waived=initial_gate_failure_waived,
+    )
     _atomic_write_json(
         config.bundle_root / "targeted_supplement_report.json", report
     )
@@ -566,8 +583,12 @@ def build_composition_manifest(
     *,
     original_bundle: Path = DEFAULT_ORIGINAL_BUNDLE,
     output_path: Path | None = None,
+    initial_gate_failure_waived: bool = False,
 ) -> dict[str, object]:
-    report = write_targeted_supplement_report(config)
+    report = write_targeted_supplement_report(
+        config,
+        initial_gate_failure_waived=initial_gate_failure_waived,
+    )
     if not report["complete"]:
         raise TargetedSupplementAuditError(
             "targeted supplement is incomplete; composition was not generated"
@@ -659,6 +680,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--composition-output", type=Path)
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--stop-reason")
+    parser.add_argument(
+        "--allow-failed-initial-gate-continue",
+        action="store_true",
+    )
     return parser.parse_args(argv)
 
 
@@ -667,7 +692,11 @@ def main(argv: list[str] | None = None) -> int:
     config = load_run_config(args.config)
     if args.report_only:
         report = write_targeted_supplement_report(
-            config, stop_reason=args.stop_reason
+            config,
+            stop_reason=args.stop_reason,
+            initial_gate_failure_waived=(
+                args.allow_failed_initial_gate_continue
+            ),
         )
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0 if report["complete"] else 2
@@ -675,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
         config,
         original_bundle=args.original_bundle,
         output_path=args.composition_output,
+        initial_gate_failure_waived=args.allow_failed_initial_gate_continue,
     )
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
     return 0

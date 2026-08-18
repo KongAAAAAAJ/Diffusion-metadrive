@@ -1876,9 +1876,11 @@ def _targeted_hard_stop_reason(
     simulator_attempts: int,
     accepted_episodes: int,
     requirements: TargetedSupplementRequirements,
+    allow_failed_initial_gate_continue: bool = False,
 ) -> str | None:
     if (
-        simulator_attempts >= requirements.initial_feasibility_attempts
+        not allow_failed_initial_gate_continue
+        and simulator_attempts >= requirements.initial_feasibility_attempts
         and accepted_episodes
         < requirements.initial_feasibility_min_accepted_episodes
     ):
@@ -2472,7 +2474,24 @@ def run_collection(
     config: JointCollectionRunConfig,
     *,
     stop_after_initial_gate: bool = False,
+    allow_failed_initial_gate_continue: bool = False,
 ) -> dict[str, object]:
+    if allow_failed_initial_gate_continue and config.targeted_supplement is None:
+        raise ValueError(
+            "allow_failed_initial_gate_continue requires targeted_supplement mode"
+        )
+    if allow_failed_initial_gate_continue and stop_after_initial_gate:
+        raise ValueError(
+            "allow_failed_initial_gate_continue and stop_after_initial_gate "
+            "are mutually exclusive"
+        )
+    if (
+        allow_failed_initial_gate_continue
+        and config.scenario_contract_id != CANDIDATE_V4_CONTRACT_ID
+    ):
+        raise ValueError(
+            "allow_failed_initial_gate_continue is restricted to candidate-v4"
+        )
     wall_start = time.perf_counter()
     scenario_contract = config.scenario_contract()
     scenario_contract_sha256 = str(scenario_contract["sha256"])
@@ -2621,6 +2640,7 @@ def run_collection(
         ] = {}
         targeted_pending_entries: list[dict[str, object]] = []
         stopped_after_initial_gate = False
+        initial_gate_failure_waiver_applied = False
         initial_gate_status: dict[str, object] | None = None
         try:
             while store.total_joint_samples < config.target_joint_steps:
@@ -2637,10 +2657,24 @@ def run_collection(
                             requirements=targeted_requirements,
                             scenario_contract_id=config.scenario_contract_id,
                         )
-                        if not bool(initial_gate_status["passed"]):
+                        if (
+                            not bool(initial_gate_status["passed"])
+                            and not allow_failed_initial_gate_continue
+                        ):
                             raise JointCollectionError(
                                 "targeted supplement failed its initial acceptance gate",
                                 reason_code="targeted_initial_feasibility_failed",
+                            )
+                        if (
+                            not bool(initial_gate_status["passed"])
+                            and not initial_gate_failure_waiver_applied
+                        ):
+                            initial_gate_failure_waiver_applied = True
+                            print(
+                                "[WARNING] targeted initial gate failed but the "
+                                "explicit runtime continuation waiver is active; "
+                                "strict per-episode acceptance remains unchanged",
+                                flush=True,
                             )
                         if stop_after_initial_gate:
                             stopped_after_initial_gate = True
@@ -2656,6 +2690,9 @@ def run_collection(
                             targeted_progress["accepted_episodes"]
                         ),
                         requirements=targeted_requirements,
+                        allow_failed_initial_gate_continue=(
+                            allow_failed_initial_gate_continue
+                        ),
                     )
                     if hard_stop_reason is not None:
                         raise JointCollectionError(
@@ -2946,6 +2983,9 @@ def run_collection(
                                 targeted_progress["accepted_episodes"]
                             ),
                             requirements=targeted_requirements,
+                            allow_failed_initial_gate_continue=(
+                                allow_failed_initial_gate_continue
+                            ),
                         )
                         if hard_stop_reason is not None:
                             raise JointCollectionError(
@@ -3156,6 +3196,9 @@ def run_collection(
                                 targeted_progress["accepted_episodes"]
                             ),
                             requirements=targeted_requirements,
+                            allow_failed_initial_gate_continue=(
+                                allow_failed_initial_gate_continue
+                            ),
                         )
                         if hard_stop_reason is not None:
                             raise JointCollectionError(
@@ -3257,6 +3300,9 @@ def run_collection(
                                 targeted_progress["accepted_episodes"]
                             ),
                             requirements=targeted_requirements,
+                            allow_failed_initial_gate_continue=(
+                                allow_failed_initial_gate_continue
+                            ),
                         )
                         if hard_stop_reason is not None:
                             raise JointCollectionError(
@@ -3347,6 +3393,9 @@ def run_collection(
                     )
                 ),
                 "stopped_after_initial_gate": stopped_after_initial_gate,
+                "initial_gate_failure_waiver_applied": (
+                    initial_gate_failure_waiver_applied
+                ),
             }
             if not stopped_after_initial_gate:
                 _validate_targeted_completion(
@@ -3401,13 +3450,39 @@ def main(argv: list[str] | None = None) -> int:
     if raw_stop_after_gate not in {"0", "1"}:
         raise ValueError("STOP_AFTER_INITIAL_GATE must be 0 or 1")
     stop_after_initial_gate = raw_stop_after_gate == "1"
+    raw_allow_failed_gate = os.environ.get(
+        "ALLOW_FAILED_INITIAL_GATE_CONTINUE", "0"
+    )
+    if raw_allow_failed_gate not in {"0", "1"}:
+        raise ValueError("ALLOW_FAILED_INITIAL_GATE_CONTINUE must be 0 or 1")
+    allow_failed_initial_gate_continue = raw_allow_failed_gate == "1"
     if stop_after_initial_gate and config.targeted_supplement is None:
         raise ValueError(
             "STOP_AFTER_INITIAL_GATE=1 requires targeted_supplement mode"
         )
+    if allow_failed_initial_gate_continue and config.targeted_supplement is None:
+        raise ValueError(
+            "ALLOW_FAILED_INITIAL_GATE_CONTINUE=1 requires targeted_supplement mode"
+        )
+    if allow_failed_initial_gate_continue and stop_after_initial_gate:
+        raise ValueError(
+            "ALLOW_FAILED_INITIAL_GATE_CONTINUE and STOP_AFTER_INITIAL_GATE "
+            "are mutually exclusive"
+        )
+    if (
+        allow_failed_initial_gate_continue
+        and config.scenario_contract_id != CANDIDATE_V4_CONTRACT_ID
+    ):
+        raise ValueError(
+            "ALLOW_FAILED_INITIAL_GATE_CONTINUE=1 is restricted to candidate-v4"
+        )
     try:
         summary = run_collection(
-            config, stop_after_initial_gate=stop_after_initial_gate
+            config,
+            stop_after_initial_gate=stop_after_initial_gate,
+            allow_failed_initial_gate_continue=(
+                allow_failed_initial_gate_continue
+            ),
         )
     except JointCollectionError as exc:
         if config.targeted_supplement is not None:
@@ -3416,7 +3491,11 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             report = write_targeted_supplement_report(
-                config, stop_reason=getattr(exc, "reason_code", None)
+                config,
+                stop_reason=getattr(exc, "reason_code", None),
+                initial_gate_failure_waived=(
+                    allow_failed_initial_gate_continue
+                ),
             )
             print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
         raise
@@ -3440,7 +3519,10 @@ def main(argv: list[str] | None = None) -> int:
             build_composition_manifest,
         )
 
-        build_composition_manifest(config)
+        build_composition_manifest(
+            config,
+            initial_gate_failure_waived=allow_failed_initial_gate_continue,
+        )
     return 0
 
 

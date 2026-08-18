@@ -11,6 +11,11 @@ if [[ "${STOP_AFTER_INITIAL_GATE:-0}" != "0" ]] && [[ "${STOP_AFTER_INITIAL_GATE
   exit 2
 fi
 export STOP_AFTER_INITIAL_GATE="${STOP_AFTER_INITIAL_GATE:-0}"
+if [[ "${ALLOW_FAILED_INITIAL_GATE_CONTINUE:-0}" != "0" ]] && [[ "${ALLOW_FAILED_INITIAL_GATE_CONTINUE:-0}" != "1" ]]; then
+  echo "ALLOW_FAILED_INITIAL_GATE_CONTINUE must be 0 or 1" >&2
+  exit 2
+fi
+export ALLOW_FAILED_INITIAL_GATE_CONTINUE="${ALLOW_FAILED_INITIAL_GATE_CONTINUE:-0}"
 if [[ -n "${MAX_EPISODES:-}" ]]; then
   ARGS+=(--max-episodes "${MAX_EPISODES}")
 fi

@@ -1,0 +1,55 @@
+{
+  "format": "s5_candidate_v4_v2_gate_rerun_preparation_report_v1",
+  "recorded_at": "2026-08-18T07:36:47+08:00",
+  "status": "command_ready_collection_not_started",
+  "repository_head_before_changes": "186e2dbc185d416c5ac8b429a712c3f3eb92ca3d",
+  "authorization": "User requested a new ten-episode S5 gate rerun after the sidecar out-of-road fix.",
+  "preserved_history": {
+    "old_bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v1",
+    "rewrite_relabel_or_resume_allowed": false
+  },
+  "new_run": {
+    "config": "configs/dataset/data_collect_candidate_v4_s5_release20_v2.yaml",
+    "config_sha256": "8ca7406761eb2824c82af7c94f0b189d7ba8398e913286096dd844423efee7bb",
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v2",
+    "bundle_root_available_before_run": true,
+    "dataset_fingerprint": "8e19b181f504bbabd96a93cad2259eba6348ea60f4b7aefa118108f26d8488e1",
+    "scenario_contract_id": "candidate_v4",
+    "scenario_contract_sha256": "1003ccf55ec4131e8b89e2a65611f582df4c04ec124016fe63cc5f5119917d84",
+    "parallel_workers": 4,
+    "initial_attempts": 10,
+    "minimum_strict_accepts": 8,
+    "dispatch_schedule": [4, 4, 2],
+    "stop_after_initial_gate": true,
+    "bootstrap_spawn_seeds": [82017, 82018, 82019, 82020, 82021, 82022, 82023, 82024, 82025, 82026]
+  },
+  "config_equivalence": {
+    "reference_config": "configs/dataset/data_collect_candidate_v4_s5_release20.yaml",
+    "different_parsed_fields": [
+      "bundle_root",
+      "config_path",
+      "dataset_root",
+      "sidecar_root"
+    ],
+    "immutable_fingerprint_unchanged": true,
+    "scenario_rule_maker_controller_or_quota_changed": false
+  },
+  "verification": {
+    "config_load_and_fingerprint_recalculation_passed": true,
+    "collector_regression_command": "pytest tests/test_run_joint_bev_collection.py -q",
+    "collector_regression_result": "29 passed",
+    "bundle_root_absent_before_run": true
+  },
+  "execution": {
+    "started": false,
+    "must_run_in_separate_collection_thread": true,
+    "command": "STOP_AFTER_INITIAL_GATE=1 CONFIG=\"$PWD/configs/dataset/data_collect_candidate_v4_s5_release20_v2.yaml\" LOG_FILE=\"/media/kong/Elements_SE/Diffusion_Data/collection_logs/bev_joint_risk_candidate_v4_s5_release20_v2/collection_$(date +%Y%m%d_%H%M%S).log\" bash scripts/run_bundle_v2_formal_collection.sh"
+  },
+  "acceptance_boundary": {
+    "attempt_11_before_gate_resolution_allowed": false,
+    "pass_condition": "At least 8 of the first 10 actual simulator attempts pass strict targeted acceptance, including all eight target-background episodes.",
+    "failure_behavior": "Exit nonzero at ten attempts and retain the new v2 bundle and report as failed evidence.",
+    "composition_manifest_on_this_gate": false,
+    "eligible_for_formal_training": false
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "format": "s5_candidate_v4_v2_gate_waiver_continuation_report_v1",
+  "recorded_at": "2026-08-18T08:42:16+08:00",
+  "status": "continuation_command_ready_collection_not_resumed",
+  "repository_head_before_changes": "186e2dbc185d416c5ac8b429a712c3f3eb92ca3d",
+  "user_decision": {
+    "accepted_measured_initial_gate_result": "6/10",
+    "authorized_on": "2026-08-18",
+    "scope": "Waive only the candidate-v4 v2 first-ten 8/10 continuation gate and continue collecting the same strict release-and-recovery category to 20 accepted episodes."
+  },
+  "measured_v2_gate": {
+    "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v2",
+    "targeted_supplement_report": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v2/targeted_supplement_report.json",
+    "targeted_supplement_report_sha256": "b2f3db2f89ea73cc358117517c4dbe7230d19abdb8c7d4b5cb7670a5a93b1ac5",
+    "dataset_fingerprint": "8e19b181f504bbabd96a93cad2259eba6348ea60f4b7aefa118108f26d8488e1",
+    "simulator_attempts": 10,
+    "strictly_accepted_episodes": 6,
+    "target_background_sampled": 8,
+    "target_background_realized": 8,
+    "platoon_safety_rejections": 0,
+    "pending_transaction": false,
+    "duplicate_spawn_seeds": []
+  },
+  "continuation_contract": {
+    "target_total_accepted_episodes": 20,
+    "accepted_episodes_already_stored": 6,
+    "remaining_strict_accepts": 14,
+    "accepted_split_quotas": {"train": 16, "val": 2, "test": 2},
+    "stored_split_counts": {"train": 5, "val": 1, "test": 0},
+    "remaining_split_counts": {"train": 11, "val": 1, "test": 2},
+    "accepted_background_count_quotas": {"3": 5, "4": 5, "5": 5, "6": 5},
+    "stored_background_count_counts": {"3": 1, "4": 1, "5": 3, "6": 1},
+    "remaining_background_count_counts": {"3": 4, "4": 4, "5": 2, "6": 4},
+    "maximum_total_simulator_attempts": 200,
+    "remaining_attempt_budget": 190,
+    "parallel_workers": 4,
+    "behavior_category": "temporary_formation_release_and_recovery",
+    "rule_maker_profile_id": "balanced"
+  },
+  "waiver_semantics": {
+    "runtime_switch": "ALLOW_FAILED_INITIAL_GATE_CONTINUE=1",
+    "default_behavior_unchanged": true,
+    "initial_gate_yaml_or_contract_modified": false,
+    "dataset_fingerprint_modified": false,
+    "strict_per_episode_category_gate_modified": false,
+    "physical_recovery_gate_modified": false,
+    "platoon_safety_gate_modified": false,
+    "split_or_background_quota_modified": false,
+    "maximum_attempt_limit_modified": false,
+    "measured_initial_gate_passed_rewritten": false,
+    "audit_records_failure_waiver_separately": true
+  },
+  "verification": {
+    "collector_regression_command": "pytest tests/test_run_joint_bev_collection.py -q",
+    "collector_regression_result": "32 passed",
+    "real_v2_read_only_preflight": {
+      "measured_gate_passed": false,
+      "failure_waiver_applied": true,
+      "effective_continuation_gate_passed": true,
+      "pending_transaction": false
+    },
+    "launcher_shell_syntax_passed": true,
+    "fingerprint_recalculation_passed": true
+  },
+  "execution": {
+    "started": false,
+    "must_run_in_separate_collection_thread": true,
+    "command": "ALLOW_FAILED_INITIAL_GATE_CONTINUE=1 STOP_AFTER_INITIAL_GATE=0 CONFIG=\"$PWD/configs/dataset/data_collect_candidate_v4_s5_release20_v2.yaml\" LOG_FILE=\"/media/kong/Elements_SE/Diffusion_Data/collection_logs/bev_joint_risk_candidate_v4_s5_release20_v2/continuation_$(date +%Y%m%d_%H%M%S).log\" bash scripts/run_bundle_v2_formal_collection.sh"
+  },
+  "eligibility": {
+    "supplement_complete": false,
+    "composition_generated": false,
+    "eligible_for_formal_training": false
+  }
+}

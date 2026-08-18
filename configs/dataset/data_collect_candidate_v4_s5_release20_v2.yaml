@@ -1,0 +1,65 @@
+dataset:
+  name: platoon_joint_bev
+  sidecar_name: riskentry_actor_sidecar
+  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release20_v2
+  scenario_contract: candidate_v4
+
+split:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  seed: 17
+
+collection:
+  target_joint_steps: 3800
+  start_seed: 82017
+  max_episodes: 1000
+  max_episode_steps: 200
+  resume: true
+  scenario_weights:
+    S5_hard_brake_lead: 1.0
+  traffic_density_min: 0.0
+  traffic_density_max: 0.0
+
+targeted_supplement:
+  enabled: true
+  scenario_id: S5_hard_brake_lead
+  behavior_category: temporary_formation_release_and_recovery
+  rule_maker_profile_id: balanced
+  accepted_episode_quotas:
+    train: 16
+    val: 2
+    test: 2
+  required_samples_per_episode: 190
+  max_simulator_attempts: 200
+  initial_feasibility_attempts: 10
+  initial_feasibility_min_accepted_episodes: 8
+  minimum_lateral_range_m: 2.5
+  maximum_return_error_m: 0.5
+  parallel_workers: 4
+  bootstrap_spawn_seeds:
+    - 82017
+    - 82018
+    - 82019
+    - 82020
+    - 82021
+    - 82022
+    - 82023
+    - 82024
+    - 82025
+    - 82026
+  accepted_background_count_quotas:
+    3: 5
+    4: 5
+    5: 5
+    6: 5
+
+env_config:
+  num_agents: 3
+  horizon: 200
+  observation_mode: bev_gt
+  use_render: false
+  image_observation: false
+  image_on_cuda: false
+  sensors: {}
+  target_speed_km_h: 30.0
