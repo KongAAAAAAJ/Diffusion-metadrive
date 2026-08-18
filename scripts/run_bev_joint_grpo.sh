@@ -6,19 +6,14 @@ PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
 VARIANT="${VARIANT:-A}"
 RUN_MODE="${RUN_MODE:-smoke}"
 PIPELINE_STAGE="${PIPELINE_STAGE:-train}"
-ALLOW_FAILED_CALIBRATION_DIAGNOSTIC="${ALLOW_FAILED_CALIBRATION_DIAGNOSTIC:-1}"
+ALLOW_FAILED_CALIBRATION_DIAGNOSTIC="${ALLOW_FAILED_CALIBRATION_DIAGNOSTIC:-0}"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/configs/train/bev_joint_grpo.yaml}"
 SOURCE_CHECKPOINT="${SOURCE_CHECKPOINT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt}"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_at_risk/stage1_run_1}"
-DEVELOPMENT_REPORT="${DEVELOPMENT_REPORT:-${ARTIFACT_ROOT}/calibration/A-development.json}"
-CALIBRATION_REPORT="${CALIBRATION_REPORT:-${ARTIFACT_ROOT}/calibration/A-holdout.json}"
-if [[ "$ALLOW_FAILED_CALIBRATION_DIAGNOSTIC" == "1" ]]; then
-  DEFAULT_OUTPUT_ROOT="${ARTIFACT_ROOT}/training_calibration_bypass"
-  DEFAULT_LOG_ROOT="${ARTIFACT_ROOT}/logs_calibration_bypass"
-else
-  DEFAULT_OUTPUT_ROOT="${ARTIFACT_ROOT}/training"
-  DEFAULT_LOG_ROOT="${ARTIFACT_ROOT}/logs"
-fi
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_reward_v2/stage1_run_1}"
+DEVELOPMENT_REPORT="${DEVELOPMENT_REPORT:-${ARTIFACT_ROOT}/calibration_v3/A-development.json}"
+CALIBRATION_REPORT="${CALIBRATION_REPORT:-${ARTIFACT_ROOT}/calibration_v3/A-holdout.json}"
+DEFAULT_OUTPUT_ROOT="${ARTIFACT_ROOT}/training_v2"
+DEFAULT_LOG_ROOT="${ARTIFACT_ROOT}/logs_v2"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$DEFAULT_OUTPUT_ROOT}"
 LOG_ROOT="${LOG_ROOT:-$DEFAULT_LOG_ROOT}"
 DEVICE="${DEVICE:-cuda}"
@@ -33,12 +28,8 @@ if [[ "$RUN_MODE" != "smoke" ]]; then
   echo "at-risk GRPO-Open requires RUN_MODE=smoke" >&2
   exit 2
 fi
-if [[ "$ALLOW_FAILED_CALIBRATION_DIAGNOSTIC" != "0" && "$ALLOW_FAILED_CALIBRATION_DIAGNOSTIC" != "1" ]]; then
-  echo "ALLOW_FAILED_CALIBRATION_DIAGNOSTIC must be 0 or 1" >&2
-  exit 2
-fi
-if [[ "$ALLOW_FAILED_CALIBRATION_DIAGNOSTIC" == "1" && "$PIPELINE_STAGE" != "train" ]]; then
-  echo "calibration bypass requires PIPELINE_STAGE=train" >&2
+if [[ "$ALLOW_FAILED_CALIBRATION_DIAGNOSTIC" != "0" ]]; then
+  echo "Stage2 joint reward V2 forbids failed-calibration bypass" >&2
   exit 2
 fi
 if [[ ! "$MAX_OPTIMIZER_STEPS" =~ ^[1-9][0-9]*$ ]]; then
@@ -104,10 +95,6 @@ ARGS=(
   --output-root "$OUTPUT_ROOT"
   --max-optimizer-steps "$MAX_OPTIMIZER_STEPS"
 )
-if [[ "$ALLOW_FAILED_CALIBRATION_DIAGNOSTIC" == "1" ]]; then
-  ARGS+=(--allow-failed-calibration-diagnostic)
-fi
-
 run_training() {
   if [[ ! -f "$CALIBRATION_REPORT" ]]; then
     echo "holdout calibration report does not exist: $CALIBRATION_REPORT" >&2

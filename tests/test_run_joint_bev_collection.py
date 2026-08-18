@@ -394,6 +394,81 @@ def test_candidate_v4_config_freezes_eight_of_ten_gate_and_seed_window() -> None
     assert status["passed"] is False
 
 
+def test_candidate_v4_release30_config_freezes_descriptive_background_contract() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v4_s5_release30.yaml")
+    )
+    requirements = config.targeted_supplement
+    assert requirements is not None
+    assert config.bundle_root.name == (
+        "bev_joint_risk_candidate_v4_s5_release30_v1"
+    )
+    assert config.target_joint_steps == 5700
+    assert requirements.accepted_episode_quotas == {
+        "train": 24,
+        "val": 3,
+        "test": 3,
+    }
+    assert requirements.accepted_background_count_quotas == {}
+    assert requirements.finalization_mode == "audit_only"
+    assert requirements.initial_feasibility_attempts == 10
+    assert requirements.initial_feasibility_min_accepted_episodes == 2
+    assert requirements.max_simulator_attempts == 300
+    assert requirements.parallel_workers == 4
+    assert requirements.bootstrap_spawn_seeds == tuple(range(83017, 83027))
+    assert config.immutable_fingerprint() == (
+        "a02cf2cf4a0e6a44adec7248ea9b4230a841cef612ff3e07520085c2203b2e77"
+    )
+
+    rows = [
+        SimpleNamespace(
+            outcome="accepted" if offset < 2 else "sidecar_only",
+            spawn_seed=seed,
+            base_status="committed" if offset < 2 else "rejected",
+        )
+        for offset, seed in enumerate(requirements.bootstrap_spawn_seeds)
+    ]
+    status = runner._targeted_initial_gate_status(
+        bundle=SimpleNamespace(rows=rows),
+        requirements=requirements,
+        scenario_contract_id="candidate_v4",
+    )
+    assert status["passed"] is True
+    assert status["accepted_episodes"] == 2
+    assert status["target_background_episodes"] == 8
+    assert status["accepted_target_background_episodes"] == 1
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=10,
+        accepted_episodes=1,
+        requirements=requirements,
+    ) == "targeted_initial_feasibility_failed"
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=10,
+        accepted_episodes=2,
+        requirements=requirements,
+    ) is None
+    assert runner._targeted_hard_stop_reason(
+        simulator_attempts=300,
+        accepted_episodes=29,
+        requirements=requirements,
+    ) == "targeted_max_simulator_attempts_exhausted"
+
+    progress = runner._empty_targeted_progress(requirements)
+    progress["accepted_episodes"] = 30
+    progress["split_counts"] = {"train": 24, "val": 3, "test": 3}
+    progress["background_count_counts"] = {3: 30, 4: 0, 5: 0, 6: 0}
+    runner._validate_targeted_completion(progress, requirements)
+    observed = runner._serializable_targeted_progress(
+        progress, 150, requirements
+    )
+    assert observed["background_count_counts"] == {
+        "3": 30,
+        "4": 0,
+        "5": 0,
+        "6": 0,
+    }
+
+
 def test_main_routes_explicit_candidate_v4_failed_gate_waiver(monkeypatch) -> None:
     config = runner.load_run_config(
         Path("configs/dataset/data_collect_candidate_v4_s5_release20.yaml")
@@ -424,6 +499,36 @@ def test_main_routes_explicit_candidate_v4_failed_gate_waiver(monkeypatch) -> No
     assert observed["composition"] == {
         "initial_gate_failure_waived": True,
     }
+
+
+def test_main_release30_writes_audit_without_legacy_composition(monkeypatch) -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v4_s5_release30.yaml")
+    )
+    observed = {}
+
+    def _run_collection(config, **kwargs):
+        observed["run"] = kwargs
+        return {}
+
+    def _write_report(config, **kwargs):
+        observed["audit"] = kwargs
+        return {"complete": True}
+
+    from expert_dataset import finalize_s5_targeted_supplement as finalizer
+
+    monkeypatch.setattr(runner, "parse_args", lambda argv: config)
+    monkeypatch.setattr(runner, "run_collection", _run_collection)
+    monkeypatch.setattr(finalizer, "write_targeted_supplement_report", _write_report)
+    monkeypatch.setenv("STOP_AFTER_INITIAL_GATE", "0")
+    monkeypatch.setenv("ALLOW_FAILED_INITIAL_GATE_CONTINUE", "0")
+
+    assert runner.main([]) == 0
+    assert observed["run"] == {
+        "stop_after_initial_gate": False,
+        "allow_failed_initial_gate_continue": False,
+    }
+    assert observed["audit"] == {}
 
 
 def test_main_rejects_conflicting_targeted_gate_switches(monkeypatch) -> None:

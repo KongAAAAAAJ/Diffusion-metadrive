@@ -1,0 +1,68 @@
+{
+  "format": "s5_curated_44560_state_reconciliation_report_v1",
+  "generated_at": "2026-08-18T14:32:25+08:00",
+  "git": {
+    "branch": "BEV",
+    "head": "3d0b3342694325143ae9dcfa2709a8fc14442571",
+    "worktree_clean": false,
+    "unrelated_uncommitted_changes_preserved": true
+  },
+  "destination": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+    "bytes": 11195871402,
+    "format": "s5-behavior-rebalanced-curated-bundle-v1",
+    "base_dataset_fingerprint": "b93dfa5c6e2224aac7ae3518b45216c9f04b4a18b78f0a88aafb0b22657a3b4a",
+    "sidecar_dataset_fingerprint": "500d973124a6c0f734b1bb2e0681a9578db053c00d64f0fb1683722fb128dea3",
+    "curation_contract_sha256": "8e7394f4eb6b6ab4dcefe7b31ff32828c4866aacae89e20ba7715a313c5f0c83",
+    "bundle_index_sha256": "b56de9a388d7d2e694a0eebfe722bbe0979f1dd9f74c3052c09bf256822b3778",
+    "dataset_curation_manifest_sha256": "fbc73e20761a258590bdf125c4182ca287ea0c6e8a39b342b88394c953b31f50",
+    "dataset_bundle_manifest_sha256": "18ab28dedd17e57d548ee4a13385890cb50d9a9a866a2981b8710d3abbb087a1",
+    "base_episodes": 233,
+    "base_joint_samples": 44560,
+    "sidecar_episodes": 333,
+    "sidecar_only_episodes": 100,
+    "sidecar_raw_steps": 97682,
+    "bundle_index_rows": 401,
+    "split_episode_counts": {
+      "train": 184,
+      "val": 28,
+      "test": 21
+    },
+    "split_joint_samples": {
+      "train": 35220,
+      "val": 5310,
+      "test": 4030
+    },
+    "s5_behavior_episode_counts": {
+      "keep_emergency_braking": 5,
+      "temporary_formation_release_and_recovery": 19
+    },
+    "verified_payload_files": 5327,
+    "formal_training_eligibility": false
+  },
+  "verification": {
+    "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -c 'from tools.rebalance_s5_dataset import verify_curated_bundle; verify_curated_bundle(ROOT, verify_payload_hashes=True)'",
+    "base_verifier_passed": true,
+    "sidecar_verifier_passed": true,
+    "curated_bundle_verifier_passed": true,
+    "payload_sha256_verification_passed": true,
+    "pending_transaction": false,
+    "symlink_count": 0,
+    "active_writer_or_training_process": false
+  },
+  "historical_backup": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1.pre_s5_rebalance_4060c643",
+    "bytes": 87241147,
+    "regular_file_count": 3625,
+    "symlink_count": 0,
+    "complete_backup": false,
+    "usable_as_rollback_source": false,
+    "policy": "preserve_untouched_and_do_not_use_as_a_source"
+  },
+  "decision": {
+    "state_reconciliation_passed": true,
+    "destination_is_authoritative_release30_append_baseline": true,
+    "existing_destination_episodes_must_be_preserved": true,
+    "formal_training_eligibility_remains_false": true
+  }
+}

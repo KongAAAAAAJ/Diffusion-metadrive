@@ -1,0 +1,117 @@
+{
+  "format": "s5_candidate_v4_release30_preparation_report_v1",
+  "generated_at": "2026-08-18T15:05:00+08:00",
+  "scope": {
+    "hard_gate": "prepare_collection_and_append_implementation_only",
+    "collection_started": false,
+    "supplement_verification_started": false,
+    "append_dry_run_started": false,
+    "staging_started": false,
+    "main_dataset_replaced": false,
+    "user_will_execute_collection": true
+  },
+  "collection": {
+    "scenario_id": "S5_hard_brake_lead",
+    "behavior_category": "temporary_formation_release_and_recovery",
+    "scenario_contract_id": "candidate_v4",
+    "scenario_contract_sha256": "1003ccf55ec4131e8b89e2a65611f582df4c04ec124016fe63cc5f5119917d84",
+    "config": "configs/dataset/data_collect_candidate_v4_s5_release30.yaml",
+    "config_file_sha256": "43b5858d8de84e3c95a8ccc4cd9315c53922fbfb0554034b2591d1f02cf3c54f",
+    "dataset_fingerprint": "a02cf2cf4a0e6a44adec7248ea9b4230a841cef612ff3e07520085c2203b2e77",
+    "launcher": "scripts/run_s5_release30_collection.sh",
+    "launcher_sha256": "bf3ce63caec2c68409996d0f39c2eff15f37cdac343ee4e27dcb9754184dd073",
+    "command": "cd /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive && bash scripts/run_s5_release30_collection.sh",
+    "output_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release30_v1",
+    "log_directory": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/bev_joint_risk_candidate_v4_s5_release30_v1",
+    "target_accepted_episodes": 30,
+    "target_joint_samples": 5700,
+    "split_episode_quotas": {
+      "train": 24,
+      "val": 3,
+      "test": 3
+    },
+    "required_samples_per_episode": 190,
+    "parallel_workers": 4,
+    "maximum_simulator_attempts": 300,
+    "initial_feasibility_attempts": 10,
+    "initial_feasibility_min_accepted_episodes": 2,
+    "bootstrap_spawn_seeds": [83017, 83018, 83019, 83020, 83021, 83022, 83023, 83024, 83025, 83026],
+    "bootstrap_dispatch_policy": "4_plus_4_plus_2",
+    "bootstrap_enriched_sampling_rows": 8,
+    "bootstrap_control_sampling_rows": 2,
+    "accepted_background_count_quotas": {},
+    "background_count_policy": "descriptive_only_with_each_accepted_episode_required_to_be_in_range_3_to_6",
+    "finalization_mode": "audit_only"
+  },
+  "append_implementation": {
+    "tool": "tools/append_s5_release30_dataset.py",
+    "tool_sha256": "36debfd55e3c799db387dfa60f30a9dfc8c8b71442f0f03ceeaf9e96e33a7763",
+    "baseline_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+    "baseline_base_dataset_fingerprint": "b93dfa5c6e2224aac7ae3518b45216c9f04b4a18b78f0a88aafb0b22657a3b4a",
+    "baseline_sidecar_dataset_fingerprint": "500d973124a6c0f734b1bb2e0681a9578db053c00d64f0fb1683722fb128dea3",
+    "baseline_bundle_index_sha256": "b56de9a388d7d2e694a0eebfe722bbe0979f1dd9f74c3052c09bf256822b3778",
+    "baseline_reconciliation_report": "evaluation/S5_CURATED_44560_STATE_RECONCILIATION_REPORT.json",
+    "baseline_reconciliation_report_sha256": "6c009784aba9b496750fdddbd04407a0344cb1b350bd4b782e0fa99606ffcbc8",
+    "staging_path": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1.s5_release30_append_staging",
+    "backup_path": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1.pre_s5_release30_append_b93dfa5c",
+    "failed_install_path": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1.failed_s5_release30_append",
+    "source_episode_target_indices": "401_through_430_sorted_by_source_episode_index_with_split_preserved",
+    "copy_mode": "physical_copy_only",
+    "existing_base_episodes_removed": 0,
+    "expected_final_base_episodes": 263,
+    "expected_final_joint_samples": 50260,
+    "expected_final_bundle_index_rows": 431,
+    "expected_final_split_episode_counts": {
+      "train": 208,
+      "val": 31,
+      "test": 24
+    },
+    "expected_final_split_joint_samples": {
+      "train": 39780,
+      "val": 5880,
+      "test": 4600
+    },
+    "expected_final_s5_behavior_episode_counts": {
+      "keep_emergency_braking": 5,
+      "temporary_formation_release_and_recovery": 49
+    },
+    "formal_training_eligibility": false,
+    "dry_run_deferred_until_user_collection_finishes": true
+  },
+  "path_preflight": {
+    "supplement_root_absent": true,
+    "staging_path_absent": true,
+    "backup_path_absent": true,
+    "failed_install_path_absent": true,
+    "active_collector_or_trainer": false,
+    "active_dataset_lock": false
+  },
+  "verification": {
+    "python_compile_passed": true,
+    "launcher_bash_syntax_passed": true,
+    "focused_tests": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_append_s5_release30_dataset.py tests/test_run_joint_bev_collection.py -k 'release30 or candidate_v4 or targeted or main_routes' -q",
+      "passed": 21,
+      "deselected": 17
+    },
+    "broader_relevant_tests": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_run_joint_bev_collection.py tests/test_append_s5_release30_dataset.py tests/test_rebalance_s5_dataset.py -q",
+      "passed": 37,
+      "known_preexisting_failures": 4,
+      "preexisting_failure_source": "configs/dataset/data_collect_candidate_v3_formal50k.yaml contains malformed image_observation text in HEAD",
+      "clean_scoped_rerun": "37 passed, 4 deselected"
+    },
+    "historical_release20_dataset_fingerprint_unchanged": "8e19b181f504bbabd96a93cad2259eba6348ea60f4b7aefa118108f26d8488e1",
+    "git_diff_check_passed": true,
+    "black_available": false,
+    "ruff_available": false,
+    "real_rollout_smoke_run": false
+  },
+  "decision": {
+    "preparation_gate_passed": true,
+    "collection_authorized_for_user_execution": true,
+    "collection_must_stop_before_merge_on_any_failed_gate_or_pending_transaction": true,
+    "append_install_not_authorized_by_this_preparation_result_alone": true,
+    "next_action": "User runs the recorded collection command; verification, append dry-run manifest review, staging validation, rendering, and atomic installation remain a separate hard gate after collection completes."
+  }
+}

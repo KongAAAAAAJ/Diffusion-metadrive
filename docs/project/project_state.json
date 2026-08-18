@@ -1,13 +1,13 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-18T11:46:21+08:00",
+  "updated_at": "2026-08-18T15:07:00+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "8859a1b34a413a345297f0a0df25d553139c7d0d",
+    "git_commit": "3d0b3342694325143ae9dcfa2709a8fc14442571",
     "worktree_clean_before_this_update": true,
-    "project_state_update_committed": true,
-    "uncommitted_plan_update_present": false,
+    "project_state_update_committed": false,
+    "uncommitted_plan_update_present": true,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
     "uncommitted_stage2_calibration_bypass_present": false,
     "uncommitted_stage2_bare_launcher_fix_present": false,
@@ -26,19 +26,23 @@
     "uncommitted_s9_implementation_present": false,
     "uncommitted_combined_acceptance_evidence_present": false,
     "uncommitted_s5_targeted_supplement_present": false,
+    "uncommitted_s5_curated_44560_reconciliation_present": true,
+    "uncommitted_s5_release30_preparation_present": true,
     "uncommitted_s5_sidecar_out_of_road_fix_present": false,
     "uncommitted_s5_candidate_v4_v2_gate_config_present": false,
     "uncommitted_s5_candidate_v4_v2_gate_waiver_present": false,
     "uncommitted_s5_candidate_v4_v2_user_stop_evidence_present": false,
     "uncommitted_dataset_episode_visualizer_present": false,
     "uncommitted_stage2_run3_termination_evidence_present": false,
-    "uncommitted_stage2_pretrain_reward_tb_present": false
+    "uncommitted_stage2_pretrain_reward_tb_present": false,
+    "uncommitted_stage2_continuous_reward_v2_present": true,
+    "uncommitted_stage2_continuous_reward_v2_report_present": true
   },
   "current": {
     "phase": "stage2_at_risk_grpo_open",
-    "round": "stage2-pretrain-reward-tensorboard-20260818",
-    "status": "pretrain_reward_tensorboard_logging_verified_run_3_remains_incomplete",
-    "active_hard_gate": "stage2_at_risk_grpo_open_bounded_training_or_resume"
+    "round": "stage2-continuous-reward-v2-implementation-20260818",
+    "status": "continuous_reward_v2_implementation_verified_fresh_v3_calibration_pending",
+    "active_hard_gate": "stage2_joint_reward_v2_fresh_development_and_holdout_calibration"
   },
   "active_workstreams": {
     "candidate_s5_s9_scenario_revision": {
@@ -290,7 +294,7 @@
       }
     },
     "candidate_v3_data_refresh": {
-      "status": "stage2_pretrain_reward_tensorboard_verified_run_3_incomplete",
+      "status": "stage2_continuous_reward_v2_implementation_verified_fresh_v3_calibration_pending",
       "active_task": null,
       "pilot_target_joint_steps": 10000,
       "pilot_per_scenario_quota": 2000,
@@ -374,9 +378,52 @@
       "remediation9999_accepted_for_formal50k_collection_precondition": true
     },
     "s5_targeted_supplement": {
-      "status": "candidate_v4_v2_user_stopped_at_18_of_20_preserved_incomplete",
+      "status": "release30_preparation_complete_user_collection_pending",
       "active_task": null,
       "active_hard_gate": null,
+      "installed_curated_baseline": {
+        "status": "verified_and_reconciled",
+        "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+        "base_dataset_fingerprint": "b93dfa5c6e2224aac7ae3518b45216c9f04b4a18b78f0a88aafb0b22657a3b4a",
+        "sidecar_dataset_fingerprint": "500d973124a6c0f734b1bb2e0681a9578db053c00d64f0fb1683722fb128dea3",
+        "bundle_index_sha256": "b56de9a388d7d2e694a0eebfe722bbe0979f1dd9f74c3052c09bf256822b3778",
+        "base_episodes": 233,
+        "base_joint_samples": 44560,
+        "s5_behavior_episode_counts": {
+          "keep_emergency_braking": 5,
+          "temporary_formation_release_and_recovery": 19
+        },
+        "verified_payload_files": 5327,
+        "formal_training_eligibility": false,
+        "report": "evaluation/S5_CURATED_44560_STATE_RECONCILIATION_REPORT.json"
+      },
+      "release30_preparation": {
+        "status": "preparation_gate_passed_user_collection_pending",
+        "collection_started": false,
+        "supplement_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release30_v1",
+        "config": "configs/dataset/data_collect_candidate_v4_s5_release30.yaml",
+        "launcher": "scripts/run_s5_release30_collection.sh",
+        "command": "cd /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive && bash scripts/run_s5_release30_collection.sh",
+        "append_tool": "tools/append_s5_release30_dataset.py",
+        "dataset_fingerprint": "a02cf2cf4a0e6a44adec7248ea9b4230a841cef612ff3e07520085c2203b2e77",
+        "target_accepted_episodes": 30,
+        "target_joint_samples": 5700,
+        "split_episode_quotas": {"train": 24, "val": 3, "test": 3},
+        "accepted_background_count_quotas": {},
+        "background_count_distribution_is_acceptance_gate": false,
+        "accepted_background_count_range": [3, 6],
+        "initial_feasibility_attempts": 10,
+        "initial_feasibility_min_accepted_episodes": 2,
+        "maximum_simulator_attempts": 300,
+        "parallel_workers": 4,
+        "bootstrap_spawn_seeds": [83017, 83018, 83019, 83020, 83021, 83022, 83023, 83024, 83025, 83026],
+        "finalization_mode": "audit_only",
+        "staging_started": false,
+        "main_dataset_replaced": false,
+        "formal_training_eligibility": false,
+        "preparation_report": "evaluation/S5_CANDIDATE_V4_RELEASE30_PREPARATION_REPORT.json",
+        "preparation_report_sha256": "e3ccf64439df945c7b9ee409b451dc60a3f57c86a3b5b33033a6163570473eb4"
+      },
       "scenario_id": "S5_hard_brake_lead",
       "behavior_category": "temporary_formation_release_and_recovery",
       "rule_maker_profile_id": "balanced",
@@ -509,6 +556,11 @@
     "stage2_failed_calibration_bypass_authorized": true,
     "stage2_failed_calibration_bypass_recorded_on": "2026-08-17",
     "stage2_failed_calibration_bypass_scope": "Waive only holdout passed=true for the named at-risk diagnostic run. Retain and validate the failed holdout report, blocker list, reward configuration, scenario/seed contract, trajectory optimizer contract, and exact source checkpoint SHA256.",
+    "stage2_continuous_reward_v2_authorized": true,
+    "stage2_continuous_reward_v2_authorized_on": "2026-08-18",
+    "stage2_continuous_reward_v2_scope": "Implement and verify the stage2_joint_reward_v2 contract, focused regression suite, isolated diagnostic calibration-path smoke, implementation report, and project-state update only; do not run full development or holdout calibration and do not start training.",
+    "stage2_joint_reward_v2_failed_calibration_bypass_authorized": false,
+    "stage2_joint_reward_v2_run3_resume_authorized": false,
     "s5_targeted_supplement_authorized": true,
     "s5_targeted_supplement_authorized_on": "2026-08-17",
     "s5_targeted_supplement_parallel_collection_requested": true,
@@ -531,9 +583,24 @@
     "current_bev_merge_authorized": true,
     "candidate_v3_s6_background_enrichment_authorized_by_user": true,
     "candidate_v3_s6_background_enrichment_recorded_on": "2026-08-14",
-    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. On 2026-08-17 the user explicitly waived only the failed holdout passed=true gate for bounded diagnostic GRPO-Open; run_3 subsequently started under that waiver and was user-terminated at metrics step 4532. The failed report and stop_terminal_speed blocker remain auditable, and no formal eligibility was granted."
+    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. On 2026-08-17 the user explicitly waived only the legacy reward contract's failed holdout passed=true gate for bounded diagnostic GRPO-Open; run_3 subsequently started under that waiver and was user-terminated at metrics step 4532. On 2026-08-18 stage2_joint_reward_v2 was implemented and locally verified, but the legacy waiver does not apply to V2, run_3 cannot be resumed under V2, fresh V3 development and holdout calibration remain pending, and no formal eligibility was granted."
   },
   "source_of_truth": {
+    "s5_candidate_v4_release30_preparation_report": {
+      "path": "evaluation/S5_CANDIDATE_V4_RELEASE30_PREPARATION_REPORT.json",
+      "sha256": "e3ccf64439df945c7b9ee409b451dc60a3f57c86a3b5b33033a6163570473eb4",
+      "role": "Records the frozen 30-episode audit-only collection contract, exact user-run command, descriptive background-count policy, pure physical append implementation, scoped tests, untouched 44560-sample baseline, and the no-collection/no-install preparation boundary"
+    },
+    "s5_curated_44560_state_reconciliation_report": {
+      "path": "evaluation/S5_CURATED_44560_STATE_RECONCILIATION_REPORT.json",
+      "sha256": "6c009784aba9b496750fdddbd04407a0344cb1b350bd4b782e0fa99606ffcbc8",
+      "role": "Records the complete 5327-payload verification of the installed 44560-sample curated baseline, immutable fingerprints and counts, formal ineligibility, and the unusable 87MB partial historical backup"
+    },
+    "stage2_continuous_reward_v2_implementation_report": {
+      "path": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
+      "sha256": "a1bd2efad79f42fbce8d3900b4818e1507e09684058d7ff9e563c39f37211daa",
+      "role": "Records the stage2_joint_reward_v2 contract and config hashes, continuous additive reward implementation, proxy/simulator semantic alignment, V3 calibration and checkpoint provenance, pure-reward best selection, 94-test regression, isolated diagnostic calibration-path smoke, and the explicit no-calibration-pass/no-training boundary"
+    },
     "stage2_pretrain_reward_tensorboard_implementation_report": {
       "path": "evaluation/STAGE2_PRETRAIN_REWARD_TENSORBOARD_IMPLEMENTATION_REPORT.json",
       "sha256": "cbe7d4f8b9d67dd39cafaf54bf73f989aa040320820b82cf34e15b5b297ef9d2",
@@ -629,8 +696,8 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "cec017a48d3502c9387c5f7aeeda3a6d8bf776b738e4ae32749e69a95b790ca8",
-      "role": "Records the dedicated bare launcher default to bounded at-risk diagnostic GRPO-Open bypass while retaining a strict calibration opt-in and all formal ineligibility boundaries"
+      "sha256": "f3a32e02e7f14e986f463eb882a12b1ff5f1e11809d506cce8642bcf14fa4259",
+      "role": "Records the verified stage2_joint_reward_v2 implementation, isolated V3 calibration and training roots, prohibition on legacy bypass or run_3 resume, and the fresh development-plus-holdout calibration hard gate"
     },
     "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
@@ -953,6 +1020,8 @@
     },
     "candidate_v3_formal_s5_s9_50k": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+      "root_currently_contains_original_bundle": false,
+      "installed_replacement_dataset": "candidate_v3_curated_s5_rebalanced_44560",
       "target_joint_steps": 50000,
       "per_scenario_quota": 10000,
       "collection_config": "configs/dataset/data_collect_candidate_v3_formal50k.yaml",
@@ -992,6 +1061,50 @@
       "sidecar_dataset_fingerprint": "8f0d6e0bbc75b144c072d3f0685365e9453cd06ef604aebae50bf322ab0f2245",
       "bundle_index_sha256": "5403bca52214e77a93867ca7c245605a4d04bc2f747321626eb22fc890ad2420",
       "blocker": "complete_acceptance_skipped_formal_eligibility_unavailable"
+    },
+    "candidate_v3_curated_s5_rebalanced_44560": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+      "format": "s5-behavior-rebalanced-curated-bundle-v1",
+      "base_episodes": 233,
+      "base_joint_samples": 44560,
+      "sidecar_episodes": 333,
+      "sidecar_only_episodes": 100,
+      "bundle_index_rows": 401,
+      "base_dataset_fingerprint": "b93dfa5c6e2224aac7ae3518b45216c9f04b4a18b78f0a88aafb0b22657a3b4a",
+      "sidecar_dataset_fingerprint": "500d973124a6c0f734b1bb2e0681a9578db053c00d64f0fb1683722fb128dea3",
+      "bundle_index_sha256": "b56de9a388d7d2e694a0eebfe722bbe0979f1dd9f74c3052c09bf256822b3778",
+      "curation_contract_sha256": "8e7394f4eb6b6ab4dcefe7b31ff32828c4866aacae89e20ba7715a313c5f0c83",
+      "full_payload_verifier_passed": true,
+      "verified_payload_files": 5327,
+      "eligible_for_formal_training": false,
+      "historical_backup_path": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1.pre_s5_rebalance_4060c643",
+      "historical_backup_complete": false,
+      "report": "evaluation/S5_CURATED_44560_STATE_RECONCILIATION_REPORT.json"
+    },
+    "candidate_v4_s5_release30_supplement": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release30_v1",
+      "collection_config": "configs/dataset/data_collect_candidate_v4_s5_release30.yaml",
+      "collection_launcher": "scripts/run_s5_release30_collection.sh",
+      "scenario_contract_id": "candidate_v4",
+      "scenario_contract_sha256": "1003ccf55ec4131e8b89e2a65611f582df4c04ec124016fe63cc5f5119917d84",
+      "dataset_fingerprint": "a02cf2cf4a0e6a44adec7248ea9b4230a841cef612ff3e07520085c2203b2e77",
+      "target_accepted_episodes": 30,
+      "target_joint_samples": 5700,
+      "split_episode_quotas": {"train": 24, "val": 3, "test": 3},
+      "background_count_episode_quotas": {},
+      "accepted_background_count_range": [3, 6],
+      "background_count_distribution_is_acceptance_gate": false,
+      "parallel_workers": 4,
+      "initial_gate_attempts": 10,
+      "initial_gate_minimum_accepted_episodes": 2,
+      "maximum_simulator_attempts": 300,
+      "finalization_mode": "audit_only",
+      "collection_started": false,
+      "collection_complete": false,
+      "append_dry_run_complete": false,
+      "composition_generated": false,
+      "eligible_for_formal_training": false,
+      "preparation_report": "evaluation/S5_CANDIDATE_V4_RELEASE30_PREPARATION_REPORT.json"
     },
     "candidate_v3_s5_release20_supplement": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_s5_release20_v1",
@@ -1193,6 +1306,9 @@
       "pretrain_reward_tensorboard_smoke_root": "/tmp/stage2_pretrain_tb_smoke/run_1",
       "pretrain_reward_tensorboard_report": "evaluation/STAGE2_PRETRAIN_REWARD_TENSORBOARD_IMPLEMENTATION_REPORT.json",
       "run_3_tensorboard_backfilled": false,
+      "legacy_reward_contract_run_3": true,
+      "legacy_calibration_format": "bev_joint_reward_calibration_v2",
+      "legacy_bypass_applies_to_stage2_joint_reward_v2": false,
       "source": "stage1_a_exploratory",
       "variant": "A",
       "reward_domain": "tau_cmd",
@@ -1214,6 +1330,19 @@
       "calibration_gate_bypass_authorized": true,
       "calibration_gate_bypass_implemented": true,
       "bare_launcher_bypass_default_implemented": true,
+      "stage2_continuous_reward_v2_implemented": true,
+      "stage2_joint_reward_v2_contract_sha256": "0e95826028f77e86d8130e2f4bc6ac4ed617001d5adef99b600df8f061fb2ab9",
+      "stage2_joint_reward_v2_config_sha256": "d8ee4366681b5f2b69b1dfad376b4cfd551822dc1996adff79eed4955e4218a3",
+      "stage2_joint_reward_v2_calibration_format": "bev_joint_reward_calibration_v3",
+      "stage2_joint_reward_v2_development_calibration_complete": false,
+      "stage2_joint_reward_v2_holdout_calibration_complete": false,
+      "stage2_joint_reward_v2_holdout_calibration_passed": false,
+      "stage2_joint_reward_v2_training_started": false,
+      "stage2_joint_reward_v2_run3_compatible": false,
+      "stage2_joint_reward_v2_failed_calibration_bypass_default": false,
+      "stage2_joint_reward_v2_calibration_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_reward_v2/stage1_run_1/calibration_v3",
+      "stage2_joint_reward_v2_training_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_reward_v2/stage1_run_1/training_v2",
+      "stage2_joint_reward_v2_implementation_report": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
       "diagnostic_only": true,
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false,
@@ -1231,7 +1360,8 @@
     }
   },
   "blockers": [
-    "Formal Stage1-A remains blocked because complete formal50K base, sidecar, bundle, and statistical quality acceptance was skipped and therefore was not measured as passed. This does not block the explicitly authorized bounded at-risk diagnostic GRPO-Open path."
+    "Formal Stage1-A remains blocked because complete formal50K base, sidecar, bundle, and statistical quality acceptance was skipped and therefore was not measured as passed. This does not block the explicitly authorized bounded at-risk diagnostic GRPO-Open path.",
+    "stage2_joint_reward_v2 full development calibration on seeds 17/23 and independent holdout calibration on seeds 31/47 have not run. New Stage 2 training is blocked until the SHA-bound V3 holdout report records passed=true."
   ],
   "future_hard_gates": [
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
@@ -1242,15 +1372,17 @@
     "Formal Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded; the only currently planned exception is a bounded at-risk diagnostic Variant A smoke using run_mode=smoke and explicit max optimizer steps.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen.",
-    "At-risk GRPO-Open may run only as Variant A, run_mode=smoke, with an explicit positive max_optimizer_steps. The dedicated launcher defaults internally to train+bypass under the recorded authorization; the failed source-bound holdout report remains mandatory and outputs remain formally ineligible."
+    "stage2_joint_reward_v2 requires fresh Variant-A V3 development calibration followed by an independent SHA-bound holdout calibration with passed=true. Failed-calibration bypass and run_3 resume are forbidden; any later training must start from the original Stage1 source checkpoint in the isolated V2 artifact root and remain formally ineligible unless all independent formal gates also pass."
   ],
   "next_actions": [
+    "The release30 preparation gate passed without starting collection. The user may run: cd /home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive && bash scripts/run_s5_release30_collection.sh. After it exits, do not merge until strict supplement verification, SHA-bound append dry-run review, staging verification, and rendering pass in a separate hard gate.",
     "Preserve the failed candidate-v4 S5 supplement root as immutable historical evidence; do not rewrite, relabel, or resume it after the sidecar out-of-road fix.",
     "Preserve the 18 committed candidate-v4-v2 S5 episodes and leave the interrupted episode-376 pending transaction untouched until the user explicitly chooses a future cleanup or continuation policy.",
     "Treat the observed S5 background actor counts as descriptive evidence rather than an acceptance hard gate; no explicit background-quota waiver continuation switch exists in the current collector.",
     "Use tools/visualize_dataset_episode.py for read-only scenario/episode listing and world-topdown MP4 rendering; keep outputs outside dataset roots.",
     "Preserve run_3 as the user-terminated incomplete diagnostic artifact at metrics step 4532 and checkpoint step 4500; do not backfill or otherwise modify its TensorBoard event or checkpoints.",
-    "If the user starts a future new or resumed bounded diagnostic Stage 2 process, use the verified validation/pretrain_reward and validation/reward_gain tags while preserving the failed calibration report, diagnostic-only metadata, and formal ineligibility.",
+    "Run fresh stage2_joint_reward_v2 V3 development calibration on seeds 17/23 and, only if its tracking envelope is valid, independent holdout calibration on seeds 31/47 in the isolated calibration_v3 root.",
+    "Only after the SHA-bound V3 holdout report records passed=true may a new bounded diagnostic Stage 2 process start from the original Stage1 checkpoint in the isolated training_v2 root. Do not resume run_3 or reuse its legacy failed calibration report; retain validation/pretrain_reward and validation/reward_gain logging.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
@@ -1267,6 +1399,7 @@
     "historical_v1_and_candidate_v3_dataset_mixing_forbidden": true,
     "quality_thresholds_must_be_frozen_before_collection": true,
     "bev_merge_requires_pilot_quality_pass_or_explicit_user_risk_waiver": true,
-    "exploratory_training_waiver_must_not_change_acceptance_or_formal_eligibility": true
+    "exploratory_training_waiver_must_not_change_acceptance_or_formal_eligibility": true,
+    "reward_contract_or_config_hash_mixing_forbidden": true
   }
 }

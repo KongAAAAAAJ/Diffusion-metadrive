@@ -5,6 +5,79 @@ from __future__ import annotations
 import numpy as np
 
 
+def shared_corridor_gap_series(
+    first: np.ndarray,
+    first_dimensions: tuple[float, float],
+    second: np.ndarray,
+    second_dimensions: tuple[float, float],
+    *,
+    no_risk_gap_m: float,
+) -> np.ndarray:
+    """Return finite per-sample bumper gaps when two OBBs share a corridor.
+
+    The first trajectory defines the longitudinal/lateral frame.  Samples
+    outside the shared lateral corridor use the explicit finite no-risk
+    sentinel so downstream TTC and report serialization never depend on
+    infinities.
+    """
+
+    first_values = np.asarray(first, dtype=np.float64)
+    second_values = np.asarray(second, dtype=np.float64)
+    if (
+        first_values.shape != second_values.shape
+        or first_values.ndim != 2
+        or first_values.shape[1] != 3
+        or not np.isfinite(first_values).all()
+        or not np.isfinite(second_values).all()
+    ):
+        raise ValueError("OBB trajectories must be finite matching [N,3] arrays")
+    first_size = np.asarray(first_dimensions, dtype=np.float64)
+    second_size = np.asarray(second_dimensions, dtype=np.float64)
+    if (
+        first_size.shape != (2,)
+        or second_size.shape != (2,)
+        or not np.isfinite(first_size).all()
+        or not np.isfinite(second_size).all()
+        or np.any(first_size <= 0.0)
+        or np.any(second_size <= 0.0)
+    ):
+        raise ValueError("OBB dimensions must be positive finite (length,width)")
+    sentinel = float(no_risk_gap_m)
+    if not np.isfinite(sentinel) or sentinel <= 0.0:
+        raise ValueError("no_risk_gap_m must be positive and finite")
+
+    forward = np.column_stack(
+        (np.cos(first_values[:, 2]), np.sin(first_values[:, 2]))
+    )
+    lateral_axis = np.column_stack((-forward[:, 1], forward[:, 0]))
+    delta = second_values[:, :2] - first_values[:, :2]
+    longitudinal = np.abs(np.einsum("ij,ij->i", delta, forward))
+    lateral = np.abs(np.einsum("ij,ij->i", delta, lateral_axis))
+    relative_heading = second_values[:, 2] - first_values[:, 2]
+    cosine = np.abs(np.cos(relative_heading))
+    sine = np.abs(np.sin(relative_heading))
+    first_longitudinal_support = 0.5 * first_size[0]
+    first_lateral_support = 0.5 * first_size[1]
+    second_longitudinal_support = (
+        0.5 * second_size[0] * cosine + 0.5 * second_size[1] * sine
+    )
+    second_lateral_support = (
+        0.5 * second_size[0] * sine + 0.5 * second_size[1] * cosine
+    )
+    same_corridor = (
+        lateral
+        <= first_lateral_support + second_lateral_support + 1e-6
+    )
+    bumper = (
+        longitudinal
+        - first_longitudinal_support
+        - second_longitudinal_support
+    )
+    return np.ascontiguousarray(
+        np.where(same_corridor, bumper, sentinel), dtype=np.float64
+    )
+
+
 def obb_overlap_series(
     first: np.ndarray,
     first_dimensions: tuple[float, float],
@@ -80,4 +153,8 @@ def world_trajectory_to_ego_local(
     return np.ascontiguousarray(local.astype(np.float32))
 
 
-__all__ = ["obb_overlap_series", "world_trajectory_to_ego_local"]
+__all__ = [
+    "obb_overlap_series",
+    "shared_corridor_gap_series",
+    "world_trajectory_to_ego_local",
+]

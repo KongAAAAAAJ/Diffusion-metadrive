@@ -109,6 +109,7 @@ SECTION_KEYS = {
         "accepted_background_count_quotas",
         "bootstrap_spawn_seeds",
         "parallel_workers",
+        "finalization_mode",
     },
 }
 
@@ -175,6 +176,7 @@ class TargetedSupplementRequirements:
     initial_feasibility_min_accepted_episodes: int = 1
     bootstrap_spawn_seeds: tuple[int, ...] = ()
     parallel_workers: int = 1
+    finalization_mode: str = "composition"
 
     @property
     def target_episodes(self) -> int:
@@ -203,6 +205,8 @@ class TargetedSupplementRequirements:
             payload["initial_feasibility_min_accepted_episodes"] = (
                 self.initial_feasibility_min_accepted_episodes
             )
+        if self.finalization_mode != "composition":
+            payload["finalization_mode"] = self.finalization_mode
         return payload
 
 
@@ -548,10 +552,13 @@ class JointCollectionRunConfig:
                 or targeted.maximum_return_error_m < 0.0
             ):
                 raise ValueError("targeted_supplement physical thresholds are invalid")
+            if targeted.finalization_mode not in {"composition", "audit_only"}:
+                raise ValueError(
+                    "targeted_supplement finalization_mode must be composition or audit_only"
+                )
             background_quotas = dict(targeted.accepted_background_count_quotas)
-            if (
-                not background_quotas
-                or any(key not in (3, 4, 5, 6) for key in background_quotas)
+            if background_quotas and (
+                any(key not in (3, 4, 5, 6) for key in background_quotas)
                 or any(
                     isinstance(value, bool) or int(value) <= 0
                     for value in background_quotas.values()
@@ -585,14 +592,29 @@ class JointCollectionRunConfig:
                 )
                 if (
                     targeted.initial_feasibility_attempts != 10
-                    or targeted.initial_feasibility_min_accepted_episodes != 8
                     or targeted.parallel_workers != 4
                     or targeted.bootstrap_spawn_seeds != expected_bootstrap
                     or sum(seed % 10 < 8 for seed in expected_bootstrap) != 8
                 ):
                     raise ValueError(
                         "candidate-v4 targeted collection requires the frozen "
-                        "10-attempt, 8-accepted, 4-worker bootstrap gate"
+                        "10-attempt, 4-worker bootstrap window"
+                    )
+                if targeted.finalization_mode == "composition" and (
+                    targeted.initial_feasibility_min_accepted_episodes != 8
+                    or not background_quotas
+                ):
+                    raise ValueError(
+                        "candidate-v4 composition collection requires the historical "
+                        "8-of-10 gate and hard background quotas"
+                    )
+                if targeted.finalization_mode == "audit_only" and (
+                    targeted.initial_feasibility_min_accepted_episodes != 2
+                    or background_quotas
+                ):
+                    raise ValueError(
+                        "candidate-v4 audit_only collection requires the release30 "
+                        "2-of-10 gate and descriptive background counts"
                     )
 
     def immutable_fingerprint(self) -> str:
@@ -968,6 +990,9 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
             ),
             parallel_workers=int(
                 targeted.get("parallel_workers", 1)
+            ),
+            finalization_mode=str(
+                targeted.get("finalization_mode", "composition")
             ),
         )
 
@@ -1758,10 +1783,7 @@ def _empty_targeted_progress(
     return {
         "accepted_episodes": 0,
         "split_counts": {name: 0 for name in FORMAL_SPLITS},
-        "background_count_counts": {
-            int(name): 0
-            for name in requirements.accepted_background_count_quotas
-        },
+        "background_count_counts": {count: 0 for count in (3, 4, 5, 6)},
         "spawn_seeds": set(),
     }
 
@@ -1823,8 +1845,8 @@ def _stored_targeted_progress(
                 f"targeted split {split} exceeds its quota",
                 reason_code="targeted_resume_mismatch",
             )
-    for background, count in progress["background_count_counts"].items():
-        if count > int(requirements.accepted_background_count_quotas[background]):
+    for background, quota in requirements.accepted_background_count_quotas.items():
+        if progress["background_count_counts"][background] > int(quota):
             raise JointCollectionError(
                 f"targeted background count {background} exceeds its quota",
                 reason_code="targeted_resume_mismatch",
@@ -1837,15 +1859,22 @@ def _targeted_simulator_attempts(bundle: JointRiskBundleIndex) -> int:
 
 
 def _serializable_targeted_progress(
-    progress: Mapping[str, object], simulator_attempts: int
+    progress: Mapping[str, object],
+    simulator_attempts: int,
+    requirements: TargetedSupplementRequirements,
 ) -> dict[str, object]:
+    background_keys = (
+        tuple(requirements.accepted_background_count_quotas)
+        if requirements.accepted_background_count_quotas
+        else (3, 4, 5, 6)
+    )
     return {
         "accepted_episodes": int(progress["accepted_episodes"]),
         "simulator_attempts": int(simulator_attempts),
         "split_counts": dict(progress["split_counts"]),
         "background_count_counts": {
-            str(key): int(value)
-            for key, value in progress["background_count_counts"].items()
+            str(key): int(progress["background_count_counts"][key])
+            for key in background_keys
         },
         "spawn_seeds": sorted(progress["spawn_seeds"]),
     }
@@ -1862,9 +1891,10 @@ def _validate_targeted_completion(
             "targeted supplement split quotas are incomplete",
             reason_code="targeted_split_quota_incomplete",
         )
-    if dict(progress["background_count_counts"]) != dict(
-        requirements.accepted_background_count_quotas
-    ):
+    quotas = dict(requirements.accepted_background_count_quotas)
+    if quotas and {
+        key: int(progress["background_count_counts"][key]) for key in quotas
+    } != quotas:
         raise JointCollectionError(
             "targeted supplement background quotas are incomplete",
             reason_code="targeted_background_quota_incomplete",
@@ -2003,11 +2033,9 @@ def _targeted_initial_gate_status(
                 "accepted_target_background_episodes": len(target_accepted),
             }
         )
-        passed = bool(
-            passed
-            and len(target_rows) == 8
-            and len(target_accepted) == 8
-        )
+        passed = bool(passed and len(target_rows) == 8)
+        if requirements.finalization_mode == "composition":
+            passed = bool(passed and len(target_accepted) == 8)
     status["passed"] = passed
     return status
 
@@ -2572,6 +2600,7 @@ def run_collection(
                     "observed": _serializable_targeted_progress(
                         targeted_progress,
                         _targeted_simulator_attempts(bundle),
+                        config.targeted_supplement,
                     ),
                 }
             print("[INFO] target already satisfied; no simulator started", flush=True)
@@ -3096,20 +3125,20 @@ def run_collection(
                                 "incidental_background_actor_count"
                             ]
                         )
-                        if background_count not in (
-                            targeted_requirements.accepted_background_count_quotas
-                        ):
+                        if background_count not in (3, 4, 5, 6):
                             raise JointCollectionError(
-                                "targeted background count is outside the frozen quotas",
+                                "targeted background count is outside the frozen 3-6 range",
                                 reason_code="targeted_background_count_invalid",
                             )
-                        if (
-                            targeted_progress["background_count_counts"][
+                        background_quotas = (
+                            targeted_requirements.accepted_background_count_quotas
+                        )
+                        if background_quotas and (
+                            background_count not in background_quotas
+                            or targeted_progress["background_count_counts"][
                                 background_count
                             ]
-                            >= targeted_requirements.accepted_background_count_quotas[
-                                background_count
-                            ]
+                            >= background_quotas[background_count]
                         ):
                             raise JointCollectionError(
                                 "targeted background-count quota is already satisfied",
@@ -3381,7 +3410,9 @@ def run_collection(
             summary["targeted_supplement"] = {
                 "requirements": targeted_requirements.as_dict(),
                 "observed": _serializable_targeted_progress(
-                    targeted_progress, targeted_simulator_attempts
+                    targeted_progress,
+                    targeted_simulator_attempts,
+                    targeted_requirements,
                 ),
                 "initial_gate": (
                     initial_gate_status
@@ -3515,14 +3546,24 @@ def main(argv: list[str] | None = None) -> int:
         ):
             return 1
     elif config.targeted_supplement is not None:
-        from expert_dataset.finalize_s5_targeted_supplement import (
-            build_composition_manifest,
-        )
+        if config.targeted_supplement.finalization_mode == "audit_only":
+            from expert_dataset.finalize_s5_targeted_supplement import (
+                write_targeted_supplement_report,
+            )
 
-        build_composition_manifest(
-            config,
-            initial_gate_failure_waived=allow_failed_initial_gate_continue,
-        )
+            report = write_targeted_supplement_report(config)
+            print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
+            if not bool(report["complete"]):
+                return 2
+        else:
+            from expert_dataset.finalize_s5_targeted_supplement import (
+                build_composition_manifest,
+            )
+
+            build_composition_manifest(
+                config,
+                initial_gate_failure_waived=allow_failed_initial_gate_continue,
+            )
     return 0
 
 

@@ -1,0 +1,120 @@
+{
+  "format": "stage2_continuous_reward_v2_implementation_report_v1",
+  "recorded_at": "2026-08-18T14:23:00+08:00",
+  "repository_head_before_changes": "3d0b3342694325143ae9dcfa2709a8fc14442571",
+  "scope": {
+    "reward_contract_version": "stage2_joint_reward_v2",
+    "reward_contract_sha256": "0e95826028f77e86d8130e2f4bc6ac4ed617001d5adef99b600df8f061fb2ab9",
+    "base_reward_config_sha256": "d8ee4366681b5f2b69b1dfad376b4cfd551822dc1996adff79eed4955e4218a3",
+    "formula": "0.47*progress_score - 1.00*formation_penalty - 1.185*gap_penalty - 0.50*ttc_penalty - 0.50*road_penalty - 0.0225*comfort_penalty - 5.00*collision - 4.00*out_of_drivable",
+    "total_reward_clipped": false,
+    "unsafe_reward_branch_present": false,
+    "collision_and_out_penalties": "fixed candidate-local additive penalties; all quality components remain present",
+    "best_checkpoint_objective": "strictly maximize validation/simulator_reward_mean; exact ties preserve the earlier checkpoint, including verified historical best across resume",
+    "grpo_update_semantics_changed": false
+  },
+  "continuous_safety_contract": {
+    "timeline": "0.0 through 4.0 seconds inclusive, resampled at 0.1 seconds for proxy and simulator continuous risks",
+    "gap": "tracking-aware oriented-box shared-corridor bumper gap; 7m platoon and 5m background thresholds; 0.5m stable-softplus softness",
+    "ttc": "adjacent finite gap decrease; closing speed <=0.1m/s has no risk; 4s warning and 0.5s softness; no-risk values use a finite sentinel",
+    "road": "signed DRIVABLE distance field with bilinear sampling; 1m warning and 0.25m softness; raster-filled physical footprint determines out-of-drivable",
+    "aggregation": "alternative branches max within each actor, interactions max per time, then 0.7*time_max + 0.3*time_mean",
+    "hard_event_semantics": "physical footprint and nominal background branch only; alternative branches affect continuous gap/TTC only",
+    "diagnostic_semantics": "unsafe, clearance_violation, collision, and out_of_drivable remain diagnostics and do not branch reward or rank best checkpoints"
+  },
+  "implementation": {
+    "core_files": [
+      "models/bev_planner/joint_reward.py",
+      "models/platoon_planner/collision_geometry.py",
+      "models/bev_planner/__init__.py"
+    ],
+    "simulator_files": [
+      "evaluation/joint_simulator_branch.py"
+    ],
+    "training_and_contract_files": [
+      "train/train_bev_joint_grpo_online.py",
+      "scripts/calibrate_bev_joint_reward.py",
+      "scripts/run_bev_joint_grpo.sh",
+      "evaluation/bev_four_model_evaluator.py",
+      "evaluation/round13_closeout.py"
+    ],
+    "calibration_format": "bev_joint_reward_calibration_v3",
+    "calibration_contract": "holdout is bound to the exact development-report SHA, Stage1 source SHA, variant, complete ordered S5-S9 contract, development/holdout seeds, trajectory optimizer, reward contract SHA, and reward config SHA",
+    "legacy_rejection": "calibration v2, failed-calibration bypass, missing V2 checkpoint metadata, and run_3 resume are rejected",
+    "artifact_isolation": "launcher defaults to reward_v2/calibration_v3, training_v2, and logs_v2 roots; legacy reports, run_3, and ROUND13_96_FREEZE.json are not overwritten",
+    "tensorboard_preserved": [
+      "validation/pretrain_reward",
+      "validation/reward_gain",
+      "validation/unsafe_count",
+      "validation/collision_count",
+      "validation/out_of_road_count"
+    ],
+    "new_calibration_diagnostics": [
+      "per-scenario informative_rate",
+      "per-scenario reward_tie_rate",
+      "per-scenario false_unsafe_rate"
+    ],
+    "new_diagnostic_thresholds_added": false,
+    "round13_history_mutated": false,
+    "chassis_fusion_sibling_modified": false,
+    "maintenance_gap": "No dedicated Stage 2 reward specialist skill exists; implementation used the project workflow, project-plan, and simple-code gates."
+  },
+  "verification": {
+    "focused_regression_command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_reward.py tests/test_joint_simulator_branch.py tests/test_bev_joint_grpo_online.py tests/test_bev_joint_grpo_a.py tests/test_control_tracking_benchmark.py tests/test_bev_four_model_evaluator.py tests/test_run_bev_joint_grpo_launcher.py tests/test_round13_closeout.py -q",
+    "focused_regression_result": "94 passed, 15 warnings",
+    "smoke": {
+      "kind": "single-scenario single-seed single-state calibration-path subset smoke",
+      "scenario": [
+        "S5_hard_brake_lead",
+        "R1_entry_straight"
+      ],
+      "seed": 17,
+      "states_per_episode": 1,
+      "groups": 1,
+      "candidates_per_group": 4,
+      "device": "cuda",
+      "artifact": "/tmp/stage2_reward_v2_calibration_smoke/A-development-subset.json",
+      "artifact_sha256": "276163aba29b2ab1a00089480914061da0f1fbaa3499424c3860b90f26073897",
+      "artifact_count_under_smoke_root": 1,
+      "format": "bev_joint_reward_calibration_v3",
+      "scope_format": "bev_joint_reward_calibration_v3_subset_smoke_scope",
+      "all_numeric_values_finite": true,
+      "numeric_values_checked": 15758,
+      "mean_spearman": 0.7999999999999998,
+      "pairwise_agreement": 0.8333333333333334,
+      "informative_groups": 1,
+      "false_safe_count": 0,
+      "informative_rate": 1.0,
+      "reward_tie_rate": 0.0,
+      "false_unsafe_rate": 0.0,
+      "diagnostic_subset_smoke": true,
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false,
+      "passed": false,
+      "blockers": [
+        "diagnostic_subset_smoke",
+        "independent_holdout_phase_required",
+        "insufficient_informative_groups",
+        "no_closed_loop_safe_group",
+        "tracking_envelope_gate_failed"
+      ]
+    },
+    "checkpoint_contracts": [
+      "pretrain baseline is computed once from the original Stage1 source before resume",
+      "last checkpoint binds historical best reward and sibling best checkpoint SHA",
+      "resume rejects missing, non-finite, mismatched, or absent historical best",
+      "four-model formal evaluation rejects diagnostic, bypassed, failed-calibration, or blocker-bearing checkpoints"
+    ],
+    "diff_check": "passed"
+  },
+  "gate_result": {
+    "continuous_reward_v2_implementation_verified": true,
+    "fresh_development_calibration_completed": false,
+    "fresh_holdout_calibration_completed": false,
+    "calibration_gate_passed": false,
+    "stage2_training_started": false,
+    "stage2_training_completed": false,
+    "formal_qualification_passed": false,
+    "next_hard_gate": "Run fresh complete S5-S9 development calibration and independent holdout calibration in the isolated V3 paths. New Stage 2 training is permitted only after the V3 holdout report has passed=true."
+  }
+}

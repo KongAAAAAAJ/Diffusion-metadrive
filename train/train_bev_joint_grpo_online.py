@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
@@ -37,13 +38,17 @@ from expert_dataset.collect_joint_bev import (
     simulator_decision_dt_s,
 )
 from models.bev_planner import (
+    JOINT_REWARD_CONTRACT,
+    JOINT_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
+    JointRewardError,
     JointTrajectoryProxyReward,
     KinematicTrajectoryOptimizer,
     KinematicTrajectoryOptimizerConfig,
     TrajectoryOptimizationError,
     TrajectoryOptimizationResult,
     calibrate_joint_rewards,
+    joint_reward_config_sha256,
 )
 from models.bev_planner.mode_contract import ModeIndex
 from train.bev_joint_grpo import (
@@ -327,6 +332,17 @@ def _json_sha256(path: Path) -> tuple[dict[str, object], str]:
     return payload, hashlib.sha256(raw).hexdigest()
 
 
+def _checkpoint_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise OnlineGRPOError(f"unable to read checkpoint: {path}") from exc
+    return digest.hexdigest()
+
+
 def _validate_calibration_trajectory_optimizer_contract(
     calibration: Mapping[str, object],
 ) -> KinematicTrajectoryOptimizerConfig:
@@ -353,6 +369,43 @@ def _validate_calibration_trajectory_optimizer_contract(
     return parsed
 
 
+def _reward_contract_version() -> str:
+    version = JOINT_REWARD_CONTRACT.get("version")
+    if not isinstance(version, str) or not version:
+        raise OnlineGRPOError("joint reward contract version is invalid")
+    return version
+
+
+def _validate_calibration_reward_contract(
+    calibration: Mapping[str, object],
+) -> JointRewardConfig:
+    """Load only the exact V2 reward contract/config frozen by calibration."""
+
+    if (
+        calibration.get("reward_contract_version")
+        != _reward_contract_version()
+        or calibration.get("reward_contract_sha256")
+        != JOINT_REWARD_CONTRACT_SHA256
+        or calibration.get("reward_contract") != JOINT_REWARD_CONTRACT
+    ):
+        raise OnlineGRPOError("calibration reward contract mismatch")
+    raw_config = calibration.get("reward_config")
+    if not isinstance(raw_config, Mapping):
+        raise OnlineGRPOError("calibration reward config mismatch")
+    try:
+        parsed = JointRewardConfig(**dict(raw_config))
+    except (TypeError, ValueError, JointRewardError) as exc:
+        raise OnlineGRPOError("calibration reward config mismatch") from exc
+    canonical_config = dataclasses.asdict(parsed)
+    if (
+        dict(raw_config) != canonical_config
+        or calibration.get("reward_config_sha256")
+        != joint_reward_config_sha256(parsed)
+    ):
+        raise OnlineGRPOError("calibration reward config mismatch")
+    return parsed
+
+
 def _joint_rewards_are_informative(
     rewards: np.ndarray, *, minimum_span: float = 1e-6
 ) -> bool:
@@ -368,6 +421,94 @@ def _joint_rewards_are_informative(
             "minimum reward span must be finite and non-negative"
         )
     return float(np.ptp(values.astype(np.float64, copy=False))) > minimum_span
+
+
+def _calibration_reward_diagnostics(
+    proxy_rewards: np.ndarray,
+    proxy_unsafe: np.ndarray,
+    simulator_unsafe: np.ndarray,
+    scenarios: Sequence[str],
+    *,
+    tie_epsilon: float = 1e-6,
+) -> dict[str, object]:
+    """Summarize reward diversity and false-unsafe diagnostics without gating."""
+
+    rewards = np.asarray(proxy_rewards)
+    proxy_bad = np.asarray(proxy_unsafe)
+    simulator_bad = np.asarray(simulator_unsafe)
+    if (
+        rewards.ndim != 2
+        or rewards.shape[1] != 4
+        or rewards.shape[0] == 0
+        or rewards.dtype not in (np.float32, np.float64)
+        or not np.isfinite(rewards).all()
+    ):
+        raise OnlineGRPOError("calibration proxy rewards must be finite float [N,4]")
+    if (
+        proxy_bad.shape != rewards.shape
+        or simulator_bad.shape != rewards.shape
+        or proxy_bad.dtype != np.bool_
+        or simulator_bad.dtype != np.bool_
+    ):
+        raise OnlineGRPOError("calibration unsafe diagnostics must be bool [N,4]")
+    if len(scenarios) != rewards.shape[0]:
+        raise OnlineGRPOError("calibration scenario diagnostic count mismatch")
+    if not math.isfinite(tie_epsilon) or tie_epsilon < 0.0:
+        raise OnlineGRPOError("calibration tie epsilon must be finite and non-negative")
+
+    pair_indices = tuple((left, right) for left in range(4) for right in range(left + 1, 4))
+
+    def summarize(indices: np.ndarray) -> dict[str, object]:
+        selected_rewards = rewards[indices]
+        selected_proxy_bad = proxy_bad[indices]
+        selected_simulator_bad = simulator_bad[indices]
+        group_count = int(selected_rewards.shape[0])
+        informative_count = int(
+            np.count_nonzero(np.ptp(selected_rewards.astype(np.float64), axis=1) > tie_epsilon)
+        )
+        pair_count = group_count * len(pair_indices)
+        tie_count = sum(
+            int(
+                np.count_nonzero(
+                    np.abs(
+                        selected_rewards[:, left].astype(np.float64)
+                        - selected_rewards[:, right].astype(np.float64)
+                    )
+                    <= tie_epsilon
+                )
+            )
+            for left, right in pair_indices
+        )
+        candidate_count = int(selected_rewards.size)
+        false_unsafe_count = int(
+            np.count_nonzero(selected_proxy_bad & ~selected_simulator_bad)
+        )
+        return {
+            "groups": group_count,
+            "informative_groups": informative_count,
+            "informative_rate": informative_count / group_count,
+            "reward_pair_count": pair_count,
+            "reward_tie_count": tie_count,
+            "reward_tie_rate": tie_count / pair_count,
+            "candidate_count": candidate_count,
+            "false_unsafe_count": false_unsafe_count,
+            "false_unsafe_rate": false_unsafe_count / candidate_count,
+        }
+
+    scenario_values = np.asarray([str(value) for value in scenarios], dtype=object)
+    ordered_scenarios = tuple(dict.fromkeys(str(value) for value in scenarios))
+    all_indices = np.arange(rewards.shape[0], dtype=np.int64)
+    return {
+        "diagnostic_only": True,
+        "gating_thresholds_added": False,
+        "reward_domain": "proxy",
+        "tie_epsilon": float(tie_epsilon),
+        "overall": summarize(all_indices),
+        "by_scenario": {
+            scenario: summarize(np.flatnonzero(scenario_values == scenario))
+            for scenario in ordered_scenarios
+        },
+    }
 
 
 def _summarize_calibration_tracking(
@@ -626,23 +767,56 @@ def run_s5_s9_preflight(
     return report
 
 
-def run_joint_reward_calibration(
+def _calibration_scope_contract(
+    scenarios: Sequence[tuple[str, str]],
+    seeds: Sequence[int],
     *,
-    variant: Literal["A", "B"],
-    source_checkpoint: Path,
-    output_path: Path,
-    device: str = "cuda",
-    reward_config: JointRewardConfig | None = None,
-    scenarios: Sequence[tuple[str, str]] = PRIMARY_S5_S9_SCENARIOS,
-    seeds: Sequence[int] = HOLDOUT_SEEDS,
-    states_per_episode: int = 3,
-    calibration_phase: Literal["development", "holdout"] = "holdout",
-) -> dict[str, object]:
-    if variant not in ("A", "B"):
-        raise OnlineGRPOError("calibration variant must be A or B")
-    if states_per_episode <= 0:
-        raise OnlineGRPOError("states_per_episode must be positive")
-    if tuple((str(a), str(b)) for a, b in scenarios) != PRIMARY_S5_S9_SCENARIOS:
+    states_per_episode: int,
+    calibration_phase: str,
+    diagnostic_subset_smoke: bool,
+) -> tuple[
+    tuple[tuple[str, str], ...], tuple[int, ...], dict[str, object]
+]:
+    """Freeze either the formal primary scope or a non-gating smoke subset."""
+
+    scenario_values = tuple(
+        (str(scenario), str(route)) for scenario, route in scenarios
+    )
+    seed_values = tuple(int(value) for value in seeds)
+    if diagnostic_subset_smoke:
+        if (
+            calibration_phase != "development"
+            or states_per_episode != 1
+            or len(scenario_values) != 1
+            or scenario_values[0] not in PRIMARY_S5_S9_SCENARIOS
+            or len(seed_values) != 1
+            or seed_values[0] not in DEVELOPMENT_SEEDS
+        ):
+            raise OnlineGRPOError(
+                "diagnostic subset smoke requires one primary S5--S9 scenario, "
+                "one development seed, one state, and development phase"
+            )
+        primary = primary_scenario_contract()
+        contract: dict[str, object] = {
+            "format": "bev_joint_reward_calibration_v3_subset_smoke_scope",
+            "diagnostic_only": True,
+            "eligible_for_formal_training": False,
+            "parent_scenario_contract_sha256": primary["sha256"],
+            "scenarios": [list(value) for value in scenario_values],
+            "seeds": list(seed_values),
+            "states_per_episode": 1,
+        }
+        canonical = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        contract["sha256"] = hashlib.sha256(canonical).hexdigest()
+        return scenario_values, seed_values, contract
+
+    if scenario_values != PRIMARY_S5_S9_SCENARIOS:
         raise OnlineGRPOError(
             "primary calibration requires the complete ordered S5--S9 set"
         )
@@ -657,11 +831,61 @@ def run_joint_reward_calibration(
         raise OnlineGRPOError(
             "calibration_phase must be development or holdout"
         )
-    if tuple(int(value) for value in seeds) != expected_seeds:
+    if seed_values != expected_seeds:
         raise OnlineGRPOError(
-            f"{calibration_phase} calibration requires seeds {list(expected_seeds)}"
+            f"{calibration_phase} calibration requires seeds "
+            f"{list(expected_seeds)}"
         )
-    contract = primary_scenario_contract(scenarios)
+    return scenario_values, seed_values, primary_scenario_contract(
+        scenario_values
+    )
+
+
+def run_joint_reward_calibration(
+    *,
+    variant: Literal["A", "B"],
+    source_checkpoint: Path,
+    output_path: Path,
+    device: str = "cuda",
+    reward_config: JointRewardConfig | None = None,
+    scenarios: Sequence[tuple[str, str]] = PRIMARY_S5_S9_SCENARIOS,
+    seeds: Sequence[int] = HOLDOUT_SEEDS,
+    states_per_episode: int = 3,
+    calibration_phase: Literal["development", "holdout"] = "holdout",
+    diagnostic_subset_smoke: bool = False,
+    development_calibration_sha256: str | None = None,
+) -> dict[str, object]:
+    if variant not in ("A", "B"):
+        raise OnlineGRPOError("calibration variant must be A or B")
+    if states_per_episode <= 0:
+        raise OnlineGRPOError("states_per_episode must be positive")
+    scenarios, seeds, contract = _calibration_scope_contract(
+        scenarios,
+        seeds,
+        states_per_episode=states_per_episode,
+        calibration_phase=calibration_phase,
+        diagnostic_subset_smoke=diagnostic_subset_smoke,
+    )
+    if calibration_phase == "holdout":
+        digest = development_calibration_sha256
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or digest != digest.lower()
+        ):
+            raise OnlineGRPOError(
+                "holdout calibration requires a development report SHA256"
+            )
+        try:
+            int(digest, 16)
+        except ValueError as exc:
+            raise OnlineGRPOError(
+                "holdout calibration requires a development report SHA256"
+            ) from exc
+    elif development_calibration_sha256 is not None:
+        raise OnlineGRPOError(
+            "development calibration cannot bind a development report SHA256"
+        )
     torch_device = _device(device)
     trainer, source_payload, source_sha = _load_trainer(
         variant,
@@ -679,6 +903,7 @@ def run_joint_reward_calibration(
     simulator_rows = []
     proxy_bad_rows = []
     simulator_bad_rows = []
+    calibration_scenarios: list[str] = []
     details = []
     tracking_rows = []
     longitudinal_audit_rows = []
@@ -771,6 +996,7 @@ def run_joint_reward_calibration(
                         simulator_rows.append(simulator.reward.rewards.copy())
                         proxy_bad_rows.append(proxy.unsafe.copy())
                         simulator_bad_rows.append(simulator.reward.unsafe.copy())
+                        calibration_scenarios.append(str(scenario[0]))
                         dynamic_anchor_violations = []
                         for role in range(3):
                             valid_modes = np.flatnonzero(
@@ -1163,6 +1389,12 @@ def run_joint_reward_calibration(
         simulator_bad,
         min_informative_groups=15,
     )
+    reward_diagnostics = _calibration_reward_diagnostics(
+        proxy_array,
+        proxy_bad,
+        simulator_bad,
+        calibration_scenarios,
+    )
     tracking, lateral_p95, heading_p95, tracking_passed = (
         _summarize_calibration_tracking(tracking_rows)
     )
@@ -1224,22 +1456,39 @@ def run_joint_reward_calibration(
         maximum_target_speed_delta_p95 = None
         maximum_continuous_saturation = None
         maximum_stop_terminal_speed = None
-    passed = bool(
-        calibration_phase == "holdout"
-        and result.passed
-        and tracking_passed
-        and not longitudinal_blockers
-    )
+    calibration_blockers = list(longitudinal_blockers)
+    if calibration_phase != "holdout":
+        calibration_blockers.append("independent_holdout_phase_required")
+    if result.informative_groups < 15:
+        calibration_blockers.append("insufficient_informative_groups")
+    if result.mean_spearman < 0.50:
+        calibration_blockers.append("mean_spearman_below_0.50")
+    if result.pairwise_agreement < 0.70:
+        calibration_blockers.append("pairwise_agreement_below_0.70")
+    if result.false_safe_count != 0:
+        calibration_blockers.append("false_safe_count_nonzero")
+    if not tracking_passed:
+        calibration_blockers.append("tracking_envelope_gate_failed")
+    if diagnostic_subset_smoke:
+        calibration_blockers.append("diagnostic_subset_smoke")
+    calibration_blockers = sorted(set(calibration_blockers))
+    passed = not calibration_blockers
     report: dict[str, object] = {
-        "format": "bev_joint_reward_calibration_v2",
+        "format": "bev_joint_reward_calibration_v3",
         "variant": variant,
         "calibration_phase": calibration_phase,
+        "development_calibration_sha256": development_calibration_sha256,
+        "diagnostic_subset_smoke": diagnostic_subset_smoke,
         "diagnostic_only": True,
         "eligible_for_formal_training": False,
         "source_stage1_checkpoint": str(Path(source_checkpoint).resolve()),
         "source_stage1_sha256": source_sha,
         "source_dataset_fingerprint": source_payload["dataset_fingerprint"],
+        "reward_contract_version": _reward_contract_version(),
+        "reward_contract": JOINT_REWARD_CONTRACT,
+        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
         "reward_config": dataclasses.asdict(reward_cfg),
+        "reward_config_sha256": joint_reward_config_sha256(reward_cfg),
         "trajectory_optimizer_config": dataclasses.asdict(
             trajectory_optimizer.config
         ),
@@ -1255,6 +1504,14 @@ def run_joint_reward_calibration(
         "informative_groups": result.informative_groups,
         "pairwise_comparisons": result.pairwise_comparisons,
         "false_safe_count": result.false_safe_count,
+        "ranking_gate": {
+            "minimum_informative_groups": 15,
+            "minimum_mean_spearman": 0.50,
+            "minimum_pairwise_agreement": 0.70,
+            "required_false_safe_count": 0,
+            "passed": result.passed,
+        },
+        "reward_diagnostics": reward_diagnostics,
         "tracking": tracking,
         "tracking_gate": {
             "lateral_p95_m": lateral_p95,
@@ -1309,14 +1566,15 @@ def run_joint_reward_calibration(
             "passed": not longitudinal_blockers,
         },
         "false_safe_causes": dict(sorted(false_safe_causes.items())),
-        "blockers": longitudinal_blockers,
+        "blockers": calibration_blockers,
         "passed": passed,
         "details": details,
     }
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
     )
     return report
 
@@ -1353,7 +1611,21 @@ def _checkpoint_payload(
     scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
     environment_steps: int,
+    best_validation_reward: float,
+    best_checkpoint_sha256: str | None,
 ) -> dict[str, object]:
+    if not math.isfinite(float(best_validation_reward)):
+        raise OnlineGRPOError("best validation reward must be finite")
+    if best_checkpoint_sha256 is not None:
+        if (
+            len(best_checkpoint_sha256) != 64
+            or best_checkpoint_sha256 != best_checkpoint_sha256.lower()
+        ):
+            raise OnlineGRPOError("best checkpoint SHA256 is invalid")
+        try:
+            int(best_checkpoint_sha256, 16)
+        except ValueError as exc:
+            raise OnlineGRPOError("best checkpoint SHA256 is invalid") from exc
     builder = (
         grpo_checkpoint_payload if variant == "A" else grpo_b_checkpoint_payload
     )
@@ -1367,7 +1639,10 @@ def _checkpoint_payload(
     payload.update(
         {
             "run_mode": run_mode,
+            "reward_contract_version": _reward_contract_version(),
+            "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
             "reward_config": dataclasses.asdict(reward_config),
+            "reward_config_sha256": joint_reward_config_sha256(reward_config),
             "calibration_report_sha256": calibration_sha,
             "calibration_gate_bypassed": calibration_gate_bypassed,
             "calibration_report_passed": calibration_report_passed,
@@ -1375,6 +1650,8 @@ def _checkpoint_payload(
             "scenario_contract_sha256": scenario_contract_sha,
             "scenario_seeds": [int(value) for value in scenario_seeds],
             "environment_steps": int(environment_steps),
+            "best_validation_reward": float(best_validation_reward),
+            "best_checkpoint_sha256": best_checkpoint_sha256,
             "trajectory_optimizer_config": dataclasses.asdict(
                 KinematicTrajectoryOptimizerConfig()
             ),
@@ -1400,7 +1677,10 @@ def _validate_online_checkpoint_metadata(
 ) -> None:
     expected = {
         "run_mode": run_mode,
+        "reward_contract_version": _reward_contract_version(),
+        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
         "reward_config": dataclasses.asdict(reward_config),
+        "reward_config_sha256": joint_reward_config_sha256(reward_config),
         "calibration_report_sha256": calibration_sha,
         "calibration_gate_bypassed": calibration_gate_bypassed,
         "calibration_report_passed": calibration_report_passed,
@@ -1426,6 +1706,31 @@ def _validate_online_checkpoint_metadata(
         raise OnlineGRPOError(
             "online GRPO checkpoint environment_steps is invalid"
         )
+    best_reward = payload.get("best_validation_reward")
+    if (
+        isinstance(best_reward, bool)
+        or not isinstance(best_reward, (int, float))
+        or not math.isfinite(float(best_reward))
+    ):
+        raise OnlineGRPOError(
+            "online GRPO checkpoint best_validation_reward is invalid"
+        )
+    best_sha = payload.get("best_checkpoint_sha256")
+    if best_sha is not None:
+        if (
+            not isinstance(best_sha, str)
+            or len(best_sha) != 64
+            or best_sha != best_sha.lower()
+        ):
+            raise OnlineGRPOError(
+                "online GRPO checkpoint best_checkpoint_sha256 is invalid"
+            )
+        try:
+            int(best_sha, 16)
+        except ValueError as exc:
+            raise OnlineGRPOError(
+                "online GRPO checkpoint best_checkpoint_sha256 is invalid"
+            ) from exc
 
 
 @torch.no_grad()
@@ -1559,6 +1864,95 @@ def _validation_reward_comparison_metrics(
     }
 
 
+def _validation_simulator_reward(
+    validation: Mapping[str, object],
+) -> float:
+    """Return the sole best-checkpoint objective as a finite scalar."""
+
+    reward_tag = "validation/simulator_reward_mean"
+    if reward_tag not in validation:
+        raise OnlineGRPOError(
+            f"fixed validation is missing required metric {reward_tag}"
+        )
+    try:
+        reward = float(validation[reward_tag])
+    except (TypeError, ValueError) as exc:
+        raise OnlineGRPOError(
+            "validation simulator reward must be a finite scalar"
+        ) from exc
+    if not math.isfinite(reward):
+        raise OnlineGRPOError(
+            "validation simulator reward must be a finite scalar"
+        )
+    return reward
+
+
+def _resume_best_checkpoint_anchor(
+    resume_checkpoint: Path,
+    resume_payload: Mapping[str, object],
+) -> tuple[Path, float]:
+    """Resolve and verify the historical best paired with a V2 resume file."""
+
+    best_reward = float(resume_payload["best_validation_reward"])
+    best_sha = resume_payload.get("best_checkpoint_sha256")
+    if best_sha is None:
+        if _validation_simulator_reward(
+            resume_payload.get("metrics", {})
+        ) != best_reward:
+            raise OnlineGRPOError(
+                "self-contained best checkpoint reward binding mismatch"
+            )
+        return Path(resume_checkpoint), best_reward
+
+    best_path = Path(resume_checkpoint).with_name("best.pt")
+    if _checkpoint_file_sha256(best_path) != best_sha:
+        raise OnlineGRPOError("resume best checkpoint SHA256 mismatch")
+    try:
+        best_payload = torch.load(
+            best_path, map_location="cpu", weights_only=False
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise OnlineGRPOError(
+            f"unable to load resume best checkpoint: {best_path}"
+        ) from exc
+    if not isinstance(best_payload, Mapping):
+        raise OnlineGRPOError("resume best checkpoint must be a mapping")
+    binding_fields = (
+        "schema_version",
+        "format",
+        "variant",
+        "predecessor_condition",
+        "source_stage1_sha256",
+        "run_mode",
+        "reward_contract_version",
+        "reward_contract_sha256",
+        "reward_config_sha256",
+        "calibration_report_sha256",
+        "scenario_contract_sha256",
+        "trajectory_optimizer_sha256",
+    )
+    if any(
+        best_payload.get(field) != resume_payload.get(field)
+        for field in binding_fields
+    ):
+        raise OnlineGRPOError("resume best checkpoint contract binding mismatch")
+    raw_best_reward = best_payload.get("best_validation_reward")
+    if (
+        isinstance(raw_best_reward, bool)
+        or not isinstance(raw_best_reward, (int, float))
+        or not math.isfinite(float(raw_best_reward))
+    ):
+        raise OnlineGRPOError("resume best checkpoint reward binding mismatch")
+    if (
+        best_payload.get("best_checkpoint_sha256") is not None
+        or float(raw_best_reward) != best_reward
+        or _validation_simulator_reward(best_payload.get("metrics", {}))
+        != best_reward
+    ):
+        raise OnlineGRPOError("resume best checkpoint reward binding mismatch")
+    return best_path, best_reward
+
+
 def run_joint_grpo_training(
     config: JointGRPOOnlineConfig,
     *,
@@ -1587,36 +1981,44 @@ def run_joint_grpo_training(
         target_steps = config.total_optimizer_steps
     else:
         raise OnlineGRPOError("run_mode must be formal or smoke")
-    if allow_failed_calibration_diagnostic and (
-        variant != "A" or run_mode != "smoke"
-    ):
+    if allow_failed_calibration_diagnostic:
         raise OnlineGRPOError(
-            "failed-calibration bypass is restricted to Variant A smoke"
+            "stage2 joint reward v2 forbids failed-calibration bypass"
         )
     if config.calibration_report is None:
         raise OnlineGRPOError("online GRPO requires a calibration report")
     calibration, calibration_sha = _json_sha256(config.calibration_report)
-    if calibration.get("format") != "bev_joint_reward_calibration_v2":
+    if calibration.get("format") != "bev_joint_reward_calibration_v3":
         raise OnlineGRPOError("calibration report format mismatch")
     if calibration.get("variant") != variant:
         raise OnlineGRPOError("calibration report variant mismatch")
+    reward_config = _validate_calibration_reward_contract(calibration)
     calibration_report_passed = calibration.get("passed") is True
-    if not calibration_report_passed and not allow_failed_calibration_diagnostic:
+    if not calibration_report_passed:
         raise OnlineGRPOError(
             "proxy calibration failed; online GRPO is intentionally blocked"
         )
-    if calibration_report_passed and allow_failed_calibration_diagnostic:
-        raise OnlineGRPOError(
-            "failed-calibration bypass requires a failed calibration report"
-        )
-    calibration_gate_bypassed = bool(
-        allow_failed_calibration_diagnostic and not calibration_report_passed
-    )
+    calibration_gate_bypassed = False
     calibration_blockers = tuple(
         str(value) for value in calibration.get("blockers", ())
     )
     if calibration.get("calibration_phase") != "holdout":
         raise OnlineGRPOError("online GRPO requires an independent holdout calibration")
+    development_sha = calibration.get("development_calibration_sha256")
+    if (
+        not isinstance(development_sha, str)
+        or len(development_sha) != 64
+        or development_sha != development_sha.lower()
+    ):
+        raise OnlineGRPOError(
+            "holdout calibration is not bound to a development report"
+        )
+    try:
+        int(development_sha, 16)
+    except ValueError as exc:
+        raise OnlineGRPOError(
+            "holdout calibration is not bound to a development report"
+        ) from exc
     try:
         scenario_contract_sha = validate_primary_scenario_contract(
             calibration.get("scenario_contract")
@@ -1632,7 +2034,6 @@ def run_joint_grpo_training(
     if tuple(calibration.get("seeds", ())) != HOLDOUT_SEEDS:
         raise OnlineGRPOError("calibration does not use holdout seeds [31,47]")
     _validate_calibration_trajectory_optimizer_contract(calibration)
-    reward_config = JointRewardConfig(**dict(calibration["reward_config"]))
     torch_device = _device(config.device)
     trainer, source_payload, source_sha = _load_trainer(
         variant,
@@ -1665,6 +2066,8 @@ def run_joint_grpo_training(
     sampled_rollouts = 0
     uninformative_rollouts = 0
     last_metrics: dict[str, float] = {}
+    resume_best_path: Path | None = None
+    best_reward: float | None = None
     if config.resume_checkpoint is not None:
         resume_payload = checkpoint_loader(
             config.resume_checkpoint,
@@ -1687,6 +2090,9 @@ def run_joint_grpo_training(
             str(name): float(value)
             for name, value in resume_payload["metrics"].items()
         }
+        resume_best_path, best_reward = _resume_best_checkpoint_anchor(
+            Path(config.resume_checkpoint), resume_payload
+        )
         if trainer.optimizer_step >= target_steps:
             raise OnlineGRPOError(
                 "resume checkpoint already reached requested optimizer steps"
@@ -1694,7 +2100,7 @@ def run_joint_grpo_training(
 
     run_dir = _next_run_directory(Path(output_root))
     frozen = {
-        "format": "bev_joint_grpo_online_config_v1",
+        "format": "bev_joint_grpo_online_config_v2",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -1711,7 +2117,11 @@ def run_joint_grpo_training(
                 else None
             ),
         },
+        "reward_contract_version": _reward_contract_version(),
+        "reward_contract": JOINT_REWARD_CONTRACT,
+        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
         "reward_config": dataclasses.asdict(reward_config),
+        "reward_config_sha256": joint_reward_config_sha256(reward_config),
         "trajectory_optimizer_config": dataclasses.asdict(
             KinematicTrajectoryOptimizerConfig()
         ),
@@ -1737,9 +2147,12 @@ def run_joint_grpo_training(
     bucket_sample_counts = [0 for _ in training_buckets]
     bucket_update_counts = [0 for _ in training_buckets]
     consecutive_empty_episodes = 0
-    best_key: tuple[float, float] | None = None
     best_path = run_dir / "checkpoints" / "best.pt"
     last_path = run_dir / "checkpoints" / "last.pt"
+    best_checkpoint_sha256: str | None = None
+    if resume_best_path is not None:
+        shutil.copyfile(resume_best_path, best_path)
+        best_checkpoint_sha256 = _checkpoint_file_sha256(best_path)
     last_validated_step = -1
 
     try:
@@ -1941,10 +2354,32 @@ def run_joint_grpo_training(
                     writer.add_scalar(
                         metric_name, metric_value, trainer.optimizer_step
                     )
-                validation_key = (
-                    validation["validation/unsafe_count"],
-                    -validation["validation/simulator_reward_mean"],
-                )
+                validation_reward = _validation_simulator_reward(validation)
+                if best_reward is None or validation_reward > best_reward:
+                    best_reward = validation_reward
+                    best_checkpoint = _checkpoint_payload(
+                        variant=variant,
+                        trainer=trainer,
+                        source_sha=source_sha,
+                        source_payload=source_payload,
+                        metrics=last_metrics,
+                        diagnostic_only=run_mode != "formal",
+                        run_mode=run_mode,
+                        reward_config=reward_config,
+                        calibration_sha=calibration_sha,
+                        calibration_gate_bypassed=calibration_gate_bypassed,
+                        calibration_report_passed=calibration_report_passed,
+                        calibration_blockers=calibration_blockers,
+                        scenario_contract_sha=scenario_contract_sha,
+                        scenario_seeds=config.scenario_seeds,
+                        environment_steps=environment_steps,
+                        best_validation_reward=best_reward,
+                        best_checkpoint_sha256=None,
+                    )
+                    save_grpo_checkpoint(best_path, best_checkpoint)
+                    best_checkpoint_sha256 = _checkpoint_file_sha256(best_path)
+                assert best_reward is not None
+                assert best_checkpoint_sha256 is not None
                 checkpoint = _checkpoint_payload(
                     variant=variant,
                     trainer=trainer,
@@ -1961,16 +2396,15 @@ def run_joint_grpo_training(
                     scenario_contract_sha=scenario_contract_sha,
                     scenario_seeds=config.scenario_seeds,
                     environment_steps=environment_steps,
+                    best_validation_reward=best_reward,
+                    best_checkpoint_sha256=best_checkpoint_sha256,
                 )
                 save_grpo_checkpoint(last_path, checkpoint)
-                if best_key is None or validation_key < best_key:
-                    best_key = validation_key
-                    save_grpo_checkpoint(best_path, checkpoint)
                 last_validated_step = trainer.optimizer_step
     finally:
         writer.close()
 
-    if best_key is None:
+    if best_reward is None or best_checkpoint_sha256 is None:
         raise OnlineGRPOError("online GRPO never completed fixed validation")
     payload = _checkpoint_payload(
         variant=variant,
@@ -1988,6 +2422,8 @@ def run_joint_grpo_training(
         scenario_contract_sha=scenario_contract_sha,
         scenario_seeds=config.scenario_seeds,
         environment_steps=environment_steps,
+        best_validation_reward=best_reward,
+        best_checkpoint_sha256=best_checkpoint_sha256,
     )
     last_path = save_grpo_checkpoint(last_path, payload)
 
@@ -2015,7 +2451,7 @@ def run_joint_grpo_training(
     )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v1",
+        "format": "bev_joint_grpo_online_report_v2",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -2027,6 +2463,9 @@ def run_joint_grpo_training(
         "environment_steps": environment_steps,
         "sampled_rollouts": sampled_rollouts,
         "uninformative_rollouts": uninformative_rollouts,
+        "reward_contract_version": _reward_contract_version(),
+        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+        "reward_config_sha256": joint_reward_config_sha256(reward_config),
         "calibration_report_sha256": calibration_sha,
         "scenario_contract_sha256": scenario_contract_sha,
         "training_scenarios": [list(value) for value in config.scenarios],
@@ -2044,6 +2483,7 @@ def run_joint_grpo_training(
         "validation_seeds": list(HOLDOUT_SEEDS),
         "last_checkpoint": str(last_path.resolve()),
         "best_checkpoint": str(best_path.resolve()),
+        "best_validation_reward": best_reward,
         "metrics": last_metrics,
         "checkpoint_round_trip": True,
     }
@@ -2108,8 +2548,8 @@ def main() -> int:
         "--allow-failed-calibration-diagnostic",
         action="store_true",
         help=(
-            "Explicitly waive passed=true only for bounded Variant-A smoke; "
-            "all other calibration bindings remain enforced."
+            "Legacy compatibility flag. Stage2 joint reward V2 rejects this "
+            "flag and requires a passed V3 holdout calibration."
         ),
     )
     arguments = parser.parse_args()

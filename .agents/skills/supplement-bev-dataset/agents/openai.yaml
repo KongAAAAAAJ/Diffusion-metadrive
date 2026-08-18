@@ -1,0 +1,4 @@
+interface:
+  display_name: "Supplement BEV Dataset"
+  short_description: "Safely collect and curate BEV supplements"
+  default_prompt: "Use $supplement-bev-dataset to collect a targeted supplement bundle and safely curate it into a larger BEV dataset."

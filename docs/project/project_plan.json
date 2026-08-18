@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-17T11:38:28+08:00",
-  "status": "at_risk_diagnostic_grpo_open_bare_launcher_ready",
+  "updated_at": "2026-08-18T14:23:00+08:00",
+  "status": "stage2_continuous_reward_v2_implementation_verified_fresh_v3_calibration_pending",
   "purpose": "Machine-readable memory for the candidate-v3 data refresh, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
@@ -304,6 +304,7 @@
   },
   "stage2_at_risk_grpo_open": {
     "name": "At-risk diagnostic GRPO-Open",
+    "status": "historical_run3_user_terminated_under_legacy_reward",
     "authorization_recorded_on": "2026-08-17",
     "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
     "source_checkpoint_classification": "user-authorized at-risk diagnostic source; embedded formal eligibility metadata does not override the unaccepted dataset boundary",
@@ -318,11 +319,14 @@
     "failed_holdout_observed_blockers": [
       "stop_terminal_speed"
     ],
+    "legacy_reward_contract": "round13_joint_reward_v1_hard_unsafe_override",
+    "resume_with_stage2_joint_reward_v2_allowed": false,
+    "stage2_joint_reward_v2_failed_calibration_bypass_authorized": false,
     "required_sequence": [
-      "the dedicated scripts/run_bev_joint_grpo.sh launcher defaults internally to PIPELINE_STAGE=train and ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=1 under the recorded user authorization",
-      "existing failed independent holdout report retained and bound to the exact source checkpoint SHA256",
-      "all holdout report format, scenario, seed, trajectory-optimizer, reward-configuration, and source-checkpoint checks remain mandatory except passed=true",
-      "bounded GRPO-Open training with an explicit maximum optimizer-step limit"
+      "historical run_3 used the then-authorized failed-calibration bypass under the legacy reward contract; the current V2 launcher defaults to bypass=0 and rejects any nonzero bypass",
+      "the existing failed independent holdout report and run_3 remain immutable historical artifacts",
+      "stage2_joint_reward_v2 requires a fresh V3 development report and a SHA-bound independent holdout report with passed=true",
+      "any future V2 training must start from the original Stage1 source in the isolated training_v2 root; run_3 resume is forbidden"
     ],
     "output_contract": {
       "diagnostic_only": true,
@@ -341,6 +345,22 @@
     "policy_sample": "tau_d",
     "policy_probability": "raw diffusion/DDIM rollout and sampled-mode log-probability",
     "command_optimization": "tau_cmd = KinematicTrajectoryOptimizer(tau_d)",
+    "reward_contract": {
+      "version": "stage2_joint_reward_v2",
+      "machine_source": "models.bev_planner.joint_reward.JOINT_REWARD_CONTRACT",
+      "contract_sha256": "0e95826028f77e86d8130e2f4bc6ac4ed617001d5adef99b600df8f061fb2ab9",
+      "base_config_sha256": "d8ee4366681b5f2b69b1dfad376b4cfd551822dc1996adff79eed4955e4218a3",
+      "formula": "0.47*progress - 1.0*formation - 1.185*gap - 0.5*ttc - 0.5*road - 0.0225*comfort - 5.0*collision - 4.0*out_of_road",
+      "component_range": "all quality components are finite [0,1]; collision and out_of_road are per-candidate indicators",
+      "continuous_risk_timeline": "0.0 through 4.0 seconds inclusive at 0.1-second spacing in both proxy and resampled executed-trace domains",
+      "continuous_risk_aggregation": "per-background-actor alternative-branch max, then per-time interaction max, then 0.7*time_max + 0.3*time_mean",
+      "physical_event_semantics": "raster-filled physical footprint plus nominal background branch; collision/out penalties are additive and never replace the remaining candidate score",
+      "tracking_risk_semantics": "tracking-aware footprint plus reachable background alternatives contributes only continuous gap, TTC and road-margin risk",
+      "unsafe_semantics": "diagnostic only; never controls reward, action selection, optimizer update, or best-checkpoint ordering",
+      "best_checkpoint": "maximize fixed-validation simulator_reward_mean only; exact ties preserve the earlier checkpoint",
+      "calibration_format": "bev_joint_reward_calibration_v3; holdout must bind the exact development-report SHA256",
+      "legacy_compatibility": "v2 calibration reports and legacy GRPO checkpoints are rejected; no silent migration or run_3 resume"
+    },
     "trainable_modules": [
       "diffusion_decoder",
       "mode_head"
@@ -361,7 +381,7 @@
       "training update budget",
       "trainable and frozen planner modules",
       "trajectory optimizer",
-      "reward component definitions and safety gates",
+      "stage2_joint_reward_v2 contract SHA and exact reward-config SHA",
       "online action selection and single env.step semantics"
     ],
     "only_primary_experimental_variable": "reward evaluation domain"
@@ -371,7 +391,7 @@
       "display_name": "GRPO-Open",
       "worktree": "current BEV worktree",
       "reward_input": "tau_cmd",
-      "reward_definition": "R_open = R(tau_cmd) using the current command-trajectory geometric and safety proxy",
+      "reward_definition": "R_open = stage2_joint_reward_v2(tau_cmd)",
       "surrogate_used": false,
       "formal_checkpoint_name": "Stage1-A+GRPO-Open"
     },
@@ -379,7 +399,7 @@
       "display_name": "GRPO-Exec",
       "worktree": "chassis-fusion sibling worktree",
       "reward_input": "tau_a",
-      "reward_definition": "R_exec = R(tau_a) using the frozen chassis execution surrogate prediction and the same reward semantics evaluated in the execution domain",
+      "reward_definition": "R_exec = stage2_joint_reward_v2(tau_a) using the exact same contract and reward-config hashes as GRPO-Open",
       "surrogate_used": true,
       "surrogate_runtime_contract": [
         "surrogate input is tau_cmd, never tau_d",
@@ -502,8 +522,9 @@
     "Do not convert diagnostic artifacts into formal artifacts by editing metadata.",
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision.",
-    "The 2026-08-17 at-risk GRPO-Open calibration waiver permits only Variant A with run_mode=smoke and an explicit bounded max_optimizer_steps. The dedicated launcher defaults to the recorded train+bypass authorization; strict recalibration remains an explicit ALLOW_FAILED_CALIBRATION_DIAGNOSTIC=0 and PIPELINE_STAGE=all opt-in. The existing failed holdout report must remain source-bound and auditable; only its passed=true gate is waived.",
+    "The 2026-08-17 failed-calibration waiver is historical and applies only to the legacy reward contract and preserved run_3. It does not authorize a stage2_joint_reward_v2 bypass, reuse of the v2 calibration report, or resume of run_3.",
     "Every at-risk GRPO-Open output remains diagnostic_only=true and eligible_for_formal_training=false; never use it for formal evaluation, GRPO-Exec, paper evidence, or metadata promotion."
   ],
-  "current_next_action": "After the dedicated launcher default fix and focused tests pass, start a separate bounded Variant-A GRPO-Open training thread with bash scripts/run_bev_joint_grpo.sh; MAX_OPTIMIZER_STEPS remains a positive bounded override. Preserve the failed holdout report and its blocker in every artifact. Formal Stage1, formal GRPO, formal evaluation, GRPO-Exec, and paper evidence remain blocked."
+  "implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
+  "current_next_action": "In a separate thread and isolated reward_v2/calibration_v3 artifact root, run the complete ordered S5-S9 development calibration on seeds [17,23], then the SHA-bound independent holdout calibration on seeds [31,47]. Training remains blocked until the new V3 holdout has passed=true; the legacy bypass and run_3 cannot be reused."
 }

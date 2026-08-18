@@ -16,6 +16,8 @@ from evaluation.bev_four_model_evaluator import (
     _execution_mask_or_record_rejection,
     _initial_state_signature,
     _initial_scene_sha256,
+    _validate_common_reward_binding,
+    _validate_grpo_evaluation_eligibility,
     _summarize,
     compare_models,
     compare_repeated_reports,
@@ -206,6 +208,61 @@ def test_behavior_hash_excludes_timing_but_not_policy_metrics() -> None:
     assert _behavior_sha256(report) == baseline
     report["models"]["stage1_a"]["joint_safety"]["collision_rate"] = 1.0
     assert _behavior_sha256(report) != baseline
+
+
+def test_four_model_comparison_rejects_mixed_reward_hashes() -> None:
+    common = ("stage2_joint_reward_v2", "a" * 64, "b" * 64)
+    assert _validate_common_reward_binding(
+        {"grpo_open": common, "grpo_exec": common}
+    ) == {
+        "reward_contract_version": "stage2_joint_reward_v2",
+        "reward_contract_sha256": "a" * 64,
+        "reward_config_sha256": "b" * 64,
+    }
+    with pytest.raises(ModelEvaluationError, match="mix reward contract/config"):
+        _validate_common_reward_binding(
+            {
+                "grpo_open": common,
+                "grpo_exec": ("stage2_joint_reward_v2", "a" * 64, "c" * 64),
+            }
+        )
+
+
+def test_grpo_evaluation_flags_are_strict_in_smoke_and_formal_modes() -> None:
+    smoke = {
+        "run_mode": "smoke",
+        "diagnostic_only": True,
+        "eligible_for_formal_training": False,
+        "calibration_gate_bypassed": False,
+        "calibration_report_passed": True,
+        "calibration_blockers": [],
+    }
+    formal = {
+        **smoke,
+        "run_mode": "formal",
+        "diagnostic_only": False,
+        "eligible_for_formal_training": True,
+    }
+    _validate_grpo_evaluation_eligibility(
+        smoke, formal=False, model_id="grpo_open"
+    )
+    _validate_grpo_evaluation_eligibility(
+        formal, formal=True, model_id="grpo_open"
+    )
+
+    for field, bad_value in (
+        ("run_mode", "smoke"),
+        ("diagnostic_only", True),
+        ("eligible_for_formal_training", False),
+        ("calibration_gate_bypassed", True),
+        ("calibration_report_passed", False),
+        ("calibration_blockers", ["tracking"]),
+    ):
+        invalid = {**formal, field: bad_value}
+        with pytest.raises(ModelEvaluationError, match=field):
+            _validate_grpo_evaluation_eligibility(
+                invalid, formal=True, model_id="grpo_open"
+            )
 
 
 def _repeat_report(

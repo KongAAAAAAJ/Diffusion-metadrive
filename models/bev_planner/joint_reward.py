@@ -8,15 +8,69 @@ semantic drivable BEV used by the planner.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import asdict, dataclass
 from typing import Mapping
 
+import cv2
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 from envs.observations.semantic_bev import BEVChannel, SemanticBEVConfig
+from models.platoon_planner.collision_geometry import (
+    obb_overlap_series,
+    shared_corridor_gap_series,
+)
+
 AGENT_IDS = ("agent0", "agent1", "agent2")
 NUM_ROLES = 3
 TRAJECTORY_SHAPE = (8, 3)
+
+JOINT_REWARD_CONTRACT = {
+    "version": "stage2_joint_reward_v2",
+    "formula": (
+        "+progress_weight*progress_score"
+        "-formation_weight*formation_penalty"
+        "-gap_weight*gap_penalty"
+        "-ttc_weight*ttc_penalty"
+        "-road_weight*road_penalty"
+        "-comfort_weight*comfort_penalty"
+        "-collision_penalty*collision"
+        "-out_of_drivable_penalty*out_of_drivable"
+    ),
+    "quality_component_range": [0.0, 1.0],
+    "total_reward_clip": None,
+    "unsafe_reward_branch": False,
+    "continuous_risk_aggregation": "temporal_max_weight*max+temporal_mean_weight*mean",
+    "continuous_risk_timeline": "0.0s through 4.0s inclusive at 0.1s",
+    "gap_geometry": (
+        "shared-corridor oriented-box bumper gap with relative-heading support"
+    ),
+    "background_branch_semantics": (
+        "max per time over mutually-exclusive branches of one actor, then max "
+        "per time over actors and all other interactions"
+    ),
+    "collision_semantics": (
+        "physical policy footprint against physical platoon footprints and "
+        "nominal background predictions only"
+    ),
+    "road_semantics": (
+        "full raster-resolution tracking footprint for signed-margin risk; "
+        "full raster-resolution physical footprint for out-of-drivable event"
+    ),
+    "diagnostic_unsafe_semantics": (
+        "collision or out_of_drivable or clearance_violation; never changes reward"
+    ),
+}
+JOINT_REWARD_CONTRACT_SHA256 = hashlib.sha256(
+    json.dumps(
+        JOINT_REWARD_CONTRACT,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+).hexdigest()
 
 
 class JointRewardError(RuntimeError):
@@ -31,21 +85,29 @@ class JointRewardConfig:
     vehicle_width_m: float = 2.3
     platoon_safe_gap_m: float = 7.0
     background_safe_gap_m: float = 5.0
+    gap_softness_m: float = 0.5
+    ttc_warning_s: float = 4.0
+    ttc_softness_s: float = 0.5
+    closing_speed_epsilon_mps: float = 0.1
+    road_margin_warning_m: float = 1.0
+    road_margin_softness_m: float = 0.25
     tracking_longitudinal_margin_m: float = 0.0
     tracking_lateral_margin_m: float = 0.0
     tracking_heading_margin_rad: float = 0.0
     progress_norm_m: float = 30.0
     formation_norm_m: float = 10.0
-    local_progress_weight: float = 0.8
-    local_formation_weight: float = 1.0
-    local_clearance_weight: float = 0.8
-    local_comfort_weight: float = 0.05
-    team_formation_weight: float = 1.0
-    team_safety_weight: float = 1.5
-    team_progress_weight: float = 0.2
-    local_mix: float = 0.45
-    team_mix: float = 0.55
-    unsafe_base_reward: float = -20.0
+    progress_weight: float = 0.47
+    formation_weight: float = 1.0
+    gap_weight: float = 1.185
+    ttc_weight: float = 0.5
+    road_weight: float = 0.5
+    comfort_weight: float = 0.0225
+    collision_penalty: float = 5.0
+    out_of_drivable_penalty: float = 4.0
+    temporal_max_weight: float = 0.7
+    temporal_mean_weight: float = 0.3
+    no_risk_gap_m: float = 1.0e6
+    no_risk_ttc_s: float = 1.0e6
 
     def __post_init__(self) -> None:
         positive = (
@@ -55,8 +117,16 @@ class JointRewardConfig:
             "vehicle_width_m",
             "platoon_safe_gap_m",
             "background_safe_gap_m",
+            "gap_softness_m",
+            "ttc_warning_s",
+            "ttc_softness_s",
+            "closing_speed_epsilon_mps",
+            "road_margin_warning_m",
+            "road_margin_softness_m",
             "progress_norm_m",
             "formation_norm_m",
+            "no_risk_gap_m",
+            "no_risk_ttc_s",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -78,25 +148,41 @@ class JointRewardConfig:
                 "interpolation_dt_s cannot exceed trajectory_dt_s"
             )
         for name in (
-            "local_progress_weight",
-            "local_formation_weight",
-            "local_clearance_weight",
-            "local_comfort_weight",
-            "team_formation_weight",
-            "team_safety_weight",
-            "team_progress_weight",
-            "local_mix",
-            "team_mix",
+            "progress_weight",
+            "formation_weight",
+            "gap_weight",
+            "ttc_weight",
+            "road_weight",
+            "comfort_weight",
+            "collision_penalty",
+            "out_of_drivable_penalty",
+            "temporal_max_weight",
+            "temporal_mean_weight",
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
                 raise JointRewardError(f"{name} must be non-negative and finite")
-        if not math.isclose(self.local_mix + self.team_mix, 1.0):
-            raise JointRewardError("local_mix and team_mix must sum to one")
-        if not math.isfinite(self.unsafe_base_reward) or (
-            self.unsafe_base_reward >= -5.0
+        if not math.isclose(
+            self.temporal_max_weight + self.temporal_mean_weight,
+            1.0,
         ):
-            raise JointRewardError("unsafe_base_reward must be below -5")
+            raise JointRewardError(
+                "temporal_max_weight and temporal_mean_weight must sum to one"
+            )
+
+
+def joint_reward_config_sha256(config: JointRewardConfig) -> str:
+    """Return the canonical digest binding every numeric reward setting."""
+
+    if not isinstance(config, JointRewardConfig):
+        raise JointRewardError("config must be JointRewardConfig")
+    payload = json.dumps(
+        asdict(config),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -175,7 +261,7 @@ def _dense_local_trajectories(
 ) -> tuple[np.ndarray, np.ndarray]:
     source_times = np.arange(1, 9, dtype=np.float64) * config.trajectory_dt_s
     target_times = np.arange(
-        config.interpolation_dt_s,
+        0.0,
         source_times[-1] + 0.5 * config.interpolation_dt_s,
         config.interpolation_dt_s,
         dtype=np.float64,
@@ -231,36 +317,11 @@ def _local_to_world(local: np.ndarray, pose: np.ndarray) -> np.ndarray:
     return world
 
 
-def _footprint_points(local: np.ndarray, config: JointRewardConfig) -> np.ndarray:
-    half_length, half_width = _tracking_aware_half_extents(config)
-    offsets = np.asarray(
-        [
-            [0.0, 0.0],
-            [half_length, half_width],
-            [half_length, -half_width],
-            [-half_length, half_width],
-            [-half_length, -half_width],
-        ],
-        dtype=np.float64,
-    )
-    heading = local[:, 2]
-    cos_h = np.cos(heading)
-    sin_h = np.sin(heading)
-    points = np.empty((len(local), len(offsets), 2), dtype=np.float64)
-    for index, (longitudinal, lateral) in enumerate(offsets):
-        points[:, index, 0] = (
-            local[:, 0] + cos_h * longitudinal - sin_h * lateral
-        )
-        points[:, index, 1] = (
-            local[:, 1] + sin_h * longitudinal + cos_h * lateral
-        )
-    return points
-
-
-def _tracking_aware_half_extents(
+def tracking_aware_half_extents(
     config: JointRewardConfig,
 ) -> tuple[float, float]:
-    """Conservative vehicle extents under measured closed-loop tracking error."""
+    """Return conservative half extents under measured tracking error."""
+
     heading = config.tracking_heading_margin_rad
     half_length = (
         0.5 * config.vehicle_length_m
@@ -275,11 +336,61 @@ def _tracking_aware_half_extents(
     return half_length, half_width
 
 
-def _footprint_outside_drivable(
-    local: np.ndarray, drivable: np.ndarray, config: JointRewardConfig
-) -> bool:
+def _footprint_points(
+    local: np.ndarray,
+    config: JointRewardConfig,
+    *,
+    tracking_aware: bool,
+) -> np.ndarray:
+    poses = np.asarray(local, dtype=np.float64)
+    if poses.ndim != 2 or poses.shape[1] != 3 or not np.isfinite(poses).all():
+        raise JointRewardError("footprint poses must be finite [N,3]")
+    if tracking_aware:
+        half_length, half_width = tracking_aware_half_extents(config)
+    else:
+        half_length = 0.5 * config.vehicle_length_m
+        half_width = 0.5 * config.vehicle_width_m
     bev_config = SemanticBEVConfig()
-    points = _footprint_points(local, config).reshape(-1, 2)
+    longitudinal_resolution = (
+        bev_config.x_max_m - bev_config.x_min_m
+    ) / (bev_config.height - 1)
+    lateral_resolution = (
+        bev_config.y_max_m - bev_config.y_min_m
+    ) / (bev_config.width - 1)
+    longitudinal = np.linspace(
+        -half_length,
+        half_length,
+        max(2, int(math.ceil(2.0 * half_length / longitudinal_resolution)) + 1),
+        dtype=np.float64,
+    )
+    lateral = np.linspace(
+        -half_width,
+        half_width,
+        max(2, int(math.ceil(2.0 * half_width / lateral_resolution)) + 1),
+        dtype=np.float64,
+    )
+    longitudinal_grid, lateral_grid = np.meshgrid(
+        longitudinal, lateral, indexing="ij"
+    )
+    offsets = np.column_stack(
+        (longitudinal_grid.reshape(-1), lateral_grid.reshape(-1))
+    )
+    heading = poses[:, 2]
+    cos_h = np.cos(heading)
+    sin_h = np.sin(heading)
+    points = np.empty((len(local), len(offsets), 2), dtype=np.float64)
+    for index, (longitudinal, lateral) in enumerate(offsets):
+        points[:, index, 0] = (
+            poses[:, 0] + cos_h * longitudinal - sin_h * lateral
+        )
+        points[:, index, 1] = (
+            poses[:, 1] + sin_h * longitudinal + cos_h * lateral
+        )
+    return points
+
+
+def _local_points_to_bev_coordinates(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    bev_config = SemanticBEVConfig()
     col = (
         (bev_config.y_max_m - points[:, 1])
         / (bev_config.y_max_m - bev_config.y_min_m)
@@ -290,17 +401,289 @@ def _footprint_outside_drivable(
         / (bev_config.x_max_m - bev_config.x_min_m)
         * (bev_config.height - 1)
     )
+    return row, col
+
+
+def footprint_outside_drivable_series(
+    local_poses: np.ndarray,
+    drivable: np.ndarray,
+    config: JointRewardConfig,
+) -> np.ndarray:
+    """Return physical-footprint raster violations for every dense sample."""
+
+    drivable_values = np.asarray(drivable)
+    bev_config = SemanticBEVConfig()
+    if drivable_values.shape != (bev_config.height, bev_config.width):
+        raise JointRewardError("drivable BEV must match SemanticBEVConfig")
+    poses = np.asarray(local_poses, dtype=np.float64)
+    if poses.ndim != 2 or poses.shape[1] != 3 or not np.isfinite(poses).all():
+        raise JointRewardError("footprint poses must be finite [N,3]")
+    half_length = 0.5 * config.vehicle_length_m
+    half_width = 0.5 * config.vehicle_width_m
+    offsets = np.asarray(
+        [
+            [half_length, half_width],
+            [half_length, -half_width],
+            [-half_length, -half_width],
+            [-half_length, half_width],
+        ],
+        dtype=np.float64,
+    )
+    result = np.zeros(len(poses), dtype=np.bool_)
+    for index, pose in enumerate(poses):
+        cosine = math.cos(float(pose[2]))
+        sine = math.sin(float(pose[2]))
+        corners = np.empty((4, 2), dtype=np.float64)
+        corners[:, 0] = (
+            pose[0] + cosine * offsets[:, 0] - sine * offsets[:, 1]
+        )
+        corners[:, 1] = (
+            pose[1] + sine * offsets[:, 0] + cosine * offsets[:, 1]
+        )
+        row, col = _local_points_to_bev_coordinates(corners)
+        if bool(
+            np.any(row < 0.0)
+            or np.any(row > bev_config.height - 1)
+            or np.any(col < 0.0)
+            or np.any(col > bev_config.width - 1)
+        ):
+            result[index] = True
+            continue
+        polygon = np.column_stack((np.rint(col), np.rint(row))).astype(
+            np.int32
+        )
+        col_min = int(np.min(polygon[:, 0]))
+        col_max = int(np.max(polygon[:, 0]))
+        row_min = int(np.min(polygon[:, 1]))
+        row_max = int(np.max(polygon[:, 1]))
+        roi_mask = np.zeros(
+            (row_max - row_min + 1, col_max - col_min + 1),
+            dtype=np.uint8,
+        )
+        roi_polygon = polygon - np.asarray([col_min, row_min], dtype=np.int32)
+        cv2.fillConvexPoly(roi_mask, roi_polygon, 1)
+        roi_drivable = drivable_values[
+            row_min : row_max + 1, col_min : col_max + 1
+        ]
+        result[index] = bool(np.any(roi_drivable[roi_mask != 0] == 0))
+    return result
+
+
+def drivable_signed_distance_m(drivable: np.ndarray) -> np.ndarray:
+    """Build a metric signed-distance field from a semantic drivable raster."""
+
+    values = np.asarray(drivable)
+    bev_config = SemanticBEVConfig()
+    if values.shape != (bev_config.height, bev_config.width):
+        raise JointRewardError("drivable BEV must match SemanticBEVConfig")
+    mask = values != 0
+    row_resolution = (bev_config.x_max_m - bev_config.x_min_m) / (
+        bev_config.height - 1
+    )
+    col_resolution = (bev_config.y_max_m - bev_config.y_min_m) / (
+        bev_config.width - 1
+    )
+    sampling = (row_resolution, col_resolution)
+    inside = distance_transform_edt(
+        np.pad(mask, 1, mode="constant", constant_values=False),
+        sampling=sampling,
+    )[1:-1, 1:-1]
+    if bool(np.any(mask)):
+        outside = distance_transform_edt(~mask, sampling=sampling)
+    else:
+        outside = np.full(
+            mask.shape,
+            math.hypot(
+                bev_config.x_max_m - bev_config.x_min_m,
+                bev_config.y_max_m - bev_config.y_min_m,
+            ),
+            dtype=np.float64,
+        )
+    return np.ascontiguousarray(inside - outside, dtype=np.float64)
+
+
+def footprint_road_margin_series(
+    local_poses: np.ndarray,
+    signed_distance_m: np.ndarray,
+    config: JointRewardConfig,
+    *,
+    tracking_aware: bool,
+) -> np.ndarray:
+    """Return the minimum signed drivable margin across footprint samples."""
+
+    field = np.asarray(signed_distance_m, dtype=np.float64)
+    bev_config = SemanticBEVConfig()
+    if (
+        field.shape != (bev_config.height, bev_config.width)
+        or not np.isfinite(field).all()
+    ):
+        raise JointRewardError("signed drivable distance must be finite BEV [H,W]")
+    points_by_time = _footprint_points(
+        local_poses, config, tracking_aware=tracking_aware
+    )
+    points = points_by_time.reshape(-1, 2)
+    row, col = _local_points_to_bev_coordinates(points)
     inside = (
         (row >= 0.0)
         & (row <= bev_config.height - 1)
         & (col >= 0.0)
         & (col <= bev_config.width - 1)
     )
-    if not bool(inside.all()):
-        return True
-    row_index = np.rint(row).astype(np.int64)
-    col_index = np.rint(col).astype(np.int64)
-    return bool(np.any(drivable[row_index, col_index] == 0))
+    sampled = np.empty(len(points), dtype=np.float64)
+    if np.any(inside):
+        indices = np.flatnonzero(inside)
+        row_inside = row[indices]
+        col_inside = col[indices]
+        row_low = np.floor(row_inside).astype(np.int64)
+        col_low = np.floor(col_inside).astype(np.int64)
+        row_high = np.minimum(row_low + 1, bev_config.height - 1)
+        col_high = np.minimum(col_low + 1, bev_config.width - 1)
+        row_fraction = row_inside - row_low
+        col_fraction = col_inside - col_low
+        sampled[indices] = (
+            field[row_low, col_low]
+            * (1.0 - row_fraction)
+            * (1.0 - col_fraction)
+            + field[row_high, col_low]
+            * row_fraction
+            * (1.0 - col_fraction)
+            + field[row_low, col_high]
+            * (1.0 - row_fraction)
+            * col_fraction
+            + field[row_high, col_high] * row_fraction * col_fraction
+        )
+    if np.any(~inside):
+        indices = np.flatnonzero(~inside)
+        clamped_row = np.clip(row[indices], 0.0, bev_config.height - 1)
+        clamped_col = np.clip(col[indices], 0.0, bev_config.width - 1)
+        row_resolution = (bev_config.x_max_m - bev_config.x_min_m) / (
+            bev_config.height - 1
+        )
+        col_resolution = (bev_config.y_max_m - bev_config.y_min_m) / (
+            bev_config.width - 1
+        )
+        outside_distance = np.hypot(
+            (row[indices] - clamped_row) * row_resolution,
+            (col[indices] - clamped_col) * col_resolution,
+        )
+        sampled[indices] = -outside_distance
+    return np.min(sampled.reshape(points_by_time.shape[:2]), axis=1)
+
+
+def soft_threshold_risk(
+    values: np.ndarray,
+    *,
+    warning_threshold: float,
+    softness: float,
+) -> np.ndarray:
+    """Map a larger-is-safer metric to a stable continuous risk in [0,1]."""
+
+    metric = np.asarray(values, dtype=np.float64)
+    threshold = float(warning_threshold)
+    width = float(softness)
+    if (
+        not np.isfinite(metric).all()
+        or not math.isfinite(threshold)
+        or threshold <= 0.0
+        or not math.isfinite(width)
+        or width <= 0.0
+    ):
+        raise JointRewardError("soft risk inputs and parameters must be finite/positive")
+    scaled = (threshold - metric) / width
+    softplus = np.maximum(scaled, 0.0) + np.log1p(
+        np.exp(-np.abs(scaled))
+    )
+    return np.clip((width / threshold) * softplus, 0.0, 1.0)
+
+
+def closing_ttc_from_gap_series(
+    gap_series: np.ndarray,
+    *,
+    dt_s: float,
+    closing_speed_epsilon_mps: float,
+    no_risk_gap_m: float,
+    no_risk_ttc_s: float,
+) -> np.ndarray:
+    """Return finite TTC using adjacent finite shared-corridor gap samples."""
+
+    gap = np.asarray(gap_series, dtype=np.float64)
+    if gap.ndim != 1 or not np.isfinite(gap).all() or gap.size == 0:
+        raise JointRewardError("gap_series must be a non-empty finite vector")
+    dt = float(dt_s)
+    epsilon = float(closing_speed_epsilon_mps)
+    gap_sentinel = float(no_risk_gap_m)
+    sentinel = float(no_risk_ttc_s)
+    if (
+        not math.isfinite(dt)
+        or dt <= 0.0
+        or not math.isfinite(epsilon)
+        or epsilon <= 0.0
+        or not math.isfinite(gap_sentinel)
+        or gap_sentinel <= 0.0
+        or not math.isfinite(sentinel)
+        or sentinel <= 0.0
+    ):
+        raise JointRewardError("TTC parameters must be positive and finite")
+    ttc = np.full(gap.shape, sentinel, dtype=np.float64)
+    closing_speed = (gap[:-1] - gap[1:]) / dt
+    adjacent_shared_corridor = (
+        (gap[:-1] < gap_sentinel) & (gap[1:] < gap_sentinel)
+    )
+    closing = adjacent_shared_corridor & (closing_speed > epsilon)
+    indices = np.flatnonzero(closing) + 1
+    if len(indices):
+        ttc[indices] = np.maximum(gap[indices], 0.0) / closing_speed[closing]
+    return ttc
+
+
+def ttc_risk_from_gap_series(
+    gap_series: np.ndarray,
+    *,
+    dt_s: float,
+    warning_threshold_s: float,
+    softness_s: float,
+    closing_speed_epsilon_mps: float,
+    no_risk_gap_m: float,
+    no_risk_ttc_s: float,
+) -> np.ndarray:
+    ttc = closing_ttc_from_gap_series(
+        gap_series,
+        dt_s=dt_s,
+        closing_speed_epsilon_mps=closing_speed_epsilon_mps,
+        no_risk_gap_m=no_risk_gap_m,
+        no_risk_ttc_s=no_risk_ttc_s,
+    )
+    return soft_threshold_risk(
+        ttc,
+        warning_threshold=warning_threshold_s,
+        softness=softness_s,
+    )
+
+
+def aggregate_temporal_risk(
+    per_time_risk: np.ndarray,
+    *,
+    max_weight: float,
+    mean_weight: float,
+) -> float:
+    values = np.asarray(per_time_risk, dtype=np.float64)
+    if (
+        values.ndim != 1
+        or values.size == 0
+        or not np.isfinite(values).all()
+        or np.any(values < 0.0)
+        or np.any(values > 1.0)
+    ):
+        raise JointRewardError("temporal risk must be a non-empty [0,1] vector")
+    if (
+        not math.isfinite(max_weight)
+        or not math.isfinite(mean_weight)
+        or max_weight < 0.0
+        or mean_weight < 0.0
+        or not math.isclose(max_weight + mean_weight, 1.0)
+    ):
+        raise JointRewardError("temporal aggregation weights must sum to one")
+    return float(max_weight * np.max(values) + mean_weight * np.mean(values))
 
 
 def _rank_average(value: np.ndarray) -> np.ndarray:
@@ -374,9 +757,10 @@ def calibrate_joint_rewards(
                     continue
                 comparisons += 1
                 agreement += int(np.sign(proxy_delta) == np.sign(simulator_delta))
-    mean_spearman = (
-        float(np.mean(correlations)) if correlations else float("-inf")
-    )
+    # An uninformative calibration has zero measurable rank correlation.  A
+    # finite sentinel keeps the machine-readable report strict JSON while the
+    # informative-group gate still makes the calibration fail explicitly.
+    mean_spearman = float(np.mean(correlations)) if correlations else 0.0
     pairwise = agreement / comparisons if comparisons else 0.0
     false_safe = int(np.count_nonzero(simulator_bad & ~proxy_bad))
     passed = (
@@ -397,30 +781,41 @@ def calibrate_joint_rewards(
 
 def compose_joint_reward(
     *,
-    progress: np.ndarray,
-    formation: np.ndarray,
-    clearance: np.ndarray,
-    comfort: np.ndarray,
+    progress_score: np.ndarray,
+    formation_penalty: np.ndarray,
+    gap_penalty: np.ndarray,
+    ttc_penalty: np.ndarray,
+    road_penalty: np.ndarray,
+    comfort_penalty: np.ndarray,
     collision: np.ndarray,
     out_of_drivable: np.ndarray,
     clearance_violation: np.ndarray,
     config: JointRewardConfig,
     diagnostic_components: Mapping[str, np.ndarray] | None = None,
 ) -> JointRewardResult:
-    """Apply the shared local/team formula and the non-negotiable safety gate."""
+    """Compose the V2 continuous quality reward without an unsafe branch."""
 
     arrays = {
-        "progress": np.asarray(progress, dtype=np.float64),
-        "formation": np.asarray(formation, dtype=np.float64),
-        "clearance": np.asarray(clearance, dtype=np.float64),
-        "comfort": np.asarray(comfort, dtype=np.float64),
+        "progress_score": np.asarray(progress_score, dtype=np.float64),
+        "formation_penalty": np.asarray(formation_penalty, dtype=np.float64),
+        "gap_penalty": np.asarray(gap_penalty, dtype=np.float64),
+        "ttc_penalty": np.asarray(ttc_penalty, dtype=np.float64),
+        "road_penalty": np.asarray(road_penalty, dtype=np.float64),
+        "comfort_penalty": np.asarray(comfort_penalty, dtype=np.float64),
     }
-    group_size = arrays["progress"].shape[0] if arrays["progress"].ndim == 1 else -1
+    group_size = (
+        arrays["progress_score"].shape[0]
+        if arrays["progress_score"].ndim == 1
+        else -1
+    )
     if group_size <= 0 or any(
-        value.shape != (group_size,) or not np.isfinite(value).all()
+        value.shape != (group_size,)
+        or not np.isfinite(value).all()
+        or np.any(value < 0.0)
+        or np.any(value > 1.0)
         for value in arrays.values()
     ):
-        raise JointRewardError("reward components must be finite vectors [G]")
+        raise JointRewardError("reward quality components must be [0,1] vectors [G]")
     collision_values = np.asarray(collision)
     out_values = np.asarray(out_of_drivable)
     clearance_values = np.asarray(clearance_violation)
@@ -434,47 +829,37 @@ def compose_joint_reward(
     ):
         raise JointRewardError("reward safety masks must be bool [G]")
 
-    local_reward = (
-        config.local_progress_weight * arrays["progress"]
-        + config.local_formation_weight * arrays["formation"]
-        + config.local_clearance_weight * arrays["clearance"]
-        + config.local_comfort_weight * arrays["comfort"]
-    )
-    team_reward = (
-        config.team_formation_weight * arrays["formation"]
-        + config.team_safety_weight * arrays["clearance"]
-        + config.team_progress_weight * arrays["progress"]
-    )
-    safe_reward = np.clip(
-        config.local_mix * local_reward + config.team_mix * team_reward,
-        -5.0,
-        5.0,
-    )
     unsafe = collision_values | out_values | clearance_values
-    severity = (
-        collision_values.astype(np.float64)
-        + out_values.astype(np.float64)
-        + clearance_values.astype(np.float64)
+    rewards = (
+        config.progress_weight * arrays["progress_score"]
+        - config.formation_weight * arrays["formation_penalty"]
+        - config.gap_weight * arrays["gap_penalty"]
+        - config.ttc_weight * arrays["ttc_penalty"]
+        - config.road_weight * arrays["road_penalty"]
+        - config.comfort_weight * arrays["comfort_penalty"]
+        - config.collision_penalty * collision_values.astype(np.float64)
+        - config.out_of_drivable_penalty * out_values.astype(np.float64)
     )
-    rewards = np.where(
-        unsafe,
-        config.unsafe_base_reward - severity,
-        safe_reward,
-    ).astype(np.float32)
+    if not np.isfinite(rewards).all():
+        raise JointRewardError("composed rewards must be finite")
+    reserved = set(arrays)
+    overlap = reserved.intersection(diagnostic_components or {})
+    if overlap:
+        raise JointRewardError(
+            f"diagnostic components cannot replace reward components: {sorted(overlap)}"
+        )
     diagnostics = {
         str(name): np.asarray(value, dtype=np.float32)
         for name, value in (diagnostic_components or {}).items()
     }
     return JointRewardResult(
-        rewards=rewards,
+        rewards=rewards.astype(np.float32),
         unsafe=unsafe.astype(np.bool_),
         collision=collision_values,
         out_of_drivable=out_values,
         clearance_violation=clearance_values,
         components={
             **{name: value.astype(np.float32) for name, value in arrays.items()},
-            "local": local_reward.astype(np.float32),
-            "team": team_reward.astype(np.float32),
             **diagnostics,
         },
     )
@@ -502,11 +887,6 @@ class JointTrajectoryProxyReward:
         model_inputs: object,
         trajectories: np.ndarray,
     ) -> JointRewardResult:
-        from models.platoon_planner.platoon_normal_planner import (
-            minimum_dense_background_gap,
-            minimum_dense_pair_gap,
-        )
-
         trajectory_values = _validate_trajectories(trajectories)
         bev = _as_numpy_model_field(model_inputs, "bev")
         relation = _as_numpy_model_field(
@@ -530,18 +910,26 @@ class JointTrajectoryProxyReward:
             dense_world[:, role] = _local_to_world(dense_local[:, role], poses[role])
 
         group_size = trajectory_values.shape[0]
-        progress = np.zeros(group_size, dtype=np.float64)
-        formation = np.zeros(group_size, dtype=np.float64)
-        clearance = np.zeros(group_size, dtype=np.float64)
-        comfort = np.zeros(group_size, dtype=np.float64)
+        progress_score = np.zeros(group_size, dtype=np.float64)
+        formation_penalty = np.zeros(group_size, dtype=np.float64)
+        gap_penalty = np.zeros(group_size, dtype=np.float64)
+        ttc_penalty = np.zeros(group_size, dtype=np.float64)
+        road_penalty = np.zeros(group_size, dtype=np.float64)
+        comfort_penalty = np.zeros(group_size, dtype=np.float64)
         collision = np.zeros(group_size, dtype=np.bool_)
         out_of_drivable = np.zeros(group_size, dtype=np.bool_)
         clearance_violation = np.zeros(group_size, dtype=np.bool_)
         minimum_background_by_group = np.full(
-            group_size, np.inf, dtype=np.float64
+            group_size, self.config.no_risk_gap_m, dtype=np.float64
         )
         minimum_platoon_by_group = np.full(
-            group_size, np.inf, dtype=np.float64
+            group_size, self.config.no_risk_gap_m, dtype=np.float64
+        )
+        minimum_road_by_group = np.full(
+            group_size, self.config.no_risk_gap_m, dtype=np.float64
+        )
+        minimum_ttc_by_group = np.full(
+            group_size, self.config.no_risk_ttc_s, dtype=np.float64
         )
 
         background = self._prediction_planner._predicted_obstacles(
@@ -551,13 +939,31 @@ class JointTrajectoryProxyReward:
             include_platoon=False,
             include_policy_branches=True,
         )
-        half_length, half_width = _tracking_aware_half_extents(self.config)
-        dimensions = (2.0 * half_length, 2.0 * half_width)
+        background_by_actor: dict[
+            str, list[tuple[str, np.ndarray, tuple[float, float]]]
+        ] = {}
+        for name, predicted, other_dimensions in background:
+            actor = str(name).split(":policy_branch_", 1)[0]
+            background_by_actor.setdefault(actor, []).append(
+                (str(name), np.asarray(predicted, dtype=np.float64), other_dimensions)
+            )
+        half_length, half_width = tracking_aware_half_extents(self.config)
+        tracking_dimensions = (2.0 * half_length, 2.0 * half_width)
+        physical_dimensions = (
+            self.config.vehicle_length_m,
+            self.config.vehicle_width_m,
+        )
+        road_fields = [
+            drivable_signed_distance_m(bev[role, int(BEVChannel.DRIVABLE)])
+            for role in range(NUM_ROLES)
+        ]
 
         for group in range(group_size):
             role_progress = []
-            role_clearance_deficits = []
             role_comfort = []
+            interaction_gap_risks: list[np.ndarray] = []
+            interaction_ttc_risks: list[np.ndarray] = []
+            role_road_risks: list[np.ndarray] = []
             for role in range(NUM_ROLES):
                 local = dense_local[group, role]
                 world = dense_world[group, role]
@@ -571,15 +977,36 @@ class JointTrajectoryProxyReward:
                         )
                     )
                 )
-                out_of_drivable[group] |= _footprint_outside_drivable(
-                    local,
+                # The simulator reports collision/out only after an executed
+                # step.  Keep those hard events on t=0.1..4.0 while continuous
+                # gap/TTC/road risks also include the shared t=0 snapshot.
+                physical_out = footprint_outside_drivable_series(
+                    local[1:],
                     bev[role, int(BEVChannel.DRIVABLE)],
                     self.config,
                 )
+                out_of_drivable[group] |= bool(np.any(physical_out))
+                road_margin = footprint_road_margin_series(
+                    local,
+                    road_fields[role],
+                    self.config,
+                    tracking_aware=True,
+                )
+                minimum_road_by_group[group] = min(
+                    minimum_road_by_group[group], float(np.min(road_margin))
+                )
+                role_road_risks.append(
+                    soft_threshold_risk(
+                        road_margin,
+                        warning_threshold=self.config.road_margin_warning_m,
+                        softness=self.config.road_margin_softness_m,
+                    )
+                )
+                motion_local = local[1:]
                 speed = np.linalg.norm(
                     np.diff(
                         np.concatenate(
-                            (np.zeros((1, 2)), local[:, :2]), axis=0
+                            (np.zeros((1, 2)), motion_local[:, :2]), axis=0
                         ),
                         axis=0,
                     ),
@@ -588,12 +1015,12 @@ class JointTrajectoryProxyReward:
                 acceleration = np.diff(speed, prepend=speed[0]) / (
                     self.config.interpolation_dt_s
                 )
-                unwrapped_heading = np.unwrap(local[:, 2])
+                unwrapped_heading = np.unwrap(motion_local[:, 2])
                 yaw_rate = np.diff(
                     unwrapped_heading, prepend=unwrapped_heading[0]
                 ) / self.config.interpolation_dt_s
                 role_comfort.append(
-                    -float(
+                    float(
                         np.clip(
                             0.5 * np.mean(np.abs(acceleration)) / 8.0
                             + 0.5 * np.mean(np.abs(yaw_rate)),
@@ -603,71 +1030,120 @@ class JointTrajectoryProxyReward:
                     )
                 )
 
-                for _, predicted, other_dimensions in background:
-                    if self._prediction_planner._obb_overlap_series(
-                        world,
-                        dimensions,
-                        predicted,
-                        other_dimensions,
-                        0.0,
-                    ):
-                        collision[group] = True
-                minimum_background_gap = minimum_dense_background_gap(
-                    world,
-                    dimensions,
-                    background,
-                )
-                background_deficit = (
-                    0.0
-                    if not math.isfinite(minimum_background_gap)
-                    else max(
-                        0.0,
-                        self.config.background_safe_gap_m
-                        - minimum_background_gap,
+                for actor, predictions in background_by_actor.items():
+                    branch_gap_risks = []
+                    branch_ttc_risks = []
+                    for name, predicted, other_dimensions in predictions:
+                        gap_series = shared_corridor_gap_series(
+                            world,
+                            tracking_dimensions,
+                            predicted,
+                            other_dimensions,
+                            no_risk_gap_m=self.config.no_risk_gap_m,
+                        )
+                        branch_gap_risks.append(
+                            soft_threshold_risk(
+                                gap_series,
+                                warning_threshold=(
+                                    self.config.background_safe_gap_m
+                                ),
+                                softness=self.config.gap_softness_m,
+                            )
+                        )
+                        ttc = closing_ttc_from_gap_series(
+                            gap_series,
+                            dt_s=self.config.interpolation_dt_s,
+                            closing_speed_epsilon_mps=(
+                                self.config.closing_speed_epsilon_mps
+                            ),
+                            no_risk_gap_m=self.config.no_risk_gap_m,
+                            no_risk_ttc_s=self.config.no_risk_ttc_s,
+                        )
+                        minimum_ttc_by_group[group] = min(
+                            minimum_ttc_by_group[group], float(np.min(ttc))
+                        )
+                        branch_ttc_risks.append(
+                            soft_threshold_risk(
+                                ttc,
+                                warning_threshold=self.config.ttc_warning_s,
+                                softness=self.config.ttc_softness_s,
+                            )
+                        )
+                        if name == actor:
+                            minimum_background_by_group[group] = min(
+                                minimum_background_by_group[group],
+                                float(np.min(gap_series)),
+                            )
+                            if obb_overlap_series(
+                                world[1:],
+                                physical_dimensions,
+                                predicted[1:],
+                                other_dimensions,
+                                0.0,
+                            ):
+                                collision[group] = True
+                    interaction_gap_risks.append(
+                        np.max(np.stack(branch_gap_risks), axis=0)
                     )
-                    / self.config.background_safe_gap_m
-                )
-                if (
-                    math.isfinite(minimum_background_gap)
-                    and minimum_background_gap
-                    < self.config.background_safe_gap_m
-                ):
-                    clearance_violation[group] = True
-                minimum_background_by_group[group] = min(
-                    minimum_background_by_group[group], minimum_background_gap
-                )
-                role_clearance_deficits.append(min(background_deficit, 1.0))
+                    interaction_ttc_risks.append(
+                        np.max(np.stack(branch_ttc_risks), axis=0)
+                    )
 
             pair_errors = []
-            platoon_deficits = []
             for leader, follower in ((0, 1), (1, 2), (0, 2)):
                 first = dense_world[group, leader]
                 second = dense_world[group, follower]
-                if self._prediction_planner._obb_overlap_series(
-                    first, dimensions, second, dimensions, 0.0
+                if obb_overlap_series(
+                    first[1:],
+                    physical_dimensions,
+                    second[1:],
+                    physical_dimensions,
+                    0.0,
                 ):
                     collision[group] = True
-                minimum_pair_gap = minimum_dense_pair_gap(
+                pair_gap = shared_corridor_gap_series(
                     first,
-                    dimensions,
+                    tracking_dimensions,
                     second,
-                    dimensions,
+                    tracking_dimensions,
+                    no_risk_gap_m=self.config.no_risk_gap_m,
                 )
+                minimum_pair_gap = float(np.min(pair_gap))
                 center_distance = np.linalg.norm(
-                    first[:, :2] - second[:, :2], axis=1
+                    first[1:, :2] - second[1:, :2], axis=1
                 )
                 minimum_platoon_by_group[group] = min(
                     minimum_platoon_by_group[group], minimum_pair_gap
                 )
                 if minimum_pair_gap < self.config.platoon_safe_gap_m:
                     clearance_violation[group] = True
+                interaction_gap_risks.append(
+                    soft_threshold_risk(
+                        pair_gap,
+                        warning_threshold=self.config.platoon_safe_gap_m,
+                        softness=self.config.gap_softness_m,
+                    )
+                )
+                pair_ttc = closing_ttc_from_gap_series(
+                    pair_gap,
+                    dt_s=self.config.interpolation_dt_s,
+                    closing_speed_epsilon_mps=(
+                        self.config.closing_speed_epsilon_mps
+                    ),
+                    no_risk_gap_m=self.config.no_risk_gap_m,
+                    no_risk_ttc_s=self.config.no_risk_ttc_s,
+                )
+                minimum_ttc_by_group[group] = min(
+                    minimum_ttc_by_group[group], float(np.min(pair_ttc))
+                )
+                interaction_ttc_risks.append(
+                    soft_threshold_risk(
+                        pair_ttc,
+                        warning_threshold=self.config.ttc_warning_s,
+                        softness=self.config.ttc_softness_s,
+                    )
+                )
                 if follower == leader + 1:
-                    deficit = np.maximum(
-                        self.config.platoon_safe_gap_m - minimum_pair_gap,
-                        0.0,
-                    ) / self.config.platoon_safe_gap_m
-                    platoon_deficits.append(float(np.clip(deficit, 0, 1)))
-
                     target_gap = abs(float(relation[follower, leader * 6 + 4]))
                     if target_gap <= 0.0:
                         target_gap = float(
@@ -678,32 +1154,41 @@ class JointTrajectoryProxyReward:
                     pair_errors.append(
                         float(np.mean(np.abs(center_distance - target_gap)))
                     )
-            progress[group] = float(np.mean(role_progress))
-            formation[group] = -min(
+            progress_score[group] = float(np.mean(role_progress))
+            formation_penalty[group] = min(
                 float(np.mean(pair_errors)) / self.config.formation_norm_m,
                 1.0,
             )
-            clearance[group] = -min(
-                float(
-                    np.mean(
-                        [*role_clearance_deficits, *platoon_deficits]
-                    )
-                ),
-                1.0,
+            comfort_penalty[group] = float(np.mean(role_comfort))
+            gap_penalty[group] = aggregate_temporal_risk(
+                np.max(np.stack(interaction_gap_risks), axis=0),
+                max_weight=self.config.temporal_max_weight,
+                mean_weight=self.config.temporal_mean_weight,
             )
-            comfort[group] = float(np.mean(role_comfort))
+            ttc_penalty[group] = aggregate_temporal_risk(
+                np.max(np.stack(interaction_ttc_risks), axis=0),
+                max_weight=self.config.temporal_max_weight,
+                mean_weight=self.config.temporal_mean_weight,
+            )
+            road_penalty[group] = aggregate_temporal_risk(
+                np.max(np.stack(role_road_risks), axis=0),
+                max_weight=self.config.temporal_max_weight,
+                mean_weight=self.config.temporal_mean_weight,
+            )
+            clearance_violation[group] |= bool(
+                minimum_background_by_group[group]
+                < self.config.background_safe_gap_m
+                or minimum_platoon_by_group[group]
+                < self.config.platoon_safe_gap_m
+            )
 
-        minimum_background_by_group[
-            ~np.isfinite(minimum_background_by_group)
-        ] = 1.0e6
-        minimum_platoon_by_group[
-            ~np.isfinite(minimum_platoon_by_group)
-        ] = 1.0e6
         return compose_joint_reward(
-            progress=progress,
-            formation=formation,
-            clearance=clearance,
-            comfort=comfort,
+            progress_score=progress_score,
+            formation_penalty=formation_penalty,
+            gap_penalty=gap_penalty,
+            ttc_penalty=ttc_penalty,
+            road_penalty=road_penalty,
+            comfort_penalty=comfort_penalty,
             collision=collision,
             out_of_drivable=out_of_drivable,
             clearance_violation=clearance_violation,
@@ -711,16 +1196,30 @@ class JointTrajectoryProxyReward:
             diagnostic_components={
                 "minimum_background_gap_m": minimum_background_by_group,
                 "minimum_platoon_gap_m": minimum_platoon_by_group,
+                "minimum_road_margin_m": minimum_road_by_group,
+                "minimum_ttc_s": minimum_ttc_by_group,
             },
         )
 
 
 __all__ = [
+    "JOINT_REWARD_CONTRACT",
+    "JOINT_REWARD_CONTRACT_SHA256",
     "JointRewardConfig",
     "JointRewardError",
     "JointRewardResult",
     "JointTrajectoryProxyReward",
     "RewardCalibrationResult",
+    "aggregate_temporal_risk",
     "calibrate_joint_rewards",
+    "closing_ttc_from_gap_series",
     "compose_joint_reward",
+    "drivable_signed_distance_m",
+    "footprint_outside_drivable_series",
+    "footprint_road_margin_series",
+    "joint_reward_config_sha256",
+    "shared_corridor_gap_series",
+    "soft_threshold_risk",
+    "tracking_aware_half_extents",
+    "ttc_risk_from_gap_series",
 ]

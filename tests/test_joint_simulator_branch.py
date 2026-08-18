@@ -15,7 +15,7 @@ from evaluation.joint_simulator_branch import (
     _world_reference_to_current_local,
 )
 from evaluation.joint_simulator_branch import _has_failure
-from models.bev_planner import JointRewardError
+from models.bev_planner import JointRewardConfig, JointRewardError
 
 
 def _trajectory(speed_mps: float) -> np.ndarray:
@@ -113,6 +113,14 @@ class _BranchEnv:
         self._closed = True
 
 
+class _CollisionBranchEnv(_BranchEnv):
+    def step(self, actions):
+        observation, reward, terminated, truncated, info = super().step(actions)
+        info["agent0"]["crash_vehicle"] = True
+        terminated["__all__"] = True
+        return observation, reward, terminated, truncated, info
+
+
 def _spec(reference=None) -> JointEpisodeSpec:
     if reference is None:
         reference = np.asarray(
@@ -130,6 +138,9 @@ def _spec(reference=None) -> JointEpisodeSpec:
 def _evaluator() -> JointSimulatorBranchEvaluator:
     evaluator = JointSimulatorBranchEvaluator(env_factory=_BranchEnv)
     evaluator._vehicle_helper._surrounding_vehicles = lambda _env: []
+    evaluator._reference_drivable_bev = lambda _env, _pose: np.full(
+        (3, 256, 256), 255, dtype=np.uint8
+    )
     return evaluator
 
 
@@ -147,6 +158,29 @@ def test_branch_recreates_each_group_and_tracks_for_four_seconds() -> None:
     assert result.replay_heading_error_rad.tolist() == [0.0, 0.0]
     assert not result.reward.unsafe.any()
     assert result.reward.rewards[1] > result.reward.rewards[0]
+    assert set(result.reward.components) == {
+        "progress_score",
+        "formation_penalty",
+        "gap_penalty",
+        "ttc_penalty",
+        "road_penalty",
+        "comfort_penalty",
+        "minimum_background_gap_m",
+        "minimum_platoon_gap_m",
+        "minimum_road_margin_m",
+        "minimum_ttc_s",
+    }
+    for name in (
+        "progress_score",
+        "formation_penalty",
+        "gap_penalty",
+        "ttc_penalty",
+        "road_penalty",
+        "comfort_penalty",
+    ):
+        component = result.reward.components[name]
+        assert np.isfinite(component).all()
+        assert ((0.0 <= component) & (component <= 1.0)).all()
     assert result.minimum_platoon_gap_m == pytest.approx([10.0, 10.0])
     assert result.tracking_longitudinal_error_m.shape == (2, 3)
     assert result.tracking_lateral_error_m.shape == (2, 3)
@@ -216,6 +250,136 @@ def test_branch_is_deterministic_and_does_not_mutate_inputs() -> None:
     np.testing.assert_array_equal(first.reward.rewards, second.reward.rewards)
 
 
+def test_closing_gap_produces_continuous_gap_and_ttc_penalties() -> None:
+    steady = np.stack([_trajectory(2.0)] * 3)
+    closing = np.stack(
+        [_trajectory(1.0), _trajectory(3.0), _trajectory(5.0)]
+    )
+    result = _evaluator().evaluate(
+        _spec(),
+        (),
+        np.stack((steady, closing)),
+    )
+
+    gap = result.reward.components["gap_penalty"]
+    ttc = result.reward.components["ttc_penalty"]
+    assert gap[1] > gap[0]
+    assert ttc[1] > ttc[0]
+    assert result.reward.components["minimum_ttc_s"][0] == pytest.approx(1.0e6)
+    assert result.reward.components["minimum_ttc_s"][1] < 4.0
+    assert result.reward.clearance_violation.tolist() == [False, True]
+    assert result.reward.rewards[0] != result.reward.rewards[1]
+
+
+def test_simulator_gap_transform_resamples_to_point_one_seconds() -> None:
+    evaluator = _evaluator()
+    snapshots = [
+        {"background:agent0:vehicle": (5.0, 5.0)},
+        {"background:agent0:vehicle": (4.6, 5.0)},
+        {"background:agent0:vehicle": (4.6, 5.0)},
+    ]
+    _, ttc_penalty, minimum_ttc, _, minimum_background = (
+        evaluator._continuous_gap_risks(snapshots, dt_s=0.1)
+    )
+    assert minimum_background == pytest.approx(4.6)
+    assert minimum_ttc == pytest.approx(1.15)
+    ttc = np.full(3, 1.0e6, dtype=np.float64)
+    ttc[1] = 1.15
+    from models.bev_planner import (
+        aggregate_temporal_risk,
+        soft_threshold_risk,
+    )
+
+    expected = aggregate_temporal_risk(
+        soft_threshold_risk(
+            ttc, warning_threshold=4.0, softness=0.5
+        ),
+        max_weight=0.7,
+        mean_weight=0.3,
+    )
+    assert ttc_penalty == pytest.approx(expected)
+
+
+def test_simulator_collision_is_additive_and_stops_at_the_real_event() -> None:
+    evaluator = JointSimulatorBranchEvaluator(env_factory=_CollisionBranchEnv)
+    evaluator._vehicle_helper._surrounding_vehicles = lambda _env: []
+    evaluator._reference_drivable_bev = lambda _env, _pose: np.full(
+        (3, 256, 256), 255, dtype=np.uint8
+    )
+    result = evaluator.evaluate(
+        _spec(), (), np.stack([np.stack([_trajectory(2.0)] * 3)])
+    )
+
+    assert result.executed_steps.tolist() == [1]
+    assert result.reward.collision.tolist() == [True]
+    assert result.reward.out_of_drivable.tolist() == [False]
+    components = result.reward.components
+    expected = (
+        evaluator.config.progress_weight * components["progress_score"][0]
+        - evaluator.config.formation_weight
+        * components["formation_penalty"][0]
+        - evaluator.config.gap_weight * components["gap_penalty"][0]
+        - evaluator.config.ttc_weight * components["ttc_penalty"][0]
+        - evaluator.config.road_weight * components["road_penalty"][0]
+        - evaluator.config.comfort_weight * components["comfort_penalty"][0]
+        - evaluator.config.collision_penalty
+    )
+    assert result.reward.rewards[0] == pytest.approx(expected)
+    assert np.isfinite(tuple(components.values())).all()
+
+
+def test_tracking_footprint_only_increases_continuous_road_risk() -> None:
+    drivable = np.zeros((3, 256, 256), dtype=np.uint8)
+    drivable[:, :, 116:140] = 255
+
+    def evaluate(config: JointRewardConfig):
+        evaluator = JointSimulatorBranchEvaluator(
+            config=config, env_factory=_BranchEnv
+        )
+        evaluator._vehicle_helper._surrounding_vehicles = lambda _env: []
+        evaluator._reference_drivable_bev = (
+            lambda _env, _pose: drivable.copy()
+        )
+        return evaluator.evaluate(
+            _spec(), (), np.stack([np.stack([_trajectory(2.0)] * 3)])
+        )
+
+    physical = evaluate(JointRewardConfig())
+    expanded = evaluate(
+        JointRewardConfig(tracking_lateral_margin_m=0.75)
+    )
+
+    assert (
+        expanded.reward.components["minimum_road_margin_m"][0]
+        < physical.reward.components["minimum_road_margin_m"][0]
+    )
+    assert (
+        expanded.reward.components["road_penalty"][0]
+        > physical.reward.components["road_penalty"][0]
+    )
+    assert not physical.reward.out_of_drivable[0]
+    assert not expanded.reward.out_of_drivable[0]
+
+
+def test_simulator_clearance_diagnostics_use_tracking_gap_footprint() -> None:
+    evaluator = JointSimulatorBranchEvaluator(
+        config=JointRewardConfig(tracking_longitudinal_margin_m=0.5),
+        env_factory=_BranchEnv,
+    )
+    evaluator._vehicle_helper._surrounding_vehicles = lambda _env: []
+    evaluator._reference_drivable_bev = lambda _env, _pose: np.full(
+        (3, 256, 256), 255, dtype=np.uint8
+    )
+    result = evaluator.evaluate(
+        _spec(), (), np.stack([np.stack([_trajectory(2.0)] * 3)])
+    )
+
+    assert result.minimum_platoon_gap_m[0] == pytest.approx(9.0)
+    assert result.reward.components["minimum_platoon_gap_m"][0] == pytest.approx(
+        9.0
+    )
+
+
 def test_instant_gaps_ignore_adjacent_lane_radial_proximity() -> None:
     evaluator = JointSimulatorBranchEvaluator(env_factory=_BranchEnv)
     env = _BranchEnv({})
@@ -232,13 +396,15 @@ def test_instant_gaps_ignore_adjacent_lane_radial_proximity() -> None:
     platoon_gap, adjacent_gap = evaluator._instant_gaps(env)
 
     assert platoon_gap == pytest.approx(10.0)
-    assert adjacent_gap == float("inf")
+    assert adjacent_gap == pytest.approx(evaluator.config.no_risk_gap_m)
 
     env.agents["agent1"].position = np.asarray([0.0, 3.5])
     env.agents["agent2"].position = np.asarray([0.0, 7.0])
     adjacent_platoon_gap, _ = evaluator._instant_gaps(env)
 
-    assert adjacent_platoon_gap == float("inf")
+    assert adjacent_platoon_gap == pytest.approx(
+        evaluator.config.no_risk_gap_m
+    )
 
     adjacent.position = np.asarray([10.0, 0.0], dtype=np.float64)
     _, close_gap = evaluator._instant_gaps(env)

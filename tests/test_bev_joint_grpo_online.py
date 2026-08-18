@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,31 +20,56 @@ from train.train_bev_joint_grpo_online import (
     model_inputs_to_batch,
     optimize_selected_model_trajectories,
     run_joint_grpo_training,
+    _checkpoint_file_sha256,
     _joint_rewards_are_informative,
+    _calibration_scope_contract,
+    _calibration_reward_diagnostics,
     _round_robin_training_buckets,
+    _resume_best_checkpoint_anchor,
     _summarize_calibration_tracking,
     _validate_calibration_trajectory_optimizer_contract,
+    _validate_calibration_reward_contract,
+    _validate_online_checkpoint_metadata,
     _validation_reward_comparison_metrics,
+    _validation_simulator_reward,
     _scenario_ready_for_primary_sampling,
 )
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizerConfig,
 )
+from models.bev_planner.joint_reward import (
+    JOINT_REWARD_CONTRACT,
+    JOINT_REWARD_CONTRACT_SHA256,
+    JointRewardConfig,
+    joint_reward_config_sha256,
+)
 from scenarios.definitions import SCENARIO_BY_ID
 from scenarios.bev_round13_contract import HOLDOUT_SEEDS, primary_scenario_contract
 
 
-def _calibration(path: Path, *, variant: str = "A", passed: bool = False) -> Path:
+def _calibration(
+    path: Path,
+    *,
+    variant: str = "A",
+    passed: bool = False,
+    format_name: str = "bev_joint_reward_calibration_v3",
+) -> Path:
     optimizer_config = KinematicTrajectoryOptimizerConfig()
+    reward_config = JointRewardConfig()
     path.write_text(
         json.dumps(
             {
-                "format": "bev_joint_reward_calibration_v2",
+                "format": format_name,
                 "calibration_phase": "holdout",
+                "development_calibration_sha256": "d" * 64,
                 "variant": variant,
                 "passed": passed,
                 "blockers": [] if passed else ["stop_terminal_speed"],
-                "reward_config": {},
+                "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
+                "reward_contract": JOINT_REWARD_CONTRACT,
+                "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+                "reward_config": dataclasses.asdict(reward_config),
+                "reward_config_sha256": joint_reward_config_sha256(reward_config),
                 "scenario_contract": primary_scenario_contract(),
                 "scenario_contract_sha256": primary_scenario_contract()["sha256"],
                 "scenarios": [list(value) for value in PRIMARY_S5_S9_SCENARIOS],
@@ -98,20 +124,24 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
         )
 
 
-def test_failed_calibration_bypass_is_explicit_and_smoke_only(
+def test_failed_calibration_bypass_is_rejected_for_reward_v2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     report = _calibration(tmp_path / "failed.json")
     config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
 
+    source_loader_reached = False
+
     def reached_source_loader(*args, **kwargs):
-        raise OnlineGRPOError("source loader reached")
+        nonlocal source_loader_reached
+        source_loader_reached = True
+        raise AssertionError("source loader must not be reached")
 
     monkeypatch.setattr(
         "train.train_bev_joint_grpo_online._load_trainer",
         reached_source_loader,
     )
-    with pytest.raises(OnlineGRPOError, match="source loader reached"):
+    with pytest.raises(OnlineGRPOError, match="forbids failed-calibration bypass"):
         run_joint_grpo_training(
             config,
             variant="A",
@@ -121,7 +151,7 @@ def test_failed_calibration_bypass_is_explicit_and_smoke_only(
             max_optimizer_steps=1,
             allow_failed_calibration_diagnostic=True,
         )
-    with pytest.raises(OnlineGRPOError, match="restricted to Variant A smoke"):
+    with pytest.raises(OnlineGRPOError, match="forbids failed-calibration bypass"):
         run_joint_grpo_training(
             config,
             variant="A",
@@ -135,7 +165,7 @@ def test_failed_calibration_bypass_is_explicit_and_smoke_only(
     passed_config = JointGRPOOnlineConfig(
         device="cpu", calibration_report=passed_report
     )
-    with pytest.raises(OnlineGRPOError, match="requires a failed"):
+    with pytest.raises(OnlineGRPOError, match="forbids failed-calibration bypass"):
         run_joint_grpo_training(
             passed_config,
             variant="A",
@@ -145,6 +175,7 @@ def test_failed_calibration_bypass_is_explicit_and_smoke_only(
             max_optimizer_steps=1,
             allow_failed_calibration_diagnostic=True,
         )
+    assert source_loader_reached is False
 
 
 def test_empty_safe_group_tracking_becomes_an_explicit_failed_gate() -> None:
@@ -180,6 +211,38 @@ def test_calibration_scenario_routes_match_runtime_contract() -> None:
         assert route in SCENARIO_BY_ID[scenario_id].allowed_local_routes
         assert route in SCENARIO_BY_ID[scenario_id].trigger_by_local_route
     assert JointGRPOOnlineConfig(device="cpu").scenarios == PRIMARY_S5_S9_SCENARIOS
+
+
+def test_calibration_subset_smoke_is_explicitly_formal_ineligible() -> None:
+    scenarios, seeds, contract = _calibration_scope_contract(
+        (PRIMARY_S5_S9_SCENARIOS[0],),
+        (17,),
+        states_per_episode=1,
+        calibration_phase="development",
+        diagnostic_subset_smoke=True,
+    )
+    assert scenarios == (PRIMARY_S5_S9_SCENARIOS[0],)
+    assert seeds == (17,)
+    assert contract["diagnostic_only"] is True
+    assert contract["eligible_for_formal_training"] is False
+    assert contract["format"].endswith("subset_smoke_scope")
+    assert len(contract["sha256"]) == 64
+    with pytest.raises(OnlineGRPOError, match="complete ordered S5--S9"):
+        _calibration_scope_contract(
+            scenarios,
+            seeds,
+            states_per_episode=1,
+            calibration_phase="development",
+            diagnostic_subset_smoke=False,
+        )
+    with pytest.raises(OnlineGRPOError, match="one primary S5--S9 scenario"):
+        _calibration_scope_contract(
+            scenarios,
+            HOLDOUT_SEEDS[:1],
+            states_per_episode=1,
+            calibration_phase="holdout",
+            diagnostic_subset_smoke=True,
+        )
 
 
 def test_execution_mask_override_reaches_policy_batch_without_mutating_inputs() -> None:
@@ -275,6 +338,167 @@ def test_calibration_variant_is_checked_before_source_load(tmp_path: Path) -> No
             source_checkpoint=tmp_path / "does-not-exist.pt",
             output_root=tmp_path / "output",
             max_optimizer_steps=1,
+        )
+
+
+def test_legacy_v2_calibration_and_reward_hash_drift_are_rejected(
+    tmp_path: Path,
+) -> None:
+    legacy = _calibration(
+        tmp_path / "legacy.json",
+        passed=True,
+        format_name="bev_joint_reward_calibration_v2",
+    )
+    with pytest.raises(OnlineGRPOError, match="format mismatch"):
+        run_joint_grpo_training(
+            JointGRPOOnlineConfig(device="cpu", calibration_report=legacy),
+            variant="A",
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "does-not-exist.pt",
+            output_root=tmp_path / "output",
+            max_optimizer_steps=1,
+        )
+
+    current = _calibration(tmp_path / "current.json", passed=True)
+    payload = json.loads(current.read_text(encoding="utf-8"))
+    payload["reward_config_sha256"] = "0" * 64
+    with pytest.raises(OnlineGRPOError, match="reward config mismatch"):
+        _validate_calibration_reward_contract(payload)
+
+
+def test_calibration_reward_diagnostics_are_per_scenario_and_non_gating() -> None:
+    rewards = np.asarray(
+        [[0.0, 0.0, 1.0, 2.0], [-1.0, -1.0, -1.0, -1.0]],
+        dtype=np.float32,
+    )
+    proxy_unsafe = np.asarray(
+        [[True, False, False, False], [True, True, False, False]],
+        dtype=np.bool_,
+    )
+    simulator_unsafe = np.asarray(
+        [[False, False, False, False], [True, False, False, False]],
+        dtype=np.bool_,
+    )
+    diagnostics = _calibration_reward_diagnostics(
+        rewards,
+        proxy_unsafe,
+        simulator_unsafe,
+        ["S5", "S6"],
+    )
+
+    assert diagnostics["diagnostic_only"] is True
+    assert diagnostics["gating_thresholds_added"] is False
+    assert diagnostics["overall"]["informative_rate"] == pytest.approx(0.5)
+    assert diagnostics["overall"]["false_unsafe_rate"] == pytest.approx(0.25)
+    assert diagnostics["by_scenario"]["S5"]["informative_rate"] == 1.0
+    assert diagnostics["by_scenario"]["S6"]["reward_tie_rate"] == 1.0
+
+
+def test_best_checkpoint_objective_uses_only_simulator_reward() -> None:
+    earlier = {
+        "validation/simulator_reward_mean": -8.0,
+        "validation/unsafe_count": 0.0,
+    }
+    safer_but_worse = {
+        "validation/simulator_reward_mean": -9.0,
+        "validation/unsafe_count": 0.0,
+    }
+    higher_reward_more_unsafe = {
+        "validation/simulator_reward_mean": -7.0,
+        "validation/unsafe_count": 10.0,
+    }
+    exact_tie = {
+        "validation/simulator_reward_mean": -7.0,
+        "validation/unsafe_count": 0.0,
+    }
+
+    best = _validation_simulator_reward(earlier)
+    assert _validation_simulator_reward(safer_but_worse) < best
+    candidate = _validation_simulator_reward(higher_reward_more_unsafe)
+    assert candidate > best
+    best = candidate
+    assert not _validation_simulator_reward(exact_tie) > best
+
+
+def test_resume_inherits_verified_historical_best_checkpoint(
+    tmp_path: Path,
+) -> None:
+    binding = {
+        "schema_version": 1,
+        "format": "bev_joint_grpo_a_v1",
+        "variant": "A",
+        "predecessor_condition": "A",
+        "source_stage1_sha256": "a" * 64,
+        "run_mode": "smoke",
+        "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
+        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+        "reward_config_sha256": joint_reward_config_sha256(
+            JointRewardConfig()
+        ),
+        "calibration_report_sha256": "b" * 64,
+        "scenario_contract_sha256": "c" * 64,
+        "trajectory_optimizer_sha256": (
+            KinematicTrajectoryOptimizerConfig().sha256()
+        ),
+    }
+    best_payload = {
+        **binding,
+        "metrics": {"validation/simulator_reward_mean": -7.0},
+        "best_validation_reward": -7.0,
+        "best_checkpoint_sha256": None,
+    }
+    best_path = tmp_path / "best.pt"
+    torch.save(best_payload, best_path)
+    last_payload = {
+        **binding,
+        "metrics": {"validation/simulator_reward_mean": -8.0},
+        "best_validation_reward": -7.0,
+        "best_checkpoint_sha256": _checkpoint_file_sha256(best_path),
+    }
+
+    resolved, reward = _resume_best_checkpoint_anchor(
+        tmp_path / "last.pt", last_payload
+    )
+    assert resolved == best_path
+    assert reward == -7.0
+    assert not _validation_simulator_reward(
+        {"validation/simulator_reward_mean": -7.0}
+    ) > reward
+
+    last_payload["best_checkpoint_sha256"] = "0" * 64
+    with pytest.raises(OnlineGRPOError, match="SHA256 mismatch"):
+        _resume_best_checkpoint_anchor(tmp_path / "last.pt", last_payload)
+
+
+def test_legacy_online_checkpoint_without_reward_binding_is_rejected() -> None:
+    reward_config = JointRewardConfig()
+    optimizer_config = KinematicTrajectoryOptimizerConfig()
+    legacy_payload = {
+        "run_mode": "smoke",
+        "reward_config": dataclasses.asdict(reward_config),
+        "calibration_report_sha256": "a" * 64,
+        "calibration_gate_bypassed": False,
+        "calibration_report_passed": True,
+        "calibration_blockers": [],
+        "scenario_contract_sha256": "b" * 64,
+        "scenario_seeds": [17, 23],
+        "trajectory_optimizer_config": dataclasses.asdict(optimizer_config),
+        "trajectory_optimizer_sha256": optimizer_config.sha256(),
+        "environment_steps": 1,
+    }
+    with pytest.raises(
+        OnlineGRPOError, match="reward_contract_version mismatch"
+    ):
+        _validate_online_checkpoint_metadata(
+            legacy_payload,
+            run_mode="smoke",
+            reward_config=reward_config,
+            calibration_sha="a" * 64,
+            calibration_gate_bypassed=False,
+            calibration_report_passed=True,
+            calibration_blockers=(),
+            scenario_contract_sha="b" * 64,
+            scenario_seeds=(17, 23),
         )
 
 

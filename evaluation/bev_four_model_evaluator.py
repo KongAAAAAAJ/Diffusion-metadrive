@@ -51,6 +51,13 @@ from train.train_bev_joint_grpo_online import (
     model_inputs_to_batch,
     optimize_selected_model_trajectories,
 )
+from models.bev_planner.joint_reward import (
+    JOINT_REWARD_CONTRACT,
+    JOINT_REWARD_CONTRACT_SHA256,
+    JointRewardConfig,
+    JointRewardError,
+    joint_reward_config_sha256,
+)
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizer,
     KinematicTrajectoryOptimizerConfig,
@@ -180,11 +187,32 @@ def _percentile(values: list[float], q: float) -> float:
     return float(np.percentile(values, q)) if values else 0.0
 
 
+def _validate_grpo_evaluation_eligibility(
+    payload: Mapping[str, object], *, formal: bool, model_id: str
+) -> None:
+    """Reject diagnostic/formal flag combinations that could overclaim a run."""
+
+    expected = {
+        "run_mode": "formal" if formal else "smoke",
+        "diagnostic_only": not formal,
+        "eligible_for_formal_training": formal,
+        "calibration_gate_bypassed": False,
+        "calibration_report_passed": True,
+        "calibration_blockers": [],
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            raise ModelEvaluationError(
+                f"{model_id} checkpoint evaluation eligibility mismatch: {field}"
+            )
+
+
 def _load_policy(
     spec: ModelSpec,
     *,
     device: torch.device,
     formal: bool,
+    reward_bindings: dict[str, tuple[str, str, str]] | None = None,
 ):
     expected_variant = spec.variant
     expected_kind = spec.kind
@@ -217,8 +245,16 @@ def _load_policy(
         )
         for field in (
             "run_mode",
+            "reward_contract_version",
+            "reward_contract_sha256",
             "reward_config",
+            "reward_config_sha256",
             "calibration_report_sha256",
+            "calibration_gate_bypassed",
+            "calibration_report_passed",
+            "calibration_blockers",
+            "diagnostic_only",
+            "eligible_for_formal_training",
             "scenario_seeds",
             "environment_steps",
             "scenario_contract_sha256",
@@ -229,6 +265,41 @@ def _load_policy(
                 raise ModelEvaluationError(
                     f"{spec.model_id} is not an online-calibrated GRPO checkpoint"
                 )
+        _validate_grpo_evaluation_eligibility(
+            grpo_payload, formal=formal, model_id=spec.model_id
+        )
+        expected_reward_version = JOINT_REWARD_CONTRACT.get("version")
+        raw_reward_config = grpo_payload.get("reward_config")
+        try:
+            parsed_reward_config = (
+                JointRewardConfig(**dict(raw_reward_config))
+                if isinstance(raw_reward_config, Mapping)
+                else None
+            )
+        except (TypeError, ValueError, JointRewardError) as exc:
+            raise ModelEvaluationError(
+                f"{spec.model_id} reward config contract mismatch"
+            ) from exc
+        if (
+            not isinstance(expected_reward_version, str)
+            or parsed_reward_config is None
+            or dict(raw_reward_config) != dataclasses.asdict(parsed_reward_config)
+            or grpo_payload.get("reward_contract_version")
+            != expected_reward_version
+            or grpo_payload.get("reward_contract_sha256")
+            != JOINT_REWARD_CONTRACT_SHA256
+            or grpo_payload.get("reward_config_sha256")
+            != joint_reward_config_sha256(parsed_reward_config)
+        ):
+            raise ModelEvaluationError(
+                f"{spec.model_id} reward contract mismatch"
+            )
+        if reward_bindings is not None:
+            reward_bindings[spec.model_id] = (
+                expected_reward_version,
+                JOINT_REWARD_CONTRACT_SHA256,
+                joint_reward_config_sha256(parsed_reward_config),
+            )
         optimizer_config = KinematicTrajectoryOptimizerConfig()
         if (
             grpo_payload.get("trajectory_optimizer_config")
@@ -239,8 +310,6 @@ def _load_policy(
             raise ModelEvaluationError(
                 f"{spec.model_id} trajectory optimizer contract mismatch"
             )
-        if formal and grpo_payload.get("eligible_for_formal_training") is not True:
-            raise ModelEvaluationError(f"{spec.model_id} checkpoint is diagnostic-only")
         expected_contract = primary_scenario_contract()
         if grpo_payload.get("scenario_contract_sha256") != expected_contract["sha256"]:
             raise ModelEvaluationError(
@@ -248,6 +317,26 @@ def _load_policy(
             )
     trainer.planner.eval()
     return trainer.planner
+
+
+def _validate_common_reward_binding(
+    bindings: Mapping[str, tuple[str, str, str]],
+) -> dict[str, str] | None:
+    """Reject comparisons between GRPO checkpoints trained under mixed rewards."""
+
+    if not bindings:
+        return None
+    distinct = set(bindings.values())
+    if len(distinct) != 1:
+        raise ModelEvaluationError(
+            "GRPO checkpoints mix reward contract/config hashes"
+        )
+    version, contract_sha, config_sha = next(iter(distinct))
+    return {
+        "reward_contract_version": version,
+        "reward_contract_sha256": contract_sha,
+        "reward_config_sha256": config_sha,
+    }
 
 
 def _empty_metrics() -> dict[str, object]:
@@ -593,14 +682,17 @@ def evaluate_models(
     device = torch.device(cfg.device)
     _configure_deterministic_inference(device)
     manifest = load_model_manifest(Path(manifest_path))
+    reward_bindings: dict[str, tuple[str, str, str]] = {}
     models = {
         spec.model_id: _load_policy(
             spec,
             device=device,
             formal=cfg.run_mode == "formal",
+            reward_bindings=reward_bindings,
         )
         for spec in manifest.models
     }
+    common_reward_binding = _validate_common_reward_binding(reward_bindings)
     model_reports = {}
     episode_count = len(cfg.scenarios) * len(cfg.seeds)
     reference_initial_states: dict[tuple[str, str, int], np.ndarray] = {}
@@ -1112,6 +1204,7 @@ def evaluate_models(
             "tf32": False,
         },
         "scenario_contract": primary_scenario_contract(cfg.scenarios),
+        "grpo_reward_binding": common_reward_binding,
         "manifest": str(manifest.path),
         "manifest_sha256": file_sha256(manifest.path),
         "model_order": list(manifest.model_ids),
@@ -1620,6 +1713,7 @@ def evaluate_models_repeated(
             "tolerance_comparison": tolerance_comparison,
         },
         "model_order": reports[0]["model_order"],
+        "grpo_reward_binding": reports[0].get("grpo_reward_binding"),
         "models": reports[0]["models"],
         "comparison_policy": reports[0]["comparison_policy"],
         "comparisons": reports[0]["comparisons"],

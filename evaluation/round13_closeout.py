@@ -14,7 +14,6 @@ from expert_dataset.joint_bev_storage import (
     STORAGE_SCHEMA_VERSION,
 )
 from expert_dataset.semantic_bev_codec import packed_bev_contract
-from models.bev_planner.joint_reward import JointRewardConfig
 from models.bev_planner.mode_contract import (
     HardModeMaskConfig,
     MODE_NAMES,
@@ -37,6 +36,36 @@ ROUND13_REPORTS = (
     "evaluation/ROUND13_94_REPORT.md",
     "evaluation/ROUND13_95_REPORT.md",
 )
+
+# Round 13 accepted the legacy discrete-safety reward.  This snapshot must not
+# follow the live Stage 2 reward implementation: doing so would retroactively
+# rewrite an already frozen infrastructure boundary whenever the reward evolves.
+ROUND13_REWARD_CONTRACT_SNAPSHOT = {
+    "config": {
+        "background_safe_gap_m": 5.0,
+        "formation_norm_m": 10.0,
+        "interpolation_dt_s": 0.1,
+        "local_clearance_weight": 0.8,
+        "local_comfort_weight": 0.05,
+        "local_formation_weight": 1.0,
+        "local_mix": 0.45,
+        "local_progress_weight": 0.8,
+        "platoon_safe_gap_m": 7.0,
+        "progress_norm_m": 30.0,
+        "team_formation_weight": 1.0,
+        "team_mix": 0.55,
+        "team_progress_weight": 0.2,
+        "team_safety_weight": 1.5,
+        "tracking_heading_margin_rad": 0.0,
+        "tracking_lateral_margin_m": 0.0,
+        "tracking_longitudinal_margin_m": 0.0,
+        "trajectory_dt_s": 0.5,
+        "unsafe_base_reward": -20.0,
+        "vehicle_length_m": 5.74,
+        "vehicle_width_m": 2.3,
+    },
+    "sha256": "bd6e726135082d9e3ff983b2ce0fbf55021479c678d731250395341ca93cd7c1",
+}
 
 
 class Round13CloseoutError(RuntimeError):
@@ -143,7 +172,9 @@ def build_round13_closeout(repo_root: Path | str) -> dict[str, object]:
         "execution_contract": _config_contract(
             KinematicTrajectoryOptimizerConfig()
         ),
-        "reward_contract": _config_contract(JointRewardConfig()),
+        "reward_contract": json.loads(
+            json.dumps(ROUND13_REWARD_CONTRACT_SNAPSHOT)
+        ),
         "checkpoint_contract": {
             "stage1_schema_version": CHECKPOINT_SCHEMA_VERSION,
             "grpo_schema_version": GRPO_CHECKPOINT_SCHEMA_VERSION,

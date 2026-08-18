@@ -342,12 +342,15 @@ def audit_targeted_supplement(
             (config.bundle_root / ".targeted_batch_pending.json").exists(),
         )
     )
+    background_quotas = dict(requirements.accepted_background_count_quotas)
+    background_gate_passed = not background_quotas or {
+        key: int(background_counts[key]) for key in background_quotas
+    } == background_quotas
     complete = all(
         (
             accepted == requirements.target_episodes,
             dict(split_counts) == dict(requirements.accepted_episode_quotas),
-            dict(background_counts)
-            == dict(requirements.accepted_background_count_quotas),
+            background_gate_passed,
             len(seeds) == len(set(seeds)),
             all(accepted_contract_rows),
             all(bool(row["passed"]) for row in physical_rows),
@@ -398,17 +401,18 @@ def audit_targeted_supplement(
             and row["sampling_policy_id"] == "s5_release_enriched_80_v1"
             for row in initial_gate_rows
         )
-        all_target_rows_accepted = all(
-            bool(row["base_committed"]) for row in sampled_target_rows
-        )
         initial_gate_passed = bool(
             initial_gate_passed
             and len(sampled_target_rows) == 8
             and len(realized_target_rows) == 8
-            and all_target_rows_accepted
             and evidence_complete
             and initial_attempt_seeds == expected_seeds
         )
+        if requirements.finalization_mode == "composition":
+            initial_gate_passed = bool(
+                initial_gate_passed
+                and all(bool(row["base_committed"]) for row in sampled_target_rows)
+            )
     else:
         sampled_target_rows = []
         realized_target_rows = []
@@ -475,8 +479,15 @@ def audit_targeted_supplement(
         "split_counts": {name: int(split_counts[name]) for name in FORMAL_SPLITS},
         "background_count_counts": {
             str(key): int(background_counts[key])
-            for key in requirements.accepted_background_count_quotas
+            for key in (
+                requirements.accepted_background_count_quotas
+                if requirements.accepted_background_count_quotas
+                else (3, 4, 5, 6)
+            )
         },
+        "background_count_distribution_is_acceptance_gate": bool(
+            requirements.accepted_background_count_quotas
+        ),
         "duplicate_spawn_seeds": sorted(
             seed for seed, count in Counter(seeds).items() if count > 1
         ),

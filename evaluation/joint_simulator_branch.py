@@ -12,17 +12,31 @@ from expert_dataset.collect_joint_bev import (
     SensorlessJointBEVPlatoonEnv,
     simulator_decision_dt_s,
 )
+from envs.observations.semantic_bev import (
+    BEVChannel,
+    MetaDriveSceneAdapter,
+    SemanticBEVRasterizer,
+    SemanticBEVScene,
+)
 from models.bev_planner.joint_reward import (
     AGENT_IDS,
     JointRewardConfig,
     JointRewardError,
     JointRewardResult,
+    aggregate_temporal_risk,
+    closing_ttc_from_gap_series,
     compose_joint_reward,
+    drivable_signed_distance_m,
+    footprint_road_margin_series,
+    soft_threshold_risk,
+    tracking_aware_half_extents,
+    ttc_risk_from_gap_series,
 )
-from models.platoon_planner.platoon_normal_planner import (
-    PlatoonNormalPlanner,
-    minimum_dense_pair_gap,
+from models.platoon_planner.collision_geometry import (
+    shared_corridor_gap_series,
+    world_trajectory_to_ego_local,
 )
+from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
 from models.controller.longitudinal_reference import (
     LongitudinalTrackingReference,
     signed_longitudinal_speed_mps,
@@ -435,9 +449,11 @@ class JointSimulatorBranchEvaluator:
         config: JointRewardConfig | None = None,
         *,
         env_factory: Callable[[Mapping[str, object]], object] | None = None,
+        scene_adapter: MetaDriveSceneAdapter | None = None,
     ) -> None:
         self.config = config or JointRewardConfig()
         self._env_factory = env_factory or SensorlessJointBEVPlatoonEnv
+        self._scene_adapter = scene_adapter or MetaDriveSceneAdapter()
         self._vehicle_helper = PlatoonNormalPlanner(
             background_safe_gap_m=self.config.background_safe_gap_m,
             platoon_safe_gap_m=self.config.platoon_safe_gap_m,
@@ -499,128 +515,316 @@ class JointSimulatorBranchEvaluator:
             env.reset()
         return env
 
-    def _instant_gaps(self, env: object) -> tuple[float, float]:
-        agents = getattr(env, "agents", {}) or {}
-        platoon_gap = float("inf")
-        for leader, follower in zip(AGENT_IDS[:-1], AGENT_IDS[1:]):
-            first_vehicle = agents[leader]
-            second_vehicle = agents[follower]
-            first = np.asarray(
-                [[
-                    *np.asarray(first_vehicle.position, dtype=np.float64)[:2],
-                    float(first_vehicle.heading_theta),
-                ]],
-                dtype=np.float64,
-            )
-            second = np.asarray(
-                [[
-                    *np.asarray(second_vehicle.position, dtype=np.float64)[:2],
-                    float(second_vehicle.heading_theta),
-                ]],
-                dtype=np.float64,
-            )
-            platoon_gap = min(
-                platoon_gap,
-                minimum_dense_pair_gap(
-                    first,
-                    (
-                        float(
-                            getattr(
-                                first_vehicle,
-                                "LENGTH",
-                                self.config.vehicle_length_m,
-                            )
-                        ),
-                        float(
-                            getattr(
-                                first_vehicle,
-                                "WIDTH",
-                                self.config.vehicle_width_m,
-                            )
-                        ),
-                    ),
-                    second,
-                    (
-                        float(
-                            getattr(
-                                second_vehicle,
-                                "LENGTH",
-                                self.config.vehicle_length_m,
-                            )
-                        ),
-                        float(
-                            getattr(
-                                second_vehicle,
-                                "WIDTH",
-                                self.config.vehicle_width_m,
-                            )
-                        ),
-                    ),
-                ),
-            )
+    @staticmethod
+    def _physical_dimensions(
+        vehicle: object, config: JointRewardConfig
+    ) -> tuple[float, float]:
+        return (
+            float(getattr(vehicle, "LENGTH", config.vehicle_length_m)),
+            float(getattr(vehicle, "WIDTH", config.vehicle_width_m)),
+        )
 
-        background_gap = float("inf")
-        vehicles = [
-            vehicle
-            for _, vehicle in self._vehicle_helper._surrounding_vehicles(env)
-        ]
+    def _tracking_dimensions(self, vehicle: object) -> tuple[float, float]:
+        physical_length, physical_width = self._physical_dimensions(
+            vehicle, self.config
+        )
+        half_length, half_width = tracking_aware_half_extents(self.config)
+        return (
+            physical_length
+            + 2.0 * (half_length - 0.5 * self.config.vehicle_length_m),
+            physical_width
+            + 2.0 * (half_width - 0.5 * self.config.vehicle_width_m),
+        )
+
+    @staticmethod
+    def _vehicle_pose(vehicle: object) -> np.ndarray:
+        position = np.asarray(
+            getattr(vehicle, "position", ()), dtype=np.float64
+        ).reshape(-1)
+        heading = float(getattr(vehicle, "heading_theta", float("nan")))
+        if (
+            position.size < 2
+            or not np.isfinite(position[:2]).all()
+            or not math.isfinite(heading)
+        ):
+            raise JointRewardError("simulator vehicle pose is invalid")
+        return np.asarray([[position[0], position[1], heading]], dtype=np.float64)
+
+    def _instant_interaction_gaps(
+        self, env: object, *, tracking_aware: bool
+    ) -> dict[str, tuple[float, float]]:
+        """Return finite same-corridor gaps keyed by physical interaction."""
+
+        agents = getattr(env, "agents", {}) or {}
+        missing = [agent_id for agent_id in AGENT_IDS if agent_id not in agents]
+        if missing:
+            raise JointRewardError(
+                f"simulator is missing active platoon agents: {missing}"
+            )
+        gaps: dict[str, tuple[float, float]] = {}
+        for leader_role, follower_role in ((0, 1), (1, 2), (0, 2)):
+            leader_id = AGENT_IDS[leader_role]
+            follower_id = AGENT_IDS[follower_role]
+            leader = agents[leader_id]
+            follower = agents[follower_id]
+            first_dimensions = (
+                self._tracking_dimensions(leader)
+                if tracking_aware
+                else self._physical_dimensions(leader, self.config)
+            )
+            second_dimensions = (
+                self._tracking_dimensions(follower)
+                if tracking_aware
+                else self._physical_dimensions(follower, self.config)
+            )
+            value = shared_corridor_gap_series(
+                self._vehicle_pose(leader),
+                first_dimensions,
+                self._vehicle_pose(follower),
+                second_dimensions,
+                no_risk_gap_m=self.config.no_risk_gap_m,
+            )[0]
+            gaps[
+                f"platoon:{leader_id}:{follower_id}"
+            ] = (float(value), self.config.platoon_safe_gap_m)
+
+        vehicles = list(self._vehicle_helper._surrounding_vehicles(env))
         platoon_objects = {id(vehicle) for vehicle in agents.values()}
         for agent_id in AGENT_IDS:
             vehicle = agents[agent_id]
-            pose = np.asarray(
-                [[
-                    *np.asarray(vehicle.position, dtype=np.float64)[:2],
-                    float(vehicle.heading_theta),
-                ]],
-                dtype=np.float64,
-            )
             dimensions = (
-                float(getattr(vehicle, "LENGTH", self.config.vehicle_length_m)),
-                float(getattr(vehicle, "WIDTH", self.config.vehicle_width_m)),
+                self._tracking_dimensions(vehicle)
+                if tracking_aware
+                else self._physical_dimensions(vehicle, self.config)
             )
-            for other in vehicles:
+            for name, other in vehicles:
                 if id(other) in platoon_objects:
                     continue
-                other_position = np.asarray(
-                    getattr(other, "position", ()), dtype=np.float64
-                ).reshape(-1)
-                if other_position.size < 2 or not np.isfinite(
-                    other_position[:2]
-                ).all():
+                value = shared_corridor_gap_series(
+                    self._vehicle_pose(vehicle),
+                    dimensions,
+                    self._vehicle_pose(other),
+                    self._physical_dimensions(other, self.config),
+                    no_risk_gap_m=self.config.no_risk_gap_m,
+                )[0]
+                key = f"background:{agent_id}:{name}"
+                previous = gaps.get(key)
+                if previous is None or value < previous[0]:
+                    gaps[key] = (
+                        float(value),
+                        self.config.background_safe_gap_m,
+                    )
+        return gaps
+
+    def _instant_gaps(self, env: object) -> tuple[float, float]:
+        values = self._instant_interaction_gaps(env, tracking_aware=False)
+        platoon = [
+            value
+            for key, (value, _) in values.items()
+            if key.startswith("platoon:")
+        ]
+        background = [
+            value
+            for key, (value, _) in values.items()
+            if key.startswith("background:")
+        ]
+        return (
+            min(platoon, default=self.config.no_risk_gap_m),
+            min(background, default=self.config.no_risk_gap_m),
+        )
+
+    def _continuous_gap_risks(
+        self,
+        snapshots: Sequence[Mapping[str, tuple[float, float]]],
+        *,
+        dt_s: float,
+    ) -> tuple[float, float, float, float, float]:
+        keys = sorted({key for snapshot in snapshots for key in snapshot})
+        if not snapshots or not keys:
+            raise JointRewardError("simulator gap trace cannot be empty")
+        gap_risks = []
+        ttc_risks = []
+        minimum_ttc = self.config.no_risk_ttc_s
+        minimum_platoon = self.config.no_risk_gap_m
+        minimum_background = self.config.no_risk_gap_m
+        source_times = np.arange(len(snapshots), dtype=np.float64) * dt_s
+        target_times = np.arange(
+            0.0,
+            source_times[-1] + 0.5 * self.config.interpolation_dt_s,
+            self.config.interpolation_dt_s,
+            dtype=np.float64,
+        )
+        for key in keys:
+            thresholds = [
+                snapshot[key][1] for snapshot in snapshots if key in snapshot
+            ]
+            threshold = float(thresholds[0])
+            if any(not math.isclose(value, threshold) for value in thresholds):
+                raise JointRewardError("gap threshold changed within one interaction")
+            sampled_gap = np.asarray(
+                [
+                    snapshot.get(
+                        key, (self.config.no_risk_gap_m, threshold)
+                    )[0]
+                    for snapshot in snapshots
+                ],
+                dtype=np.float64,
+            )
+            shared = sampled_gap < self.config.no_risk_gap_m
+            gap_series = np.full(
+                target_times.shape,
+                self.config.no_risk_gap_m,
+                dtype=np.float64,
+            )
+            for source_index, source_time in enumerate(source_times):
+                exact = np.isclose(target_times, source_time, atol=1e-9)
+                if shared[source_index]:
+                    gap_series[exact] = sampled_gap[source_index]
+            for source_index in range(len(source_times) - 1):
+                if not (shared[source_index] and shared[source_index + 1]):
                     continue
-                other_pose = np.asarray(
-                    [[
-                        other_position[0],
-                        other_position[1],
-                        float(getattr(other, "heading_theta", 0.0)),
-                    ]],
-                    dtype=np.float64,
+                interval = (
+                    (target_times >= source_times[source_index])
+                    & (target_times <= source_times[source_index + 1])
                 )
-                background_gap = min(
-                    background_gap,
-                    minimum_dense_pair_gap(
-                        pose,
-                        dimensions,
-                        other_pose,
-                        (
-                            float(
-                                getattr(
-                                    other,
-                                    "LENGTH",
-                                    self.config.vehicle_length_m,
-                                )
-                            ),
-                            float(
-                                getattr(
-                                    other,
-                                    "WIDTH",
-                                    self.config.vehicle_width_m,
-                                )
-                            ),
-                        ),
+                gap_series[interval] = np.interp(
+                    target_times[interval],
+                    source_times[source_index : source_index + 2],
+                    sampled_gap[source_index : source_index + 2],
+                )
+            if key.startswith("platoon:"):
+                minimum_platoon = min(
+                    minimum_platoon, float(np.min(gap_series))
+                )
+            elif key.startswith("background:"):
+                minimum_background = min(
+                    minimum_background, float(np.min(gap_series))
+                )
+            gap_risks.append(
+                soft_threshold_risk(
+                    gap_series,
+                    warning_threshold=threshold,
+                    softness=self.config.gap_softness_m,
+                )
+            )
+            ttc = closing_ttc_from_gap_series(
+                gap_series,
+                dt_s=self.config.interpolation_dt_s,
+                closing_speed_epsilon_mps=(
+                    self.config.closing_speed_epsilon_mps
+                ),
+                no_risk_gap_m=self.config.no_risk_gap_m,
+                no_risk_ttc_s=self.config.no_risk_ttc_s,
+            )
+            minimum_ttc = min(minimum_ttc, float(np.min(ttc)))
+            ttc_risks.append(
+                ttc_risk_from_gap_series(
+                    gap_series,
+                    dt_s=self.config.interpolation_dt_s,
+                    warning_threshold_s=self.config.ttc_warning_s,
+                    softness_s=self.config.ttc_softness_s,
+                    closing_speed_epsilon_mps=(
+                        self.config.closing_speed_epsilon_mps
                     ),
+                    no_risk_gap_m=self.config.no_risk_gap_m,
+                    no_risk_ttc_s=self.config.no_risk_ttc_s,
                 )
-        return platoon_gap, background_gap
+            )
+        gap_by_time = np.max(np.stack(gap_risks, axis=0), axis=0)
+        ttc_by_time = np.max(np.stack(ttc_risks, axis=0), axis=0)
+        aggregate_kwargs = {
+            "max_weight": self.config.temporal_max_weight,
+            "mean_weight": self.config.temporal_mean_weight,
+        }
+        return (
+            aggregate_temporal_risk(gap_by_time, **aggregate_kwargs),
+            aggregate_temporal_risk(ttc_by_time, **aggregate_kwargs),
+            float(minimum_ttc),
+            float(minimum_platoon),
+            float(minimum_background),
+        )
+
+    def _reference_drivable_bev(
+        self, env: object, reference_pose_global: np.ndarray
+    ) -> np.ndarray:
+        """Rasterize only the static drivable map in each frozen role frame."""
+
+        road_network = self._scene_adapter._road_network(env)
+        drivable_polygons, _, _ = self._scene_adapter._map_geometry(road_network)
+        if not drivable_polygons:
+            raise JointRewardError("simulator road network has no drivable polygons")
+        rasterizer = SemanticBEVRasterizer(self._scene_adapter.config)
+        values = []
+        for pose in np.asarray(reference_pose_global, dtype=np.float64):
+            scene = SemanticBEVScene(
+                ego_pose=pose.astype(np.float32),
+                drivable_polygons=drivable_polygons,
+            )
+            values.append(rasterizer.rasterize(scene)[int(BEVChannel.DRIVABLE)])
+        result = np.ascontiguousarray(np.stack(values), dtype=np.uint8)
+        if result.shape != (3, 256, 256) or not np.any(result, axis=(1, 2)).all():
+            raise JointRewardError("reference drivable BEV is empty or malformed")
+        return result
+
+    def _continuous_road_risk(
+        self,
+        pose_traces: Sequence[Sequence[np.ndarray]],
+        reference_pose_global: np.ndarray,
+        signed_distance_fields: Sequence[np.ndarray],
+        *,
+        dt_s: float,
+    ) -> tuple[float, float]:
+        role_risks = []
+        minimum_margin = float("inf")
+        for role in range(3):
+            world = np.asarray(pose_traces[role], dtype=np.float64)
+            source_times = np.arange(len(world), dtype=np.float64) * dt_s
+            target_times = np.arange(
+                0.0,
+                source_times[-1] + 0.5 * self.config.interpolation_dt_s,
+                self.config.interpolation_dt_s,
+                dtype=np.float64,
+            )
+            dense_world = np.empty((len(target_times), 3), dtype=np.float64)
+            dense_world[:, 0] = np.interp(
+                target_times, source_times, world[:, 0]
+            )
+            dense_world[:, 1] = np.interp(
+                target_times, source_times, world[:, 1]
+            )
+            unwrapped_heading = np.unwrap(world[:, 2])
+            dense_heading = np.interp(
+                target_times, source_times, unwrapped_heading
+            )
+            dense_world[:, 2] = np.arctan2(
+                np.sin(dense_heading), np.cos(dense_heading)
+            )
+            local = world_trajectory_to_ego_local(
+                dense_world, reference_pose_global[role]
+            )
+            margins = footprint_road_margin_series(
+                local,
+                signed_distance_fields[role],
+                self.config,
+                tracking_aware=True,
+            )
+            minimum_margin = min(minimum_margin, float(np.min(margins)))
+            role_risks.append(
+                soft_threshold_risk(
+                    margins,
+                    warning_threshold=self.config.road_margin_warning_m,
+                    softness=self.config.road_margin_softness_m,
+                )
+            )
+        per_time = np.max(np.stack(role_risks, axis=0), axis=0)
+        return (
+            aggregate_temporal_risk(
+                per_time,
+                max_weight=self.config.temporal_max_weight,
+                mean_weight=self.config.temporal_mean_weight,
+            ),
+            float(minimum_margin),
+        )
 
     def evaluate(
         self,
@@ -642,10 +846,12 @@ class JointSimulatorBranchEvaluator:
         candidates = np.ascontiguousarray(candidates, dtype=np.float32)
         prefix = self._validate_prefix(prefix_actions)
         group_size = candidates.shape[0]
-        progress = np.zeros(group_size, dtype=np.float64)
-        formation = np.zeros(group_size, dtype=np.float64)
-        clearance = np.zeros(group_size, dtype=np.float64)
-        comfort = np.zeros(group_size, dtype=np.float64)
+        progress_score = np.zeros(group_size, dtype=np.float64)
+        formation_penalty = np.zeros(group_size, dtype=np.float64)
+        gap_penalty = np.zeros(group_size, dtype=np.float64)
+        ttc_penalty = np.zeros(group_size, dtype=np.float64)
+        road_penalty = np.zeros(group_size, dtype=np.float64)
+        comfort_penalty = np.zeros(group_size, dtype=np.float64)
         collision = np.zeros(group_size, dtype=np.bool_)
         out = np.zeros(group_size, dtype=np.bool_)
         replay_position = np.zeros(group_size, dtype=np.float64)
@@ -654,6 +860,10 @@ class JointSimulatorBranchEvaluator:
         executed = np.zeros(group_size, dtype=np.int64)
         minimum_platoon = np.full(group_size, np.inf, dtype=np.float64)
         minimum_background = np.full(group_size, np.inf, dtype=np.float64)
+        minimum_ttc = np.full(
+            group_size, self.config.no_risk_ttc_s, dtype=np.float64
+        )
+        minimum_road_margin = np.full(group_size, np.inf, dtype=np.float64)
         failure_reasons: list[set[str]] = [set() for _ in range(group_size)]
         tracking_longitudinal = np.zeros((group_size, 3), dtype=np.float64)
         tracking_lateral = np.zeros((group_size, 3), dtype=np.float64)
@@ -705,6 +915,7 @@ class JointSimulatorBranchEvaluator:
             ]
             for _ in range(group_size)
         ]
+        signed_distance_fields: tuple[np.ndarray, ...] | None = None
 
         for group in range(group_size):
             env = self._make_env(episode_spec)
@@ -741,8 +952,19 @@ class JointSimulatorBranchEvaluator:
                 formation_constraint_enabled = bool(regime_getter())
 
                 initial = replay_pose.copy()
+                if signed_distance_fields is None:
+                    reference_drivable = self._reference_drivable_bev(
+                        env, episode_spec.reference_pose_global
+                    )
+                    signed_distance_fields = tuple(
+                        drivable_signed_distance_m(reference_drivable[role])
+                        for role in range(3)
+                    )
                 for role, agent_id in enumerate(AGENT_IDS):
                     initial_speed[group, role] = signed_longitudinal_speed_mps(
+                        env.agents[agent_id]
+                    )
+                    road_clearance[group, role] = _road_clearance_m(
                         env.agents[agent_id]
                     )
                 references = [
@@ -758,8 +980,20 @@ class JointSimulatorBranchEvaluator:
                 positions = [[initial[role, :2].copy()] for role in range(3)]
                 speeds = [[] for _ in range(3)]
                 headings = [[initial[role, 2]] for role in range(3)]
+                pose_traces = [[initial[role].copy()] for role in range(3)]
                 formation_errors = []
-                clearance_deficits = []
+                reward_gap_snapshots = [
+                    self._instant_interaction_gaps(
+                        env, tracking_aware=True
+                    )
+                ]
+                platoon_gap, background_gap = self._instant_gaps(env)
+                minimum_platoon[group] = min(
+                    minimum_platoon[group], platoon_gap
+                )
+                minimum_background[group] = min(
+                    minimum_background[group], background_gap
+                )
 
                 for step_index in range(maximum_steps):
                     current = capture_joint_pose_global(env)
@@ -904,6 +1138,7 @@ class JointSimulatorBranchEvaluator:
                     for role, agent_id in enumerate(AGENT_IDS):
                         positions[role].append(current[role, :2].copy())
                         headings[role].append(float(current[role, 2]))
+                        pose_traces[role].append(current[role].copy())
                         speeds[role].append(
                             signed_longitudinal_speed_mps(env.agents[agent_id])
                         )
@@ -1074,27 +1309,11 @@ class JointSimulatorBranchEvaluator:
                     minimum_background[group] = min(
                         minimum_background[group], background_gap
                     )
-                    deficits = [
-                        np.clip(
-                            (self.config.platoon_safe_gap_m - platoon_gap)
-                            / self.config.platoon_safe_gap_m,
-                            0.0,
-                            1.0,
+                    reward_gap_snapshots.append(
+                        self._instant_interaction_gaps(
+                            env, tracking_aware=True
                         )
-                    ]
-                    if math.isfinite(background_gap):
-                        deficits.append(
-                            np.clip(
-                                (
-                                    self.config.background_safe_gap_m
-                                    - background_gap
-                                )
-                                / self.config.background_safe_gap_m,
-                                0.0,
-                                1.0,
-                            )
-                        )
-                    clearance_deficits.append(float(np.mean(deficits)))
+                    )
                     if ended:
                         break
 
@@ -1123,9 +1342,13 @@ class JointSimulatorBranchEvaluator:
                         if speed_values.size > 1
                         else np.zeros(1, dtype=np.float64)
                     )
-                    yaw_rate = np.diff(heading_values) / dt_s
+                    yaw_rate = (
+                        np.diff(heading_values) / dt_s
+                        if heading_values.size > 1
+                        else np.zeros(1, dtype=np.float64)
+                    )
                     role_comfort.append(
-                        -float(
+                        float(
                             np.clip(
                                 0.5 * np.mean(np.abs(acceleration)) / 8.0
                                 + 0.5 * np.mean(np.abs(yaw_rate)),
@@ -1134,8 +1357,8 @@ class JointSimulatorBranchEvaluator:
                             )
                         )
                     )
-                progress[group] = float(np.mean(role_progress))
-                formation[group] = -min(
+                progress_score[group] = float(np.mean(role_progress))
+                formation_penalty[group] = min(
                     (
                         float(np.mean(formation_errors))
                         if formation_errors
@@ -1144,15 +1367,26 @@ class JointSimulatorBranchEvaluator:
                     / self.config.formation_norm_m,
                     1.0,
                 )
-                clearance[group] = -min(
-                    (
-                        float(np.mean(clearance_deficits))
-                        if clearance_deficits
-                        else 1.0
-                    ),
-                    1.0,
+                (
+                    gap_penalty[group],
+                    ttc_penalty[group],
+                    minimum_ttc[group],
+                    minimum_platoon[group],
+                    minimum_background[group],
+                ) = self._continuous_gap_risks(
+                    reward_gap_snapshots, dt_s=dt_s
                 )
-                comfort[group] = float(np.mean(role_comfort))
+                assert signed_distance_fields is not None
+                (
+                    road_penalty[group],
+                    minimum_road_margin[group],
+                ) = self._continuous_road_risk(
+                    pose_traces,
+                    episode_spec.reference_pose_global,
+                    signed_distance_fields,
+                    dt_s=dt_s,
+                )
+                comfort_penalty[group] = float(np.mean(role_comfort))
                 for role in range(3):
                     saturated = tracking_traces[group][role][
                         "control_saturated"
@@ -1170,22 +1404,34 @@ class JointSimulatorBranchEvaluator:
 
         # An absent background vehicle is represented as a large finite gap in
         # the report, never as an NaN/inf sentinel.
-        minimum_background[~np.isfinite(minimum_background)] = 1.0e6
-        minimum_platoon[~np.isfinite(minimum_platoon)] = 1.0e6
-        road_clearance[~np.isfinite(road_clearance)] = 1.0e6
+        minimum_background[~np.isfinite(minimum_background)] = (
+            self.config.no_risk_gap_m
+        )
+        minimum_platoon[~np.isfinite(minimum_platoon)] = (
+            self.config.no_risk_gap_m
+        )
+        road_clearance[~np.isfinite(road_clearance)] = self.config.no_risk_gap_m
         clearance_violation = (
             (minimum_background < self.config.background_safe_gap_m)
             | (minimum_platoon < self.config.platoon_safe_gap_m)
         )
         reward = compose_joint_reward(
-            progress=progress,
-            formation=formation,
-            clearance=clearance,
-            comfort=comfort,
+            progress_score=progress_score,
+            formation_penalty=formation_penalty,
+            gap_penalty=gap_penalty,
+            ttc_penalty=ttc_penalty,
+            road_penalty=road_penalty,
+            comfort_penalty=comfort_penalty,
             collision=collision,
             out_of_drivable=out,
             clearance_violation=clearance_violation.astype(np.bool_),
             config=self.config,
+            diagnostic_components={
+                "minimum_background_gap_m": minimum_background,
+                "minimum_platoon_gap_m": minimum_platoon,
+                "minimum_road_margin_m": minimum_road_margin,
+                "minimum_ttc_s": minimum_ttc,
+            },
         )
         return SimulatorBranchResult(
             reward=reward,

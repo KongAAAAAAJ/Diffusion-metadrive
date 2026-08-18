@@ -24,6 +24,11 @@ def test_round13_closeout_freezes_formal_boundary() -> None:
     assert payload["data_contract"]["joint_first"] is True
     assert payload["mode_contract"]["num_modes"] == 10
     assert payload["mode_contract"]["trajectory_steps"] == 8
+    assert payload["reward_contract"]["config"]["unsafe_base_reward"] == -20.0
+    assert (
+        payload["reward_contract"]["sha256"]
+        == "bd6e726135082d9e3ff983b2ce0fbf55021479c678d731250395341ca93cd7c1"
+    )
     assert payload["latency_evidence_ms"]["full_planning_tick_p95_max"] > 100.0
     assert payload["next_hard_gate"]["name"] == "formal_joint_bev_15000_step_pilot"
 
