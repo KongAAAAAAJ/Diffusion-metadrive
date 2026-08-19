@@ -1,11 +1,11 @@
 {
   "format": "bev_rule_conditioned_v2_dataset_preparation_report_v1",
   "schema_version": 1,
-  "recorded_at": "2026-08-19T16:56:01+08:00",
+  "recorded_at": "2026-08-19T22:26:55+08:00",
   "branch": "BEV",
   "source_git_commit": "ff580191e96c643e35e6ff1bdd6da031989a4619",
-  "status": "implementation_and_short_smoke_verified_collection_not_started",
-  "scope": "Rule-conditioned v2 collection, verification and safe composition preparation only; no diagnostic, formal or S5 production collection was run",
+  "status": "diagnostic8k_verified_parallel_formal_and_s5_collection_ready",
+  "scope": "Rule-conditioned v2 diagnostic verification and parallel formal/S5 collection preparation; no formal40k, S5 production collection or final composition was run in this implementation round",
   "implementation": {
     "collector": {
       "v1_formal_requires_complete_ordered_s5_s9": true,
@@ -25,10 +25,12 @@
     },
     "condition_verifier": {
       "path": "expert_dataset/verify_rule_conditioned_v2_bundle.py",
-      "sha256": "312c98721d61dda9284586a414afacafb0c3b39bf21855d32cd8f020f292fe94",
+      "sha256": "595476e0342c0a4c88811890874b1dc5c9e792d4b36267af08892ddce13c33d4",
       "reuses_existing_component_verifiers": true,
       "requires_planner_v2_schema3": true,
       "aligns_each_base_sample_to_one_rule_maker_condition_event": true,
+      "allows_structurally_valid_unselected_raw_audit_events": true,
+      "s7_lateral_feedback_contract": "S7/R7 physical LEFT and RIGHT feed RuleMaker KEEP; all other physical/feedback pairs are strict",
       "fields_checked": [
         "background_actor_state",
         "background_actor_valid_mask",
@@ -40,14 +42,14 @@
         "accepted_proposal_rank",
         "physical_mode_action",
         "rule_feedback_action",
-        "s7_left_to_keep_exception"
+        "legacy s7_left_to_keep_exception plus derived right-to-keep audit"
       ]
     },
     "composition_tool": {
       "path": "tools/compose_rule_conditioned_v2_dataset.py",
-      "sha256": "108b0fec41a2c889f16c04ecf19a2a72faa77a05cd351efc6187ef7d7dee9b51",
+      "sha256": "41918e41e3a575f80d97e83310cc1f57ed8cfc3f4f23768a0554cf67fc2adf79",
       "commands": [
-        "prepare-s5-config",
+        "prepare-composition-contract",
         "compose dry-run",
         "compose --stage-only",
         "compose --install-to-new-root"
@@ -57,7 +59,9 @@
       "final_target_samples": 50070,
       "physical_copy_only": true,
       "source_fingerprint_and_index_hash_binding": true,
-      "generated_config_and_freeze_hash_binding": true,
+      "independent_s5_config_and_both_source_hash_binding": true,
+      "source_and_target_split_quotas_are_independent": true,
+      "global_cross_split_mapping": true,
       "preserves_source_rejection_audit": true,
       "rejects_pending_links_duplicates_drift_existing_targets_and_insufficient_space": true,
       "source_roots_modified": false,
@@ -83,9 +87,10 @@
       "s6_horizon": 260,
       "s9_horizon": 800
     },
-    "s5_release10070_template": {
-      "path": "configs/dataset/data_collect_bev_rule_conditioned_v2_s5_release10070.template.yaml",
-      "file_sha256": "9d56ca677c654e862c0fb06b51aa3f8ec51b85fbaf0bf0c184c1028d0163c8c0",
+    "s5_release10070": {
+      "path": "configs/dataset/data_collect_bev_rule_conditioned_v2_s5_release10070.yaml",
+      "file_sha256": "74616049d74d391fdaf58621e819a0cb24c0e04d04f8cbe665493f93889b69c6",
+      "immutable_fingerprint": "1931363c8d69d73904f15901b211b2d1a71bba4c07d09c24aeab55a3a12e5a1f",
       "samples": 10070,
       "episodes": 53,
       "profile": "balanced",
@@ -95,13 +100,14 @@
       "initial_gate": "at least 2 strict accepted target episodes in the first 10 simulator attempts",
       "maximum_simulator_attempts": 300,
       "parallel_workers": 4,
-      "split_quotas": "generated only after formal40k verification from its real next_episode_index"
+      "source_split_quotas": {"train": 43, "val": 5, "test": 5},
+      "final_target_split_quotas": "derived after both sources finish from the formal40k real next_episode_index"
     }
   },
   "verification": {
     "required_regression": {
       "command": "pytest -q tests/test_run_joint_bev_collection.py tests/test_bev_rule_conditioned_v2.py tests/test_append_s5_release30_dataset.py tests/test_compose_rule_conditioned_v2_dataset.py tests/test_verify_rule_conditioned_v2_bundle.py",
-      "result": "68 passed, 15 warnings"
+      "result": "76 passed, 15 warnings"
     },
     "python_compile": "passed",
     "git_diff_check": "passed before final report/state update",
@@ -141,12 +147,17 @@
     ]
   },
   "production_state": {
-    "diagnostic8k_started": false,
+    "diagnostic8k_started": true,
+    "diagnostic8k_complete": true,
+    "diagnostic8k_full_verifier_passed": true,
+    "diagnostic8k_s7_left_to_keep_role_steps": 2122,
+    "diagnostic8k_s7_right_to_keep_role_steps": 581,
     "formal40k_started": false,
-    "s5_generated_config_created": false,
+    "s5_independent_config_created": true,
     "s5_collection_started": false,
+    "parallel_collection_ready": true,
     "final_composition_started": false,
     "formal_training_eligible": false
   },
-  "next_hard_gate": "User runs and fully verifies the isolated S6-S9 diagnostic8k bundle; formal40k must not start before that verifier passes"
+  "next_hard_gate": "Freeze one clean code revision, then run S6-S9 formal40k and the S5 first-ten gate concurrently in isolated roots; do not modify code or config during either collection"
 }

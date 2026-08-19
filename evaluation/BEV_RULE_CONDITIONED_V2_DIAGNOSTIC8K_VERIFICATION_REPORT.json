@@ -1,0 +1,62 @@
+{
+  "format": "bev_rule_conditioned_v2_diagnostic8k_verification_report_v2",
+  "status": "passed_with_bidirectional_s7_lateral_to_keep_contract",
+  "updated_at": "2026-08-19T22:26:55+08:00",
+  "git_head": "c748e84d3832c385be5a7d52137a3cd89dd52b05",
+  "worktree_state": "uncommitted_rule_conditioned_v2_parallel_collection_preparation_edits_present",
+  "bundle": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s6_s9_diagnostic8k_v1",
+    "config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s6_s9_diagnostic8k.yaml",
+    "config_sha256": "76ff4ba8abf2160a267a06a1418daf82244d5abc0add70cdd3be146da85705a6",
+    "base_dataset_fingerprint": "951208e9241e8043f1852b793e40749865e6130d03455d0a10f3ad66352ea12c",
+    "sidecar_dataset_fingerprint": "b005abba508d9844e25ae81b668a281c884c10b721f8a2f2cb2360afdc13f894",
+    "bundle_index_sha256": "97d3ae4f2a526aa257ddee9157ee58a06ed596aca9316a091952a43ad2495a73",
+    "joint_samples": 8000,
+    "scenario_joint_samples": {
+      "S6_background_merge_in": 2000,
+      "S7_ego_merge_from_ramp": 2000,
+      "S8_ego_exit_to_ramp": 2000,
+      "S9_narrow_channel_negotiation": 2000
+    },
+    "stored_episodes": 44,
+    "attempted_episodes": 93,
+    "rejected_episodes": 49,
+    "pending_transaction": false,
+    "writer_locks_released": true
+  },
+  "contract_revision": {
+    "authorized_by_user": true,
+    "scope": "Only S7_ego_merge_from_ramp/R7_merge_core physical LEFT and RIGHT modes feed RuleMaker KEEP; all other physical/feedback pairs remain strict one-to-one",
+    "legacy_left_exception_flag_preserved": true,
+    "right_exception_audit": "derived from physical_mode_action=RIGHT and rule_feedback_action=KEEP without changing schema3 or rewriting the bundle"
+  },
+  "verification": {
+    "base_sidecar_bundle_component_verifiers": "passed",
+    "full_rule_conditioned_v2_verifier_passed": true,
+    "aligned_episodes": 44,
+    "aligned_samples": 8000,
+    "raw_condition_events": 15020,
+    "unselected_condition_events": 7020,
+    "proposal_batches": 6638,
+    "executions": 67,
+    "s7_left_to_keep_role_steps": 2122,
+    "s7_right_to_keep_role_steps": 581,
+    "accepted_proposal_rank_counts": {
+      "0": 7630,
+      "1": 346,
+      "2": 6,
+      "3": 18
+    },
+    "focused_s7_and_verifier_tests": "22 passed",
+    "required_regression": "76 passed, 15 warnings",
+    "verifier_sha256": "595476e0342c0a4c88811890874b1dc5c9e792d4b36267af08892ddce13c33d4"
+  },
+  "implementation_boundary": {
+    "diagnostic_samples_reused_in_formal40k": false,
+    "formal40k_started": false,
+    "s5_release10070_started": false,
+    "parallel_collection_change_complete": true,
+    "formal_training_eligible": false,
+    "next_permitted_action": "Freeze one clean code revision, then run formal40k and the S5 first-ten gate in separate terminals with isolated roots, logs and caches"
+  }
+}

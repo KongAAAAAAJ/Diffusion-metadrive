@@ -27,11 +27,10 @@ targeted_supplement:
   scenario_id: S5_hard_brake_lead
   behavior_category: temporary_formation_release_and_recovery
   rule_maker_profile_id: balanced
-  # Filled by compose_rule_conditioned_v2_dataset.py prepare-s5-config.
   accepted_episode_quotas:
-    train: 0
-    val: 0
-    test: 0
+    train: 43
+    val: 5
+    test: 5
   required_samples_per_episode: 190
   max_simulator_attempts: 300
   initial_feasibility_attempts: 10

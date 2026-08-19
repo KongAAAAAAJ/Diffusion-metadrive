@@ -1,7 +1,7 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-19T16:30:00+08:00",
+  "updated_at": "2026-08-19T22:26:55+08:00",
   "status": "bev_only_diffusion_planner_v2_implementation_verified",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, candidate-v3 data history, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
@@ -109,7 +109,7 @@
       "LEFT_HIGH_TO_LOW": "LEFT",
       "RIGHT_HIGH_TO_LOW": "RIGHT",
       "STOP": "KEEP",
-      "s7_temporary_exception": "On S7 R7 route-chain states, a physical LEFT mode is explicitly audited and fed back to RuleMaker as KEEP; every other match is strict one-to-one."
+      "s7_temporary_exception": "On S7 R7 route-chain states, physical LEFT and RIGHT modes are explicitly audited and fed back to RuleMaker as KEEP; every other match is strict one-to-one."
     },
     "data_contract": {
       "historical_v1_policy": "preserve and keep readable; it is not eligible for v2 conditioning training",
@@ -121,7 +121,7 @@
         "proposal batch ID and committed execution ID",
         "explicit background actor state and valid mask",
         "physical mode action and RuleMaker feedback action",
-        "S7 exception mask"
+        "legacy S7 LEFT-to-KEEP exception mask; S7 RIGHT-to-KEEP is derived from physical and feedback actions"
       ],
       "parity_gate": "identical environment state, config, reset, agent order, hard-valid modes, and accepted-action history must produce elementwise-identical RuleMaker conditions in collection and online inference"
     },

@@ -130,7 +130,7 @@ def diffusion_mode_feedback_actions(
     scenario_id: str,
     local_route: str,
 ) -> tuple[dict[str, int], dict[str, int], dict[str, bool]]:
-    """Map physical modes to RuleMaker feedback with the explicit S7 exception."""
+    """Map physical modes to RuleMaker feedback with the explicit S7 exceptions."""
 
     ordered_ids = tuple(str(value) for value in agent_ids)
     modes = tuple(int(value) for value in selected_modes)
@@ -149,7 +149,11 @@ def diffusion_mode_feedback_actions(
         for agent_id in ordered_ids
     }
     feedback = {
-        agent_id: (0 if exceptions[agent_id] else physical[agent_id])
+        agent_id: (
+            0
+            if s7_route_chain and physical[agent_id] in (-1, 1)
+            else physical[agent_id]
+        )
         for agent_id in ordered_ids
     }
     return physical, feedback, exceptions

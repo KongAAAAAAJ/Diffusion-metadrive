@@ -98,7 +98,7 @@ def _v2_sample() -> JointBEVSampleV2:
     )
 
 
-def test_mode_feedback_and_s7_exception_are_explicit() -> None:
+def test_mode_feedback_and_s7_exceptions_are_explicit() -> None:
     assert [int(mode_index_to_rule_action(index)) for index in range(10)] == [
         0,
         0,
@@ -112,22 +112,23 @@ def test_mode_feedback_and_s7_exception_are_explicit() -> None:
         0,
     ]
     physical, feedback, exceptions = diffusion_mode_feedback_actions(
-        (3, 2, 9),
+        (3, 6, 9),
         AGENT_IDS,
         scenario_id="S7_ego_merge_from_ramp",
         local_route="R7_merge_core",
     )
-    assert physical == {"agent0": -1, "agent1": 0, "agent2": 0}
+    assert physical == {"agent0": -1, "agent1": 1, "agent2": 0}
     assert feedback == {"agent0": 0, "agent1": 0, "agent2": 0}
     assert exceptions == {"agent0": True, "agent1": False, "agent2": False}
 
     _, strict_feedback, strict_exceptions = diffusion_mode_feedback_actions(
-        (3, 2, 9),
+        (3, 6, 9),
         AGENT_IDS,
         scenario_id="S6_background_merge_in",
         local_route="R3_mainline_straight",
     )
     assert strict_feedback["agent0"] == -1
+    assert strict_feedback["agent1"] == 1
     assert not any(strict_exceptions.values())
 
 

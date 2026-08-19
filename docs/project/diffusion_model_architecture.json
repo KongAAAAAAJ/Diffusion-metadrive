@@ -1,10 +1,10 @@
 {
   "format": "bev_diffusion_model_architecture_v2",
   "schema_version": 2,
-  "recorded_at": "2026-08-19T16:30:00+08:00",
+  "recorded_at": "2026-08-19T22:26:55+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "fd63ec525475b7fa2b3245d717d92fea7e2783fe"
+    "git_commit": "c748e84d3832c385be5a7d52137a3cd89dd52b05"
   },
   "model": {
     "name": "BEVOnlyDiffusionPlanner",
@@ -487,7 +487,7 @@
       "6--8": "RIGHT",
       "9": "KEEP feedback for physical STOP"
     },
-    "s7_route_chain_exception": "only S7/R7 physical LEFT is fed back as KEEP, with both physical and feedback actions audited",
+    "s7_route_chain_exception": "only on S7/R7, physical LEFT and RIGHT are fed back as KEEP, with both physical and feedback actions audited; the legacy exception mask remains LEFT-only",
     "complete_three_role_planning_tick_p95_limit_ms": 200.0
   }
 }

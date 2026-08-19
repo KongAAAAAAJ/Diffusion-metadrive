@@ -49,14 +49,24 @@ SCENARIO_ID = "S6_background_merge_in"
 LOCAL_ROUTE = "R6_mainline_merge_approach"
 
 
-def _sample() -> JointBEVSampleV2:
+def _sample(
+    *,
+    scenario_code: int = 2,
+    gt_modes: tuple[ModeIndex, ModeIndex, ModeIndex] = (
+        ModeIndex.STOP,
+        ModeIndex.STOP,
+        ModeIndex.STOP,
+    ),
+) -> JointBEVSampleV2:
     values = {
         name: np.zeros(shape, dtype=JOINT_SAMPLE_DTYPES[name])
         for name, shape in JOINT_SAMPLE_SHAPES.items()
     }
     values["agent_role"] = np.asarray(list(AgentRole), dtype=np.int64)
     values["mode_valid_mask"][:, ModeIndex.STOP] = True
-    values["gt_mode"][:] = int(ModeIndex.STOP)
+    for role, mode in enumerate(gt_modes):
+        values["mode_valid_mask"][role, mode] = True
+    values["gt_mode"][:] = np.asarray(gt_modes, dtype=np.int64)
     base = JointBEVSample(**values)
     return JointBEVSampleV2(
         base=base,
@@ -66,7 +76,7 @@ def _sample() -> JointBEVSampleV2:
         background_actor_valid_mask=np.zeros(
             V2_JOINT_SAMPLE_SHAPES["background_actor_valid_mask"], dtype=np.bool_
         ),
-        scenario_code=np.asarray(2, dtype=np.int64),
+        scenario_code=np.asarray(scenario_code, dtype=np.int64),
         rule_formation_state=np.asarray(1, dtype=np.int64),
         rule_action_condition=np.asarray((-1, 0, 1), dtype=np.int64),
     )
@@ -104,15 +114,22 @@ def _snapshot(record: SidecarActorRecord, step: int) -> SidecarActorSnapshot:
     )
 
 
-def _details(sample: JointBEVSampleV2) -> dict[str, object]:
-    zeros = {agent_id: 0 for agent_id in AGENT_IDS}
+def _details(
+    sample: JointBEVSampleV2,
+    *,
+    physical_actions: tuple[int, int, int] = (0, 0, 0),
+    feedback_actions: tuple[int, int, int] = (0, 0, 0),
+    left_exception_flags: tuple[bool, bool, bool] = (False, False, False),
+) -> dict[str, object]:
+    physical = dict(zip(AGENT_IDS, physical_actions))
+    feedback = dict(zip(AGENT_IDS, feedback_actions))
     return {
         "trajectory_source": "new_native_plan",
         "diffusion_input_actions": {
             agent_id: action
             for agent_id, action in zip(AGENT_IDS, (-1, 0, 1))
         },
-        "normal_planner_accepted_actions": dict(zeros),
+        "normal_planner_accepted_actions": dict(feedback),
         "normal_planner_accepted_proposal_rank": 1,
         "rule_formation_state": "LOCKED",
         "proposal_batch_id": 4,
@@ -121,15 +138,27 @@ def _details(sample: JointBEVSampleV2) -> dict[str, object]:
         "background_actor_valid_mask": (
             sample.background_actor_valid_mask.tolist()
         ),
-        "physical_mode_action": dict(zeros),
-        "rule_feedback_action": dict(zeros),
-        "s7_left_to_keep_exception": {
-            agent_id: False for agent_id in AGENT_IDS
-        },
+        "physical_mode_action": physical,
+        "rule_feedback_action": feedback,
+        "s7_left_to_keep_exception": dict(zip(AGENT_IDS, left_exception_flags)),
     }
 
 
-def _build_bundle(root: Path) -> Path:
+def _build_bundle(
+    root: Path,
+    *,
+    scenario_id: str = SCENARIO_ID,
+    local_route: str = LOCAL_ROUTE,
+    scenario_code: int = 2,
+    gt_modes: tuple[ModeIndex, ModeIndex, ModeIndex] = (
+        ModeIndex.STOP,
+        ModeIndex.STOP,
+        ModeIndex.STOP,
+    ),
+    physical_actions: tuple[int, int, int] = (0, 0, 0),
+    feedback_actions: tuple[int, int, int] = (0, 0, 0),
+    left_exception_flags: tuple[bool, bool, bool] = (False, False, False),
+) -> Path:
     bundle_root = root / "bundle"
     base_root = bundle_root / "platoon_joint_bev"
     sidecar_root = bundle_root / "riskentry_actor_sidecar"
@@ -137,7 +166,7 @@ def _build_bundle(root: Path) -> Path:
     scenario_hash = str(candidate_scenario_contract_v4()["sha256"])
     split_config = EpisodeSplitConfig(1.0, 0.0, 0.0, seed=17)
     storage_contract = joint_sample_storage_contract("v2")
-    sample = _sample()
+    sample = _sample(scenario_code=scenario_code, gt_modes=gt_modes)
 
     with JointBEVDatasetStore(
         base_root,
@@ -163,14 +192,14 @@ def _build_bundle(root: Path) -> Path:
         planner_version="v2",
     ) as bundle:
         bundle.begin_attempt(
-            BundleEpisodeAttempt(0, "train", SCENARIO_ID, LOCAL_ROUTE, 17)
+            BundleEpisodeAttempt(0, "train", scenario_id, local_route, 17)
         )
         base_store.commit_episode(
             0,
             [sample],
             {
-                "scenario_id": SCENARIO_ID,
-                "local_route": LOCAL_ROUTE,
+                "scenario_id": scenario_id,
+                "local_route": local_route,
                 "spawn_seed": 17,
                 "selected_sample_steps": [1],
                 "decision_dt_s": 0.1,
@@ -183,8 +212,8 @@ def _build_bundle(root: Path) -> Path:
             SidecarEpisodeStart(
                 episode_index=0,
                 split="train",
-                scenario_id=SCENARIO_ID,
-                local_route=LOCAL_ROUTE,
+                scenario_id=scenario_id,
+                local_route=local_route,
                 spawn_seed=17,
                 decision_dt_s=0.1,
                 base_dataset_fingerprint=fingerprint,
@@ -210,7 +239,12 @@ def _build_bundle(root: Path) -> Path:
                         "rule_maker_condition",
                         1,
                         0.1,
-                        details=_details(sample),
+                        details=_details(
+                            sample,
+                            physical_actions=physical_actions,
+                            feedback_actions=feedback_actions,
+                            left_exception_flags=left_exception_flags,
+                        ),
                     )
                 )
         sidecar_store.commit_episode(base_sample_step_indices=(1,))
@@ -218,8 +252,8 @@ def _build_bundle(root: Path) -> Path:
             BundleEpisodeResult(
                 episode_index=0,
                 split="train",
-                scenario_id=SCENARIO_ID,
-                local_route=LOCAL_ROUTE,
+                scenario_id=scenario_id,
+                local_route=local_route,
                 spawn_seed=17,
                 base_status="committed",
                 base_rejection_reason=None,
@@ -264,6 +298,114 @@ def test_verifier_aligns_schema3_conditions_and_cli_prints_json(
     printed = json.loads(capsys.readouterr().out)
     assert printed["aligned_samples"] == 1
     assert printed["status"] == "pass"
+
+
+@pytest.mark.parametrize(
+    (
+        "mode",
+        "physical_action",
+        "left_exception_flag",
+        "expected_left",
+        "expected_right",
+    ),
+    [
+        (ModeIndex.LEFT_HIGH, -1, True, 1, 0),
+        (ModeIndex.RIGHT_HIGH, 1, False, 0, 1),
+    ],
+)
+def test_verifier_accepts_both_s7_lateral_to_keep_exceptions(
+    tmp_path: Path,
+    mode: ModeIndex,
+    physical_action: int,
+    left_exception_flag: bool,
+    expected_left: int,
+    expected_right: int,
+) -> None:
+    bundle_root = _build_bundle(
+        tmp_path,
+        scenario_id="S7_ego_merge_from_ramp",
+        local_route="R7_merge_core",
+        scenario_code=3,
+        gt_modes=(mode, ModeIndex.STOP, ModeIndex.STOP),
+        physical_actions=(physical_action, 0, 0),
+        feedback_actions=(0, 0, 0),
+        left_exception_flags=(left_exception_flag, False, False),
+    )
+
+    report = verify_rule_conditioned_v2_bundle(bundle_root)
+    assert report["s7_left_to_keep_exceptions"] == expected_left
+    assert report["s7_right_to_keep_exceptions"] == expected_right
+
+
+def test_verifier_rejects_right_to_keep_outside_s7(tmp_path: Path) -> None:
+    bundle_root = _build_bundle(
+        tmp_path,
+        gt_modes=(ModeIndex.RIGHT_HIGH, ModeIndex.STOP, ModeIndex.STOP),
+        physical_actions=(1, 0, 0),
+        feedback_actions=(0, 0, 0),
+    )
+
+    with pytest.raises(
+        RuleConditionedV2VerificationError,
+        match="physical/feedback actions mismatch",
+    ):
+        verify_rule_conditioned_v2_bundle(bundle_root)
+
+
+def test_verifier_rejects_right_to_keep_with_legacy_left_flag(tmp_path: Path) -> None:
+    bundle_root = _build_bundle(
+        tmp_path,
+        scenario_id="S7_ego_merge_from_ramp",
+        local_route="R7_merge_core",
+        scenario_code=3,
+        gt_modes=(ModeIndex.RIGHT_HIGH, ModeIndex.STOP, ModeIndex.STOP),
+        physical_actions=(1, 0, 0),
+        feedback_actions=(0, 0, 0),
+        left_exception_flags=(True, False, False),
+    )
+
+    with pytest.raises(
+        RuleConditionedV2VerificationError,
+        match="S7 exception flag mismatch",
+    ):
+        verify_rule_conditioned_v2_bundle(bundle_root)
+
+
+def test_verifier_allows_unselected_raw_condition_audit_events(
+    tmp_path: Path,
+) -> None:
+    bundle_root = _build_bundle(tmp_path)
+
+    def append_unselected(events: list[dict[str, object]]) -> None:
+        extra = json.loads(json.dumps(events[0]))
+        extra["step_index"] = 2
+        extra["timestamp_s"] = 0.2
+        events.append(extra)
+
+    _mutate_event(bundle_root, append_unselected)
+    report = verify_rule_conditioned_v2_bundle(bundle_root)
+    assert report["aligned_samples"] == 1
+    assert report["raw_condition_events"] == 2
+    assert report["unselected_condition_events"] == 1
+
+
+def test_verifier_rejects_condition_event_outside_raw_timeline(
+    tmp_path: Path,
+) -> None:
+    bundle_root = _build_bundle(tmp_path)
+
+    def append_out_of_range(events: list[dict[str, object]]) -> None:
+        extra = json.loads(json.dumps(events[0]))
+        extra["step_index"] = 3
+        extra["timestamp_s"] = 0.3
+        events.append(extra)
+
+    _mutate_event(bundle_root, append_out_of_range)
+    with pytest.raises(
+        RuleConditionedV2VerificationError,
+        match="event timeline or actor reference mismatch",
+    ):
+        verify_rule_conditioned_v2_bundle(bundle_root)
 
 
 @pytest.mark.parametrize(

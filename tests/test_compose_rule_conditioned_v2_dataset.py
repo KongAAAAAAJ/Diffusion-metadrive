@@ -197,30 +197,40 @@ def test_new_collection_configs_are_v2_candidate_v4_and_loadable() -> None:
         assert tuple(config.formal_scenario_quotas) == compose.S6_S9_SCENARIOS
 
 
-def test_s5_template_is_strict_balanced_target_release() -> None:
+def test_s5_config_is_independently_runnable_strict_balanced_target_release() -> None:
     path = Path(
-        "configs/dataset/data_collect_bev_rule_conditioned_v2_s5_release10070.template.yaml"
+        "configs/dataset/data_collect_bev_rule_conditioned_v2_s5_release10070.yaml"
     )
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    compose._validate_template(payload)
+    config = load_run_config(path)
     targeted = payload["targeted_supplement"]
-    assert targeted["accepted_episode_quotas"] == {"train": 0, "val": 0, "test": 0}
+    assert targeted["accepted_episode_quotas"] == {"train": 43, "val": 5, "test": 5}
     assert targeted["require_target_background_condition"] is True
     assert targeted["bootstrap_spawn_seeds"] == list(range(83017, 83027))
+    assert config.target_joint_steps == 10_070
+    assert config.targeted_supplement is not None
+    assert config.targeted_supplement.target_episodes == 53
+    assert dict(config.targeted_supplement.accepted_episode_quotas) == {
+        "train": 43,
+        "val": 5,
+        "test": 5,
+    }
 
 
-def test_prepare_s5_config_freezes_dynamic_slots_and_refuses_different_output(
+def test_prepare_composition_contract_freezes_both_sources_and_dynamic_slots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = tmp_path / "base"
+    supplement = tmp_path / "supplement"
     base.mkdir()
-    template = Path(
-        "configs/dataset/data_collect_bev_rule_conditioned_v2_s5_release10070.template.yaml"
-    ).resolve()
-    output = tmp_path / "generated.yaml"
+    supplement.mkdir()
+    config_path = tmp_path / "s5.yaml"
+    config_path.write_text("frozen S5 config\n", encoding="utf-8")
     contract_path = tmp_path / "contract.json"
     start = 417
-    monkeypatch.setattr(compose, "_validate_source_root", lambda path: base)
+    monkeypatch.setattr(
+        compose, "_validate_source_root", lambda path: Path(path).resolve()
+    )
     monkeypatch.setattr(
         compose,
         "_validate_completed_s6_s9",
@@ -234,28 +244,63 @@ def test_prepare_s5_config_freezes_dynamic_slots_and_refuses_different_output(
             },
         ),
     )
+    supplement_binding = {
+        "base_dataset_fingerprint": "d" * 64,
+        "sidecar_dataset_fingerprint": "e" * 64,
+        "bundle_index_sha256": "f" * 64,
+        "next_episode_index": 53,
+    }
     monkeypatch.setattr(
         compose,
-        "load_run_config",
-        lambda path: SimpleNamespace(
-            targeted_supplement=SimpleNamespace(target_episodes=53)
+        "_strict_verify",
+        lambda root: {
+            "status": "pass",
+            "aligned_samples": 10_070,
+            "aligned_episodes": 53,
+        },
+    )
+    monkeypatch.setattr(compose, "_source_binding", lambda root: supplement_binding)
+    config = SimpleNamespace(
+        targeted_supplement=SimpleNamespace(
+            accepted_episode_quotas=dict(compose.S5_SOURCE_EPISODE_QUOTAS)
+        )
+    )
+    monkeypatch.setattr(
+        compose,
+        "_validate_s5_config",
+        lambda root, path, binding: (
+            config,
+            {"complete": True, "accepted_episodes": 53, "pending_transaction": False},
         ),
     )
 
-    contract = compose.prepare_s5_config(base, template, output, contract_path)
-    generated = yaml.safe_load(output.read_text(encoding="utf-8"))
+    contract = compose.prepare_composition_contract(
+        base, supplement, config_path, contract_path
+    )
     expected = compose._target_slots(start)
-    assert generated["targeted_supplement"]["accepted_episode_quotas"] == {
+    assert contract["source_accepted_episode_quotas"] == {"train": 43, "val": 5, "test": 5}
+    assert contract["target_split_quotas"] == {
         split: len(expected[split]) for split in compose.SPLIT_NAMES
     }
+    assert contract["target_split_quotas"] != contract["source_accepted_episode_quotas"]
     assert [row["episode_index"] for row in contract["append_slots"]] == list(
         range(start, start + 53)
     )
-    assert compose.prepare_s5_config(base, template, output, contract_path) == contract
+    assert contract["supplement_source"]["config_sha256"] == compose._file_sha256(
+        config_path
+    )
+    assert (
+        compose.prepare_composition_contract(
+            base, supplement, config_path, contract_path
+        )
+        == contract
+    )
 
-    output.write_text("different\n", encoding="utf-8")
+    contract_path.write_text("different\n", encoding="utf-8")
     with pytest.raises(compose.RuleConditionedV2CompositionError, match="different content"):
-        compose.prepare_s5_config(base, template, output, contract_path)
+        compose.prepare_composition_contract(
+            base, supplement, config_path, contract_path
+        )
 
 
 def test_strict_s5_evidence_rejects_non_target_or_wrong_profile() -> None:
@@ -286,9 +331,9 @@ def test_strict_s5_evidence_rejects_non_target_or_wrong_profile() -> None:
         compose._validate_s5_attributes(attributes)
 
 
-def test_frozen_contract_rejects_generated_config_hash_drift(tmp_path: Path) -> None:
-    generated = tmp_path / "generated.yaml"
-    generated.write_text("original\n", encoding="utf-8")
+def test_frozen_contract_rejects_s5_config_or_source_quota_drift(tmp_path: Path) -> None:
+    s5_config = tmp_path / "s5.yaml"
+    s5_config.write_text("original\n", encoding="utf-8")
     start = 401
     slots = compose._target_slots(start)
     quotas = {split: len(slots[split]) for split in compose.SPLIT_NAMES}
@@ -297,12 +342,21 @@ def test_frozen_contract_rejects_generated_config_hash_drift(tmp_path: Path) -> 
         "bundle_index_sha256": "b" * 64,
         "next_episode_index": start,
     }
+    supplement_binding = {
+        "base_dataset_fingerprint": "c" * 64,
+        "bundle_index_sha256": "d" * 64,
+    }
     freeze = {
         "format": compose.PREPARE_CONTRACT_FORMAT,
         "base_source": dict(base_binding),
-        "generated_config_path": str(generated.resolve()),
-        "generated_config_sha256": compose._file_sha256(generated),
-        "accepted_episode_quotas": quotas,
+        "supplement_source": {
+            **supplement_binding,
+            "config_path": str(s5_config.resolve()),
+            "config_sha256": compose._file_sha256(s5_config),
+            "accepted_episode_quotas": dict(compose.S5_SOURCE_EPISODE_QUOTAS),
+        },
+        "source_accepted_episode_quotas": dict(compose.S5_SOURCE_EPISODE_QUOTAS),
+        "target_split_quotas": quotas,
         "append_slots": [
             {"episode_index": index, "split": split}
             for split in compose.SPLIT_NAMES
@@ -310,17 +364,29 @@ def test_frozen_contract_rejects_generated_config_hash_drift(tmp_path: Path) -> 
         ],
     }
     config = SimpleNamespace(
-        targeted_supplement=SimpleNamespace(accepted_episode_quotas=quotas)
+        targeted_supplement=SimpleNamespace(
+            accepted_episode_quotas=dict(compose.S5_SOURCE_EPISODE_QUOTAS)
+        )
     )
     assert compose._validated_frozen_slots(
-        freeze, base_binding, generated.resolve(), config
+        freeze, base_binding, supplement_binding, s5_config.resolve(), config
     ) == slots
-    generated.write_text("drifted\n", encoding="utf-8")
+    s5_config.write_text("drifted\n", encoding="utf-8")
     with pytest.raises(
-        compose.RuleConditionedV2CompositionError, match="base/config drift"
+        compose.RuleConditionedV2CompositionError, match="base/S5 config drift"
     ):
         compose._validated_frozen_slots(
-            freeze, base_binding, generated.resolve(), config
+            freeze, base_binding, supplement_binding, s5_config.resolve(), config
+        )
+
+    freeze["supplement_source"]["config_sha256"] = compose._file_sha256(s5_config)
+    config.targeted_supplement.accepted_episode_quotas = {"train": 44, "val": 4, "test": 5}
+    with pytest.raises(
+        compose.RuleConditionedV2CompositionError,
+        match="slots/source quotas drifted",
+    ):
+        compose._validated_frozen_slots(
+            freeze, base_binding, supplement_binding, s5_config.resolve(), config
         )
 
 
@@ -349,7 +415,7 @@ def test_build_staging_physically_copies_and_reindexes_tiny_schema3_bundle(
                 "source_episode_index": 0,
                 "source_split": "test",
                 "target_episode_index": 2,
-                "target_split": "test",
+                "target_split": "val",
             }
         ],
         "expected_output": {
@@ -360,20 +426,25 @@ def test_build_staging_physically_copies_and_reindexes_tiny_schema3_bundle(
             "sidecar_raw_steps": 2,
             "bundle_index_rows": 3,
             "rejected_episodes": 1,
-            "split_episode_counts": {"train": 1, "val": 0, "test": 1},
-            "split_joint_samples": {"train": 1, "val": 0, "test": 1},
+            "split_episode_counts": {"train": 1, "val": 1, "test": 0},
+            "split_joint_samples": {"train": 1, "val": 1, "test": 0},
         },
     }
     source_hash = compose._file_sha256(
         supplement / "platoon_joint_bev/test/episodes/episode_00000000/value.npy"
     )
     compose.build_staging(base, supplement, staging, plan)
-    copied = staging / "platoon_joint_bev/test/episodes/episode_00000002/value.npy"
+    copied = staging / "platoon_joint_bev/val/episodes/episode_00000002/value.npy"
     assert compose._file_sha256(copied) == source_hash
     assert copied.stat().st_ino != (
         supplement / "platoon_joint_bev/test/episodes/episode_00000000/value.npy"
     ).stat().st_ino
-    assert _read(copied.parent / "episode.json")["episode_index"] == 2
+    copied_metadata = _read(copied.parent / "episode.json")
+    assert copied_metadata["episode_index"] == 2
+    assert copied_metadata["split"] == "val"
+    provenance = copied_metadata["attributes"]["curation_source"]
+    assert provenance["source_split"] == "test"
+    assert provenance["target_split"] == "val"
     assert _read(staging / "platoon_joint_bev/train/manifest.json")[
         "schema_version"
     ] == 3
@@ -401,6 +472,106 @@ def test_stage_refuses_insufficient_space_before_copy(
     )
     with pytest.raises(compose.RuleConditionedV2CompositionError, match="insufficient"):
         compose.stage_composition(base, supplement, final, {"supplement_episode_mapping": []})
+
+
+def test_stage_refuses_existing_staging_root(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    supplement = tmp_path / "supplement"
+    final = tmp_path / "final"
+    base.mkdir()
+    supplement.mkdir()
+    compose._staging_path(final).mkdir()
+
+    with pytest.raises(
+        compose.RuleConditionedV2CompositionError,
+        match="already exists",
+    ):
+        compose.stage_composition(
+            base, supplement, final, {"supplement_episode_mapping": []}
+        )
+
+
+def test_inspect_sources_rejects_duplicate_s5_scenario_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "base"
+    supplement = tmp_path / "supplement"
+    base.mkdir()
+    supplement.mkdir()
+    config_path = tmp_path / "s5.yaml"
+    config_path.write_text("frozen\n", encoding="utf-8")
+    freeze_path = tmp_path / "freeze.json"
+    _write_json(freeze_path, {})
+    base_binding = {
+        "base_dataset_fingerprint": "a" * 64,
+        "bundle_index_sha256": "b" * 64,
+        "next_episode_index": 100,
+    }
+    supplement_binding = {
+        "base_dataset_fingerprint": "c" * 64,
+        "bundle_index_sha256": "d" * 64,
+    }
+    config = SimpleNamespace(
+        targeted_supplement=SimpleNamespace(
+            accepted_episode_quotas=dict(compose.S5_SOURCE_EPISODE_QUOTAS)
+        ),
+        immutable_fingerprint=lambda: supplement_binding[
+            "base_dataset_fingerprint"
+        ],
+    )
+    source_entries: dict[int, tuple[str, dict[str, object]]] = {}
+    source_index = 0
+    for split, count in compose.S5_SOURCE_EPISODE_QUOTAS.items():
+        for _ in range(count):
+            spawn_seed = 83017 if source_index < 2 else 83017 + source_index
+            source_entries[source_index] = (
+                split,
+                {
+                    "joint_samples": compose.SAMPLES_PER_S5_EPISODE,
+                    "attributes": {"spawn_seed": spawn_seed},
+                },
+            )
+            source_index += 1
+
+    monkeypatch.setattr(
+        compose, "_validate_source_root", lambda path: Path(path).resolve()
+    )
+    monkeypatch.setattr(
+        compose,
+        "_validate_completed_s6_s9",
+        lambda root: ({"status": "pass"}, dict(base_binding)),
+    )
+    monkeypatch.setattr(compose, "_strict_verify", lambda root: {"status": "pass"})
+    monkeypatch.setattr(compose, "_source_binding", lambda root: supplement_binding)
+    monkeypatch.setattr(
+        compose,
+        "_validate_s5_config",
+        lambda root, path, binding: (config, {"complete": True}),
+    )
+    monkeypatch.setattr(
+        compose,
+        "_validated_frozen_slots",
+        lambda *args: compose._target_slots(100),
+    )
+    monkeypatch.setattr(compose, "_manifest_entries", lambda *args: source_entries)
+    monkeypatch.setattr(compose, "_validate_s5_attributes", lambda attributes: None)
+    monkeypatch.setattr(compose, "_episode_hashes", lambda path: {})
+    monkeypatch.setattr(compose, "_read_rows", lambda root: [])
+
+    with pytest.raises(
+        compose.RuleConditionedV2CompositionError,
+        match=r"duplicate \(scenario_id, spawn_seed\)",
+    ):
+        compose.inspect_sources(
+            base,
+            supplement,
+            config_path,
+            freeze_path,
+            expected_base_fingerprint="a" * 64,
+            expected_base_index_sha256="b" * 64,
+            expected_supplement_fingerprint="c" * 64,
+            expected_supplement_index_sha256="d" * 64,
+        )
 
 
 def test_install_is_atomic_to_absent_new_root(

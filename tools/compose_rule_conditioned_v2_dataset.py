@@ -9,15 +9,12 @@ import argparse
 import hashlib
 import json
 import shutil
-import tempfile
 import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
-import yaml
-
 from expert_dataset.finalize_s5_targeted_supplement import (
     audit_targeted_supplement,
 )
@@ -69,9 +66,10 @@ S6_S9_TOTAL_SAMPLES = 40_000
 FINAL_TOTAL_SAMPLES = 50_070
 COMPOSITION_FORMAT = "rule-conditioned-v2-s5-s9-composition-v1"
 INVENTORY_FORMAT = "rule-conditioned-v2-payload-inventory-v1"
-PREPARE_CONTRACT_FORMAT = "rule-conditioned-v2-s5-config-contract-v1"
+PREPARE_CONTRACT_FORMAT = "rule-conditioned-v2-s5-composition-contract-v2"
 SOURCE_ID_BASE = "rule_conditioned_v2_s6_s9_formal40k"
 SOURCE_ID_S5 = "rule_conditioned_v2_s5_release10070"
+S5_SOURCE_EPISODE_QUOTAS = {"train": 43, "val": 5, "test": 5}
 
 
 class RuleConditionedV2CompositionError(RuntimeError):
@@ -202,86 +200,79 @@ def _validate_completed_s6_s9(root: Path) -> tuple[dict[str, object], dict[str, 
     }
 
 
-def _validate_template(payload: object) -> dict[str, object]:
-    if not isinstance(payload, dict):
-        raise RuleConditionedV2CompositionError("S5 template root must be a mapping")
-    dataset = payload.get("dataset")
-    collection = payload.get("collection")
-    targeted = payload.get("targeted_supplement")
-    split = payload.get("split")
-    if not all(isinstance(value, dict) for value in (dataset, collection, targeted, split)):
-        raise RuleConditionedV2CompositionError("S5 template sections are missing")
-    assert isinstance(dataset, dict)
-    assert isinstance(collection, dict)
-    assert isinstance(targeted, dict)
-    assert isinstance(split, dict)
-    required = (
-        dataset.get("planner_version") == "v2"
-        and dataset.get("scenario_contract") == CANDIDATE_V4_CONTRACT_ID
-        and int(collection.get("target_joint_steps", -1)) == 10_070
-        and int(collection.get("start_seed", -1)) == 83_017
-        and int(split.get("seed", -1)) == 17
-        and targeted.get("scenario_id") == S5_SCENARIO
-        and targeted.get("behavior_category") == RELEASE_CATEGORY
-        and targeted.get("rule_maker_profile_id") == "balanced"
-        and targeted.get("require_target_background_condition") is True
-        and targeted.get("finalization_mode") == "audit_only"
-        and int(targeted.get("required_samples_per_episode", -1))
-        == SAMPLES_PER_S5_EPISODE
-        and int(targeted.get("max_simulator_attempts", -1)) == 300
-        and targeted.get("bootstrap_spawn_seeds") == list(range(83_017, 83_027))
-    )
-    if not required:
-        raise RuleConditionedV2CompositionError("S5 template contract mismatch")
-    return payload
+def _validate_s5_config(
+    supplement_root: Path,
+    config_path: Path,
+    supplement_binding: Mapping[str, object],
+) -> tuple[object, dict[str, object]]:
+    config = load_run_config(config_path)
+    requirements = config.targeted_supplement
+    if (
+        config.bundle_root.resolve() != supplement_root
+        or config.planner_version != "v2"
+        or config.scenario_contract_id != CANDIDATE_V4_CONTRACT_ID
+        or config.immutable_fingerprint()
+        != supplement_binding["base_dataset_fingerprint"]
+        or requirements is None
+        or requirements.target_episodes != APPEND_EPISODES
+        or dict(requirements.accepted_episode_quotas) != S5_SOURCE_EPISODE_QUOTAS
+    ):
+        raise RuleConditionedV2CompositionError("S5 config/source binding mismatch")
+    audit = audit_targeted_supplement(config)
+    if (
+        audit.get("complete") is not True
+        or int(audit.get("accepted_episodes", -1)) != APPEND_EPISODES
+        or audit.get("pending_transaction") is not False
+    ):
+        raise RuleConditionedV2CompositionError("S5 targeted audit is incomplete")
+    return config, audit
 
 
-def prepare_s5_config(
+def prepare_composition_contract(
     base_root: Path | str,
-    template_path: Path | str,
-    output_config: Path | str,
+    s5_root: Path | str,
+    s5_config: Path | str,
     output_contract: Path | str,
 ) -> dict[str, object]:
     base = _validate_source_root(Path(base_root))
-    template = Path(template_path).expanduser().resolve()
-    config_output = Path(output_config).expanduser().resolve()
-    contract_output = Path(output_contract).expanduser().resolve()
-    if config_output == contract_output:
-        raise RuleConditionedV2CompositionError("config and contract outputs overlap")
-    report, source = _validate_completed_s6_s9(base)
-    raw = _validate_template(yaml.safe_load(template.read_text(encoding="utf-8")))
-    start = int(source["next_episode_index"])
+    supplement = _validate_source_root(Path(s5_root))
+    if base == supplement:
+        raise RuleConditionedV2CompositionError("base and supplement roots overlap")
+    report, base_source = _validate_completed_s6_s9(base)
+    supplement_report = _strict_verify(supplement)
+    supplement_binding = _source_binding(supplement)
+    config_path = Path(s5_config).expanduser().resolve()
+    config, audit = _validate_s5_config(
+        supplement, config_path, supplement_binding
+    )
+    start = int(base_source["next_episode_index"])
     slots = _target_slots(start)
-    quotas = {split: len(slots[split]) for split in SPLIT_NAMES}
-    raw["targeted_supplement"]["accepted_episode_quotas"] = quotas
-    config_bytes = yaml.safe_dump(
-        raw, allow_unicode=True, sort_keys=False
-    ).encode("utf-8")
-
-    descriptor, temporary_name = tempfile.mkstemp(suffix=".yaml")
-    try:
-        stream = os.fdopen(descriptor, "wb")
-        descriptor = -1
-        with stream:
-            stream.write(config_bytes)
-        generated = load_run_config(Path(temporary_name))
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        Path(temporary_name).unlink(missing_ok=True)
-    if generated.targeted_supplement is None or generated.targeted_supplement.target_episodes != APPEND_EPISODES:
-        raise RuleConditionedV2CompositionError("generated S5 config is invalid")
-
+    target_quotas = {split: len(slots[split]) for split in SPLIT_NAMES}
     contract = {
         "format": PREPARE_CONTRACT_FORMAT,
         "base_source": {
             "bundle_root": str(base),
-            **source,
+            **base_source,
+        },
+        "supplement_source": {
+            "bundle_root": str(supplement),
+            **supplement_binding,
+            "config_path": str(config_path),
+            "config_sha256": _file_sha256(config_path),
+            "accepted_episode_quotas": dict(S5_SOURCE_EPISODE_QUOTAS),
         },
         "strict_verifier": {
-            "status": report.get("status"),
-            "aligned_samples": report.get("aligned_samples"),
-            "aligned_episodes": report.get("aligned_episodes"),
+            "base": {
+                "status": report.get("status"),
+                "aligned_samples": report.get("aligned_samples"),
+                "aligned_episodes": report.get("aligned_episodes"),
+            },
+            "supplement": {
+                "status": supplement_report.get("status"),
+                "aligned_samples": supplement_report.get("aligned_samples"),
+                "aligned_episodes": supplement_report.get("aligned_episodes"),
+                "accepted_episodes": audit.get("accepted_episodes"),
+            },
         },
         "split_assignment": EpisodeSplitConfig(seed=17).as_dict(),
         "append_episode_count": APPEND_EPISODES,
@@ -290,24 +281,14 @@ def prepare_s5_config(
             for split in SPLIT_NAMES
             for index in slots[split]
         ],
-        "accepted_episode_quotas": quotas,
-        "template_sha256": _file_sha256(template),
-        "generated_config_path": str(config_output),
-        "generated_config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "source_accepted_episode_quotas": dict(S5_SOURCE_EPISODE_QUOTAS),
+        "target_split_quotas": target_quotas,
     }
     contract["append_slots"].sort(key=lambda row: int(row["episode_index"]))
     contract_bytes = (
         json.dumps(contract, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     ).encode("utf-8")
-    for path, payload in (
-        (config_output, config_bytes),
-        (contract_output, contract_bytes),
-    ):
-        if path.exists() and (path.is_symlink() or path.read_bytes() != payload):
-            raise RuleConditionedV2CompositionError(
-                f"output exists with different content: {path}"
-            )
-    _write_new_or_identical(config_output, config_bytes)
+    contract_output = Path(output_contract).expanduser().resolve()
     _write_new_or_identical(contract_output, contract_bytes)
     return contract
 
@@ -412,15 +393,18 @@ def _check_expected_binding(
 def _validated_frozen_slots(
     freeze: Mapping[str, object],
     base_binding: Mapping[str, object],
+    supplement_binding: Mapping[str, object],
     supplement_config: Path,
     config,
 ) -> dict[str, list[int]]:
     if freeze.get("format") != PREPARE_CONTRACT_FORMAT:
         raise RuleConditionedV2CompositionError("invalid S5 freeze contract")
     frozen_source = freeze.get("base_source")
+    frozen_supplement = freeze.get("supplement_source")
     frozen_slots = freeze.get("append_slots")
     if (
         not isinstance(frozen_source, Mapping)
+        or not isinstance(frozen_supplement, Mapping)
         or not isinstance(frozen_slots, list)
         or frozen_source.get("base_dataset_fingerprint")
         != base_binding["base_dataset_fingerprint"]
@@ -428,10 +412,17 @@ def _validated_frozen_slots(
         != base_binding["bundle_index_sha256"]
         or int(frozen_source.get("next_episode_index", -1))
         != int(base_binding["next_episode_index"])
-        or freeze.get("generated_config_path") != str(supplement_config)
-        or freeze.get("generated_config_sha256") != _file_sha256(supplement_config)
+        or frozen_supplement.get("base_dataset_fingerprint")
+        != supplement_binding["base_dataset_fingerprint"]
+        or frozen_supplement.get("bundle_index_sha256")
+        != supplement_binding["bundle_index_sha256"]
+        or frozen_supplement.get("config_path") != str(supplement_config)
+        or frozen_supplement.get("config_sha256")
+        != _file_sha256(supplement_config)
     ):
-        raise RuleConditionedV2CompositionError("S5 freeze contract base/config drift")
+        raise RuleConditionedV2CompositionError(
+            "composition contract base/S5 config drift"
+        )
     slots = {split: [] for split in SPLIT_NAMES}
     for item in frozen_slots:
         if not isinstance(item, Mapping) or item.get("split") not in SPLIT_NAMES:
@@ -449,11 +440,15 @@ def _validated_frozen_slots(
     )
     if (
         slots != expected_slots
-        or freeze.get("accepted_episode_quotas") != expected_quotas
-        or loaded_quotas != expected_quotas
+        or freeze.get("target_split_quotas") != expected_quotas
+        or freeze.get("source_accepted_episode_quotas")
+        != S5_SOURCE_EPISODE_QUOTAS
+        or frozen_supplement.get("accepted_episode_quotas")
+        != S5_SOURCE_EPISODE_QUOTAS
+        or loaded_quotas != S5_SOURCE_EPISODE_QUOTAS
     ):
         raise RuleConditionedV2CompositionError(
-            "frozen append slots/accepted quotas drifted"
+            "frozen append slots/source quotas drifted"
         )
     return slots
 
@@ -490,27 +485,15 @@ def inspect_sources(
     )
 
     supplement_config = Path(supplement_config).expanduser().resolve()
-    config = load_run_config(supplement_config)
-    if (
-        config.bundle_root.resolve() != supplement
-        or config.planner_version != "v2"
-        or config.scenario_contract_id != CANDIDATE_V4_CONTRACT_ID
-        or config.immutable_fingerprint() != expected_supplement_fingerprint
-        or config.targeted_supplement is None
-        or config.targeted_supplement.target_episodes != APPEND_EPISODES
-    ):
+    config, _ = _validate_s5_config(
+        supplement, supplement_config, supplement_binding
+    )
+    if config.immutable_fingerprint() != expected_supplement_fingerprint:
         raise RuleConditionedV2CompositionError("S5 config/source binding mismatch")
-    audit = audit_targeted_supplement(config)
-    if (
-        audit.get("complete") is not True
-        or int(audit.get("accepted_episodes", -1)) != APPEND_EPISODES
-        or audit.get("pending_transaction") is not False
-    ):
-        raise RuleConditionedV2CompositionError("S5 targeted audit is incomplete")
 
     freeze = _read_json(Path(s5_contract_path).expanduser().resolve())
     slots = _validated_frozen_slots(
-        freeze, base_binding, supplement_config, config
+        freeze, base_binding, supplement_binding, supplement_config, config
     )
 
     supplement_base = _manifest_entries(supplement, "platoon_joint_bev")
@@ -519,7 +502,7 @@ def inspect_sources(
         raise RuleConditionedV2CompositionError(
             "S5 supplement must contain exactly 53 joined accepted episodes"
         )
-    by_split = {split: [] for split in SPLIT_NAMES}
+    source_episodes = []
     for index, (split, entry) in sorted(supplement_base.items()):
         if int(entry["joint_samples"]) != SAMPLES_PER_S5_EPISODE:
             raise RuleConditionedV2CompositionError("S5 episode sample count mismatch")
@@ -527,38 +510,48 @@ def inspect_sources(
         if not isinstance(attributes, Mapping):
             raise RuleConditionedV2CompositionError("S5 attributes missing")
         _validate_s5_attributes(attributes)
-        by_split[split].append(index)
-    if {split: len(by_split[split]) for split in SPLIT_NAMES} != {
-        split: len(slots[split]) for split in SPLIT_NAMES
-    }:
-        raise RuleConditionedV2CompositionError("S5 accepted split quotas drifted")
+        source_episodes.append((index, split, entry))
+    observed_source_quotas = Counter(split for _, split, _ in source_episodes)
+    if {
+        split: int(observed_source_quotas[split]) for split in SPLIT_NAMES
+    } != S5_SOURCE_EPISODE_QUOTAS:
+        raise RuleConditionedV2CompositionError("S5 accepted source quotas drifted")
+    source_episodes.sort(key=lambda row: int(row[0]))
+    target_episodes = sorted(
+        (index, split)
+        for split in SPLIT_NAMES
+        for index in slots[split]
+    )
+    if len(source_episodes) != len(target_episodes):
+        raise RuleConditionedV2CompositionError("S5 source/target episode counts differ")
 
     mapping = []
-    for split in SPLIT_NAMES:
-        for source_index, target_index in zip(sorted(by_split[split]), slots[split]):
-            attributes = supplement_base[source_index][1]["attributes"]
-            mapping.append(
-                {
-                    "source_episode_index": source_index,
-                    "source_split": split,
-                    "target_episode_index": target_index,
-                    "target_split": split,
-                    "spawn_seed": int(attributes["spawn_seed"]),
-                    "base_file_sha256": _episode_hashes(
-                        _episode_path(
-                            supplement, "platoon_joint_bev", split, source_index
-                        )
-                    ),
-                    "sidecar_file_sha256": _episode_hashes(
-                        _episode_path(
-                            supplement,
-                            "riskentry_actor_sidecar",
-                            split,
-                            source_index,
-                        )
-                    ),
-                }
-            )
+    for (source_index, source_split, entry), (target_index, target_split) in zip(
+        source_episodes, target_episodes
+    ):
+        attributes = entry["attributes"]
+        mapping.append(
+            {
+                "source_episode_index": source_index,
+                "source_split": source_split,
+                "target_episode_index": target_index,
+                "target_split": target_split,
+                "spawn_seed": int(attributes["spawn_seed"]),
+                "base_file_sha256": _episode_hashes(
+                    _episode_path(
+                        supplement, "platoon_joint_bev", source_split, source_index
+                    )
+                ),
+                "sidecar_file_sha256": _episode_hashes(
+                    _episode_path(
+                        supplement,
+                        "riskentry_actor_sidecar",
+                        source_split,
+                        source_index,
+                    )
+                ),
+            }
+        )
     mapping.sort(key=lambda row: int(row["target_episode_index"]))
 
     identities = [
@@ -624,6 +617,10 @@ def inspect_sources(
         "base_policy": "preserve_all_s6_s9_bundle_rows_and_component_episodes",
         "supplement_episode_mapping": mapping,
         "split_assignment": EpisodeSplitConfig(seed=17).as_dict(),
+        "source_accepted_episode_quotas": dict(S5_SOURCE_EPISODE_QUOTAS),
+        "target_split_quotas": {
+            split: len(slots[split]) for split in SPLIT_NAMES
+        },
         "scenario_contract_id": CANDIDATE_V4_CONTRACT_ID,
         "scenario_contract_sha256": scenario_contract_for_id(
             CANDIDATE_V4_CONTRACT_ID
@@ -683,6 +680,8 @@ def _copy_episode(
         )
     metadata = _read_json(source / "episode.json")
     provenance = _curation_source(source_id, source_root, source_split, source_index)
+    provenance["target_episode_index"] = target_index
+    provenance["target_split"] = target_split
     metadata["episode_index"] = target_index
     metadata["split"] = target_split
     if component == "platoon_joint_bev":
@@ -1143,10 +1142,10 @@ def install_staged_composition(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    prepare = commands.add_parser("prepare-s5-config")
+    prepare = commands.add_parser("prepare-composition-contract")
     prepare.add_argument("--base-root", type=Path, required=True)
-    prepare.add_argument("--template", type=Path, required=True)
-    prepare.add_argument("--output-config", type=Path, required=True)
+    prepare.add_argument("--s5-root", type=Path, required=True)
+    prepare.add_argument("--s5-config", type=Path, required=True)
     prepare.add_argument("--output-contract", type=Path, required=True)
     prepare.add_argument("--result-json", type=Path)
 
@@ -1174,9 +1173,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "prepare-s5-config":
-        result = prepare_s5_config(
-            args.base_root, args.template, args.output_config, args.output_contract
+    if args.command == "prepare-composition-contract":
+        result = prepare_composition_contract(
+            args.base_root, args.s5_root, args.s5_config, args.output_contract
         )
         result = {"mode": "prepared", **result}
     else:
@@ -1222,7 +1221,7 @@ __all__ = [
     "build_staging",
     "inspect_sources",
     "install_staged_composition",
-    "prepare_s5_config",
+    "prepare_composition_contract",
     "stage_composition",
     "verify_composed_bundle",
 ]

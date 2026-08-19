@@ -167,6 +167,14 @@ def _condition_events(
                 f"condition event identity is invalid at episode {episode_index} "
                 f"raw step {step}"
             )
+        details = row.get("details")
+        if not isinstance(details, Mapping) or not REQUIRED_CONDITION_DETAILS.issubset(
+            details
+        ):
+            raise RuleConditionedV2VerificationError(
+                f"condition event details are incomplete at episode {episode_index} "
+                f"raw step {step}"
+            )
         by_step[step] = row
     return by_step
 
@@ -322,23 +330,31 @@ def _verify_event(
             f"committed input/feedback actions mismatch at {context}"
         )
 
+    s7_left_exceptions = 0
+    s7_right_exceptions = 0
     for role, (physical, feedback, exception) in enumerate(
         zip(physical_actions, feedback_actions, exceptions)
     ):
-        valid_exception = bool(
+        s7_route_chain = bool(
             scenario_id == "S7_ego_merge_from_ramp"
             and local_route == "R7_merge_core"
-            and physical == -1
-            and feedback == 0
         )
-        if exception != valid_exception:
+        valid_left_exception = bool(
+            s7_route_chain and physical == -1 and feedback == 0
+        )
+        valid_right_exception = bool(
+            s7_route_chain and physical == 1 and feedback == 0
+        )
+        if exception != valid_left_exception:
             raise RuleConditionedV2VerificationError(
                 f"S7 exception flag mismatch for {AGENT_IDS[role]} at {context}"
             )
-        if not exception and physical != feedback:
+        if not (valid_left_exception or valid_right_exception) and physical != feedback:
             raise RuleConditionedV2VerificationError(
                 f"physical/feedback actions mismatch at {context}"
             )
+        s7_left_exceptions += int(valid_left_exception)
+        s7_right_exceptions += int(valid_right_exception)
 
     return {
         "scenario_id": scenario_id,
@@ -348,7 +364,8 @@ def _verify_event(
         "accepted_rank": accepted_rank,
         "proposal_batch_id": proposal_batch_id,
         "execution_id": execution_id,
-        "s7_exceptions": sum(exceptions),
+        "s7_left_exceptions": s7_left_exceptions,
+        "s7_right_exceptions": s7_right_exceptions,
     }
 
 
@@ -410,12 +427,15 @@ def verify_rule_conditioned_v2_bundle(
 
     aligned_episodes = 0
     aligned_samples = 0
+    raw_condition_events = 0
+    unselected_condition_events = 0
     formation_counts: Counter[str] = Counter()
     action_counts: Counter[str] = Counter()
     source_counts: Counter[str] = Counter()
     rank_counts: Counter[int] = Counter()
     scenario_counts: Counter[str] = Counter()
-    s7_exceptions = 0
+    s7_left_exceptions = 0
+    s7_right_exceptions = 0
     proposal_batches: set[tuple[int, int]] = set()
     executions: set[tuple[int, int]] = set()
 
@@ -459,17 +479,24 @@ def verify_rule_conditioned_v2_bundle(
         mapping = _load_array(sidecar_path / "base_sample_step_index.npy")
         events = _condition_events(sidecar_metadata, episode_index=episode_index)
         expected_steps = tuple(int(value) for value in mapping)
-        if set(events) != set(expected_steps) or len(events) != len(expected_steps):
-            missing = sorted(set(expected_steps) - set(events))
-            unexpected = sorted(set(events) - set(expected_steps))
+        expected_step_set = set(expected_steps)
+        if len(expected_step_set) != len(expected_steps):
+            raise RuleConditionedV2VerificationError(
+                f"duplicate base sample step mapping for episode {episode_index}"
+            )
+        missing = sorted(expected_step_set - set(events))
+        if missing:
             raise RuleConditionedV2VerificationError(
                 f"condition/base step mapping mismatch for episode {episode_index}: "
-                f"missing={missing}, unexpected={unexpected}"
+                f"missing={missing}"
             )
         if any(len(array) != len(mapping) for array in arrays.values()):
             raise RuleConditionedV2VerificationError(
                 f"condition array length mismatch for episode {episode_index}"
             )
+
+        raw_condition_events += len(events)
+        unselected_condition_events += len(set(events) - expected_step_set)
 
         for sample_index, raw_step in enumerate(expected_steps):
             summary = _verify_event(
@@ -486,7 +513,8 @@ def verify_rule_conditioned_v2_bundle(
             source_counts[str(summary["trajectory_source"])] += 1
             rank_counts[int(summary["accepted_rank"])] += 1
             scenario_counts[str(summary["scenario_id"])] += 1
-            s7_exceptions += int(summary["s7_exceptions"])
+            s7_left_exceptions += int(summary["s7_left_exceptions"])
+            s7_right_exceptions += int(summary["s7_right_exceptions"])
             proposal_batches.add(
                 (episode_index, int(summary["proposal_batch_id"]))
             )
@@ -518,9 +546,12 @@ def verify_rule_conditioned_v2_bundle(
         "scenario_contract_sha256": expected_scenario_sha256,
         "aligned_episodes": aligned_episodes,
         "aligned_samples": aligned_samples,
+        "raw_condition_events": raw_condition_events,
+        "unselected_condition_events": unselected_condition_events,
         "proposal_batches": len(proposal_batches),
         "executions": len(executions),
-        "s7_left_to_keep_exceptions": s7_exceptions,
+        "s7_left_to_keep_exceptions": s7_left_exceptions,
+        "s7_right_to_keep_exceptions": s7_right_exceptions,
         "formation_state_counts": dict(sorted(formation_counts.items())),
         "input_action_counts": dict(sorted(action_counts.items())),
         "trajectory_source_counts": dict(sorted(source_counts.items())),
