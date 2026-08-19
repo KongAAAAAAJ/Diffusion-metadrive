@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import weakref
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -468,7 +469,9 @@ class _JointGRPOTrainerBase:
             weight_decay=float(self.config.weight_decay),
         )
         self.optimizer_step = 0
-        self._consumed_rollouts: set[int] = set()
+        self._consumed_rollouts: weakref.WeakValueDictionary[
+            int, JointGRPORollout
+        ] = weakref.WeakValueDictionary()
 
     def _context_from_inputs(self, model_inputs: Mapping[str, Tensor]) -> BEVPlannerContext:
         missing = [name for name in self.required_model_inputs if name not in model_inputs]
@@ -922,7 +925,7 @@ class _JointGRPOTrainerBase:
         self, rollout: JointGRPORollout, rewards: Tensor
     ) -> JointGRPOUpdateResult:
         rollout_id = id(rollout)
-        if rollout_id in self._consumed_rollouts:
+        if self._consumed_rollouts.get(rollout_id) is rollout:
             raise JointGRPOError("each joint rollout may be updated exactly once")
         self.optimizer.zero_grad(set_to_none=True)
         loss = self.compute_loss(rollout, rewards)
@@ -954,7 +957,7 @@ class _JointGRPOTrainerBase:
             raise JointGRPOError("joint GRPO total gradient norm is non-finite")
         self.optimizer.step()
         self.optimizer_step += 1
-        self._consumed_rollouts.add(rollout_id)
+        self._consumed_rollouts[rollout_id] = rollout
         return JointGRPOUpdateResult(
             loss=loss,
             gradient_norms=gradient_norms,

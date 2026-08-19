@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-18T19:46:58+08:00",
+  "updated_at": "2026-08-19T11:24:44+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "2bbb516f557aff998ae52c64b33788240b93a6f8",
+    "git_commit": "2ad63c927d6776865c62d3c88e95377935ab39e5",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -14,6 +14,7 @@
     "uncommitted_stage1_evaluation_artifact_parity_present": false,
     "uncommitted_stage1_metadrive_topdown_video_present": false,
     "uncommitted_stage1_epoch_override_present": false,
+    "uncommitted_stage1_auto_best_checkpoint_present": true,
     "uncommitted_exploratory_training_waiver_present": false,
     "uncommitted_formal50k_diversity_contract_present": false,
     "uncommitted_formal50k_launcher_update_present": false,
@@ -39,7 +40,8 @@
     "uncommitted_stage2_continuous_reward_v2_present": true,
     "uncommitted_stage2_continuous_reward_v2_report_present": true,
     "uncommitted_stage2_grpo_open_tau_d_v1_present": true,
-    "uncommitted_stage2_grpo_open_tau_d_v1_report_present": true
+    "uncommitted_stage2_grpo_open_tau_d_v1_report_present": true,
+    "uncommitted_stage2_grpo_rollout_identity_fix_present": true
   },
   "current": {
     "phase": "stage2_at_risk_grpo_open",
@@ -634,6 +636,11 @@
       "sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
       "role": "Records the SHA-bound tau_d application contract, raw reward/update/argmax/best semantics, selected-only optimizer ordering, removal of calibration/preflight, 81-test regression, passing isolated one-step smoke, TensorBoard tags, checkpoint round-trip, and diagnostic/formal-ineligible boundary"
     },
+    "stage2_grpo_rollout_identity_fix_report": {
+      "path": "evaluation/STAGE2_GRPO_ROLLOUT_IDENTITY_FIX_REPORT.json",
+      "sha256": "31aecc1850cfc7c74ad2c74e051e8513b88cf5911d348296dc26c8cf8f5ec992",
+      "role": "Records the id-reuse root cause, weak live-rollout identity fix, preserved one-update contract, focused regressions, isolated two-update GPU smoke, and unchanged diagnostic/formal-ineligible boundary"
+    },
     "stage2_pretrain_reward_tensorboard_implementation_report": {
       "path": "evaluation/STAGE2_PRETRAIN_REWARD_TENSORBOARD_IMPLEMENTATION_REPORT.json",
       "sha256": "cbe7d4f8b9d67dd39cafaf54bf73f989aa040320820b82cf34e15b5b297ef9d2",
@@ -726,6 +733,11 @@
       "path": "evaluation/STAGE1_METADRIVE_TOPDOWN_VIDEO_REPORT.json",
       "sha256": "a495d29a3bd57868dd18a41292cbe203f9d3a6b5a985260265c3bb95cb4f8454",
       "role": "Records the renderer-native MetaDrive topdown trajectory video implementation, focused regressions, real S1/S5 renderer smoke, Stage1-A checkpoint S1 smoke, diagnostic-only boundary, and no-full-evaluation handoff"
+    },
+    "stage1_a_auto_best_checkpoint_report": {
+      "path": "evaluation/STAGE1_A_AUTO_BEST_CHECKPOINT_REPORT.json",
+      "sha256": "0d5c9e3834c5cdbc2b66d778fbff70cb7f2e28ecce9219ae853a5692f1eb2055",
+      "role": "Records automatic best.pt resolution and SHA256 manifest binding, optional explicit identity pinning, focused launcher regressions, the run_2 best.pt smoke, and the no-full-evaluation boundary"
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
@@ -1430,6 +1442,10 @@
       "stage2_grpo_open_tau_d_smoke_root": "/tmp/stage2_grpo_open_tau_d_smoke/run_2",
       "stage2_grpo_open_tau_d_smoke_optimizer_steps": 1,
       "stage2_grpo_open_tau_d_checkpoint_round_trip": true,
+      "stage2_grpo_rollout_identity_fix_implemented": true,
+      "stage2_grpo_rollout_identity_fix_two_update_smoke_passed": true,
+      "stage2_grpo_rollout_identity_fix_smoke_root": "/tmp/grpo_rollout_identity_fix_smoke/run_1",
+      "stage2_grpo_rollout_identity_fix_report": "evaluation/STAGE2_GRPO_ROLLOUT_IDENTITY_FIX_REPORT.json",
       "diagnostic_only": true,
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false,

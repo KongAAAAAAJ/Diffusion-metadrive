@@ -1,0 +1,62 @@
+{
+  "format": "stage2_grpo_rollout_identity_fix_report_v1",
+  "created_at": "2026-08-19T11:19:36+08:00",
+  "repository_head_at_verification": "2ad63c927d6776865c62d3c88e95377935ab39e5",
+  "gate": {
+    "name": "stage2_grpo_rollout_identity_fix",
+    "passed": true,
+    "scope": "root-cause correction, focused regression, and isolated two-update GPU smoke",
+    "long_training_started": false
+  },
+  "failure": {
+    "exception": "models.bev_planner.joint_grpo.JointGRPOError: each joint rollout may be updated exactly once",
+    "root_cause": "The trainer retained bare id(rollout) integers forever. After a completed rollout was released, Python could reuse that object address for a fresh rollout, causing a false duplicate-update rejection.",
+    "training_entry_called_update_once_per_rollout": true
+  },
+  "implementation": {
+    "module": "models/bev_planner/joint_grpo.py",
+    "change": "Replace the permanent set of integer object addresses with a WeakValueDictionary keyed by object address and validate identity against the live weak value.",
+    "same_live_rollout_second_update_rejected": true,
+    "released_rollout_entry_removed": true,
+    "historical_gpu_rollout_retained": false,
+    "reward_or_application_contract_changed": false
+  },
+  "verification": {
+    "targeted_regression": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py::test_exactly_one_update_changes_only_trainable_policy -q",
+      "passed": 1,
+      "failed": 0
+    },
+    "joint_grpo_regression": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py -q",
+      "passed": 28,
+      "failed": 0
+    },
+    "extended_regression": {
+      "passed": 80,
+      "failed": 1,
+      "unrelated_existing_failure": "tests/test_run_bev_joint_grpo_launcher.py::test_launcher_defaults_to_isolated_tau_d_roots expects stage1_run_1 while the committed launcher defaults to stage1_run_2-2"
+    },
+    "gpu_smoke": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 PYTHONPATH=$PWD:$PYTHONPATH SOURCE_CHECKPOINT=/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_2/checkpoints/best.pt OUTPUT_ROOT=/tmp/grpo_rollout_identity_fix_smoke LOG_ROOT=/tmp/grpo_rollout_identity_fix_logs MAX_OPTIMIZER_STEPS=2 bash scripts/run_bev_joint_grpo.sh",
+      "exit_code": 0,
+      "artifact_root": "/tmp/grpo_rollout_identity_fix_smoke/run_1",
+      "report_sha256": "549d3405e974310e8503999e6682fdb7d0a7aaecde4265ae99a1c38642bfdf53",
+      "best_checkpoint_sha256": "deb7a12caa0d70905940aeffde19e7f13ab3b3225da8f166add0633c8b473cc4",
+      "last_checkpoint_sha256": "bfa0b64dc96a3453f511a09582e94cd60d7143c5f789b595bcc8589b9cd0feb6",
+      "optimizer_steps": 2,
+      "sampled_rollouts": 2,
+      "environment_steps": 67,
+      "checkpoint_round_trip": true,
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false
+    }
+  },
+  "contract_boundary": {
+    "reward_application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
+    "reward_contract_sha256": "0e95826028f77e86d8130e2f4bc6ac4ed617001d5adef99b600df8f061fb2ab9",
+    "reward_config_sha256": "d8ee4366681b5f2b69b1dfad376b4cfd551822dc1996adff79eed4955e4218a3",
+    "formal_eligibility_changed": false,
+    "next_hard_gate_changed": false
+  }
+}

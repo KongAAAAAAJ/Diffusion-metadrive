@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import gc
+import weakref
 from pathlib import Path
 
 import pytest
@@ -423,6 +425,21 @@ def test_exactly_one_update_changes_only_trainable_policy() -> None:
             rollout,
             torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
         )
+    rollout_reference = weakref.ref(rollout)
+    del rollout
+    gc.collect()
+    assert rollout_reference() is None
+    assert len(trainer._consumed_rollouts) == 0
+
+    fresh_rollout = trainer.sample_groups(
+        inputs,
+        generator=torch.Generator().manual_seed(31),
+    )
+    second = trainer.update(
+        fresh_rollout,
+        torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
+    )
+    assert second.optimizer_step == trainer.optimizer_step == 2
 
 
 def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:

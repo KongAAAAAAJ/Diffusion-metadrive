@@ -8,9 +8,9 @@ export PYTHONUNBUFFERED=1
 export PYTHONHASHSEED=0
 
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
-RUN_ROOT="${RUN_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1}"
+RUN_ROOT="${RUN_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_2}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-${RUN_ROOT}/checkpoints/best.pt}"
-EXPECTED_CHECKPOINT_SHA256="${EXPECTED_CHECKPOINT_SHA256:-ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc}"
+EXPECTED_CHECKPOINT_SHA256="${EXPECTED_CHECKPOINT_SHA256:-}"
 DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${RUN_ROOT}/evaluation/stage1_a_diagnostic}"
 MANIFEST_PATH="${MANIFEST_PATH:-${OUTPUT_ROOT}/manifest_v2.json}"
@@ -83,7 +83,7 @@ if [[ "${EVAL_STAGE}" != "all" && "${EVAL_STAGE}" != "open_s1" && "${EVAL_STAGE}
 fi
 
 CHECKPOINT_SHA256="$(sha256sum -- "${CHECKPOINT_PATH}" | awk '{print $1}')"
-if [[ "${CHECKPOINT_SHA256}" != "${EXPECTED_CHECKPOINT_SHA256}" ]]; then
+if [[ -n "${EXPECTED_CHECKPOINT_SHA256}" && "${CHECKPOINT_SHA256}" != "${EXPECTED_CHECKPOINT_SHA256}" ]]; then
   echo "Stage1-A checkpoint SHA256 mismatch" >&2
   echo "expected=${EXPECTED_CHECKPOINT_SHA256}" >&2
   echo "observed=${CHECKPOINT_SHA256}" >&2

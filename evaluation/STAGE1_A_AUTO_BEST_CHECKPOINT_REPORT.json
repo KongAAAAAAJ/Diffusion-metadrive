@@ -1,0 +1,37 @@
+{
+  "format": "stage1_a_auto_best_checkpoint_report_v1",
+  "recorded_at": "2026-08-19T11:24:44+08:00",
+  "source_head": "2ad63c927d6776865c62d3c88e95377935ab39e5",
+  "status": "launcher_gate_passed_full_evaluation_not_started",
+  "scope": {
+    "launcher": "scripts/run_stage1_a_evaluation.sh",
+    "test": "tests/test_run_stage1_a_evaluation_script.py",
+    "default_checkpoint_resolution": "${RUN_ROOT}/checkpoints/best.pt",
+    "automatic_checkpoint_sha256": true,
+    "optional_explicit_sha256_pin": "EXPECTED_CHECKPOINT_SHA256"
+  },
+  "behavior": {
+    "default": "Compute SHA256 from the resolved best.pt and write it into the generated evaluation manifest.",
+    "explicit_pin": "When EXPECTED_CHECKPOINT_SHA256 is non-empty, fail before evaluation if it does not match the resolved checkpoint.",
+    "manual_sha_switch_required": false
+  },
+  "verification": {
+    "shell_syntax": "passed",
+    "focused_tests": "9 passed",
+    "focused_test_command": "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -o cache_dir=/tmp/stage1-eval-auto-best-suite-cache tests/test_run_stage1_a_evaluation_script.py tests/test_bev_model_manifest.py -q",
+    "smoke_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_2/checkpoints/best.pt",
+    "smoke_checkpoint_sha256": "cb697d02340b2285a17f1ad7bb54de32cbe80dff1e7fae74aae797bddef39b7a",
+    "smoke_manifest": "/tmp/stage1-a-auto-best-smoke/manifest_v2.json",
+    "smoke_manifest_hash_matches_checkpoint": true,
+    "real_model_evaluation_started": false
+  },
+  "evidence_classification": {
+    "launcher_behavior_verified": true,
+    "checkpoint_evaluation_completed": false,
+    "formal_eligibility_changed": false
+  },
+  "remaining_risks": [
+    "The full open-loop and S5-S9 evaluation remains a separate long-running gate.",
+    "Automatic hashing proves which bytes were evaluated but does not independently authorize that checkpoint for formal conclusions; callers may set EXPECTED_CHECKPOINT_SHA256 when an external immutable identity pin is required."
+  ]
+}

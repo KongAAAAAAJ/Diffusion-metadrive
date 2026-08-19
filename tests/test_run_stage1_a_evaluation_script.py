@@ -38,17 +38,16 @@ fi
 
 def _environment(tmp_path: Path) -> dict[str, str]:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    checkpoint = tmp_path / "best.pt"
+    run_root = tmp_path / "run_1"
+    checkpoint = run_root / "checkpoints" / "best.pt"
+    checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"stage1-a")
-    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     dataset_root = tmp_path / "dataset"
     dataset_root.mkdir()
     return {
         **os.environ,
         "PYTHON_BIN": str(_fake_python(tmp_path / "fake-python")),
-        "RUN_ROOT": str(tmp_path / "run_1"),
-        "CHECKPOINT_PATH": str(checkpoint),
-        "EXPECTED_CHECKPOINT_SHA256": digest,
+        "RUN_ROOT": str(run_root),
         "DATASET_ROOT": str(dataset_root),
         "OUTPUT_ROOT": str(tmp_path / "evaluation"),
         "CALL_LOG": str(tmp_path / "calls.log"),
@@ -73,6 +72,8 @@ def test_all_writes_single_model_manifest_and_runs_both_evaluations(
 
     output_root = Path(environment["OUTPUT_ROOT"])
     manifest = json.loads((output_root / "manifest_v2.json").read_text())
+    checkpoint = Path(environment["RUN_ROOT"]) / "checkpoints" / "best.pt"
+    checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     assert manifest == {
         "format": "bev_model_evaluation_manifest_v2",
         "models": [
@@ -80,8 +81,8 @@ def test_all_writes_single_model_manifest_and_runs_both_evaluations(
                 "id": "stage1_a",
                 "kind": "stage1",
                 "variant": "A",
-                "checkpoint": environment["CHECKPOINT_PATH"],
-                "checkpoint_sha256": environment["EXPECTED_CHECKPOINT_SHA256"],
+                "checkpoint": str(checkpoint),
+                "checkpoint_sha256": checkpoint_sha256,
             }
         ],
         "comparisons": [],
@@ -107,7 +108,7 @@ def test_all_writes_single_model_manifest_and_runs_both_evaluations(
     assert "--topdown-film-size 3000" in calls[1]
 
 
-def test_stage_selector_and_checkpoint_hash_are_strict(tmp_path: Path) -> None:
+def test_stage_selector_and_optional_checkpoint_hash_are_strict(tmp_path: Path) -> None:
     environment = _environment(tmp_path)
     environment["EVAL_STAGE"] = "open_s1"
     subprocess.run(
