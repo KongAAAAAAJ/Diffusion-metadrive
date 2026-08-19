@@ -1,8 +1,9 @@
 dataset:
   name: platoon_joint_bev
   sidecar_name: riskentry_actor_sidecar
-  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1
-  scenario_contract: candidate_v3
+  output_root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s6_s9_diagnostic8k_v1
+  scenario_contract: candidate_v4
+  planner_version: v2
 
 split:
   train_ratio: 0.8
@@ -11,15 +12,15 @@ split:
   seed: 17
 
 collection:
-  target_joint_steps: 50000
-  start_seed: 71017
+  target_joint_steps: 8000
+  start_seed: 91017
   max_episodes: 1000
   max_episode_steps: 200
   scenario_max_episode_steps:
+    S6_background_merge_in: 260
     S9_narrow_channel_negotiation: 800
   resume: true
   scenario_weights:
-    S5_hard_brake_lead: 1.0
     S6_background_merge_in: 1.0
     S7_ego_merge_from_ramp: 1.0
     S8_ego_exit_to_ramp: 1.0
@@ -30,21 +31,17 @@ collection:
 formal_pilot:
   enabled: true
   scenario_quotas:
-    S5_hard_brake_lead: 10000
-    S6_background_merge_in: 10000
-    S7_ego_merge_from_ramp: 10000
-    S8_ego_exit_to_ramp: 10000
-    S9_narrow_channel_negotiation: 10000
-  max_attempts_per_scenario: 200
-  min_episodes_per_scenario: 50
+    S6_background_merge_in: 2000
+    S7_ego_merge_from_ramp: 2000
+    S8_ego_exit_to_ramp: 2000
+    S9_narrow_channel_negotiation: 2000
+  max_attempts_per_scenario: 80
+  min_episodes_per_scenario: 10
   max_samples_per_episode: 200
   require_all_scenarios_in_each_split: true
   required_spawn_seeds: [17, 23, 31, 47, 59]
   required_incidental_background_actor_counts: [3, 4, 5, 6]
   required_behavior_categories:
-    S5_hard_brake_lead:
-      - keep_emergency_braking
-      - temporary_formation_release_and_recovery
     S6_background_merge_in:
       - agent0-agent1
       - agent1-agent2
@@ -57,10 +54,6 @@ formal_pilot:
     S9_narrow_channel_negotiation:
       - agent0-agent1
       - agent1-agent2
-  behavior_rule_maker_profiles:
-    S5_hard_brake_lead:
-      keep_emergency_braking: brake_first
-      temporary_formation_release_and_recovery: balanced
 
 env_config:
   num_agents: 3

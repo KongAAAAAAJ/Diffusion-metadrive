@@ -276,6 +276,8 @@ def test_targeted_supplement_config_freezes_all_production_gates() -> None:
     assert requirements.parallel_workers == 4
     assert requirements.bootstrap_spawn_seeds == ()
     assert requirements.initial_feasibility_min_accepted_episodes == 1
+    assert requirements.require_target_background_condition is False
+    assert "require_target_background_condition" not in requirements.as_dict()
     assert config.immutable_fingerprint() == (
         "627b2a52b88842aaa4c27f6fa91e60255b8561b6271d30a08702cccf8415f9de"
     )
@@ -293,6 +295,113 @@ def test_targeted_supplement_config_freezes_all_production_gates() -> None:
                 requirements, rule_maker_profile_id="brake_first"
             ),
         )
+
+
+def test_v2_formal_pilot_accepts_only_an_ordered_primary_scenario_subset() -> None:
+    config = runner.load_run_config(
+        Path("configs/dataset/data_collect_candidate_v3_formal50k.yaml")
+    )
+    subset_ids = (
+        "S6_background_merge_in",
+        "S7_ego_merge_from_ramp",
+        "S8_ego_exit_to_ramp",
+        "S9_narrow_channel_negotiation",
+    )
+    subset_quotas = {scenario_id: 10_000 for scenario_id in subset_ids}
+    subset_weights = {scenario_id: 1.0 for scenario_id in subset_ids}
+    assert config.formal_diversity is not None
+    subset_behaviors = {
+        scenario_id: config.formal_diversity.required_behavior_categories[scenario_id]
+        for scenario_id in subset_ids
+    }
+    subset_diversity = runner.replace(
+        config.formal_diversity,
+        required_behavior_categories=subset_behaviors,
+        behavior_rule_maker_profiles={},
+    )
+    subset = runner.replace(
+        config,
+        planner_version="v2",
+        target_joint_steps=40_000,
+        scenario_weights=subset_weights,
+        formal_scenario_quotas=subset_quotas,
+        formal_diversity=subset_diversity,
+    )
+    assert tuple(subset.scenario_weights) == subset_ids
+    assert tuple(subset.formal_scenario_quotas) == subset_ids
+    assert tuple(subset.formal_diversity.required_behavior_categories) == subset_ids
+
+    with pytest.raises(ValueError, match="ordered S5--S9"):
+        runner.replace(
+            config,
+            target_joint_steps=40_000,
+            scenario_weights=subset_weights,
+            formal_scenario_quotas=subset_quotas,
+            formal_diversity=subset_diversity,
+        )
+
+    reordered = {
+        "S7_ego_merge_from_ramp": 1.0,
+        "S6_background_merge_in": 1.0,
+        "S8_ego_exit_to_ramp": 1.0,
+        "S9_narrow_channel_negotiation": 1.0,
+    }
+    with pytest.raises(ValueError, match="ordered subset"):
+        runner.replace(
+            subset,
+            scenario_weights=reordered,
+            formal_scenario_quotas={name: 10_000 for name in reordered},
+            formal_diversity=runner.replace(
+                subset_diversity,
+                required_behavior_categories={
+                    name: subset_behaviors[name] for name in reordered
+                },
+            ),
+        )
+
+    with pytest.raises(ValueError, match="same ordered scenarios"):
+        runner.replace(
+            subset,
+            formal_diversity=runner.replace(
+                subset_diversity,
+                required_behavior_categories={
+                    **subset_behaviors,
+                    "S5_hard_brake_lead": ("temporary_formation_release_and_recovery",),
+                },
+            ),
+        )
+
+
+def test_strict_candidate_v4_target_background_condition_requires_true_true() -> None:
+    requirements = runner.replace(
+        _targeted_requirements(samples=6, background_quotas={}),
+        require_target_background_condition=True,
+    )
+    valid = _small_candidate_v4_success_rollout()
+    evidence = runner._validate_targeted_rollout(
+        valid,
+        requirements,
+        scenario_contract_id="candidate_v4",
+    )
+    assert evidence["target_background_condition_sampled"] is True
+    assert evidence["target_background_condition_realized"] is True
+    assert requirements.as_dict()["require_target_background_condition"] is True
+
+    for sampled, realized in ((False, False), (False, True), (True, False)):
+        summary = dict(valid.scenario_summary)
+        resolved = dict(summary["resolved_scenario_parameters"])
+        conflict_evidence = dict(summary["conflict_evidence"])
+        resolved["target_background_condition_sampled"] = sampled
+        conflict_evidence["s5_target_background_condition_realized"] = realized
+        summary["resolved_scenario_parameters"] = resolved
+        summary["conflict_evidence"] = conflict_evidence
+        with pytest.raises(runner.JointCollectionError) as exc_info:
+            runner._validate_targeted_rollout(
+                runner.replace(valid, scenario_summary=summary),
+                requirements,
+                scenario_contract_id="candidate_v4",
+            )
+        assert exc_info.value.reason_code == "targeted_scenario_not_realized"
 
 
 def test_targeted_physical_validator_requires_two_runs_recovery_and_safety() -> None:

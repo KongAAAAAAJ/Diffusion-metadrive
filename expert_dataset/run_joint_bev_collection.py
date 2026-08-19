@@ -117,6 +117,7 @@ SECTION_KEYS = {
         "bootstrap_spawn_seeds",
         "parallel_workers",
         "finalization_mode",
+        "require_target_background_condition",
     },
 }
 
@@ -184,6 +185,7 @@ class TargetedSupplementRequirements:
     bootstrap_spawn_seeds: tuple[int, ...] = ()
     parallel_workers: int = 1
     finalization_mode: str = "composition"
+    require_target_background_condition: bool = False
 
     @property
     def target_episodes(self) -> int:
@@ -207,13 +209,15 @@ class TargetedSupplementRequirements:
             "bootstrap_spawn_seeds": list(self.bootstrap_spawn_seeds),
             "parallel_workers": self.parallel_workers,
         }
-        # Omitting the historical default preserves candidate-v3 fingerprints.
+        # Omitting the historical defaults preserves existing fingerprints.
         if self.initial_feasibility_min_accepted_episodes != 1:
             payload["initial_feasibility_min_accepted_episodes"] = (
                 self.initial_feasibility_min_accepted_episodes
             )
         if self.finalization_mode != "composition":
             payload["finalization_mode"] = self.finalization_mode
+        if self.require_target_background_condition:
+            payload["require_target_background_condition"] = True
         return payload
 
 
@@ -377,10 +381,29 @@ class JointCollectionRunConfig:
                 "diagnostic_64, formal_pilot and targeted_supplement are mutually exclusive"
             )
         if formal_quotas is not None:
-            expected = tuple(value[0] for value in PRIMARY_S5_S9_SCENARIOS)
-            if tuple(formal_quotas) != expected:
+            primary_order = tuple(value[0] for value in PRIMARY_S5_S9_SCENARIOS)
+            formal_order = tuple(formal_quotas)
+            if self.planner_version == "v1":
+                expected = primary_order
+                if formal_order != expected:
+                    raise ValueError(
+                        "formal_pilot scenario_quotas must use ordered S5--S9"
+                    )
+            else:
+                expected = tuple(
+                    scenario_id
+                    for scenario_id in primary_order
+                    if scenario_id in formal_quotas
+                )
+                if not formal_order or formal_order != expected:
+                    raise ValueError(
+                        "v2 formal_pilot scenario_quotas must use a non-empty "
+                        "ordered subset of S5--S9"
+                    )
+            if tuple(self.scenario_weights) != formal_order:
                 raise ValueError(
-                    "formal_pilot scenario_quotas must use ordered S5--S9"
+                    "formal_pilot scenario_quotas and scenario_weights must "
+                    "use the same ordered scenarios"
                 )
             normalized_formal_quotas = {}
             for scenario_id, value in formal_quotas.items():
@@ -444,9 +467,10 @@ class JointCollectionRunConfig:
                     raise ValueError(
                         "formal_pilot background coverage must be an ordered subset of 3--6"
                     )
-                if tuple(diversity.required_behavior_categories) != expected:
+                if tuple(diversity.required_behavior_categories) != formal_order:
                     raise ValueError(
-                        "formal_pilot behavior coverage must use ordered S5--S9"
+                        "formal_pilot behavior coverage must use the same ordered "
+                        "scenarios as scenario_quotas"
                     )
                 for scenario_id, values in (
                     diversity.required_behavior_categories.items()
@@ -498,6 +522,18 @@ class JointCollectionRunConfig:
             )
         targeted = self.targeted_supplement
         if targeted is not None:
+            if not isinstance(targeted.require_target_background_condition, bool):
+                raise ValueError(
+                    "targeted_supplement.require_target_background_condition "
+                    "must be bool"
+                )
+            if (
+                targeted.require_target_background_condition
+                and self.scenario_contract_id != CANDIDATE_V4_CONTRACT_ID
+            ):
+                raise ValueError(
+                    "strict target background condition requires candidate-v4"
+                )
             if targeted.scenario_id != "S5_hard_brake_lead":
                 raise ValueError("targeted_supplement supports only S5_hard_brake_lead")
             if set(self.scenario_weights) != {targeted.scenario_id}:
@@ -936,6 +972,13 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
             raise ValueError(
                 "targeted_supplement.bootstrap_spawn_seeds must be a list"
             )
+        require_target_background_condition = targeted.get(
+            "require_target_background_condition", False
+        )
+        if not isinstance(require_target_background_condition, bool):
+            raise ValueError(
+                "targeted_supplement.require_target_background_condition must be bool"
+            )
         targeted_requirements = TargetedSupplementRequirements(
             scenario_id=str(
                 _required(targeted, "targeted_supplement", "scenario_id")
@@ -1006,6 +1049,7 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
             finalization_mode=str(
                 targeted.get("finalization_mode", "composition")
             ),
+            require_target_background_condition=require_target_background_condition,
         )
 
     return JointCollectionRunConfig(
@@ -1660,6 +1704,14 @@ def _validate_targeted_rollout(
         if sampled_target != realized_target:
             raise JointCollectionError(
                 "candidate-v4 sampled traffic condition was not realized exactly",
+                reason_code="targeted_scenario_not_realized",
+            )
+        if requirements.require_target_background_condition and not (
+            sampled_target is True and realized_target is True
+        ):
+            raise JointCollectionError(
+                "candidate-v4 targeted rollout requires sampled and realized "
+                "traffic conditions to be true",
                 reason_code="targeted_scenario_not_realized",
             )
     observed = evidence.get("observed_behavior_class")

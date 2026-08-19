@@ -320,6 +320,13 @@ def audit_targeted_supplement(
                 == requirements.behavior_category,
                 evidence.get("platoon_safety_events") == [],
                 not unsafe_sidecar_events,
+                (
+                    not requirements.require_target_background_condition
+                    or (
+                        evidence.get("target_background_condition_sampled") is True
+                        and evidence.get("target_background_condition_realized") is True
+                    )
+                ),
                 config.scenario_contract_id != CANDIDATE_V4_CONTRACT_ID
                 or attributes.get("scenario_contract_id")
                 == CANDIDATE_V4_CONTRACT_ID,
