@@ -15,15 +15,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-from expert_dataset.collect_joint_bev import JOINT_SAMPLE_DTYPES, JOINT_SAMPLE_SHAPES
 from expert_dataset.joint_bev_storage import (
     EPISODE_PATTERN,
     PACKED_BEV_FIELD,
     SPLIT_NAMES,
     STORAGE_FORMAT,
-    STORAGE_SCHEMA_VERSION,
-    STORED_FIELD_DTYPES,
-    STORED_FIELD_SHAPES,
+    V2_STORAGE_FORMAT,
+    joint_sample_storage_contract,
 )
 from expert_dataset.semantic_bev_codec import (
     packed_bev_contract,
@@ -45,31 +43,38 @@ def _read_json(path: Path) -> dict[str, object]:
     return payload
 
 
-def _logical_contract() -> dict[str, dict[str, object]]:
+def _logical_contract(storage_contract) -> dict[str, dict[str, object]]:
     return {
         name: {
-            "shape": list(JOINT_SAMPLE_SHAPES[name]),
-            "dtype": str(JOINT_SAMPLE_DTYPES[name]),
+            "shape": list(storage_contract.sample_shapes[name]),
+            "dtype": str(storage_contract.sample_dtypes[name]),
         }
-        for name in JOINT_SAMPLE_SHAPES
+        for name in storage_contract.sample_shapes
     }
 
 
-def _physical_contract() -> dict[str, dict[str, object]]:
+def _physical_contract(storage_contract) -> dict[str, dict[str, object]]:
     return {
         name: {
-            "shape": list(STORED_FIELD_SHAPES[name]),
-            "dtype": str(STORED_FIELD_DTYPES[name]),
+            "shape": list(storage_contract.stored_shapes[name]),
+            "dtype": str(storage_contract.stored_dtypes[name]),
         }
-        for name in STORED_FIELD_SHAPES
+        for name in storage_contract.stored_shapes
     }
 
 
 def validate_dataset_contract(dataset_root: Path | str) -> dict[str, object]:
-    """Validate and return the immutable schema-v2 dataset contract."""
+    """Validate and return the immutable v1 or rule-conditioned v2 contract."""
 
     root = Path(dataset_root).expanduser()
     contract = _read_json(root / "dataset_contract.json")
+    storage_format = contract.get("format")
+    if storage_format == STORAGE_FORMAT:
+        storage_contract = joint_sample_storage_contract("v1")
+    elif storage_format == V2_STORAGE_FORMAT:
+        storage_contract = joint_sample_storage_contract("v2")
+    else:
+        raise JointBEVDatasetError("dataset storage format mismatch")
     expected_keys = {
         "schema_version",
         "format",
@@ -80,21 +85,23 @@ def validate_dataset_contract(dataset_root: Path | str) -> dict[str, object]:
         "split_assignment",
         "dataset_fingerprint",
     }
+    if storage_contract.planner_version == "v2":
+        expected_keys.add("planner_version")
     if set(contract) != expected_keys:
         raise JointBEVDatasetError(
             "dataset contract fields do not match the packed joint-first schema"
         )
-    if int(contract.get("schema_version", -1)) != STORAGE_SCHEMA_VERSION:
+    if int(contract.get("schema_version", -1)) != storage_contract.schema_version:
         raise JointBEVDatasetError(
-            f"dataset schema must be version {STORAGE_SCHEMA_VERSION}"
+            f"dataset schema must be version {storage_contract.schema_version}"
         )
-    if contract.get("format") != STORAGE_FORMAT:
-        raise JointBEVDatasetError("dataset storage format mismatch")
+    if storage_contract.planner_version == "v2" and contract.get("planner_version") != "v2":
+        raise JointBEVDatasetError("v2 dataset must declare planner_version=v2")
     if contract.get("joint_first") is not True:
         raise JointBEVDatasetError("dataset must declare joint_first=true")
-    if contract.get("sample_contract") != _logical_contract():
+    if contract.get("sample_contract") != _logical_contract(storage_contract):
         raise JointBEVDatasetError("logical sample contract mismatch")
-    if contract.get("physical_storage_contract") != _physical_contract():
+    if contract.get("physical_storage_contract") != _physical_contract(storage_contract):
         raise JointBEVDatasetError("physical storage contract mismatch")
     if contract.get("packed_semantic_bev") != packed_bev_contract():
         raise JointBEVDatasetError("packed semantic BEV contract mismatch")
@@ -169,11 +176,14 @@ class JointBEVDataset(Dataset):
         self.config = config
         self.dataset_root = Path(config.dataset_root)
         self.contract = validate_dataset_contract(self.dataset_root)
+        self.storage_contract = joint_sample_storage_contract(
+            str(self.contract.get("planner_version", "v1"))
+        )
         self.split_root = self.dataset_root / config.split
         manifest = _read_json(self.split_root / "manifest.json")
-        if int(manifest.get("schema_version", -1)) != STORAGE_SCHEMA_VERSION:
+        if int(manifest.get("schema_version", -1)) != self.storage_contract.schema_version:
             raise JointBEVDatasetError("manifest schema version mismatch")
-        if manifest.get("format") != STORAGE_FORMAT:
+        if manifest.get("format") != self.storage_contract.storage_format:
             raise JointBEVDatasetError("manifest storage format mismatch")
         if manifest.get("split") != config.split:
             raise JointBEVDatasetError("manifest split mismatch")
@@ -274,8 +284,9 @@ class JointBEVDataset(Dataset):
         metadata = _read_json(episode_root / "episode.json")
         if (
             metadata.get("complete") is not True
-            or int(metadata.get("schema_version", -1)) != STORAGE_SCHEMA_VERSION
-            or metadata.get("format") != STORAGE_FORMAT
+            or int(metadata.get("schema_version", -1))
+            != self.storage_contract.schema_version
+            or metadata.get("format") != self.storage_contract.storage_format
             or int(metadata.get("episode_index", -1)) != record.episode_index
             or metadata.get("split") != self.config.split
             or int(metadata.get("joint_samples", -1)) != record.joint_samples
@@ -284,7 +295,7 @@ class JointBEVDataset(Dataset):
                 f"episode metadata mismatch: {episode_root}"
             )
         expected_names = {"episode.json"} | {
-            f"{name}.npy" for name in STORED_FIELD_SHAPES
+            f"{name}.npy" for name in self.storage_contract.stored_shapes
         }
         try:
             actual_names = {path.name for path in episode_root.iterdir()}
@@ -297,7 +308,7 @@ class JointBEVDataset(Dataset):
 
         arrays: dict[str, np.memmap] = {}
         try:
-            for field_name, sample_shape in STORED_FIELD_SHAPES.items():
+            for field_name, sample_shape in self.storage_contract.stored_shapes.items():
                 array = np.load(
                     episode_root / f"{field_name}.npy",
                     mmap_mode="r",
@@ -310,7 +321,7 @@ class JointBEVDataset(Dataset):
                     )
                 if (
                     array.shape != expected_shape
-                    or array.dtype != STORED_FIELD_DTYPES[field_name]
+                    or array.dtype != self.storage_contract.stored_dtypes[field_name]
                 ):
                     raise JointBEVDatasetError(
                         f"episode field contract mismatch: {field_name}"
@@ -347,7 +358,7 @@ class JointBEVDataset(Dataset):
         record_index, sample_index = self._locate(index)
         arrays = self._load_episode(record_index)
         output: dict[str, torch.Tensor] = {}
-        for field_name in JOINT_SAMPLE_SHAPES:
+        for field_name in self.storage_contract.sample_shapes:
             if field_name == "bev":
                 value = unpack_semantic_bev(
                     np.asarray(arrays[PACKED_BEV_FIELD][sample_index])

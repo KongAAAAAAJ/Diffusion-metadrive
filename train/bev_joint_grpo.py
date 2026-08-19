@@ -134,8 +134,27 @@ def _load_stage1_for_grpo(
 ) -> tuple[JointGRPOTrainerA | JointGRPOTrainerB, dict[str, Any], str]:
     condition, _ = _variant_contract(variant)
     checkpoint_path = Path(path)
+    try:
+        source_preview = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise JointGRPOError("unable to inspect the Stage 1 source checkpoint") from exc
+    planner_config = (
+        source_preview.get("planner_config", {})
+        if isinstance(source_preview, Mapping)
+        else {}
+    )
+    model_version = (
+        str(planner_config.get("model_version", "v1"))
+        if isinstance(planner_config, Mapping)
+        else "v1"
+    )
     planner = BEVOnlyDiffusionPlanner(
-        BEVOnlyDiffusionPlannerConfig(predecessor_condition=condition)
+        BEVOnlyDiffusionPlannerConfig(
+            predecessor_condition=condition,
+            model_version=model_version,
+        )
     )
     try:
         payload = load_stage1_checkpoint(checkpoint_path, planner)

@@ -1,9 +1,9 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-18T19:31:00+08:00",
-  "status": "stage2_grpo_open_tau_d_v1_implementation_verified_bounded_diagnostic_allowed",
-  "purpose": "Machine-readable memory for the candidate-v3 data refresh, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
+  "updated_at": "2026-08-19T16:30:00+08:00",
+  "status": "bev_only_diffusion_planner_v2_implementation_verified",
+  "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, candidate-v3 data history, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
     "最新计划",
@@ -34,6 +34,105 @@
       "camera or LiDAR end-to-end input",
       "Stage 1 Variant A versus Variant B as a main experiment",
       "four-model A/B Stage 1 and A/B GRPO matrix"
+    ]
+  },
+  "bev_only_diffusion_planner_v2": {
+    "status": "implementation_and_short_closed_loop_verified_formal_data_and_latency_pending",
+    "decision_owner": "MultiAgentRuleMaker created by make_rule_maker(config) in both expert collection and online inference",
+    "forbidden_duplicate_components": [
+      "RuleMakerHintProvider",
+      "a second RuleMaker implementation",
+      "a duplicated lane-change commitment state machine"
+    ],
+    "expert_collection_contract": {
+      "proposal_acceptor": "PlatoonNormalPlanner",
+      "native_plan_condition": "rank-0 actions from the outstanding RuleMakerProposalBatch before NormalPlanner planning",
+      "committed_roll_condition": "committed_execution_rule_actions() after advance_committed_execution()",
+      "proposal_commit": "the selected NormalPlanner proposal is committed through MultiAgentRuleMaker.accept_joint_action()",
+      "normal_planner_scope": "offline expert labels, baseline evaluation, and diagnostics only"
+    },
+    "online_inference_contract": {
+      "proposal_acceptor": "BEVOnlyDiffusionPlanner v2",
+      "normal_planner_allowed": false,
+      "proposal_generation": "propose_joint_actions() with the same config, reset state, agent order, scenario profile, and hard-valid action groups used by collection",
+      "acceptance_order": [
+        "diffusion mode and trajectory selection",
+        "existing hard mask",
+        "KinematicTrajectoryOptimizer",
+        "execution control check",
+        "exact action-tuple match in the outstanding proposal batch",
+        "MultiAgentRuleMaker.accept_joint_action(batch_id, proposal_id)"
+      ],
+      "no_match_behavior": "do not commit a fabricated proposal; execute the validated STOP trajectory and record the failure",
+      "commitment_behavior": "advance with advance_committed_execution(), condition with committed_execution_rule_actions(), require compatible diffusion feedback, and complete from live pose/lane state",
+      "latency_gate_p95_ms": 200.0
+    },
+    "model_input_contract": {
+      "background_actor_state": {
+        "dtype": "float32",
+        "shape": ["B", 3, 16, 8],
+        "features": [
+          "ego_local_x_m",
+          "ego_local_y_m",
+          "sin_relative_heading",
+          "cos_relative_heading",
+          "ego_local_relative_vx_mps",
+          "ego_local_relative_vy_mps",
+          "length_m",
+          "width_m"
+        ]
+      },
+      "background_actor_valid_mask": {
+        "dtype": "bool",
+        "shape": ["B", 3, 16]
+      },
+      "scenario_code": {
+        "dtype": "int64",
+        "shape": ["B"],
+        "mapping": {"S5": 1, "S6": 2, "S7": 3, "S8": 4, "S9": 5}
+      },
+      "rule_formation_state": {
+        "dtype": "int64",
+        "shape": ["B"],
+        "mapping": {"UNLOCKED": 0, "LOCKED": 1}
+      },
+      "rule_action_condition": {
+        "dtype": "int64",
+        "shape": ["B", 3],
+        "values": {"LEFT": -1, "KEEP": 0, "RIGHT": 1}
+      },
+      "fusion": "background actor cross-attention plus scenario/formation/action condition embeddings",
+      "hard_mask_policy": "RuleMaker actions are soft model conditions and never rewrite the fixed K=10 hard mode mask"
+    },
+    "mode_feedback_contract": {
+      "KEEP_HIGH_TO_LOW": "KEEP",
+      "LEFT_HIGH_TO_LOW": "LEFT",
+      "RIGHT_HIGH_TO_LOW": "RIGHT",
+      "STOP": "KEEP",
+      "s7_temporary_exception": "On S7 R7 route-chain states, a physical LEFT mode is explicitly audited and fed back to RuleMaker as KEEP; every other match is strict one-to-one."
+    },
+    "data_contract": {
+      "historical_v1_policy": "preserve and keep readable; it is not eligible for v2 conditioning training",
+      "v2_requirement": "collect a new v2 dataset or perform deterministic replay from complete RuleMaker state/history; never infer RuleMaker conditions from gt_mode",
+      "audit_fields": [
+        "diffusion input rule actions",
+        "NormalPlanner accepted actions and proposal rank",
+        "LOCKED or UNLOCKED",
+        "proposal batch ID and committed execution ID",
+        "explicit background actor state and valid mask",
+        "physical mode action and RuleMaker feedback action",
+        "S7 exception mask"
+      ],
+      "parity_gate": "identical environment state, config, reset, agent order, hard-valid modes, and accepted-action history must produce elementwise-identical RuleMaker conditions in collection and online inference"
+    },
+    "implementation_hard_gate": [
+      "direct MultiAgentRuleMaker code path with no new decision provider",
+      "shared accept_joint_action() coverage for NormalPlanner and diffusion acceptors",
+      "rank-0 and lower-ranked proposal coverage",
+      "KEEP, STOP, active commitment, completion, and S7 exception coverage",
+      "v1 dataset and planner compatibility",
+      "short closed-loop smoke without online NormalPlanner",
+      "formal multi-seed online planning P95 no greater than 200 ms in a separate evaluation run"
     ]
   },
   "frozen_artifacts": {
@@ -463,7 +562,7 @@
       "trajectory optimizer intervention and final execution feasibility",
       "BEV build, model inference, optimizer/surrogate, control mapping, and full planning tick P50/P95 latency"
     ],
-    "latency_gate": "three-vehicle online planning remains within the frozen 100 ms P95 target unless a separately approved protocol revision records otherwise",
+    "latency_gate": "BEVOnlyDiffusionPlanner v1 retains the historical 100 ms P95 target. The explicitly approved RuleMaker-conditioned v2 protocol uses a three-vehicle complete planning-tick P95 target of 200 ms.",
     "optional_secondary_ablation": "Inside GRPO-Exec only, compare surrogate ensemble mean against mean plus uncertainty-aware reward after the three-model main matrix is complete. This is not a Stage1 A/B ablation."
   },
   "execution_order": [
@@ -548,5 +647,5 @@
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
   "implementation_evidence_sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
-  "current_next_action": "In a separate thread, start a new bounded diagnostic GRPO-Open run from the original Stage1 checkpoint in the isolated tau_d training_v1 root. No calibration report is read, run_3 cannot be resumed, and the output remains diagnostic/formal-ineligible."
+  "current_next_action": "In a separate execution thread, collect and verify a bounded rule-conditioned v2 diagnostic dataset before any formal v2 training, then qualify a v2 checkpoint with RuleMaker-only closed-loop evaluation and the complete three-vehicle planning-tick P95 <= 200 ms gate. Do not reuse or infer missing conditions from the historical v1 dataset."
 }

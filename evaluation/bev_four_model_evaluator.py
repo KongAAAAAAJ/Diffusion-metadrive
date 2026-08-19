@@ -34,7 +34,14 @@ from evaluation.bev_model_manifest import (
     load_model_manifest,
 )
 from evaluation.bev_evaluation_artifacts import ClosedLoopArtifactWriter
-from models.platoon_planner.platoon_normal_planner import PlatoonNormalPlanner
+from models.decisioner.rule_decisioner import (
+    LaneChangeCommitmentError,
+    diffusion_mode_feedback_actions,
+    hard_valid_modes_by_rule_action,
+    joint_proposal_actions,
+    make_rule_maker,
+    match_joint_action_proposal,
+)
 from train.bev_joint_grpo import (
     load_grpo_b_checkpoint,
     load_grpo_checkpoint,
@@ -50,6 +57,7 @@ from train.train_bev_joint_grpo_online import (
     joint_trajectory_action,
     model_inputs_to_batch,
     optimize_selected_model_trajectories,
+    optimize_safe_stop_trajectories,
 )
 from models.bev_planner.joint_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
@@ -91,6 +99,7 @@ class ModelEvaluationConfig:
     scenarios: tuple[tuple[str, str], ...] = DIAGNOSTIC_EVAL_SCENARIOS
     max_steps: int = 100
     inference_p95_limit_ms: float = 100.0
+    v2_planning_tick_p95_limit_ms: float = 200.0
     artifact_root: Path | None = None
     save_visualizations: bool = False
     video_fps: int = 10
@@ -124,6 +133,13 @@ class ModelEvaluationConfig:
         ):
             raise ModelEvaluationError(
                 "inference_p95_limit_ms must be positive and finite"
+            )
+        if (
+            not math.isfinite(self.v2_planning_tick_p95_limit_ms)
+            or self.v2_planning_tick_p95_limit_ms <= 0.0
+        ):
+            raise ModelEvaluationError(
+                "v2_planning_tick_p95_limit_ms must be positive and finite"
             )
         if self.save_visualizations and self.artifact_root is None:
             raise ModelEvaluationError("save_visualizations requires an artifact_root")
@@ -436,12 +452,18 @@ def _empty_metrics() -> dict[str, object]:
             "control_mapping_ms": [],
             "planning_tick_ms": [],
             "trajectory_optimizer_ms": [],
+            "rule_maker_ms": [],
         },
         "trajectory_intervention_ade_m": [],
         "trajectory_intervention_fde_m": [],
         "trajectory_retained_raw_fraction": [],
         "execution_modes_removed": 0,
         "execution_mode_masks_built": 0,
+        "rule_proposal_match_attempts": 0,
+        "rule_proposal_matches": 0,
+        "rule_accepted_ranks": [],
+        "rule_condition_failures": 0,
+        "s7_feedback_exception_hits": 0,
         "episode_outcomes": [],
     }
 
@@ -536,6 +558,21 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
                 / max(raw.get("execution_mode_masks_built", 0), 1)
             ),
         },
+        "rule_maker": {
+            "proposal_match_rate": raw.get("rule_proposal_matches", 0)
+            / max(raw.get("rule_proposal_match_attempts", 0), 1),
+            "accepted_proposal_rank_mean": (
+                float(np.mean(raw.get("rule_accepted_ranks", ())))
+                if raw.get("rule_accepted_ranks")
+                else None
+            ),
+            "condition_failure_count": int(
+                raw.get("rule_condition_failures", 0)
+            ),
+            "s7_left_to_keep_exception_hits": int(
+                raw.get("s7_feedback_exception_hits", 0)
+            ),
+        },
         "trajectory_optimization": {
             "intervention_ade_mean_m": (
                 float(np.mean(raw.get("trajectory_intervention_ade_m", ())))
@@ -573,11 +610,34 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
     }
 
 
+def _surrounding_vehicles(env: object) -> tuple[object, ...]:
+    """Return controlled and traffic vehicles without planner ownership."""
+
+    seen: set[int] = set()
+    vehicles: list[object] = []
+    agents = getattr(env, "agents", {}) or {}
+    agent_values = agents.values() if isinstance(agents, Mapping) else agents
+    engine = getattr(env, "engine", None)
+    traffic_manager = getattr(engine, "traffic_manager", None)
+    traffic = getattr(traffic_manager, "traffic_vehicles", None)
+    if traffic is None:
+        traffic = getattr(traffic_manager, "_traffic_vehicles", ()) or ()
+    try:
+        traffic_values = tuple(traffic)
+    except TypeError:
+        traffic_values = ()
+    for vehicle in (*tuple(agent_values), *traffic_values):
+        if vehicle is None or id(vehicle) in seen:
+            continue
+        seen.add(id(vehicle))
+        vehicles.append(vehicle)
+    return tuple(vehicles)
+
+
 def _minimum_background_gap(env: object) -> float:
-    helper = PlatoonNormalPlanner()
     platoon_objects = set(id(value) for value in env.agents.values())
     minimum = float("inf")
-    for _, other in helper._surrounding_vehicles(env):
+    for other in _surrounding_vehicles(env):
         if id(other) in platoon_objects:
             continue
         other_position = np.asarray(other.position, dtype=np.float64)[:2]
@@ -631,7 +691,6 @@ def _initial_states_sha256(
 def _initial_scene_sha256(env: object) -> str:
     """Hash platoon and background actors without unstable object UUIDs."""
 
-    helper = PlatoonNormalPlanner()
     agent_objects = {
         id(vehicle): agent_id
         for agent_id, vehicle in (getattr(env, "agents", {}) or {}).items()
@@ -639,7 +698,7 @@ def _initial_scene_sha256(env: object) -> str:
     rows = []
     engine = getattr(env, "engine", None)
     get_policy = getattr(engine, "get_policy", None)
-    for _, vehicle in helper._surrounding_vehicles(env):
+    for vehicle in _surrounding_vehicles(env):
         position = np.asarray(getattr(vehicle, "position", ()), dtype=np.float64)
         if position.shape[0] < 2 or not np.isfinite(position[:2]).all():
             raise ModelEvaluationError("initial scene vehicle position is invalid")
@@ -822,6 +881,13 @@ def evaluate_models(
                     )
                 builder = JointBEVSampleBuilder(AGENT_IDS)
                 builder.reset()
+                planner_v2 = getattr(planner.config, "model_version", "v1") == "v2"
+                rule_maker = None
+                committed_execution_id: int | None = None
+                committed_plan_actions: dict[str, int] | None = None
+                if planner_v2:
+                    rule_maker = make_rule_maker(dict(env.config))
+                    rule_maker.reset(env, list(AGENT_IDS))
                 dt_s = simulator_decision_dt_s(env)
                 generator = torch.Generator(device=device)
                 generator.manual_seed(int(seed))
@@ -873,6 +939,73 @@ def evaluate_models(
                             values = builder.build_model_inputs(env)
                             step_bev = values.bev
                             bev_ms = (time.perf_counter() - bev_start) * 1000.0
+                            rule_batch = None
+                            rule_condition: dict[str, int] | None = None
+                            rule_condition_is_commitment = False
+                            rule_maker_ms = 0.0
+                            if planner_v2:
+                                assert rule_maker is not None
+                                rule_start = time.perf_counter()
+                                hard_modes = hard_valid_modes_by_rule_action(
+                                    AGENT_IDS, values.mode_valid_mask
+                                )
+                                if rule_maker.has_active_lane_change_commitments:
+                                    if (
+                                        committed_execution_id is None
+                                        or committed_plan_actions is None
+                                    ):
+                                        raise ModelEvaluationError(
+                                            "online RuleMaker commitment has no execution state"
+                                        )
+                                    try:
+                                        rule_maker.advance_committed_execution(
+                                            env,
+                                            list(AGENT_IDS),
+                                            committed_execution_id,
+                                        )
+                                    except LaneChangeCommitmentError as exc:
+                                        raise ModelEvaluationError(
+                                            f"online RuleMaker commitment failed: {exc}"
+                                        ) from exc
+                                    if rule_maker.has_active_lane_change_commitments:
+                                        rule_condition = (
+                                            rule_maker.committed_execution_rule_actions(
+                                                env, committed_plan_actions
+                                            )
+                                        )
+                                        rule_condition_is_commitment = True
+                                    else:
+                                        committed_execution_id = None
+                                        committed_plan_actions = None
+                                if rule_condition is None:
+                                    try:
+                                        rule_batch = rule_maker.propose_joint_actions(
+                                            env,
+                                            list(AGENT_IDS),
+                                            getattr(env, "_last_planner_batch", None)
+                                            or {},
+                                            hard_valid_modes_by_action=hard_modes,
+                                        )
+                                    except LaneChangeCommitmentError as exc:
+                                        raise ModelEvaluationError(
+                                            f"online RuleMaker proposal failed: {exc}"
+                                        ) from exc
+                                    rule_condition = (
+                                        joint_proposal_actions(
+                                            rule_batch.proposals[0], AGENT_IDS
+                                        )
+                                        if rule_batch.proposals
+                                        else {agent_id: 0 for agent_id in AGENT_IDS}
+                                    )
+                                rule_maker_ms = (
+                                    time.perf_counter() - rule_start
+                                ) * 1000.0
+                                values = builder.augment_v2_model_inputs(
+                                    env,
+                                    values,
+                                    rule_action_condition=rule_condition,
+                                    rule_formation_state=rule_maker.is_formation_locked,
+                                )
                             execution_mask = _execution_mask_or_record_rejection(
                                 values,
                                 optimizer=trajectory_optimizer,
@@ -934,6 +1067,8 @@ def evaluate_models(
                             selected_mode_array = (
                                 output["selected_mode"][0].detach().cpu().numpy()
                             )
+                            pending_rule_acceptance = None
+                            forced_safe_stop = False
                             try:
                                 optimization = optimize_selected_model_trajectories(
                                     values,
@@ -942,10 +1077,6 @@ def evaluate_models(
                                     optimizer=trajectory_optimizer,
                                 )
                             except TrajectoryOptimizationError as exc:
-                                # An unprojectable policy output is a measured
-                                # closed-loop planning failure. End this episode
-                                # without executing a fallback, while preserving
-                                # a complete and comparable four-model report.
                                 raw["execution_rejections"].append(
                                     {
                                         "scenario": scenario[0],
@@ -957,7 +1088,90 @@ def evaluate_models(
                                     }
                                 )
                                 episode_execution_rejected = True
-                                break
+                                if not planner_v2:
+                                    break
+                                raw["rule_condition_failures"] += 1
+                                optimization = optimize_safe_stop_trajectories(
+                                    values, optimizer=trajectory_optimizer
+                                )
+                                forced_safe_stop = True
+                                selected_mode_array = np.full(
+                                    (3,), 9, dtype=np.int64
+                                )
+                            if planner_v2 and not forced_safe_stop:
+                                assert rule_maker is not None
+                                assert rule_condition is not None
+                                physical_actions, feedback_actions, s7_exceptions = (
+                                    diffusion_mode_feedback_actions(
+                                        selected_mode_array.tolist(),
+                                        AGENT_IDS,
+                                        scenario_id=scenario[0],
+                                        local_route=scenario[1],
+                                    )
+                                )
+                                raw["s7_feedback_exception_hits"] += sum(
+                                    int(value) for value in s7_exceptions.values()
+                                )
+                                if rule_condition_is_commitment:
+                                    compatible = all(
+                                        feedback_actions[agent_id]
+                                        == int(rule_condition[agent_id])
+                                        for agent_id in AGENT_IDS
+                                    )
+                                    if not compatible:
+                                        raw["rule_condition_failures"] += 1
+                                        raw["execution_rejections"].append(
+                                            {
+                                                "scenario": scenario[0],
+                                                "route": scenario[1],
+                                                "seed": int(seed),
+                                                "step": int(step_index),
+                                                "stage": "active_commitment_compatibility",
+                                                "physical_actions": physical_actions,
+                                                "feedback_actions": feedback_actions,
+                                                "required_actions": rule_condition,
+                                            }
+                                        )
+                                        optimization = optimize_safe_stop_trajectories(
+                                            values, optimizer=trajectory_optimizer
+                                        )
+                                        forced_safe_stop = True
+                                        selected_mode_array = np.full(
+                                            (3,), 9, dtype=np.int64
+                                        )
+                                else:
+                                    raw["rule_proposal_match_attempts"] += 1
+                                    matched = (
+                                        None
+                                        if rule_batch is None
+                                        else match_joint_action_proposal(
+                                            rule_batch,
+                                            feedback_actions,
+                                            AGENT_IDS,
+                                        )
+                                    )
+                                    if matched is None:
+                                        raw["rule_condition_failures"] += 1
+                                        raw["execution_rejections"].append(
+                                            {
+                                                "scenario": scenario[0],
+                                                "route": scenario[1],
+                                                "seed": int(seed),
+                                                "step": int(step_index),
+                                                "stage": "proposal_action_match",
+                                                "physical_actions": physical_actions,
+                                                "feedback_actions": feedback_actions,
+                                            }
+                                        )
+                                        optimization = optimize_safe_stop_trajectories(
+                                            values, optimizer=trajectory_optimizer
+                                        )
+                                        forced_safe_stop = True
+                                        selected_mode_array = np.full(
+                                            (3,), 9, dtype=np.int64
+                                        )
+                                    else:
+                                        pending_rule_acceptance = matched
                             trajectories = optimization.optimized_trajectories
                             selected_modes = selected_mode_array.tolist()
                             action = joint_trajectory_action(trajectories)
@@ -978,6 +1192,27 @@ def evaluate_models(
                                     raise ModelEvaluationError(
                                         "trajectory control is non-finite"
                                     )
+                            if pending_rule_acceptance is not None:
+                                assert rule_maker is not None
+                                assert rule_batch is not None
+                                try:
+                                    rule_maker.accept_joint_action(
+                                        rule_batch.batch_id,
+                                        pending_rule_acceptance.proposal_id,
+                                    )
+                                except LaneChangeCommitmentError as exc:
+                                    raise ModelEvaluationError(
+                                        f"diffusion proposal acceptance failed: {exc}"
+                                    ) from exc
+                                raw["rule_proposal_matches"] += 1
+                                raw["rule_accepted_ranks"].append(
+                                    int(pending_rule_acceptance.rank)
+                                )
+                                if rule_maker.has_active_lane_change_commitments:
+                                    committed_execution_id = int(rule_batch.batch_id)
+                                    committed_plan_actions = joint_proposal_actions(
+                                        pending_rule_acceptance, AGENT_IDS
+                                    )
                             control_ms = (time.perf_counter() - control_start) * 1000.0
                             raw["timing"]["bev_build_ms"].append(bev_ms)
                             raw["timing"]["model_inference_ms"].append(inference_ms)
@@ -988,6 +1223,7 @@ def evaluate_models(
                             raw["timing"]["trajectory_optimizer_ms"].append(
                                 optimization.elapsed_ms
                             )
+                            raw["timing"]["rule_maker_ms"].append(rule_maker_ms)
                             raw["trajectory_intervention_ade_m"].extend(
                                 optimization.intervention_ade_m.tolist()
                             )
@@ -1229,12 +1465,26 @@ def evaluate_models(
         summary = _summarize(raw, episode_count)
         if artifact_writer is not None:
             summary["artifacts"] = artifact_writer.finalize()
-        inference_p95 = summary["timing"]["model_inference_ms"]["p95_ms"]
-        if inference_p95 > cfg.inference_p95_limit_ms:
-            raise ModelEvaluationError(
-                f"{name} three-role inference P95 {inference_p95:.2f}ms exceeds "
-                f"{cfg.inference_p95_limit_ms:.2f}ms"
-            )
+        planner_v2 = getattr(planner.config, "model_version", "v1") == "v2"
+        if planner_v2:
+            planning_p95 = summary["timing"]["planning_tick_ms"]["p95_ms"]
+            if planning_p95 > cfg.v2_planning_tick_p95_limit_ms:
+                raise ModelEvaluationError(
+                    f"{name} v2 complete planning tick P95 {planning_p95:.2f}ms "
+                    f"exceeds {cfg.v2_planning_tick_p95_limit_ms:.2f}ms"
+                )
+            summary["online_rule_maker_contract"] = {
+                "implementation": "MultiAgentRuleMaker",
+                "normal_planner_called": False,
+                "planning_tick_p95_limit_ms": cfg.v2_planning_tick_p95_limit_ms,
+            }
+        else:
+            inference_p95 = summary["timing"]["model_inference_ms"]["p95_ms"]
+            if inference_p95 > cfg.inference_p95_limit_ms:
+                raise ModelEvaluationError(
+                    f"{name} three-role inference P95 {inference_p95:.2f}ms exceeds "
+                    f"{cfg.inference_p95_limit_ms:.2f}ms"
+                )
         if deterministic_probe is None:
             raise ModelEvaluationError(
                 f"{name} evaluation never reached a model-ready state"

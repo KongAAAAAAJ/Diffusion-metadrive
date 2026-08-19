@@ -8,7 +8,7 @@ episode splitting, shard writers, and resume semantics belong to round four.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from enum import IntEnum
 from typing import Mapping, Sequence
 
@@ -29,7 +29,7 @@ from models.bev_planner.mode_contract import (
     build_hard_mode_valid_mask,
     label_gt_mode,
     label_gt_mode_from_trajectory,
-    mode_indices_for_rule_action,
+    mode_index_to_rule_action,
     validate_trajectory_kinematics,
 )
 from models.controller.LQRFollowerController import LQRFollowerController
@@ -40,6 +40,7 @@ from models.controller.longitudinal_reference import (
 )
 from models.decisioner.rule_decisioner import (
     LaneChangeCommitmentError,
+    hard_valid_modes_by_rule_action,
     make_rule_maker,
     select_controller_by_formation,
 )
@@ -57,6 +58,7 @@ from expert_dataset.riskentry_sidecar_adapter import (
     SidecarActorRecord,
     SidecarFrameCapture,
     SidecarLaneRecord,
+    SidecarRawEvent,
 )
 
 try:
@@ -69,6 +71,15 @@ NUM_PLATOON_AGENTS = 3
 EGO_STATE_DIM = 8
 FORMATION_RELATION_DIM = 12
 NUM_RELATION_NEIGHBORS = 2
+MAX_BACKGROUND_ACTORS = 16
+BACKGROUND_ACTOR_STATE_DIM = 8
+SCENARIO_CODE_BY_ID = {
+    "S5_hard_brake_lead": 1,
+    "S6_background_merge_in": 2,
+    "S7_ego_merge_from_ramp": 3,
+    "S8_ego_exit_to_ramp": 4,
+    "S9_narrow_channel_negotiation": 5,
+}
 MODEL_INPUT_FIELDS = (
     "bev",
     "ego_state",
@@ -77,6 +88,14 @@ MODEL_INPUT_FIELDS = (
     "agent_role",
     "coarse_trajectories",
     "mode_valid_mask",
+)
+V2_MODEL_INPUT_FIELDS = (
+    *MODEL_INPUT_FIELDS,
+    "background_actor_state",
+    "background_actor_valid_mask",
+    "scenario_code",
+    "rule_formation_state",
+    "rule_action_condition",
 )
 
 
@@ -111,6 +130,15 @@ JOINT_SAMPLE_DTYPES = {
     "expert_trajectory": np.dtype(np.float32),
 }
 
+V2_ADDITIONAL_SAMPLE_DTYPES = {
+    "background_actor_state": np.dtype(np.float32),
+    "background_actor_valid_mask": np.dtype(np.bool_),
+    "scenario_code": np.dtype(np.int64),
+    "rule_formation_state": np.dtype(np.int64),
+    "rule_action_condition": np.dtype(np.int64),
+}
+V2_JOINT_SAMPLE_DTYPES = {**JOINT_SAMPLE_DTYPES, **V2_ADDITIONAL_SAMPLE_DTYPES}
+
 
 JOINT_SAMPLE_SHAPES = {
     "bev": (NUM_PLATOON_AGENTS, *SemanticBEVConfig().shape),
@@ -129,6 +157,22 @@ JOINT_SAMPLE_SHAPES = {
     "gt_mode": (NUM_PLATOON_AGENTS,),
     "expert_trajectory": (NUM_PLATOON_AGENTS, TRAJECTORY_STEPS, TRAJECTORY_DIM),
 }
+
+V2_ADDITIONAL_SAMPLE_SHAPES = {
+    "background_actor_state": (
+        NUM_PLATOON_AGENTS,
+        MAX_BACKGROUND_ACTORS,
+        BACKGROUND_ACTOR_STATE_DIM,
+    ),
+    "background_actor_valid_mask": (
+        NUM_PLATOON_AGENTS,
+        MAX_BACKGROUND_ACTORS,
+    ),
+    "scenario_code": (),
+    "rule_formation_state": (),
+    "rule_action_condition": (NUM_PLATOON_AGENTS,),
+}
+V2_JOINT_SAMPLE_SHAPES = {**JOINT_SAMPLE_SHAPES, **V2_ADDITIONAL_SAMPLE_SHAPES}
 
 
 @dataclass(frozen=True)
@@ -160,7 +204,7 @@ class JointBEVSample:
                 )
             if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
                 raise JointCollectionError(f"{name} contains non-finite values")
-            owned = np.ascontiguousarray(array).copy()
+            owned = np.array(array, copy=True, order="C")
             owned.setflags(write=False)
             object.__setattr__(self, name, owned)
 
@@ -222,11 +266,138 @@ class JointBEVModelInputs:
 
 
 @dataclass(frozen=True)
+class JointBEVModelInputsV2:
+    """V1 physical inputs plus explicit actor and RuleMaker conditions."""
+
+    base: JointBEVModelInputs
+    background_actor_state: np.ndarray
+    background_actor_valid_mask: np.ndarray
+    scenario_code: np.ndarray
+    rule_formation_state: np.ndarray
+    rule_action_condition: np.ndarray
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.base, JointBEVModelInputs):
+            raise JointCollectionError("v2 model inputs require v1 base inputs")
+        for name in V2_ADDITIONAL_SAMPLE_SHAPES:
+            array = np.asarray(getattr(self, name))
+            if array.shape != V2_ADDITIONAL_SAMPLE_SHAPES[name]:
+                raise JointCollectionError(
+                    f"{name} must have shape {V2_ADDITIONAL_SAMPLE_SHAPES[name]}, "
+                    f"got {array.shape}"
+                )
+            if array.dtype != V2_ADDITIONAL_SAMPLE_DTYPES[name]:
+                raise JointCollectionError(
+                    f"{name} must have dtype {V2_ADDITIONAL_SAMPLE_DTYPES[name]}, "
+                    f"got {array.dtype}"
+                )
+            if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
+                raise JointCollectionError(f"{name} contains non-finite values")
+            owned = np.array(array, copy=True, order="C")
+            owned.setflags(write=False)
+            object.__setattr__(self, name, owned)
+        if int(self.scenario_code) not in SCENARIO_CODE_BY_ID.values():
+            raise JointCollectionError("scenario_code must encode one of S5--S9")
+        if int(self.rule_formation_state) not in (0, 1):
+            raise JointCollectionError("rule_formation_state must be UNLOCKED=0 or LOCKED=1")
+        if not np.isin(self.rule_action_condition, (-1, 0, 1)).all():
+            raise JointCollectionError("rule_action_condition must contain LEFT/KEEP/RIGHT")
+        if np.any(self.background_actor_valid_mask.sum(axis=1) > MAX_BACKGROUND_ACTORS):
+            raise JointCollectionError("background actor valid mask exceeds capacity")
+
+    def __getattr__(self, name: str):
+        if name in MODEL_INPUT_FIELDS:
+            return getattr(self.base, name)
+        raise AttributeError(name)
+
+    def as_dict(self) -> dict[str, np.ndarray]:
+        return {
+            **self.base.as_dict(),
+            **{
+                name: getattr(self, name)
+                for name in V2_ADDITIONAL_SAMPLE_SHAPES
+            },
+        }
+
+
+@dataclass(frozen=True)
+class JointBEVSampleV2:
+    """Persisted v2 sample; the frozen v1 payload remains embedded unchanged."""
+
+    base: JointBEVSample
+    background_actor_state: np.ndarray
+    background_actor_valid_mask: np.ndarray
+    scenario_code: np.ndarray
+    rule_formation_state: np.ndarray
+    rule_action_condition: np.ndarray
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.base, JointBEVSample):
+            raise JointCollectionError("v2 sample requires a validated v1 sample")
+        validated = JointBEVModelInputsV2(
+            base=JointBEVModelInputs(
+                **{name: self.base.as_dict()[name] for name in MODEL_INPUT_FIELDS}
+            ),
+            background_actor_state=self.background_actor_state,
+            background_actor_valid_mask=self.background_actor_valid_mask,
+            scenario_code=self.scenario_code,
+            rule_formation_state=self.rule_formation_state,
+            rule_action_condition=self.rule_action_condition,
+        )
+        for name in V2_ADDITIONAL_SAMPLE_SHAPES:
+            object.__setattr__(self, name, getattr(validated, name))
+
+    def __getattr__(self, name: str):
+        if name in JOINT_SAMPLE_SHAPES:
+            return getattr(self.base, name)
+        raise AttributeError(name)
+
+    def as_dict(self) -> dict[str, np.ndarray]:
+        return {
+            **self.base.as_dict(),
+            **{
+                name: getattr(self, name)
+                for name in V2_ADDITIONAL_SAMPLE_SHAPES
+            },
+        }
+
+
+@dataclass(frozen=True)
+class RuleConditionAudit:
+    """One expert planning tick's RuleMaker condition and acceptance evidence."""
+
+    trajectory_source: str
+    input_actions: Mapping[str, int]
+    accepted_actions: Mapping[str, int]
+    formation_locked: bool
+    proposal_batch_id: int
+    accepted_proposal_rank: int
+    execution_id: int
+
+    def __post_init__(self) -> None:
+        if self.trajectory_source not in ("new_native_plan", "committed_roll"):
+            raise JointCollectionError("invalid RuleMaker audit trajectory source")
+        for name in ("input_actions", "accepted_actions"):
+            actions = {str(key): int(value) for key, value in getattr(self, name).items()}
+            if tuple(actions) != ("agent0", "agent1", "agent2"):
+                raise JointCollectionError(f"{name} must use ordered agent0--agent2")
+            if any(value not in (-1, 0, 1) for value in actions.values()):
+                raise JointCollectionError(f"{name} contains an invalid RuleMaker action")
+            object.__setattr__(self, name, actions)
+        for name in ("proposal_batch_id", "accepted_proposal_rank", "execution_id"):
+            value = int(getattr(self, name))
+            if value < -1:
+                raise JointCollectionError(f"{name} must be -1 or non-negative")
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True)
 class ExpertJointStep:
     rule_actions: Mapping[str, int]
     trajectories_world: Mapping[str, np.ndarray]
     controls: Mapping[str, np.ndarray]
     trajectories_local: Mapping[str, np.ndarray] | None = None
+    rule_condition_audit: RuleConditionAudit | None = None
 
 
 @dataclass(frozen=True)
@@ -254,7 +425,7 @@ class JointEpisodeSidecar:
 
 @dataclass(frozen=True)
 class JointEpisodeRollout:
-    samples: tuple[JointBEVSample, ...]
+    samples: tuple[JointBEVSample | JointBEVSampleV2, ...]
     simulator_steps: int
     rejected_joint_steps: int
     failure_reason: str | None
@@ -328,6 +499,9 @@ class RulePlannerExpert:
         self.lqr_controller.reset()
         self._last_formation_locked: bool | None = None
         self._last_execution_id: int | None = None
+        self._last_accepted_actions = {agent_id: 0 for agent_id in self.agent_ids}
+        self._last_proposal_batch_id = -1
+        self._last_accepted_proposal_rank = -1
 
     @staticmethod
     def _normalize_decision(value: object) -> tuple[int, np.ndarray, bool, str]:
@@ -377,17 +551,10 @@ class RulePlannerExpert:
             raise JointCollectionError(
                 "online mode_valid_mask does not match the joint action contract"
             )
-        result: dict[str, dict[int, tuple[int, ...]]] = {}
-        for role_index, agent_id in enumerate(self.agent_ids):
-            result[agent_id] = {
-                action: tuple(
-                    mode_index
-                    for mode_index in mode_indices_for_rule_action(action)
-                    if bool(masks[role_index, mode_index])
-                )
-                for action in (-1, 0, 1)
-            }
-        return result
+        try:
+            return hard_valid_modes_by_rule_action(self.agent_ids, masks)
+        except LaneChangeCommitmentError as exc:
+            raise JointCollectionError(str(exc)) from exc
 
     @staticmethod
     def _validate_actions_have_hard_modes(
@@ -491,6 +658,15 @@ class RulePlannerExpert:
                         trajectory_source="committed_roll",
                         execution_debug=execution_debug,
                         longitudinal_references=rolled.longitudinal_references,
+                        rule_condition_audit=RuleConditionAudit(
+                            trajectory_source="committed_roll",
+                            input_actions=effective_actions,
+                            accepted_actions=self._last_accepted_actions,
+                            formation_locked=bool(self.rule_maker.is_formation_locked),
+                            proposal_batch_id=self._last_proposal_batch_id,
+                            accepted_proposal_rank=self._last_accepted_proposal_rank,
+                            execution_id=int(execution_plan.execution_id),
+                        ),
                     )
         try:
             proposal_batch = self.rule_maker.propose_joint_actions(
@@ -508,6 +684,10 @@ class RulePlannerExpert:
                 "RuleMaker produced no joint action proposal",
                 reason_code="rule_maker_no_action",
             )
+        rank0_actions = {
+            agent_id: int(proposal_batch.proposals[0].decisions[agent_id]["action"])
+            for agent_id in self.agent_ids
+        }
         try:
             plan_result = self.planner.plan_ranked(
                 env, proposal_batch.proposals
@@ -561,6 +741,19 @@ class RulePlannerExpert:
         self._validate_actions_have_hard_modes(
             actions, hard_valid_modes_by_action
         )
+        accepted_proposal = next(
+            proposal
+            for proposal in proposal_batch.proposals
+            if int(proposal.proposal_id) == int(plan_result.proposal_id)
+        )
+        self._last_accepted_actions = dict(actions)
+        self._last_proposal_batch_id = int(proposal_batch.batch_id)
+        self._last_accepted_proposal_rank = int(accepted_proposal.rank)
+        execution_id = (
+            int(plan_result.execution_plan.execution_id)
+            if plan_result.execution_plan is not None
+            else -1
+        )
         return self._build_expert_step(
             env,
             actions=actions,
@@ -569,6 +762,15 @@ class RulePlannerExpert:
             trajectory_source="new_native_plan",
             execution_debug=self.trajectory_executor.get_last_debug(),
             longitudinal_references=None,
+            rule_condition_audit=RuleConditionAudit(
+                trajectory_source="new_native_plan",
+                input_actions=rank0_actions,
+                accepted_actions=actions,
+                formation_locked=bool(self.rule_maker.is_formation_locked),
+                proposal_batch_id=int(proposal_batch.batch_id),
+                accepted_proposal_rank=int(accepted_proposal.rank),
+                execution_id=execution_id,
+            ),
         )
 
     def _build_expert_step(
@@ -583,6 +785,7 @@ class RulePlannerExpert:
         longitudinal_references: Mapping[
             str, LongitudinalTrackingReference
         ] | None,
+        rule_condition_audit: RuleConditionAudit,
     ) -> ExpertJointStep:
         rule_debug = getattr(self.rule_maker, "get_last_debug", lambda: None)() or {}
         dynamic_roles = rule_debug.get("dynamic_roles", {}) if isinstance(rule_debug, Mapping) else {}
@@ -703,6 +906,7 @@ class RulePlannerExpert:
                 key: np.ascontiguousarray(np.asarray(value, dtype=np.float32))
                 for key, value in trajectories_local.items()
             },
+            rule_condition_audit=rule_condition_audit,
         )
 
 
@@ -825,6 +1029,119 @@ class JointBEVSampleBuilder:
         active = set(getattr(env, "agents", {}) or {})
         values = [other_id in active for other_id in self.agent_ids if other_id != ego_id]
         return np.asarray(values, dtype=np.bool_)
+
+    @staticmethod
+    def _scenario_code(env: PlatoonEnv) -> np.ndarray:
+        config = getattr(env, "config", {}) or {}
+        scenario_id = str(
+            config.get("scenario_id", "")
+            if isinstance(config, Mapping)
+            else getattr(config, "scenario_id", "")
+        )
+        try:
+            code = SCENARIO_CODE_BY_ID[scenario_id]
+        except KeyError as exc:
+            raise JointCollectionError(
+                f"v2 scenario_code is undefined for {scenario_id!r}"
+            ) from exc
+        return np.asarray(code, dtype=np.int64)
+
+    def _background_actor_inputs(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self.snapshots:
+            raise JointCollectionError("v2 background actors require a current snapshot")
+        current = self.snapshots[-1]
+        states = np.zeros(
+            (
+                NUM_PLATOON_AGENTS,
+                MAX_BACKGROUND_ACTORS,
+                BACKGROUND_ACTOR_STATE_DIM,
+            ),
+            dtype=np.float32,
+        )
+        valid = np.zeros(
+            (NUM_PLATOON_AGENTS, MAX_BACKGROUND_ACTORS), dtype=np.bool_
+        )
+        for role_index, agent_id in enumerate(self.agent_ids):
+            ego = current.platoon[agent_id]
+            ego_xy = np.asarray(ego.center_xy, dtype=np.float64)
+            ego_velocity = np.asarray(ego.velocity_xy, dtype=np.float64)
+            heading = float(ego.heading_rad)
+            cos_h = float(np.cos(heading))
+            sin_h = float(np.sin(heading))
+            rotation_world_to_ego = np.asarray(
+                [[cos_h, sin_h], [-sin_h, cos_h]], dtype=np.float64
+            )
+            ordered = sorted(
+                enumerate(current.background),
+                key=lambda item: (
+                    float(
+                        np.linalg.norm(
+                            np.asarray(item[1].center_xy, dtype=np.float64)
+                            - ego_xy
+                        )
+                    ),
+                    float(item[1].center_xy[0]),
+                    float(item[1].center_xy[1]),
+                    float(item[1].heading_rad),
+                    int(item[0]),
+                ),
+            )[:MAX_BACKGROUND_ACTORS]
+            for slot, (_, actor) in enumerate(ordered):
+                relative_xy = rotation_world_to_ego @ (
+                    np.asarray(actor.center_xy, dtype=np.float64) - ego_xy
+                )
+                relative_velocity = rotation_world_to_ego @ (
+                    np.asarray(actor.velocity_xy, dtype=np.float64)
+                    - ego_velocity
+                )
+                relative_heading = float(
+                    (float(actor.heading_rad) - heading + np.pi)
+                    % (2.0 * np.pi)
+                    - np.pi
+                )
+                states[role_index, slot] = np.asarray(
+                    [
+                        relative_xy[0],
+                        relative_xy[1],
+                        np.sin(relative_heading),
+                        np.cos(relative_heading),
+                        relative_velocity[0],
+                        relative_velocity[1],
+                        actor.length_m,
+                        actor.width_m,
+                    ],
+                    dtype=np.float32,
+                )
+                valid[role_index, slot] = True
+        return states, valid
+
+    def augment_v2_model_inputs(
+        self,
+        env: PlatoonEnv,
+        base: JointBEVModelInputs,
+        *,
+        rule_action_condition: Mapping[str, int] | Sequence[int],
+        rule_formation_state: int | bool,
+    ) -> JointBEVModelInputsV2:
+        """Attach label-free current-state actors and RuleMaker conditions."""
+
+        if isinstance(rule_action_condition, Mapping):
+            actions = np.asarray(
+                [int(rule_action_condition[agent_id]) for agent_id in self.agent_ids],
+                dtype=np.int64,
+            )
+        else:
+            actions = np.asarray(rule_action_condition, dtype=np.int64)
+        actor_state, actor_mask = self._background_actor_inputs()
+        formation = int(bool(rule_formation_state))
+        return JointBEVModelInputsV2(
+            base=base,
+            background_actor_state=actor_state,
+            background_actor_valid_mask=actor_mask,
+            scenario_code=self._scenario_code(env),
+            rule_formation_state=np.asarray(formation, dtype=np.int64),
+            rule_action_condition=actions,
+        )
 
     def _build_model_inputs(self, env: PlatoonEnv) -> JointBEVModelInputs:
         if not self.history_ready():
@@ -1035,6 +1352,31 @@ class JointBEVSampleBuilder:
             expert_trajectory=np.stack(expert_values).astype(np.float32, copy=False),
         )
 
+    def build_sample_v2(
+        self,
+        env: PlatoonEnv,
+        expert_step: ExpertJointStep,
+        *,
+        model_inputs: JointBEVModelInputsV2,
+    ) -> JointBEVSampleV2:
+        """Build a v2 sample without altering the frozen v1 label path."""
+
+        if not isinstance(model_inputs, JointBEVModelInputsV2):
+            raise JointCollectionError("build_sample_v2 requires v2 model inputs")
+        base_sample = self.build_sample(
+            env,
+            expert_step,
+            model_inputs=model_inputs,
+        )
+        return JointBEVSampleV2(
+            base=base_sample,
+            background_actor_state=model_inputs.background_actor_state,
+            background_actor_valid_mask=model_inputs.background_actor_valid_mask,
+            scenario_code=model_inputs.scenario_code,
+            rule_formation_state=model_inputs.rule_formation_state,
+            rule_action_condition=model_inputs.rule_action_condition,
+        )
+
 
 def simulator_decision_dt_s(env: PlatoonEnv) -> float:
     config = getattr(env, "config", {})
@@ -1052,11 +1394,14 @@ def collect_joint_episode(
     max_steps: int,
     builder: JointBEVSampleBuilder | None = None,
     reset_seed: int | None = None,
+    planner_version: str = "v1",
 ) -> JointEpisodeRollout:
     """Collect one episode in memory; persistence is deliberately out of scope."""
 
     if max_steps <= 0:
         raise ValueError("max_steps must be positive")
+    if planner_version not in ("v1", "v2"):
+        raise ValueError("planner_version must be v1 or v2")
     if reset_seed is None:
         env.reset()
     else:
@@ -1080,7 +1425,7 @@ def collect_joint_episode(
             f"unable to capture RiskEntry raw state zero: {exc}",
             reason_code="sidecar_data_integrity_invalid",
         ) from exc
-    samples: list[JointBEVSample] = []
+    samples: list[JointBEVSample | JointBEVSampleV2] = []
     sample_step_indices: list[int] = []
     rejected_joint_steps = 0
     joint_step_rejection_counts: Counter[str] = Counter()
@@ -1104,11 +1449,80 @@ def collect_joint_episode(
             break
         if model_inputs is not None:
             try:
-                samples.append(
-                    sample_builder.build_sample(
+                if planner_version == "v2":
+                    audit = expert_step.rule_condition_audit
+                    if audit is None:
+                        raise JointCollectionError(
+                            "v2 expert step omitted RuleMaker condition audit"
+                        )
+                    v2_inputs = sample_builder.augment_v2_model_inputs(
+                        env,
+                        model_inputs,
+                        rule_action_condition=audit.input_actions,
+                        rule_formation_state=audit.formation_locked,
+                    )
+                    sample = sample_builder.build_sample_v2(
+                        env, expert_step, model_inputs=v2_inputs
+                    )
+                    physical_actions = {
+                        agent_id: int(mode_index_to_rule_action(sample.gt_mode[role]))
+                        for role, agent_id in enumerate(agent_ids)
+                    }
+                    feedback_actions = {
+                        agent_id: int(expert_step.rule_actions[agent_id])
+                        for agent_id in agent_ids
+                    }
+                    config = getattr(env, "config", {}) or {}
+                    scenario_id = str(config.get("scenario_id", ""))
+                    local_route = str(config.get("local_route", ""))
+                    s7_exception_mask = {
+                        agent_id: bool(
+                            scenario_id == "S7_ego_merge_from_ramp"
+                            and local_route == "R7_merge_core"
+                            and physical_actions[agent_id] == -1
+                            and feedback_actions[agent_id] == 0
+                        )
+                        for agent_id in agent_ids
+                    }
+                    current_capture = sidecar_captures[joint_step]
+                    condition_event = SidecarRawEvent(
+                        event_type="rule_maker_condition",
+                        step_index=int(joint_step),
+                        timestamp_s=float(joint_step * dt_s),
+                        details={
+                            "trajectory_source": audit.trajectory_source,
+                            "diffusion_input_actions": dict(audit.input_actions),
+                            "normal_planner_accepted_actions": dict(
+                                audit.accepted_actions
+                            ),
+                            "normal_planner_accepted_proposal_rank": int(
+                                audit.accepted_proposal_rank
+                            ),
+                            "rule_formation_state": (
+                                "LOCKED" if audit.formation_locked else "UNLOCKED"
+                            ),
+                            "proposal_batch_id": int(audit.proposal_batch_id),
+                            "execution_id": int(audit.execution_id),
+                            "background_actor_state": (
+                                v2_inputs.background_actor_state.tolist()
+                            ),
+                            "background_actor_valid_mask": (
+                                v2_inputs.background_actor_valid_mask.tolist()
+                            ),
+                            "physical_mode_action": physical_actions,
+                            "rule_feedback_action": feedback_actions,
+                            "s7_left_to_keep_exception": s7_exception_mask,
+                        },
+                    )
+                    sidecar_captures[joint_step] = replace(
+                        current_capture,
+                        events=(*current_capture.events, condition_event),
+                    )
+                else:
+                    sample = sample_builder.build_sample(
                         env, expert_step, model_inputs=model_inputs
                     )
-                )
+                samples.append(sample)
                 sample_step_indices.append(int(joint_step))
             except JointStepRejected as exc:
                 # The expert controls remain valid, but a joint label/mask
@@ -1210,11 +1624,14 @@ def collect_joint_episode(
 
 __all__ = [
     "AgentRole",
+    "BACKGROUND_ACTOR_STATE_DIM",
     "EGO_STATE_DIM",
     "ExpertJointStep",
     "JointBEVSample",
+    "JointBEVSampleV2",
     "JointBEVSampleBuilder",
     "JointBEVModelInputs",
+    "JointBEVModelInputsV2",
     "JointCollectionError",
     "JointEpisodeRollout",
     "JointEpisodeSidecar",
@@ -1223,6 +1640,11 @@ __all__ = [
     "JOINT_SAMPLE_SHAPES",
     "NUM_PLATOON_AGENTS",
     "MODEL_INPUT_FIELDS",
+    "V2_MODEL_INPUT_FIELDS",
+    "V2_JOINT_SAMPLE_DTYPES",
+    "V2_JOINT_SAMPLE_SHAPES",
+    "MAX_BACKGROUND_ACTORS",
+    "RuleConditionAudit",
     "RulePlannerExpert",
     "SensorlessJointBEVPlatoonEnv",
     "collect_joint_episode",

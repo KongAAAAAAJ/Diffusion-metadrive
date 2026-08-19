@@ -74,27 +74,29 @@ def verify_joint_risk_bundle(
     }
     if set(manifest) != required_manifest:
         raise JointRiskBundleVerificationError("bundle manifest fields mismatch")
+    base_root = root / str(manifest["base_directory"])
+    sidecar_root = root / str(manifest["sidecar_directory"])
+    if base_root == sidecar_root:
+        raise JointRiskBundleVerificationError("base and sidecar roots overlap")
+    base_contract = _read_object(base_root / "dataset_contract.json")
+    planner_version = str(base_contract.get("planner_version", "v1"))
     if (
         manifest["format"] != BUNDLE_FORMAT
         or manifest["schema_version"] != BUNDLE_SCHEMA_VERSION
-        or manifest["protocol_sha256"] != bundle_protocol_sha256()
+        or manifest["protocol_sha256"]
+        != bundle_protocol_sha256(planner_version=planner_version)
         or manifest["scenario_contract_sha256"]
         != expected_scenario_sha256
         or float(manifest["decision_dt_s"]) != 0.1
         or int(manifest["split_seed"]) != 17
     ):
         raise JointRiskBundleVerificationError("bundle protocol binding mismatch")
-    base_root = root / str(manifest["base_directory"])
-    sidecar_root = root / str(manifest["sidecar_directory"])
-    if base_root == sidecar_root:
-        raise JointRiskBundleVerificationError("base and sidecar roots overlap")
 
     base_report = verify_joint_bev_dataset(
         base_root,
         expected_scenario_contract_sha256=expected_scenario_sha256,
     )
     sidecar_report = verify_riskentry_sidecar_dataset(sidecar_root)
-    base_contract = _read_object(base_root / "dataset_contract.json")
     if base_contract.get("dataset_fingerprint") != manifest["base_dataset_fingerprint"]:
         raise JointRiskBundleVerificationError("base fingerprint mismatch")
     if sidecar_report["sidecar_dataset_fingerprint"] != manifest["sidecar_dataset_fingerprint"]:

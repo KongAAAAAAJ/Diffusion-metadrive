@@ -1,10 +1,10 @@
 {
-  "format": "bev_diffusion_model_architecture_v1",
-  "schema_version": 1,
-  "recorded_at": "2026-08-10T13:33:44+08:00",
+  "format": "bev_diffusion_model_architecture_v2",
+  "schema_version": 2,
+  "recorded_at": "2026-08-19T16:30:00+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "13bd7c5d649f52264779a3107faed927848a1765"
+    "git_commit": "fd63ec525475b7fa2b3245d717d92fea7e2783fe"
   },
   "model": {
     "name": "BEVOnlyDiffusionPlanner",
@@ -19,15 +19,22 @@
     ]
   },
   "source_snapshot": {
-    "models/bev_planner/bev_only_diffusion_planner.py": "b362d6c2e7c46d22fff7233ce769a903488f85bad76fb812c9ef21516e0ec95a",
+    "models/bev_planner/bev_only_diffusion_planner.py": "e91861aac11d10d6ae94f80f01db2530065096e77e82a8aba34f9fb1a53a864f",
     "models/bev_planner/bev_resnet18_backbone.py": "3f0c6b184eff34f9fe648b5afd7037d21f0c9f60c8610a8cad8efe35afc391e7",
-    "models/bev_planner/mode_contract.py": "934c67d13f83cf35d0eebf6fd2f0acd2304f3971f065dc6eaff7658198d690d3",
+    "models/bev_planner/mode_contract.py": "22f1f6f7697a64ad7f2d8ded76eb7e0af4fb2fac787b0f96928266fa8bf483e9",
     "models/bev_planner/trajectory_optimizer.py": "6039f1de5142e4a4a6cd2515aab1c4e505143a0c09c9179f0d7323af107150ae",
-    "envs/observations/semantic_bev.py": "088fea064e65f55f091526acd22f1e42e0481222aefecdebf861e9db71155286",
-    "configs/train/bev_diffusion_stage1.yaml": "91dbf347a4ec43fd237ce710e845f527483d89f6db00f9072ea147c1bf0ce39a",
-    "configs/train/bev_joint_grpo.yaml": "5ec2f0f9a9130527c7c564c041bbdb90f0f371b467c2b2e5b1aeb9a4ac64720a"
+    "models/decisioner/rule_decisioner.py": "ef368abeb669fce6d23ed3e010eca703d6832fc66a26f8b087eca7df9cb058d8",
+    "envs/observations/semantic_bev.py": "76cb276907ee4a156849d7ade1fb5102f963fbe9479d41d3faa06185e689dde0",
+    "expert_dataset/collect_joint_bev.py": "2c6149fa0b330f259bdc4849f69b5ca59569a868c1e788b624c198f35693d11b",
+    "expert_dataset/joint_bev_storage.py": "1352b3bbae23508309883f17b8182fd97daee3dc6bd84b6e384adf8eed7f2af9",
+    "evaluation/bev_four_model_evaluator.py": "d779adaaa3c3202fc6f1f8a57b491f0cc107fe0099ea4506bc22d9c2dc45a909",
+    "configs/train/bev_diffusion_stage1.yaml": "741779da2395160065d75d143a4467126fe05535cb67ab8053efc510dfebcada",
+    "configs/train/bev_diffusion_stage1_v2.yaml": "2d9395525939550d0d38c85afefde86317528ca666a58a985e6f873426d1b2d9",
+    "configs/train/bev_joint_grpo.yaml": "52d56e489c0e8c877d070cc39e45ea11319c82862290a79423e8b432a4b709f5",
+    "schemas/metadrive_joint_risk_bundle_rule_conditioned_v2.json": "6d22b695ef8c240b0b632aa20b40adb9a99507856b328955241d2566ec90ea42"
   },
   "input_contract": {
+    "model_version": "v1",
     "joint_first": true,
     "roles": [
       "leader",
@@ -112,6 +119,69 @@
       "expert_trajectory",
       "RuleMaker action"
     ]
+  },
+  "input_contract_v2_extension": {
+    "base_contract": "input_contract v1 tensors remain unchanged",
+    "tensors": {
+      "background_actor_state": {
+        "dtype": "torch.float32",
+        "shape": [
+          "B",
+          3,
+          16,
+          8
+        ],
+        "features": [
+          "ego_local_x_m",
+          "ego_local_y_m",
+          "sin_relative_heading",
+          "cos_relative_heading",
+          "ego_local_relative_velocity_x_mps",
+          "ego_local_relative_velocity_y_mps",
+          "length_m",
+          "width_m"
+        ]
+      },
+      "background_actor_valid_mask": {
+        "dtype": "torch.bool",
+        "shape": [
+          "B",
+          3,
+          16
+        ]
+      },
+      "scenario_code": {
+        "dtype": "torch.int64",
+        "shape": [
+          "B"
+        ],
+        "values": "1--5 map to S5--S9"
+      },
+      "rule_formation_state": {
+        "dtype": "torch.int64",
+        "shape": [
+          "B"
+        ],
+        "values": {
+          "UNLOCKED": 0,
+          "LOCKED": 1
+        }
+      },
+      "rule_action_condition": {
+        "dtype": "torch.int64",
+        "shape": [
+          "B",
+          3
+        ],
+        "values": {
+          "LEFT": -1,
+          "KEEP": 0,
+          "RIGHT": 1
+        }
+      }
+    },
+    "condition_source": "rank-0 MultiAgentRuleMaker proposal, or committed_execution_rule_actions while a commitment is active",
+    "hard_mask_independence": "rule_action_condition is a learned condition and never rewrites the fixed K=10 mode_valid_mask"
   },
   "semantic_bev": {
     "channel_order": [
@@ -245,6 +315,17 @@
       "hard_mask_application": "invalid mode logits are replaced with -inf before sampling or argmax"
     }
   },
+  "architecture_v2_extension": {
+    "background_actor_encoder": "per actor Linear(8,128), LayerNorm, GELU, Linear(128,128)",
+    "background_actor_cross_attention": "each role token attends to its 16 explicit actor tokens with the valid mask; empty actor rows produce a zero update",
+    "rule_condition_embeddings": [
+      "scenario embedding 6x128 with codes 1--5 used",
+      "formation embedding 2x128",
+      "per-role rule action embedding 3x128 after action+1 indexing"
+    ],
+    "condition_fusion": "concatenate scenario, formation, and per-role action embeddings; Linear(384,128), LayerNorm, GELU; add to role tokens before cross-role attention",
+    "v1_compatibility": "v1 constructs none of the v2 modules and retains the historical forward and state-dict contract"
+  },
   "variants": {
     "A": {
       "joint_update": "joint_mean",
@@ -270,7 +351,10 @@
     "context_encoder": 251648,
     "diffusion_decoder_A": 570392,
     "diffusion_decoder_B": 590361,
-    "mode_head": 129
+    "mode_head": 129,
+    "planner_v1_A_total": 12285465,
+    "planner_v2_A_total": 12420633,
+    "planner_v2_additional": 135168
   },
   "diffusion_process": {
     "scheduler": "DDIMScheduler",
@@ -389,5 +473,21 @@
     "postprocessor_behavior": "preserve selected mode and project only the three selected trajectories onto the strict executable kinematic contract",
     "controller_consumes": "optimized selected trajectories",
     "raw_output_retained_for_learning_and_diagnostics": true
+  },
+  "online_rule_maker_contract_v2": {
+    "factory": "models.decisioner.rule_decisioner.make_rule_maker(config)",
+    "implementation": "MultiAgentRuleMaker",
+    "normal_planner_online": false,
+    "proposal_path": "propose_joint_actions -> rank-0 model condition -> diffusion -> hard mask/optimizer/execution check -> exact action-tuple match -> accept_joint_action",
+    "no_match_behavior": "do not accept or synthesize a proposal; execute optimized STOP",
+    "commitment_path": "advance_committed_execution + committed_execution_rule_actions; incompatible diffusion modes execute STOP",
+    "mode_to_rule_action": {
+      "0--2": "KEEP",
+      "3--5": "LEFT",
+      "6--8": "RIGHT",
+      "9": "KEEP feedback for physical STOP"
+    },
+    "s7_route_chain_exception": "only S7/R7 physical LEFT is fed back as KEEP, with both physical and feedback actions audited",
+    "complete_three_role_planning_tick_p95_limit_ms": 200.0
   }
 }

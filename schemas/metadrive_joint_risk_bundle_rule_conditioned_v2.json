@@ -1,0 +1,168 @@
+{
+  "format": "metadrive-joint-planning-risk-bundle",
+  "schema_version": "1.0.0",
+  "status": "rule-conditioned-v2",
+  "components": {
+    "base": {
+      "directory": "platoon_joint_bev",
+      "format": "joint-first-packed-semantic-bev-rule-conditioned-npy-episodes",
+      "schema_version": 3,
+      "sample_fields": {
+        "bev": {"dtype": "uint8", "shape": [3, 8, 256, 256]},
+        "ego_state": {"dtype": "float32", "shape": [3, 8]},
+        "ego_pose_global": {"dtype": "float32", "shape": [3, 3]},
+        "formation_relation_state": {"dtype": "float32", "shape": [3, 12]},
+        "relation_valid_mask": {"dtype": "bool", "shape": [3, 2]},
+        "agent_role": {"dtype": "int64", "shape": [3]},
+        "coarse_trajectories": {"dtype": "float32", "shape": [3, 10, 8, 3]},
+        "mode_valid_mask": {"dtype": "bool", "shape": [3, 10]},
+        "gt_mode": {"dtype": "int64", "shape": [3]},
+        "expert_trajectory": {"dtype": "float32", "shape": [3, 8, 3]},
+        "background_actor_state": {"dtype": "float32", "shape": [3, 16, 8]},
+        "background_actor_valid_mask": {"dtype": "bool", "shape": [3, 16]},
+        "scenario_code": {"dtype": "int64", "shape": []},
+        "rule_formation_state": {"dtype": "int64", "shape": []},
+        "rule_action_condition": {"dtype": "int64", "shape": [3]}
+      }
+    },
+    "sidecar": {
+      "directory": "riskentry_actor_sidecar",
+      "format": "riskentry-metadrive-actor-sidecar",
+      "schema_version": "1.0.0",
+      "array_fields": {
+        "step_index": {"dtype": "int64", "shape": ["T"]},
+        "timestamp_s": {"dtype": "float64", "shape": ["T"]},
+        "actor_state": {"dtype": "float32", "shape": ["T", "N", 8]},
+        "actor_state_valid_mask": {"dtype": "bool", "shape": ["T", "N", 8]},
+        "actor_valid_mask": {"dtype": "bool", "shape": ["T", "N"]},
+        "lane_index": {"dtype": "int32", "shape": ["T", "N"]},
+        "lane_state": {"dtype": "float32", "shape": ["T", "N", 4]},
+        "lane_valid_mask": {"dtype": "bool", "shape": ["T", "N"]},
+        "base_sample_step_index": {"dtype": "int64", "shape": ["S"]}
+      },
+      "actor_state_channels": [
+        "world_x_m",
+        "world_y_m",
+        "heading_rad",
+        "velocity_x_mps",
+        "velocity_y_mps",
+        "acceleration_x_mps2",
+        "acceleration_y_mps2",
+        "yaw_rate_radps"
+      ],
+      "lane_state_channels": [
+        "lane_s_m",
+        "lane_lateral_m",
+        "lane_heading_error_rad",
+        "lane_width_m"
+      ]
+    }
+  },
+  "join": {
+    "episode_key": ["base_dataset_fingerprint", "episode_index", "split"],
+    "required_equal_metadata": [
+      "scenario_id",
+      "local_route",
+      "spawn_seed",
+      "decision_dt_s",
+      "scenario_contract_sha256"
+    ],
+    "split_policy": "mirror_base_episode_split",
+    "sample_alignment": "sidecar.base_sample_step_index[s] -> raw step k",
+    "coverage_policy": "sidecar_episode_set_is_superset_of_base_episode_set",
+    "base_without_sidecar_allowed": false,
+    "sidecar_without_base_allowed": true
+  },
+  "timeline": {
+    "raw_state_semantics": "state immediately before action k",
+    "timestamp_formula": "timestamp_s[k] = k * decision_dt_s",
+    "terminal_post_step_required": true,
+    "states_for_k_actions": "K+1",
+    "transition_event_step": "k+1",
+    "missing_value_policy": "zero_plus_explicit_mask"
+  },
+  "actor_identity": {
+    "platoon": [
+      {"source_agent_id": "agent0", "actor_id": "P0", "role": "leader", "role_index": 0},
+      {"source_agent_id": "agent1", "actor_id": "P1", "role": "middle", "role_index": 1},
+      {"source_agent_id": "agent2", "actor_id": "P2", "role": "rear", "role_index": 2}
+    ],
+    "external_id_pattern": "^V[0-9]{3,}$",
+    "external_id_sequence": "V000,V001,V002,...",
+    "external_sort_key": ["first_seen_step", "source_object_id"],
+    "source_object_id_required": true,
+    "legacy_p1_p2_p3_allowed": false
+  },
+  "retention": {
+    "base_commit_requires": [
+      "complete_native_expert_episode",
+      "planner_contract_valid",
+      "hard_mode_contract_valid",
+      "gt_mode_contract_valid",
+      "trajectory_contract_valid",
+      "rule_maker_condition_audit_valid",
+      "sidecar_data_integrity_valid"
+    ],
+    "base_rejects": [
+      "collision",
+      "out_of_road",
+      "out_of_route",
+      "planner_infeasible",
+      "gt_mode_mask_conflict",
+      "trajectory_contract_invalid",
+      "rule_maker_condition_invalid"
+    ],
+    "sidecar_keeps": [
+      "success",
+      "collision",
+      "out_of_road",
+      "out_of_route",
+      "near_collision",
+      "expert_failure",
+      "terminated",
+      "truncated"
+    ],
+    "sidecar_rejects": [
+      "timeline_gap_or_regression",
+      "unstable_actor_identity",
+      "required_active_state_missing",
+      "non_finite_value",
+      "invalid_key_actor",
+      "base_identity_split_or_fingerprint_mismatch"
+    ]
+  },
+  "leakage_boundary": {
+    "sidecar_not_in_base_episode_directory": true,
+    "offline_only_fields": [
+      "key_actor_ids",
+      "future_actor_states",
+      "outcome_events",
+      "derived_ttc_thw",
+      "risk_entry_edges",
+      "risk_labels",
+      "mllm_labels"
+    ],
+    "sidecar_does_not_store_derived_risk_labels": true,
+    "sidecar_does_not_duplicate_future_trajectories": true
+  },
+  "formal_research_binding": {
+    "scenario_contract_format": "bev_primary_s5_s9_contract_v1",
+    "scenario_contract_sha256": "e70b07d7e73d6969f90417441f983b49ecd6bfe48003be310fde5860e24e8e34",
+    "scenarios": [
+      ["S5_hard_brake_lead", "R1_entry_straight"],
+      ["S6_background_merge_in", "R6_mainline_merge_approach"],
+      ["S7_ego_merge_from_ramp", "R7_merge_core"],
+      ["S8_ego_exit_to_ramp", "R6_exit_to_ramp"],
+      ["S9_narrow_channel_negotiation", "R8_narrow_channel"]
+    ],
+    "decision_dt_s": 0.1,
+    "split_seed": 17,
+    "required_dataset_instance_bindings": [
+      "base_dataset_fingerprint",
+      "sidecar_dataset_fingerprint",
+      "scenario_contract_sha256",
+      "decision_dt_s",
+      "split_seed"
+    ]
+  }
+}

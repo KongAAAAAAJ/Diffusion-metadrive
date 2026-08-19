@@ -1,0 +1,94 @@
+{
+  "format": "bev_only_diffusion_planner_v2_implementation_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-19T16:30:00+08:00",
+  "branch": "BEV",
+  "status": "implementation_and_short_closed_loop_verified",
+  "scope": "Rule-conditioned BEVOnlyDiffusionPlanner v2 implementation only; no formal data collection or training was run",
+  "decision_path": {
+    "collection": "make_rule_maker(config) -> MultiAgentRuleMaker.propose_joint_actions -> rank-0 condition -> PlatoonNormalPlanner.plan_ranked -> MultiAgentRuleMaker.accept_joint_action",
+    "online": "make_rule_maker(config) -> MultiAgentRuleMaker.propose_joint_actions -> rank-0 condition -> BEVOnlyDiffusionPlanner v2 -> hard mask -> trajectory optimizer -> execution check -> exact proposal match -> MultiAgentRuleMaker.accept_joint_action",
+    "online_normal_planner_called": false,
+    "new_decision_wrapper_added": false,
+    "active_commitment": "advance_committed_execution plus committed_execution_rule_actions with live-pose completion"
+  },
+  "model": {
+    "new_inputs": {
+      "background_actor_state": ["B", 3, 16, 8],
+      "background_actor_valid_mask": ["B", 3, 16],
+      "scenario_code": ["B"],
+      "rule_formation_state": ["B"],
+      "rule_action_condition": ["B", 3]
+    },
+    "fusion": "background actor cross-attention and scenario/formation/action embeddings",
+    "v1_default_preserved": true,
+    "v1_parameter_count": 12285465,
+    "v2_parameter_count": 12420633,
+    "v2_additional_parameters": 135168,
+    "rule_action_overrides_hard_mask": false
+  },
+  "data": {
+    "v1_schema_version": 2,
+    "v2_schema_version": 3,
+    "bundle_protocol": "schemas/metadrive_joint_risk_bundle_rule_conditioned_v2.json",
+    "historical_v1_eligible_for_v2_training": false,
+    "sidecar_event": "rule_maker_condition",
+    "audits_rank0_and_accepted_actions_separately": true,
+    "audits_locked_state_batch_execution_and_background_actors": true,
+    "s7_physical_left_to_rule_keep_exception_explicit": true
+  },
+  "verification": {
+    "focused_tests": [
+      {
+        "command": "pytest tests/test_bev_rule_conditioned_v2.py -q",
+        "result": "7 passed"
+      },
+      {
+        "command": "pytest tests/test_bev_only_diffusion_planner.py -q",
+        "result": "19 passed"
+      },
+      {
+        "command": "pytest tests/test_bev_stage1_training.py tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_bev_four_model_evaluator.py -q",
+        "result": "50 passed"
+      },
+      {
+        "command": "pytest tests/test_rule_maker.py::test_committed_execution_advances_state_without_generating_proposals tests/test_rule_maker.py::test_stale_execution_can_retire_without_dropping_lane_commitment tests/test_rule_maker.py::test_commitment_is_not_completed_at_lane_assignment_boundary tests/test_rule_maker.py::test_s9_commitment_releases_inside_target_footprint_at_centering_tail -q",
+        "result": "4 passed"
+      },
+      {
+        "command": "pytest tests/test_joint_bev_collection.py::test_rule_planner_expert_uses_independent_pid_when_formation_is_unlocked -q",
+        "result": "1 passed"
+      },
+      {
+        "command": "pytest tests/test_joint_risk_bundle_contract.py tests/test_joint_risk_bundle_storage.py tests/test_riskentry_sidecar_storage.py tests/test_verify_joint_bev_dataset.py tests/test_run_joint_bev_collection.py -q excluding four unrelated malformed candidate-v3 config cases",
+        "result": "57 passed, 4 deselected"
+      }
+    ],
+    "short_closed_loop": [
+      {
+        "scenario": "S5_hard_brake_lead",
+        "seed": 17,
+        "simulator_steps": 15,
+        "v2_samples": 5,
+        "rule_maker_condition_events": 5,
+        "failure": null
+      },
+      {
+        "scenario": "S7_ego_merge_from_ramp",
+        "seed": 18,
+        "simulator_steps": 15,
+        "v2_samples": 5,
+        "rule_maker_condition_events": 5,
+        "failure": null
+      }
+    ],
+    "tracked_preexisting_test_issue": "The repository's tracked configs/dataset/data_collect_candidate_v3_formal50k.yaml contains a malformed image_observation line, so four unrelated candidate-v3 config tests fail before reaching this v2 implementation."
+  },
+  "not_claimed": {
+    "formal_v2_dataset_collected": false,
+    "v2_checkpoint_trained": false,
+    "formal_safety_or_success_rate": false,
+    "complete_three_vehicle_planning_tick_p95_measured": false
+  },
+  "next_hard_gate": "In a separate thread, collect a bounded v2 diagnostic dataset, qualify a v2 checkpoint, then run RuleMaker-only versus RuleMaker-plus-NormalPlanner comparison and enforce complete planning-tick P95 <= 200 ms."
+}

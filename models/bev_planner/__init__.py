@@ -37,6 +37,7 @@ from .mode_contract import (
     RuleAction,
     build_hard_mode_valid_mask,
     label_gt_mode,
+    mode_index_to_rule_action,
     validate_trajectory_kinematics,
 )
 from .stage1_joint_loss import (
@@ -149,6 +150,7 @@ __all__ = [
     "Stage1LossResult",
     "build_hard_mode_valid_mask",
     "label_gt_mode",
+    "mode_index_to_rule_action",
     "validate_trajectory_kinematics",
     "local_trajectory_to_world_xy",
     "sha256_file",

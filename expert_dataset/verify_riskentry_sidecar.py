@@ -10,7 +10,10 @@ from pathlib import Path
 
 import numpy as np
 
-from expert_dataset.joint_bev_storage import SPLIT_NAMES
+from expert_dataset.joint_bev_storage import (
+    SPLIT_NAMES,
+    joint_sample_storage_contract,
+)
 from expert_dataset.riskentry_sidecar_storage import (
     EPISODE_FILE_NAMES,
     EPISODE_PATTERN,
@@ -43,7 +46,32 @@ def validate_sidecar_dataset_contract(dataset_root: Path | str) -> dict[str, obj
     contract = _read_json(root / "dataset_contract.json")
     base_fingerprint = str(contract.get("base_dataset_fingerprint", ""))
     try:
-        expected = sidecar_dataset_contract(base_fingerprint)
+        base_schema_version = int(contract.get("base_schema_version", -1))
+    except (TypeError, ValueError) as exc:
+        raise RiskEntrySidecarVerificationError(
+            "sidecar base schema version is invalid"
+        ) from exc
+    base_pair = (
+        str(contract.get("base_format", "")),
+        base_schema_version,
+    )
+    supported_pairs = {
+        (
+            joint_sample_storage_contract(version).storage_format,
+            joint_sample_storage_contract(version).schema_version,
+        )
+        for version in ("v1", "v2")
+    }
+    if base_pair not in supported_pairs:
+        raise RiskEntrySidecarVerificationError(
+            "sidecar references an unsupported base dataset contract"
+        )
+    try:
+        expected = sidecar_dataset_contract(
+            base_fingerprint,
+            base_format=base_pair[0],
+            base_schema_version=base_pair[1],
+        )
     except RiskEntrySidecarStorageError as exc:
         raise RiskEntrySidecarVerificationError(str(exc)) from exc
     if contract != expected:
@@ -313,7 +341,9 @@ def verify_riskentry_sidecar_dataset(
         "dataset_root": str(root.resolve()),
         "base_dataset_fingerprint": contract["base_dataset_fingerprint"],
         "sidecar_dataset_fingerprint": sidecar_dataset_fingerprint(
-            str(contract["base_dataset_fingerprint"])
+            str(contract["base_dataset_fingerprint"]),
+            base_format=str(contract["base_format"]),
+            base_schema_version=int(contract["base_schema_version"]),
         ),
         "verified_splits": list(selected),
         "complete_scan": True,

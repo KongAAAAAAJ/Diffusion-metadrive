@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-19T11:24:44+08:00",
+  "updated_at": "2026-08-19T16:30:00+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "2ad63c927d6776865c62d3c88e95377935ab39e5",
+    "git_commit": "fd63ec525475b7fa2b3245d717d92fea7e2783fe",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -41,15 +41,57 @@
     "uncommitted_stage2_continuous_reward_v2_report_present": true,
     "uncommitted_stage2_grpo_open_tau_d_v1_present": true,
     "uncommitted_stage2_grpo_open_tau_d_v1_report_present": true,
-    "uncommitted_stage2_grpo_rollout_identity_fix_present": true
+    "uncommitted_stage2_grpo_rollout_identity_fix_present": true,
+    "uncommitted_bev_only_diffusion_planner_v2_present": true
   },
   "current": {
-    "phase": "stage2_at_risk_grpo_open",
-    "round": "stage2-grpo-open-tau-d-v1-implementation-20260818",
-    "status": "tau_d_application_v1_implementation_verified_bounded_diagnostic_allowed",
-    "active_hard_gate": "stage2_grpo_open_tau_d_v1_bounded_diagnostic_run_in_separate_thread"
+    "phase": "bev_only_diffusion_planner_v2",
+    "round": "v2-multi-agent-rule-maker-conditioning-implementation-20260819",
+    "status": "implementation_and_short_closed_loop_verified",
+    "active_hard_gate": "bounded_v2_dataset_collection_and_formal_rule_maker_only_latency_evaluation_in_separate_thread"
   },
   "active_workstreams": {
+    "bev_only_diffusion_planner_v2": {
+      "branch": "BEV",
+      "status": "implementation_verified_formal_data_training_and_evaluation_pending",
+      "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
+      "normal_planner_online": false,
+      "v1_preserved": true,
+      "data_schema": {
+        "v1": 2,
+        "v2": 3
+      },
+      "model_inputs_added": [
+        "background_actor_state",
+        "background_actor_valid_mask",
+        "scenario_code",
+        "rule_formation_state",
+        "rule_action_condition"
+      ],
+      "online_acceptance": "exact action tuple in outstanding proposal batch followed by the existing accept_joint_action()",
+      "active_commitment": "advance_committed_execution() plus committed_execution_rule_actions() with live-pose completion",
+      "s7_exception_audited": true,
+      "unit_and_regression_tests_passed": 138,
+      "short_closed_loop": {
+        "S5_hard_brake_lead": {
+          "simulator_steps": 15,
+          "v2_samples": 5,
+          "rule_condition_events": 5,
+          "failure": null
+        },
+        "S7_ego_merge_from_ramp": {
+          "simulator_steps": 15,
+          "v2_samples": 5,
+          "rule_condition_events": 5,
+          "failure": null
+        }
+      },
+      "formal_p95_gate_ms": 200.0,
+      "formal_p95_measured": false,
+      "formal_data_collected": false,
+      "report": "evaluation/BEV_ONLY_DIFFUSION_PLANNER_V2_IMPLEMENTATION_REPORT.json",
+      "next_hard_gate": "bounded_v2_dataset_collection_and_formal_rule_maker_only_latency_evaluation_in_separate_thread"
+    },
     "candidate_s5_s9_scenario_revision": {
       "branch": "BEV",
       "status": "candidate_v3_s5_s9_combined_contract_accepted_and_frozen",

@@ -634,6 +634,28 @@ def mode_indices_for_rule_action(
     raise AssertionError("unreachable RuleMaker action")
 
 
+def mode_index_to_rule_action(mode_index: int | ModeIndex) -> RuleAction:
+    """Map one fixed diffusion mode to the RuleMaker feedback action.
+
+    STOP is longitudinal and therefore feeds back as KEEP; it remains a
+    distinct physical mode in the diffusion output and hard mask.
+    """
+
+    if isinstance(mode_index, (bool, np.bool_)) or not isinstance(
+        mode_index, (int, np.integer, ModeIndex)
+    ):
+        raise ModeContractError(f"invalid diffusion mode index: {mode_index!r}")
+    try:
+        mode = ModeIndex(int(mode_index))
+    except (TypeError, ValueError) as exc:
+        raise ModeContractError(f"invalid diffusion mode index: {mode_index!r}") from exc
+    if int(mode) in LEFT_MODES:
+        return RuleAction.LEFT
+    if int(mode) in RIGHT_MODES:
+        return RuleAction.RIGHT
+    return RuleAction.KEEP
+
+
 def label_gt_mode(
     rule_action: int | RuleAction,
     expert_trajectory: np.ndarray,

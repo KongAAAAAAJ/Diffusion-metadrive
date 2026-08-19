@@ -7,8 +7,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-from expert_dataset.collect_joint_bev import JOINT_SAMPLE_DTYPES, JOINT_SAMPLE_SHAPES
-from expert_dataset.joint_bev_storage import STORAGE_FORMAT, STORAGE_SCHEMA_VERSION
+from expert_dataset.joint_bev_storage import joint_sample_storage_contract
 from scenarios.bev_round13_contract import (
     PRIMARY_S5_S9_SCENARIOS,
     primary_scenario_contract,
@@ -29,6 +28,11 @@ PROTOCOL_PATH = (
     / "schemas"
     / "metadrive_joint_risk_bundle_v1.json"
 )
+RULE_CONDITIONED_V2_PROTOCOL_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "schemas"
+    / "metadrive_joint_risk_bundle_rule_conditioned_v2.json"
+)
 
 
 class JointRiskBundleContractError(ValueError):
@@ -45,7 +49,9 @@ def _read_protocol(path: Path) -> dict[str, object]:
     return payload
 
 
-def validate_bundle_protocol(payload: object) -> dict[str, object]:
+def validate_bundle_protocol(
+    payload: object, *, planner_version: str = "v1"
+) -> dict[str, object]:
     if not isinstance(payload, Mapping):
         raise JointRiskBundleContractError("bundle protocol must be an object")
     protocol = dict(payload)
@@ -61,17 +67,18 @@ def validate_bundle_protocol(payload: object) -> dict[str, object]:
     sidecar = components.get("sidecar")
     if not isinstance(base, Mapping) or not isinstance(sidecar, Mapping):
         raise JointRiskBundleContractError("base and sidecar component contracts are required")
+    storage_contract = joint_sample_storage_contract(planner_version)
     if (
-        base.get("format") != STORAGE_FORMAT
-        or base.get("schema_version") != STORAGE_SCHEMA_VERSION
+        base.get("format") != storage_contract.storage_format
+        or base.get("schema_version") != storage_contract.schema_version
     ):
         raise JointRiskBundleContractError("base storage contract mismatch")
     expected_fields = {
         name: {
-            "dtype": str(JOINT_SAMPLE_DTYPES[name]),
-            "shape": list(JOINT_SAMPLE_SHAPES[name]),
+            "dtype": str(storage_contract.sample_dtypes[name]),
+            "shape": list(storage_contract.sample_shapes[name]),
         }
-        for name in JOINT_SAMPLE_SHAPES
+        for name in storage_contract.sample_shapes
     }
     if base.get("sample_fields") != expected_fields:
         raise JointRiskBundleContractError("base tensor contract mismatch")
@@ -122,13 +129,36 @@ def validate_bundle_protocol(payload: object) -> dict[str, object]:
     return protocol
 
 
-def load_bundle_protocol(path: Path | str = PROTOCOL_PATH) -> dict[str, object]:
-    return validate_bundle_protocol(_read_protocol(Path(path)))
+def load_bundle_protocol(
+    path: Path | str | None = None, *, planner_version: str = "v1"
+) -> dict[str, object]:
+    protocol_path = (
+        Path(path)
+        if path is not None
+        else (
+            RULE_CONDITIONED_V2_PROTOCOL_PATH
+            if planner_version == "v2"
+            else PROTOCOL_PATH
+        )
+    )
+    return validate_bundle_protocol(
+        _read_protocol(protocol_path), planner_version=planner_version
+    )
 
 
-def bundle_protocol_sha256(path: Path | str = PROTOCOL_PATH) -> str:
-    protocol_path = Path(path)
-    load_bundle_protocol(protocol_path)
+def bundle_protocol_sha256(
+    path: Path | str | None = None, *, planner_version: str = "v1"
+) -> str:
+    protocol_path = (
+        Path(path)
+        if path is not None
+        else (
+            RULE_CONDITIONED_V2_PROTOCOL_PATH
+            if planner_version == "v2"
+            else PROTOCOL_PATH
+        )
+    )
+    load_bundle_protocol(protocol_path, planner_version=planner_version)
     return hashlib.sha256(protocol_path.read_bytes()).hexdigest()
 
 
@@ -140,6 +170,7 @@ __all__ = [
     "PLATOON_ACTOR_IDS",
     "PLATOON_AGENT_TO_ACTOR_ID",
     "PROTOCOL_PATH",
+    "RULE_CONDITIONED_V2_PROTOCOL_PATH",
     "SIDECAR_FORMAT",
     "SIDECAR_SCHEMA_VERSION",
     "bundle_protocol_sha256",

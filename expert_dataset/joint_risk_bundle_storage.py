@@ -141,6 +141,7 @@ class JointRiskBundleIndex:
         scenario_contract_sha256: str,
         split_seed: int,
         resume: bool,
+        planner_version: str = "v1",
     ) -> None:
         self.bundle_root = Path(bundle_root).expanduser()
         self.bundle_root.mkdir(parents=True, exist_ok=True)
@@ -156,7 +157,9 @@ class JointRiskBundleIndex:
         self.manifest = {
             "format": BUNDLE_FORMAT,
             "schema_version": BUNDLE_SCHEMA_VERSION,
-            "protocol_sha256": bundle_protocol_sha256(),
+            "protocol_sha256": bundle_protocol_sha256(
+                planner_version=planner_version
+            ),
             "base_directory": str(base_directory),
             "sidecar_directory": str(sidecar_directory),
             "base_dataset_fingerprint": str(base_dataset_fingerprint),

@@ -12,7 +12,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from envs.observations.semantic_bev import BEV_CHANNEL_NAMES
-from expert_dataset.collect_joint_bev import AgentRole, JOINT_SAMPLE_DTYPES
+from expert_dataset.collect_joint_bev import AgentRole
 from expert_dataset.joint_bev_dataset import (
     JointBEVDataset,
     JointBEVDatasetConfig,
@@ -24,8 +24,7 @@ from expert_dataset.joint_bev_storage import (
     EpisodeSplitConfig,
     PACKED_BEV_FIELD,
     SPLIT_NAMES,
-    STORAGE_SCHEMA_VERSION,
-    STORED_FIELD_SHAPES,
+    joint_sample_storage_contract,
 )
 from expert_dataset.semantic_bev_codec import (
     BEV_COMPRESSION_RATIO,
@@ -98,7 +97,7 @@ def _split_assigner(
 
 
 def _validate_root_entries(
-    root: Path, contract: Mapping[str, object]
+    root: Path, contract: Mapping[str, object], *, schema_version: int
 ) -> dict[str, object]:
     split_assignment = contract.get("split_assignment")
     if not isinstance(split_assignment, Mapping):
@@ -132,7 +131,7 @@ def _validate_root_entries(
             f"unexpected={sorted(actual - allowed)}"
         )
     state = _read_json(root / "collection_state.json")
-    if int(state.get("schema_version", -1)) != STORAGE_SCHEMA_VERSION:
+    if int(state.get("schema_version", -1)) != int(schema_version):
         raise JointBEVVerificationError("collection state schema version mismatch")
     return state
 
@@ -144,6 +143,7 @@ def _validate_chunk(
     *,
     split: str,
     episode_index: int,
+    sample_dtypes: Mapping[str, np.dtype],
 ) -> tuple[np.ndarray, float, dict[str, int]]:
     context = f"split={split} episode={episode_index} samples=[{start}:{stop}]"
     packed = np.asarray(arrays[PACKED_BEV_FIELD][start:stop])
@@ -166,7 +166,7 @@ def _validate_chunk(
             f"semantic BEV round-trip mismatch at {context}"
         )
 
-    for field_name, dtype in JOINT_SAMPLE_DTYPES.items():
+    for field_name, dtype in sample_dtypes.items():
         if field_name == "bev":
             continue
         value = np.asarray(arrays[field_name][start:stop])
@@ -177,6 +177,36 @@ def _validate_chunk(
         if np.issubdtype(dtype, np.floating) and not np.isfinite(value).all():
             raise JointBEVVerificationError(
                 f"{field_name} contains non-finite values at {context}"
+            )
+    if "rule_action_condition" in sample_dtypes:
+        scenario_code = np.asarray(arrays["scenario_code"][start:stop])
+        formation_state = np.asarray(
+            arrays["rule_formation_state"][start:stop]
+        )
+        rule_actions = np.asarray(
+            arrays["rule_action_condition"][start:stop]
+        )
+        actor_state = np.asarray(
+            arrays["background_actor_state"][start:stop]
+        )
+        actor_valid = np.asarray(
+            arrays["background_actor_valid_mask"][start:stop]
+        )
+        if not np.isin(scenario_code, (1, 2, 3, 4, 5)).all():
+            raise JointBEVVerificationError(
+                f"scenario_code is outside S5--S9 at {context}"
+            )
+        if not np.isin(formation_state, (0, 1)).all():
+            raise JointBEVVerificationError(
+                f"rule_formation_state is invalid at {context}"
+            )
+        if not np.isin(rule_actions, (-1, 0, 1)).all():
+            raise JointBEVVerificationError(
+                f"rule_action_condition is invalid at {context}"
+            )
+        if np.any(actor_state[~actor_valid] != 0.0):
+            raise JointBEVVerificationError(
+                f"invalid background actor slots must be zero at {context}"
             )
 
     roles = np.asarray(arrays["agent_role"][start:stop])
@@ -290,7 +320,12 @@ def verify_joint_bev_dataset(
         contract = validate_dataset_contract(root)
     except JointBEVDatasetError as exc:
         raise JointBEVVerificationError(str(exc)) from exc
-    state = _validate_root_entries(root, contract)
+    storage_contract = joint_sample_storage_contract(
+        str(contract.get("planner_version", "v1"))
+    )
+    state = _validate_root_entries(
+        root, contract, schema_version=storage_contract.schema_version
+    )
     assigner, split_unit = _split_assigner(contract)
 
     datasets: dict[str, JointBEVDataset] = {}
@@ -468,6 +503,7 @@ def verify_joint_bev_dataset(
                         stop,
                         split=split,
                         episode_index=record.episode_index,
+                        sample_dtypes=storage_contract.sample_dtypes,
                     )
                     count = stop - start
                     scanned += count
@@ -502,7 +538,7 @@ def verify_joint_bev_dataset(
 
             packed_bytes = int(
                 len(dataset)
-                * np.prod(STORED_FIELD_SHAPES[PACKED_BEV_FIELD])
+                * np.prod(storage_contract.stored_shapes[PACKED_BEV_FIELD])
             )
             raw_bytes = int(
                 len(dataset) * 3 * np.prod(LOGICAL_BEV_SHAPE)
@@ -625,8 +661,8 @@ def verify_joint_bev_dataset(
                 raise JointBEVVerificationError(
                     "diagnostic_64 role-level kinematic counts must equal 192"
                 )
-        return {
-            "schema_version": STORAGE_SCHEMA_VERSION,
+        report = {
+            "schema_version": storage_contract.schema_version,
             "dataset_root": str(root.resolve()),
             "verified_splits": list(selected_splits),
             "complete_scan": all(
@@ -654,6 +690,9 @@ def verify_joint_bev_dataset(
             "diagnostic_64": bool(diagnostic_64),
             "splits": report_splits,
         }
+        if storage_contract.planner_version == "v2":
+            report["planner_version"] = "v2"
+        return report
     finally:
         for dataset in datasets.values():
             dataset.close()

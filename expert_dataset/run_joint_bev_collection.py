@@ -36,6 +36,7 @@ from expert_dataset.joint_bev_storage import (
     EpisodeSplitConfig,
     JointBEVDatasetStore,
     fingerprint_payload,
+    joint_sample_storage_contract,
 )
 from expert_dataset.riskentry_sidecar_storage import (
     RiskEntrySidecarDatasetStore,
@@ -63,7 +64,13 @@ TOP_LEVEL_KEYS = {
     "targeted_supplement",
 }
 SECTION_KEYS = {
-    "dataset": {"name", "sidecar_name", "output_root", "scenario_contract"},
+    "dataset": {
+        "name",
+        "sidecar_name",
+        "output_root",
+        "scenario_contract",
+        "planner_version",
+    },
     "split": {"train_ratio", "val_ratio", "test_ratio", "seed"},
     "collection": {
         "target_joint_steps",
@@ -235,6 +242,7 @@ class JointCollectionRunConfig:
     formal_diversity: FormalDiversityRequirements | None = None
     targeted_supplement: TargetedSupplementRequirements | None = None
     scenario_contract_id: str = FORMAL_V1_CONTRACT_ID
+    planner_version: str = "v1"
 
     def __post_init__(self) -> None:
         bundle_root = Path(self.bundle_root).expanduser().resolve()
@@ -268,6 +276,8 @@ class JointCollectionRunConfig:
             scenario_steps[str(scenario_id)] = int(value)
         object.__setattr__(self, "scenario_max_episode_steps", scenario_steps)
         scenario_contract_for_id(self.scenario_contract_id)
+        if self.planner_version not in ("v1", "v2"):
+            raise ValueError("dataset.planner_version must be v1 or v2")
         if not self.scenario_weights:
             raise ValueError("collection.scenario_weights must not be empty")
         normalized = {}
@@ -618,8 +628,7 @@ class JointCollectionRunConfig:
                     )
 
     def immutable_fingerprint(self) -> str:
-        return fingerprint_payload(
-            {
+        payload = {
                 "collector": "joint_bev_rule_planner",
                 "scenario_contract": self.scenario_contract(),
                 "start_seed": self.start_seed,
@@ -667,7 +676,9 @@ class JointCollectionRunConfig:
                     else self.targeted_supplement.as_dict()
                 ),
             }
-        )
+        if self.planner_version == "v2":
+            payload["planner_version"] = "v2"
+        return fingerprint_payload(payload)
 
     def scenario_contract(self) -> dict[str, object]:
         return scenario_contract_for_id(self.scenario_contract_id)
@@ -752,6 +763,7 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
     bundle_root = _resolve_path(_required(dataset, "dataset", "output_root"))
     dataset_root = bundle_root / dataset_name
     sidecar_root = bundle_root / sidecar_name
+    planner_version = str(dataset.get("planner_version", "v1"))
     scenario_weights = _required(
         collection, "collection", "scenario_weights"
     )
@@ -1039,6 +1051,7 @@ def load_run_config(path: Path | str) -> JointCollectionRunConfig:
         scenario_contract_id=str(
             dataset.get("scenario_contract", FORMAL_V1_CONTRACT_ID)
         ),
+        planner_version=planner_version,
     )
 
 
@@ -2106,11 +2119,13 @@ def _isolated_targeted_rollout_worker(
         )
         env = SensorlessJointBEVPlatoonEnv(episode_env_config)
         _configure_episode(env, spec)
-        rollout = collect_joint_episode(
-            env,
-            max_steps=episode_step_limit,
-            reset_seed=spec.spawn_seed,
-        )
+        rollout_kwargs = {
+            "max_steps": episode_step_limit,
+            "reset_seed": spec.spawn_seed,
+        }
+        if config.planner_version == "v2":
+            rollout_kwargs["planner_version"] = "v2"
+        rollout = collect_joint_episode(env, **rollout_kwargs)
         sender.send(("ok", rollout, simulator_decision_dt_s(env)))
     except BaseException as exc:
         sender.send(
@@ -2530,10 +2545,17 @@ def run_collection(
         split_config=config.split_config,
         dataset_fingerprint=base_fingerprint,
         resume=effective_resume,
+        planner_version=config.planner_version,
     ) as store, RiskEntrySidecarDatasetStore(
         config.sidecar_root,
         base_dataset_fingerprint=base_fingerprint,
         resume=effective_resume,
+        base_format=joint_sample_storage_contract(
+            config.planner_version
+        ).storage_format,
+        base_schema_version=joint_sample_storage_contract(
+            config.planner_version
+        ).schema_version,
     ) as sidecar_store, JointRiskBundleIndex(
         config.bundle_root,
         base_directory=config.dataset_root.name,
@@ -2543,6 +2565,7 @@ def run_collection(
         scenario_contract_sha256=scenario_contract_sha256,
         split_seed=config.split_config.seed,
         resume=effective_resume,
+        planner_version=config.planner_version,
     ) as bundle:
         _recover_pending_bundle_attempt(bundle, store, sidecar_store)
         if config.targeted_supplement is not None:
@@ -2958,11 +2981,13 @@ def run_collection(
                     targeted_simulator_attempts += 1
                 try:
                     if precollected_payload is None:
-                        rollout = collect_joint_episode(
-                            env,
-                            max_steps=episode_step_limit,
-                            reset_seed=spec.spawn_seed,
-                        )
+                        rollout_kwargs = {
+                            "max_steps": episode_step_limit,
+                            "reset_seed": spec.spawn_seed,
+                        }
+                        if config.planner_version == "v2":
+                            rollout_kwargs["planner_version"] = "v2"
+                        rollout = collect_joint_episode(env, **rollout_kwargs)
                         episode_decision_dt_s = simulator_decision_dt_s(env)
                     else:
                         status, first, second = precollected_payload[1]

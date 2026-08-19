@@ -678,6 +678,15 @@ def test_rule_planner_expert_uses_independent_pid_when_formation_is_unlocked() -
     assert expert.pid_controller.reset_calls == 1
     assert expert.lqr_controller.compute_calls == 0
     assert applied_roles == {agent_id: "leader" for agent_id in agent_ids}
+    assert result.rule_condition_audit is not None
+    assert result.rule_condition_audit.input_actions == {
+        agent_id: 0 for agent_id in agent_ids
+    }
+    assert result.rule_condition_audit.accepted_actions == {
+        agent_id: 0 for agent_id in agent_ids
+    }
+    assert result.rule_condition_audit.accepted_proposal_rank == 0
+    assert result.rule_condition_audit.formation_locked is False
 
 
 def test_sensorless_environment_forces_no_rendering_observation_stack(monkeypatch) -> None:

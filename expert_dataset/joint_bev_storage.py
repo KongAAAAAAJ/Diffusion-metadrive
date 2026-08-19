@@ -24,7 +24,10 @@ import numpy as np
 from expert_dataset.collect_joint_bev import (
     JOINT_SAMPLE_DTYPES,
     JOINT_SAMPLE_SHAPES,
+    V2_JOINT_SAMPLE_DTYPES,
+    V2_JOINT_SAMPLE_SHAPES,
     JointBEVSample,
+    JointBEVSampleV2,
 )
 from expert_dataset.semantic_bev_codec import (
     PACKED_BEV_SHAPE,
@@ -36,6 +39,8 @@ from expert_dataset.semantic_bev_codec import (
 
 STORAGE_SCHEMA_VERSION = 2
 STORAGE_FORMAT = "joint-first-packed-semantic-bev-npy-episodes"
+V2_STORAGE_SCHEMA_VERSION = 3
+V2_STORAGE_FORMAT = "joint-first-packed-semantic-bev-rule-conditioned-npy-episodes"
 SPLIT_NAMES = ("train", "val", "test")
 EPISODE_PATTERN = re.compile(r"^episode_(\d{8})$")
 PACKED_BEV_FIELD = "bev_packed"
@@ -55,6 +60,62 @@ STORED_FIELD_DTYPES = {
         if name != "bev"
     },
 }
+V2_STORED_FIELD_SHAPES = {
+    PACKED_BEV_FIELD: (V2_JOINT_SAMPLE_SHAPES["bev"][0], *PACKED_BEV_SHAPE),
+    **{
+        name: shape
+        for name, shape in V2_JOINT_SAMPLE_SHAPES.items()
+        if name != "bev"
+    },
+}
+V2_STORED_FIELD_DTYPES = {
+    PACKED_BEV_FIELD: np.dtype(np.uint8),
+    **{
+        name: dtype
+        for name, dtype in V2_JOINT_SAMPLE_DTYPES.items()
+        if name != "bev"
+    },
+}
+
+
+@dataclass(frozen=True)
+class JointSampleStorageContract:
+    planner_version: str
+    schema_version: int
+    storage_format: str
+    sample_shapes: Mapping[str, tuple[int, ...]]
+    sample_dtypes: Mapping[str, np.dtype]
+    stored_shapes: Mapping[str, tuple[int, ...]]
+    stored_dtypes: Mapping[str, np.dtype]
+
+
+JOINT_SAMPLE_STORAGE_CONTRACTS = {
+    "v1": JointSampleStorageContract(
+        planner_version="v1",
+        schema_version=STORAGE_SCHEMA_VERSION,
+        storage_format=STORAGE_FORMAT,
+        sample_shapes=JOINT_SAMPLE_SHAPES,
+        sample_dtypes=JOINT_SAMPLE_DTYPES,
+        stored_shapes=STORED_FIELD_SHAPES,
+        stored_dtypes=STORED_FIELD_DTYPES,
+    ),
+    "v2": JointSampleStorageContract(
+        planner_version="v2",
+        schema_version=V2_STORAGE_SCHEMA_VERSION,
+        storage_format=V2_STORAGE_FORMAT,
+        sample_shapes=V2_JOINT_SAMPLE_SHAPES,
+        sample_dtypes=V2_JOINT_SAMPLE_DTYPES,
+        stored_shapes=V2_STORED_FIELD_SHAPES,
+        stored_dtypes=V2_STORED_FIELD_DTYPES,
+    ),
+}
+
+
+def joint_sample_storage_contract(planner_version: str) -> JointSampleStorageContract:
+    try:
+        return JOINT_SAMPLE_STORAGE_CONTRACTS[str(planner_version)]
+    except KeyError as exc:
+        raise JointStorageError("planner_version must be v1 or v2") from exc
 
 
 class JointStorageError(RuntimeError):
@@ -199,23 +260,27 @@ class EpisodeSplitAssigner:
         return "test"
 
 
-def _sample_contract() -> dict[str, dict[str, object]]:
+def _sample_contract(
+    contract: JointSampleStorageContract,
+) -> dict[str, dict[str, object]]:
     return {
         name: {
-            "shape": list(JOINT_SAMPLE_SHAPES[name]),
-            "dtype": str(JOINT_SAMPLE_DTYPES[name]),
+            "shape": list(contract.sample_shapes[name]),
+            "dtype": str(contract.sample_dtypes[name]),
         }
-        for name in JOINT_SAMPLE_SHAPES
+        for name in contract.sample_shapes
     }
 
 
-def _physical_storage_contract() -> dict[str, dict[str, object]]:
+def _physical_storage_contract(
+    contract: JointSampleStorageContract,
+) -> dict[str, dict[str, object]]:
     return {
         name: {
-            "shape": list(STORED_FIELD_SHAPES[name]),
-            "dtype": str(STORED_FIELD_DTYPES[name]),
+            "shape": list(contract.stored_shapes[name]),
+            "dtype": str(contract.stored_dtypes[name]),
         }
-        for name in STORED_FIELD_SHAPES
+        for name in contract.stored_shapes
     }
 
 
@@ -239,11 +304,14 @@ class StoredEpisode:
 class JointEpisodeWriter:
     """One split-local writer; episode directories never cross split roots."""
 
-    def __init__(self, split_root: Path, split: str) -> None:
+    def __init__(
+        self, split_root: Path, split: str, *, planner_version: str = "v1"
+    ) -> None:
         if split not in SPLIT_NAMES:
             raise JointStorageError(f"unknown split: {split}")
         self.split_root = split_root
         self.split = split
+        self.contract = joint_sample_storage_contract(planner_version)
         self.episodes_root = split_root / "episodes"
         self.manifest_path = split_root / "manifest.json"
         self.episodes_root.mkdir(parents=True, exist_ok=True)
@@ -265,9 +333,9 @@ class JointEpisodeWriter:
         metadata = _read_json(metadata_path)
         if metadata.get("complete") is not True:
             raise JointStorageError(f"committed episode is not marked complete: {path}")
-        if int(metadata.get("schema_version", -1)) != STORAGE_SCHEMA_VERSION:
+        if int(metadata.get("schema_version", -1)) != self.contract.schema_version:
             raise JointStorageError(f"episode schema version mismatch: {path}")
-        if metadata.get("format") != STORAGE_FORMAT:
+        if metadata.get("format") != self.contract.storage_format:
             raise JointStorageError(f"episode storage format mismatch: {path}")
         if int(metadata.get("episode_index", -1)) != episode_index:
             raise JointStorageError(f"episode directory/index mismatch: {path}")
@@ -281,7 +349,7 @@ class JointEpisodeWriter:
             raise JointStorageError(f"episode attributes must be an object: {path}")
 
         expected_names = {"episode.json"} | {
-            f"{field_name}.npy" for field_name in STORED_FIELD_SHAPES
+            f"{field_name}.npy" for field_name in self.contract.stored_shapes
         }
         actual_names = {item.name for item in path.iterdir()}
         if actual_names != expected_names:
@@ -291,7 +359,7 @@ class JointEpisodeWriter:
                 f"unexpected={sorted(actual_names - expected_names)}"
             )
 
-        for field_name, sample_shape in STORED_FIELD_SHAPES.items():
+        for field_name, sample_shape in self.contract.stored_shapes.items():
             array_path = path / f"{field_name}.npy"
             try:
                 array = np.load(array_path, mmap_mode="r", allow_pickle=False)
@@ -303,10 +371,10 @@ class JointEpisodeWriter:
                     f"stored {field_name} shape mismatch at {path}: "
                     f"expected {expected_shape}, got {array.shape}"
                 )
-            if array.dtype != STORED_FIELD_DTYPES[field_name]:
+            if array.dtype != self.contract.stored_dtypes[field_name]:
                 raise JointStorageError(
                     f"stored {field_name} dtype mismatch at {path}: "
-                    f"expected {STORED_FIELD_DTYPES[field_name]}, got {array.dtype}"
+                    f"expected {self.contract.stored_dtypes[field_name]}, got {array.dtype}"
                 )
 
         return StoredEpisode(
@@ -359,8 +427,8 @@ class JointEpisodeWriter:
         _atomic_write_json(
             self.manifest_path,
             {
-                "schema_version": STORAGE_SCHEMA_VERSION,
-                "format": STORAGE_FORMAT,
+                "schema_version": self.contract.schema_version,
+                "format": self.contract.storage_format,
                 "split": self.split,
                 "episode_count": len(entries),
                 "joint_samples": sum(int(item["joint_samples"]) for item in entries),
@@ -371,11 +439,20 @@ class JointEpisodeWriter:
     def commit(
         self,
         episode_index: int,
-        samples: Sequence[JointBEVSample],
+        samples: Sequence[JointBEVSample | JointBEVSampleV2],
         attributes: Mapping[str, object] | None = None,
     ) -> StoredEpisode:
         if not samples:
             raise JointStorageError("cannot commit an empty episode")
+        expected_type = (
+            JointBEVSampleV2
+            if self.contract.planner_version == "v2"
+            else JointBEVSample
+        )
+        if any(type(sample) is not expected_type for sample in samples):
+            raise JointStorageError(
+                f"{self.contract.planner_version} storage received the wrong sample type"
+            )
         if episode_index in self.episodes:
             raise JointStorageError(f"episode {episode_index} already exists")
         final_path = self.episodes_root / self._episode_name(episode_index)
@@ -387,7 +464,7 @@ class JointEpisodeWriter:
         temporary.mkdir()
 
         packed_bev = np.empty(
-            (len(samples), *STORED_FIELD_SHAPES[PACKED_BEV_FIELD]),
+            (len(samples), *self.contract.stored_shapes[PACKED_BEV_FIELD]),
             dtype=np.uint8,
         )
         try:
@@ -399,13 +476,16 @@ class JointEpisodeWriter:
             ) from exc
 
         stacked: dict[str, np.ndarray] = {PACKED_BEV_FIELD: packed_bev}
-        for field_name in JOINT_SAMPLE_SHAPES:
+        for field_name in self.contract.sample_shapes:
             if field_name == "bev":
                 continue
             values = [sample.as_dict()[field_name] for sample in samples]
             array = np.ascontiguousarray(np.stack(values, axis=0))
-            expected_shape = (len(samples), *JOINT_SAMPLE_SHAPES[field_name])
-            if array.shape != expected_shape or array.dtype != JOINT_SAMPLE_DTYPES[field_name]:
+            expected_shape = (len(samples), *self.contract.sample_shapes[field_name])
+            if (
+                array.shape != expected_shape
+                or array.dtype != self.contract.sample_dtypes[field_name]
+            ):
                 raise JointStorageError(
                     f"episode field {field_name} violates the frozen storage contract"
                 )
@@ -419,8 +499,8 @@ class JointEpisodeWriter:
                 os.fsync(stream.fileno())
 
         metadata = {
-            "schema_version": STORAGE_SCHEMA_VERSION,
-            "format": STORAGE_FORMAT,
+            "schema_version": self.contract.schema_version,
+            "format": self.contract.storage_format,
             "complete": True,
             "episode_index": int(episode_index),
             "split": self.split,
@@ -452,9 +532,11 @@ class JointBEVDatasetStore:
         split_config: EpisodeSplitConfig,
         dataset_fingerprint: str,
         resume: bool,
+        planner_version: str = "v1",
     ) -> None:
         self.dataset_root = Path(dataset_root).expanduser()
         self.split_config = split_config
+        self.contract = joint_sample_storage_contract(planner_version)
         self.assigner = EpisodeSplitAssigner(split_config)
         self.dataset_fingerprint = str(dataset_fingerprint)
         if not re.fullmatch(r"[0-9a-f]{64}", self.dataset_fingerprint):
@@ -479,7 +561,11 @@ class JointBEVDatasetStore:
         self.contract_path = self.dataset_root / self.CONTRACT_FILE
         self.state_path = self.dataset_root / self.STATE_FILE
         self.writers = {
-            split: JointEpisodeWriter(self.dataset_root / split, split)
+            split: JointEpisodeWriter(
+                self.dataset_root / split,
+                split,
+                planner_version=self.contract.planner_version,
+            )
             for split in SPLIT_NAMES
         }
         self.state: dict[str, object] = {}
@@ -508,16 +594,19 @@ class JointBEVDatasetStore:
         stream.close()
 
     def _expected_contract(self) -> dict[str, object]:
-        return {
-            "schema_version": STORAGE_SCHEMA_VERSION,
-            "format": STORAGE_FORMAT,
+        payload = {
+            "schema_version": self.contract.schema_version,
+            "format": self.contract.storage_format,
             "joint_first": True,
-            "sample_contract": _sample_contract(),
-            "physical_storage_contract": _physical_storage_contract(),
+            "sample_contract": _sample_contract(self.contract),
+            "physical_storage_contract": _physical_storage_contract(self.contract),
             "packed_semantic_bev": packed_bev_contract(),
             "split_assignment": self.split_config.as_dict(),
             "dataset_fingerprint": self.dataset_fingerprint,
         }
+        if self.contract.planner_version == "v2":
+            payload["planner_version"] = "v2"
+        return payload
 
     def _initialize_contract(self) -> None:
         allowed = {self.LOCK_FILE, *SPLIT_NAMES}
@@ -584,7 +673,7 @@ class JointBEVDatasetStore:
         raw_state: dict[str, object] = {}
         if resume and self.state_path.exists():
             raw_state = _read_json(self.state_path)
-            if int(raw_state.get("schema_version", -1)) != STORAGE_SCHEMA_VERSION:
+            if int(raw_state.get("schema_version", -1)) != self.contract.schema_version:
                 raise JointStorageError("collection state schema version mismatch")
 
         disk_next = max(stored_by_id, default=-1) + 1
@@ -608,7 +697,7 @@ class JointBEVDatasetStore:
             normalized_reasons[str(name)] = count
 
         self.state = {
-            "schema_version": STORAGE_SCHEMA_VERSION,
+            "schema_version": self.contract.schema_version,
             "next_episode_index": next_episode,
             "attempted_episodes": next_episode,
             "stored_episodes": stored_count,
@@ -632,7 +721,7 @@ class JointBEVDatasetStore:
     def commit_episode(
         self,
         episode_index: int,
-        samples: Sequence[JointBEVSample],
+        samples: Sequence[JointBEVSample | JointBEVSampleV2],
         attributes: Mapping[str, object] | None = None,
     ) -> StoredEpisode:
         self.assigner.split_for_episode(episode_index)
@@ -689,6 +778,7 @@ __all__ = [
     "EpisodeSplitConfig",
     "JointBEVDatasetStore",
     "JointEpisodeWriter",
+    "JointSampleStorageContract",
     "JointStorageError",
     "PACKED_BEV_FIELD",
     "SPLIT_NAMES",
@@ -696,6 +786,11 @@ __all__ = [
     "STORAGE_SCHEMA_VERSION",
     "STORED_FIELD_DTYPES",
     "STORED_FIELD_SHAPES",
+    "V2_STORAGE_FORMAT",
+    "V2_STORAGE_SCHEMA_VERSION",
+    "V2_STORED_FIELD_DTYPES",
+    "V2_STORED_FIELD_SHAPES",
+    "joint_sample_storage_contract",
     "StoredEpisode",
     "fingerprint_payload",
 ]

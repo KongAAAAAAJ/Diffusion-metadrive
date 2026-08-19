@@ -17,6 +17,11 @@ from models.platoon_planner.route_chain_geometry import (
     RouteChainGeometryError,
     build_continuous_lane_chain_path,
 )
+from models.bev_planner.mode_contract import (
+    NUM_MODES,
+    mode_index_to_rule_action,
+    mode_indices_for_rule_action,
+)
 from models.decisioner.rule_decisioner_helper import (
     save_candidate_debug_plot,
     save_lane_pair_debug_plot,
@@ -59,6 +64,95 @@ class RuleMakerProposalBatch:
 
     batch_id: int
     proposals: tuple[JointActionProposal, ...]
+
+
+def hard_valid_modes_by_rule_action(
+    agent_ids: Sequence[str], mode_valid_mask: np.ndarray
+) -> dict[str, dict[int, tuple[int, ...]]]:
+    """Expose the existing K=10 hard mask to RuleMaker proposal filtering."""
+
+    ordered_ids = tuple(str(value) for value in agent_ids)
+    masks = np.asarray(mode_valid_mask)
+    if masks.shape != (len(ordered_ids), NUM_MODES) or masks.dtype != np.bool_:
+        raise LaneChangeCommitmentError(
+            "hard mode action feasibility requires bool [agents,10]"
+        )
+    return {
+        agent_id: {
+            action: tuple(
+                mode_index
+                for mode_index in mode_indices_for_rule_action(action)
+                if bool(masks[role_index, mode_index])
+            )
+            for action in (-1, 0, 1)
+        }
+        for role_index, agent_id in enumerate(ordered_ids)
+    }
+
+
+def joint_proposal_actions(
+    proposal: JointActionProposal, agent_ids: Sequence[str]
+) -> dict[str, int]:
+    ordered_ids = tuple(str(value) for value in agent_ids)
+    if tuple(proposal.decisions) != ordered_ids:
+        raise LaneChangeCommitmentError(
+            "proposal decisions do not match the ordered agent contract"
+        )
+    actions = {
+        agent_id: int(proposal.decisions[agent_id]["action"])
+        for agent_id in ordered_ids
+    }
+    if any(action not in (-1, 0, 1) for action in actions.values()):
+        raise LaneChangeCommitmentError("proposal contains an invalid RuleMaker action")
+    return actions
+
+
+def match_joint_action_proposal(
+    batch: RuleMakerProposalBatch,
+    actions: Mapping[str, int],
+    agent_ids: Sequence[str],
+) -> JointActionProposal | None:
+    """Find an exact action-tuple match without fabricating a commitment."""
+
+    ordered_ids = tuple(str(value) for value in agent_ids)
+    requested = tuple(int(actions[agent_id]) for agent_id in ordered_ids)
+    for proposal in batch.proposals:
+        candidate = joint_proposal_actions(proposal, ordered_ids)
+        if tuple(candidate[agent_id] for agent_id in ordered_ids) == requested:
+            return proposal
+    return None
+
+
+def diffusion_mode_feedback_actions(
+    selected_modes: Sequence[int],
+    agent_ids: Sequence[str],
+    *,
+    scenario_id: str,
+    local_route: str,
+) -> tuple[dict[str, int], dict[str, int], dict[str, bool]]:
+    """Map physical modes to RuleMaker feedback with the explicit S7 exception."""
+
+    ordered_ids = tuple(str(value) for value in agent_ids)
+    modes = tuple(int(value) for value in selected_modes)
+    if len(modes) != len(ordered_ids):
+        raise LaneChangeCommitmentError("selected modes do not match agent order")
+    physical = {
+        agent_id: int(mode_index_to_rule_action(modes[role_index]))
+        for role_index, agent_id in enumerate(ordered_ids)
+    }
+    s7_route_chain = (
+        str(scenario_id) == "S7_ego_merge_from_ramp"
+        and str(local_route) == "R7_merge_core"
+    )
+    exceptions = {
+        agent_id: bool(s7_route_chain and physical[agent_id] == -1)
+        for agent_id in ordered_ids
+    }
+    feedback = {
+        agent_id: (0 if exceptions[agent_id] else physical[agent_id])
+        for agent_id in ordered_ids
+    }
+    return physical, feedback, exceptions
 
 
 def load_rule_maker_config(

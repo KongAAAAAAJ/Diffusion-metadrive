@@ -107,6 +107,9 @@ class OrientedBoxState:
     heading_rad: float
     length_m: float
     width_m: float
+    velocity_xy: np.ndarray = field(
+        default_factory=lambda: np.zeros((2,), dtype=np.float32)
+    )
 
     def __post_init__(self) -> None:
         center = np.asarray(self.center_xy, dtype=np.float32).reshape(-1)
@@ -116,12 +119,18 @@ class OrientedBoxState:
             raise ValueError("heading_rad must be finite")
         if self.length_m <= 0.0 or self.width_m <= 0.0:
             raise ValueError("box length and width must be positive")
+        velocity = np.asarray(self.velocity_xy, dtype=np.float32).reshape(-1)
+        if velocity.size < 2 or not np.isfinite(velocity[:2]).all():
+            raise ValueError("velocity_xy must contain two finite values")
         # A simulator mutates vehicle.position in place.  Snapshots must own
         # their coordinates or all history channels collapse to the latest pose.
         object.__setattr__(self, "center_xy", np.ascontiguousarray(center[:2]).copy())
         object.__setattr__(self, "heading_rad", float(self.heading_rad))
         object.__setattr__(self, "length_m", float(self.length_m))
         object.__setattr__(self, "width_m", float(self.width_m))
+        object.__setattr__(
+            self, "velocity_xy", np.ascontiguousarray(velocity[:2]).copy()
+        )
 
     def corners_world(self) -> np.ndarray:
         half_length = self.length_m / 2.0
@@ -344,7 +353,28 @@ def _object_to_box(obj: object) -> OrientedBoxState | None:
         return None
     length = _read_dimension(obj, ("top_down_length", "LENGTH", "length"), 4.5)
     width = _read_dimension(obj, ("top_down_width", "WIDTH", "width"), 1.8)
-    return OrientedBoxState(position[:2], heading, length, width)
+    velocity = None
+    try:
+        candidate = np.asarray(getattr(obj, "velocity"), dtype=np.float32).reshape(-1)
+        if candidate.size >= 2 and np.isfinite(candidate[:2]).all():
+            velocity = candidate[:2]
+    except (AttributeError, TypeError, ValueError):
+        velocity = None
+    if velocity is None:
+        speed_mps = 0.0
+        for name, scale in (("speed", 1.0), ("speed_km_h", 1.0 / 3.6)):
+            try:
+                speed_mps = float(getattr(obj, name)) * scale
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if np.isfinite(speed_mps):
+                break
+            speed_mps = 0.0
+        velocity = np.asarray(
+            [speed_mps * np.cos(heading), speed_mps * np.sin(heading)],
+            dtype=np.float32,
+        )
+    return OrientedBoxState(position[:2], heading, length, width, velocity)
 
 
 def _deduplicate_objects(objects: Iterable[object]) -> list[object]:

@@ -239,6 +239,25 @@ def optimize_selected_model_trajectories(
     )
 
 
+def optimize_safe_stop_trajectories(
+    model_inputs: object,
+    *,
+    optimizer: KinematicTrajectoryOptimizer | None = None,
+) -> TrajectoryOptimizationResult:
+    """Project the always-valid fixed STOP anchors for fail-closed execution."""
+
+    if not hasattr(model_inputs, "coarse_trajectories"):
+        raise OnlineGRPOError("online model inputs are missing coarse_trajectories")
+    coarse = np.asarray(model_inputs.coarse_trajectories)
+    raw_stop = np.asarray(coarse[:, int(ModeIndex.STOP)], dtype=np.float32)
+    return optimize_selected_model_trajectories(
+        model_inputs,
+        raw_stop,
+        np.full((3,), int(ModeIndex.STOP), dtype=np.int64),
+        optimizer=optimizer,
+    )
+
+
 def episode_has_ended(
     terminated: Mapping[str, object],
     truncated: Mapping[str, object],

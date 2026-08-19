@@ -1,0 +1,44 @@
+experiment:
+  variant: A
+  joint_update: joint_mean
+  predecessor_condition: none
+  model_version: v2
+
+dataset:
+  root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2/platoon_joint_bev
+  train_split: train
+  val_split: val
+
+training:
+  device: cuda
+  mixed_precision: true
+  grad_scaler_init_scale: 1024.0
+  seed: 17
+  batch_size: 8
+  gradient_accumulation: 2
+  max_epochs: 40
+  num_workers: 4
+  planner_lr: 0.0001
+  backbone_lr: 0.00001
+  weight_decay: 0.0001
+  gradient_diagnostics_interval: 100
+
+loss:
+  xy_weight: 1.0
+  heading_weight: 0.2
+  mode_weight: 1.0
+  motion_weight: 0.05
+  pair_weight: 0.25
+  xy_beta_m: 1.0
+  heading_beta_rad: 0.1
+  motion_beta: 1.0
+  pair_beta_m: 1.0
+  dt_s: 0.5
+
+overfit:
+  max_optimizer_steps: 500
+  evaluation_interval_steps: 20
+  timestep: 8
+  min_loss_reduction: 0.70
+  min_mode_accuracy: 0.95
+  max_gt_mode_ade_m: 1.0

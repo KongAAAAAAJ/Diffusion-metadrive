@@ -38,6 +38,7 @@ RAW_EVENT_TYPES = frozenset(
         "terminated",
         "truncated",
         "actor_despawn",
+        "rule_maker_condition",
     }
 )
 

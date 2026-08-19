@@ -31,6 +31,9 @@ RELATION_STATE_DIM: Final[int] = 12
 RELATION_NEIGHBORS: Final[int] = 2
 TRAJECTORY_DIM: Final[int] = 3
 STOP_MODE_INDEX: Final[int] = NUM_MODES - 1
+MAX_BACKGROUND_ACTORS: Final[int] = 16
+BACKGROUND_ACTOR_STATE_DIM: Final[int] = 8
+NUM_SCENARIO_CODES: Final[int] = 6
 
 
 class BEVPlannerError(RuntimeError):
@@ -54,6 +57,7 @@ class BEVOnlyDiffusionPlannerConfig:
     inference_seed: int = 0
     max_xy_residual_m: float = 12.0
     predecessor_condition: Literal["none", "predicted_detached"] = "none"
+    model_version: Literal["v1", "v2"] = "v1"
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -88,6 +92,8 @@ class BEVOnlyDiffusionPlannerConfig:
             raise BEVPlannerError(
                 "predecessor_condition must be none or predicted_detached"
             )
+        if self.model_version not in ("v1", "v2"):
+            raise BEVPlannerError("model_version must be v1 or v2")
 
 
 @dataclass(frozen=True)
@@ -172,7 +178,13 @@ class JointStateRelationEncoder(nn.Module):
     """Encode ego state, masked neighbor relations, role, and BEV context."""
 
     def __init__(
-        self, d_model: int, num_heads: int, ffn_dim: int, dropout: float
+        self,
+        d_model: int,
+        num_heads: int,
+        ffn_dim: int,
+        dropout: float,
+        *,
+        model_version: str,
     ) -> None:
         super().__init__()
         self.register_buffer(
@@ -228,6 +240,47 @@ class JointStateRelationEncoder(nn.Module):
         )
         self.joint_norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+        self.model_version = str(model_version)
+        if self.model_version == "v2":
+            self.register_buffer(
+                "actor_scale",
+                torch.tensor(
+                    [64.0, 32.0, 1.0, 1.0, 30.0, 30.0, 10.0, 4.0],
+                    dtype=torch.float32,
+                ),
+                persistent=True,
+            )
+            self.actor_encoder: nn.Module | None = nn.Sequential(
+                nn.Linear(BACKGROUND_ACTOR_STATE_DIM, d_model),
+                nn.LayerNorm(d_model),
+                nn.GELU(),
+                nn.Linear(d_model, d_model),
+            )
+            self.actor_attention: nn.MultiheadAttention | None = nn.MultiheadAttention(
+                d_model,
+                num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.actor_norm: nn.LayerNorm | None = nn.LayerNorm(d_model)
+            self.scenario_embedding: nn.Embedding | None = nn.Embedding(
+                NUM_SCENARIO_CODES, d_model
+            )
+            self.formation_embedding: nn.Embedding | None = nn.Embedding(2, d_model)
+            self.rule_action_embedding: nn.Embedding | None = nn.Embedding(3, d_model)
+            self.rule_condition_fusion: nn.Module | None = nn.Sequential(
+                nn.Linear(d_model * 3, d_model),
+                nn.LayerNorm(d_model),
+                nn.GELU(),
+            )
+        else:
+            self.actor_encoder = None
+            self.actor_attention = None
+            self.actor_norm = None
+            self.scenario_embedding = None
+            self.formation_embedding = None
+            self.rule_action_embedding = None
+            self.rule_condition_fusion = None
 
     def forward(
         self,
@@ -236,6 +289,11 @@ class JointStateRelationEncoder(nn.Module):
         relation_valid_mask: Tensor,
         agent_role: Tensor,
         bev_feature: Tensor,
+        background_actor_state: Tensor | None = None,
+        background_actor_valid_mask: Tensor | None = None,
+        scenario_code: Tensor | None = None,
+        rule_formation_state: Tensor | None = None,
+        rule_action_condition: Tensor | None = None,
     ) -> Tensor:
         batch_size = int(ego_state.shape[0])
         ego_normalized = (ego_state / self.ego_scale).clamp(-5.0, 5.0)
@@ -271,6 +329,67 @@ class JointStateRelationEncoder(nn.Module):
                 dim=-1,
             )
         )
+        if self.model_version == "v2":
+            modules = (
+                self.actor_encoder,
+                self.actor_attention,
+                self.actor_norm,
+                self.scenario_embedding,
+                self.formation_embedding,
+                self.rule_action_embedding,
+                self.rule_condition_fusion,
+            )
+            if any(module is None for module in modules):
+                raise BEVPlannerError("v2 context modules are incomplete")
+            if any(
+                value is None
+                for value in (
+                    background_actor_state,
+                    background_actor_valid_mask,
+                    scenario_code,
+                    rule_formation_state,
+                    rule_action_condition,
+                )
+            ):
+                raise BEVPlannerError("v2 context inputs are incomplete")
+            actor_state = background_actor_state.reshape(
+                batch_size * NUM_PLATOON_ROLES,
+                MAX_BACKGROUND_ACTORS,
+                BACKGROUND_ACTOR_STATE_DIM,
+            )
+            actor_valid = background_actor_valid_mask.reshape(
+                batch_size * NUM_PLATOON_ROLES, MAX_BACKGROUND_ACTORS
+            )
+            actor_tokens = self.actor_encoder(
+                (actor_state / self.actor_scale).clamp(-5.0, 5.0)
+            )
+            safe_valid = actor_valid.clone()
+            empty_rows = ~safe_valid.any(dim=1)
+            if bool(empty_rows.any()):
+                safe_valid[empty_rows, 0] = True
+                actor_tokens = actor_tokens.clone()
+                actor_tokens[empty_rows, 0] = 0.0
+            actor_update = self.actor_attention(
+                tokens.reshape(batch_size * NUM_PLATOON_ROLES, 1, -1),
+                actor_tokens,
+                actor_tokens,
+                key_padding_mask=~safe_valid,
+                need_weights=False,
+            )[0].reshape(batch_size, NUM_PLATOON_ROLES, -1)
+            actor_update = actor_update.masked_fill(
+                empty_rows.reshape(batch_size, NUM_PLATOON_ROLES, 1), 0.0
+            )
+            tokens = self.actor_norm(tokens + self.dropout(actor_update))
+            scenario_token = self.scenario_embedding(scenario_code).unsqueeze(1).expand(
+                -1, NUM_PLATOON_ROLES, -1
+            )
+            formation_token = self.formation_embedding(
+                rule_formation_state
+            ).unsqueeze(1).expand(-1, NUM_PLATOON_ROLES, -1)
+            action_token = self.rule_action_embedding(rule_action_condition + 1)
+            tokens = tokens + self.rule_condition_fusion(
+                torch.cat((scenario_token, formation_token, action_token), dim=-1)
+            )
         attended = self.joint_attention(tokens, tokens, tokens, need_weights=False)[0]
         tokens = self.joint_norm1(tokens + self.dropout(attended))
         return self.joint_norm2(tokens + self.dropout(self.joint_ffn(tokens)))
@@ -620,6 +739,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             self.config.num_heads,
             self.config.ffn_dim,
             self.config.dropout,
+            model_version=self.config.model_version,
         )
         self.diffusion_decoder = CrossBEVDiffusionDecoder(self.config)
         self.mode_head = nn.Linear(self.config.d_model, 1)
@@ -691,6 +811,11 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         formation_relation_state: Tensor,
         relation_valid_mask: Tensor,
         agent_role: Tensor,
+        background_actor_state: Tensor | None = None,
+        background_actor_valid_mask: Tensor | None = None,
+        scenario_code: Tensor | None = None,
+        rule_formation_state: Tensor | None = None,
+        rule_action_condition: Tensor | None = None,
     ) -> int:
         batch_size = self._require_tensor(
             bev,
@@ -735,15 +860,84 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             raise BEVPlannerError(
                 "agent_role must be [LEADER,MIDDLE,REAR] for every joint sample"
             )
-        self._require_same_device(
-            bev,
-            {
+        device_values = {
                 "ego_state": ego_state,
                 "formation_relation_state": formation_relation_state,
                 "relation_valid_mask": relation_valid_mask,
                 "agent_role": agent_role,
-            },
-        )
+            }
+        if self.config.model_version == "v2":
+            if any(
+                value is None
+                for value in (
+                    background_actor_state,
+                    background_actor_valid_mask,
+                    scenario_code,
+                    rule_formation_state,
+                    rule_action_condition,
+                )
+            ):
+                raise BEVPlannerError("v2 planner requires all explicit condition inputs")
+            self._require_tensor(
+                background_actor_state,
+                name="background_actor_state",
+                dtype=torch.float32,
+                shape_tail=(
+                    NUM_PLATOON_ROLES,
+                    MAX_BACKGROUND_ACTORS,
+                    BACKGROUND_ACTOR_STATE_DIM,
+                ),
+                batch_size=batch_size,
+                finite=True,
+            )
+            self._require_tensor(
+                background_actor_valid_mask,
+                name="background_actor_valid_mask",
+                dtype=torch.bool,
+                shape_tail=(NUM_PLATOON_ROLES, MAX_BACKGROUND_ACTORS),
+                batch_size=batch_size,
+            )
+            self._require_tensor(
+                scenario_code,
+                name="scenario_code",
+                dtype=torch.int64,
+                shape_tail=(),
+                batch_size=batch_size,
+            )
+            self._require_tensor(
+                rule_formation_state,
+                name="rule_formation_state",
+                dtype=torch.int64,
+                shape_tail=(),
+                batch_size=batch_size,
+            )
+            self._require_tensor(
+                rule_action_condition,
+                name="rule_action_condition",
+                dtype=torch.int64,
+                shape_tail=(NUM_PLATOON_ROLES,),
+                batch_size=batch_size,
+            )
+            if bool(((scenario_code < 1) | (scenario_code > 5)).any()):
+                raise BEVPlannerError("scenario_code must be in [1,5]")
+            if bool(
+                ((rule_formation_state < 0) | (rule_formation_state > 1)).any()
+            ):
+                raise BEVPlannerError("rule_formation_state must be 0 or 1")
+            if bool(
+                ((rule_action_condition < -1) | (rule_action_condition > 1)).any()
+            ):
+                raise BEVPlannerError("rule_action_condition must be -1, 0, or 1")
+            device_values.update(
+                {
+                    "background_actor_state": background_actor_state,
+                    "background_actor_valid_mask": background_actor_valid_mask,
+                    "scenario_code": scenario_code,
+                    "rule_formation_state": rule_formation_state,
+                    "rule_action_condition": rule_action_condition,
+                }
+            )
+        self._require_same_device(bev, device_values)
         return batch_size
 
     def _validate_trajectory_inputs(
@@ -801,6 +995,12 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         formation_relation_state: Tensor,
         relation_valid_mask: Tensor,
         agent_role: Tensor,
+        *,
+        background_actor_state: Tensor | None = None,
+        background_actor_valid_mask: Tensor | None = None,
+        scenario_code: Tensor | None = None,
+        rule_formation_state: Tensor | None = None,
+        rule_action_condition: Tensor | None = None,
     ) -> BEVPlannerContext:
         """Encode reusable BEV and joint role context."""
 
@@ -810,6 +1010,11 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             formation_relation_state,
             relation_valid_mask,
             agent_role,
+            background_actor_state,
+            background_actor_valid_mask,
+            scenario_code,
+            rule_formation_state,
+            rule_action_condition,
         )
         flattened_bev = bev.reshape(batch_size * NUM_PLATOON_ROLES, 8, 256, 256)
         features = self.backbone(flattened_bev)
@@ -827,6 +1032,11 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             relation_valid_mask,
             agent_role,
             fused,
+            background_actor_state,
+            background_actor_valid_mask,
+            scenario_code,
+            rule_formation_state,
+            rule_action_condition,
         )
         return BEVPlannerContext(bev_feature=fused, role_tokens=role_tokens)
 
@@ -1218,6 +1428,11 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         coarse_trajectories: Tensor,
         mode_valid_mask: Tensor,
         *,
+        background_actor_state: Tensor | None = None,
+        background_actor_valid_mask: Tensor | None = None,
+        scenario_code: Tensor | None = None,
+        rule_formation_state: Tensor | None = None,
+        rule_action_condition: Tensor | None = None,
         diffusion_noise: Tensor | None = None,
         diffusion_timesteps: Tensor | None = None,
     ) -> dict[str, Tensor]:
@@ -1227,6 +1442,11 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             formation_relation_state,
             relation_valid_mask,
             agent_role,
+            background_actor_state=background_actor_state,
+            background_actor_valid_mask=background_actor_valid_mask,
+            scenario_code=scenario_code,
+            rule_formation_state=rule_formation_state,
+            rule_action_condition=rule_action_condition,
         )
         batch_size = context.batch_size
         self._validate_trajectory_inputs(

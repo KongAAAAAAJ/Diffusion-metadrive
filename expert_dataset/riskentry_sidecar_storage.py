@@ -147,7 +147,12 @@ def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
     _fsync_directory(path.parent)
 
 
-def sidecar_dataset_contract(base_dataset_fingerprint: str) -> dict[str, object]:
+def sidecar_dataset_contract(
+    base_dataset_fingerprint: str,
+    *,
+    base_format: str = BASE_STORAGE_FORMAT,
+    base_schema_version: int = BASE_STORAGE_SCHEMA_VERSION,
+) -> dict[str, object]:
     fingerprint = str(base_dataset_fingerprint)
     if SHA256_PATTERN.fullmatch(fingerprint) is None:
         raise RiskEntrySidecarStorageError(
@@ -156,8 +161,8 @@ def sidecar_dataset_contract(base_dataset_fingerprint: str) -> dict[str, object]
     return {
         "format": SIDECAR_FORMAT,
         "schema_version": SIDECAR_SCHEMA_VERSION,
-        "base_format": BASE_STORAGE_FORMAT,
-        "base_schema_version": BASE_STORAGE_SCHEMA_VERSION,
+        "base_format": str(base_format),
+        "base_schema_version": int(base_schema_version),
         "base_dataset_fingerprint": fingerprint,
         "split_policy": "mirror_base_episode_split",
         "timeline_policy": "all_decision_boundaries_including_terminal_post_step",
@@ -167,8 +172,17 @@ def sidecar_dataset_contract(base_dataset_fingerprint: str) -> dict[str, object]
     }
 
 
-def sidecar_dataset_fingerprint(base_dataset_fingerprint: str) -> str:
-    contract = sidecar_dataset_contract(base_dataset_fingerprint)
+def sidecar_dataset_fingerprint(
+    base_dataset_fingerprint: str,
+    *,
+    base_format: str = BASE_STORAGE_FORMAT,
+    base_schema_version: int = BASE_STORAGE_SCHEMA_VERSION,
+) -> str:
+    contract = sidecar_dataset_contract(
+        base_dataset_fingerprint,
+        base_format=base_format,
+        base_schema_version=base_schema_version,
+    )
     return hashlib.sha256(_canonical_json(contract).encode("utf-8")).hexdigest()
 
 
@@ -1040,12 +1054,20 @@ class RiskEntrySidecarDatasetStore:
         *,
         base_dataset_fingerprint: str,
         resume: bool,
+        base_format: str = BASE_STORAGE_FORMAT,
+        base_schema_version: int = BASE_STORAGE_SCHEMA_VERSION,
     ) -> None:
         self.dataset_root = Path(dataset_root).expanduser()
         self.base_dataset_fingerprint = str(base_dataset_fingerprint)
-        self.contract = sidecar_dataset_contract(self.base_dataset_fingerprint)
+        self.contract = sidecar_dataset_contract(
+            self.base_dataset_fingerprint,
+            base_format=base_format,
+            base_schema_version=base_schema_version,
+        )
         self.dataset_fingerprint = sidecar_dataset_fingerprint(
-            self.base_dataset_fingerprint
+            self.base_dataset_fingerprint,
+            base_format=base_format,
+            base_schema_version=base_schema_version,
         )
         existed = self.dataset_root.exists()
         existing_entries = set(self.dataset_root.iterdir()) if existed else set()
