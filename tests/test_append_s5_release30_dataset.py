@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -144,3 +145,66 @@ def test_copy_episode_is_physical_and_preserves_prior_provenance(
     assert np.array_equal(np.load(copied), np.arange(4, dtype=np.float32))
     assert copied.stat().st_ino != (source_episode / "value.npy").stat().st_ino
     assert len(inventory) == 2
+
+
+def test_install_staged_append_swaps_only_after_staging_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "dataset"
+    supplement = tmp_path / "supplement"
+    destination.mkdir()
+    supplement.mkdir()
+    staging, backup, failed = append._swap_paths(destination)
+    staging.mkdir()
+    (destination / "marker").write_text("old", encoding="utf-8")
+    (staging / "marker").write_text("new", encoding="utf-8")
+    plan = {
+        "contract_payload": {},
+        "base_dataset_fingerprint": "base",
+        "sidecar_dataset_fingerprint": "sidecar",
+        "curation_contract_sha256": "curation",
+    }
+    verified_roots = []
+
+    monkeypatch.setattr(append, "_exclusive_source_locks", lambda roots: nullcontext())
+    monkeypatch.setattr(
+        append,
+        "_recheck_plan_bindings",
+        lambda destination_root, supplement_root, frozen_plan: None,
+    )
+
+    def fake_verify(root: Path) -> dict[str, object]:
+        verified_roots.append(Path(root))
+        return {
+            "bundle_root": str(Path(root).resolve()),
+            "base_dataset_fingerprint": "base",
+            "sidecar_dataset_fingerprint": "sidecar",
+            "curation_contract_sha256": "curation",
+            "verified": True,
+        }
+
+    monkeypatch.setattr(append, "verify_appended_bundle", fake_verify)
+    result = append.install_staged_append(destination, supplement, plan)
+
+    assert verified_roots == [staging, destination]
+    assert (destination / "marker").read_text(encoding="utf-8") == "new"
+    assert (backup / "marker").read_text(encoding="utf-8") == "old"
+    assert not staging.exists()
+    assert not failed.exists()
+    assert result["backup_retained"] is True
+    assert result["rollback_performed"] is False
+
+
+def test_staging_must_match_the_bound_dry_run_plan() -> None:
+    report = {
+        "base_dataset_fingerprint": "unexpected",
+        "sidecar_dataset_fingerprint": "sidecar",
+        "curation_contract_sha256": "curation",
+    }
+    plan = {
+        "base_dataset_fingerprint": "base",
+        "sidecar_dataset_fingerprint": "sidecar",
+        "curation_contract_sha256": "curation",
+    }
+    with pytest.raises(append.S5AppendError, match="does not match dry-run plan"):
+        append._require_staging_matches_plan(report, plan)

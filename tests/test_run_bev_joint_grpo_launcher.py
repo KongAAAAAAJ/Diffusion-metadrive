@@ -7,6 +7,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "run_bev_joint_grpo.sh"
+LEGACY_ENV = (
+    "PIPELINE_STAGE",
+    "ALLOW_FAILED_CALIBRATION_DIAGNOSTIC",
+    "DEVELOPMENT_REPORT",
+    "CALIBRATION_REPORT",
+)
 
 
 def _fake_python(path: Path) -> Path:
@@ -14,27 +20,6 @@ def _fake_python(path: Path) -> Path:
         """#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$CALL_LOG"
-output=""
-phase=""
-while (( "$#" )); do
-  case "$1" in
-    --output)
-      output="$2"
-      shift 2
-      ;;
-    --phase)
-      phase="$2"
-      shift 2
-      ;;
-    *)
-      shift
-      ;;
-  esac
-done
-if [[ -n "$output" ]]; then
-  mkdir -p "$(dirname "$output")"
-  printf '{"phase":"%s"}\\n' "$phase" > "$output"
-fi
 """,
         encoding="utf-8",
     )
@@ -45,24 +30,22 @@ fi
 def _environment(tmp_path: Path) -> dict[str, str]:
     checkpoint = tmp_path / "best.pt"
     checkpoint.write_bytes(b"stage1")
-    call_log = tmp_path / "calls.log"
-    return {
+    environment = {
         **os.environ,
         "PYTHON_BIN": str(_fake_python(tmp_path / "fake-python")),
         "SOURCE_CHECKPOINT": str(checkpoint),
         "ARTIFACT_ROOT": str(tmp_path / "artifacts"),
-        "CALL_LOG": str(call_log),
+        "CALL_LOG": str(tmp_path / "calls.log"),
         "MAX_OPTIMIZER_STEPS": "37",
     }
+    for name in LEGACY_ENV:
+        environment.pop(name, None)
+    return environment
 
 
-def test_all_runs_development_holdout_then_bounded_training(
-    tmp_path: Path,
-) -> None:
+def test_launcher_directly_starts_bounded_tau_d_training(tmp_path: Path) -> None:
     environment = _environment(tmp_path)
-    environment["PIPELINE_STAGE"] = "all"
-    environment["ALLOW_FAILED_CALIBRATION_DIAGNOSTIC"] = "0"
-    subprocess.run(
+    result = subprocess.run(
         ["bash", str(LAUNCHER)],
         cwd=ROOT,
         env=environment,
@@ -71,21 +54,36 @@ def test_all_runs_development_holdout_then_bounded_training(
         text=True,
     )
     calls = Path(environment["CALL_LOG"]).read_text(encoding="utf-8").splitlines()
-    assert len(calls) == 3
-    assert "calibrate_bev_joint_reward.py" in calls[0]
-    assert "--phase development" in calls[0]
-    assert "calibration_v3/A-development.json" in calls[0]
-    assert "calibrate_bev_joint_reward.py" in calls[1]
-    assert "--phase holdout" in calls[1]
-    assert "calibration_v3/A-holdout.json" in calls[1]
-    assert "--tracking-envelope-report" in calls[1]
-    assert "-m train.train_bev_joint_grpo_online" in calls[2]
-    assert "--variant A" in calls[2]
-    assert "--run-mode smoke" in calls[2]
-    assert "--max-optimizer-steps 37" in calls[2]
+    assert len(calls) == 1
+    assert "-m train.train_bev_joint_grpo_online" in calls[0]
+    assert "--variant A" in calls[0]
+    assert "--run-mode smoke" in calls[0]
+    assert "--max-optimizer-steps 37" in calls[0]
+    assert "calibrat" not in calls[0]
+    assert "training_v1" in calls[0]
+    assert "reward_domain=tau_d" in result.stdout
 
 
-def test_formal_mode_is_rejected_before_any_process_starts(tmp_path: Path) -> None:
+def test_launcher_rejects_legacy_calibration_and_pipeline_variables(
+    tmp_path: Path,
+) -> None:
+    for name in LEGACY_ENV:
+        environment = _environment(tmp_path)
+        environment[name] = "legacy-value"
+        result = subprocess.run(
+            ["bash", str(LAUNCHER)],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "no longer accepted" in result.stderr
+    assert not Path(environment["CALL_LOG"]).exists()
+
+
+def test_formal_mode_is_rejected_before_training(tmp_path: Path) -> None:
     environment = _environment(tmp_path)
     environment["RUN_MODE"] = "formal"
     result = subprocess.run(
@@ -101,64 +99,9 @@ def test_formal_mode_is_rejected_before_any_process_starts(tmp_path: Path) -> No
     assert not Path(environment["CALL_LOG"]).exists()
 
 
-def test_train_stage_requires_holdout_report(tmp_path: Path) -> None:
-    environment = _environment(tmp_path)
-    environment["PIPELINE_STAGE"] = "train"
-    result = subprocess.run(
-        ["bash", str(LAUNCHER)],
-        cwd=ROOT,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 2
-    assert "holdout calibration report does not exist" in result.stderr
-    assert not Path(environment["CALL_LOG"]).exists()
-
-
-def test_bare_launcher_uses_v3_report_and_never_adds_bypass_flag(
-    tmp_path: Path,
-) -> None:
-    environment = _environment(tmp_path)
-    calibration_report = (
-        Path(environment["ARTIFACT_ROOT"])
-        / "calibration_v3"
-        / "A-holdout.json"
-    )
-    calibration_report.parent.mkdir(parents=True)
-    calibration_report.write_text('{"passed":false}\n', encoding="utf-8")
-
-    result = subprocess.run(
-        ["bash", str(LAUNCHER)],
-        cwd=ROOT,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    calls = Path(environment["CALL_LOG"]).read_text(encoding="utf-8").splitlines()
-    assert len(calls) == 1
-    assert "-m train.train_bev_joint_grpo_online" in calls[0]
-    assert "--allow-failed-calibration-diagnostic" not in calls[0]
-    assert "training_v2" in calls[0]
-    assert "pipeline_stage=train" in result.stdout
-    assert "calibration_bypass=0" in result.stdout
-
-
-def test_bypass_rejects_calibration_or_all_pipeline(tmp_path: Path) -> None:
-    environment = _environment(tmp_path)
-    environment["PIPELINE_STAGE"] = "all"
-    environment["ALLOW_FAILED_CALIBRATION_DIAGNOSTIC"] = "1"
-    result = subprocess.run(
-        ["bash", str(LAUNCHER)],
-        cwd=ROOT,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 2
-    assert "forbids failed-calibration bypass" in result.stderr
-    assert not Path(environment["CALL_LOG"]).exists()
+def test_launcher_defaults_to_isolated_tau_d_roots() -> None:
+    source = LAUNCHER.read_text(encoding="utf-8")
+    assert "bev_joint_grpo_open_tau_d_v1/stage1_run_1" in source
+    assert 'DEFAULT_OUTPUT_ROOT="${ARTIFACT_ROOT}/training_v1"' in source
+    assert 'DEFAULT_LOG_ROOT="${ARTIFACT_ROOT}/logs_v1"' in source
+    assert "calibrate_bev_joint_reward.py" not in source

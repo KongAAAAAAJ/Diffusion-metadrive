@@ -7,13 +7,14 @@ import pytest
 
 from envs.observations.semantic_bev import SemanticBEVConfig
 from models.bev_planner import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
     JointRewardError,
     JointTrajectoryProxyReward,
     aggregate_temporal_risk,
-    calibrate_joint_rewards,
     closing_ttc_from_gap_series,
     compose_joint_reward,
     drivable_signed_distance_m,
@@ -299,35 +300,25 @@ def test_reward_rejects_labels_and_invalid_contracts() -> None:
         )
 
 
-def test_calibration_statistics_and_gate() -> None:
-    proxy = np.tile(np.asarray([0.0, 1.0, 2.0, 3.0]), (12, 1))
-    simulator = proxy * 2.0 + 0.25
-    safe = np.zeros_like(proxy, dtype=np.bool_)
-    passed = calibrate_joint_rewards(proxy, simulator, safe, safe)
-    assert passed.passed is True
-    assert passed.mean_spearman == pytest.approx(1.0)
-    assert passed.pairwise_agreement == pytest.approx(1.0)
-    assert passed.informative_groups == 12
-
-    simulator_bad = safe.copy()
-    simulator_bad[0, 0] = True
-    failed = calibrate_joint_rewards(proxy, simulator, safe, simulator_bad)
-    assert failed.passed is False
-    assert failed.false_safe_count == 1
-
-
-def test_calibration_rejects_uninformative_or_wrong_shapes() -> None:
-    constant = np.ones((12, 4), dtype=np.float32)
-    safe = np.zeros((12, 4), dtype=np.bool_)
-    result = calibrate_joint_rewards(constant, constant, safe, safe)
-    assert result.passed is False
-    assert result.informative_groups == 0
-    assert result.mean_spearman == 0.0
-    assert np.isfinite(result.mean_spearman)
-    with pytest.raises(JointRewardError):
-        calibrate_joint_rewards(
-            np.zeros((2, 3)), np.zeros((2, 3)), safe[:2, :3], safe[:2, :3]
-        )
+def test_grpo_open_application_contract_freezes_tau_d_without_changing_reward() -> None:
+    assert GRPO_OPEN_REWARD_APPLICATION_CONTRACT == {
+        "version": "stage2_grpo_open_application_v1",
+        "policy_sample_domain": "tau_d",
+        "policy_probability_domain": "tau_d",
+        "reward_input_domain": "tau_d",
+        "candidate_selection_domain": "tau_d",
+        "execution_input_domain": "tau_cmd",
+        "execution_transform": "KinematicTrajectoryOptimizer(selected_tau_d)",
+        "optimize_only_selected_candidate": True,
+        "optimizer_must_succeed_before_policy_update": True,
+        "tracking_expansion_enabled": False,
+        "calibration_required": False,
+        "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+        "simulator_validation_role": "diagnostic_only",
+    }
+    assert GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 == (
+        "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6"
+    )
 
 
 def test_reward_config_is_strict() -> None:

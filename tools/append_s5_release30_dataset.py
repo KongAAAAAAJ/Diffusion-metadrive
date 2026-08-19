@@ -851,7 +851,44 @@ def _validate_swap_paths(destination_root: Path) -> tuple[Path, Path, Path]:
     return staging, backup, failed
 
 
-def execute_append(
+def _recheck_plan_bindings(
+    destination_root: Path,
+    supplement_root: Path,
+    plan: Mapping[str, object],
+) -> None:
+    contract = plan["contract_payload"]
+    if not isinstance(contract, Mapping):
+        raise S5AppendError("append contract payload is missing")
+    destination_source = contract["destination_source"]
+    supplement_source = contract["supplement_source"]
+    if not isinstance(destination_source, Mapping) or not isinstance(
+        supplement_source, Mapping
+    ):
+        raise S5AppendError("append source bindings are missing")
+    if (
+        _file_sha256(destination_root / "bundle_episode_index.jsonl")
+        != destination_source["bundle_index_sha256"]
+        or _file_sha256(destination_root / "dataset_curation_manifest.json")
+        != destination_source["dataset_curation_manifest_sha256"]
+        or _file_sha256(supplement_root / "bundle_episode_index.jsonl")
+        != supplement_source["bundle_index_sha256"]
+    ):
+        raise S5AppendError("append source hashes drifted before staging")
+
+
+def _require_staging_matches_plan(
+    staging_report: Mapping[str, object], plan: Mapping[str, object]
+) -> None:
+    for key in (
+        "base_dataset_fingerprint",
+        "sidecar_dataset_fingerprint",
+        "curation_contract_sha256",
+    ):
+        if staging_report.get(key) != plan.get(key):
+            raise S5AppendError(f"verified staging {key} does not match dry-run plan")
+
+
+def stage_append(
     destination_root: Path,
     supplement_root: Path,
     plan: Mapping[str, object],
@@ -860,26 +897,27 @@ def execute_append(
     if staging.exists() or backup.exists() or failed.exists():
         raise S5AppendError("append staging, backup, or failed root already exists")
     with _exclusive_source_locks((destination_root, supplement_root)):
-        contract = plan["contract_payload"]
-        if not isinstance(contract, Mapping):
-            raise S5AppendError("append contract payload is missing")
-        destination_source = contract["destination_source"]
-        supplement_source = contract["supplement_source"]
-        if not isinstance(destination_source, Mapping) or not isinstance(
-            supplement_source, Mapping
-        ):
-            raise S5AppendError("append source bindings are missing")
-        if (
-            _file_sha256(destination_root / "bundle_episode_index.jsonl")
-            != destination_source["bundle_index_sha256"]
-            or _file_sha256(destination_root / "dataset_curation_manifest.json")
-            != destination_source["dataset_curation_manifest_sha256"]
-            or _file_sha256(supplement_root / "bundle_episode_index.jsonl")
-            != supplement_source["bundle_index_sha256"]
-        ):
-            raise S5AppendError("append source hashes drifted before staging")
+        _recheck_plan_bindings(destination_root, supplement_root, plan)
         build_staging(destination_root, supplement_root, staging, plan)
         staging_report = verify_appended_bundle(staging)
+        _require_staging_matches_plan(staging_report, plan)
+        return staging_report
+
+
+def install_staged_append(
+    destination_root: Path,
+    supplement_root: Path,
+    plan: Mapping[str, object],
+) -> dict[str, object]:
+    staging, backup, failed = _validate_swap_paths(destination_root)
+    if not staging.is_dir():
+        raise S5AppendError("verified append staging root is missing")
+    if backup.exists() or failed.exists():
+        raise S5AppendError("append backup or failed root already exists")
+    with _exclusive_source_locks((destination_root, supplement_root)):
+        _recheck_plan_bindings(destination_root, supplement_root, plan)
+        staging_report = verify_appended_bundle(staging)
+        _require_staging_matches_plan(staging_report, plan)
         os.replace(destination_root, backup)
         try:
             os.replace(staging, destination_root)
@@ -908,6 +946,15 @@ def execute_append(
     }
 
 
+def execute_append(
+    destination_root: Path,
+    supplement_root: Path,
+    plan: Mapping[str, object],
+) -> dict[str, object]:
+    stage_append(destination_root, supplement_root, plan)
+    return install_staged_append(destination_root, supplement_root, plan)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--destination-root", type=Path, default=DESTINATION_ROOT)
@@ -923,7 +970,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--expected-supplement-fingerprint", required=True)
     parser.add_argument("--expected-supplement-index-sha256", required=True)
-    parser.add_argument("--execute", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--execute", action="store_true")
+    modes.add_argument("--stage-only", action="store_true")
+    modes.add_argument("--install-staged", action="store_true")
     parser.add_argument("--replace-in-place", action="store_true")
     parser.add_argument("--result-json", type=Path)
     return parser
@@ -946,10 +996,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_supplement_index_sha256=args.expected_supplement_index_sha256,
         verify_destination_payload_hashes=True,
     )
-    if args.execute:
+    if args.execute or args.install_staged:
         if not args.replace_in_place:
-            raise S5AppendError("execution requires --replace-in-place")
+            raise S5AppendError("installation requires --replace-in-place")
+    if args.execute:
         executed = execute_append(destination_root, supplement_root, plan)
+        result = {"mode": "executed", **executed}
+    elif args.stage_only:
+        staged = stage_append(destination_root, supplement_root, plan)
+        result = {"mode": "staged", **staged}
+    elif args.install_staged:
+        executed = install_staged_append(destination_root, supplement_root, plan)
         result = {"mode": "executed", **executed}
     else:
         result = {"mode": "dry_run", **plan}
@@ -971,5 +1028,7 @@ __all__ = [
     "build_staging",
     "execute_append",
     "inspect_sources",
+    "install_staged_append",
+    "stage_append",
     "verify_appended_bundle",
 ]

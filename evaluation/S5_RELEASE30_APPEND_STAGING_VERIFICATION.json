@@ -1,0 +1,32 @@
+{
+  "base_dataset_fingerprint": "e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511",
+  "base_episodes": 263,
+  "base_joint_samples": 50260,
+  "bundle_index_rows": 431,
+  "bundle_index_sha256": "1467958600f764cd6cca1a7301bcfd00ac9c720326296b0ff950f76e4d6f66e5",
+  "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1.s5_release30_append_staging",
+  "curation_contract_sha256": "8e7394f4eb6b6ab4dcefe7b31ff32828c4866aacae89e20ba7715a313c5f0c83",
+  "eligible_for_formal_training": false,
+  "format": "s5-release30-appended-curated-bundle-v1",
+  "mode": "staged",
+  "new_release30_episodes": 30,
+  "s5_behavior_episode_counts": {
+    "keep_emergency_braking": 5,
+    "temporary_formation_release_and_recovery": 49
+  },
+  "sidecar_dataset_fingerprint": "a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6",
+  "sidecar_episodes": 363,
+  "sidecar_only_episodes": 100,
+  "sidecar_raw_steps": 103712,
+  "split_episode_counts": {
+    "test": 24,
+    "train": 208,
+    "val": 31
+  },
+  "split_joint_samples": {
+    "test": 4600,
+    "train": 39780,
+    "val": 5880
+  },
+  "verified_payload_files": 5897
+}

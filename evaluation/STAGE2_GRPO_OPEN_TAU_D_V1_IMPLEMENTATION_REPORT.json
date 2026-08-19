@@ -1,0 +1,93 @@
+{
+  "format": "stage2_grpo_open_tau_d_v1_implementation_report_v1",
+  "created_at": "2026-08-18T19:28:57+08:00",
+  "repository_commit_at_implementation": "2bbb516f557aff998ae52c64b33788240b93a6f8",
+  "implementation_gate": {
+    "name": "stage2_grpo_open_tau_d_v1_implementation",
+    "passed": true,
+    "scope": "code, focused regression, isolated one-step smoke, TensorBoard inspection, and checkpoint round-trip",
+    "long_training_started": false
+  },
+  "contracts": {
+    "reward_contract_version": "stage2_joint_reward_v2",
+    "reward_contract_sha256": "0e95826028f77e86d8130e2f4bc6ac4ed617001d5adef99b600df8f061fb2ab9",
+    "reward_config_sha256": "d8ee4366681b5f2b69b1dfad376b4cfd551822dc1996adff79eed4955e4218a3",
+    "reward_application_contract_version": "stage2_grpo_open_application_v1",
+    "reward_application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
+    "reward_input_domain": "tau_d",
+    "candidate_selection_domain": "tau_d",
+    "execution_input_domain": "tau_cmd",
+    "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+    "tracking_expansion_enabled": false,
+    "calibration_required": false
+  },
+  "implementation": {
+    "online_order": [
+      "sample G raw diffusion trajectories tau_d",
+      "score all tau_d with the V2 Proxy Reward",
+      "select the raw-reward argmax",
+      "optimize only the selected tau_d into tau_cmd",
+      "require optimizer success before the GRPO update",
+      "use the same raw rewards for GRPO advantage",
+      "execute the selected tau_cmd with one env.step"
+    ],
+    "simulator_validation_role": "diagnostic_only",
+    "simulator_failure_policy": "record simulator_available=0 and typed error details without suppressing a valid raw Proxy checkpoint",
+    "resume_policy": "require the application-contract SHA and verified historical raw-best checkpoint SHA; reject legacy calibration metadata and run_3",
+    "removed_runtime_surfaces": [
+      "scripts/calibrate_bev_joint_reward.py",
+      "scripts/preflight_bev_s5_s9.py",
+      "calibrate_joint_rewards API",
+      "calibration report config/CLI arguments",
+      "launcher calibration and pipeline stages"
+    ],
+    "historical_artifacts_modified": false
+  },
+  "focused_regression": {
+    "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_reward.py tests/test_joint_simulator_branch.py tests/test_bev_joint_grpo_online.py tests/test_bev_joint_grpo_a.py tests/test_control_tracking_benchmark.py tests/test_bev_four_model_evaluator.py tests/test_run_bev_joint_grpo_launcher.py tests/test_round13_closeout.py -q",
+    "passed": 81,
+    "failed": 0,
+    "warnings": 15
+  },
+  "smoke": {
+    "classification": "bounded diagnostic, formal-ineligible",
+    "artifact_root": "/tmp/stage2_grpo_open_tau_d_smoke/run_2",
+    "source_stage1_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
+    "optimizer_steps": 1,
+    "environment_steps": 33,
+    "sampled_rollouts": 1,
+    "checkpoint_round_trip": true,
+    "simulator_available": true,
+    "raw_proxy_reward_mean": -2.1674387715756893,
+    "pretrain_reward": -2.193595763295889,
+    "reward_gain": 0.026156991720199585,
+    "simulator_reward_mean": -0.8919584695249796,
+    "config_sha256": "cad3a0da25e166c598456ca9ce729008986586232406430e527b3a04879b92e2",
+    "report_sha256": "e9a9972cd1ea3e653bcb1e70e58153bd4bdddf5b3914964bec9371966eaf5a0e",
+    "best_checkpoint_sha256": "21d5b26c393a64e95c84553637d6ad37f5be3bfe636dac76d8b0582ab3e2a516",
+    "last_checkpoint_sha256": "059480912fec8f7ba3af6f0dbd5df2215509866bea89f3d68183c2a1712d68b5",
+    "tensorboard": {
+      "step": 1,
+      "required_tags_present": [
+        "validation/raw_proxy_reward_mean",
+        "validation/pretrain_reward",
+        "validation/reward_gain",
+        "validation/simulator_available",
+        "validation/simulator_reward_mean"
+      ],
+      "gain_equals_current_minus_pretrain": true
+    },
+    "earlier_attempts": [
+      "sandboxed launch stopped before model load because CUDA was unavailable",
+      "GPU run_1 exposed and preserved a selected-candidate metric shape bug; it produced no report/checkpoint and was superseded by passing run_2"
+    ]
+  },
+  "qualification": {
+    "reward_implementation_verified": true,
+    "calibration_performed": false,
+    "stage2_training_complete": false,
+    "formal_qualification_passed": false,
+    "paper_evidence_allowed": false
+  },
+  "next_hard_gate": "In a separate thread, start a new bounded diagnostic GRPO-Open run from the original Stage1 checkpoint under the isolated tau_d training_v1 root. Do not resume run_3 or read historical calibration reports."
+}

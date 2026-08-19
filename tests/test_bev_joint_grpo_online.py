@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,78 +8,77 @@ import numpy as np
 import pytest
 import torch
 
-from train.train_bev_joint_grpo_online import (
-    PRIMARY_S5_S9_SCENARIOS,
-    JointGRPOOnlineConfig,
-    OnlineGRPOError,
-    constant_velocity_actions,
-    execution_mode_valid_mask,
-    episode_has_ended,
-    joint_trajectory_action,
-    model_inputs_to_batch,
-    optimize_selected_model_trajectories,
-    run_joint_grpo_training,
-    _checkpoint_file_sha256,
-    _joint_rewards_are_informative,
-    _calibration_scope_contract,
-    _calibration_reward_diagnostics,
-    _round_robin_training_buckets,
-    _resume_best_checkpoint_anchor,
-    _summarize_calibration_tracking,
-    _validate_calibration_trajectory_optimizer_contract,
-    _validate_calibration_reward_contract,
-    _validate_online_checkpoint_metadata,
-    _validation_reward_comparison_metrics,
-    _validation_simulator_reward,
-    _scenario_ready_for_primary_sampling,
-)
-from models.bev_planner.trajectory_optimizer import (
-    KinematicTrajectoryOptimizerConfig,
-)
 from models.bev_planner.joint_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
     joint_reward_config_sha256,
 )
+from models.bev_planner.trajectory_optimizer import (
+    KinematicTrajectoryOptimizerConfig,
+    TrajectoryOptimizationError,
+)
+from scenarios.bev_round13_contract import primary_scenario_contract
 from scenarios.definitions import SCENARIO_BY_ID
-from scenarios.bev_round13_contract import HOLDOUT_SEEDS, primary_scenario_contract
+from train.train_bev_joint_grpo_online import (
+    PRIMARY_S5_S9_SCENARIOS,
+    JointGRPOOnlineConfig,
+    OnlineGRPOError,
+    _checkpoint_file_sha256,
+    _fixed_raw_proxy_and_simulator_validation,
+    _joint_rewards_are_informative,
+    _resume_best_checkpoint_anchor,
+    _round_robin_training_buckets,
+    _scenario_ready_for_primary_sampling,
+    _score_select_and_optimize_raw_candidates,
+    _validate_online_checkpoint_metadata,
+    _validate_raw_reward_config,
+    _validation_raw_proxy_reward,
+    _validation_reward_comparison_metrics,
+    constant_velocity_actions,
+    episode_has_ended,
+    execution_mode_valid_mask,
+    joint_trajectory_action,
+    model_inputs_to_batch,
+    optimize_selected_model_trajectories,
+    run_joint_grpo_training,
+)
 
 
-def _calibration(
-    path: Path,
-    *,
-    variant: str = "A",
-    passed: bool = False,
-    format_name: str = "bev_joint_reward_calibration_v3",
-) -> Path:
-    optimizer_config = KinematicTrajectoryOptimizerConfig()
+def _binding() -> dict[str, object]:
     reward_config = JointRewardConfig()
-    path.write_text(
-        json.dumps(
-            {
-                "format": format_name,
-                "calibration_phase": "holdout",
-                "development_calibration_sha256": "d" * 64,
-                "variant": variant,
-                "passed": passed,
-                "blockers": [] if passed else ["stop_terminal_speed"],
-                "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
-                "reward_contract": JOINT_REWARD_CONTRACT,
-                "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
-                "reward_config": dataclasses.asdict(reward_config),
-                "reward_config_sha256": joint_reward_config_sha256(reward_config),
-                "scenario_contract": primary_scenario_contract(),
-                "scenario_contract_sha256": primary_scenario_contract()["sha256"],
-                "scenarios": [list(value) for value in PRIMARY_S5_S9_SCENARIOS],
-                "seeds": list(HOLDOUT_SEEDS),
-                "trajectory_optimizer_config": optimizer_config.__dict__,
-                "trajectory_optimizer_sha256": optimizer_config.sha256(),
-            }
+    optimizer_config = KinematicTrajectoryOptimizerConfig()
+    return {
+        "schema_version": 1,
+        "format": "bev_joint_grpo_a_v1",
+        "variant": "A",
+        "predecessor_condition": "A",
+        "source_stage1_sha256": "a" * 64,
+        "run_mode": "smoke",
+        "diagnostic_only": True,
+        "eligible_for_formal_training": False,
+        "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
+        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+        "reward_config": dataclasses.asdict(reward_config),
+        "reward_config_sha256": joint_reward_config_sha256(reward_config),
+        "reward_application_contract": GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+        "reward_application_contract_sha256": (
+            GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
         ),
-        encoding="utf-8",
-    )
-    return path
+        "reward_input_domain": "tau_d",
+        "candidate_selection_domain": "tau_d",
+        "execution_input_domain": "tau_cmd",
+        "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+        "tracking_expansion_enabled": False,
+        "calibration_required": False,
+        "scenario_contract_sha256": primary_scenario_contract()["sha256"],
+        "scenario_seeds": [17, 23],
+        "trajectory_optimizer_config": dataclasses.asdict(optimizer_config),
+        "trajectory_optimizer_sha256": optimizer_config.sha256(),
+        "environment_steps": 1,
+    }
 
 
 def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
@@ -92,358 +90,132 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
         JointGRPOOnlineConfig(
             scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),)
         )
-
-    report = _calibration(tmp_path / "failed.json")
-    config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
-    with pytest.raises(OnlineGRPOError, match="calibration failed"):
-        run_joint_grpo_training(
-            config,
-            variant="A",
-            run_mode="smoke",
-            source_checkpoint=tmp_path / "does-not-exist.pt",
-            output_root=tmp_path / "output",
-            max_optimizer_steps=20,
-        )
+    config = JointGRPOOnlineConfig(device="cpu")
     with pytest.raises(OnlineGRPOError, match="positive"):
         run_joint_grpo_training(
             config,
             variant="A",
             run_mode="smoke",
-            source_checkpoint=tmp_path / "does-not-exist.pt",
+            source_checkpoint=tmp_path / "missing.pt",
             output_root=tmp_path / "output",
             max_optimizer_steps=0,
         )
-    with pytest.raises(OnlineGRPOError, match="forbids"):
-        run_joint_grpo_training(
-            config,
-            variant="A",
-            run_mode="formal",
-            source_checkpoint=tmp_path / "does-not-exist.pt",
-            output_root=tmp_path / "output",
-            max_optimizer_steps=20,
+
+
+def test_tracking_expansion_is_rejected_and_base_config_is_frozen() -> None:
+    _validate_raw_reward_config(JointRewardConfig())
+    with pytest.raises(OnlineGRPOError, match="zero tracking margins"):
+        _validate_raw_reward_config(
+            JointRewardConfig(tracking_lateral_margin_m=0.01)
         )
+    with pytest.raises(OnlineGRPOError, match="frozen base config"):
+        _validate_raw_reward_config(JointRewardConfig(gap_weight=1.0))
 
 
-def test_failed_calibration_bypass_is_rejected_for_reward_v2(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report = _calibration(tmp_path / "failed.json")
-    config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
+def test_raw_proxy_receives_exact_tau_d_and_only_argmax_is_optimized() -> None:
+    raw = np.arange(4 * 3 * 8 * 3, dtype=np.float32).reshape(4, 3, 8, 3)
+    modes = np.arange(12, dtype=np.int64).reshape(4, 3) % 10
+    seen: dict[str, np.ndarray] = {}
 
-    source_loader_reached = False
+    class Proxy:
+        def score(self, env, model_inputs, trajectories):
+            seen["proxy"] = np.array(trajectories, copy=True)
+            return SimpleNamespace(
+                rewards=np.asarray([-3.0, 8.0, 2.0, 1.0], dtype=np.float32),
+                unsafe=np.zeros(4, dtype=np.bool_),
+            )
 
-    def reached_source_loader(*args, **kwargs):
-        nonlocal source_loader_reached
-        source_loader_reached = True
-        raise AssertionError("source loader must not be reached")
+    class Optimizer:
+        def optimize(self, trajectories, coarse, speeds, selected_modes):
+            seen["optimizer"] = np.array(trajectories, copy=True)
+            seen["modes"] = np.array(selected_modes, copy=True)
+            return SimpleNamespace(
+                optimized_trajectories=np.asarray(trajectories) + 1000.0
+            )
 
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._load_trainer",
-        reached_source_loader,
-    )
-    with pytest.raises(OnlineGRPOError, match="forbids failed-calibration bypass"):
-        run_joint_grpo_training(
-            config,
-            variant="A",
-            run_mode="smoke",
-            source_checkpoint=tmp_path / "does-not-exist.pt",
-            output_root=tmp_path / "output",
-            max_optimizer_steps=1,
-            allow_failed_calibration_diagnostic=True,
-        )
-    with pytest.raises(OnlineGRPOError, match="forbids failed-calibration bypass"):
-        run_joint_grpo_training(
-            config,
-            variant="A",
-            run_mode="formal",
-            source_checkpoint=tmp_path / "does-not-exist.pt",
-            output_root=tmp_path / "output",
-            allow_failed_calibration_diagnostic=True,
-        )
-
-    passed_report = _calibration(tmp_path / "passed.json", passed=True)
-    passed_config = JointGRPOOnlineConfig(
-        device="cpu", calibration_report=passed_report
-    )
-    with pytest.raises(OnlineGRPOError, match="forbids failed-calibration bypass"):
-        run_joint_grpo_training(
-            passed_config,
-            variant="A",
-            run_mode="smoke",
-            source_checkpoint=tmp_path / "does-not-exist.pt",
-            output_root=tmp_path / "output",
-            max_optimizer_steps=1,
-            allow_failed_calibration_diagnostic=True,
-        )
-    assert source_loader_reached is False
-
-
-def test_empty_safe_group_tracking_becomes_an_explicit_failed_gate() -> None:
-    tracking, lateral_p95, heading_p95, passed = (
-        _summarize_calibration_tracking([])
-    )
-    assert tracking["row_count"] == 0
-    assert tracking["blocked_reason"] == "no_closed_loop_safe_group"
-    assert tracking["overall"] is None
-    assert tracking["recommended_envelope"]["within_controller_limits"] is False
-    assert lateral_p95 is None
-    assert heading_p95 is None
-    assert passed is False
-
-    safe_row = {
-        "scenario": "S5_hard_brake_lead",
-        "role": 0,
-        "longitudinal_errors_m": [0.1, 0.2],
-        "lateral_errors_m": [0.05, 0.1],
-        "heading_errors_rad": [0.01, 0.02],
-    }
-    tracking, lateral_p95, heading_p95, passed = (
-        _summarize_calibration_tracking([safe_row])
-    )
-    assert tracking["row_count"] == 1
-    assert lateral_p95 == pytest.approx(0.0975)
-    assert heading_p95 == pytest.approx(0.0195)
-    assert passed is True
-
-
-def test_calibration_scenario_routes_match_runtime_contract() -> None:
-    for scenario_id, route in PRIMARY_S5_S9_SCENARIOS:
-        assert route in SCENARIO_BY_ID[scenario_id].allowed_local_routes
-        assert route in SCENARIO_BY_ID[scenario_id].trigger_by_local_route
-    assert JointGRPOOnlineConfig(device="cpu").scenarios == PRIMARY_S5_S9_SCENARIOS
-
-
-def test_calibration_subset_smoke_is_explicitly_formal_ineligible() -> None:
-    scenarios, seeds, contract = _calibration_scope_contract(
-        (PRIMARY_S5_S9_SCENARIOS[0],),
-        (17,),
-        states_per_episode=1,
-        calibration_phase="development",
-        diagnostic_subset_smoke=True,
-    )
-    assert scenarios == (PRIMARY_S5_S9_SCENARIOS[0],)
-    assert seeds == (17,)
-    assert contract["diagnostic_only"] is True
-    assert contract["eligible_for_formal_training"] is False
-    assert contract["format"].endswith("subset_smoke_scope")
-    assert len(contract["sha256"]) == 64
-    with pytest.raises(OnlineGRPOError, match="complete ordered S5--S9"):
-        _calibration_scope_contract(
-            scenarios,
-            seeds,
-            states_per_episode=1,
-            calibration_phase="development",
-            diagnostic_subset_smoke=False,
-        )
-    with pytest.raises(OnlineGRPOError, match="one primary S5--S9 scenario"):
-        _calibration_scope_contract(
-            scenarios,
-            HOLDOUT_SEEDS[:1],
-            states_per_episode=1,
-            calibration_phase="holdout",
-            diagnostic_subset_smoke=True,
-        )
-
-
-def test_execution_mask_override_reaches_policy_batch_without_mutating_inputs() -> None:
-    coarse = np.zeros((3, 10, 8, 3), dtype=np.float32)
-    coarse[..., 0] = (
-        4.0 * np.arange(1, 9, dtype=np.float32)[None, None, :] * 0.5
-    )
-    coarse[:, 9, :, 0] = np.asarray(
-        [1.5, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float32
-    )
-    physical_mask = np.ones((3, 10), dtype=np.bool_)
-    fields = {
-        "bev": np.zeros((3, 8, 256, 256), dtype=np.uint8),
-        "ego_state": np.zeros((3, 8), dtype=np.float32),
-        "formation_relation_state": np.zeros((3, 12), dtype=np.float32),
-        "relation_valid_mask": np.ones((3, 2), dtype=np.bool_),
-        "agent_role": np.arange(3, dtype=np.int64),
-        "coarse_trajectories": coarse,
-        "mode_valid_mask": physical_mask,
-    }
-    fields["ego_state"][:, 0] = 4.0
     values = SimpleNamespace(
-        **fields,
-        as_dict=lambda: fields,
+        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
+        ego_state=np.zeros((3, 8), dtype=np.float32),
     )
-
-    execution_mask = execution_mode_valid_mask(values)
-    batch = model_inputs_to_batch(
+    proxy, selected, optimization = _score_select_and_optimize_raw_candidates(
+        object(),
         values,
-        torch.device("cpu"),
-        mode_valid_mask=execution_mask,
+        raw,
+        modes,
+        proxy_backend=Proxy(),
+        trajectory_optimizer=Optimizer(),
     )
 
-    assert np.array_equal(values.mode_valid_mask, physical_mask)
-    assert torch.equal(
-        batch["mode_valid_mask"][0], torch.from_numpy(execution_mask.copy())
+    assert np.array_equal(seen["proxy"], raw)
+    assert selected == 1
+    assert np.array_equal(seen["optimizer"], raw[1:2])
+    assert np.array_equal(seen["modes"], modes[1:2])
+    assert np.array_equal(
+        optimization.optimized_trajectories[0], raw[1] + 1000.0
     )
-    assert bool(batch["mode_valid_mask"][0, :, 9].all())
+    assert proxy.rewards[selected] == 8.0
 
 
-def test_primary_sampling_waits_for_every_scenario_recipe() -> None:
-    class Orchestrator:
-        def __init__(self, complete: bool) -> None:
-            self.complete = complete
+def test_optimizer_failure_has_no_fallback_candidate() -> None:
+    raw = np.zeros((4, 3, 8, 3), dtype=np.float32)
+    modes = np.zeros((4, 3), dtype=np.int64)
+    calls = []
 
-        def get_episode_summary(self):
-            return {
-                "scenario_id": "S8_ego_exit_to_ramp",
-                "scenario_realized": True,
-                "scenario_recipes_complete": self.complete,
-            }
+    class Proxy:
+        def score(self, env, model_inputs, trajectories):
+            return SimpleNamespace(
+                rewards=np.asarray([0.0, 1.0, 9.0, 2.0], dtype=np.float32)
+            )
 
-    env = SimpleNamespace(_scenario_orchestrator=Orchestrator(False))
-    assert not _scenario_ready_for_primary_sampling(env)
-    env._scenario_orchestrator.complete = True
-    assert _scenario_ready_for_primary_sampling(env)
+    class FailingOptimizer:
+        def optimize(self, trajectories, coarse, speeds, selected_modes):
+            calls.append(np.array(trajectories, copy=True))
+            raise TrajectoryOptimizationError("selected candidate failed")
 
-
-def test_s5_primary_sampling_waits_for_actual_hard_brake() -> None:
-    class Orchestrator:
-        def __init__(self) -> None:
-            self.triggered = False
-            self.notes = ["adjacent_spawned:left_side"]
-
-        def get_episode_summary(self):
-            return {
-                "scenario_id": "S5_hard_brake_lead",
-                "scenario_realized": True,
-                "scenario_triggered": self.triggered,
-                "scenario_notes": list(self.notes),
-                "scenario_recipes_complete": False,
-            }
-
-    orchestrator = Orchestrator()
-    env = SimpleNamespace(_scenario_orchestrator=orchestrator)
-    assert not _scenario_ready_for_primary_sampling(env)
-
-    orchestrator.triggered = True
-    assert not _scenario_ready_for_primary_sampling(env)
-
-    orchestrator.notes.append("lead_brake_profile")
-    assert _scenario_ready_for_primary_sampling(env)
-
-
-def test_calibration_variant_is_checked_before_source_load(tmp_path: Path) -> None:
-    report = _calibration(tmp_path / "wrong.json", variant="B", passed=True)
-    config = JointGRPOOnlineConfig(device="cpu", calibration_report=report)
-    with pytest.raises(OnlineGRPOError, match="variant mismatch"):
-        run_joint_grpo_training(
-            config,
-            variant="A",
-            run_mode="smoke",
-            source_checkpoint=tmp_path / "does-not-exist.pt",
-            output_root=tmp_path / "output",
-            max_optimizer_steps=1,
+    values = SimpleNamespace(
+        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
+        ego_state=np.zeros((3, 8), dtype=np.float32),
+    )
+    with pytest.raises(TrajectoryOptimizationError, match="selected candidate"):
+        _score_select_and_optimize_raw_candidates(
+            object(),
+            values,
+            raw,
+            modes,
+            proxy_backend=Proxy(),
+            trajectory_optimizer=FailingOptimizer(),
         )
+    assert len(calls) == 1
+    assert np.array_equal(calls[0], raw[2:3])
 
 
-def test_legacy_v2_calibration_and_reward_hash_drift_are_rejected(
-    tmp_path: Path,
-) -> None:
-    legacy = _calibration(
-        tmp_path / "legacy.json",
-        passed=True,
-        format_name="bev_joint_reward_calibration_v2",
-    )
-    with pytest.raises(OnlineGRPOError, match="format mismatch"):
-        run_joint_grpo_training(
-            JointGRPOOnlineConfig(device="cpu", calibration_report=legacy),
-            variant="A",
-            run_mode="smoke",
-            source_checkpoint=tmp_path / "does-not-exist.pt",
-            output_root=tmp_path / "output",
-            max_optimizer_steps=1,
-        )
-
-    current = _calibration(tmp_path / "current.json", passed=True)
-    payload = json.loads(current.read_text(encoding="utf-8"))
-    payload["reward_config_sha256"] = "0" * 64
-    with pytest.raises(OnlineGRPOError, match="reward config mismatch"):
-        _validate_calibration_reward_contract(payload)
-
-
-def test_calibration_reward_diagnostics_are_per_scenario_and_non_gating() -> None:
-    rewards = np.asarray(
-        [[0.0, 0.0, 1.0, 2.0], [-1.0, -1.0, -1.0, -1.0]],
-        dtype=np.float32,
-    )
-    proxy_unsafe = np.asarray(
-        [[True, False, False, False], [True, True, False, False]],
-        dtype=np.bool_,
-    )
-    simulator_unsafe = np.asarray(
-        [[False, False, False, False], [True, False, False, False]],
-        dtype=np.bool_,
-    )
-    diagnostics = _calibration_reward_diagnostics(
-        rewards,
-        proxy_unsafe,
-        simulator_unsafe,
-        ["S5", "S6"],
-    )
-
-    assert diagnostics["diagnostic_only"] is True
-    assert diagnostics["gating_thresholds_added"] is False
-    assert diagnostics["overall"]["informative_rate"] == pytest.approx(0.5)
-    assert diagnostics["overall"]["false_unsafe_rate"] == pytest.approx(0.25)
-    assert diagnostics["by_scenario"]["S5"]["informative_rate"] == 1.0
-    assert diagnostics["by_scenario"]["S6"]["reward_tie_rate"] == 1.0
-
-
-def test_best_checkpoint_objective_uses_only_simulator_reward() -> None:
+def test_best_checkpoint_objective_uses_only_raw_proxy_reward() -> None:
     earlier = {
-        "validation/simulator_reward_mean": -8.0,
+        "validation/raw_proxy_reward_mean": -8.0,
+        "validation/simulator_reward_mean": 100.0,
         "validation/unsafe_count": 0.0,
     }
-    safer_but_worse = {
-        "validation/simulator_reward_mean": -9.0,
-        "validation/unsafe_count": 0.0,
-    }
-    higher_reward_more_unsafe = {
-        "validation/simulator_reward_mean": -7.0,
+    better_raw_worse_simulator = {
+        "validation/raw_proxy_reward_mean": -7.0,
+        "validation/simulator_reward_mean": -100.0,
         "validation/unsafe_count": 10.0,
     }
     exact_tie = {
-        "validation/simulator_reward_mean": -7.0,
-        "validation/unsafe_count": 0.0,
+        "validation/raw_proxy_reward_mean": -7.0,
+        "validation/simulator_reward_mean": 1000.0,
     }
-
-    best = _validation_simulator_reward(earlier)
-    assert _validation_simulator_reward(safer_but_worse) < best
-    candidate = _validation_simulator_reward(higher_reward_more_unsafe)
+    best = _validation_raw_proxy_reward(earlier)
+    candidate = _validation_raw_proxy_reward(better_raw_worse_simulator)
     assert candidate > best
     best = candidate
-    assert not _validation_simulator_reward(exact_tie) > best
+    assert not _validation_raw_proxy_reward(exact_tie) > best
 
 
-def test_resume_inherits_verified_historical_best_checkpoint(
-    tmp_path: Path,
-) -> None:
-    binding = {
-        "schema_version": 1,
-        "format": "bev_joint_grpo_a_v1",
-        "variant": "A",
-        "predecessor_condition": "A",
-        "source_stage1_sha256": "a" * 64,
-        "run_mode": "smoke",
-        "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
-        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
-        "reward_config_sha256": joint_reward_config_sha256(
-            JointRewardConfig()
-        ),
-        "calibration_report_sha256": "b" * 64,
-        "scenario_contract_sha256": "c" * 64,
-        "trajectory_optimizer_sha256": (
-            KinematicTrajectoryOptimizerConfig().sha256()
-        ),
-    }
+def test_resume_inherits_verified_historical_raw_best(tmp_path: Path) -> None:
+    binding = _binding()
     best_payload = {
         **binding,
-        "metrics": {"validation/simulator_reward_mean": -7.0},
+        "metrics": {"validation/raw_proxy_reward_mean": -7.0},
         "best_validation_reward": -7.0,
         "best_checkpoint_sha256": None,
     }
@@ -451,136 +223,204 @@ def test_resume_inherits_verified_historical_best_checkpoint(
     torch.save(best_payload, best_path)
     last_payload = {
         **binding,
-        "metrics": {"validation/simulator_reward_mean": -8.0},
+        "metrics": {"validation/raw_proxy_reward_mean": -8.0},
         "best_validation_reward": -7.0,
         "best_checkpoint_sha256": _checkpoint_file_sha256(best_path),
     }
-
     resolved, reward = _resume_best_checkpoint_anchor(
         tmp_path / "last.pt", last_payload
     )
     assert resolved == best_path
     assert reward == -7.0
-    assert not _validation_simulator_reward(
-        {"validation/simulator_reward_mean": -7.0}
-    ) > reward
-
     last_payload["best_checkpoint_sha256"] = "0" * 64
     with pytest.raises(OnlineGRPOError, match="SHA256 mismatch"):
         _resume_best_checkpoint_anchor(tmp_path / "last.pt", last_payload)
 
 
-def test_legacy_online_checkpoint_without_reward_binding_is_rejected() -> None:
-    reward_config = JointRewardConfig()
-    optimizer_config = KinematicTrajectoryOptimizerConfig()
-    legacy_payload = {
-        "run_mode": "smoke",
-        "reward_config": dataclasses.asdict(reward_config),
-        "calibration_report_sha256": "a" * 64,
-        "calibration_gate_bypassed": False,
-        "calibration_report_passed": True,
-        "calibration_blockers": [],
-        "scenario_contract_sha256": "b" * 64,
-        "scenario_seeds": [17, 23],
-        "trajectory_optimizer_config": dataclasses.asdict(optimizer_config),
-        "trajectory_optimizer_sha256": optimizer_config.sha256(),
-        "environment_steps": 1,
+def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
+    payload = {
+        **_binding(),
+        "best_validation_reward": -7.0,
+        "best_checkpoint_sha256": None,
     }
-    with pytest.raises(
-        OnlineGRPOError, match="reward_contract_version mismatch"
-    ):
+    _validate_online_checkpoint_metadata(
+        payload,
+        run_mode="smoke",
+        reward_config=JointRewardConfig(),
+        scenario_contract_sha=primary_scenario_contract()["sha256"],
+        scenario_seeds=(17, 23),
+    )
+    payload["reward_input_domain"] = "tau_cmd"
+    with pytest.raises(OnlineGRPOError, match="reward_input_domain mismatch"):
         _validate_online_checkpoint_metadata(
-            legacy_payload,
+            payload,
             run_mode="smoke",
-            reward_config=reward_config,
-            calibration_sha="a" * 64,
-            calibration_gate_bypassed=False,
-            calibration_report_passed=True,
-            calibration_blockers=(),
-            scenario_contract_sha="b" * 64,
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+        )
+    payload = {**_binding(), "calibration_report_sha256": "b" * 64}
+    with pytest.raises(OnlineGRPOError, match="legacy calibration semantics"):
+        _validate_online_checkpoint_metadata(
+            payload,
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
             scenario_seeds=(17, 23),
         )
 
 
-def test_validation_reward_comparison_metrics_are_exact_and_reusable() -> None:
-    baseline = -10.5
-    first = _validation_reward_comparison_metrics(
-        {"validation/simulator_reward_mean": -8.0}, baseline
+def test_validation_reward_comparison_uses_raw_tag() -> None:
+    result = _validation_reward_comparison_metrics(
+        {"validation/raw_proxy_reward_mean": -8.0}, -10.5
     )
-    second = _validation_reward_comparison_metrics(
-        {"validation/simulator_reward_mean": -11.25}, baseline
-    )
-
-    assert set(first) == {
-        "validation/pretrain_reward",
-        "validation/reward_gain",
+    assert result == {
+        "validation/pretrain_reward": -10.5,
+        "validation/reward_gain": 2.5,
     }
-    assert first["validation/pretrain_reward"] == pytest.approx(-10.5)
-    assert first["validation/reward_gain"] == pytest.approx(2.5)
-    assert second["validation/pretrain_reward"] == pytest.approx(-10.5)
-    assert second["validation/reward_gain"] == pytest.approx(-0.75)
+    with pytest.raises(OnlineGRPOError, match="raw_proxy_reward_mean"):
+        _validation_reward_comparison_metrics(
+            {"validation/simulator_reward_mean": -8.0}, -10.5
+        )
 
 
-@pytest.mark.parametrize(
-    ("current", "pretrain"),
-    [
-        ({}, -10.0),
-        ({"validation/simulator_reward_mean": None}, -10.0),
-        ({"validation/simulator_reward_mean": float("nan")}, -10.0),
-        ({"validation/simulator_reward_mean": -10.0}, None),
-        ({"validation/simulator_reward_mean": -10.0}, float("inf")),
-    ],
-)
-def test_validation_reward_comparison_rejects_missing_or_nonfinite_rewards(
-    current: dict[str, object], pretrain: object
+def test_simulator_failure_is_non_gating_for_raw_validation(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with pytest.raises(OnlineGRPOError, match="missing|required|finite"):
-        _validation_reward_comparison_metrics(current, pretrain)
+    values = SimpleNamespace(
+        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
+        ego_state=np.zeros((3, 8), dtype=np.float32),
+    )
+
+    class Env:
+        def close(self):
+            return None
+
+    class Builder:
+        def __init__(self, agent_ids):
+            pass
+
+        def reset(self):
+            pass
+
+        def capture_state(self, env, timestamp):
+            pass
+
+        def history_ready(self):
+            return True
+
+        def build_model_inputs(self, env):
+            return values
+
+    class Proxy:
+        def __init__(self, config):
+            pass
+
+        def score(self, env, model_inputs, trajectories):
+            return SimpleNamespace(
+                rewards=np.asarray([3.5], dtype=np.float32),
+                unsafe=np.asarray([False]),
+                collision=np.asarray([False]),
+                out_of_drivable=np.asarray([False]),
+            )
+
+    class Optimizer:
+        def optimize(self, trajectories, coarse, speeds, modes):
+            return SimpleNamespace(optimized_trajectories=trajectories + 1.0)
+
+    class Evaluator:
+        def __init__(self, config):
+            pass
+
+        def evaluate(self, spec, prefix, candidates):
+            raise RuntimeError("diagnostic backend unavailable")
+
+    monkeypatch.setattr("train.train_bev_joint_grpo_online._new_env", lambda *a: Env())
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.JointBEVSampleBuilder", Builder
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.simulator_decision_dt_s", lambda env: 0.1
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online._scenario_ready_for_primary_sampling",
+        lambda env: True,
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.execution_mode_valid_mask",
+        lambda values, optimizer: np.ones((3, 10), dtype=np.bool_),
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.model_inputs_to_batch",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.planner_forward_from_batch",
+        lambda *args, **kwargs: {
+            "selected_trajectory": torch.zeros((1, 3, 8, 3)),
+            "selected_mode": torch.zeros((1, 3), dtype=torch.int64),
+        },
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.JointTrajectoryProxyReward", Proxy
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.KinematicTrajectoryOptimizer",
+        Optimizer,
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.JointSimulatorBranchEvaluator",
+        Evaluator,
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.capture_joint_pose_global",
+        lambda env: np.zeros((3, 3), dtype=np.float32),
+    )
+
+    metrics, errors = _fixed_raw_proxy_and_simulator_validation(
+        object(),
+        device=torch.device("cpu"),
+        reward_config=JointRewardConfig(),
+        scenarios=(PRIMARY_S5_S9_SCENARIOS[0],),
+        seeds=(31,),
+    )
+    assert metrics["validation/raw_proxy_reward_mean"] == pytest.approx(3.5)
+    assert metrics["validation/simulator_available"] == 0.0
+    assert metrics["validation/simulator_failure_count"] == 1.0
+    assert "validation/simulator_reward_mean" not in metrics
+    assert errors[0]["error_type"] == "RuntimeError"
 
 
-def test_pretrain_baseline_uses_stage1_source_once_before_resume(
+def test_pretrain_raw_baseline_runs_once_before_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source_sha = "a" * 64
-    report = _calibration(tmp_path / "passed.json", passed=True)
-    calibration = json.loads(report.read_text(encoding="utf-8"))
-    calibration["source_stage1_sha256"] = source_sha
-    report.write_text(json.dumps(calibration), encoding="utf-8")
-
     source_planner = object()
-    resumed_planner = object()
     trainer = SimpleNamespace(planner=source_planner)
     validation_planners = []
-
     monkeypatch.setattr(
         "train.train_bev_joint_grpo_online._load_trainer",
-        lambda *args, **kwargs: (trainer, {}, source_sha),
+        lambda *args, **kwargs: (trainer, {}, "a" * 64),
     )
 
     def fixed_validation(planner, **kwargs):
         validation_planners.append(planner)
-        return {"validation/simulator_reward_mean": -10.0}
+        return ({"validation/raw_proxy_reward_mean": -10.0}, ())
 
     monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._fixed_simulator_validation",
+        "train.train_bev_joint_grpo_online._fixed_raw_proxy_and_simulator_validation",
         fixed_validation,
     )
 
     def resume_loader(*args, **kwargs):
         assert validation_planners == [source_planner]
-        trainer.planner = resumed_planner
         raise OnlineGRPOError("resume loader reached")
 
     monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.load_grpo_checkpoint",
-        resume_loader,
+        "train.train_bev_joint_grpo_online.load_grpo_checkpoint", resume_loader
     )
     config = JointGRPOOnlineConfig(
-        device="cpu",
-        calibration_report=report,
-        resume_checkpoint=tmp_path / "resume.pt",
+        device="cpu", resume_checkpoint=tmp_path / "resume.pt"
     )
-
     with pytest.raises(OnlineGRPOError, match="resume loader reached"):
         run_joint_grpo_training(
             config,
@@ -593,78 +433,38 @@ def test_pretrain_baseline_uses_stage1_source_once_before_resume(
     assert validation_planners == [source_planner]
 
 
-def test_json_optimizer_contract_is_canonicalized_without_relaxing_hash() -> None:
-    config = KinematicTrajectoryOptimizerConfig()
-    serialized = json.loads(
-        json.dumps(
-            {
-                "trajectory_optimizer_config": config.__dict__,
-                "trajectory_optimizer_sha256": config.sha256(),
-            }
-        )
-    )
-    assert _validate_calibration_trajectory_optimizer_contract(serialized) == config
-
-    serialized["trajectory_optimizer_sha256"] = "0" * 64
-    with pytest.raises(OnlineGRPOError, match="optimizer contract mismatch"):
-        _validate_calibration_trajectory_optimizer_contract(serialized)
-
-
-def test_constant_joint_rewards_are_skipped_instead_of_faking_an_update() -> None:
+def test_constant_rewards_and_training_buckets_are_strict() -> None:
     assert not _joint_rewards_are_informative(
-        np.asarray([-21.0, -21.0, -21.0, -21.0], dtype=np.float32)
+        np.asarray([-1.0, -1.0, -1.0, -1.0], dtype=np.float32)
     )
     assert _joint_rewards_are_informative(
-        np.asarray([-21.0, -20.0, -21.0, -21.0], dtype=np.float32)
+        np.asarray([-1.0, 0.0, -1.0, -1.0], dtype=np.float32)
     )
-    with pytest.raises(OnlineGRPOError, match=r"float \[4\]"):
-        _joint_rewards_are_informative(np.zeros(3, dtype=np.float32))
+    buckets = _round_robin_training_buckets(PRIMARY_S5_S9_SCENARIOS, (17, 23))
+    assert len(buckets) == len(set(buckets)) == 10
 
 
-def test_online_training_buckets_cover_every_scenario_seed_pair() -> None:
-    buckets = _round_robin_training_buckets(
-        PRIMARY_S5_S9_SCENARIOS, (17, 23)
-    )
-    assert len(buckets) == 10
-    assert len(set(buckets)) == 10
-    counts = [0 for _ in buckets]
-    for optimizer_step in range(20):
-        counts[optimizer_step % len(buckets)] += 1
-    assert counts == [2] * 10
+def test_scenario_routes_and_primary_sampling_contract() -> None:
+    for scenario_id, route in PRIMARY_S5_S9_SCENARIOS:
+        assert route in SCENARIO_BY_ID[scenario_id].allowed_local_routes
+    assert JointGRPOOnlineConfig(device="cpu").scenarios == PRIMARY_S5_S9_SCENARIOS
+
+    class Orchestrator:
+        def get_episode_summary(self):
+            return {
+                "scenario_id": "S8_ego_exit_to_ramp",
+                "scenario_realized": True,
+                "scenario_recipes_complete": False,
+            }
+
+    env = SimpleNamespace(_scenario_orchestrator=Orchestrator())
+    assert not _scenario_ready_for_primary_sampling(env)
 
 
-def test_online_action_helpers_are_label_free_and_strict() -> None:
-    env = SimpleNamespace(
-        agents={
-            f"agent{role}": SimpleNamespace(speed_km_h=18.0)
-            for role in range(3)
-        }
-    )
-    actions = constant_velocity_actions(env)
-    assert set(actions) == {"agent0", "agent1", "agent2"}
-    assert actions["agent0"].shape == (8, 3)
-    assert actions["agent0"][1, 0] == pytest.approx(5.0)
-
-    trajectories = np.zeros((3, 8, 3), dtype=np.float32)
-    converted = joint_trajectory_action(trajectories)
-    trajectories[0, 0, 0] = 99.0
-    assert converted["agent0"][0, 0] == 0.0
-    with pytest.raises(OnlineGRPOError):
-        joint_trajectory_action(np.zeros((3, 7, 3), dtype=np.float32))
-
-    flags = {"__all__": False}
-    assert not episode_has_ended(flags, flags, {})
-    assert episode_has_ended(
-        flags,
-        flags,
-        {"agent1": {"out_of_road": True}},
-    )
-
-
-def test_execution_optimizer_keeps_raw_policy_action_immutable() -> None:
+def test_execution_helpers_preserve_raw_policy_action() -> None:
     coarse = np.zeros((3, 10, 8, 3), dtype=np.float32)
     coarse[..., 0] = 4.0 * np.arange(1, 9, dtype=np.float32)
-    raw = np.broadcast_to(coarse[:, 0], (4, 3, 8, 3)).copy()
+    raw = np.broadcast_to(coarse[:, 0], (1, 3, 8, 3)).copy()
     raw[..., 0] *= -1.0
     original = raw.copy()
     values = SimpleNamespace(
@@ -673,11 +473,50 @@ def test_execution_optimizer_keeps_raw_policy_action_immutable() -> None:
             np.full((3, 1), 8.0, dtype=np.float32), ((0, 0), (0, 7))
         ),
     )
-    modes = np.zeros((4, 3), dtype=np.int64)
-
-    result = optimize_selected_model_trajectories(values, raw, modes)
-
+    result = optimize_selected_model_trajectories(
+        values, raw, np.zeros((1, 3), dtype=np.int64)
+    )
     assert np.array_equal(raw, original)
     assert np.array_equal(result.raw_trajectories, original)
     assert result.optimized_valid.all()
-    assert not np.array_equal(result.optimized_trajectories, original)
+
+
+def test_online_action_and_batch_helpers_are_strict() -> None:
+    env = SimpleNamespace(
+        agents={
+            f"agent{role}": SimpleNamespace(speed_km_h=18.0)
+            for role in range(3)
+        }
+    )
+    assert constant_velocity_actions(env)["agent0"][1, 0] == pytest.approx(5.0)
+    trajectories = np.zeros((3, 8, 3), dtype=np.float32)
+    action = joint_trajectory_action(trajectories)
+    trajectories[0, 0, 0] = 99.0
+    assert action["agent0"][0, 0] == 0.0
+    assert episode_has_ended(
+        {"__all__": False},
+        {"__all__": False},
+        {"agent1": {"out_of_road": True}},
+    )
+
+    coarse = np.zeros((3, 10, 8, 3), dtype=np.float32)
+    coarse[..., 0] = (
+        4.0 * np.arange(1, 9, dtype=np.float32)[None, None, :] * 0.5
+    )
+    coarse[:, 9, :, 0] = np.asarray(
+        [1.5, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float32
+    )
+    fields = {
+        "bev": np.zeros((3, 8, 256, 256), dtype=np.uint8),
+        "ego_state": np.zeros((3, 8), dtype=np.float32),
+        "formation_relation_state": np.zeros((3, 12), dtype=np.float32),
+        "relation_valid_mask": np.ones((3, 2), dtype=np.bool_),
+        "agent_role": np.arange(3, dtype=np.int64),
+        "coarse_trajectories": coarse,
+        "mode_valid_mask": np.ones((3, 10), dtype=np.bool_),
+    }
+    fields["ego_state"][:, 0] = 4.0
+    values = SimpleNamespace(**fields, as_dict=lambda: fields)
+    mask = execution_mode_valid_mask(values)
+    batch = model_inputs_to_batch(values, torch.device("cpu"), mode_valid_mask=mask)
+    assert torch.equal(batch["mode_valid_mask"][0], torch.from_numpy(mask.copy()))

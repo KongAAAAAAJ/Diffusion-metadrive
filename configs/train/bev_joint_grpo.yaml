@@ -1,8 +1,7 @@
 online:
   device: cuda
   seed: 17
-  total_optimizer_steps: 10000
-  calibration_report: null
+  total_optimizer_steps: 100
   resume_checkpoint: null
   environment_steps_per_episode: 100
   validation_interval_steps: 100

@@ -1,0 +1,142 @@
+{
+  "format": "s5_release30_append_curation_report_v1",
+  "generated_at": "2026-08-18T19:45:14+08:00",
+  "request": {
+    "scenario_id": "S5_hard_brake_lead",
+    "behavior_category": "temporary_formation_release_and_recovery",
+    "operation": "append_30_episodes_without_removing_existing_destination_data",
+    "in_place_replacement_authorized_by_user": true,
+    "backup_deletion_authorized": false
+  },
+  "sources": {
+    "destination_before_install": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+      "base_dataset_fingerprint": "b93dfa5c6e2224aac7ae3518b45216c9f04b4a18b78f0a88aafb0b22657a3b4a",
+      "sidecar_dataset_fingerprint": "500d973124a6c0f734b1bb2e0681a9578db053c00d64f0fb1683722fb128dea3",
+      "bundle_index_sha256": "b56de9a388d7d2e694a0eebfe722bbe0979f1dd9f74c3052c09bf256822b3778",
+      "base_episodes": 233,
+      "base_joint_samples": 44560,
+      "s5_behavior_episode_counts": {
+        "keep_emergency_braking": 5,
+        "temporary_formation_release_and_recovery": 19
+      }
+    },
+    "supplement": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v4_s5_release30_v1",
+      "base_dataset_fingerprint": "a02cf2cf4a0e6a44adec7248ea9b4230a841cef612ff3e07520085c2203b2e77",
+      "sidecar_dataset_fingerprint": "c3803cb3dfb24ae00a588977ed955d801d99b61a5a2a4dadfee23a8eb5af2180",
+      "bundle_index_sha256": "c21967a0ceea1a0ce2abb06bdfd4b19da97ae391b4237fdd205a806772315789",
+      "scenario_contract_sha256": "1003ccf55ec4131e8b89e2a65611f582df4c04ec124016fe63cc5f5119917d84",
+      "accepted_episodes": 30,
+      "joint_samples": 5700,
+      "split_episode_counts": {"train": 24, "val": 3, "test": 3},
+      "background_count_distribution": {"3": 9, "4": 4, "5": 6, "6": 11},
+      "simulator_attempts": 74,
+      "pending_transaction": false,
+      "strict_audit_complete": true
+    }
+  },
+  "dry_run": {
+    "manifest": "evaluation/S5_RELEASE30_APPEND_DRY_RUN_MANIFEST.json",
+    "manifest_sha256": "3c4a8f3f554651f0654c24e68fa65d4ec7dea9f91e6443a3f9e770a03543cc87",
+    "selected_episode_count": 30,
+    "target_episode_indices": "401_through_430",
+    "removed_episode_indices": [],
+    "removal_policy": "preserve_every_existing_destination_episode",
+    "source_metadata_and_payload_hashes_bound": true,
+    "passed": true
+  },
+  "staging": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1.s5_release30_append_staging",
+    "physical_copy_only": true,
+    "symlink_count": 0,
+    "verification_report": "evaluation/S5_RELEASE30_APPEND_STAGING_VERIFICATION.json",
+    "verification_report_sha256": "5e8d410f48cbcb49162ae2dbe36d4d0cc72f30b745e54c88a8591785750ab776",
+    "verified_payload_files": 5897,
+    "passed": true,
+    "visualization": {
+      "source_global_episode_index": 401,
+      "scenario_episode_number": 25,
+      "output": "/tmp/s5_release30_append_staging_episode_401.mp4",
+      "sha256": "46ad1567a74c5acfb597de6e0f53f7c5c44070f0a26c893581dbbbb03dfd6718",
+      "codec": "h264",
+      "width": 1280,
+      "height": 720,
+      "fps": 10,
+      "frames": 201,
+      "duration_s": 20.1,
+      "decodable": true
+    }
+  },
+  "installation": {
+    "status": "installed_and_final_verification_passed",
+    "final_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1",
+    "final_verification_report": "evaluation/S5_RELEASE30_APPEND_FINAL_VERIFICATION.json",
+    "final_verification_report_sha256": "2ca91f292cf0911eb59e28e8bc5dbf183b14b2593037f8f890dd25e9a423acde",
+    "atomic_swap_completed": true,
+    "rollback_performed": false,
+    "failed_install_path_exists": false,
+    "staging_path_exists_after_install": false,
+    "base_dataset_fingerprint": "e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511",
+    "sidecar_dataset_fingerprint": "a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6",
+    "curation_contract_sha256": "8e7394f4eb6b6ab4dcefe7b31ff32828c4866aacae89e20ba7715a313c5f0c83",
+    "bundle_index_sha256": "1467958600f764cd6cca1a7301bcfd00ac9c720326296b0ff950f76e4d6f66e5",
+    "dataset_curation_manifest_sha256": "144265011708c0d9882639a5336afe62bed64b63343fda64fcedad75cfa8a81b",
+    "dataset_bundle_manifest_sha256": "f27c8fb5b86889402ffb9b2010de73e8e0030cc2aa324f9d3989a5a3dc89a597",
+    "payload_inventory_sha256": "9167968b6456f8702584da1ff6160057593935eadbe5e6ad144a072fb2a75aba",
+    "base_episodes": 263,
+    "base_joint_samples": 50260,
+    "sidecar_episodes": 363,
+    "sidecar_only_episodes": 100,
+    "sidecar_raw_steps": 103712,
+    "bundle_index_rows": 431,
+    "split_episode_counts": {"train": 208, "val": 31, "test": 24},
+    "split_joint_samples": {"train": 39780, "val": 5880, "test": 4600},
+    "s5_behavior_episode_counts": {
+      "keep_emergency_braking": 5,
+      "temporary_formation_release_and_recovery": 49
+    },
+    "new_release30_episodes": 30,
+    "verified_payload_files": 5897,
+    "formal_training_eligibility": false
+  },
+  "preservation_audit": {
+    "existing_destination_episodes_removed": 0,
+    "original_bundle_index_rows_preserved": 401,
+    "final_first_401_rows_sha256": "b56de9a388d7d2e694a0eebfe722bbe0979f1dd9f74c3052c09bf256822b3778",
+    "backup_bundle_index_sha256": "b56de9a388d7d2e694a0eebfe722bbe0979f1dd9f74c3052c09bf256822b3778",
+    "original_payload_files_copied_and_verified": 5327,
+    "supplement_payload_files_copied_and_verified": 570,
+    "final_symlink_count": 0,
+    "final_multilink_file_count": 0,
+    "pending_transaction_count": 0
+  },
+  "backup": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1.pre_s5_release30_append_b93dfa5c",
+    "retained": true,
+    "bytes": 11195871402,
+    "regular_file_count": 5909,
+    "symlink_count": 0,
+    "multilink_file_count": 0,
+    "fuse_hidden_file_count": 0,
+    "writer_locks_released": true,
+    "permanent_deletion_performed": false
+  },
+  "implementation_and_tests": {
+    "append_tool": "tools/append_s5_release30_dataset.py",
+    "append_tool_sha256": "8f17b7425b2345ae2fbdc11e1d95ce3aba0b4b316849e570e3116aaa7bf1ed5b",
+    "stage_only_and_install_staged_interfaces_added": true,
+    "staging_to_dry_run_fingerprint_binding_added": true,
+    "focused_tests": "6 passed",
+    "python_compile_passed": true,
+    "git_diff_check_passed_before_report": true,
+    "unrelated_concurrent_stage2_worktree_changes_preserved": true
+  },
+  "decision": {
+    "hard_gate_passed": true,
+    "main_dataset_append_complete": true,
+    "all_preexisting_s5_episodes_preserved": true,
+    "formal_training_eligibility_remains_false": true,
+    "next_action": "Use the installed 50260-sample root only under its new fingerprints; retain the complete backup until a separately authorized cleanup round."
+  }
+}

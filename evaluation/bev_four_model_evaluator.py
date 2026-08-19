@@ -52,6 +52,8 @@ from train.train_bev_joint_grpo_online import (
     optimize_selected_model_trajectories,
 )
 from models.bev_planner.joint_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
@@ -196,14 +198,66 @@ def _validate_grpo_evaluation_eligibility(
         "run_mode": "formal" if formal else "smoke",
         "diagnostic_only": not formal,
         "eligible_for_formal_training": formal,
-        "calibration_gate_bypassed": False,
-        "calibration_report_passed": True,
-        "calibration_blockers": [],
+        "calibration_required": False,
     }
     for field, value in expected.items():
         if payload.get(field) != value:
             raise ModelEvaluationError(
                 f"{model_id} checkpoint evaluation eligibility mismatch: {field}"
+            )
+
+
+def _validate_grpo_application_contract(
+    payload: Mapping[str, object], *, model_id: str
+) -> None:
+    raw_contract = payload.get("reward_application_contract")
+    contract_sha = payload.get("reward_application_contract_sha256")
+    if not isinstance(raw_contract, Mapping) or not isinstance(contract_sha, str):
+        raise ModelEvaluationError(
+            f"{model_id} reward application contract is missing"
+        )
+    canonical_sha = hashlib.sha256(
+        json.dumps(
+            dict(raw_contract),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if contract_sha != canonical_sha:
+        raise ModelEvaluationError(
+            f"{model_id} reward application contract SHA mismatch"
+        )
+    bound_fields = (
+        "reward_input_domain",
+        "candidate_selection_domain",
+        "execution_input_domain",
+        "best_checkpoint_metric",
+        "tracking_expansion_enabled",
+        "calibration_required",
+    )
+    if any(payload.get(name) != raw_contract.get(name) for name in bound_fields):
+        raise ModelEvaluationError(
+            f"{model_id} reward application metadata mismatch"
+        )
+    if model_id == "grpo_open":
+        if (
+            dict(raw_contract) != GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+            or contract_sha != GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        ):
+            raise ModelEvaluationError(
+                "grpo_open must use the frozen tau_d application contract"
+            )
+    elif model_id == "grpo_exec":
+        expected = {
+            "reward_input_domain": "tau_a",
+            "candidate_selection_domain": "tau_a",
+            "execution_input_domain": "tau_cmd",
+            "calibration_required": False,
+        }
+        if any(raw_contract.get(name) != value for name, value in expected.items()):
+            raise ModelEvaluationError(
+                "grpo_exec must use an execution-domain application contract"
             )
 
 
@@ -249,10 +303,14 @@ def _load_policy(
             "reward_contract_sha256",
             "reward_config",
             "reward_config_sha256",
-            "calibration_report_sha256",
-            "calibration_gate_bypassed",
-            "calibration_report_passed",
-            "calibration_blockers",
+            "reward_application_contract",
+            "reward_application_contract_sha256",
+            "reward_input_domain",
+            "candidate_selection_domain",
+            "execution_input_domain",
+            "best_checkpoint_metric",
+            "tracking_expansion_enabled",
+            "calibration_required",
             "diagnostic_only",
             "eligible_for_formal_training",
             "scenario_seeds",
@@ -263,10 +321,13 @@ def _load_policy(
         ):
             if field not in grpo_payload:
                 raise ModelEvaluationError(
-                    f"{spec.model_id} is not an online-calibrated GRPO checkpoint"
+                    f"{spec.model_id} is not a contract-bound online GRPO checkpoint"
                 )
         _validate_grpo_evaluation_eligibility(
             grpo_payload, formal=formal, model_id=spec.model_id
+        )
+        _validate_grpo_application_contract(
+            grpo_payload, model_id=spec.model_id
         )
         expected_reward_version = JOINT_REWARD_CONTRACT.get("version")
         raw_reward_config = grpo_payload.get("reward_config")

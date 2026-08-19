@@ -72,6 +72,30 @@ JOINT_REWARD_CONTRACT_SHA256 = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 
+GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
+    "version": "stage2_grpo_open_application_v1",
+    "policy_sample_domain": "tau_d",
+    "policy_probability_domain": "tau_d",
+    "reward_input_domain": "tau_d",
+    "candidate_selection_domain": "tau_d",
+    "execution_input_domain": "tau_cmd",
+    "execution_transform": "KinematicTrajectoryOptimizer(selected_tau_d)",
+    "optimize_only_selected_candidate": True,
+    "optimizer_must_succeed_before_policy_update": True,
+    "tracking_expansion_enabled": False,
+    "calibration_required": False,
+    "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+    "simulator_validation_role": "diagnostic_only",
+}
+GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 = hashlib.sha256(
+    json.dumps(
+        GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+).hexdigest()
+
 
 class JointRewardError(RuntimeError):
     """Raised when the strict joint reward contract is violated."""
@@ -216,16 +240,6 @@ class JointRewardResult:
                 raise JointRewardError(
                     f"reward component {name} must be finite [G]"
                 )
-
-
-@dataclass(frozen=True)
-class RewardCalibrationResult:
-    mean_spearman: float
-    pairwise_agreement: float
-    informative_groups: int
-    pairwise_comparisons: int
-    false_safe_count: int
-    passed: bool
 
 
 def _as_numpy_model_field(model_inputs: object, name: str) -> np.ndarray:
@@ -686,99 +700,6 @@ def aggregate_temporal_risk(
     return float(max_weight * np.max(values) + mean_weight * np.mean(values))
 
 
-def _rank_average(value: np.ndarray) -> np.ndarray:
-    order = np.argsort(value, kind="mergesort")
-    ranks = np.empty(len(value), dtype=np.float64)
-    start = 0
-    while start < len(value):
-        stop = start + 1
-        while stop < len(value) and value[order[stop]] == value[order[start]]:
-            stop += 1
-        ranks[order[start:stop]] = 0.5 * (start + stop - 1)
-        start = stop
-    return ranks
-
-
-def _spearman(first: np.ndarray, second: np.ndarray) -> float | None:
-    first_rank = _rank_average(first)
-    second_rank = _rank_average(second)
-    first_centered = first_rank - first_rank.mean()
-    second_centered = second_rank - second_rank.mean()
-    denominator = float(
-        np.linalg.norm(first_centered) * np.linalg.norm(second_centered)
-    )
-    if denominator <= 1e-12:
-        return None
-    return float(np.dot(first_centered, second_centered) / denominator)
-
-
-def calibrate_joint_rewards(
-    proxy_rewards: np.ndarray,
-    simulator_rewards: np.ndarray,
-    proxy_unsafe: np.ndarray,
-    simulator_unsafe: np.ndarray,
-    *,
-    min_informative_groups: int = 12,
-    min_mean_spearman: float = 0.50,
-    min_pairwise_agreement: float = 0.70,
-) -> RewardCalibrationResult:
-    proxy = np.asarray(proxy_rewards, dtype=np.float64)
-    simulator = np.asarray(simulator_rewards, dtype=np.float64)
-    proxy_bad = np.asarray(proxy_unsafe)
-    simulator_bad = np.asarray(simulator_unsafe)
-    if (
-        proxy.ndim != 2
-        or proxy.shape[1] != 4
-        or simulator.shape != proxy.shape
-        or proxy_bad.shape != proxy.shape
-        or simulator_bad.shape != proxy.shape
-        or proxy_bad.dtype != np.bool_
-        or simulator_bad.dtype != np.bool_
-        or not np.isfinite(proxy).all()
-        or not np.isfinite(simulator).all()
-    ):
-        raise JointRewardError(
-            "calibration arrays must be finite [N,4] with bool unsafe masks"
-        )
-    correlations = []
-    agreement = 0
-    comparisons = 0
-    for proxy_group, simulator_group in zip(proxy, simulator):
-        correlation = _spearman(proxy_group, simulator_group)
-        if correlation is not None:
-            correlations.append(correlation)
-        for first in range(4):
-            for second in range(first + 1, 4):
-                proxy_delta = proxy_group[first] - proxy_group[second]
-                simulator_delta = (
-                    simulator_group[first] - simulator_group[second]
-                )
-                if abs(proxy_delta) <= 1e-12 or abs(simulator_delta) <= 1e-12:
-                    continue
-                comparisons += 1
-                agreement += int(np.sign(proxy_delta) == np.sign(simulator_delta))
-    # An uninformative calibration has zero measurable rank correlation.  A
-    # finite sentinel keeps the machine-readable report strict JSON while the
-    # informative-group gate still makes the calibration fail explicitly.
-    mean_spearman = float(np.mean(correlations)) if correlations else 0.0
-    pairwise = agreement / comparisons if comparisons else 0.0
-    false_safe = int(np.count_nonzero(simulator_bad & ~proxy_bad))
-    passed = (
-        len(correlations) >= int(min_informative_groups)
-        and mean_spearman >= float(min_mean_spearman)
-        and pairwise >= float(min_pairwise_agreement)
-        and false_safe == 0
-    )
-    return RewardCalibrationResult(
-        mean_spearman=mean_spearman,
-        pairwise_agreement=float(pairwise),
-        informative_groups=len(correlations),
-        pairwise_comparisons=int(comparisons),
-        false_safe_count=false_safe,
-        passed=bool(passed),
-    )
-
-
 def compose_joint_reward(
     *,
     progress_score: np.ndarray,
@@ -1203,15 +1124,15 @@ class JointTrajectoryProxyReward:
 
 
 __all__ = [
+    "GRPO_OPEN_REWARD_APPLICATION_CONTRACT",
+    "GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256",
     "JOINT_REWARD_CONTRACT",
     "JOINT_REWARD_CONTRACT_SHA256",
     "JointRewardConfig",
     "JointRewardError",
     "JointRewardResult",
     "JointTrajectoryProxyReward",
-    "RewardCalibrationResult",
     "aggregate_temporal_risk",
-    "calibrate_joint_rewards",
     "closing_ttc_from_gap_series",
     "compose_joint_reward",
     "drivable_signed_distance_m",

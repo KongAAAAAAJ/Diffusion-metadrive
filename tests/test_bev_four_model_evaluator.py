@@ -17,12 +17,17 @@ from evaluation.bev_four_model_evaluator import (
     _initial_state_signature,
     _initial_scene_sha256,
     _validate_common_reward_binding,
+    _validate_grpo_application_contract,
     _validate_grpo_evaluation_eligibility,
     _summarize,
     compare_models,
     compare_repeated_reports,
 )
 from evaluation.bev_model_manifest import ComparisonSpec
+from models.bev_planner.joint_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+)
 from models.bev_planner.trajectory_optimizer import TrajectoryOptimizationError
 from scenarios.bev_round13_contract import HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS
 
@@ -233,9 +238,7 @@ def test_grpo_evaluation_flags_are_strict_in_smoke_and_formal_modes() -> None:
         "run_mode": "smoke",
         "diagnostic_only": True,
         "eligible_for_formal_training": False,
-        "calibration_gate_bypassed": False,
-        "calibration_report_passed": True,
-        "calibration_blockers": [],
+        "calibration_required": False,
     }
     formal = {
         **smoke,
@@ -254,15 +257,36 @@ def test_grpo_evaluation_flags_are_strict_in_smoke_and_formal_modes() -> None:
         ("run_mode", "smoke"),
         ("diagnostic_only", True),
         ("eligible_for_formal_training", False),
-        ("calibration_gate_bypassed", True),
-        ("calibration_report_passed", False),
-        ("calibration_blockers", ["tracking"]),
+        ("calibration_required", True),
     ):
         invalid = {**formal, field: bad_value}
         with pytest.raises(ModelEvaluationError, match=field):
             _validate_grpo_evaluation_eligibility(
                 invalid, formal=True, model_id="grpo_open"
             )
+
+
+def test_grpo_open_evaluator_requires_exact_tau_d_application_contract() -> None:
+    payload = {
+        "reward_application_contract": GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+        "reward_application_contract_sha256": (
+            GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        ),
+        "reward_input_domain": "tau_d",
+        "candidate_selection_domain": "tau_d",
+        "execution_input_domain": "tau_cmd",
+        "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+        "tracking_expansion_enabled": False,
+        "calibration_required": False,
+    }
+    _validate_grpo_application_contract(payload, model_id="grpo_open")
+    payload["reward_input_domain"] = "tau_cmd"
+    with pytest.raises(ModelEvaluationError, match="metadata mismatch"):
+        _validate_grpo_application_contract(payload, model_id="grpo_open")
+    payload["reward_input_domain"] = "tau_d"
+    payload["reward_application_contract_sha256"] = "0" * 64
+    with pytest.raises(ModelEvaluationError, match="SHA mismatch"):
+        _validate_grpo_application_contract(payload, model_id="grpo_open")
 
 
 def _repeat_report(
