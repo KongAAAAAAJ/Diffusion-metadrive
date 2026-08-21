@@ -377,6 +377,19 @@ def _source_statistics(root: Path) -> dict[str, object]:
     }
 
 
+def _duplicate_committed_identities(
+    rows: Sequence[Mapping[str, object]],
+    additional: Sequence[tuple[str, int]] = (),
+) -> list[tuple[str, int]]:
+    identities = [
+        (str(row["scenario_id"]), int(row["spawn_seed"]))
+        for row in rows
+        if row.get("base_status") == "committed"
+    ]
+    identities.extend(additional)
+    return sorted(key for key, count in Counter(identities).items() if count > 1)
+
+
 def _check_expected_binding(
     name: str,
     observed: Mapping[str, object],
@@ -554,14 +567,10 @@ def inspect_sources(
         )
     mapping.sort(key=lambda row: int(row["target_episode_index"]))
 
-    identities = [
-        (
-            str(row["scenario_id"]),
-            int(row["spawn_seed"]),
-        )
-        for row in _read_rows(base)
-    ] + [(S5_SCENARIO, int(row["spawn_seed"])) for row in mapping]
-    duplicates = sorted(key for key, count in Counter(identities).items() if count > 1)
+    duplicates = _duplicate_committed_identities(
+        _read_rows(base),
+        [(S5_SCENARIO, int(row["spawn_seed"])) for row in mapping],
+    )
     if duplicates:
         raise RuleConditionedV2CompositionError(
             f"duplicate (scenario_id, spawn_seed) pairs: {duplicates}"
@@ -1006,10 +1015,7 @@ def verify_composed_bundle(
         raise RuleConditionedV2CompositionError("composition collection state mismatch")
 
     appended = 0
-    identities = [
-        (str(row["scenario_id"]), int(row["spawn_seed"]))
-        for row in _read_rows(bundle)
-    ]
+    duplicate_identities = _duplicate_committed_identities(_read_rows(bundle))
     for _, (_, entry) in _manifest_entries(bundle, "platoon_joint_bev").items():
         attributes = entry.get("attributes")
         if not isinstance(attributes, Mapping):
@@ -1018,7 +1024,7 @@ def verify_composed_bundle(
         if isinstance(provenance, Mapping) and provenance.get("source_id") == SOURCE_ID_S5:
             _validate_s5_attributes(attributes)
             appended += 1
-    if appended != APPEND_EPISODES or len(identities) != len(set(identities)):
+    if appended != APPEND_EPISODES or duplicate_identities:
         raise RuleConditionedV2CompositionError("S5 count or scenario/seed uniqueness failed")
 
     inventory_path = bundle / "payload_inventory.json"

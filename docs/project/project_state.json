@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-19T22:26:55+08:00",
+  "updated_at": "2026-08-21T00:44:40+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "c748e84d3832c385be5a7d52137a3cd89dd52b05",
+    "git_commit": "5dd08e759fba1171810849882e9e80e0cc45f075",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -13,7 +13,7 @@
     "uncommitted_stage2_bare_launcher_fix_present": false,
     "uncommitted_stage1_evaluation_artifact_parity_present": false,
     "uncommitted_stage1_metadrive_topdown_video_present": false,
-    "uncommitted_stage1_epoch_override_present": false,
+    "uncommitted_stage1_epoch_override_present": true,
     "uncommitted_stage1_auto_best_checkpoint_present": false,
     "uncommitted_exploratory_training_waiver_present": false,
     "uncommitted_formal50k_diversity_contract_present": false,
@@ -34,7 +34,7 @@
     "uncommitted_s5_candidate_v4_v2_gate_config_present": false,
     "uncommitted_s5_candidate_v4_v2_gate_waiver_present": false,
     "uncommitted_s5_candidate_v4_v2_user_stop_evidence_present": false,
-    "uncommitted_dataset_episode_visualizer_present": false,
+    "uncommitted_dataset_episode_visualizer_present": true,
     "uncommitted_stage2_run3_termination_evidence_present": false,
     "uncommitted_stage2_pretrain_reward_tb_present": false,
     "uncommitted_stage2_continuous_reward_v2_present": false,
@@ -47,18 +47,21 @@
     "uncommitted_rule_conditioned_v2_dataset_preparation_present": true,
     "uncommitted_rule_conditioned_v2_diagnostic_verifier_fix_present": true,
     "uncommitted_rule_conditioned_v2_parallel_collection_preparation_present": true,
-    "uncommitted_candidate_v3_frozen_config_repair_present": true
+    "uncommitted_candidate_v3_frozen_config_repair_present": true,
+    "uncommitted_rule_conditioned_v2_precomposition_reconciliation_present": true,
+    "uncommitted_rule_conditioned_v2_composition_fix_present": true,
+    "uncommitted_rule_conditioned_v2_composition_evidence_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "rule-conditioned-v2-dataset-preparation-20260819",
-    "status": "diagnostic8k_verified_parallel_formal_and_s5_collection_ready",
-    "active_hard_gate": "freeze_clean_revision_then_run_formal40k_and_s5_parallel"
+    "round": "rule-conditioned-v2-composition-20260821",
+    "status": "rule_conditioned_v2_50070_installed_verified_quality_acceptance_pending",
+    "active_hard_gate": "formal_50070_quality_acceptance_before_stage1"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "implementation_verified_formal_data_training_and_evaluation_pending",
+      "status": "implementation_and_composition_verified_quality_acceptance_training_and_evaluation_pending",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_preserved": true,
@@ -94,11 +97,11 @@
       },
       "formal_p95_gate_ms": 200.0,
       "formal_p95_measured": false,
-      "formal_data_collected": false,
+      "formal_data_collected": true,
       "report": "evaluation/BEV_ONLY_DIFFUSION_PLANNER_V2_IMPLEMENTATION_REPORT.json",
-      "next_hard_gate": "freeze_clean_revision_then_run_formal40k_and_s5_parallel",
+      "next_hard_gate": "formal_50070_quality_acceptance_before_stage1",
       "dataset_preparation": {
-        "status": "diagnostic8k_verified_parallel_formal_and_s5_collection_ready",
+        "status": "formal50070_installed_and_fully_verified_quality_acceptance_pending",
         "diagnostic8k_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s6_s9_diagnostic8k.yaml",
         "formal40k_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s6_s9_formal40k.yaml",
         "s5_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s5_release10070.yaml",
@@ -110,8 +113,19 @@
           "S9 seed17: 25 steps, 15 v2 samples/condition events",
           "S5 seed83024 balanced target: sampled=true, realized=true, 15 v2 samples/condition events"
         ],
-        "formal_data_collected": false,
+        "formal_data_collected": true,
         "formal_training_eligible": false,
+        "composition_contract": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.contract.json",
+        "composition_contract_sha256": "646b408bc2583b31f9c4f5081129d07d856064bea89aeb97673dabca15d41c6b",
+        "composition_dry_run_blocker": null,
+        "composition_fix_regression_tests": "87 passed",
+        "composition_final_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+        "composition_base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
+        "composition_sidecar_dataset_fingerprint": "6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b",
+        "composition_bundle_index_sha256": "024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4",
+        "composition_joint_samples": 50070,
+        "composition_full_verifier_passed": true,
+        "composition_report": "evaluation/BEV_RULE_CONDITIONED_V2_COMPOSITION_REPORT.json",
         "report": "evaluation/BEV_RULE_CONDITIONED_V2_DATASET_PREPARATION_REPORT.json"
       }
     },
@@ -679,9 +693,22 @@
     "rule_conditioned_v2_parallel_formal_and_s5_collection_requested": true,
     "rule_conditioned_v2_parallel_formal_and_s5_collection_requested_on": "2026-08-19",
     "rule_conditioned_v2_parallel_formal_and_s5_collection_scope": "After diagnostic8k passes, run formal40k and the independent 43/5/5 S5 collection from one clean frozen revision in separate roots/logs/caches; freeze the composition contract only after both sources complete verification",
+    "rule_conditioned_v2_stage1_after_composition_requested": true,
+    "rule_conditioned_v2_stage1_after_composition_requested_on": "2026-08-20",
+    "rule_conditioned_v2_stage1_after_composition_scope": "After the installed formal50070 bundle passes a separate formal data-quality and training-eligibility acceptance, bind Stage 1 to its immutable root/fingerprints, run a bounded smoke, then launch formal training in a separate long-running thread; composition verification alone does not waive eligibility.",
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. A new bounded diagnostic run is allowed only in a separate thread from the original Stage1 checkpoint; no formal eligibility was granted."
   },
   "source_of_truth": {
+    "bev_rule_conditioned_v2_composition_report": {
+      "path": "evaluation/BEV_RULE_CONDITIONED_V2_COMPOSITION_REPORT.json",
+      "sha256": "f17dc00b5388e91f66db06562922c2d02a13ff0127073cb2d305c897381fbe40",
+      "role": "Records the committed-identity uniqueness fix, frozen dry-run, physical staging, atomic new-root install, complete 7620-payload verification, RuleMaker condition audit, S7 bidirectional KEEP counts, S5 video smoke, immutable source evidence and formal-training-ineligible boundary"
+    },
+    "bev_rule_conditioned_v2_precomposition_reconciliation_report": {
+      "path": "evaluation/BEV_RULE_CONDITIONED_V2_PRECOMPOSITION_RECONCILIATION_REPORT.json",
+      "sha256": "a1a614e743262d734a77e0a293f3b61073275c83fa1e4b643c63ed4b368a6863",
+      "role": "Reconciles the completed verified formal40k and S5 sources, frozen composition contract and the committed-identity uniqueness dry-run blocker before the scoped composition fix"
+    },
     "bev_rule_conditioned_v2_diagnostic8k_verification_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_DIAGNOSTIC8K_VERIFICATION_REPORT.json",
       "sha256": "1ca2003a6448439e6077e65986ce26e330e6bd782e99a4091894868821879e09",
@@ -1039,9 +1066,16 @@
       "immutable_fingerprint": "2286e4ed24db6142b8b6d861fcbf721342e449e33844703fc748f44ca6c076d6",
       "target_joint_samples": 40000,
       "per_scenario_quota": 10000,
-      "collection_started": false,
-      "collection_complete": false,
-      "full_verifier_passed": false,
+      "collection_started": true,
+      "collection_complete": true,
+      "full_verifier_passed": true,
+      "observed_joint_samples": 40000,
+      "observed_stored_episodes": 206,
+      "observed_attempted_episodes": 362,
+      "observed_rejected_episodes": 156,
+      "observed_pending_transaction": false,
+      "sidecar_dataset_fingerprint": "f6b8afbc3c764309c5d9d73d7fae93f993de3d6aa91b8d5136d796a621609a19",
+      "bundle_index_sha256": "ffb56c4a1c21a19ce19140ddcd8afdc1cdc801c44a6482daafc63227aa5ae3a8",
       "eligible_for_formal_training": false,
       "blocker": null
     },
@@ -1057,11 +1091,41 @@
       "target_background_condition_required": true,
       "source_split_episode_quotas": {"train": 43, "val": 5, "test": 5},
       "independent_config_created": true,
-      "collection_started": false,
-      "collection_complete": false,
-      "full_verifier_passed": false,
+      "collection_started": true,
+      "collection_complete": true,
+      "full_verifier_passed": true,
+      "observed_joint_samples": 10070,
+      "observed_stored_episodes": 53,
+      "observed_attempted_episodes": 132,
+      "observed_rejected_episodes": 79,
+      "observed_pending_transaction": false,
+      "sidecar_dataset_fingerprint": "8275abf9bc3efce92d596949b45a0a11a14cd33806102c7b607d1ce4edc86549",
+      "bundle_index_sha256": "206118a440d7f2719a3d939e1dfe7052808e804d02b3b8665a9fe7714b0a9f41",
       "eligible_for_formal_training": false,
       "blocker": null
+    },
+    "bev_rule_conditioned_v2_s5_s9_formal50070": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+      "composition_contract": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.contract.json",
+      "composition_contract_sha256": "646b408bc2583b31f9c4f5081129d07d856064bea89aeb97673dabca15d41c6b",
+      "base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
+      "sidecar_dataset_fingerprint": "6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b",
+      "bundle_index_sha256": "024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4",
+      "joint_samples": 50070,
+      "committed_episodes": 259,
+      "bundle_index_rows": 415,
+      "rejected_audit_rows": 156,
+      "split_episode_counts": {"train": 205, "val": 27, "test": 27},
+      "split_joint_samples": {"train": 39670, "val": 5170, "test": 5230},
+      "new_s5_release_episodes": 53,
+      "cross_split_s5_mappings": 17,
+      "verified_payload_files": 7620,
+      "composition_complete": true,
+      "full_verifier_passed": true,
+      "rule_conditioned_v2_verifier_passed": true,
+      "visual_smoke_passed": true,
+      "eligible_for_formal_training": false,
+      "blocker": "Separate formal data-quality and training-eligibility acceptance is required before Stage 1."
     },
     "exact_path_s5_s9_pilot1k": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_exact_path_pilot1k_round13_99_v1",
@@ -1594,7 +1658,7 @@
     }
   },
   "blockers": [
-    "Formal Rule-conditioned v2 training remains blocked until formal40k and S5 release10070 are collected, fully verified, composed into a new root and separately accepted; diagnostic8k is verified but remains non-training data.",
+    "The Rule-conditioned v2 formal50070 bundle is installed and fully integrity/condition verified, but formal Stage 1 remains blocked until a separate data-quality and training-eligibility acceptance explicitly passes; diagnostic8k remains non-training data.",
     "Formal Stage1-A remains blocked because complete formal50K base, sidecar, bundle, and statistical quality acceptance was skipped and therefore was not measured as passed. This does not block the explicitly authorized bounded at-risk diagnostic GRPO-Open tau_d path."
   ],
   "future_hard_gates": [
@@ -1609,11 +1673,8 @@
     "GRPO-Open must retain the stage2_grpo_open_application_v1 SHA, raw tau_d reward/selection/best semantics, zero tracking expansion, selected-only trajectory optimization, and calibration_required=false. Any new run must start from the original Stage1 checkpoint in the isolated tau_d training_v1 root; run_3 resume and metadata promotion remain forbidden."
   ],
   "next_actions": [
-    "Freeze one clean revision containing the bidirectional S7 contract, exact verifier, independent S5 config and composition tooling; do not modify code or config while either production collector is active.",
-    "In one terminal run the new-root S6-S9 formal40k collection with no quota, target-step or max-episode override; in a second terminal run the S5 first-ten gate from the independent 43/5/5 config with isolated logs and caches.",
-    "After the S5 first-ten gate passes without a waiver, resume the same S5 root/config to collect exactly 53 balanced temporary-release-and-recovery target-background episodes while formal40k may continue independently.",
-    "After both sources pass complete verification, run compose_rule_conditioned_v2_dataset.py prepare-composition-contract to freeze both fingerprints/index hashes, the S5 config SHA and the final 53 append slots derived from the real formal40k next_episode_index.",
-    "After both sources pass, use compose dry-run, physical stage and install-to-new-root with explicit source fingerprints/index hashes; fully verify the 50070-sample result before any separate formal-training eligibility decision.",
+    "Run a separate formal data-quality and training-eligibility acceptance on /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1, binding base fingerprint 88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813, sidecar fingerprint 6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b and bundle index SHA 024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4.",
+    "Only after that eligibility gate passes, bind the Stage 1 config to the frozen formal50070 root/fingerprints, run a bounded training smoke, and launch formal Stage 1 in a separate long-running thread with immutable config and output root.",
     "The S5 release30 append is installed and fully verified at 50260 samples with all 233 prior base episodes preserved. Bind any consumer to base fingerprint e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511 and sidecar fingerprint a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6; retain the complete pre-append backup unless a separate cleanup round is explicitly authorized.",
     "Preserve the failed candidate-v4 S5 supplement root as immutable historical evidence; do not rewrite, relabel, or resume it after the sidecar out-of-road fix.",
     "Preserve the 18 committed candidate-v4-v2 S5 episodes and leave the interrupted episode-376 pending transaction untouched until the user explicitly chooses a future cleanup or continuation policy.",

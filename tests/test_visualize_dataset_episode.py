@@ -237,6 +237,39 @@ def test_contract_and_episode_corruption_fail_fast(mini_bundle: Path) -> None:
         resolve_dataset_roots(mini_bundle)
 
 
+def test_resolve_dataset_roots_accepts_v2_sidecar_contract(tmp_path: Path) -> None:
+    bundle = tmp_path / "v2_bundle"
+    base = bundle / "platoon_joint_bev"
+    with JointBEVDatasetStore(
+        base,
+        split_config=EpisodeSplitConfig(),
+        dataset_fingerprint=FINGERPRINT,
+        resume=False,
+        planner_version="v2",
+    ):
+        pass
+    base_contract = json.loads(
+        (base / "dataset_contract.json").read_text(encoding="utf-8")
+    )
+    sidecar = bundle / "riskentry_actor_sidecar"
+    _write_json(
+        sidecar / "dataset_contract.json",
+        sidecar_dataset_contract(
+            FINGERPRINT,
+            base_format=str(base_contract["format"]),
+            base_schema_version=int(base_contract["schema_version"]),
+        ),
+    )
+
+    roots = resolve_dataset_roots(bundle)
+
+    assert roots.dataset_fingerprint == FINGERPRINT
+    assert roots.sidecar_root == sidecar
+    assert roots.base_schema_version == int(base_contract["schema_version"])
+    assert roots.base_format == str(base_contract["format"])
+    assert discover_episodes(roots) == ()
+
+
 def test_vehicle_geometry_and_world_pixel_conversion() -> None:
     polygon = vehicle_polygon_world((10.0, 5.0), 0.0, 4.0, 2.0)
     assert np.allclose(

@@ -1,0 +1,140 @@
+{
+  "format": "bev_rule_conditioned_v2_composition_report_v1",
+  "generated_at": "2026-08-21T00:44:40+08:00",
+  "status": "installed_and_fully_verified_quality_acceptance_pending",
+  "repository": {
+    "branch": "BEV",
+    "base_git_commit": "5dd08e759fba1171810849882e9e80e0cc45f075",
+    "composition_changes_uncommitted": true
+  },
+  "implementation": {
+    "committed_identity_uniqueness_fix": {
+      "status": "verified",
+      "rule": "Only base_status=committed rows and selected S5 accepted episodes participate in (scenario_id, spawn_seed) uniqueness; rejected audit retries are preserved and may reuse a seed.",
+      "source": "tools/compose_rule_conditioned_v2_dataset.py"
+    },
+    "schema3_visualization_compatibility": {
+      "status": "verified",
+      "rule": "The visualization reader derives sidecar, manifest and episode format/schema expectations from the validated base dataset contract.",
+      "source": "tools/visualize_dataset_episode.py"
+    }
+  },
+  "sources": {
+    "s6_s9_formal40k": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s6_s9_formal40k_v1",
+      "base_dataset_fingerprint": "2286e4ed24db6142b8b6d861fcbf721342e449e33844703fc748f44ca6c076d6",
+      "bundle_index_sha256": "ffb56c4a1c21a19ce19140ddcd8afdc1cdc801c44a6482daafc63227aa5ae3a8",
+      "preserved_unchanged": true
+    },
+    "s5_release10070": {
+      "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_release10070_v1",
+      "base_dataset_fingerprint": "1931363c8d69d73904f15901b211b2d1a71bba4c07d09c24aeab55a3a12e5a1f",
+      "bundle_index_sha256": "206118a440d7f2719a3d939e1dfe7052808e804d02b3b8665a9fe7714b0a9f41",
+      "config_sha256": "74616049d74d391fdaf58621e819a0cb24c0e04d04f8cbe665493f93889b69c6",
+      "preserved_unchanged": true
+    }
+  },
+  "contract": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.contract.json",
+    "sha256": "646b408bc2583b31f9c4f5081129d07d856064bea89aeb97673dabca15d41c6b"
+  },
+  "composition_runs": {
+    "dry_run": {
+      "status": "pass",
+      "result": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.dry_run.json",
+      "result_sha256": "5f1ab820c3a00ae01722c241d2856bf817e8711fb5813517e7a2b0b5796cbda9"
+    },
+    "physical_staging": {
+      "status": "pass",
+      "result": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.staged.json",
+      "result_sha256": "349bc407284760dcdbb98c37f149323285421cebadcc2ada69904e9aa270336a",
+      "physical_copy": true,
+      "verified_before_install": true
+    },
+    "atomic_install": {
+      "status": "pass",
+      "result": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.installed.json",
+      "result_sha256": "fa76f9a32529c4302f2cd3a0f6a9ade3a834c78a9aaf91f1a2e7463a9bcaffda",
+      "staging_absent_after_install": true,
+      "post_install_full_verification": true
+    }
+  },
+  "output": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+    "base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
+    "sidecar_dataset_fingerprint": "6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b",
+    "bundle_index_sha256": "024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4",
+    "joint_samples": 50070,
+    "base_committed_episodes": 259,
+    "bundle_index_rows": 415,
+    "rejected_audit_rows": 156,
+    "sidecar_raw_steps": 118321,
+    "verified_payload_files": 7620,
+    "split_episode_counts": {
+      "train": 205,
+      "val": 27,
+      "test": 27
+    },
+    "split_sample_counts": {
+      "train": 39670,
+      "val": 5170,
+      "test": 5230
+    },
+    "new_s5_release_episodes": 53,
+    "cross_split_s5_mappings": 17,
+    "committed_identity_duplicates": 0,
+    "symbolic_links": 0,
+    "pending_or_temporary_entries": 0
+  },
+  "rule_conditioned_v2_verification": {
+    "status": "pass",
+    "aligned_episodes": 259,
+    "aligned_samples": 50070,
+    "raw_condition_events": 82210,
+    "proposal_batches": 38612,
+    "executions": 436,
+    "accepted_proposal_rank_counts": {
+      "0": 48327,
+      "1": 1722,
+      "2": 21
+    },
+    "formation_state_counts": {
+      "LOCKED": 30500,
+      "UNLOCKED": 19570
+    },
+    "s7_left_to_keep_exceptions": 10402,
+    "s7_right_to_keep_exceptions": 2676,
+    "scenario_sample_counts": {
+      "S5_hard_brake_lead": 10070,
+      "S6_background_merge_in": 10000,
+      "S7_ego_merge_from_ramp": 10000,
+      "S8_ego_exit_to_ramp": 10000,
+      "S9_narrow_channel_negotiation": 10000
+    }
+  },
+  "visual_smoke": {
+    "status": "pass",
+    "scenario_id": "S5_hard_brake_lead",
+    "scenario_episode_number": 1,
+    "global_episode_index": 362,
+    "path": "/media/kong/Elements_SE/Diffusion_Data/collection_logs/bev_rule_conditioned_v2_composition/s5_episode1.mp4",
+    "sha256": "84690d75ba2b488c894ad617e8ef4ddf891f9758d094e6b66f19536af5e32734",
+    "size_bytes": 257191,
+    "codec": "h264",
+    "resolution": "1280x720",
+    "fps": 10,
+    "frames": 201,
+    "duration_seconds": 20.1
+  },
+  "tests": {
+    "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_run_joint_bev_collection.py tests/test_bev_rule_conditioned_v2.py tests/test_append_s5_release30_dataset.py tests/test_compose_rule_conditioned_v2_dataset.py tests/test_verify_rule_conditioned_v2_bundle.py tests/test_visualize_dataset_episode.py",
+    "result": "87 passed, 15 warnings",
+    "status": "pass"
+  },
+  "training_eligibility": {
+    "eligible_for_formal_training": false,
+    "stage1_started": false,
+    "hard_gate": "Run and record a separate formal data-quality and training-eligibility acceptance on the installed 50070-sample bundle before binding or launching Stage 1.",
+    "reason": "Composition integrity and RuleMaker consistency have passed, but the contract intentionally does not grant formal-training eligibility."
+  }
+}

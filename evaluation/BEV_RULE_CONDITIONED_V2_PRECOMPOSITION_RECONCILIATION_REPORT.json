@@ -1,0 +1,61 @@
+{
+  "format": "bev_rule_conditioned_v2_precomposition_reconciliation_v1",
+  "generated_at": "2026-08-20T22:09:00+08:00",
+  "repository": {
+    "branch": "BEV",
+    "git_commit": "5dd08e759fba1171810849882e9e80e0cc45f075",
+    "worktree_clean_before_reconciliation": true
+  },
+  "formal40k_source": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s6_s9_formal40k_v1",
+    "base_dataset_fingerprint": "2286e4ed24db6142b8b6d861fcbf721342e449e33844703fc748f44ca6c076d6",
+    "sidecar_dataset_fingerprint": "f6b8afbc3c764309c5d9d73d7fae93f993de3d6aa91b8d5136d796a621609a19",
+    "bundle_index_sha256": "ffb56c4a1c21a19ce19140ddcd8afdc1cdc801c44a6482daafc63227aa5ae3a8",
+    "joint_samples": 40000,
+    "stored_episodes": 206,
+    "attempted_episodes": 362,
+    "rejected_episodes": 156,
+    "strict_verifier_passed": true,
+    "pending_transaction": false,
+    "writer_lock_released": true
+  },
+  "s5_source": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_release10070_v1",
+    "base_dataset_fingerprint": "1931363c8d69d73904f15901b211b2d1a71bba4c07d09c24aeab55a3a12e5a1f",
+    "sidecar_dataset_fingerprint": "8275abf9bc3efce92d596949b45a0a11a14cd33806102c7b607d1ce4edc86549",
+    "bundle_index_sha256": "206118a440d7f2719a3d939e1dfe7052808e804d02b3b8665a9fe7714b0a9f41",
+    "joint_samples": 10070,
+    "stored_episodes": 53,
+    "attempted_episodes": 132,
+    "rejected_episodes": 79,
+    "source_split_episode_quotas": {
+      "train": 43,
+      "val": 5,
+      "test": 5
+    },
+    "strict_verifier_passed": true,
+    "targeted_audit_passed": true,
+    "pending_transaction": false,
+    "writer_lock_released": true
+  },
+  "composition_contract": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.contract.json",
+    "sha256": "646b408bc2583b31f9c4f5081129d07d856064bea89aeb97673dabca15d41c6b",
+    "append_episode_count": 53,
+    "target_split_quotas": {
+      "train": 41,
+      "val": 3,
+      "test": 9
+    },
+    "strict_verifier_status": "pass"
+  },
+  "dry_run_blocker": {
+    "error": "duplicate (scenario_id, spawn_seed) pairs: [('S6_background_merge_in', 31)]",
+    "rejected_attempt_episode_index": 10,
+    "committed_episode_index": 11,
+    "committed_identity_duplicates": 0,
+    "root_cause": "composition uniqueness validation included rejected audit rows instead of committed dataset episodes"
+  },
+  "status": "sources_verified_contract_frozen_composition_fix_pending",
+  "eligible_for_formal_training": false
+}

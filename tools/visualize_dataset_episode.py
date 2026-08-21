@@ -18,7 +18,7 @@ import mediapy
 import numpy as np
 
 from expert_dataset.joint_bev_dataset import validate_dataset_contract
-from expert_dataset.joint_bev_storage import SPLIT_NAMES, STORAGE_FORMAT, STORAGE_SCHEMA_VERSION
+from expert_dataset.joint_bev_storage import SPLIT_NAMES
 from expert_dataset.riskentry_sidecar_storage import (
     ACTOR_STATE_CHANNELS,
     SIDECAR_ARRAY_DTYPES,
@@ -54,6 +54,8 @@ class DatasetRoots:
     base_root: Path
     sidecar_root: Path
     dataset_fingerprint: str
+    base_format: str
+    base_schema_version: int
 
 
 @dataclass(frozen=True)
@@ -131,12 +133,23 @@ def resolve_dataset_roots(dataset_root: Path | str) -> DatasetRoots:
         ) from exc
     fingerprint = str(base_contract["dataset_fingerprint"])
     observed_sidecar_contract = _read_json(sidecar_root / "dataset_contract.json")
-    expected_sidecar_contract = sidecar_dataset_contract(fingerprint)
+    expected_sidecar_contract = sidecar_dataset_contract(
+        fingerprint,
+        base_format=str(base_contract["format"]),
+        base_schema_version=int(base_contract["schema_version"]),
+    )
     if observed_sidecar_contract != expected_sidecar_contract:
         raise DatasetEpisodeVisualizationError(
             "sidecar contract or base dataset fingerprint does not match"
         )
-    return DatasetRoots(bundle_root, base_root, sidecar_root, fingerprint)
+    return DatasetRoots(
+        bundle_root,
+        base_root,
+        sidecar_root,
+        fingerprint,
+        str(base_contract["format"]),
+        int(base_contract["schema_version"]),
+    )
 
 
 def _validate_sidecar_episode(
@@ -192,12 +205,14 @@ def _validate_base_episode(
     split: str,
     joint_samples: int,
     attributes: Mapping[str, object],
+    base_format: str,
+    base_schema_version: int,
 ) -> None:
     metadata = _read_json(path / "episode.json")
     expected = {
         "complete": True,
-        "format": STORAGE_FORMAT,
-        "schema_version": STORAGE_SCHEMA_VERSION,
+        "format": base_format,
+        "schema_version": base_schema_version,
         "episode_index": episode_index,
         "split": split,
         "joint_samples": joint_samples,
@@ -220,8 +235,8 @@ def discover_episodes(roots: DatasetRoots) -> tuple[EpisodeRecord, ...]:
         manifest_path = roots.base_root / split / "manifest.json"
         manifest = _read_json(manifest_path)
         if (
-            manifest.get("schema_version") != STORAGE_SCHEMA_VERSION
-            or manifest.get("format") != STORAGE_FORMAT
+            manifest.get("schema_version") != roots.base_schema_version
+            or manifest.get("format") != roots.base_format
             or manifest.get("split") != split
         ):
             raise DatasetEpisodeVisualizationError(f"invalid base manifest: {manifest_path}")
@@ -269,6 +284,8 @@ def discover_episodes(roots: DatasetRoots) -> tuple[EpisodeRecord, ...]:
                 split=split,
                 joint_samples=joint_samples,
                 attributes=attributes,
+                base_format=roots.base_format,
+                base_schema_version=roots.base_schema_version,
             )
             raw_steps, duration_s = _validate_sidecar_episode(
                 sidecar_directory,

@@ -138,13 +138,15 @@ def _source_root(root: Path, *, split: str, index: int) -> None:
     )
 
 
-def _append_rejected_without_sidecar(root: Path, index: int) -> None:
+def _append_rejected_without_sidecar(
+    root: Path, index: int, *, spawn_seed: int | None = None
+) -> None:
     row = {
         "episode_index": index,
         "split": "val",
         "scenario_id": "S6_background_merge_in",
         "local_route": "R1",
-        "spawn_seed": index + 10,
+        "spawn_seed": index + 10 if spawn_seed is None else spawn_seed,
         "base_status": "rejected",
         "base_rejection_reason": "trajectory_infeasible",
         "sidecar_status": "rejected",
@@ -177,6 +179,40 @@ def test_target_slots_are_contiguous_and_match_seed17_split() -> None:
     flattened = sorted(index for values in slots.values() for index in values)
     assert flattened == list(range(401, 401 + compose.APPEND_EPISODES))
     assert sum(len(values) for values in slots.values()) == 53
+
+
+def test_committed_identity_uniqueness_ignores_rejected_retry() -> None:
+    rows = [
+        {
+            "scenario_id": "S6_background_merge_in",
+            "spawn_seed": 31,
+            "base_status": "rejected",
+        },
+        {
+            "scenario_id": "S6_background_merge_in",
+            "spawn_seed": 31,
+            "base_status": "committed",
+        },
+    ]
+    assert compose._duplicate_committed_identities(rows) == []
+
+
+def test_committed_identity_uniqueness_rejects_two_committed_rows() -> None:
+    rows = [
+        {
+            "scenario_id": "S6_background_merge_in",
+            "spawn_seed": 31,
+            "base_status": "committed",
+        },
+        {
+            "scenario_id": "S6_background_merge_in",
+            "spawn_seed": 31,
+            "base_status": "committed",
+        },
+    ]
+    assert compose._duplicate_committed_identities(rows) == [
+        ("S6_background_merge_in", 31)
+    ]
 
 
 def test_new_collection_configs_are_v2_candidate_v4_and_loadable() -> None:
@@ -397,7 +433,7 @@ def test_build_staging_physically_copies_and_reindexes_tiny_schema3_bundle(
     supplement = tmp_path / "supplement"
     staging = tmp_path / "staging"
     _source_root(base, split="train", index=0)
-    _append_rejected_without_sidecar(base, 1)
+    _append_rejected_without_sidecar(base, 1, spawn_seed=10)
     _source_root(supplement, split="test", index=0)
     fingerprint = "d" * 64
     storage = joint_sample_storage_contract("v2")
@@ -452,7 +488,18 @@ def test_build_staging_physically_copies_and_reindexes_tiny_schema3_bundle(
     assert state["next_episode_index"] == 3
     assert state["rejected_episodes"] == 1
     assert state["rejection_reasons"] == {"trajectory_infeasible": 1}
-    assert len((staging / "bundle_episode_index.jsonl").read_text().splitlines()) == 3
+    staged_rows = [
+        json.loads(line)
+        for line in (staging / "bundle_episode_index.jsonl").read_text().splitlines()
+    ]
+    assert len(staged_rows) == 3
+    preserved_base_rows = [row for row in staged_rows if row["episode_index"] < 2]
+    assert sum(
+        row["scenario_id"] == "S6_background_merge_in"
+        and row["spawn_seed"] == 10
+        for row in preserved_base_rows
+    ) == 2
+    assert compose._duplicate_committed_identities(preserved_base_rows) == []
     assert compose._file_sha256(
         supplement / "platoon_joint_bev/test/episodes/episode_00000000/value.npy"
     ) == source_hash

@@ -15,7 +15,7 @@ training:
   seed: 17
   batch_size: 8
   gradient_accumulation: 2
-  max_epochs: 40
+  max_epochs: 60
   num_workers: 4
   planner_lr: 0.0001
   backbone_lr: 0.00001
