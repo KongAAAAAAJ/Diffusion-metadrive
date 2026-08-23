@@ -1,0 +1,123 @@
+{
+  "format": "bev_rule_conditioned_v2_formal50070_quality_acceptance_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-21T09:04:53+08:00",
+  "status": "blocked_not_eligible_for_formal_training",
+  "scope": "Separate formal data-quality and Stage 1 training-eligibility acceptance for the installed Rule-conditioned v2 formal50070 bundle; no dataset mutation, collection, training, threshold change, verifier change, or Stage 1 binding was performed",
+  "repository": {
+    "branch": "BEV",
+    "git_commit": "e818b2a0aade44df560524a3b1f69f6c57c531f8",
+    "worktree_clean_before_acceptance": false,
+    "preserved_unrelated_change": "AGENTS.md",
+    "active_collection_or_training_processes": 0
+  },
+  "dataset": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+    "base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
+    "sidecar_dataset_fingerprint": "6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b",
+    "bundle_index_sha256": "024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4",
+    "composition_contract": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.contract.json",
+    "composition_contract_sha256": "646b408bc2583b31f9c4f5081129d07d856064bea89aeb97673dabca15d41c6b",
+    "joint_samples": 50070,
+    "committed_base_episodes": 259,
+    "bundle_index_rows": 415,
+    "split_joint_samples": {
+      "train": 39670,
+      "val": 5170,
+      "test": 5230
+    },
+    "metadata_binding_passed": true
+  },
+  "frozen_contract_evidence": {
+    "composition_report": "evaluation/BEV_RULE_CONDITIONED_V2_COMPOSITION_REPORT.json",
+    "composition_report_sha256": "f17dc00b5388e91f66db06562922c2d02a13ff0127073cb2d305c897381fbe40",
+    "composition_full_verifier_passed": true,
+    "rule_conditioned_v2_verifier_passed": true,
+    "s6_s9_formal_diversity_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s6_s9_formal40k.yaml",
+    "s6_s9_formal_diversity_config_sha256": "7cb0f974c380adf09b131543a7c0800507a7df06506a05c846a74a96d392c60a",
+    "s5_strict_targeted_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s5_release10070.yaml",
+    "s5_strict_targeted_config_sha256": "74616049d74d391fdaf58621e819a0cb24c0e04d04f8cbe665493f93889b69c6",
+    "s5_targeted_audit_passed_before_composition": true,
+    "interpretation": "The just-completed immutable composition and condition checks remain accepted evidence. This round adds the separate statistical/safety quality gate and does not repeat the settled 7620-payload integrity scan."
+  },
+  "execution": {
+    "smoke_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_round13_97g_dataset_quality.py",
+    "smoke_result": "5 passed, 15 warnings in 2.55s",
+    "smoke_status": "pass",
+    "quality_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=\"$PWD:$PYTHONPATH\" /home/kong/anaconda3/envs/meta_drive/bin/python -m evaluation.round13_97g_dataset_quality /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1 --output /tmp/BEV_RULE_CONDITIONED_V2_FORMAL50070_QUALITY_AUDIT.json",
+    "quality_exit_code": 0,
+    "quality_elapsed_seconds": 13.591636549,
+    "raw_quality_report": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL50070_QUALITY_AUDIT.json",
+    "raw_quality_report_sha256": "6bca36458aac29f7f3a7e98d67e9bb66042b9569abb65d6f3d90475e10e50702"
+  },
+  "statistical_quality": {
+    "status": "statistical_quality_blocked",
+    "gates": {
+      "required_scenarios_present": true,
+      "required_splits_non_empty": true,
+      "sidecar_no_platoon_collision_events": false,
+      "sidecar_no_platoon_out_of_road_events": true,
+      "s7_stop_fraction": true,
+      "s7_low_speed_fraction": true,
+      "s7_lateral_mode_fraction": true
+    },
+    "thresholds": {
+      "s7_max_stop_fraction": 0.4,
+      "s7_max_low_speed_fraction": 0.4,
+      "s7_min_lateral_mode_fraction": 0.1
+    },
+    "s7_observed": {
+      "episodes": 53,
+      "joint_samples": 10000,
+      "stop_fraction": 0.021833333333333333,
+      "speed_below_0_3_fraction": 0.0699,
+      "lateral_mode_fraction": 0.43593333333333334
+    },
+    "safety_observed": {
+      "base_committed_platoon_collision_events": 1,
+      "base_committed_platoon_out_of_road_events": 0,
+      "sidecar_only_platoon_collision_events_retained": 2,
+      "sidecar_only_platoon_out_of_road_events_retained": 0,
+      "external_collision_events_retained_as_context": 775,
+      "external_out_of_road_events_retained_as_context": 721
+    }
+  },
+  "failed_gate_evidence": {
+    "gate": "sidecar_no_platoon_collision_events",
+    "required": "zero platoon collision events in base-committed episodes",
+    "observed": 1,
+    "episode": {
+      "scenario_id": "S6_background_merge_in",
+      "local_route": "R6_mainline_merge_approach",
+      "spawn_seed": 1751228647,
+      "split": "train",
+      "episode_index": 194,
+      "directory": "episode_00000194",
+      "base_status": "committed",
+      "base_samples": 200,
+      "bundle_outcome": "collision",
+      "sidecar_retention_kept_despite_dangerous_outcome": true,
+      "event_type": "collision_sidewalk",
+      "platoon_actor_id": "P2",
+      "source_agent_id": "agent2",
+      "step_index": 0,
+      "timestamp_s": 0.0
+    },
+    "classification_check": {
+      "total_platoon_collision_sidewalk_events": 3,
+      "base_committed_events": 1,
+      "base_rejected_sidecar_only_events": 2,
+      "audit_mapping_error_found": false
+    }
+  },
+  "decision": {
+    "quality_gate_passed": false,
+    "eligible_for_formal_training": false,
+    "stage1_binding_allowed": false,
+    "stage1_started": false,
+    "active_hard_gate": "formal_50070_zero_committed_platoon_collision_events_before_stage1",
+    "blocker": "S6 train episode_00000194 is base-committed with 200 training samples despite a platoon P2 collision_sidewalk event at simulator step 0.",
+    "next_permitted_action": "Diagnose the S6 episode-admission path and define an immutable new-root remediation; do not mutate or relabel the installed formal50070 bundle. Rerun complete quality and eligibility acceptance on any replacement before Stage 1."
+  },
+  "maintenance_gap": "No repository specialist skill exists for standalone dataset verification; this acceptance used the frozen contracts and runbook referenced by project_state.json."
+}

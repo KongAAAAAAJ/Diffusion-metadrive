@@ -1,0 +1,279 @@
+{
+  "bundle_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+  "eligible_for_formal_50k_collection": true,
+  "formal_collection_contract": null,
+  "format": "bev_shared_bundle_statistical_quality_v1",
+  "gates": {
+    "required_scenarios_present": true,
+    "required_splits_non_empty": true,
+    "s7_lateral_mode_fraction": true,
+    "s7_low_speed_fraction": true,
+    "s7_stop_fraction": true,
+    "sidecar_no_platoon_collision_events": true,
+    "sidecar_no_platoon_out_of_road_events": true
+  },
+  "global_gt_mode_counts": {
+    "KEEP_HIGH": 42092,
+    "KEEP_LOW": 11356,
+    "KEEP_MEDIUM": 59365,
+    "LEFT_HIGH": 12937,
+    "LEFT_LOW": 98,
+    "LEFT_MEDIUM": 4354,
+    "RIGHT_HIGH": 6254,
+    "RIGHT_LOW": 1049,
+    "RIGHT_MEDIUM": 5469,
+    "STOP": 6636
+  },
+  "infrastructure_report_status": null,
+  "mode_valid_rate": {
+    "KEEP_HIGH": 0.9321836775616603,
+    "KEEP_LOW": 0.9463137490809438,
+    "KEEP_MEDIUM": 0.9616335806430052,
+    "LEFT_HIGH": 0.679921128266827,
+    "LEFT_LOW": 0.6908896464140097,
+    "LEFT_MEDIUM": 0.722104137423969,
+    "RIGHT_HIGH": 0.5546220172448366,
+    "RIGHT_LOW": 0.49546153331996523,
+    "RIGHT_MEDIUM": 0.601744535793062,
+    "STOP": 1.0
+  },
+  "role_gt_mode_counts": {
+    "leader": {
+      "KEEP_HIGH": 23675,
+      "KEEP_LOW": 964,
+      "KEEP_MEDIUM": 14145,
+      "LEFT_HIGH": 4372,
+      "LEFT_LOW": 91,
+      "LEFT_MEDIUM": 730,
+      "RIGHT_HIGH": 2439,
+      "RIGHT_LOW": 166,
+      "RIGHT_MEDIUM": 2057,
+      "STOP": 1231
+    },
+    "middle": {
+      "KEEP_HIGH": 10021,
+      "KEEP_LOW": 5468,
+      "KEEP_MEDIUM": 21337,
+      "LEFT_HIGH": 5143,
+      "LEFT_LOW": 1,
+      "LEFT_MEDIUM": 1133,
+      "RIGHT_HIGH": 2362,
+      "RIGHT_LOW": 113,
+      "RIGHT_MEDIUM": 1931,
+      "STOP": 2361
+    },
+    "rear": {
+      "KEEP_HIGH": 8396,
+      "KEEP_LOW": 4924,
+      "KEEP_MEDIUM": 23883,
+      "LEFT_HIGH": 3422,
+      "LEFT_LOW": 6,
+      "LEFT_MEDIUM": 2491,
+      "RIGHT_HIGH": 1453,
+      "RIGHT_LOW": 770,
+      "RIGHT_MEDIUM": 1481,
+      "STOP": 3044
+    }
+  },
+  "round": "13.97g",
+  "scenario_statistics": {
+    "S5_hard_brake_lead": {
+      "episodes": 53,
+      "expert_terminal_displacement_m": {
+        "p05": 6.476569104194642,
+        "p50": 26.99596405029297,
+        "p95": 46.039788246154785
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 6521,
+        "KEEP_LOW": 4500,
+        "KEEP_MEDIUM": 8295,
+        "LEFT_HIGH": 3895,
+        "LEFT_LOW": 71,
+        "LEFT_MEDIUM": 826,
+        "RIGHT_HIGH": 3796,
+        "RIGHT_LOW": 9,
+        "RIGHT_MEDIUM": 927,
+        "STOP": 1370
+      },
+      "joint_samples": 10070,
+      "lateral_mode_fraction": 0.3152598477325389,
+      "role_labels": 30210,
+      "speed_below_0_3_fraction": 0.0,
+      "speed_mps": {
+        "p05": 2.022910642623901,
+        "p50": 5.962043762207031,
+        "p95": 10.05168557167053
+      },
+      "stop_fraction": 0.04534922211188348
+    },
+    "S6_background_merge_in": {
+      "episodes": 49,
+      "expert_terminal_displacement_m": {
+        "p05": 9.205667400360108,
+        "p50": 26.133581161499023,
+        "p95": 33.50178394317627
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 16046,
+        "KEEP_LOW": 1716,
+        "KEEP_MEDIUM": 8226,
+        "LEFT_HIGH": 925,
+        "LEFT_MEDIUM": 352,
+        "RIGHT_HIGH": 341,
+        "RIGHT_LOW": 19,
+        "RIGHT_MEDIUM": 827,
+        "STOP": 948
+      },
+      "joint_samples": 9800,
+      "lateral_mode_fraction": 0.0838095238095238,
+      "role_labels": 29400,
+      "speed_below_0_3_fraction": 0.0028231292517006804,
+      "speed_mps": {
+        "p05": 1.5946713447570802,
+        "p50": 5.180966854095459,
+        "p95": 7.651153421401975
+      },
+      "stop_fraction": 0.03224489795918367
+    },
+    "S7_ego_merge_from_ramp": {
+      "episodes": 53,
+      "expert_terminal_displacement_m": {
+        "p05": 6.750132369995117,
+        "p50": 23.095850944519043,
+        "p95": 35.03949813842773
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 3402,
+        "KEEP_LOW": 2134,
+        "KEEP_MEDIUM": 10731,
+        "LEFT_HIGH": 7696,
+        "LEFT_LOW": 27,
+        "LEFT_MEDIUM": 2679,
+        "RIGHT_HIGH": 747,
+        "RIGHT_LOW": 224,
+        "RIGHT_MEDIUM": 1705,
+        "STOP": 655
+      },
+      "joint_samples": 10000,
+      "lateral_mode_fraction": 0.43593333333333334,
+      "role_labels": 30000,
+      "speed_below_0_3_fraction": 0.0699,
+      "speed_mps": {
+        "p05": 0.20505672916769982,
+        "p50": 4.993851661682129,
+        "p95": 8.204756355285644
+      },
+      "stop_fraction": 0.021833333333333333
+    },
+    "S8_ego_exit_to_ramp": {
+      "episodes": 53,
+      "expert_terminal_displacement_m": {
+        "p05": 13.688088321685791,
+        "p50": 30.77534294128418,
+        "p95": 37.863071060180665
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 10167,
+        "KEEP_LOW": 2264,
+        "KEEP_MEDIUM": 11261,
+        "RIGHT_HIGH": 1235,
+        "RIGHT_LOW": 426,
+        "RIGHT_MEDIUM": 1460,
+        "STOP": 3187
+      },
+      "joint_samples": 10000,
+      "lateral_mode_fraction": 0.10403333333333334,
+      "role_labels": 30000,
+      "speed_below_0_3_fraction": 0.0,
+      "speed_mps": {
+        "p05": 4.007923603057861,
+        "p50": 6.561470031738281,
+        "p95": 10.172954750061034
+      },
+      "stop_fraction": 0.10623333333333333
+    },
+    "S9_narrow_channel_negotiation": {
+      "episodes": 50,
+      "expert_terminal_displacement_m": {
+        "p05": 3.0501648783683777,
+        "p50": 18.063469886779785,
+        "p95": 41.120097923278806
+      },
+      "gt_mode_counts": {
+        "KEEP_HIGH": 5956,
+        "KEEP_LOW": 742,
+        "KEEP_MEDIUM": 20852,
+        "LEFT_HIGH": 421,
+        "LEFT_MEDIUM": 497,
+        "RIGHT_HIGH": 135,
+        "RIGHT_LOW": 371,
+        "RIGHT_MEDIUM": 550,
+        "STOP": 476
+      },
+      "joint_samples": 10000,
+      "lateral_mode_fraction": 0.0658,
+      "role_labels": 30000,
+      "speed_below_0_3_fraction": 0.02266666666666667,
+      "speed_mps": {
+        "p05": 0.9024484872817993,
+        "p50": 2.296758532524109,
+        "p95": 9.312584972381591
+      },
+      "stop_fraction": 0.015866666666666668
+    }
+  },
+  "sidecar_event_actor_types": {
+    "actor_despawn": {
+      "platoon": 783
+    },
+    "collision_sidewalk": {
+      "external": 670,
+      "platoon": 3
+    },
+    "collision_vehicle": {
+      "external": 105
+    },
+    "out_of_road": {
+      "external": 721
+    },
+    "out_of_route": {
+      "external": 609,
+      "platoon": 357
+    },
+    "terminated": {
+      "platoon": 783
+    },
+    "truncated": {
+      "platoon": 783
+    }
+  },
+  "sidecar_safety_audit": {
+    "base_committed_platoon_collision_events": 0,
+    "base_committed_platoon_out_of_road_events": 0,
+    "external_collision_events_retained_as_context": 775,
+    "external_out_of_road_events_retained_as_context": 721,
+    "interpretation": "Raw external-actor events remain losslessly retained for RiskEntry; formal BEV safety eligibility is gated on platoon actors from base-committed episodes only. Sidecar-only failures remain evidence.",
+    "sidecar_only_platoon_collision_events_retained": 3,
+    "sidecar_only_platoon_out_of_road_events_retained": 0
+  },
+  "split_joint_samples": {
+    "test": 5230,
+    "train": 39470,
+    "val": 5170
+  },
+  "status": "statistical_quality_accepted",
+  "thresholds": {
+    "require_all_splits": true,
+    "required_scenarios": [
+      "S5_hard_brake_lead",
+      "S6_background_merge_in",
+      "S7_ego_merge_from_ramp",
+      "S8_ego_exit_to_ramp",
+      "S9_narrow_channel_negotiation"
+    ],
+    "s7_max_low_speed_fraction": 0.4,
+    "s7_max_stop_fraction": 0.4,
+    "s7_min_lateral_mode_fraction": 0.1
+  }
+}

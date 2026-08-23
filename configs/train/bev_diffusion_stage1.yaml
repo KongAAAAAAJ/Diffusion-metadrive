@@ -4,7 +4,7 @@ experiment:
   predecessor_condition: none
 
 dataset:
-  root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev
+  root: /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1/platoon_joint_bev
   train_split: train
   val_split: val
 

@@ -1,0 +1,141 @@
+{
+  "format": "bev_rule_conditioned_v2_formal49870_curated_acceptance_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-21T12:44:34+08:00",
+  "status": "accepted_for_stage1_by_explicit_user_quota_waiver",
+  "scope": "User-authorized removal of the one base-committed platoon-collision episode from the installed Rule-conditioned v2 bundle, retention of its raw sidecar evidence, full post-curation verification, statistical quality acceptance, and Stage 1 v2 dataset binding; no training was started.",
+  "decision_semantics": {
+    "strict_original_formal50070_contract_passed": false,
+    "temporary_training_use_allowed": true,
+    "eligibility_basis": "explicit_user_temporary_waiver_after_base_episode_removal",
+    "waived_requirements": [
+      "exact 50070 total joint samples",
+      "exact 10000 S6 joint samples"
+    ],
+    "not_waived": [
+      "zero platoon collision events in base-committed episodes",
+      "zero platoon out-of-road events in base-committed episodes",
+      "base/sidecar/bundle structural integrity",
+      "Rule-conditioned v2 sample/event alignment",
+      "all other statistical quality gates",
+      "Stage 1 data-contract and real-sample readability"
+    ]
+  },
+  "source_dataset": {
+    "root_before_atomic_replacement": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+    "backup_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1.pre_episode194_removal_88690467",
+    "backup_retained": true,
+    "backup_is_real_directory": true,
+    "base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
+    "sidecar_dataset_fingerprint": "6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b",
+    "bundle_index_sha256": "024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4",
+    "base_joint_samples": 50070,
+    "base_episodes": 259
+  },
+  "curation": {
+    "tool": "tools/remove_formal50070_collision_episode.py",
+    "tool_sha256": "b835e819746aa5259c91e3881a6f47b574990eaa38f7af446fb3660b8e516709",
+    "install_policy": "physical sibling staging followed by complete verification and atomic same-filesystem replacement",
+    "rollback_performed": false,
+    "original_dataset_deleted": false,
+    "removed_base_episode": {
+      "episode_index": 194,
+      "split": "train",
+      "scenario_id": "S6_background_merge_in",
+      "local_route": "R6_mainline_merge_approach",
+      "spawn_seed": 1751228647,
+      "base_samples_removed": 200,
+      "event_type": "collision_sidewalk",
+      "platoon_actor_id": "P2",
+      "source_agent_id": "agent2",
+      "step_index": 0
+    },
+    "sidecar_policy": "The raw sidecar episode and collision event remain committed as sidecar-only evidence; only base_sample_step_index.npy was replaced with an empty int64 mapping.",
+    "first_staging_verification": {
+      "status": "failed_safely_before_swap",
+      "failure": "episode/manifest attributes mismatch: 0",
+      "cause": "episode metadata had the new sidecar fingerprint while manifest-embedded attributes retained the source fingerprint",
+      "resolution": "synchronize manifest-embedded attributes, retain the physical staging copy, and rerun complete verification before installation"
+    }
+  },
+  "curated_dataset": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+    "base_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1/platoon_joint_bev",
+    "base_dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779",
+    "sidecar_dataset_fingerprint": "0925c1de1579b9bc8c39d725e3b0e78f8ced88610097988fc0171cba293abf22",
+    "bundle_index_sha256": "77cb90bdf5df1b58f90159529053744f6be702b22ed619a0b0751a0e9bdd2a99",
+    "dataset_curation_manifest_sha256": "6c8321602b9fad0156bd34b4e8e72aae8785666c9cf3012d0be6cfcac95df8cb",
+    "payload_inventory_sha256": "42b04c95c2878c197067b9f3c7804888be5a5fdd4199c76e3a45c3f0d7469c95",
+    "base_joint_samples": 49870,
+    "base_episodes": 258,
+    "sidecar_episodes": 415,
+    "sidecar_only_episodes": 157,
+    "bundle_index_rows": 415,
+    "split_joint_samples": {
+      "train": 39470,
+      "val": 5170,
+      "test": 5230
+    },
+    "scenario_joint_samples": {
+      "S5_hard_brake_lead": 10070,
+      "S6_background_merge_in": 9800,
+      "S7_ego_merge_from_ramp": 10000,
+      "S8_ego_exit_to_ramp": 10000,
+      "S9_narrow_channel_negotiation": 10000
+    }
+  },
+  "verification": {
+    "curation_focused_tests": "8 passed, 15 warnings in 2.56s",
+    "curation_test": "tests/test_remove_formal50070_collision_episode.py",
+    "curation_test_sha256": "adaae98ffc3194844bb960e4493944327bce47291f27f97905e6b042b2cac12c",
+    "complete_bundle_and_rule_conditioned_verification": "pass_with_explicit_user_quota_waiver",
+    "complete_verification_note": "The curation verifier ran the Rule-conditioned v2 verifier, which includes component and joint-bundle verification, on staging and again after atomic installation.",
+    "quality_report": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_QUALITY_AUDIT.json",
+    "quality_report_sha256": "14d28f7638befaa3a7b295031415e418c931d9a14c02753c695d25e8b39ed435",
+    "quality_status": "statistical_quality_accepted",
+    "quality_gates": {
+      "required_scenarios_present": true,
+      "required_splits_non_empty": true,
+      "sidecar_no_platoon_collision_events": true,
+      "sidecar_no_platoon_out_of_road_events": true,
+      "s7_stop_fraction": true,
+      "s7_low_speed_fraction": true,
+      "s7_lateral_mode_fraction": true
+    },
+    "safety_observed": {
+      "base_committed_platoon_collision_events": 0,
+      "base_committed_platoon_out_of_road_events": 0,
+      "sidecar_only_platoon_collision_events_retained": 3,
+      "sidecar_only_platoon_out_of_road_events_retained": 0,
+      "external_collision_events_retained_as_context": 775,
+      "external_out_of_road_events_retained_as_context": 721
+    },
+    "stage1_sample_read": {
+      "status": "pass",
+      "splits": {
+        "train": 39470,
+        "val": 5170,
+        "test": 5230
+      },
+      "sample_keys_present": 15,
+      "decoded_bev_shape": [3, 8, 256, 256]
+    }
+  },
+  "stage1_binding": {
+    "config": "configs/train/bev_diffusion_stage1_v2.yaml",
+    "config_sha256": "b8a3091b278fca0b599de5b61e05d4f4ba8149b39e23abf303d2678bf5e11bad",
+    "dataset_root_matches_curated_base": true,
+    "dataset_contract_fingerprint_matches": true,
+    "planner_version": "v2",
+    "training_started": false
+  },
+  "decision": {
+    "quality_gate_passed_after_curation": true,
+    "eligible_for_stage1_by_explicit_user_quota_waiver": true,
+    "strict_original_formal50070_contract_passed": false,
+    "stage1_binding_allowed": true,
+    "stage1_started": false,
+    "active_hard_gate": "bounded_stage1_v2_training_smoke_on_curated_fingerprint",
+    "next_permitted_action": "Run a bounded Stage 1 v2 smoke in a separate execution thread using the bound 23aae3c3... fingerprint; preserve the rollback backup until that smoke is accepted."
+  }
+}

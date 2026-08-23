@@ -17,6 +17,7 @@ from models.bev_planner import (
     StandardGaussianDDIM,
     normalize_signed_advantages,
 )
+from models.bev_planner.bev_only_diffusion_planner import MAX_BACKGROUND_ACTORS
 from models.bev_planner.joint_grpo import (
     _gather_modes,
     _repeat_context,
@@ -82,6 +83,39 @@ def _model_inputs(batch_size: int = 1) -> dict[str, torch.Tensor]:
             (batch_size, 3, 10), dtype=torch.bool
         ),
     }
+
+
+def test_v2_context_receives_all_explicit_rule_conditions() -> None:
+    planner = BEVOnlyDiffusionPlanner(
+        BEVOnlyDiffusionPlannerConfig(
+            d_model=32,
+            num_heads=4,
+            ffn_dim=64,
+            decoder_layers=1,
+            predecessor_condition="none",
+            model_version="v2",
+        )
+    )
+    trainer = JointGRPOTrainerA(planner)
+    model_inputs = {
+        **_model_inputs(),
+        "background_actor_state": torch.zeros(
+            (1, 3, MAX_BACKGROUND_ACTORS, 8), dtype=torch.float32
+        ),
+        "background_actor_valid_mask": torch.zeros(
+            (1, 3, MAX_BACKGROUND_ACTORS), dtype=torch.bool
+        ),
+        "scenario_code": torch.tensor([5], dtype=torch.int64),
+        "rule_formation_state": torch.tensor([1], dtype=torch.int64),
+        "rule_action_condition": torch.tensor(
+            [[-1, 0, 1]], dtype=torch.int64
+        ),
+    }
+
+    context = trainer._context_from_inputs(model_inputs)
+
+    assert context.batch_size == 1
+    assert torch.isfinite(context.role_tokens).all()
 
 
 def _state(module: torch.nn.Module) -> dict[str, torch.Tensor]:

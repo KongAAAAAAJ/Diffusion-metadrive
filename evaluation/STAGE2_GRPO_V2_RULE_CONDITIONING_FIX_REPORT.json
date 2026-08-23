@@ -1,0 +1,80 @@
+{
+  "format": "stage2_grpo_v2_rule_conditioning_fix_report_v1",
+  "created_at": "2026-08-23T14:26:44+08:00",
+  "repository_head_at_verification": "e818b2a0aade44df560524a3b1f69f6c57c531f8",
+  "gate": {
+    "name": "stage2_grpo_v2_rule_conditioning_compatibility",
+    "passed": true,
+    "long_training_started": false,
+    "formal_qualification_changed": false
+  },
+  "failure": {
+    "reported_exception": "models.bev_planner.bev_only_diffusion_planner.BEVPlannerError: v2 planner requires all explicit condition inputs",
+    "first_root_cause": "The online GRPO fixed-validation and training paths built only the v1 JointBEVModelInputs payload and never called JointBEVSampleBuilder.augment_v2_model_inputs().",
+    "second_root_cause": "After the first fix exposed the next reachable boundary, JointGRPOTrainer._context_from_inputs() still forwarded only v1 tensors to BEVOnlyDiffusionPlanner.encode_context().",
+    "source_checkpoint_is_v2": true,
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "source_dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779"
+  },
+  "implementation": {
+    "online_module": "train/train_bev_joint_grpo_online.py",
+    "trainer_module": "models/bev_planner/joint_grpo.py",
+    "changes": [
+      "Create and reset the existing MultiAgentRuleMaker for every fresh v2 online environment.",
+      "Build hard-valid action groups, obtain the outstanding proposal batch, and attach current actor, scenario, formation, and RuleMaker action conditions through the existing v2 builder.",
+      "Forward all five explicit v2 condition tensors through JointGRPOTrainer context encoding.",
+      "Map selected diffusion modes back to RuleMaker actions, require an exact proposal match and control feasibility, accept the matched proposal, and execute safe STOP on a no-match result.",
+      "Persist v2 RuleMaker match/failure diagnostics in metrics and the final GRPO report."
+    ],
+    "v1_path_preserved": true,
+    "reward_contract_changed": false,
+    "reward_application_contract_changed": false,
+    "trajectory_probability_domain_changed": false,
+    "dataset_or_checkpoint_metadata_rewritten": false
+  },
+  "verification": {
+    "focused": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py::test_v2_context_receives_all_explicit_rule_conditions tests/test_bev_joint_grpo_online.py -q",
+      "passed": 17,
+      "failed": 0
+    },
+    "grpo_and_v2_regression": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_bev_rule_conditioned_v2.py -q",
+      "passed": 38,
+      "failed": 0
+    },
+    "known_unrelated_launcher_test": {
+      "test": "tests/test_run_bev_joint_grpo_launcher.py::test_launcher_defaults_to_isolated_tau_d_roots",
+      "status": "pre_existing_failure",
+      "reason": "The test expects stage1_run_1 while the committed launcher already defaults to stage1_run_2-2; the current user change only updates its source checkpoint from run_2 to run_3."
+    },
+    "gpu_smoke": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 SOURCE_CHECKPOINT=/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt OUTPUT_ROOT=/tmp/stage2_grpo_v2_condition_smoke_20260823_r2 LOG_ROOT=/tmp/stage2_grpo_v2_condition_smoke_logs_20260823_r2 MAX_OPTIMIZER_STEPS=1 bash scripts/run_bev_joint_grpo.sh",
+      "exit_code": 0,
+      "artifact_root": "/tmp/stage2_grpo_v2_condition_smoke_20260823_r2/run_1",
+      "log": "/tmp/stage2_grpo_v2_condition_smoke_logs_20260823_r2/grpo-open-training.log",
+      "report_sha256": "6013fbfeccf16b6a7a66f9822a0b0ab4f1b6cda69e2356c2ac7104b1e4d874ad",
+      "best_checkpoint_sha256": "aa8c9a56ccf5bb8318df1b1db41be8dc552b3449b73670e5362e0a1e28f379b7",
+      "last_checkpoint_sha256": "0048c806893913a3ee843582c640df1a7f5634706bb79272ad559ea3fa4b02e6",
+      "optimizer_steps": 1,
+      "environment_steps": 33,
+      "sampled_rollouts": 1,
+      "v2_rule_conditioned_rollouts": 1,
+      "v2_rule_proposal_match_attempts": 1,
+      "v2_rule_proposal_matches": 1,
+      "v2_rule_condition_failures": 0,
+      "v2_rule_forced_safe_stops": 0,
+      "checkpoint_round_trip": true,
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false
+    },
+    "git_diff_check": "passed_before_report"
+  },
+  "remaining_boundary": {
+    "stage1_run_3_training_files_present": true,
+    "stage1_run_3_project_qualification_complete": false,
+    "formal_grpo_training_started": false,
+    "next_action": "Qualify the Stage 1 run_3 checkpoint under the frozen Stage 1 gates before any formal GRPO claim; a separate user-run bounded or long smoke may now use the corrected v2 path."
+  }
+}

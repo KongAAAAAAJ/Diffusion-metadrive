@@ -477,6 +477,17 @@ class _JointGRPOTrainerBase:
         missing = [name for name in self.required_model_inputs if name not in model_inputs]
         if missing:
             raise JointGRPOError(f"model_inputs are missing fields: {missing}")
+        v2_inputs = {
+            name: model_inputs[name]
+            for name in (
+                "background_actor_state",
+                "background_actor_valid_mask",
+                "scenario_code",
+                "rule_formation_state",
+                "rule_action_condition",
+            )
+            if name in model_inputs
+        }
         with torch.no_grad():
             return self.planner.encode_context(
                 model_inputs["bev"],
@@ -484,6 +495,7 @@ class _JointGRPOTrainerBase:
                 model_inputs["formation_relation_state"],
                 model_inputs["relation_valid_mask"],
                 model_inputs["agent_role"],
+                **v2_inputs,
             )
 
     def _rollout_prediction(

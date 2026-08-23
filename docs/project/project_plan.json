@@ -1,9 +1,9 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-19T22:26:55+08:00",
-  "status": "bev_only_diffusion_planner_v2_implementation_verified",
-  "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, candidate-v3 data history, Stage1-A-only formal training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
+  "updated_at": "2026-08-21T12:44:34+08:00",
+  "status": "rule_conditioned_v2_curated_dataset_accepted_by_explicit_user_quota_waiver",
+  "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "trigger_phrases": [
     "项目计划",
     "最新计划",
@@ -151,6 +151,51 @@
     "planner_architecture_memory": "docs/project/diffusion_model_architecture.json",
     "chassis_fusion_branch": "chassis-fusion",
     "chassis_fusion_worktree": "/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-chassis-fusion"
+  },
+  "rule_conditioned_v2_curated_training_dataset": {
+    "decision_recorded_on": "2026-08-21",
+    "status": "atomically_installed_fully_verified_quality_accepted_and_stage1_bound",
+    "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+    "base_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1/platoon_joint_bev",
+    "source_base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
+    "source_sidecar_dataset_fingerprint": "6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b",
+    "curated_base_dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779",
+    "curated_sidecar_dataset_fingerprint": "0925c1de1579b9bc8c39d725e3b0e78f8ced88610097988fc0171cba293abf22",
+    "curation": {
+      "removed_base_episode": {
+        "episode_index": 194,
+        "split": "train",
+        "scenario_id": "S6_background_merge_in",
+        "spawn_seed": 1751228647,
+        "joint_samples": 200,
+        "reason": "one retained P2 collision_sidewalk event at simulator step 0"
+      },
+      "sidecar_policy": "Retain raw episode 194 and its collision evidence as sidecar-only; clear only its base-sample mapping.",
+      "install_policy": "Physical sibling staging, complete verification, atomic same-filesystem replacement, and retained rollback backup.",
+      "expected_joint_samples": 49870,
+      "expected_s6_joint_samples": 9800,
+      "installed_bundle_index_sha256": "77cb90bdf5df1b58f90159529053744f6be702b22ed619a0b0751a0e9bdd2a99",
+      "rollback_backup": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1.pre_episode194_removal_88690467",
+      "rollback_backup_retained": true
+    },
+    "waiver": {
+      "authorized_by_user": true,
+      "temporary_training_use_allowed_after_all_post_curation_checks_pass": true,
+      "strict_original_formal50070_contract_passed": false,
+      "waived_requirements": [
+        "exact 50070 total joint samples",
+        "exact 10000 S6 joint samples"
+      ],
+      "not_waived": [
+        "zero base-committed platoon collision events",
+        "bundle integrity and RuleMaker-condition alignment",
+        "all other statistical quality gates",
+        "Stage 1 sample-read preflight"
+      ]
+    },
+    "authoritative_current_mainline": true,
+    "supersedes_legacy_candidate_v3_execution_steps_1_through_8": true,
+    "evidence": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json"
   },
   "candidate_v3_data_refresh": {
     "scenario_precondition": {
@@ -369,8 +414,8 @@
     "name": "Formal BEV-only diffusion pretraining",
     "formal_variant": "A",
     "joint_update": "joint_mean",
-    "predecessor_condition": "candidate_v3_data_refresh.new_formal_dataset must be complete, fully verified, quality accepted, fingerprinted, and eligible_for_formal_training=true",
-    "dataset": "candidate_v3_data_refresh.new_formal_dataset",
+    "predecessor_condition": "rule_conditioned_v2_curated_training_dataset must be atomically installed, fully verified, quality accepted, sample-read checked, and eligible_for_formal_training_by_user_waiver=true",
+    "dataset": "rule_conditioned_v2_curated_training_dataset",
     "initialization": "ResNet18.a1 pretrained backbone plus newly initialized BEV planner modules",
     "trainable_modules": "all planner parameters, with the existing separate backbone and planner learning rates",
     "variant_b_policy": {
@@ -647,5 +692,5 @@
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
   "implementation_evidence_sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
-  "current_next_action": "In a separate execution thread, collect and verify a bounded rule-conditioned v2 diagnostic dataset before any formal v2 training, then qualify a v2 checkpoint with RuleMaker-only closed-loop evaluation and the complete three-vehicle planning-tick P95 <= 200 ms gate. Do not reuse or infer missing conditions from the historical v1 dataset."
+  "current_next_action": "In a separate execution thread, run a bounded Stage1-A v2 training smoke using configs/train/bev_diffusion_stage1_v2.yaml and the bound curated base fingerprint 23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779. Keep the original 50070-sample rollback backup until the smoke is accepted; do not describe the curated dataset as satisfying the original exact 50070/10000-per-scenario quota."
 }

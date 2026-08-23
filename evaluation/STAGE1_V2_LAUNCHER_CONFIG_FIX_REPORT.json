@@ -1,0 +1,40 @@
+{
+  "format": "stage1_v2_launcher_config_fix_report_v1",
+  "created_at": "2026-08-22T10:42:13+08:00",
+  "repository_head_at_verification": "e818b2a0aade44df560524a3b1f69f6c57c531f8",
+  "failure": {
+    "exception": "Stage1TrainingError: dataset/model version mismatch: dataset=v2, model=v1",
+    "root_cause": "scripts/run_bev_diffusion_train.sh defaulted to configs/train/bev_diffusion_stage1.yaml, whose model contract is v1, while the active curated dataset contract is v2.",
+    "pkg_resources_warning_caused_failure": false
+  },
+  "implementation": {
+    "launcher": "scripts/run_bev_diffusion_train.sh",
+    "default_config": "configs/train/bev_diffusion_stage1_v2.yaml",
+    "explicit_config_override_preserved": true,
+    "model_or_dataset_contract_changed": false,
+    "training_hyperparameters_changed": false
+  },
+  "verification": {
+    "launcher_regression": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_run_bev_diffusion_train_launcher.py -q",
+      "passed": 2,
+      "failed": 0
+    },
+    "shell_syntax": {
+      "command": "bash -n scripts/run_bev_diffusion_train.sh",
+      "passed": true
+    },
+    "dataset_contract_preflight": {
+      "passed": true,
+      "config_model_version": "v2",
+      "dataset_planner_version": "v2",
+      "dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779"
+    }
+  },
+  "gate_boundary": {
+    "long_training_started": false,
+    "bounded_stage1_v2_training_smoke_started": false,
+    "active_hard_gate_changed": false,
+    "next_hard_gate": "bounded_stage1_v2_training_smoke_on_curated_fingerprint"
+  }
+}

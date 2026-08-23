@@ -1,0 +1,74 @@
+{
+  "format": "stage2_grpo_v2_safe_stop_batch_fix_report_v1",
+  "created_at": "2026-08-23T16:20:00+08:00",
+  "repository_head_at_verification": "e818b2a0aade44df560524a3b1f69f6c57c531f8",
+  "gate": {
+    "name": "stage2_grpo_v2_online_unmatched_safe_stop_execution",
+    "passed": true,
+    "long_training_started": false,
+    "formal_qualification_changed": false
+  },
+  "failure": {
+    "reported_exception": "OnlineGRPOError: selected online action must be finite [3,8,3]",
+    "user_run": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_3",
+    "last_completed_optimizer_step": 77,
+    "last_completed_environment_steps": 1206,
+    "last_completed_rule_proposal_matches": 77,
+    "trigger": "The next reachable rollout had no exact RuleMaker proposal match and entered the safe STOP branch.",
+    "root_cause": "The shared evaluator-oriented safe STOP helper correctly returned an unbatched [3,8,3] result, but the online GRPO path requires the same leading candidate-group axis as its selected optimization and indexed result[0]. The resulting [8,3] value failed the joint online action boundary; all STOP trajectory values were finite."
+  },
+  "implementation": {
+    "module": "train/train_bev_joint_grpo_online.py",
+    "test_module": "tests/test_bev_joint_grpo_online.py",
+    "change": "Build the no-match STOP anchors and mode indices with an explicit one-element candidate-group axis before invoking the existing kinematic optimizer, so the online result remains [1,3,8,3].",
+    "shared_evaluator_safe_stop_shape_changed": false,
+    "matched_rule_action_path_changed": false,
+    "v1_path_changed": false,
+    "reward_contract_changed": false,
+    "dataset_or_checkpoint_metadata_rewritten": false
+  },
+  "verification": {
+    "focused": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_online.py::test_v2_unmatched_rule_action_executes_batched_safe_stop tests/test_bev_joint_grpo_online.py::test_v2_online_inputs_use_and_accept_exact_rule_proposal -q",
+      "passed": 2,
+      "failed": 0
+    },
+    "grpo_v2_optimizer_regression": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_bev_rule_conditioned_v2.py tests/test_bev_trajectory_optimizer.py -q",
+      "passed": 47,
+      "failed": 0,
+      "warnings": 15
+    },
+    "gpu_smoke": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONUNBUFFERED=1 SOURCE_CHECKPOINT=/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt OUTPUT_ROOT=/tmp/stage2_grpo_v2_safe_stop_shape_smoke_20260823_gpu_retry LOG_ROOT=/tmp/stage2_grpo_v2_safe_stop_shape_logs_20260823_gpu_retry MAX_OPTIMIZER_STEPS=80 bash scripts/run_bev_joint_grpo.sh",
+      "exit_code": 0,
+      "artifact_root": "/tmp/stage2_grpo_v2_safe_stop_shape_smoke_20260823_gpu_retry/run_1",
+      "log": "/tmp/stage2_grpo_v2_safe_stop_shape_logs_20260823_gpu_retry/grpo-open-training.log",
+      "report_sha256": "d71d71202e88062e72a0d6717b993fcccce375d88686b435559328f4c1d135ca",
+      "best_checkpoint_sha256": "08c788ad5bdbe00572930256074df1fc0fe4be5d45a154f800d77e3f7be9b606",
+      "last_checkpoint_sha256": "eb8034578d4132458e676957949ef81609b3286ad5b23404aa82b3af17fbd783",
+      "optimizer_steps": 80,
+      "environment_steps": 1240,
+      "sampled_rollouts": 80,
+      "v2_rule_conditioned_rollouts": 80,
+      "v2_rule_proposal_match_attempts": 80,
+      "v2_rule_proposal_matches": 79,
+      "v2_rule_condition_failures": 1,
+      "v2_rule_forced_safe_stops": 1,
+      "checkpoint_round_trip": true,
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false
+    },
+    "sandbox_attempt": {
+      "status": "expected_environment_failure",
+      "reason": "CUDA was requested but unavailable inside the filesystem sandbox; the approved GPU retry supplied the executable evidence."
+    }
+  },
+  "remaining_boundary": {
+    "failed_user_run_modified": false,
+    "stage1_run_3_project_qualification_complete": false,
+    "formal_grpo_training_started": false,
+    "missing_phase_document": "docs/phases/phase6.md",
+    "next_action": "The user may start a fresh GRPO smoke run with the corrected path; do not promote it to formal evidence until Stage1 run_3 completes the frozen qualification gates."
+  }
+}

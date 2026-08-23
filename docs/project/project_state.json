@@ -1,11 +1,11 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-21T00:44:40+08:00",
+  "updated_at": "2026-08-23T16:20:00+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "5dd08e759fba1171810849882e9e80e0cc45f075",
-    "worktree_clean_before_this_update": true,
+    "git_commit": "e818b2a0aade44df560524a3b1f69f6c57c531f8",
+    "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
@@ -13,7 +13,7 @@
     "uncommitted_stage2_bare_launcher_fix_present": false,
     "uncommitted_stage1_evaluation_artifact_parity_present": false,
     "uncommitted_stage1_metadrive_topdown_video_present": false,
-    "uncommitted_stage1_epoch_override_present": true,
+    "uncommitted_stage1_epoch_override_present": false,
     "uncommitted_stage1_auto_best_checkpoint_present": false,
     "uncommitted_exploratory_training_waiver_present": false,
     "uncommitted_formal50k_diversity_contract_present": false,
@@ -34,7 +34,7 @@
     "uncommitted_s5_candidate_v4_v2_gate_config_present": false,
     "uncommitted_s5_candidate_v4_v2_gate_waiver_present": false,
     "uncommitted_s5_candidate_v4_v2_user_stop_evidence_present": false,
-    "uncommitted_dataset_episode_visualizer_present": true,
+    "uncommitted_dataset_episode_visualizer_present": false,
     "uncommitted_stage2_run3_termination_evidence_present": false,
     "uncommitted_stage2_pretrain_reward_tb_present": false,
     "uncommitted_stage2_continuous_reward_v2_present": false,
@@ -43,25 +43,32 @@
     "uncommitted_stage2_grpo_open_tau_d_v1_report_present": false,
     "uncommitted_stage2_grpo_rollout_identity_fix_present": false,
     "uncommitted_bev_only_diffusion_planner_v2_present": false,
-    "uncommitted_state_reconciliation_present": true,
-    "uncommitted_rule_conditioned_v2_dataset_preparation_present": true,
-    "uncommitted_rule_conditioned_v2_diagnostic_verifier_fix_present": true,
-    "uncommitted_rule_conditioned_v2_parallel_collection_preparation_present": true,
-    "uncommitted_candidate_v3_frozen_config_repair_present": true,
-    "uncommitted_rule_conditioned_v2_precomposition_reconciliation_present": true,
-    "uncommitted_rule_conditioned_v2_composition_fix_present": true,
-    "uncommitted_rule_conditioned_v2_composition_evidence_present": true
+    "uncommitted_state_reconciliation_present": false,
+    "uncommitted_rule_conditioned_v2_dataset_preparation_present": false,
+    "uncommitted_rule_conditioned_v2_diagnostic_verifier_fix_present": false,
+    "uncommitted_rule_conditioned_v2_parallel_collection_preparation_present": false,
+    "uncommitted_candidate_v3_frozen_config_repair_present": false,
+    "uncommitted_rule_conditioned_v2_precomposition_reconciliation_present": false,
+    "uncommitted_rule_conditioned_v2_composition_fix_present": false,
+    "uncommitted_rule_conditioned_v2_composition_evidence_present": false,
+    "uncommitted_user_agents_scope_limits_present": true,
+    "uncommitted_rule_conditioned_v2_formal50070_quality_acceptance_present": true,
+    "uncommitted_rule_conditioned_v2_formal49870_curation_present": true,
+    "uncommitted_stage1_v2_curated_dataset_binding_present": true,
+    "uncommitted_stage1_v2_launcher_config_fix_present": true,
+    "uncommitted_stage2_grpo_v2_rule_conditioning_fix_present": true,
+    "uncommitted_stage2_grpo_v2_safe_stop_batch_fix_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "rule-conditioned-v2-composition-20260821",
-    "status": "rule_conditioned_v2_50070_installed_verified_quality_acceptance_pending",
-    "active_hard_gate": "formal_50070_quality_acceptance_before_stage1"
+    "round": "rule-conditioned-v2-formal49870-curated-acceptance-20260821",
+    "status": "rule_conditioned_v2_49870_accepted_for_stage1_by_explicit_user_quota_waiver",
+    "active_hard_gate": "bounded_stage1_v2_training_smoke_on_curated_fingerprint"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "implementation_and_composition_verified_quality_acceptance_training_and_evaluation_pending",
+      "status": "implementation_verified_curated_dataset_quality_accepted_stage1_bound_by_user_waiver",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_preserved": true,
@@ -99,9 +106,9 @@
       "formal_p95_measured": false,
       "formal_data_collected": true,
       "report": "evaluation/BEV_ONLY_DIFFUSION_PLANNER_V2_IMPLEMENTATION_REPORT.json",
-      "next_hard_gate": "formal_50070_quality_acceptance_before_stage1",
+      "next_hard_gate": "bounded_stage1_v2_training_smoke_on_curated_fingerprint",
       "dataset_preparation": {
-        "status": "formal50070_installed_and_fully_verified_quality_acceptance_pending",
+        "status": "formal49870_curated_installed_fully_verified_quality_accepted_and_stage1_bound",
         "diagnostic8k_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s6_s9_diagnostic8k.yaml",
         "formal40k_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s6_s9_formal40k.yaml",
         "s5_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s5_release10070.yaml",
@@ -114,17 +121,34 @@
           "S5 seed83024 balanced target: sampled=true, realized=true, 15 v2 samples/condition events"
         ],
         "formal_data_collected": true,
-        "formal_training_eligible": false,
+        "formal_training_eligible": true,
+        "formal_training_eligibility_basis": "explicit_user_temporary_quota_waiver_after_base_episode_194_removal",
+        "strict_original_formal50070_contract_passed": false,
         "composition_contract": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.contract.json",
         "composition_contract_sha256": "646b408bc2583b31f9c4f5081129d07d856064bea89aeb97673dabca15d41c6b",
         "composition_dry_run_blocker": null,
         "composition_fix_regression_tests": "87 passed",
         "composition_final_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
-        "composition_base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
-        "composition_sidecar_dataset_fingerprint": "6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b",
-        "composition_bundle_index_sha256": "024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4",
-        "composition_joint_samples": 50070,
+        "composition_base_dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779",
+        "composition_sidecar_dataset_fingerprint": "0925c1de1579b9bc8c39d725e3b0e78f8ced88610097988fc0171cba293abf22",
+        "composition_bundle_index_sha256": "77cb90bdf5df1b58f90159529053744f6be702b22ed619a0b0751a0e9bdd2a99",
+        "composition_joint_samples": 49870,
         "composition_full_verifier_passed": true,
+        "quality_acceptance_completed": true,
+        "quality_acceptance_passed": true,
+        "quality_failed_gate": null,
+        "base_committed_platoon_collision_events": 0,
+        "curated_sidecar_only_collision_episode": "S6_background_merge_in/train/episode_00000194",
+        "quality_audit": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_QUALITY_AUDIT.json",
+        "quality_acceptance_report": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
+        "source_backup": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1.pre_episode194_removal_88690467",
+        "source_backup_retained": true,
+        "stage1_config": "configs/train/bev_diffusion_stage1_v2.yaml",
+        "stage1_launcher": "scripts/run_bev_diffusion_train.sh",
+        "stage1_launcher_default_config": "configs/train/bev_diffusion_stage1_v2.yaml",
+        "stage1_launcher_config_fix_verified": true,
+        "stage1_launcher_config_fix_report": "evaluation/STAGE1_V2_LAUNCHER_CONFIG_FIX_REPORT.json",
+        "stage1_data_read_passed": true,
         "composition_report": "evaluation/BEV_RULE_CONDITIONED_V2_COMPOSITION_REPORT.json",
         "report": "evaluation/BEV_RULE_CONDITIONED_V2_DATASET_PREPARATION_REPORT.json"
       }
@@ -696,9 +720,32 @@
     "rule_conditioned_v2_stage1_after_composition_requested": true,
     "rule_conditioned_v2_stage1_after_composition_requested_on": "2026-08-20",
     "rule_conditioned_v2_stage1_after_composition_scope": "After the installed formal50070 bundle passes a separate formal data-quality and training-eligibility acceptance, bind Stage 1 to its immutable root/fingerprints, run a bounded smoke, then launch formal training in a separate long-running thread; composition verification alone does not waive eligibility.",
+    "rule_conditioned_v2_formal50070_episode194_removal_authorized": true,
+    "rule_conditioned_v2_formal50070_episode194_removal_authorized_on": "2026-08-21",
+    "rule_conditioned_v2_formal50070_episode194_removal_scope": "Remove S6 train base episode 194 and its 200 samples, retain the raw collision sidecar as sidecar-only evidence, accept the resulting 49870 total and 9800 S6 samples for Stage 1 use, preserve all non-waived verification and quality gates, and retain the original 50070 bundle as a rollback backup.",
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. A new bounded diagnostic run is allowed only in a separate thread from the original Stage1 checkpoint; no formal eligibility was granted."
   },
   "source_of_truth": {
+    "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
+      "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
+      "sha256": "5ba22c38b010454156233cfc47126a44682d239e82cb1acdf756d791137751de",
+      "role": "Records the user-authorized base episode-194 removal, retained raw sidecar evidence and rollback backup, atomic replacement, complete post-curation verification, accepted statistical quality, Stage 1 v2 binding, and the explicit distinction between quota-waived eligibility and the unpassed original exact formal50070 contract"
+    },
+    "bev_rule_conditioned_v2_formal49870_curated_quality_audit": {
+      "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_QUALITY_AUDIT.json",
+      "sha256": "14d28f7638befaa3a7b295031415e418c931d9a14c02753c695d25e8b39ed435",
+      "role": "Raw statistical quality evidence over 258 base episodes and 415 sidecar episodes, with zero base-committed platoon collision or out-of-road events and three retained sidecar-only platoon collision events"
+    },
+    "bev_rule_conditioned_v2_formal50070_quality_acceptance_report": {
+      "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL50070_QUALITY_ACCEPTANCE_REPORT.json",
+      "sha256": "daa13024abcd66690e9d20adea3187fd2913dad311e590a5b302ae714972b56c",
+      "role": "Records the separate formal50070 statistical quality and Stage 1 eligibility decision, passing S7 behavior and out-of-road gates, the one base-committed S6 platoon collision failure, formal ineligibility, and the no-training boundary"
+    },
+    "bev_rule_conditioned_v2_formal50070_quality_audit": {
+      "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL50070_QUALITY_AUDIT.json",
+      "sha256": "6bca36458aac29f7f3a7e98d67e9bb66042b9569abb65d6f3d90475e10e50702",
+      "role": "Raw full-bundle statistical quality output over 259 base episodes and 415 sidecar episodes; blocked only by one committed platoon collision event"
+    },
     "bev_rule_conditioned_v2_composition_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_COMPOSITION_REPORT.json",
       "sha256": "f17dc00b5388e91f66db06562922c2d02a13ff0127073cb2d305c897381fbe40",
@@ -748,6 +795,16 @@
       "path": "evaluation/STAGE2_GRPO_ROLLOUT_IDENTITY_FIX_REPORT.json",
       "sha256": "31aecc1850cfc7c74ad2c74e051e8513b88cf5911d348296dc26c8cf8f5ec992",
       "role": "Records the id-reuse root cause, weak live-rollout identity fix, preserved one-update contract, focused regressions, isolated two-update GPU smoke, and unchanged diagnostic/formal-ineligible boundary"
+    },
+    "stage2_grpo_v2_rule_conditioning_fix_report": {
+      "path": "evaluation/STAGE2_GRPO_V2_RULE_CONDITIONING_FIX_REPORT.json",
+      "sha256": "8070fbb91826f15c126b3e7707cf0eb2dde8eb2df3057bc81cd7a5aa464aa18a",
+      "role": "Records the two v2 condition-forwarding root causes, strict RuleMaker condition/proposal/STOP implementation, 38-test regression, passing run_3 one-step GPU smoke, and diagnostic/formal-ineligible boundary"
+    },
+    "stage2_grpo_v2_safe_stop_batch_fix_report": {
+      "path": "evaluation/STAGE2_GRPO_V2_SAFE_STOP_BATCH_FIX_REPORT.json",
+      "sha256": "9c3d8ea9b9a43b00df369523cd65618eca5e35eb9880a49322ac3324d00aa6f9",
+      "role": "Records the reachable rollout-78 safe STOP batch-shape root cause, grouped online STOP fix, 47-test regression, passing 80-update GPU smoke with one real forced STOP, and unchanged diagnostic/formal-ineligible boundary"
     },
     "stage2_pretrain_reward_tensorboard_implementation_report": {
       "path": "evaluation/STAGE2_PRETRAIN_REWARD_TENSORBOARD_IMPLEMENTATION_REPORT.json",
@@ -849,8 +906,8 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "f6e7ec14a7e439a9a7184d195da9206ee3e2cc6c2c1083894abfc989c52f90fc",
-      "role": "Records the verified stage2_grpo_open_application_v1 tau_d semantics, unchanged V2 reward formula/config hashes, calibration-free isolated training root, immutable run_3 boundary, and the separate-thread bounded diagnostic next gate"
+      "sha256": "84aa1b0d0a75e5ccc06c44b2ac994d7cd3c0434335a4740d37fb8573971c4697",
+      "role": "Records the atomically installed and quality-accepted 49870-sample Rule-conditioned v2 curated dataset, explicit user quota waiver, Stage 1 v2 binding, retained rollback backup, and bounded separate-thread Stage 1 smoke as the next hard gate"
     },
     "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
@@ -1106,17 +1163,25 @@
     },
     "bev_rule_conditioned_v2_s5_s9_formal50070": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1",
+      "base_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1/platoon_joint_bev",
       "composition_contract": "/media/kong/Elements_SE/Diffusion_Data/collection_contracts/bev_rule_conditioned_v2_composition.contract.json",
       "composition_contract_sha256": "646b408bc2583b31f9c4f5081129d07d856064bea89aeb97673dabca15d41c6b",
-      "base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
-      "sidecar_dataset_fingerprint": "6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b",
-      "bundle_index_sha256": "024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4",
-      "joint_samples": 50070,
-      "committed_episodes": 259,
+      "base_dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779",
+      "sidecar_dataset_fingerprint": "0925c1de1579b9bc8c39d725e3b0e78f8ced88610097988fc0171cba293abf22",
+      "bundle_index_sha256": "77cb90bdf5df1b58f90159529053744f6be702b22ed619a0b0751a0e9bdd2a99",
+      "joint_samples": 49870,
+      "committed_episodes": 258,
       "bundle_index_rows": 415,
-      "rejected_audit_rows": 156,
-      "split_episode_counts": {"train": 205, "val": 27, "test": 27},
-      "split_joint_samples": {"train": 39670, "val": 5170, "test": 5230},
+      "rejected_audit_rows": 157,
+      "split_episode_counts": {"train": 204, "val": 27, "test": 27},
+      "split_joint_samples": {"train": 39470, "val": 5170, "test": 5230},
+      "scenario_joint_samples": {
+        "S5_hard_brake_lead": 10070,
+        "S6_background_merge_in": 9800,
+        "S7_ego_merge_from_ramp": 10000,
+        "S8_ego_exit_to_ramp": 10000,
+        "S9_narrow_channel_negotiation": 10000
+      },
       "new_s5_release_episodes": 53,
       "cross_split_s5_mappings": 17,
       "verified_payload_files": 7620,
@@ -1124,8 +1189,30 @@
       "full_verifier_passed": true,
       "rule_conditioned_v2_verifier_passed": true,
       "visual_smoke_passed": true,
-      "eligible_for_formal_training": false,
-      "blocker": "Separate formal data-quality and training-eligibility acceptance is required before Stage 1."
+      "quality_acceptance_completed": true,
+      "quality_gate_passed": true,
+      "quality_failed_gate": null,
+      "base_committed_platoon_collision_events": 0,
+      "base_committed_platoon_out_of_road_events": 0,
+      "curated_sidecar_only_episode": {
+        "scenario_id": "S6_background_merge_in",
+        "split": "train",
+        "episode_index": 194,
+        "event_type": "collision_sidewalk",
+        "platoon_actor_id": "P2",
+        "step_index": 0
+      },
+      "quality_audit": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_QUALITY_AUDIT.json",
+      "quality_acceptance_report": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
+      "strict_original_formal50070_contract_passed": false,
+      "eligible_for_formal_training": true,
+      "eligibility_basis": "explicit_user_temporary_quota_waiver_after_base_episode_194_removal",
+      "stage1_config": "configs/train/bev_diffusion_stage1_v2.yaml",
+      "stage1_data_read_passed": true,
+      "source_backup_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1.pre_episode194_removal_88690467",
+      "source_backup_retained": true,
+      "source_backup_base_dataset_fingerprint": "88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813",
+      "blocker": null
     },
     "exact_path_s5_s9_pilot1k": {
       "root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_exact_path_pilot1k_round13_99_v1",
@@ -1544,11 +1631,29 @@
       "checkpoint_sha256": "ab87ea481fc9bb4b2cd4b74e71d1da284803ecb8a6ca0df972ac0f297d58acfc",
       "checkpoint_sha256_status": "bound_by_completed_failed_holdout_calibration; passed=true waived only for bounded at-risk diagnostic GRPO-Open"
     },
+    "stage1_a_v2_run3_unqualified": {
+      "available": true,
+      "eligible": false,
+      "training_started": true,
+      "training_finished": true,
+      "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+      "run_metadata": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/run_metadata.json",
+      "summary": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/summary.json",
+      "model_version": "v2",
+      "source_dataset_root": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1/platoon_joint_bev",
+      "source_dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779",
+      "embedded_run_mode": "formal",
+      "embedded_eligible_for_formal_training": true,
+      "checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "project_qualification_complete": false,
+      "formal_grpo_source_allowed": false,
+      "qualification_pending": "strict Stage1 checkpoint reload, open-loop, and S5-S9 closed-loop gates"
+    },
     "stage1_a_formal": {
       "available": false,
       "eligible": false,
       "required_by_current_plan": true,
-      "blocked_until": "candidate_v3_formal_s5_s9_50k_is_complete_verified_quality_accepted_and_fingerprinted",
+      "blocked_until": "rule_conditioned_v2_formal50070_has_zero_base_committed_platoon_collision_events_and_complete_quality_acceptance_passes",
       "acceptance_waiver_does_not_satisfy_formal_gate": true
     },
     "stage1_b_formal": {
@@ -1564,6 +1669,27 @@
       "source": "stage1_a_formal",
       "reward_domain": "tau_d",
       "required_application_contract": "stage2_grpo_open_application_v1"
+    },
+    "grpo_open_v2_rule_conditioning_smoke": {
+      "available": true,
+      "eligible": false,
+      "diagnostic_only": true,
+      "source": "stage1_a_v2_run3_unqualified",
+      "artifact_root": "/tmp/stage2_grpo_v2_safe_stop_shape_smoke_20260823_gpu_retry/run_1",
+      "report": "/tmp/stage2_grpo_v2_safe_stop_shape_smoke_20260823_gpu_retry/run_1/report.json",
+      "log": "/tmp/stage2_grpo_v2_safe_stop_shape_logs_20260823_gpu_retry/grpo-open-training.log",
+      "implementation_report": "evaluation/STAGE2_GRPO_V2_RULE_CONDITIONING_FIX_REPORT.json",
+      "safe_stop_batch_fix_report": "evaluation/STAGE2_GRPO_V2_SAFE_STOP_BATCH_FIX_REPORT.json",
+      "optimizer_steps": 80,
+      "environment_steps": 1240,
+      "sampled_rollouts": 80,
+      "rule_proposal_match_attempts": 80,
+      "rule_proposal_matches": 79,
+      "rule_proposal_match_failures": 1,
+      "forced_safe_stops": 1,
+      "checkpoint_round_trip": true,
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false
     },
     "grpo_open_at_risk": {
       "available": true,
@@ -1657,24 +1783,22 @@
       "blocked_until": "real_trucksim_surrogate_gate_passes"
     }
   },
-  "blockers": [
-    "The Rule-conditioned v2 formal50070 bundle is installed and fully integrity/condition verified, but formal Stage 1 remains blocked until a separate data-quality and training-eligibility acceptance explicitly passes; diagnostic8k remains non-training data.",
-    "Formal Stage1-A remains blocked because complete formal50K base, sidecar, bundle, and statistical quality acceptance was skipped and therefore was not measured as passed. This does not block the explicitly authorized bounded at-risk diagnostic GRPO-Open tau_d path."
-  ],
+  "blockers": [],
   "future_hard_gates": [
+    "Preserve the original 50070-sample Rule-conditioned v2 bundle at the retained pre_episode194_removal backup until the bounded Stage 1 v2 smoke is accepted; the installed 49870-sample curated root must remain bound to base fingerprint 23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779.",
     "Preserve the accepted candidate-v3 S5-S9 contract, combined manifest, videos, trajectories and expert records without relabeling or mixing them with formal-v1 data.",
     "The formal candidate-v3 50k collection counter reached 50000 samples, but complete acceptance was explicitly skipped on 2026-08-16; formal acceptance and eligibility remain false.",
     "Bind the collector and both strict verifiers to candidate_v3 SHA-256 0227f5cc1fc0fd815e7725dfb22733b4006e371d48afcb3c25d189499a816860 and retain the S6=260 and S9=800 evaluation horizons.",
     "The formal candidate-v3 50k remains formally incomplete unless all frozen sample, episode, split, seed, incidental-background-count, transaction, safety, and behavior-category postconditions pass.",
     "The explicit user risk waiver supersedes the failed remediation9999 diagnostic gates only as a formal50k collection precondition; the BEV merge and post-merge exact-path smoke are recorded, while all formal50k completion gates remain mandatory.",
-    "Formal Stage1-A requires the new candidate-v3 50k dataset to pass complete verification and the same data-quality gate, with immutable fingerprints recorded; the only currently planned exception is a bounded at-risk diagnostic Variant A smoke using run_mode=smoke and explicit max optimizer steps.",
+    "The current Stage1-A v2 path uses the fully verified 49870-sample Rule-conditioned bundle under the explicit user quota waiver; never describe it as satisfying the original exact 50070-total or 10000-S6 quota.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen.",
     "GRPO-Open must retain the stage2_grpo_open_application_v1 SHA, raw tau_d reward/selection/best semantics, zero tracking expansion, selected-only trajectory optimization, and calibration_required=false. Any new run must start from the original Stage1 checkpoint in the isolated tau_d training_v1 root; run_3 resume and metadata promotion remain forbidden."
   ],
   "next_actions": [
-    "Run a separate formal data-quality and training-eligibility acceptance on /media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1, binding base fingerprint 88690467a1a65d05c7b724093f2aecbdf565d6e2f456b1e558737a4fb00a4813, sidecar fingerprint 6903c8e8ca50c2b6d3dee906d8214a4830a584642eeca3167452bbdcf450238b and bundle index SHA 024b0fd6eb1a4410cb72b8054b12534f6aaafb19641c38c2d605dc9e2a6306e4.",
-    "Only after that eligibility gate passes, bind the Stage 1 config to the frozen formal50070 root/fingerprints, run a bounded training smoke, and launch formal Stage 1 in a separate long-running thread with immutable config and output root.",
+    "Qualify the completed Stage1 run_3 checkpoint under strict Stage1 reload, open-loop, and S5-S9 closed-loop gates before any formal GRPO claim; the passing v2 GRPO one-step smoke is diagnostic compatibility evidence only.",
+    "Retain the original 50070-sample backup until the bounded Stage 1 smoke passes; no permanent backup deletion is authorized.",
     "The S5 release30 append is installed and fully verified at 50260 samples with all 233 prior base episodes preserved. Bind any consumer to base fingerprint e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511 and sidecar fingerprint a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6; retain the complete pre-append backup unless a separate cleanup round is explicitly authorized.",
     "Preserve the failed candidate-v4 S5 supplement root as immutable historical evidence; do not rewrite, relabel, or resume it after the sidecar out-of-road fix.",
     "Preserve the 18 committed candidate-v4-v2 S5 episodes and leave the interrupted episode-376 pending transaction untouched until the user explicitly chooses a future cleanup or continuation policy.",
@@ -1686,7 +1810,7 @@
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
     "Preserve the accepted candidate-v3 combined manifest and all 140 hashed artifacts without rerunning, relabeling or overwriting them unless the frozen scenario contract changes.",
-    "The decision to skip formal50K acceptance must never be represented as an acceptance pass."
+    "The historical candidate-v3 decision to skip formal50K acceptance must never be represented as an acceptance pass; it is distinct from the current Rule-conditioned v2 curated-dataset user waiver."
   ],
   "invariants": {
     "metadata_override_forbidden": true,

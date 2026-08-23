@@ -16,9 +16,15 @@ from models.bev_planner.joint_reward import (
     JointRewardConfig,
     joint_reward_config_sha256,
 )
+from models.bev_planner.mode_contract import ModeIndex
 from models.bev_planner.trajectory_optimizer import (
+    KinematicTrajectoryOptimizer,
     KinematicTrajectoryOptimizerConfig,
     TrajectoryOptimizationError,
+)
+from models.decisioner.rule_decisioner import (
+    JointActionProposal,
+    RuleMakerProposalBatch,
 )
 from scenarios.bev_round13_contract import primary_scenario_contract
 from scenarios.definitions import SCENARIO_BY_ID
@@ -27,8 +33,11 @@ from train.train_bev_joint_grpo_online import (
     JointGRPOOnlineConfig,
     OnlineGRPOError,
     _checkpoint_file_sha256,
+    _condition_online_model_inputs,
+    _finalize_online_rule_action,
     _fixed_raw_proxy_and_simulator_validation,
     _joint_rewards_are_informative,
+    _new_online_rule_maker,
     _resume_best_checkpoint_anchor,
     _round_robin_training_buckets,
     _scenario_ready_for_primary_sampling,
@@ -520,3 +529,154 @@ def test_online_action_and_batch_helpers_are_strict() -> None:
     mask = execution_mode_valid_mask(values)
     batch = model_inputs_to_batch(values, torch.device("cpu"), mode_valid_mask=mask)
     assert torch.equal(batch["mode_valid_mask"][0], torch.from_numpy(mask.copy()))
+
+
+def test_v2_online_inputs_use_and_accept_exact_rule_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = JointActionProposal(
+        proposal_id=4,
+        rank=0,
+        rule_score=1.0,
+        decisions={
+            agent_id: {"action": 0}
+            for agent_id in ("agent0", "agent1", "agent2")
+        },
+    )
+    proposal_batch = RuleMakerProposalBatch(batch_id=9, proposals=(proposal,))
+
+    class RuleMaker:
+        is_formation_locked = True
+
+        def __init__(self):
+            self.reset_args = None
+            self.proposal_args = None
+            self.accepted = None
+
+        def reset(self, env, agent_ids):
+            self.reset_args = (env, tuple(agent_ids))
+
+        def propose_joint_actions(
+            self, env, agent_ids, planner_batch, *, hard_valid_modes_by_action
+        ):
+            self.proposal_args = (
+                env,
+                tuple(agent_ids),
+                planner_batch,
+                hard_valid_modes_by_action,
+            )
+            return proposal_batch
+
+        def accept_joint_action(self, batch_id, proposal_id):
+            self.accepted = (batch_id, proposal_id)
+
+    class Builder:
+        def __init__(self):
+            self.augmentation = None
+
+        def augment_v2_model_inputs(self, env, values, **kwargs):
+            self.augmentation = (env, values, kwargs)
+            return SimpleNamespace(
+                conditioned=True, mode_valid_mask=values.mode_valid_mask
+            )
+
+    rule_maker = RuleMaker()
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.make_rule_maker",
+        lambda config: rule_maker,
+    )
+    env = SimpleNamespace(
+        config={"scenario_id": "S5_hard_brake_lead"},
+        _last_planner_batch={"tick": 3},
+        trajectory_to_control=lambda agent_id, trajectory: np.zeros(2),
+    )
+    planner = SimpleNamespace(config=SimpleNamespace(model_version="v2"))
+    values = SimpleNamespace(
+        mode_valid_mask=np.ones((3, 10), dtype=np.bool_)
+    )
+    builder = Builder()
+
+    resolved_rule_maker = _new_online_rule_maker(planner, env)
+    conditioned, resolved_batch = _condition_online_model_inputs(
+        resolved_rule_maker, env, builder, values
+    )
+
+    assert resolved_rule_maker is rule_maker
+    assert rule_maker.reset_args == (env, ("agent0", "agent1", "agent2"))
+    assert conditioned.conditioned
+    assert resolved_batch is proposal_batch
+    assert builder.augmentation[2] == {
+        "rule_action_condition": {"agent0": 0, "agent1": 0, "agent2": 0},
+        "rule_formation_state": True,
+    }
+
+    optimization = SimpleNamespace(
+        optimized_trajectories=np.zeros((1, 3, 8, 3), dtype=np.float32)
+    )
+    resolved, diagnostics = _finalize_online_rule_action(
+        rule_maker,
+        proposal_batch,
+        env=env,
+        scenario=("S5_hard_brake_lead", "R1_entry_straight"),
+        values=conditioned,
+        selected_modes=np.full(3, int(ModeIndex.KEEP_HIGH), dtype=np.int64),
+        optimization=optimization,
+        optimizer=object(),
+    )
+
+    assert resolved is optimization
+    assert rule_maker.accepted == (9, 4)
+    assert diagnostics["conditioned_rollouts"] == 1
+    assert diagnostics["proposal_matches"] == 1
+    assert diagnostics["condition_failures"] == 0
+
+
+def test_v2_unmatched_rule_action_executes_batched_safe_stop() -> None:
+    proposal = JointActionProposal(
+        proposal_id=4,
+        rank=0,
+        rule_score=1.0,
+        decisions={
+            agent_id: {"action": 0}
+            for agent_id in ("agent0", "agent1", "agent2")
+        },
+    )
+    proposal_batch = RuleMakerProposalBatch(batch_id=9, proposals=(proposal,))
+
+    class RuleMaker:
+        accepted = None
+
+        def accept_joint_action(self, batch_id, proposal_id):
+            self.accepted = (batch_id, proposal_id)
+
+    rule_maker = RuleMaker()
+    env = SimpleNamespace(
+        trajectory_to_control=lambda agent_id, trajectory: np.zeros(2)
+    )
+    optimization = SimpleNamespace(
+        optimized_trajectories=np.zeros((1, 3, 8, 3), dtype=np.float32)
+    )
+    values = SimpleNamespace(
+        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
+        ego_state=np.zeros((3, 8), dtype=np.float32),
+    )
+
+    resolved, diagnostics = _finalize_online_rule_action(
+        rule_maker,
+        proposal_batch,
+        env=env,
+        scenario=("S5_hard_brake_lead", "R1_entry_straight"),
+        values=values,
+        selected_modes=np.full(3, int(ModeIndex.LEFT_HIGH), dtype=np.int64),
+        optimization=optimization,
+        optimizer=KinematicTrajectoryOptimizer(),
+    )
+
+    assert resolved.optimized_trajectories.shape == (1, 3, 8, 3)
+    assert resolved.selected_modes.shape == (1, 3)
+    assert np.all(resolved.selected_modes == int(ModeIndex.STOP))
+    assert np.isfinite(resolved.optimized_trajectories).all()
+    assert len(joint_trajectory_action(resolved.optimized_trajectories[0])) == 3
+    assert rule_maker.accepted is None
+    assert diagnostics["condition_failures"] == 1
+    assert diagnostics["forced_safe_stops"] == 1

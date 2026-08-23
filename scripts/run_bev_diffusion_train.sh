@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
-CONFIG="${CONFIG:-${PROJECT_ROOT}/configs/train/bev_diffusion_stage1.yaml}"
+CONFIG="${CONFIG:-${PROJECT_ROOT}/configs/train/bev_diffusion_stage1_v2.yaml}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1}"
 
 ARGS=(

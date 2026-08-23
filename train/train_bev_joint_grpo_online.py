@@ -42,6 +42,14 @@ from models.bev_planner import (
     joint_reward_config_sha256,
 )
 from models.bev_planner.mode_contract import ModeIndex
+from models.decisioner.rule_decisioner import (
+    LaneChangeCommitmentError,
+    diffusion_mode_feedback_actions,
+    hard_valid_modes_by_rule_action,
+    joint_proposal_actions,
+    make_rule_maker,
+    match_joint_action_proposal,
+)
 from train.bev_joint_grpo import (
     grpo_b_checkpoint_payload,
     grpo_checkpoint_payload,
@@ -306,6 +314,146 @@ def _new_env(scenario: tuple[str, str], seed: int) -> object:
         set_spawn_seed(int(seed))
     env.reset(seed=int(seed))
     return env
+
+
+def _new_online_rule_maker(planner: object, env: object) -> object | None:
+    planner_config = getattr(planner, "config", None)
+    if getattr(planner_config, "model_version", "v1") != "v2":
+        return None
+    rule_maker = make_rule_maker(dict(env.config))
+    rule_maker.reset(env, list(AGENT_IDS))
+    return rule_maker
+
+
+def _condition_online_model_inputs(
+    rule_maker: object | None,
+    env: object,
+    builder: JointBEVSampleBuilder,
+    values: object,
+) -> tuple[object, object | None]:
+    if rule_maker is None:
+        return values, None
+    try:
+        hard_modes = hard_valid_modes_by_rule_action(
+            AGENT_IDS, np.asarray(values.mode_valid_mask)
+        )
+        proposal_batch = rule_maker.propose_joint_actions(
+            env,
+            list(AGENT_IDS),
+            getattr(env, "_last_planner_batch", None) or {},
+            hard_valid_modes_by_action=hard_modes,
+        )
+        rule_condition = (
+            joint_proposal_actions(proposal_batch.proposals[0], AGENT_IDS)
+            if proposal_batch.proposals
+            else {agent_id: 0 for agent_id in AGENT_IDS}
+        )
+    except LaneChangeCommitmentError as exc:
+        raise OnlineGRPOError(f"online RuleMaker proposal failed: {exc}") from exc
+    return (
+        builder.augment_v2_model_inputs(
+            env,
+            values,
+            rule_action_condition=rule_condition,
+            rule_formation_state=rule_maker.is_formation_locked,
+        ),
+        proposal_batch,
+    )
+
+
+def _validate_online_trajectory_controls(
+    env: object, trajectories: np.ndarray
+) -> None:
+    action = joint_trajectory_action(trajectories)
+    for agent_id in AGENT_IDS:
+        try:
+            control = np.asarray(
+                env.trajectory_to_control(agent_id, action[agent_id])
+            )
+        except Exception as exc:
+            raise OnlineGRPOError(
+                f"trajectory control failed for {agent_id}: {exc}"
+            ) from exc
+        if not np.isfinite(control).all():
+            raise OnlineGRPOError(
+                f"trajectory control is non-finite for {agent_id}"
+            )
+
+
+def _finalize_online_rule_action(
+    rule_maker: object | None,
+    proposal_batch: object | None,
+    *,
+    env: object,
+    scenario: tuple[str, str],
+    values: object,
+    selected_modes: np.ndarray,
+    optimization: TrajectoryOptimizationResult,
+    optimizer: KinematicTrajectoryOptimizer,
+) -> tuple[TrajectoryOptimizationResult, dict[str, int]]:
+    diagnostics = {
+        "conditioned_rollouts": 0,
+        "proposal_match_attempts": 0,
+        "proposal_matches": 0,
+        "condition_failures": 0,
+        "forced_safe_stops": 0,
+        "s7_feedback_exception_hits": 0,
+    }
+    if rule_maker is None:
+        return optimization, diagnostics
+    if proposal_batch is None:
+        raise OnlineGRPOError("v2 online rollout has no RuleMaker proposal batch")
+
+    diagnostics["conditioned_rollouts"] = 1
+    diagnostics["proposal_match_attempts"] = 1
+    try:
+        _, feedback_actions, s7_exceptions = diffusion_mode_feedback_actions(
+            np.asarray(selected_modes, dtype=np.int64).tolist(),
+            AGENT_IDS,
+            scenario_id=scenario[0],
+            local_route=scenario[1],
+        )
+        matched = match_joint_action_proposal(
+            proposal_batch, feedback_actions, AGENT_IDS
+        )
+    except LaneChangeCommitmentError as exc:
+        raise OnlineGRPOError(
+            f"online RuleMaker action matching failed: {exc}"
+        ) from exc
+    diagnostics["s7_feedback_exception_hits"] = sum(
+        int(value) for value in s7_exceptions.values()
+    )
+
+    if matched is None:
+        diagnostics["condition_failures"] = 1
+        diagnostics["forced_safe_stops"] = 1
+        coarse = np.asarray(values.coarse_trajectories)
+        raw_stop = np.asarray(
+            coarse[:, int(ModeIndex.STOP)], dtype=np.float32
+        )[None]
+        resolved = optimize_selected_model_trajectories(
+            values,
+            raw_stop,
+            np.full((1, 3), int(ModeIndex.STOP), dtype=np.int64),
+            optimizer=optimizer,
+        )
+    else:
+        diagnostics["proposal_matches"] = 1
+        resolved = optimization
+
+    _validate_online_trajectory_controls(
+        env, resolved.optimized_trajectories[0]
+    )
+    if matched is not None:
+        try:
+            rule_maker.accept_joint_action(
+                proposal_batch.batch_id, matched.proposal_id
+            )
+        except LaneChangeCommitmentError as exc:
+            raise OnlineGRPOError(
+                f"online RuleMaker proposal acceptance failed: {exc}"
+            ) from exc
+    return resolved, diagnostics
 
 
 def _load_trainer(
@@ -643,6 +791,7 @@ def _fixed_raw_proxy_and_simulator_validation(
             env = _new_env(tuple(scenario), int(seed))
             builder = JointBEVSampleBuilder(AGENT_IDS)
             builder.reset()
+            rule_maker = _new_online_rule_maker(planner, env)
             prefix: list[dict[str, np.ndarray]] = []
             dt_s = simulator_decision_dt_s(env)
             try:
@@ -670,6 +819,9 @@ def _fixed_raw_proxy_and_simulator_validation(
                         "fixed validation never reached a realized S5--S9 state"
                     )
                 values = builder.build_model_inputs(env)
+                values, _ = _condition_online_model_inputs(
+                    rule_maker, env, builder, values
+                )
                 execution_mask = execution_mode_valid_mask(
                     values, optimizer=trajectory_optimizer
                 )
@@ -977,6 +1129,14 @@ def run_joint_grpo_training(
     environment_steps = 0
     sampled_rollouts = 0
     uninformative_rollouts = 0
+    rule_diagnostics = {
+        "conditioned_rollouts": 0,
+        "proposal_match_attempts": 0,
+        "proposal_matches": 0,
+        "condition_failures": 0,
+        "forced_safe_stops": 0,
+        "s7_feedback_exception_hits": 0,
+    }
     last_metrics: dict[str, float] = {}
     resume_best_path: Path | None = None
     best_reward: float | None = None
@@ -1079,6 +1239,7 @@ def run_joint_grpo_training(
             env = _new_env(scenario, seed)
             builder = JointBEVSampleBuilder(AGENT_IDS)
             builder.reset()
+            rule_maker = _new_online_rule_maker(trainer.planner, env)
             dt_s = simulator_decision_dt_s(env)
             episode_step = 0
             try:
@@ -1095,6 +1256,9 @@ def run_joint_grpo_training(
                         action = route_following_warmup_actions(env, builder)
                     else:
                         values = builder.build_model_inputs(env)
+                        values, proposal_batch = _condition_online_model_inputs(
+                            rule_maker, env, builder, values
+                        )
                         execution_mask = execution_mode_valid_mask(
                             values, optimizer=trajectory_optimizer
                         )
@@ -1147,6 +1311,18 @@ def run_joint_grpo_training(
                                 ),
                             )
                             raise
+                        optimization, rule_event = _finalize_online_rule_action(
+                            rule_maker,
+                            proposal_batch,
+                            env=env,
+                            scenario=scenario,
+                            values=values,
+                            selected_modes=sampled_modes[selected_index],
+                            optimization=optimization,
+                            optimizer=trajectory_optimizer,
+                        )
+                        for name, value in rule_event.items():
+                            rule_diagnostics[name] += int(value)
                         sampled_rollouts += 1
                         bucket_sample_counts[bucket_index] += 1
                         informative = _joint_rewards_are_informative(proxy.rewards)
@@ -1198,6 +1374,10 @@ def run_joint_grpo_training(
                                     "selected_optimized_trajectory_valid_rate": float(
                                         optimization.optimized_valid.mean()
                                     ),
+                                    **{
+                                        f"diagnostic/v2_rule_{name}": float(value)
+                                        for name, value in rule_diagnostics.items()
+                                    },
                                 }
                             )
                             for name, value in update.gradient_norms.items():
@@ -1388,6 +1568,15 @@ def run_joint_grpo_training(
         "environment_steps": environment_steps,
         "sampled_rollouts": sampled_rollouts,
         "uninformative_rollouts": uninformative_rollouts,
+        "v2_rule_conditioning": {
+            "enabled": getattr(
+                getattr(trainer.planner, "config", None),
+                "model_version",
+                "v1",
+            )
+            == "v2",
+            **rule_diagnostics,
+        },
         "reward_contract_version": _reward_contract_version(),
         "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
         "reward_config_sha256": joint_reward_config_sha256(reward_config),
