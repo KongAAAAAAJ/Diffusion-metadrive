@@ -38,6 +38,7 @@ from train.train_bev_joint_grpo_online import (
     _fixed_raw_proxy_and_simulator_validation,
     _joint_rewards_are_informative,
     _new_online_rule_maker,
+    _next_run_directory,
     _resume_best_checkpoint_anchor,
     _round_robin_training_buckets,
     _scenario_ready_for_primary_sampling,
@@ -54,6 +55,16 @@ from train.train_bev_joint_grpo_online import (
     optimize_selected_model_trajectories,
     run_joint_grpo_training,
 )
+
+
+def test_next_run_directory_continues_after_migrated_run4(tmp_path: Path) -> None:
+    output_root = tmp_path / "run_3" / "grpo_open"
+    (output_root / "run_4").mkdir(parents=True)
+
+    next_run = _next_run_directory(output_root)
+
+    assert next_run == output_root / "run_5"
+    assert (next_run / "checkpoints").is_dir()
 
 
 def _binding() -> dict[str, object]:

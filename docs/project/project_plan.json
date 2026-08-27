@@ -1,7 +1,7 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T11:00:12+08:00",
+  "updated_at": "2026-08-27T21:25:53+08:00",
   "status": "v2_only_training_evaluation_cleanup_implemented_bounded_latency_gate_failed_run3_qualification_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
@@ -14,6 +14,17 @@
     "evidence": "evaluation/V2_ONLY_TRAINING_EVALUATION_CLEANUP_REPORT.json",
     "current_checkpoint_status": "Stage1 run_3 remains diagnostic and unqualified; bounded cleanup smokes cannot promote it.",
     "next_hard_gate": "strict_stage1_v2_run3_qualification"
+  },
+  "grpo_open_artifact_layout": {
+    "authorized_on": "2026-08-27",
+    "policy": "Store each GRPO-Open output beneath its exact source Stage1 run root instead of a standalone top-level GRPO output root.",
+    "default_output_root": "<stage1_run_root>/grpo_open",
+    "run_layout": "<stage1_run_root>/grpo_open/run_N",
+    "log_layout": "<stage1_run_root>/grpo_open/logs",
+    "current_migration": "Move only the completed Stage1 run_3 sourced GRPO run_4 into bev_diffusion_stage1/run_3/grpo_open/run_4; preserve Stage1 run_2 sourced run_1/run_2 and the empty historical run_3 in their existing root.",
+    "compatibility_policy": "Do not create a symlink or duplicate compatibility copy at the former run_4 path.",
+    "semantic_boundary": "Checkpoint payloads, reward/application contracts, diagnostic/formal eligibility, and the active Stage1 qualification gate are unchanged.",
+    "evidence": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json"
   },
   "trigger_phrases": [
     "项目计划",
@@ -487,7 +498,7 @@
     "required_sequence": [
       "freeze and verify stage2_grpo_open_application_v1 without changing the stage2_joint_reward_v2 formula or config SHA",
       "the existing calibration reports and run_3 remain immutable historical artifacts and are never read by tau_d application-v1 training",
-      "after implementation verification, start only a bounded diagnostic run from the original Stage1 source in the isolated training_v1 root; run_3 resume is forbidden"
+      "after implementation verification, start only a bounded diagnostic run from the original Stage1 source in that source run's grpo_open root; run_3 resume is forbidden"
     ],
     "output_contract": {
       "diagnostic_only": true,
@@ -502,6 +513,7 @@
   "stage2_common_contract": {
     "name": "Formal joint GRPO refinement",
     "source_checkpoint": "the same frozen eligible Stage1-A checkpoint",
+    "grpo_open_artifact_layout": "<source_stage1_run_root>/grpo_open/run_N",
     "group_size": 4,
     "policy_sample": "tau_d",
     "policy_probability": "raw diffusion/DDIM rollout and sampled-mode log-probability",

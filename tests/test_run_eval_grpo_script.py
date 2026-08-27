@@ -12,10 +12,7 @@ LAUNCHER = ROOT / "scripts" / "run_eval_grpo.sh"
 STAGE1_RUN3_ROOT = (
     "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3"
 )
-GRPO_RUN4_ROOT = (
-    "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/"
-    "stage1_run_2-2/training_v1/run_4"
-)
+GRPO_RUN4_ROOT = f"{STAGE1_RUN3_ROOT}/grpo_open/run_4"
 
 
 def _fake_python(path: Path) -> Path:
@@ -67,7 +64,11 @@ def test_launcher_defaults_to_stage1_run3_and_grpo_run4() -> None:
     source = LAUNCHER.read_text(encoding="utf-8")
 
     assert f'STAGE1_RUN_ROOT="${{STAGE1_RUN_ROOT:-{STAGE1_RUN3_ROOT}}}"' in source
-    assert f'GRPO_RUN_ROOT="${{GRPO_RUN_ROOT:-{GRPO_RUN4_ROOT}}}"' in source
+    assert (
+        'GRPO_RUN_ROOT="${GRPO_RUN_ROOT:-${STAGE1_RUN_ROOT}/grpo_open/run_4}"'
+        in source
+    )
+    assert GRPO_RUN4_ROOT.endswith("bev_diffusion_stage1/run_3/grpo_open/run_4")
     assert 'MAX_STEPS="${MAX_STEPS:-200}"' in source
     assert 'SAVE_VISUALIZATIONS="${SAVE_VISUALIZATIONS:-1}"' in source
 

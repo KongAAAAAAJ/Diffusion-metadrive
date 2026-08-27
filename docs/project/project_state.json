@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T20:41:21+08:00",
+  "updated_at": "2026-08-27T21:31:06+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "5c542db294c48ebc72d271384e3747fbe3da4cf5",
+    "git_commit": "35843fb97cb673c1f025172e26fdb4cd3738bc67",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -60,7 +60,8 @@
     "uncommitted_stage2_grpo_v2_rule_conditioning_fix_present": true,
     "uncommitted_stage2_grpo_v2_safe_stop_batch_fix_present": true,
     "uncommitted_v2_only_training_evaluation_cleanup_present": true,
-    "uncommitted_stage1_grpo_evaluation_launcher_present": true
+    "uncommitted_stage1_grpo_evaluation_launcher_present": true,
+    "uncommitted_grpo_run_scoped_storage_migration_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
@@ -744,7 +745,10 @@
     "v2_only_training_evaluation_cleanup_authorized": true,
     "v2_only_training_evaluation_cleanup_authorized_on": "2026-08-27",
     "v2_only_training_evaluation_cleanup_scope": "Remove active v1 planner/config/checkpoint/GRPO/evaluation execution paths while preserving historical v1 data readers and revision-labelled artifacts; run only focused tests and bounded diagnostic smokes, keep run_3 unqualified, and leave formal experiment status unchanged.",
-    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. A new bounded diagnostic run is allowed only in a separate thread from the original Stage1 checkpoint; no formal eligibility was granted."
+    "grpo_run_scoped_storage_migration_authorized": true,
+    "grpo_run_scoped_storage_migration_authorized_on": "2026-08-27",
+    "grpo_run_scoped_storage_migration_scope": "Move only the completed Stage1 run_3 sourced GRPO run_4 and its current training log beneath run_3/grpo_open, update report paths and launcher defaults, preserve standalone Stage1 run_2 sourced run_1/run_2 and empty run_3, create no compatibility link or copy, and leave checkpoint payloads, eligibility, formal status, and the active hard gate unchanged.",
+    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. Future GRPO-Open artifacts are stored beneath their exact source Stage1 run; no formal eligibility was granted."
   },
   "source_of_truth": {
     "v2_only_training_evaluation_cleanup_report": {
@@ -756,6 +760,11 @@
       "path": "evaluation/STAGE1_GRPO_S5_S9_EVALUATION_LAUNCHER_REPORT.json",
       "sha256": "029cd2020f41fb2f609f6a06f16eb47c0c31c5da47b07a53ac3f270af7e34666",
       "role": "Records the Stage1-A versus GRPO-Open diagnostic launcher, tau_d manifest correction, passing focused tests and real checkpoint loader preflight, and the bounded CUDA smoke that preserved the failed 203.01 ms Stage1 planning-tick hard gate before GRPO evaluation."
+    },
+    "stage2_grpo_run_scoped_storage_migration_report": {
+      "path": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json",
+      "sha256": "6f832109b1a6954b41939aa9345cf67305fb966672eefb55e77a662ff8402714",
+      "role": "Records the verified same-filesystem move of Stage1 run_3 sourced GRPO run_4 and its log beneath run_3/grpo_open, unchanged best/last checkpoint hashes and diagnostic eligibility, rewritten report paths, source-derived launcher defaults, run_5 allocation, and passing CPU loader preflight."
     },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
@@ -942,8 +951,8 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "84aa1b0d0a75e5ccc06c44b2ac994d7cd3c0434335a4740d37fb8573971c4697",
-      "role": "Records the atomically installed and quality-accepted 49870-sample Rule-conditioned v2 curated dataset, explicit user quota waiver, Stage 1 v2 binding, retained rollback backup, and bounded separate-thread Stage 1 smoke as the next hard gate"
+      "sha256": "bc8871b2c52e7233c2eb1a35e549ac6b0486e723e0966f1b98a21ec7bac7fc73",
+      "role": "Records the quality-accepted 49870-sample Rule-conditioned v2 dataset and Stage1 binding, preserves strict Stage1 run_3 qualification as the active hard gate, and freezes GRPO-Open storage beneath the exact source Stage1 run."
     },
     "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
@@ -1742,19 +1751,29 @@
       "eligible": false,
       "diagnostic_only": true,
       "source": "stage1_a_v2_run3_unqualified",
-      "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4/checkpoints/best.pt",
+      "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/checkpoints/best.pt",
       "checkpoint_sha256": "2dd1c44467b12cc88284265286fcb8fe29a7642d45f405d5e2ee326f46023a06",
+      "last_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/checkpoints/last.pt",
+      "last_checkpoint_sha256": "c3755966df082ddc5d148766c9eb480f147c2962e4d813ef3071697ad72e8100",
       "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
       "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
-      "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4",
-      "run_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4/report.json",
+      "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4",
+      "run_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/report.json",
+      "run_report_sha256": "67b403be49c16d1e2019089f44f2f66c594ee60e8e830fe8ec60fc54e739f1be",
+      "training_log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/logs/grpo-open-training.log",
+      "storage_layout": "<source_stage1_run_root>/grpo_open/run_N",
+      "next_default_run": "run_5",
       "optimizer_steps": 5000,
       "best_checkpoint_optimizer_step": 100,
       "environment_steps": 77500,
       "reward_domain": "tau_d",
       "application_contract": "stage2_grpo_open_application_v1",
+      "training_launcher": "scripts/run_bev_joint_grpo.sh",
+      "training_launcher_sha256": "12ac49c0fee8f77310e6ae846824d659992c8ddb9ee8652d8337639ff5fbf8f6",
       "evaluation_launcher": "scripts/run_eval_grpo.sh",
+      "evaluation_launcher_sha256": "2b85a9339f366b27c55a978e508165fc84bd2539f8f16cd4c6f304c960c1fde5",
       "evaluation_implementation_report": "evaluation/STAGE1_GRPO_S5_S9_EVALUATION_LAUNCHER_REPORT.json",
+      "storage_migration_report": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json",
       "bounded_evaluation_smoke_root": "/tmp/run_eval_grpo_smoke_20260827_v2",
       "bounded_evaluation_smoke_max_steps": 20,
       "bounded_evaluation_smoke_stage1_planning_tick_p95_ms": 203.01,
@@ -1866,7 +1885,7 @@
     "The current Stage1-A v2 path uses the fully verified 49870-sample Rule-conditioned bundle under the explicit user quota waiver; never describe it as satisfying the original exact 50070-total or 10000-S6 quota.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen.",
-    "GRPO-Open must retain the stage2_grpo_open_application_v1 SHA, raw tau_d reward/selection/best semantics, zero tracking expansion, selected-only trajectory optimization, and calibration_required=false. Any new run must start from the original Stage1 checkpoint in the isolated tau_d training_v1 root; run_3 resume and metadata promotion remain forbidden."
+    "GRPO-Open must retain the stage2_grpo_open_application_v1 SHA, raw tau_d reward/selection/best semantics, zero tracking expansion, selected-only trajectory optimization, and calibration_required=false. Every new run must be stored under its exact source Stage1 run's grpo_open root; resuming the preserved user-terminated historical standalone GRPO run_3 and metadata promotion remain forbidden."
   ],
   "next_actions": [
     "Qualify the completed Stage1 run_3 checkpoint under strict Stage1 reload, open-loop, and full S5-S9 closed-loop gates before any formal GRPO claim; the passing v2 GRPO one-step smoke is diagnostic compatibility evidence only, and the bounded 202.51 ms planning-tick result remains failed against the unchanged 200 ms gate.",
@@ -1877,7 +1896,7 @@
     "Treat the observed S5 background actor counts as descriptive evidence rather than an acceptance hard gate; no explicit background-quota waiver continuation switch exists in the current collector.",
     "Use tools/visualize_dataset_episode.py for read-only scenario/episode listing and world-topdown MP4 rendering; keep outputs outside dataset roots.",
     "Preserve run_3 as the user-terminated incomplete diagnostic artifact at metrics step 4532 and checkpoint step 4500; do not backfill or otherwise modify its TensorBoard event or checkpoints.",
-    "In a separate thread, start a new bounded diagnostic GRPO-Open process from the original Stage1 checkpoint in the isolated bev_joint_grpo_open_tau_d_v1/stage1_run_1/training_v1 root. Do not run calibration/preflight, resume run_3, or read its historical calibration report; retain raw validation/pretrain_reward and validation/reward_gain plus non-gating Simulator diagnostics.",
+    "For any future bounded diagnostic GRPO-Open process, use the selected Stage1 source checkpoint and its colocated grpo_open root; with the current Stage1 run_3 artifacts, the next allocation is run_5. Do not run calibration/preflight, resume the preserved user-terminated historical standalone GRPO run_3, or read its historical calibration report; retain raw validation/pretrain_reward and validation/reward_gain plus non-gating Simulator diagnostics.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",

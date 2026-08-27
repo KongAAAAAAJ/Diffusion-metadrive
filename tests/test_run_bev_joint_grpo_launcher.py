@@ -60,7 +60,12 @@ def test_launcher_directly_starts_bounded_tau_d_training(tmp_path: Path) -> None
     assert "--run-mode smoke" in calls[0]
     assert "--max-optimizer-steps 37" in calls[0]
     assert "calibrat" not in calls[0]
-    assert "training_v1" in calls[0]
+    assert f"--output-root {environment['ARTIFACT_ROOT']}" in calls[0]
+    assert (
+        Path(environment["ARTIFACT_ROOT"])
+        / "logs"
+        / "grpo-open-training.log"
+    ).is_file()
     assert "reward_domain=tau_d" in result.stdout
 
 
@@ -99,10 +104,39 @@ def test_formal_mode_is_rejected_before_training(tmp_path: Path) -> None:
     assert not Path(environment["CALL_LOG"]).exists()
 
 
-def test_launcher_defaults_to_isolated_tau_d_roots() -> None:
+def test_launcher_defaults_to_source_stage1_run_root() -> None:
     source = LAUNCHER.read_text(encoding="utf-8")
     assert "bev_diffusion_stage1/run_3/checkpoints/best.pt" in source
-    assert "bev_joint_grpo_open_tau_d_v1/stage1_run_2-2" in source
-    assert 'DEFAULT_OUTPUT_ROOT="${ARTIFACT_ROOT}/training_v1"' in source
-    assert 'DEFAULT_LOG_ROOT="${ARTIFACT_ROOT}/logs_v1"' in source
+    assert 'SOURCE_RUN_ROOT="$(dirname "$SOURCE_CHECKPOINT_DIR")"' in source
+    assert 'ARTIFACT_ROOT="${ARTIFACT_ROOT:-${SOURCE_RUN_ROOT}/grpo_open}"' in source
+    assert 'OUTPUT_ROOT="${OUTPUT_ROOT:-$ARTIFACT_ROOT}"' in source
+    assert 'LOG_ROOT="${LOG_ROOT:-${ARTIFACT_ROOT}/logs}"' in source
+    assert "bev_joint_grpo_open_tau_d_v1" not in source
+    assert "training_v1" not in source
+    assert "logs_v1" not in source
     assert "calibrate_bev_joint_reward.py" not in source
+
+
+def test_source_checkpoint_override_relocates_default_output(
+    tmp_path: Path,
+) -> None:
+    source_checkpoint = tmp_path / "stage1" / "run_9" / "checkpoints" / "best.pt"
+    source_checkpoint.parent.mkdir(parents=True)
+    source_checkpoint.write_bytes(b"stage1-run9")
+    environment = _environment(tmp_path)
+    environment["SOURCE_CHECKPOINT"] = str(source_checkpoint)
+    environment.pop("ARTIFACT_ROOT")
+
+    subprocess.run(
+        ["bash", str(LAUNCHER)],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    expected_root = source_checkpoint.parents[1] / "grpo_open"
+    call = Path(environment["CALL_LOG"]).read_text(encoding="utf-8")
+    assert f"--output-root {expected_root}" in call
+    assert (expected_root / "logs" / "grpo-open-training.log").is_file()

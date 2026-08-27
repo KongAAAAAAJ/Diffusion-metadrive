@@ -7,11 +7,6 @@ VARIANT="${VARIANT:-A}"
 RUN_MODE="${RUN_MODE:-smoke}"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/configs/train/bev_joint_grpo.yaml}"
 SOURCE_CHECKPOINT="${SOURCE_CHECKPOINT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt}"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2}"
-DEFAULT_OUTPUT_ROOT="${ARTIFACT_ROOT}/training_v1"
-DEFAULT_LOG_ROOT="${ARTIFACT_ROOT}/logs_v1"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$DEFAULT_OUTPUT_ROOT}"
-LOG_ROOT="${LOG_ROOT:-$DEFAULT_LOG_ROOT}"
 MAX_OPTIMIZER_STEPS="${MAX_OPTIMIZER_STEPS:-5000}"
 
 if [[ -v PIPELINE_STAGE || -v ALLOW_FAILED_CALIBRATION_DIAGNOSTIC || -v DEVELOPMENT_REPORT || -v CALIBRATION_REPORT ]]; then
@@ -38,6 +33,12 @@ if [[ ! -f "$CONFIG" ]]; then
   echo "GRPO config does not exist: $CONFIG" >&2
   exit 2
 fi
+
+SOURCE_CHECKPOINT_DIR="$(cd "$(dirname "$SOURCE_CHECKPOINT")" && pwd)"
+SOURCE_RUN_ROOT="$(dirname "$SOURCE_CHECKPOINT_DIR")"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-${SOURCE_RUN_ROOT}/grpo_open}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$ARTIFACT_ROOT}"
+LOG_ROOT="${LOG_ROOT:-${ARTIFACT_ROOT}/logs}"
 
 echo "[GRPO] application=stage2_grpo_open_application_v1 reward_domain=tau_d"
 echo "[GRPO] run_mode=$RUN_MODE variant=$VARIANT max_optimizer_steps=$MAX_OPTIMIZER_STEPS"

@@ -1,0 +1,105 @@
+{
+  "format": "stage2_grpo_run_scoped_storage_migration_report_v1",
+  "recorded_at": "2026-08-27T21:30:33+08:00",
+  "repository": {
+    "branch": "BEV",
+    "head": "35843fb97cb673c1f025172e26fdb4cd3738bc67",
+    "previous_project_state_git_baseline": "5c542db294c48ebc72d271384e3747fbe3da4cf5",
+    "aligned_project_state_git_baseline": "35843fb97cb673c1f025172e26fdb4cd3738bc67"
+  },
+  "decision": {
+    "policy": "Store every GRPO-Open run beneath the exact Stage1 run that supplied its source checkpoint.",
+    "default_output_root": "<source_stage1_run_root>/grpo_open",
+    "run_layout": "<source_stage1_run_root>/grpo_open/run_N",
+    "log_layout": "<source_stage1_run_root>/grpo_open/logs",
+    "compatibility_copy_or_symlink_created": false
+  },
+  "migration": {
+    "status": "completed",
+    "method": "same_filesystem_move",
+    "source_stage1_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_stage1_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "old_run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4",
+    "new_run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4",
+    "old_run_root_absent_after_migration": true,
+    "new_run_root_present_after_migration": true,
+    "migrated_regular_file_count": 6,
+    "migrated_run_size_bytes": 132261645,
+    "old_log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/logs_v1/grpo-open-training.log",
+    "new_log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/logs/grpo-open-training.log",
+    "new_log_sha256": "69d92ce8c2c25fb6567368a1d34f242eb44145f5a47f19b2074c8098bb4f6f6b",
+    "preserved_historical_standalone_runs": [
+      "run_1",
+      "run_2",
+      "run_3"
+    ],
+    "preserved_historical_run3_empty_training_artifact": true
+  },
+  "checkpoint_integrity": {
+    "source_binding_matches_stage1_run3": true,
+    "best_checkpoint_sha256_before": "2dd1c44467b12cc88284265286fcb8fe29a7642d45f405d5e2ee326f46023a06",
+    "best_checkpoint_sha256_after": "2dd1c44467b12cc88284265286fcb8fe29a7642d45f405d5e2ee326f46023a06",
+    "best_checkpoint_unchanged": true,
+    "last_checkpoint_sha256_before": "c3755966df082ddc5d148766c9eb480f147c2962e4d813ef3071697ad72e8100",
+    "last_checkpoint_sha256_after": "c3755966df082ddc5d148766c9eb480f147c2962e4d813ef3071697ad72e8100",
+    "last_checkpoint_unchanged": true,
+    "optimizer_steps": 5000,
+    "best_checkpoint_optimizer_step": 100,
+    "environment_steps": 77500,
+    "reward_input_domain": "tau_d",
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false
+  },
+  "run_report_rewrite": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/report.json",
+    "sha256_before": "fbd43911d01c2c47e07138ba4734c6387bec9581220e16c8903e139116eb514f",
+    "sha256_after": "67b403be49c16d1e2019089f44f2f66c594ee60e8e830fe8ec60fc54e739f1be",
+    "changed_fields": [
+      "best_checkpoint",
+      "last_checkpoint"
+    ],
+    "checkpoint_paths_exist": true,
+    "old_run_root_reference_absent": true
+  },
+  "launcher_changes": {
+    "training_launcher": "scripts/run_bev_joint_grpo.sh",
+    "evaluation_launcher": "scripts/run_eval_grpo.sh",
+    "training_default_is_derived_from_source_checkpoint": true,
+    "artifact_root_override_preserved": true,
+    "output_root_override_preserved": true,
+    "log_root_override_preserved": true,
+    "source_checkpoint_override_preserved": true,
+    "next_default_run_with_current_artifacts": "run_5",
+    "evaluation_default_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/checkpoints/best.pt",
+    "evaluation_default_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/evaluation/stage1_vs_grpo_s5_s9_diagnostic"
+  },
+  "verification": {
+    "shell_syntax": {
+      "command": "bash -n scripts/run_bev_joint_grpo.sh && bash -n scripts/run_eval_grpo.sh",
+      "passed": true
+    },
+    "focused_tests": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_run_bev_joint_grpo_launcher.py tests/test_run_eval_grpo_script.py tests/test_bev_joint_grpo_online.py::test_next_run_directory_continues_after_migrated_run4 -q",
+      "passed": 9,
+      "failed": 0
+    },
+    "real_checkpoint_cpu_loader_preflight": {
+      "passed": true,
+      "model_version": "v2",
+      "source_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "optimizer_step": 100,
+      "reward_input_domain": "tau_d"
+    },
+    "project_plan_json_valid": true
+  },
+  "boundaries": {
+    "new_training_started": false,
+    "new_closed_loop_evaluation_started": false,
+    "checkpoint_payload_changed": false,
+    "grpo_contract_changed": false,
+    "eligibility_changed": false,
+    "formal_experiment_status_changed": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification"
+  },
+  "maintainability_gap": "No dedicated GRPO training specialist skill is available; this migration used the frozen repository contracts and targeted launcher tests."
+}
