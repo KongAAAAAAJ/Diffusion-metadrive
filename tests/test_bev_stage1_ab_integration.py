@@ -20,6 +20,7 @@ from train.train_bev_diffusion_stage1 import (
     load_stage1_checkpoint,
     save_stage1_checkpoint,
 )
+from scripts.validate_bev_stage1_ab import load_planner, validate_closed_loop
 
 
 def _planner(variant: str) -> BEVOnlyDiffusionPlanner:
@@ -35,12 +36,13 @@ def _planner(variant: str) -> BEVOnlyDiffusionPlanner:
     )
 
 
-def _config(variant: str) -> dict[str, object]:
+def _config(variant: str, *, model_version: str = "v1") -> dict[str, object]:
     base: dict[str, object] = {
         "experiment": {
             "variant": "A",
             "joint_update": "joint_mean",
             "predecessor_condition": "none",
+            "model_version": model_version,
         },
         "dataset": {
             "root": "/tmp/data",
@@ -101,7 +103,7 @@ def _checkpoint(
         planner=planner,
         optimizer=optimizer,
         scaler=scaler,
-        config=_config(variant),
+        config=_config(variant, model_version=planner.config.model_version),
         dataset_fingerprint="b" * 64,
         epoch=0,
         optimizer_step=4,
@@ -134,9 +136,7 @@ def test_same_seed_keeps_all_shared_a_b_parameters_bitwise_equal() -> None:
 
 
 @pytest.mark.parametrize("variant", ["A", "B"])
-def test_schema_v2_smoke_checkpoint_round_trip(
-    tmp_path: Path, variant: str
-) -> None:
+def test_schema_v2_smoke_checkpoint_round_trip(tmp_path: Path, variant: str) -> None:
     planner = _planner(variant)
     path = _checkpoint(tmp_path, planner, variant)
     payload = load_stage1_checkpoint(path, planner)
@@ -147,6 +147,25 @@ def test_schema_v2_smoke_checkpoint_round_trip(
     assert payload["diagnostic_only"] is True
     assert payload["cross_split_overfit"] is False
     assert payload["eligible_for_formal_training"] is False
+
+
+def test_evaluation_loader_reconstructs_v2_planner_from_checkpoint(
+    tmp_path: Path,
+) -> None:
+    planner = BEVOnlyDiffusionPlanner(BEVOnlyDiffusionPlannerConfig(model_version="v2"))
+    path = _checkpoint(tmp_path, planner, "A")
+
+    loaded_planner, payload = load_planner(path, torch.device("cpu"))
+
+    assert loaded_planner.config.model_version == "v2"
+    assert payload["model_version"] == "v2"
+    assert validate_closed_loop(loaded_planner, device=torch.device("cpu")) == {
+        "status": "not_applicable",
+        "reason": (
+            "Rule-conditioned v2 is defined for S5-S9; use "
+            "evaluation.bev_four_model_evaluator for closed-loop evaluation"
+        ),
+    }
 
 
 def test_a_b_checkpoint_cross_load_is_rejected(tmp_path: Path) -> None:

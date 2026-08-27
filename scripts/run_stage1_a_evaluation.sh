@@ -8,10 +8,10 @@ export PYTHONUNBUFFERED=1
 export PYTHONHASHSEED=0
 
 PYTHON_BIN="${PYTHON_BIN:-/home/kong/anaconda3/envs/meta_drive/bin/python}"
-RUN_ROOT="${RUN_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_2}"
+RUN_ROOT="${RUN_ROOT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-${RUN_ROOT}/checkpoints/best.pt}"
 EXPECTED_CHECKPOINT_SHA256="${EXPECTED_CHECKPOINT_SHA256:-}"
-DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_risk_candidate_v3_formal50k_v1/platoon_joint_bev}"
+DATASET_ROOT="${DATASET_ROOT:-/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1/platoon_joint_bev}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${RUN_ROOT}/evaluation/stage1_a_diagnostic}"
 MANIFEST_PATH="${MANIFEST_PATH:-${OUTPUT_ROOT}/manifest_v2.json}"
 OPEN_S1_OUTPUT="${OPEN_S1_OUTPUT:-${OUTPUT_ROOT}/open_loop_s1.json}"

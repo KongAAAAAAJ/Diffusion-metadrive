@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-23T16:20:00+08:00",
+  "updated_at": "2026-08-27T10:07:28+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "e818b2a0aade44df560524a3b1f69f6c57c531f8",
+    "git_commit": "a3298050557455d31da97ded0b51a2d5d6a0646e",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -56,19 +56,20 @@
     "uncommitted_rule_conditioned_v2_formal49870_curation_present": true,
     "uncommitted_stage1_v2_curated_dataset_binding_present": true,
     "uncommitted_stage1_v2_launcher_config_fix_present": true,
+    "uncommitted_stage1_v2_run3_evaluation_entry_fix_present": true,
     "uncommitted_stage2_grpo_v2_rule_conditioning_fix_present": true,
     "uncommitted_stage2_grpo_v2_safe_stop_batch_fix_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
     "round": "rule-conditioned-v2-formal49870-curated-acceptance-20260821",
-    "status": "rule_conditioned_v2_49870_accepted_for_stage1_by_explicit_user_quota_waiver",
-    "active_hard_gate": "bounded_stage1_v2_training_smoke_on_curated_fingerprint"
+    "status": "stage1_v2_run3_evaluation_entry_fixed_full_qualification_pending",
+    "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "implementation_verified_curated_dataset_quality_accepted_stage1_bound_by_user_waiver",
+      "status": "stage1_v2_run3_evaluation_entry_fixed_bounded_smokes_passed_full_qualification_pending",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_preserved": true,
@@ -106,7 +107,7 @@
       "formal_p95_measured": false,
       "formal_data_collected": true,
       "report": "evaluation/BEV_ONLY_DIFFUSION_PLANNER_V2_IMPLEMENTATION_REPORT.json",
-      "next_hard_gate": "bounded_stage1_v2_training_smoke_on_curated_fingerprint",
+      "next_hard_gate": "strict_stage1_v2_run3_qualification",
       "dataset_preparation": {
         "status": "formal49870_curated_installed_fully_verified_quality_accepted_and_stage1_bound",
         "diagnostic8k_config": "configs/dataset/data_collect_bev_rule_conditioned_v2_s6_s9_diagnostic8k.yaml",
@@ -800,6 +801,11 @@
       "path": "evaluation/STAGE2_GRPO_V2_RULE_CONDITIONING_FIX_REPORT.json",
       "sha256": "8070fbb91826f15c126b3e7707cf0eb2dde8eb2df3057bc81cd7a5aa464aa18a",
       "role": "Records the two v2 condition-forwarding root causes, strict RuleMaker condition/proposal/STOP implementation, 38-test regression, passing run_3 one-step GPU smoke, and diagnostic/formal-ineligible boundary"
+    },
+    "stage1_v2_run3_evaluation_entry_fix_report": {
+      "path": "evaluation/STAGE1_V2_RUN3_EVALUATION_ENTRY_FIX_REPORT.json",
+      "sha256": "50fbc5bef8c0a77341d4b0c50167e1809dd6ead851022b31115ef967fddb05cd",
+      "role": "Records the run_3 v2 checkpoint reconstruction and curated-dataset binding fixes, explicit S1 non-applicability for the S5-S9-only v2 contract, 14-test regression, passing one-sample open-loop smoke, passing 40-step CUDA S5-S9 smoke with 136.60 ms planning-tick P95, four retained S9 compatibility rejections, and the unchanged full-qualification boundary"
     },
     "stage2_grpo_v2_safe_stop_batch_fix_report": {
       "path": "evaluation/STAGE2_GRPO_V2_SAFE_STOP_BATCH_FIX_REPORT.json",
@@ -1645,9 +1651,19 @@
       "embedded_run_mode": "formal",
       "embedded_eligible_for_formal_training": true,
       "checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "evaluation_launcher": "scripts/run_stage1_a_evaluation.sh",
+      "evaluation_entry_fix_report": "evaluation/STAGE1_V2_RUN3_EVALUATION_ENTRY_FIX_REPORT.json",
+      "strict_checkpoint_reload_passed": true,
+      "bounded_open_loop_smoke_passed": true,
+      "bounded_open_loop_joint_samples": 1,
+      "bounded_s5_s9_cuda_smoke_passed": true,
+      "bounded_s5_s9_cuda_smoke_episodes": 10,
+      "bounded_s5_s9_planning_tick_p95_ms": 136.5989053156227,
+      "bounded_s5_s9_execution_rejection_count": 4,
+      "full_evaluation_completed": false,
       "project_qualification_complete": false,
       "formal_grpo_source_allowed": false,
-      "qualification_pending": "strict Stage1 checkpoint reload, open-loop, and S5-S9 closed-loop gates"
+      "qualification_pending": "full 1500-sample open-loop and full-horizon S5-S9 closed-loop gates; bounded strict reload and evaluation smokes passed"
     },
     "stage1_a_formal": {
       "available": false,

@@ -82,9 +82,13 @@ def load_planner(
     variant = header.get("variant")
     if variant not in VARIANT_CONDITION:
         raise Stage1TrainingError("Stage 1 checkpoint variant must be A or B")
+    model_version = header.get("model_version", "v1")
+    if model_version not in ("v1", "v2"):
+        raise Stage1TrainingError("Stage 1 checkpoint model_version must be v1 or v2")
     planner = BEVOnlyDiffusionPlanner(
         BEVOnlyDiffusionPlannerConfig(
-            predecessor_condition=VARIANT_CONDITION[str(variant)]
+            predecessor_condition=VARIANT_CONDITION[str(variant)],
+            model_version=str(model_version),
         )
     )
     payload = load_stage1_checkpoint(path, planner)
@@ -275,6 +279,14 @@ def validate_closed_loop(
     topdown_screen_size: int = 800,
     topdown_film_size: int = 3000,
 ) -> dict[str, object]:
+    if planner.config.model_version == "v2":
+        return {
+            "status": "not_applicable",
+            "reason": (
+                "Rule-conditioned v2 is defined for S5-S9; use "
+                "evaluation.bev_four_model_evaluator for closed-loop evaluation"
+            ),
+        }
     env = SensorlessJointBEVPlatoonEnv(
         {
             "num_agents": 3,

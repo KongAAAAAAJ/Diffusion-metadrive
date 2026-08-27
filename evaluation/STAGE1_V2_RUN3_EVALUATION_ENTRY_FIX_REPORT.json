@@ -1,0 +1,78 @@
+{
+  "format": "stage1_v2_run3_evaluation_entry_fix_report_v1",
+  "schema_version": 1,
+  "recorded_at": "2026-08-27T10:07:28+08:00",
+  "repository_head_before_change": "a3298050557455d31da97ded0b51a2d5d6a0646e",
+  "status": "implementation_and_bounded_smokes_passed_full_qualification_not_started",
+  "scope": "Repair the existing Stage1-A evaluation entry for the completed run_3 Rule-conditioned v2 checkpoint. No checkpoint, dataset, model architecture, evaluation threshold, scenario contract, or formal eligibility was changed.",
+  "root_causes": [
+    "scripts/validate_bev_stage1_ab.py reconstructed every Stage 1 planner with the BEVOnlyDiffusionPlannerConfig v1 default instead of the checkpoint model_version.",
+    "scripts/run_stage1_a_evaluation.sh selected run_3 but retained the historical candidate-v3 v1 dataset root, whose fingerprint does not match run_3.",
+    "The legacy S1 one-step closed-loop probe has no valid scenario_code under the frozen Rule-conditioned v2 S5-S9 contract and therefore cannot supply the five required v2 condition inputs."
+  ],
+  "implementation": {
+    "checkpoint_loader": "Read model_version from the persisted Stage 1 checkpoint header, validate v1/v2, and construct the strict planner with that version before load_stage1_checkpoint().",
+    "launcher_default_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "launcher_default_dataset": "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1/platoon_joint_bev",
+    "s1_v2_semantics": "Report the legacy S1 one-step probe as not_applicable for v2 and route v2 closed-loop evaluation to evaluation.bev_four_model_evaluator over S5-S9."
+  },
+  "artifact_binding": {
+    "model_version": "v2",
+    "variant": "A",
+    "checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779"
+  },
+  "verification": {
+    "focused_tests": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -o cache_dir=/tmp/stage1-run3-eval-pytest-cache tests/test_bev_stage1_ab_integration.py tests/test_validate_bev_stage1_models.py tests/test_run_stage1_a_evaluation_script.py -q",
+      "result": "14 passed"
+    },
+    "open_loop_smoke": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 OUTPUT_ROOT=/tmp/stage1_run3_eval_fix_smoke_20260827 EVAL_STAGE=open_s1 OPEN_LOOP_NUM_SAMPLES=1 DEVICE=cpu SAVE_VISUALIZATIONS=0 bash scripts/run_stage1_a_evaluation.sh",
+      "result": "passed",
+      "report": "/tmp/stage1_run3_eval_fix_smoke_20260827/open_loop_s1.json",
+      "joint_samples": 1,
+      "strict_checkpoint_reload": true,
+      "dataset_fingerprint_match": true,
+      "model_version_match": true,
+      "s1_closed_loop_status": "not_applicable_for_v2"
+    },
+    "s5_s9_cuda40_smoke": {
+      "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 OUTPUT_ROOT=/tmp/stage1_run3_eval_fix_closed_cuda40_smoke_20260827 EVAL_STAGE=s5_s9 MAX_STEPS=40 REPEATS=1 DEVICE=cuda SAVE_VISUALIZATIONS=0 bash scripts/run_stage1_a_evaluation.sh",
+      "result": "passed",
+      "report": "/tmp/stage1_run3_eval_fix_closed_cuda40_smoke_20260827/s5_s9_closed_loop.json",
+      "episodes": 10,
+      "scenarios": 5,
+      "seeds": [31, 47],
+      "planning_tick_p95_ms": 136.5989053156227,
+      "planning_tick_limit_ms": 200.0,
+      "model_inference_p95_ms": 11.05480461847037,
+      "collision_rate": 0.0,
+      "out_of_road_rate": 0.0,
+      "execution_rejection_count": 4,
+      "condition_failure_count": 4
+    },
+    "short_latency_probes": {
+      "cpu_12_step_p95_ms": 252.68,
+      "cuda_12_step_p95_ms": 244.43,
+      "interpretation": "Both 12-step probes were rejected by the unchanged 200 ms gate because each episode contributed only about two planning ticks and cold-start samples dominated P95. The 40-step CUDA smoke reduced cold-start share and passed without changing the threshold."
+    },
+    "shell_syntax": "passed",
+    "formatting": "black --check reported all three Python files unchanged; the repository's Black process required the existing timeout workaround after printing its result",
+    "git_diff_check": "passed after report and project-state updates"
+  },
+  "evidence_classification": {
+    "evaluation_entry_fixed": true,
+    "bounded_open_loop_smoke_passed": true,
+    "bounded_s5_s9_smoke_passed": true,
+    "full_stage1_qualification_complete": false,
+    "formal_grpo_source_allowed": false,
+    "eligible_for_formal_conclusions": false
+  },
+  "remaining_risks": [
+    "The full 1500-sample open-loop evaluation and full-horizon S5-S9 closed-loop qualification have not been run.",
+    "The bounded S5-S9 smoke recorded four S9 active_commitment_compatibility execution rejections. Preserve this as measured evidence for the full qualification; it was not repaired or waived in this mismatch-fix round.",
+    "The 40-step diagnostic episodes are too short to establish completion, formation recovery, or full scenario behavior quality."
+  ],
+  "next_permitted_action": "Run the full run_3 Stage 1 qualification in a separate evaluation thread with the unchanged checkpoint, dataset fingerprint, S5-S9 contract, and latency threshold."
+}

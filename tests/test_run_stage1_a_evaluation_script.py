@@ -9,6 +9,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "run_stage1_a_evaluation.sh"
+RUN3_ROOT = "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3"
+RUN3_DATASET_ROOT = (
+    "/media/kong/Elements_SE/Diffusion_Data/metadrive_datasets/"
+    "bev_joint_rule_conditioned_v2_s5_s9_formal50070_v1/platoon_joint_bev"
+)
 
 
 def _fake_python(path: Path) -> Path:
@@ -55,6 +60,13 @@ def _environment(tmp_path: Path) -> dict[str, str]:
         "MAX_STEPS": "37",
         "REPEATS": "2",
     }
+
+
+def test_launcher_defaults_to_run3_v2_artifacts() -> None:
+    source = LAUNCHER.read_text(encoding="utf-8")
+
+    assert f'RUN_ROOT="${{RUN_ROOT:-{RUN3_ROOT}}}"' in source
+    assert f'DATASET_ROOT="${{DATASET_ROOT:-{RUN3_DATASET_ROOT}}}"' in source
 
 
 def test_all_writes_single_model_manifest_and_runs_both_evaluations(
