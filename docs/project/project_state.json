@@ -1,11 +1,11 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T10:07:28+08:00",
+  "updated_at": "2026-08-27T20:41:21+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "a3298050557455d31da97ded0b51a2d5d6a0646e",
-    "worktree_clean_before_this_update": false,
+    "git_commit": "5c542db294c48ebc72d271384e3747fbe3da4cf5",
+    "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
@@ -43,7 +43,7 @@
     "uncommitted_stage2_grpo_open_tau_d_v1_report_present": false,
     "uncommitted_stage2_grpo_rollout_identity_fix_present": false,
     "uncommitted_bev_only_diffusion_planner_v2_present": false,
-    "uncommitted_state_reconciliation_present": false,
+    "uncommitted_state_reconciliation_present": true,
     "uncommitted_rule_conditioned_v2_dataset_preparation_present": false,
     "uncommitted_rule_conditioned_v2_diagnostic_verifier_fix_present": false,
     "uncommitted_rule_conditioned_v2_parallel_collection_preparation_present": false,
@@ -58,21 +58,24 @@
     "uncommitted_stage1_v2_launcher_config_fix_present": true,
     "uncommitted_stage1_v2_run3_evaluation_entry_fix_present": true,
     "uncommitted_stage2_grpo_v2_rule_conditioning_fix_present": true,
-    "uncommitted_stage2_grpo_v2_safe_stop_batch_fix_present": true
+    "uncommitted_stage2_grpo_v2_safe_stop_batch_fix_present": true,
+    "uncommitted_v2_only_training_evaluation_cleanup_present": true,
+    "uncommitted_stage1_grpo_evaluation_launcher_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "rule-conditioned-v2-formal49870-curated-acceptance-20260821",
-    "status": "stage1_v2_run3_evaluation_entry_fixed_full_qualification_pending",
+    "round": "v2-only-training-evaluation-cleanup-20260827",
+    "status": "v2_only_cleanup_implemented_tests_and_training_smokes_passed_bounded_latency_gate_failed_run3_qualification_pending",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "stage1_v2_run3_evaluation_entry_fixed_bounded_smokes_passed_full_qualification_pending",
+      "status": "v2_only_cleanup_implemented_tests_and_training_smokes_passed_bounded_latency_gate_failed_run3_qualification_pending",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
-      "v1_preserved": true,
+      "v1_runtime_supported": false,
+      "historical_v1_data_readable": true,
       "data_schema": {
         "v1": 2,
         "v2": 3
@@ -89,6 +92,20 @@
       "s7_exception_audited": true,
       "s7_lateral_to_keep_contract": "S7/R7 physical LEFT and RIGHT both feed RuleMaker KEEP; the legacy persisted flag remains LEFT-only",
       "unit_and_regression_tests_passed": 138,
+      "v2_only_cleanup": {
+        "status": "implemented",
+        "report": "evaluation/V2_ONLY_TRAINING_EVALUATION_CLEANUP_REPORT.json",
+        "report_sha256": "cab7ce5f33ef38fc1c163d40364c53e20100a86cbda97d812819ce02623d8e2a",
+        "focused_tests_passed": 118,
+        "stage1_single_optimizer_step_passed": true,
+        "grpo_single_optimizer_step_passed": true,
+        "s5_s9_20_step_chain_executed": true,
+        "s5_s9_complete_planning_tick_p95_ms": 202.51,
+        "s5_s9_latency_gate_ms": 200.0,
+        "s5_s9_latency_gate_passed": false,
+        "checkpoint_eligibility_changed": false,
+        "formal_experiment_status_changed": false
+      },
       "short_closed_loop": {
         "S5_hard_brake_lead": {
           "simulator_steps": 15,
@@ -724,9 +741,22 @@
     "rule_conditioned_v2_formal50070_episode194_removal_authorized": true,
     "rule_conditioned_v2_formal50070_episode194_removal_authorized_on": "2026-08-21",
     "rule_conditioned_v2_formal50070_episode194_removal_scope": "Remove S6 train base episode 194 and its 200 samples, retain the raw collision sidecar as sidecar-only evidence, accept the resulting 49870 total and 9800 S6 samples for Stage 1 use, preserve all non-waived verification and quality gates, and retain the original 50070 bundle as a rollback backup.",
+    "v2_only_training_evaluation_cleanup_authorized": true,
+    "v2_only_training_evaluation_cleanup_authorized_on": "2026-08-27",
+    "v2_only_training_evaluation_cleanup_scope": "Remove active v1 planner/config/checkpoint/GRPO/evaluation execution paths while preserving historical v1 data readers and revision-labelled artifacts; run only focused tests and bounded diagnostic smokes, keep run_3 unqualified, and leave formal experiment status unchanged.",
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. A new bounded diagnostic run is allowed only in a separate thread from the original Stage1 checkpoint; no formal eligibility was granted."
   },
   "source_of_truth": {
+    "v2_only_training_evaluation_cleanup_report": {
+      "path": "evaluation/V2_ONLY_TRAINING_EVALUATION_CLEANUP_REPORT.json",
+      "sha256": "cab7ce5f33ef38fc1c163d40364c53e20100a86cbda97d812819ce02623d8e2a",
+      "role": "Records the v2-only planner, Stage 1, GRPO, checkpoint-loader and S5-S9 evaluation cleanup; 118 focused tests and both bounded optimizer-step smokes passed, while the bounded 202.51 ms planning-tick result remains a hard-gate failure and run_3 remains unqualified."
+    },
+    "stage1_grpo_s5_s9_evaluation_launcher_report": {
+      "path": "evaluation/STAGE1_GRPO_S5_S9_EVALUATION_LAUNCHER_REPORT.json",
+      "sha256": "029cd2020f41fb2f609f6a06f16eb47c0c31c5da47b07a53ac3f270af7e34666",
+      "role": "Records the Stage1-A versus GRPO-Open diagnostic launcher, tau_d manifest correction, passing focused tests and real checkpoint loader preflight, and the bounded CUDA smoke that preserved the failed 203.01 ms Stage1 planning-tick hard gate before GRPO evaluation."
+    },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
       "sha256": "5ba22c38b010454156233cfc47126a44682d239e82cb1acdf756d791137751de",
@@ -1707,6 +1737,32 @@
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false
     },
+    "grpo_open_v2_run4_diagnostic": {
+      "available": true,
+      "eligible": false,
+      "diagnostic_only": true,
+      "source": "stage1_a_v2_run3_unqualified",
+      "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4/checkpoints/best.pt",
+      "checkpoint_sha256": "2dd1c44467b12cc88284265286fcb8fe29a7642d45f405d5e2ee326f46023a06",
+      "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+      "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4",
+      "run_report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4/report.json",
+      "optimizer_steps": 5000,
+      "best_checkpoint_optimizer_step": 100,
+      "environment_steps": 77500,
+      "reward_domain": "tau_d",
+      "application_contract": "stage2_grpo_open_application_v1",
+      "evaluation_launcher": "scripts/run_eval_grpo.sh",
+      "evaluation_implementation_report": "evaluation/STAGE1_GRPO_S5_S9_EVALUATION_LAUNCHER_REPORT.json",
+      "bounded_evaluation_smoke_root": "/tmp/run_eval_grpo_smoke_20260827_v2",
+      "bounded_evaluation_smoke_max_steps": 20,
+      "bounded_evaluation_smoke_stage1_planning_tick_p95_ms": 203.01,
+      "bounded_evaluation_smoke_latency_gate_passed": false,
+      "bounded_evaluation_smoke_grpo_model_evaluated": false,
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false
+    },
     "grpo_open_at_risk": {
       "available": true,
       "eligible": false,
@@ -1813,8 +1869,8 @@
     "GRPO-Open must retain the stage2_grpo_open_application_v1 SHA, raw tau_d reward/selection/best semantics, zero tracking expansion, selected-only trajectory optimization, and calibration_required=false. Any new run must start from the original Stage1 checkpoint in the isolated tau_d training_v1 root; run_3 resume and metadata promotion remain forbidden."
   ],
   "next_actions": [
-    "Qualify the completed Stage1 run_3 checkpoint under strict Stage1 reload, open-loop, and S5-S9 closed-loop gates before any formal GRPO claim; the passing v2 GRPO one-step smoke is diagnostic compatibility evidence only.",
-    "Retain the original 50070-sample backup until the bounded Stage 1 smoke passes; no permanent backup deletion is authorized.",
+    "Qualify the completed Stage1 run_3 checkpoint under strict Stage1 reload, open-loop, and full S5-S9 closed-loop gates before any formal GRPO claim; the passing v2 GRPO one-step smoke is diagnostic compatibility evidence only, and the bounded 202.51 ms planning-tick result remains failed against the unchanged 200 ms gate.",
+    "The bounded Stage 1 single-step smoke passed. Continue retaining the original 50070-sample backup; no permanent backup deletion is authorized.",
     "The S5 release30 append is installed and fully verified at 50260 samples with all 233 prior base episodes preserved. Bind any consumer to base fingerprint e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511 and sidecar fingerprint a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6; retain the complete pre-append backup unless a separate cleanup round is explicitly authorized.",
     "Preserve the failed candidate-v4 S5 supplement root as immutable historical evidence; do not rewrite, relabel, or resume it after the sidecar out-of-road fix.",
     "Preserve the 18 committed candidate-v4-v2 S5 episodes and leave the interrupted episode-376 pending transaction untouched until the user explicitly chooses a future cleanup or continuation policy.",

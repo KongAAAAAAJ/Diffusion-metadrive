@@ -135,9 +135,9 @@ def _model_spec(value: object, *, index: int) -> ModelSpec:
             checkpoint_sha256=checkpoint_digest,
         )
     reward_domain = value.get("reward_domain")
-    if reward_domain not in {"tau_cmd", "tau_a"}:
+    if reward_domain not in {"tau_d", "tau_a"}:
         raise ModelManifestError(
-            f"{label}.reward_domain must be tau_cmd or tau_a"
+            f"{label}.reward_domain must be tau_d or tau_a"
         )
     source_checkpoint, source_digest = _artifact(
         value,

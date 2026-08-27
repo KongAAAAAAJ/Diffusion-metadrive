@@ -9,7 +9,9 @@ import torch
 from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
     BEVOnlyDiffusionPlannerConfig,
+    JointGRPOError,
 )
+from train.bev_joint_grpo import load_stage1_a_for_grpo
 from train.train_bev_diffusion_stage1 import (
     CHECKPOINT_FORMAT,
     CHECKPOINT_SCHEMA_VERSION,
@@ -36,7 +38,7 @@ def _planner(variant: str) -> BEVOnlyDiffusionPlanner:
     )
 
 
-def _config(variant: str, *, model_version: str = "v1") -> dict[str, object]:
+def _config(variant: str, *, model_version: str = "v2") -> dict[str, object]:
     base: dict[str, object] = {
         "experiment": {
             "variant": "A",
@@ -162,8 +164,8 @@ def test_evaluation_loader_reconstructs_v2_planner_from_checkpoint(
     assert validate_closed_loop(loaded_planner, device=torch.device("cpu")) == {
         "status": "not_applicable",
         "reason": (
-            "Rule-conditioned v2 is defined for S5-S9; use "
-            "evaluation.bev_four_model_evaluator for closed-loop evaluation"
+            "v2 closed-loop validation is S5-S9-only and is handled by "
+            "evaluation.bev_four_model_evaluator"
         ),
     }
 
@@ -190,3 +192,49 @@ def test_schema_v1_is_explicitly_rejected(tmp_path: Path) -> None:
     torch.save(legacy, legacy_path)
     with pytest.raises(Stage1TrainingError, match="schema_version mismatch"):
         load_stage1_checkpoint(legacy_path, planner)
+
+
+@pytest.mark.parametrize("model_version", [None, "v1"])
+def test_missing_or_v1_model_version_is_rejected(
+    tmp_path: Path, model_version: object
+) -> None:
+    planner = _planner("A")
+    path = _checkpoint(tmp_path, planner, "A")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if model_version is None:
+        payload.pop("model_version")
+    else:
+        payload["model_version"] = model_version
+    invalid_path = tmp_path / f"invalid_{model_version}.pt"
+    torch.save(payload, invalid_path)
+
+    with pytest.raises(Stage1TrainingError, match="model_version"):
+        load_stage1_checkpoint(invalid_path, planner)
+    with pytest.raises(Stage1TrainingError, match="model_version"):
+        load_planner(invalid_path, torch.device("cpu"))
+
+
+def test_grpo_loader_accepts_only_explicit_v2_stage1_checkpoint(
+    tmp_path: Path,
+) -> None:
+    planner = _planner("A")
+    path = _checkpoint(tmp_path, planner, "A")
+    trainer, payload, digest = load_stage1_a_for_grpo(
+        path,
+        device=torch.device("cpu"),
+        allow_diagnostic_source=True,
+    )
+    assert trainer.planner.config.model_version == "v2"
+    assert payload["model_version"] == "v2"
+    assert len(digest) == 64
+
+    invalid = torch.load(path, map_location="cpu", weights_only=False)
+    invalid["model_version"] = "v1"
+    invalid_path = tmp_path / "grpo_v1.pt"
+    torch.save(invalid, invalid_path)
+    with pytest.raises(JointGRPOError, match="explicit v2"):
+        load_stage1_a_for_grpo(
+            invalid_path,
+            device=torch.device("cpu"),
+            allow_diagnostic_source=True,
+        )

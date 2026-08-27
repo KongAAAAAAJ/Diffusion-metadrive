@@ -316,23 +316,21 @@ def _new_env(scenario: tuple[str, str], seed: int) -> object:
     return env
 
 
-def _new_online_rule_maker(planner: object, env: object) -> object | None:
+def _new_online_rule_maker(planner: object, env: object) -> object:
     planner_config = getattr(planner, "config", None)
-    if getattr(planner_config, "model_version", "v1") != "v2":
-        return None
+    if getattr(planner_config, "model_version", None) != "v2":
+        raise OnlineGRPOError("online GRPO requires a v2 planner")
     rule_maker = make_rule_maker(dict(env.config))
     rule_maker.reset(env, list(AGENT_IDS))
     return rule_maker
 
 
 def _condition_online_model_inputs(
-    rule_maker: object | None,
+    rule_maker: object,
     env: object,
     builder: JointBEVSampleBuilder,
     values: object,
-) -> tuple[object, object | None]:
-    if rule_maker is None:
-        return values, None
+) -> tuple[object, object]:
     try:
         hard_modes = hard_valid_modes_by_rule_action(
             AGENT_IDS, np.asarray(values.mode_valid_mask)
@@ -381,8 +379,8 @@ def _validate_online_trajectory_controls(
 
 
 def _finalize_online_rule_action(
-    rule_maker: object | None,
-    proposal_batch: object | None,
+    rule_maker: object,
+    proposal_batch: object,
     *,
     env: object,
     scenario: tuple[str, str],
@@ -399,11 +397,6 @@ def _finalize_online_rule_action(
         "forced_safe_stops": 0,
         "s7_feedback_exception_hits": 0,
     }
-    if rule_maker is None:
-        return optimization, diagnostics
-    if proposal_batch is None:
-        raise OnlineGRPOError("v2 online rollout has no RuleMaker proposal batch")
-
     diagnostics["conditioned_rollouts"] = 1
     diagnostics["proposal_match_attempts"] = 1
     try:
@@ -1569,12 +1562,7 @@ def run_joint_grpo_training(
         "sampled_rollouts": sampled_rollouts,
         "uninformative_rollouts": uninformative_rollouts,
         "v2_rule_conditioning": {
-            "enabled": getattr(
-                getattr(trainer.planner, "config", None),
-                "model_version",
-                "v1",
-            )
-            == "v2",
+            "enabled": True,
             **rule_diagnostics,
         },
         "reward_contract_version": _reward_contract_version(),

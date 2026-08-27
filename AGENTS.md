@@ -29,7 +29,7 @@
 2. 危险工况下编队安全通行、协作避障、队形恢复
 3. 优于从零训练多车 RL 和分层式编队方法
 4. 可支撑 SCI 论文的完整实验链
-5. 闭环推理时延：v1 三车模型推理 P95 ≤ 100ms；RuleMaker 条件化 v2 三车完整 planning tick P95 ≤ 200ms
+5. 闭环推理时延：RuleMaker 条件化 v2 三车完整 planning tick P95 ≤ 200ms
 
 ## 二、方法总路线
 
@@ -222,7 +222,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 | 项目 | 约束 |
 |------|------|
 | GPU | RTX 4080, 16GB |
-| 推理时延 | v1 模型推理 P95 ≤ 100ms；RuleMaker 条件化 v2 完整 planning tick P95 ≤ 200ms（3 车总计） |
+| 推理时延 | RuleMaker 条件化 v2 完整 planning tick P95 ≤ 200ms（3 车总计） |
 | Headless | 必须支持 `use_render=False` |
 | 已知问题 | Panda3D 退出 segfault (139)，不影响逻辑 |
 

@@ -101,7 +101,8 @@ def test_formal_mode_is_rejected_before_training(tmp_path: Path) -> None:
 
 def test_launcher_defaults_to_isolated_tau_d_roots() -> None:
     source = LAUNCHER.read_text(encoding="utf-8")
-    assert "bev_joint_grpo_open_tau_d_v1/stage1_run_1" in source
+    assert "bev_diffusion_stage1/run_3/checkpoints/best.pt" in source
+    assert "bev_joint_grpo_open_tau_d_v1/stage1_run_2-2" in source
     assert 'DEFAULT_OUTPUT_ROOT="${ARTIFACT_ROOT}/training_v1"' in source
     assert 'DEFAULT_LOG_ROOT="${ARTIFACT_ROOT}/logs_v1"' in source
     assert "calibrate_bev_joint_reward.py" not in source

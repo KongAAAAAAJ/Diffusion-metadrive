@@ -13,6 +13,8 @@ from expert_dataset.collect_joint_bev import (
     JOINT_SAMPLE_DTYPES,
     JOINT_SAMPLE_SHAPES,
     JointBEVSample,
+    JointBEVSampleV2,
+    MAX_BACKGROUND_ACTORS,
 )
 from expert_dataset.joint_bev_dataset import JointBEVDataset, JointBEVDatasetConfig
 from expert_dataset.joint_bev_storage import (
@@ -43,6 +45,7 @@ from train.train_bev_diffusion_stage1 import (
     save_stage1_checkpoint,
     train_one_epoch,
     validate_stage1_config,
+    validate_stage1_dataset_contract,
     validate_stage1_run_mode,
 )
 
@@ -53,6 +56,7 @@ def _config() -> dict[str, object]:
             "variant": "A",
             "joint_update": "joint_mean",
             "predecessor_condition": "none",
+            "model_version": "v2",
         },
         "dataset": {
             "root": "/tmp/data",
@@ -96,7 +100,7 @@ def _config() -> dict[str, object]:
     }
 
 
-def _sample(marker: int) -> JointBEVSample:
+def _sample(marker: int) -> JointBEVSampleV2:
     values = {
         name: np.zeros(shape, dtype=JOINT_SAMPLE_DTYPES[name])
         for name, shape in JOINT_SAMPLE_SHAPES.items()
@@ -117,7 +121,18 @@ def _sample(marker: int) -> JointBEVSample:
     values["expert_trajectory"][:] = values["coarse_trajectories"][
         :, int(ModeIndex.KEEP_MEDIUM)
     ]
-    return JointBEVSample(**values)
+    return JointBEVSampleV2(
+        base=JointBEVSample(**values),
+        background_actor_state=np.zeros(
+            (3, MAX_BACKGROUND_ACTORS, 8), dtype=np.float32
+        ),
+        background_actor_valid_mask=np.zeros(
+            (3, MAX_BACKGROUND_ACTORS), dtype=np.bool_
+        ),
+        scenario_code=np.asarray(1, dtype=np.int64),
+        rule_formation_state=np.asarray(0, dtype=np.int64),
+        rule_action_condition=np.zeros((3,), dtype=np.int64),
+    )
 
 
 def _packed_batch(tmp_path: Path, samples: int = 2) -> dict[str, torch.Tensor]:
@@ -127,6 +142,7 @@ def _packed_batch(tmp_path: Path, samples: int = 2) -> dict[str, torch.Tensor]:
         split_config=EpisodeSplitConfig(1.0, 0.0, 0.0, seed=7),
         dataset_fingerprint=fingerprint_payload({"round": 8}),
         resume=False,
+        planner_version="v2",
     ) as store:
         store.commit_episode(
             0,
@@ -160,6 +176,7 @@ def test_config_accepts_exact_a_b_pairs_and_rejects_other_contracts() -> None:
         "variant": "B",
         "joint_update": "joint_mean",
         "predecessor_condition": "predicted_detached",
+        "model_version": "v2",
     }
     validate_stage1_config(variant_b)
     changed = copy.deepcopy(variant_b)
@@ -174,6 +191,14 @@ def test_config_accepts_exact_a_b_pairs_and_rejects_other_contracts() -> None:
     changed["overfit"]["timestep"] = 7
     with pytest.raises(Stage1TrainingError, match="fixed at 8"):
         validate_stage1_config(changed)
+    missing_version = copy.deepcopy(config)
+    missing_version["experiment"].pop("model_version")
+    with pytest.raises(Stage1TrainingError, match="explicitly v2"):
+        validate_stage1_config(missing_version)
+    v1 = copy.deepcopy(config)
+    v1["experiment"]["model_version"] = "v1"
+    with pytest.raises(Stage1TrainingError, match="explicitly v2"):
+        validate_stage1_config(v1)
 
 
 def test_run_modes_prevent_truncated_formal_checkpoints() -> None:
@@ -186,6 +211,19 @@ def test_run_modes_prevent_truncated_formal_checkpoints() -> None:
         validate_stage1_run_mode("smoke", None)
     with pytest.raises(Stage1TrainingError, match="frozen config"):
         validate_stage1_run_mode("overfit_64", 4)
+
+
+def test_stage1_dataset_contract_requires_explicit_v2_schema3() -> None:
+    validate_stage1_dataset_contract(
+        {"planner_version": "v2", "schema_version": 3}
+    )
+    for contract in (
+        {"schema_version": 3},
+        {"planner_version": "v1", "schema_version": 2},
+        {"planner_version": "v2", "schema_version": 2},
+    ):
+        with pytest.raises(Stage1TrainingError, match="v2/schema_version=3"):
+            validate_stage1_dataset_contract(contract)
 
 
 def test_optimizer_groups_are_disjoint_exhaustive_and_use_fixed_lrs(

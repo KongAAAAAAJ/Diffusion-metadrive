@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from expert_dataset.collect_joint_bev import MAX_BACKGROUND_ACTORS
 from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
     BEVOnlyDiffusionPlannerConfig,
@@ -69,6 +70,17 @@ def _joint_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
         "agent_role": roles,
         "coarse_trajectories": anchors,
         "mode_valid_mask": mask,
+        "background_actor_state": torch.zeros(
+            (batch_size, 3, MAX_BACKGROUND_ACTORS, 8), dtype=torch.float32
+        ),
+        "background_actor_valid_mask": torch.zeros(
+            (batch_size, 3, MAX_BACKGROUND_ACTORS), dtype=torch.bool
+        ),
+        "scenario_code": torch.ones((batch_size,), dtype=torch.int64),
+        "rule_formation_state": torch.zeros((batch_size,), dtype=torch.int64),
+        "rule_action_condition": torch.zeros(
+            (batch_size, 3), dtype=torch.int64
+        ),
     }
 
 
@@ -92,6 +104,11 @@ def _call(
         batch["agent_role"],
         batch["coarse_trajectories"],
         batch["mode_valid_mask"],
+        background_actor_state=batch["background_actor_state"],
+        background_actor_valid_mask=batch["background_actor_valid_mask"],
+        scenario_code=batch["scenario_code"],
+        rule_formation_state=batch["rule_formation_state"],
+        rule_action_condition=batch["rule_action_condition"],
         **kwargs,
     )
 
@@ -152,6 +169,11 @@ def test_context_shapes_and_dynamic_anchor_dependency(
             batch["formation_relation_state"],
             batch["relation_valid_mask"],
             batch["agent_role"],
+            background_actor_state=batch["background_actor_state"],
+            background_actor_valid_mask=batch["background_actor_valid_mask"],
+            scenario_code=batch["scenario_code"],
+            rule_formation_state=batch["rule_formation_state"],
+            rule_action_condition=batch["rule_action_condition"],
         )
         normalized = planner._normalize_xy(batch["coarse_trajectories"][..., :2])
         timesteps = torch.zeros((1, 3), dtype=torch.int64)
@@ -203,6 +225,11 @@ def test_relation_mask_and_joint_role_information(
             batch["relation_valid_mask"],
             batch["agent_role"],
             bev_feature,
+            batch["background_actor_state"],
+            batch["background_actor_valid_mask"],
+            batch["scenario_code"],
+            batch["rule_formation_state"],
+            batch["rule_action_condition"],
         )
         masked_changed = encoder(
             batch["ego_state"],
@@ -210,6 +237,11 @@ def test_relation_mask_and_joint_role_information(
             batch["relation_valid_mask"],
             batch["agent_role"],
             bev_feature,
+            batch["background_actor_state"],
+            batch["background_actor_valid_mask"],
+            batch["scenario_code"],
+            batch["rule_formation_state"],
+            batch["rule_action_condition"],
         )
         leader_changed_state = batch["ego_state"].clone()
         leader_changed_state[:, 0, 0] += 12.0
@@ -219,6 +251,11 @@ def test_relation_mask_and_joint_role_information(
             batch["relation_valid_mask"],
             batch["agent_role"],
             bev_feature,
+            batch["background_actor_state"],
+            batch["background_actor_valid_mask"],
+            batch["scenario_code"],
+            batch["rule_formation_state"],
+            batch["rule_action_condition"],
         )
 
     torch.testing.assert_close(base, masked_changed)
@@ -405,6 +442,44 @@ def test_heading_is_wrapped_to_pi(planner: BEVOnlyDiffusionPlanner) -> None:
     assert bool((heading <= math.pi).all())
 
 
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "background_actor_state",
+        "background_actor_valid_mask",
+        "scenario_code",
+        "rule_formation_state",
+        "rule_action_condition",
+    ],
+)
+def test_each_v2_condition_is_required(
+    planner: BEVOnlyDiffusionPlanner, missing: str
+) -> None:
+    batch = _joint_batch()
+    conditions = {
+        name: batch[name]
+        for name in (
+            "background_actor_state",
+            "background_actor_valid_mask",
+            "scenario_code",
+            "rule_formation_state",
+            "rule_action_condition",
+        )
+    }
+    conditions.pop(missing)
+    with pytest.raises(BEVPlannerError, match="requires all explicit condition"):
+        planner(
+            batch["bev"],
+            batch["ego_state"],
+            batch["formation_relation_state"],
+            batch["relation_valid_mask"],
+            batch["agent_role"],
+            batch["coarse_trajectories"],
+            batch["mode_valid_mask"],
+            **conditions,
+        )
+
+
 def test_planner_source_has_no_legacy_model_imports() -> None:
     source_path = Path(inspect.getfile(BEVOnlyDiffusionPlanner))
     module = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -433,3 +508,5 @@ def test_config_rejects_inconsistent_architecture() -> None:
         BEVOnlyDiffusionPlannerConfig(train_timestep_upper=1001)
     with pytest.raises(BEVPlannerError, match="inference_noise_timestep"):
         BEVOnlyDiffusionPlannerConfig(inference_noise_timestep=1000)
+    with pytest.raises(BEVPlannerError, match="must be v2"):
+        BEVOnlyDiffusionPlannerConfig(model_version="v1")  # type: ignore[arg-type]

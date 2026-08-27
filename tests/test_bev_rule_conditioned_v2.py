@@ -152,9 +152,7 @@ def test_exact_proposal_matching_supports_rank_zero_and_lower_rank() -> None:
 
 
 def test_v2_actor_and_rule_conditions_change_context_without_invalid_actor_nans() -> None:
-    encoder = JointStateRelationEncoder(
-        32, 4, 64, 0.0, model_version="v2"
-    ).eval()
+    encoder = JointStateRelationEncoder(32, 4, 64, 0.0).eval()
     ego = torch.zeros((1, 3, 8), dtype=torch.float32)
     relation = torch.zeros((1, 3, 12), dtype=torch.float32)
     relation_mask = torch.ones((1, 3, 2), dtype=torch.bool)

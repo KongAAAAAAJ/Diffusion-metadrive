@@ -13,6 +13,8 @@ from expert_dataset.collect_joint_bev import (
     JOINT_SAMPLE_DTYPES,
     JOINT_SAMPLE_SHAPES,
     JointBEVSample,
+    JointBEVSampleV2,
+    MAX_BACKGROUND_ACTORS,
 )
 from expert_dataset.joint_bev_dataset import JointBEVDataset, JointBEVDatasetConfig
 from expert_dataset.joint_bev_storage import (
@@ -68,6 +70,17 @@ def _planner_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
         .repeat(batch_size, 1),
         "coarse_trajectories": anchors,
         "mode_valid_mask": torch.ones((batch_size, 3, 10), dtype=torch.bool),
+        "background_actor_state": torch.zeros(
+            (batch_size, 3, MAX_BACKGROUND_ACTORS, 8), dtype=torch.float32
+        ),
+        "background_actor_valid_mask": torch.zeros(
+            (batch_size, 3, MAX_BACKGROUND_ACTORS), dtype=torch.bool
+        ),
+        "scenario_code": torch.ones((batch_size,), dtype=torch.int64),
+        "rule_formation_state": torch.zeros((batch_size,), dtype=torch.int64),
+        "rule_action_condition": torch.zeros(
+            (batch_size, 3), dtype=torch.int64
+        ),
     }
 
 
@@ -86,6 +99,11 @@ def _call(
         batch["agent_role"],
         batch["coarse_trajectories"],
         batch["mode_valid_mask"],
+        background_actor_state=batch["background_actor_state"],
+        background_actor_valid_mask=batch["background_actor_valid_mask"],
+        scenario_code=batch["scenario_code"],
+        rule_formation_state=batch["rule_formation_state"],
+        rule_action_condition=batch["rule_action_condition"],
         diffusion_noise=noise,
         diffusion_timesteps=timesteps,
     )
@@ -391,7 +409,7 @@ def test_gate_and_action_encoder_gradient_phases(
     )
 
 
-def _packed_sample() -> JointBEVSample:
+def _packed_sample() -> JointBEVSampleV2:
     values = {
         name: np.zeros(shape, dtype=JOINT_SAMPLE_DTYPES[name])
         for name, shape in JOINT_SAMPLE_SHAPES.items()
@@ -411,7 +429,18 @@ def _packed_sample() -> JointBEVSample:
     values["expert_trajectory"][:] = values["coarse_trajectories"][
         :, int(ModeIndex.KEEP_MEDIUM)
     ]
-    return JointBEVSample(**values)
+    return JointBEVSampleV2(
+        base=JointBEVSample(**values),
+        background_actor_state=np.zeros(
+            (3, MAX_BACKGROUND_ACTORS, 8), dtype=np.float32
+        ),
+        background_actor_valid_mask=np.zeros(
+            (3, MAX_BACKGROUND_ACTORS), dtype=np.bool_
+        ),
+        scenario_code=np.asarray(1, dtype=np.int64),
+        rule_formation_state=np.asarray(0, dtype=np.int64),
+        rule_action_condition=np.zeros((3,), dtype=np.int64),
+    )
 
 
 def _packed_batch(tmp_path: Path) -> dict[str, torch.Tensor]:
@@ -421,6 +450,7 @@ def _packed_batch(tmp_path: Path) -> dict[str, torch.Tensor]:
         split_config=EpisodeSplitConfig(1.0, 0.0, 0.0, seed=9),
         dataset_fingerprint=fingerprint_payload({"round": 9}),
         resume=False,
+        planner_version="v2",
     ) as store:
         store.commit_episode(
             0,

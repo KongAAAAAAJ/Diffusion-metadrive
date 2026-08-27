@@ -28,7 +28,7 @@ def _grpo(path: Path, source: Path, model_id: str) -> dict[str, str]:
         "id": model_id,
         "kind": "grpo",
         "variant": "A",
-        "reward_domain": "tau_cmd" if model_id == "grpo_open" else "tau_a",
+        "reward_domain": "tau_d" if model_id == "grpo_open" else "tau_a",
         "checkpoint": str(path),
         "checkpoint_sha256": file_sha256(path),
         "source_checkpoint": str(source),
@@ -153,6 +153,18 @@ def test_manifest_rejects_hash_mismatch_and_incomplete_grpo(tmp_path: Path) -> N
         load_model_manifest(
             _write(tmp_path / "incomplete_grpo.json", [incomplete], [])
         )
+
+
+def test_manifest_rejects_legacy_tau_cmd_reward_domain(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "grpo.pt"
+    source = tmp_path / "stage1.pt"
+    checkpoint.write_bytes(b"grpo")
+    source.write_bytes(b"stage1")
+    legacy = _grpo(checkpoint, source, "grpo_open")
+    legacy["reward_domain"] = "tau_cmd"
+
+    with pytest.raises(ModelManifestError, match="must be tau_d or tau_a"):
+        load_model_manifest(_write(tmp_path / "legacy_tau_cmd.json", [legacy], []))
 
 
 def test_v1_manifest_is_rejected(tmp_path: Path) -> None:

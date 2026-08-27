@@ -1,9 +1,20 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-21T12:44:34+08:00",
-  "status": "rule_conditioned_v2_curated_dataset_accepted_by_explicit_user_quota_waiver",
+  "updated_at": "2026-08-27T11:00:12+08:00",
+  "status": "v2_only_training_evaluation_cleanup_implemented_bounded_latency_gate_failed_run3_qualification_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
+  "v2_only_training_evaluation_cleanup": {
+    "authorized_on": "2026-08-27",
+    "scope": "Make BEVOnlyDiffusionPlanner, Stage 1, GRPO checkpoint loading and online execution, and S5-S9 evaluation explicitly v2-only without changing checkpoint format/schema revisions, RuleMaker semantics, dataset fingerprints, checkpoint eligibility, or formal experiment status.",
+    "runtime_contract": "model_version remains an audit field whose only legal value is v2; missing or v1 Stage 1/GRPO checkpoints and configurations are rejected.",
+    "historical_data_contract": "Preserve historical v1 datasets, reports, directory names, protocol revision labels, and generic v1 dataset-schema readers as evidence; they are not runnable planner/checkpoint inputs.",
+    "implementation_status": "complete",
+    "verification": "118 focused tests passed; bounded Stage 1 and run_3-source GRPO single-step smokes passed; the bounded S5-S9 20-step chain executed but its complete planning tick P95 was 202.51 ms and failed the unchanged 200 ms gate.",
+    "evidence": "evaluation/V2_ONLY_TRAINING_EVALUATION_CLEANUP_REPORT.json",
+    "current_checkpoint_status": "Stage1 run_3 remains diagnostic and unqualified; bounded cleanup smokes cannot promote it.",
+    "next_hard_gate": "strict_stage1_v2_run3_qualification"
+  },
   "trigger_phrases": [
     "项目计划",
     "最新计划",
@@ -112,7 +123,7 @@
       "s7_temporary_exception": "On S7 R7 route-chain states, physical LEFT and RIGHT modes are explicitly audited and fed back to RuleMaker as KEEP; every other match is strict one-to-one."
     },
     "data_contract": {
-      "historical_v1_policy": "preserve and keep readable; it is not eligible for v2 conditioning training",
+      "historical_v1_policy": "preserve historical data and keep generic schema-v1 readers available; v1 planner/config/checkpoint execution is unsupported and rejected",
       "v2_requirement": "collect a new v2 dataset or perform deterministic replay from complete RuleMaker state/history; never infer RuleMaker conditions from gt_mode",
       "audit_fields": [
         "diffusion input rule actions",
@@ -130,7 +141,7 @@
       "shared accept_joint_action() coverage for NormalPlanner and diffusion acceptors",
       "rank-0 and lower-ranked proposal coverage",
       "KEEP, STOP, active commitment, completion, and S7 exception coverage",
-      "v1 dataset and planner compatibility",
+      "historical v1 dataset readability with explicit rejection of v1 planner/config/checkpoint execution",
       "short closed-loop smoke without online NormalPlanner",
       "formal multi-seed online planning P95 no greater than 200 ms in a separate evaluation run"
     ]
@@ -607,7 +618,7 @@
       "trajectory optimizer intervention and final execution feasibility",
       "BEV build, model inference, optimizer/surrogate, control mapping, and full planning tick P50/P95 latency"
     ],
-    "latency_gate": "BEVOnlyDiffusionPlanner v1 retains the historical 100 ms P95 target. The explicitly approved RuleMaker-conditioned v2 protocol uses a three-vehicle complete planning-tick P95 target of 200 ms.",
+    "latency_gate": "The v2 RuleMaker-conditioned three-vehicle complete planning-tick P95 must be no greater than 200 ms. No v1 inference gate remains in the active training/evaluation contract.",
     "optional_secondary_ablation": "Inside GRPO-Exec only, compare surrogate ensemble mean against mean plus uncertainty-aware reward after the three-model main matrix is complete. This is not a Stage1 A/B ablation."
   },
   "execution_order": [
@@ -687,10 +698,11 @@
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision.",
     "The 2026-08-17 failed-calibration waiver and all V2/V3 calibration reports are historical evidence only; tau_d application-v1 training must not read them or resume run_3.",
-    "Every at-risk GRPO-Open output remains diagnostic_only=true and eligible_for_formal_training=false; never use it for formal evaluation, GRPO-Exec, paper evidence, or metadata promotion."
+    "Every at-risk GRPO-Open output remains diagnostic_only=true and eligible_for_formal_training=false; never use it for formal evaluation, GRPO-Exec, paper evidence, or metadata promotion.",
+    "Do not restore v1 planner, Stage 1, GRPO checkpoint, or S5-S9 evaluation execution paths; historical v1 data remains readable only through the generic dataset-schema contract."
   ],
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
   "implementation_evidence_sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
-  "current_next_action": "In a separate execution thread, run a bounded Stage1-A v2 training smoke using configs/train/bev_diffusion_stage1_v2.yaml and the bound curated base fingerprint 23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779. Keep the original 50070-sample rollback backup until the smoke is accepted; do not describe the curated dataset as satisfying the original exact 50070/10000-per-scenario quota."
+  "current_next_action": "In a separate execution thread, qualify the completed Stage1 run_3 checkpoint under strict reload, open-loop, and full S5-S9 closed-loop gates. Keep the bounded 202.51 ms result failed until a qualifying run passes the unchanged 200 ms complete-planning-tick gate."
 }

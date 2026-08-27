@@ -1,0 +1,95 @@
+{
+  "format": "stage1_grpo_s5_s9_evaluation_launcher_report_v1",
+  "recorded_at": "2026-08-27T20:41:21+08:00",
+  "repository_head": "5c542db294c48ebc72d271384e3747fbe3da4cf5",
+  "scope": "Diagnostic Stage1-A versus GRPO-Open S5-S9 closed-loop evaluation launcher",
+  "outcome": {
+    "launcher_implemented": true,
+    "manifest_reward_domain_corrected_to_tau_d": true,
+    "focused_tests_passed": true,
+    "real_checkpoint_loader_preflight_passed": true,
+    "bounded_cuda_smoke_reached_evaluator": true,
+    "bounded_cuda_smoke_hard_gate_passed": false,
+    "formal_eligibility_changed": false,
+    "active_stage1_qualification_gate_changed": false
+  },
+  "launcher": {
+    "path": "scripts/run_eval_grpo.sh",
+    "run_mode": "diagnostic",
+    "default_max_steps": 200,
+    "default_device": "cuda",
+    "default_repeats": 1,
+    "default_save_visualizations": true,
+    "models": ["stage1_a", "grpo_open"],
+    "comparison": {
+      "id": "open_vs_stage1",
+      "baseline": "stage1_a",
+      "candidate": "grpo_open"
+    },
+    "reward_domain": "tau_d",
+    "default_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4/evaluation/stage1_vs_grpo_s5_s9_diagnostic"
+  },
+  "checkpoints": {
+    "stage1_a": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+      "sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "project_qualified": false
+    },
+    "grpo_open": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_joint_grpo_open_tau_d_v1/stage1_run_2-2/training_v1/run_4/checkpoints/best.pt",
+      "sha256": "2dd1c44467b12cc88284265286fcb8fe29a7642d45f405d5e2ee326f46023a06",
+      "source_stage1_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "optimizer_step": 100,
+      "run_optimizer_steps": 5000,
+      "run_environment_steps": 77500,
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false
+    }
+  },
+  "verification": {
+    "shell_syntax": {
+      "command": "bash -n scripts/run_eval_grpo.sh",
+      "passed": true
+    },
+    "launcher_and_manifest_tests": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -o cache_dir=/tmp/run-eval-grpo-pytest-cache tests/test_run_eval_grpo_script.py tests/test_bev_model_manifest.py -q",
+      "passed": 11,
+      "failed": 0
+    },
+    "evaluator_regression": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 MPLCONFIGDIR=/tmp/run-eval-grpo-mpl /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -o cache_dir=/tmp/run-eval-grpo-evaluator-cache tests/test_bev_four_model_evaluator.py -q",
+      "passed": 13,
+      "failed": 0
+    },
+    "real_checkpoint_loader_preflight": {
+      "device": "cpu",
+      "result": "grpo_loader=PASS model_version=v2"
+    },
+    "bounded_cuda_smoke": {
+      "command": "OUTPUT_ROOT=/tmp/run_eval_grpo_smoke_20260827_v2 MAX_STEPS=20 REPEATS=1 DEVICE=cuda SAVE_VISUALIZATIONS=0 bash scripts/run_eval_grpo.sh",
+      "artifact_root": "/tmp/run_eval_grpo_smoke_20260827_v2",
+      "manifest": "/tmp/run_eval_grpo_smoke_20260827_v2/manifest_v2.json",
+      "log": "/tmp/run_eval_grpo_smoke_20260827_v2/logs/s5_s9_closed_loop.log",
+      "exit_code": 1,
+      "stage1_complete_planning_tick_p95_ms": 203.01,
+      "limit_ms": 200.0,
+      "failure": "stage1_a v2 complete planning tick P95 203.01ms exceeds 200.00ms",
+      "grpo_model_evaluated": false,
+      "final_evaluation_report_written": false
+    },
+    "final_validation": {
+      "json_syntax": "passed",
+      "git_diff_check": "passed",
+      "unrelated_pre_existing_worktree_changes_preserved": true
+    }
+  },
+  "boundary": {
+    "classification": "implementation complete; bounded model-evaluation hard gate failed",
+    "full_200_step_evaluation_started": false,
+    "full_800_step_evaluation_started": false,
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false,
+    "latency_gate_relaxed": false,
+    "next_action": "Qualify Stage1 run_3 under the unchanged strict gates, then rerun this diagnostic Stage1-versus-GRPO comparison."
+  }
+}

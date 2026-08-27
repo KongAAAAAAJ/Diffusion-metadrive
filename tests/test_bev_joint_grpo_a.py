@@ -82,6 +82,17 @@ def _model_inputs(batch_size: int = 1) -> dict[str, torch.Tensor]:
         "mode_valid_mask": torch.ones(
             (batch_size, 3, 10), dtype=torch.bool
         ),
+        "background_actor_state": torch.zeros(
+            (batch_size, 3, MAX_BACKGROUND_ACTORS, 8), dtype=torch.float32
+        ),
+        "background_actor_valid_mask": torch.zeros(
+            (batch_size, 3, MAX_BACKGROUND_ACTORS), dtype=torch.bool
+        ),
+        "scenario_code": torch.ones((batch_size,), dtype=torch.int64),
+        "rule_formation_state": torch.zeros((batch_size,), dtype=torch.int64),
+        "rule_action_condition": torch.zeros(
+            (batch_size, 3), dtype=torch.int64
+        ),
     }
 
 

@@ -385,9 +385,17 @@ def test_simulator_failure_is_non_gating_for_raw_validation(
         "train.train_bev_joint_grpo_online.capture_joint_pose_global",
         lambda env: np.zeros((3, 3), dtype=np.float32),
     )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online._new_online_rule_maker",
+        lambda planner, env: object(),
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online._condition_online_model_inputs",
+        lambda rule_maker, env, builder, values: (values, object()),
+    )
 
     metrics, errors = _fixed_raw_proxy_and_simulator_validation(
-        object(),
+        SimpleNamespace(config=SimpleNamespace(model_version="v2")),
         device=torch.device("cpu"),
         reward_config=JointRewardConfig(),
         scenarios=(PRIMARY_S5_S9_SCENARIOS[0],),
@@ -629,6 +637,13 @@ def test_v2_online_inputs_use_and_accept_exact_rule_proposal(
     assert diagnostics["conditioned_rollouts"] == 1
     assert diagnostics["proposal_matches"] == 1
     assert diagnostics["condition_failures"] == 0
+
+
+@pytest.mark.parametrize("model_version", [None, "v1"])
+def test_online_grpo_rejects_non_v2_planner(model_version: object) -> None:
+    planner = SimpleNamespace(config=SimpleNamespace(model_version=model_version))
+    with pytest.raises(OnlineGRPOError, match="requires a v2 planner"):
+        _new_online_rule_maker(planner, SimpleNamespace())
 
 
 def test_v2_unmatched_rule_action_executes_batched_safe_stop() -> None:

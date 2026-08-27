@@ -98,7 +98,6 @@ class ModelEvaluationConfig:
     seeds: tuple[int, ...] = HOLDOUT_SEEDS
     scenarios: tuple[tuple[str, str], ...] = DIAGNOSTIC_EVAL_SCENARIOS
     max_steps: int = 100
-    inference_p95_limit_ms: float = 100.0
     v2_planning_tick_p95_limit_ms: float = 200.0
     artifact_root: Path | None = None
     save_visualizations: bool = False
@@ -127,13 +126,6 @@ class ModelEvaluationConfig:
             raise ModelEvaluationError(str(exc)) from exc
         if isinstance(self.max_steps, bool) or self.max_steps <= 0:
             raise ModelEvaluationError("max_steps must be positive")
-        if (
-            not math.isfinite(self.inference_p95_limit_ms)
-            or self.inference_p95_limit_ms <= 0.0
-        ):
-            raise ModelEvaluationError(
-                "inference_p95_limit_ms must be positive and finite"
-            )
         if (
             not math.isfinite(self.v2_planning_tick_p95_limit_ms)
             or self.v2_planning_tick_p95_limit_ms <= 0.0
@@ -881,13 +873,14 @@ def evaluate_models(
                     )
                 builder = JointBEVSampleBuilder(AGENT_IDS)
                 builder.reset()
-                planner_v2 = getattr(planner.config, "model_version", "v1") == "v2"
-                rule_maker = None
+                if getattr(planner.config, "model_version", None) != "v2":
+                    raise ModelEvaluationError(
+                        "S5-S9 evaluation requires a v2 planner"
+                    )
+                rule_maker = make_rule_maker(dict(env.config))
+                rule_maker.reset(env, list(AGENT_IDS))
                 committed_execution_id: int | None = None
                 committed_plan_actions: dict[str, int] | None = None
-                if planner_v2:
-                    rule_maker = make_rule_maker(dict(env.config))
-                    rule_maker.reset(env, list(AGENT_IDS))
                 dt_s = simulator_decision_dt_s(env)
                 generator = torch.Generator(device=device)
                 generator.manual_seed(int(seed))
@@ -942,70 +935,66 @@ def evaluate_models(
                             rule_batch = None
                             rule_condition: dict[str, int] | None = None
                             rule_condition_is_commitment = False
-                            rule_maker_ms = 0.0
-                            if planner_v2:
-                                assert rule_maker is not None
-                                rule_start = time.perf_counter()
-                                hard_modes = hard_valid_modes_by_rule_action(
-                                    AGENT_IDS, values.mode_valid_mask
-                                )
-                                if rule_maker.has_active_lane_change_commitments:
-                                    if (
-                                        committed_execution_id is None
-                                        or committed_plan_actions is None
-                                    ):
-                                        raise ModelEvaluationError(
-                                            "online RuleMaker commitment has no execution state"
-                                        )
-                                    try:
-                                        rule_maker.advance_committed_execution(
-                                            env,
-                                            list(AGENT_IDS),
-                                            committed_execution_id,
-                                        )
-                                    except LaneChangeCommitmentError as exc:
-                                        raise ModelEvaluationError(
-                                            f"online RuleMaker commitment failed: {exc}"
-                                        ) from exc
-                                    if rule_maker.has_active_lane_change_commitments:
-                                        rule_condition = (
-                                            rule_maker.committed_execution_rule_actions(
-                                                env, committed_plan_actions
-                                            )
-                                        )
-                                        rule_condition_is_commitment = True
-                                    else:
-                                        committed_execution_id = None
-                                        committed_plan_actions = None
-                                if rule_condition is None:
-                                    try:
-                                        rule_batch = rule_maker.propose_joint_actions(
-                                            env,
-                                            list(AGENT_IDS),
-                                            getattr(env, "_last_planner_batch", None)
-                                            or {},
-                                            hard_valid_modes_by_action=hard_modes,
-                                        )
-                                    except LaneChangeCommitmentError as exc:
-                                        raise ModelEvaluationError(
-                                            f"online RuleMaker proposal failed: {exc}"
-                                        ) from exc
-                                    rule_condition = (
-                                        joint_proposal_actions(
-                                            rule_batch.proposals[0], AGENT_IDS
-                                        )
-                                        if rule_batch.proposals
-                                        else {agent_id: 0 for agent_id in AGENT_IDS}
+                            rule_start = time.perf_counter()
+                            hard_modes = hard_valid_modes_by_rule_action(
+                                AGENT_IDS, values.mode_valid_mask
+                            )
+                            if rule_maker.has_active_lane_change_commitments:
+                                if (
+                                    committed_execution_id is None
+                                    or committed_plan_actions is None
+                                ):
+                                    raise ModelEvaluationError(
+                                        "online RuleMaker commitment has no execution state"
                                     )
-                                rule_maker_ms = (
-                                    time.perf_counter() - rule_start
-                                ) * 1000.0
-                                values = builder.augment_v2_model_inputs(
-                                    env,
-                                    values,
-                                    rule_action_condition=rule_condition,
-                                    rule_formation_state=rule_maker.is_formation_locked,
+                                try:
+                                    rule_maker.advance_committed_execution(
+                                        env,
+                                        list(AGENT_IDS),
+                                        committed_execution_id,
+                                    )
+                                except LaneChangeCommitmentError as exc:
+                                    raise ModelEvaluationError(
+                                        f"online RuleMaker commitment failed: {exc}"
+                                    ) from exc
+                                if rule_maker.has_active_lane_change_commitments:
+                                    rule_condition = (
+                                        rule_maker.committed_execution_rule_actions(
+                                            env, committed_plan_actions
+                                        )
+                                    )
+                                    rule_condition_is_commitment = True
+                                else:
+                                    committed_execution_id = None
+                                    committed_plan_actions = None
+                            if rule_condition is None:
+                                try:
+                                    rule_batch = rule_maker.propose_joint_actions(
+                                        env,
+                                        list(AGENT_IDS),
+                                        getattr(env, "_last_planner_batch", None) or {},
+                                        hard_valid_modes_by_action=hard_modes,
+                                    )
+                                except LaneChangeCommitmentError as exc:
+                                    raise ModelEvaluationError(
+                                        f"online RuleMaker proposal failed: {exc}"
+                                    ) from exc
+                                rule_condition = (
+                                    joint_proposal_actions(
+                                        rule_batch.proposals[0], AGENT_IDS
+                                    )
+                                    if rule_batch.proposals
+                                    else {agent_id: 0 for agent_id in AGENT_IDS}
                                 )
+                            rule_maker_ms = (
+                                time.perf_counter() - rule_start
+                            ) * 1000.0
+                            values = builder.augment_v2_model_inputs(
+                                env,
+                                values,
+                                rule_action_condition=rule_condition,
+                                rule_formation_state=rule_maker.is_formation_locked,
+                            )
                             execution_mask = _execution_mask_or_record_rejection(
                                 values,
                                 optimizer=trajectory_optimizer,
@@ -1044,7 +1033,9 @@ def evaluate_models(
                             inference_ms = (
                                 time.perf_counter() - inference_start
                             ) * 1000.0
+                            deterministic_probe_ms = 0.0
                             if deterministic_probe is None:
+                                probe_start = time.perf_counter()
                                 repeated_output = planner_forward_from_batch(
                                     planner, batch, diffusion_noise=noise
                                 )
@@ -1061,6 +1052,9 @@ def evaluate_models(
                                     raise ModelEvaluationError(
                                         f"{name} is not exact for identical input and noise"
                                     )
+                                deterministic_probe_ms = (
+                                    time.perf_counter() - probe_start
+                                ) * 1000.0
                             raw_trajectories = (
                                 output["selected_trajectory"][0].detach().cpu().numpy()
                             )
@@ -1088,8 +1082,6 @@ def evaluate_models(
                                     }
                                 )
                                 episode_execution_rejected = True
-                                if not planner_v2:
-                                    break
                                 raw["rule_condition_failures"] += 1
                                 optimization = optimize_safe_stop_trajectories(
                                     values, optimizer=trajectory_optimizer
@@ -1098,8 +1090,7 @@ def evaluate_models(
                                 selected_mode_array = np.full(
                                     (3,), 9, dtype=np.int64
                                 )
-                            if planner_v2 and not forced_safe_stop:
-                                assert rule_maker is not None
+                            if not forced_safe_stop:
                                 assert rule_condition is not None
                                 physical_actions, feedback_actions, s7_exceptions = (
                                     diffusion_mode_feedback_actions(
@@ -1193,7 +1184,6 @@ def evaluate_models(
                                         "trajectory control is non-finite"
                                     )
                             if pending_rule_acceptance is not None:
-                                assert rule_maker is not None
                                 assert rule_batch is not None
                                 try:
                                     rule_maker.accept_joint_action(
@@ -1218,7 +1208,11 @@ def evaluate_models(
                             raw["timing"]["model_inference_ms"].append(inference_ms)
                             raw["timing"]["control_mapping_ms"].append(control_ms)
                             raw["timing"]["planning_tick_ms"].append(
-                                (time.perf_counter() - tick_start) * 1000.0
+                                max(
+                                    0.0,
+                                    (time.perf_counter() - tick_start) * 1000.0
+                                    - deterministic_probe_ms,
+                                )
                             )
                             raw["timing"]["trajectory_optimizer_ms"].append(
                                 optimization.elapsed_ms
@@ -1465,26 +1459,17 @@ def evaluate_models(
         summary = _summarize(raw, episode_count)
         if artifact_writer is not None:
             summary["artifacts"] = artifact_writer.finalize()
-        planner_v2 = getattr(planner.config, "model_version", "v1") == "v2"
-        if planner_v2:
-            planning_p95 = summary["timing"]["planning_tick_ms"]["p95_ms"]
-            if planning_p95 > cfg.v2_planning_tick_p95_limit_ms:
-                raise ModelEvaluationError(
-                    f"{name} v2 complete planning tick P95 {planning_p95:.2f}ms "
-                    f"exceeds {cfg.v2_planning_tick_p95_limit_ms:.2f}ms"
-                )
-            summary["online_rule_maker_contract"] = {
-                "implementation": "MultiAgentRuleMaker",
-                "normal_planner_called": False,
-                "planning_tick_p95_limit_ms": cfg.v2_planning_tick_p95_limit_ms,
-            }
-        else:
-            inference_p95 = summary["timing"]["model_inference_ms"]["p95_ms"]
-            if inference_p95 > cfg.inference_p95_limit_ms:
-                raise ModelEvaluationError(
-                    f"{name} three-role inference P95 {inference_p95:.2f}ms exceeds "
-                    f"{cfg.inference_p95_limit_ms:.2f}ms"
-                )
+        planning_p95 = summary["timing"]["planning_tick_ms"]["p95_ms"]
+        if planning_p95 > cfg.v2_planning_tick_p95_limit_ms:
+            raise ModelEvaluationError(
+                f"{name} v2 complete planning tick P95 {planning_p95:.2f}ms "
+                f"exceeds {cfg.v2_planning_tick_p95_limit_ms:.2f}ms"
+            )
+        summary["online_rule_maker_contract"] = {
+            "implementation": "MultiAgentRuleMaker",
+            "normal_planner_called": False,
+            "planning_tick_p95_limit_ms": cfg.v2_planning_tick_p95_limit_ms,
+        }
         if deterministic_probe is None:
             raise ModelEvaluationError(
                 f"{name} evaluation never reached a model-ready state"

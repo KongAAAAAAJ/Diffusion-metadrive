@@ -1,0 +1,103 @@
+{
+  "format": "v2_only_training_evaluation_cleanup_report_v1",
+  "recorded_at": "2026-08-27T10:58:08+08:00",
+  "base_git_commit": "5c542db294c48ebc72d271384e3747fbe3da4cf5",
+  "scope": "BEVOnlyDiffusionPlanner, Stage 1, GRPO source loading and online execution, Stage 1 validation, and S5-S9 closed-loop evaluation",
+  "outcome": {
+    "v2_only_code_contract_complete": true,
+    "focused_tests_passed": 118,
+    "stage1_single_optimizer_step_passed": true,
+    "grpo_single_optimizer_step_passed": true,
+    "s5_s9_20_step_chain_executed": true,
+    "s5_s9_20_step_latency_gate_passed": false,
+    "checkpoint_eligibility_changed": false,
+    "formal_experiment_status_changed": false
+  },
+  "public_contract": {
+    "model_version_field_retained": true,
+    "only_legal_model_version": "v2",
+    "stage1_checkpoint_schema_version": 2,
+    "stage1_checkpoint_format": "bev_stage1_joint_mean_v2",
+    "missing_or_v1_checkpoint_rejected": true,
+    "stage1_dataset_requirement": "planner_version=v2/schema_version=3",
+    "required_condition_tensors": [
+      "background_actor_state",
+      "background_actor_valid_mask",
+      "scenario_code",
+      "rule_formation_state",
+      "rule_action_condition"
+    ],
+    "v1_inference_p95_gate_removed": true,
+    "v2_complete_planning_tick_p95_limit_ms": 200.0
+  },
+  "implementation": {
+    "deleted_config": "configs/train/bev_diffusion_stage1.yaml",
+    "canonical_stage1_config": "configs/train/bev_diffusion_stage1_v2.yaml",
+    "planner_v1_branches_removed": true,
+    "stage1_missing_version_fallback_removed": true,
+    "stage1_batch_conditions_unconditional": true,
+    "grpo_v1_source_and_rule_maker_none_paths_removed": true,
+    "legacy_s1_closed_loop_path_removed": true,
+    "s5_s9_rule_maker_tick_unconditional": true,
+    "deterministic_replay_audit_excluded_from_planning_tick_timing": true,
+    "smoke_validation_boundary": "run_mode=smoke evaluates one full-precision validation batch after the bounded optimizer step; formal validation remains unchanged",
+    "stage1_checkpoint_reconstruction": "strictly reconstruct the complete stored v2 planner_config, including non-default architectures; no migration or compatibility layer"
+  },
+  "historical_preservation": {
+    "generic_v1_dataset_schema_reader_retained": true,
+    "historical_v1_data_and_reports_retained": true,
+    "directory_suffix_v1_retained": true,
+    "stage2_grpo_open_application_v1_retained": true,
+    "training_v1_and_logs_v1_retained": true,
+    "grpo_checkpoint_revision_labels_retained": true,
+    "variant_a_b_retained": true
+  },
+  "verification": {
+    "focused_pytest": {
+      "status": "passed",
+      "passed": 118,
+      "failed": 0
+    },
+    "stage1_smoke": {
+      "status": "passed",
+      "optimizer_steps": 1,
+      "train_loss_total": 4.112090587615967,
+      "validation_loss_total": 3.1629137992858887,
+      "output": "/tmp/v2_only_cleanup_20260827/stage1_r2/run_1",
+      "diagnostic_only": true
+    },
+    "grpo_smoke": {
+      "status": "passed",
+      "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+      "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "optimizer_steps": 1,
+      "checkpoint_round_trip": true,
+      "conditioned_rollouts": 1,
+      "proposal_match_attempts": 1,
+      "proposal_matches": 1,
+      "condition_failures": 0,
+      "forced_safe_stops": 0,
+      "report": "/tmp/v2_only_cleanup_20260827/grpo/training_v1/run_1/report.json",
+      "diagnostic_only": true
+    },
+    "s5_s9_smoke": {
+      "status": "latency_gate_failed",
+      "scenarios": ["S5", "S6", "S7", "S8", "S9"],
+      "max_steps_per_episode": 20,
+      "repeats": 1,
+      "save_visualizations": false,
+      "observed_complete_planning_tick_p95_ms": 202.51,
+      "limit_ms": 200.0,
+      "failure": "stage1_a v2 complete planning tick P95 202.51ms exceeds 200.00ms",
+      "log": "/tmp/v2_only_cleanup_20260827/evaluation_r2/logs/s5_s9.log",
+      "diagnostic_only": true
+    }
+  },
+  "qualification_boundary": {
+    "run3_formally_qualified": false,
+    "run3_remains_diagnostic": true,
+    "cleanup_smokes_are_formal_evidence": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification",
+    "next_action": "Run the strict checkpoint reload, open-loop, and full S5-S9 qualification in a separate execution thread; the measured 202.51 ms bounded latency result must remain a failure until a qualifying run passes the unchanged 200 ms gate."
+  }
+}

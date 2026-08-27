@@ -6,6 +6,7 @@ import argparse
 import copy
 import contextlib
 import dataclasses
+import itertools
 import json
 import math
 import os
@@ -32,16 +33,19 @@ from expert_dataset.joint_bev_dataset import (
     build_joint_bev_dataloader,
     validate_dataset_contract,
 )
+from expert_dataset.joint_bev_storage import V2_STORAGE_SCHEMA_VERSION
 from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
     BEVOnlyDiffusionPlannerConfig,
+    BEVPlannerError,
+    BEVResNet18Config,
     JointStage1Loss,
     Stage1LossConfig,
     Stage1LossResult,
 )
 
 
-DEFAULT_CONFIG_PATH = Path("configs/train/bev_diffusion_stage1.yaml")
+DEFAULT_CONFIG_PATH = Path("configs/train/bev_diffusion_stage1_v2.yaml")
 DEFAULT_OUTPUT_ROOT = Path(
     "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1"
 )
@@ -122,8 +126,8 @@ def validate_stage1_config(config: Mapping[str, Any]) -> None:
             f"Stage 1 variant {variant} requires predecessor_condition="
             f"{expected_condition}"
         )
-    if experiment.get("model_version", "v1") not in ("v1", "v2"):
-        raise Stage1TrainingError("experiment.model_version must be v1 or v2")
+    if experiment.get("model_version") != "v2":
+        raise Stage1TrainingError("experiment.model_version must be explicitly v2")
     dataset_root = dataset.get("root")
     if not isinstance(dataset_root, str) or not dataset_root:
         raise Stage1TrainingError("dataset.root must be a non-empty path string")
@@ -226,7 +230,40 @@ def _experiment_contract(config: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def _model_version(config: Mapping[str, Any]) -> str:
-    return str(_mapping(config, "experiment").get("model_version", "v1"))
+    return str(_mapping(config, "experiment")["model_version"])
+
+
+def validate_stage1_dataset_contract(contract: Mapping[str, object]) -> None:
+    planner_version = contract.get("planner_version")
+    schema_version = contract.get("schema_version")
+    if planner_version != "v2" or schema_version != V2_STORAGE_SCHEMA_VERSION:
+        raise Stage1TrainingError(
+            "Stage 1 requires planner_version=v2/schema_version=3; "
+            f"dataset planner_version={planner_version!r}, "
+            f"schema_version={schema_version!r}"
+        )
+
+
+def stage1_planner_config_from_mapping(
+    value: object,
+) -> BEVOnlyDiffusionPlannerConfig:
+    if not isinstance(value, Mapping):
+        raise Stage1TrainingError("Stage 1 planner_config must be a mapping")
+    planner_fields = {field.name for field in dataclasses.fields(BEVOnlyDiffusionPlannerConfig)}
+    if set(value) != planner_fields:
+        raise Stage1TrainingError("Stage 1 planner_config fields mismatch")
+    config_values = dict(value)
+    backbone = config_values.get("backbone")
+    if not isinstance(backbone, Mapping):
+        raise Stage1TrainingError("Stage 1 planner_config backbone is invalid")
+    backbone_fields = {field.name for field in dataclasses.fields(BEVResNet18Config)}
+    if set(backbone) != backbone_fields:
+        raise Stage1TrainingError("Stage 1 planner_config backbone fields mismatch")
+    config_values["backbone"] = BEVResNet18Config(**dict(backbone))
+    try:
+        return BEVOnlyDiffusionPlannerConfig(**config_values)
+    except (BEVPlannerError, TypeError, ValueError) as exc:
+        raise Stage1TrainingError("Stage 1 planner_config is invalid") from exc
 
 
 def _run_mode_flags(run_mode: Stage1RunMode) -> dict[str, bool]:
@@ -504,17 +541,6 @@ def planner_forward_from_batch(
     diffusion_noise: Tensor | None = None,
     diffusion_timesteps: Tensor | None = None,
 ) -> dict[str, Tensor]:
-    v2_inputs = {
-        name: batch[name]
-        for name in (
-            "background_actor_state",
-            "background_actor_valid_mask",
-            "scenario_code",
-            "rule_formation_state",
-            "rule_action_condition",
-        )
-        if name in batch
-    }
     return planner(
         batch["bev"],
         batch["ego_state"],
@@ -523,7 +549,11 @@ def planner_forward_from_batch(
         batch["agent_role"],
         batch["coarse_trajectories"],
         batch["mode_valid_mask"],
-        **v2_inputs,
+        background_actor_state=batch["background_actor_state"],
+        background_actor_valid_mask=batch["background_actor_valid_mask"],
+        scenario_code=batch["scenario_code"],
+        rule_formation_state=batch["rule_formation_state"],
+        rule_action_condition=batch["rule_action_condition"],
         diffusion_noise=diffusion_noise,
         diffusion_timesteps=diffusion_timesteps,
     )
@@ -701,10 +731,12 @@ def evaluate_formal(
     dataloader: Iterable[Mapping[str, Tensor]],
     device: torch.device,
     mixed_precision: bool,
+    max_batches: int | None = None,
 ) -> dict[str, float]:
     planner.eval()
     accumulator = MetricAccumulator()
-    for cpu_batch in dataloader:
+    batches = itertools.islice(dataloader, max_batches) if max_batches else dataloader
+    for cpu_batch in batches:
         batch = move_joint_batch(cpu_batch, device)
         with _training_amp(device, mixed_precision):
             output = planner_forward_from_batch(planner, batch)
@@ -889,7 +921,7 @@ def load_stage1_checkpoint(
         "model_version": model_version,
     }
     for name, value in expected.items():
-        observed = payload.get(name, "v1" if name == "model_version" else None)
+        observed = payload.get(name)
         if observed != value:
             raise Stage1TrainingError(f"Stage 1 checkpoint {name} mismatch")
     required_mappings = (
@@ -920,7 +952,7 @@ def load_stage1_checkpoint(
     if (
         not isinstance(planner_config, Mapping)
         or planner_config.get("predecessor_condition") != predecessor_condition
-        or planner_config.get("model_version", "v1") != model_version
+        or planner_config.get("model_version") != model_version
     ):
         raise Stage1TrainingError(
             "Stage 1 checkpoint planner_config does not match the BEV planner"
@@ -1049,12 +1081,7 @@ def run_stage1_training(
         raise Stage1TrainingError("mixed precision is only supported for CUDA Stage 1")
     dataset_root = Path(str(dataset_config["root"])).expanduser()
     contract = validate_dataset_contract(dataset_root)
-    dataset_model_version = str(contract.get("planner_version", "v1"))
-    if dataset_model_version != model_version:
-        raise Stage1TrainingError(
-            "dataset/model version mismatch: "
-            f"dataset={dataset_model_version}, model={model_version}"
-        )
+    validate_stage1_dataset_contract(contract)
     dataset_fingerprint = str(contract["dataset_fingerprint"])
     run_dir = create_numbered_run_dir(output_root)
     (run_dir / "train_config.yaml").write_text(
@@ -1240,7 +1267,8 @@ def run_stage1_training(
                     loss_module=loss_module,
                     dataloader=val_loader,
                     device=device,
-                    mixed_precision=mixed_precision,
+                    mixed_precision=(mixed_precision if run_mode == "formal" else False),
+                    max_batches=1 if run_mode == "smoke" else None,
                 )
                 payload["val"] = val_metrics
                 _write_tensorboard(
@@ -1386,7 +1414,9 @@ __all__ = [
     "role_gradient_diagnostics",
     "run_stage1_training",
     "save_stage1_checkpoint",
+    "stage1_planner_config_from_mapping",
     "train_one_epoch",
     "validate_stage1_config",
+    "validate_stage1_dataset_contract",
     "validate_stage1_run_mode",
 ]

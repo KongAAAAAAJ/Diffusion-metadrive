@@ -13,7 +13,6 @@ import torch
 
 from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
-    BEVOnlyDiffusionPlannerConfig,
     JointGRPOConfig,
     JointGRPOError,
     JointGRPOTrainerA,
@@ -24,6 +23,7 @@ from train.train_bev_diffusion_stage1 import (
     CHECKPOINT_SCHEMA_VERSION as STAGE1_CHECKPOINT_SCHEMA_VERSION,
     Stage1TrainingError,
     load_stage1_checkpoint,
+    stage1_planner_config_from_mapping,
 )
 
 
@@ -140,22 +140,24 @@ def _load_stage1_for_grpo(
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise JointGRPOError("unable to inspect the Stage 1 source checkpoint") from exc
-    planner_config = (
-        source_preview.get("planner_config", {})
-        if isinstance(source_preview, Mapping)
-        else {}
-    )
-    model_version = (
-        str(planner_config.get("model_version", "v1"))
-        if isinstance(planner_config, Mapping)
-        else "v1"
-    )
-    planner = BEVOnlyDiffusionPlanner(
-        BEVOnlyDiffusionPlannerConfig(
-            predecessor_condition=condition,
-            model_version=model_version,
+    if not isinstance(source_preview, Mapping):
+        raise JointGRPOError("Stage 1 source checkpoint must be a mapping")
+    planner_config = source_preview.get("planner_config")
+    if (
+        source_preview.get("model_version") != "v2"
+        or not isinstance(planner_config, Mapping)
+        or planner_config.get("model_version") != "v2"
+    ):
+        raise JointGRPOError(
+            "GRPO requires an explicit v2 Stage 1 source checkpoint"
         )
-    )
+    try:
+        checkpoint_config = stage1_planner_config_from_mapping(planner_config)
+    except Stage1TrainingError as exc:
+        raise JointGRPOError("Stage 1 source planner_config is invalid") from exc
+    if checkpoint_config.predecessor_condition != condition:
+        raise JointGRPOError("Stage 1 source predecessor condition mismatch")
+    planner = BEVOnlyDiffusionPlanner(checkpoint_config)
     try:
         payload = load_stage1_checkpoint(checkpoint_path, planner)
     except Stage1TrainingError as exc:

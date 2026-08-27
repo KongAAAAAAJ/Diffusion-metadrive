@@ -46,6 +46,8 @@ def test_evaluation_config_is_strict() -> None:
     with pytest.raises(ModelEvaluationError):
         ModelEvaluationConfig(device="cpu", topdown_film_size=0)
     config = ModelEvaluationConfig(device="cpu")
+    assert not hasattr(config, "inference_p95_limit_ms")
+    assert config.v2_planning_tick_p95_limit_ms == 200.0
     assert config.scenarios == PRIMARY_S5_S9_SCENARIOS
     assert config.seeds == HOLDOUT_SEEDS
     assert DIAGNOSTIC_EVAL_SCENARIOS == PRIMARY_S5_S9_SCENARIOS
