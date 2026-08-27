@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T21:31:06+08:00",
+  "updated_at": "2026-08-27T21:45:41+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "35843fb97cb673c1f025172e26fdb4cd3738bc67",
+    "git_commit": "19dbdd3f8ff633ce0c434e94f236b39a55db6863",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -61,7 +61,8 @@
     "uncommitted_stage2_grpo_v2_safe_stop_batch_fix_present": true,
     "uncommitted_v2_only_training_evaluation_cleanup_present": true,
     "uncommitted_stage1_grpo_evaluation_launcher_present": true,
-    "uncommitted_grpo_run_scoped_storage_migration_present": true
+    "uncommitted_grpo_run_scoped_storage_migration_present": true,
+    "uncommitted_grpo_evaluation_output_root_update_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
@@ -748,6 +749,9 @@
     "grpo_run_scoped_storage_migration_authorized": true,
     "grpo_run_scoped_storage_migration_authorized_on": "2026-08-27",
     "grpo_run_scoped_storage_migration_scope": "Move only the completed Stage1 run_3 sourced GRPO run_4 and its current training log beneath run_3/grpo_open, update report paths and launcher defaults, preserve standalone Stage1 run_2 sourced run_1/run_2 and empty run_3, create no compatibility link or copy, and leave checkpoint payloads, eligibility, formal status, and the active hard gate unchanged.",
+    "grpo_evaluation_output_root_update_authorized": true,
+    "grpo_evaluation_output_root_update_authorized_on": "2026-08-27",
+    "grpo_evaluation_output_root_update_scope": "Store the Stage1-before-GRPO and GRPO-after-finetuning comparison manifest, joint report, logs, and visualization artifacts beneath the source Stage1 run's evaluation/compare directory; preserve output overrides and all evaluator hard gates.",
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. Future GRPO-Open artifacts are stored beneath their exact source Stage1 run; no formal eligibility was granted."
   },
   "source_of_truth": {
@@ -765,6 +769,11 @@
       "path": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json",
       "sha256": "6f832109b1a6954b41939aa9345cf67305fb966672eefb55e77a662ff8402714",
       "role": "Records the verified same-filesystem move of Stage1 run_3 sourced GRPO run_4 and its log beneath run_3/grpo_open, unchanged best/last checkpoint hashes and diagnostic eligibility, rewritten report paths, source-derived launcher defaults, run_5 allocation, and passing CPU loader preflight."
+    },
+    "stage1_grpo_comparison_output_root_update_report": {
+      "path": "evaluation/STAGE1_GRPO_COMPARISON_OUTPUT_ROOT_UPDATE_REPORT.json",
+      "sha256": "5b4bdecacd26c49d391ca918c985fcebde4861d5e4958fe2e1feab81a6c9d972",
+      "role": "Records the source-Stage1-scoped evaluation/compare output contract, preserved two-model manifest and single evaluator call, passing launcher tests, untouched existing Stage1 diagnostics, and unchanged checkpoint eligibility and hard gates."
     },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
@@ -951,8 +960,8 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "bc8871b2c52e7233c2eb1a35e549ac6b0486e723e0966f1b98a21ec7bac7fc73",
-      "role": "Records the quality-accepted 49870-sample Rule-conditioned v2 dataset and Stage1 binding, preserves strict Stage1 run_3 qualification as the active hard gate, and freezes GRPO-Open storage beneath the exact source Stage1 run."
+      "sha256": "cae070c1c6ddc3a1d4c561e7c7539784ed313be4cb44be3ad187cd318da251c8",
+      "role": "Records the quality-accepted 49870-sample Rule-conditioned v2 dataset and Stage1 binding, preserves strict Stage1 run_3 qualification as the active hard gate, freezes GRPO-Open training storage beneath its source Stage1 run, and places comparison evaluation under that run's evaluation/compare directory."
     },
     "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
@@ -1771,8 +1780,10 @@
       "training_launcher": "scripts/run_bev_joint_grpo.sh",
       "training_launcher_sha256": "12ac49c0fee8f77310e6ae846824d659992c8ddb9ee8652d8337639ff5fbf8f6",
       "evaluation_launcher": "scripts/run_eval_grpo.sh",
-      "evaluation_launcher_sha256": "2b85a9339f366b27c55a978e508165fc84bd2539f8f16cd4c6f304c960c1fde5",
+      "evaluation_launcher_sha256": "a52ffaa8aa506111a4fbe493acca4f8f670debd372b12988e79ddec41625de4f",
+      "comparison_evaluation_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare",
       "evaluation_implementation_report": "evaluation/STAGE1_GRPO_S5_S9_EVALUATION_LAUNCHER_REPORT.json",
+      "evaluation_output_root_update_report": "evaluation/STAGE1_GRPO_COMPARISON_OUTPUT_ROOT_UPDATE_REPORT.json",
       "storage_migration_report": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json",
       "bounded_evaluation_smoke_root": "/tmp/run_eval_grpo_smoke_20260827_v2",
       "bounded_evaluation_smoke_max_steps": 20,

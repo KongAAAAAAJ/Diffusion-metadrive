@@ -1,7 +1,7 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T21:25:53+08:00",
+  "updated_at": "2026-08-27T21:44:58+08:00",
   "status": "v2_only_training_evaluation_cleanup_implemented_bounded_latency_gate_failed_run3_qualification_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
@@ -21,6 +21,8 @@
     "default_output_root": "<stage1_run_root>/grpo_open",
     "run_layout": "<stage1_run_root>/grpo_open/run_N",
     "log_layout": "<stage1_run_root>/grpo_open/logs",
+    "comparison_evaluation_layout": "<stage1_run_root>/evaluation/compare",
+    "comparison_evaluation_contents": "Stage1-before-GRPO and GRPO-after-finetuning manifest, joint report, logs, and visualization artifacts",
     "current_migration": "Move only the completed Stage1 run_3 sourced GRPO run_4 into bev_diffusion_stage1/run_3/grpo_open/run_4; preserve Stage1 run_2 sourced run_1/run_2 and the empty historical run_3 in their existing root.",
     "compatibility_policy": "Do not create a symlink or duplicate compatibility copy at the former run_4 path.",
     "semantic_boundary": "Checkpoint payloads, reward/application contracts, diagnostic/formal eligibility, and the active Stage1 qualification gate are unchanged.",

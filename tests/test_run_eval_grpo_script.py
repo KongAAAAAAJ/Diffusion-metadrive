@@ -69,8 +69,35 @@ def test_launcher_defaults_to_stage1_run3_and_grpo_run4() -> None:
         in source
     )
     assert GRPO_RUN4_ROOT.endswith("bev_diffusion_stage1/run_3/grpo_open/run_4")
+    assert 'OUTPUT_ROOT="${OUTPUT_ROOT:-${STAGE1_RUN_ROOT}/evaluation/compare}"' in source
     assert 'MAX_STEPS="${MAX_STEPS:-200}"' in source
     assert 'SAVE_VISUALIZATIONS="${SAVE_VISUALIZATIONS:-1}"' in source
+
+
+def test_launcher_defaults_all_comparison_outputs_beneath_stage1_run(
+    tmp_path: Path,
+) -> None:
+    environment, stage1, _ = _environment(tmp_path)
+    environment["STAGE1_RUN_ROOT"] = str(stage1.parents[1])
+    environment.pop("OUTPUT_ROOT")
+
+    subprocess.run(
+        ["bash", str(LAUNCHER)],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    output_root = stage1.parents[1] / "evaluation" / "compare"
+    assert (output_root / "manifest_v2.json").is_file()
+    assert (output_root / "s5_s9_closed_loop.json").is_file()
+    assert (output_root / "logs" / "s5_s9_closed_loop.log").is_file()
+    assert (output_root / "artifacts").is_dir()
+    call = Path(environment["CALL_LOG"]).read_text(encoding="utf-8")
+    assert f"--output {output_root / 's5_s9_closed_loop.json'}" in call
+    assert f"--artifact-root {output_root / 'artifacts'}" in call
 
 
 def test_launcher_writes_comparison_manifest_and_calls_evaluator_once(

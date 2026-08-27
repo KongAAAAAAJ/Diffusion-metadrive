@@ -1,0 +1,61 @@
+{
+  "format": "stage1_grpo_comparison_output_root_update_report_v1",
+  "recorded_at": "2026-08-27T21:45:21+08:00",
+  "repository": {
+    "branch": "BEV",
+    "head": "19dbdd3f8ff633ce0c434e94f236b39a55db6863",
+    "previous_project_state_git_baseline": "35843fb97cb673c1f025172e26fdb4cd3738bc67",
+    "aligned_project_state_git_baseline": "19dbdd3f8ff633ce0c434e94f236b39a55db6863"
+  },
+  "decision": {
+    "launcher": "scripts/run_eval_grpo.sh",
+    "default_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare",
+    "default_output_expression": "${STAGE1_RUN_ROOT}/evaluation/compare",
+    "manifest": "<output_root>/manifest_v2.json",
+    "joint_report": "<output_root>/s5_s9_closed_loop.json",
+    "log": "<output_root>/logs/s5_s9_closed_loop.log",
+    "artifacts": "<output_root>/artifacts",
+    "output_root_override_preserved": true
+  },
+  "comparison_contract": {
+    "baseline_model_id": "stage1_a",
+    "candidate_model_id": "grpo_open",
+    "comparison_id": "open_vs_stage1",
+    "single_evaluator_invocation": true,
+    "run_mode": "diagnostic",
+    "reward_domain": "tau_d",
+    "checkpoint_provenance_changed": false,
+    "latency_or_safety_gate_changed": false
+  },
+  "artifact_boundary": {
+    "existing_stage1_evaluation_preserved": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/stage1_a_diagnostic",
+    "old_grpo_run4_evaluation_root_present_before_change": false,
+    "comparison_output_root_present_before_change": false,
+    "existing_artifacts_migrated_or_deleted": false,
+    "real_comparison_evaluation_started": false
+  },
+  "verification": {
+    "shell_syntax": {
+      "command": "bash -n scripts/run_eval_grpo.sh",
+      "passed": true
+    },
+    "launcher_and_manifest_tests": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -o cache_dir=/tmp/run-eval-grpo-output-root-pytest-cache tests/test_run_eval_grpo_script.py tests/test_bev_model_manifest.py -q",
+      "passed": 12,
+      "failed": 0,
+      "default_directory_tree_verified": true,
+      "explicit_output_root_override_verified": true,
+      "two_model_manifest_and_single_evaluator_call_verified": true
+    },
+    "project_plan_json_valid": true
+  },
+  "immutable_boundaries": {
+    "checkpoint_payload_changed": false,
+    "checkpoint_eligibility_changed": false,
+    "formal_experiment_status_changed": false,
+    "new_training_started": false,
+    "new_closed_loop_evaluation_started": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification"
+  },
+  "maintainability_gap": "No dedicated evaluation specialist skill is available; this path-only update uses the frozen evaluator and manifest contracts."
+}
