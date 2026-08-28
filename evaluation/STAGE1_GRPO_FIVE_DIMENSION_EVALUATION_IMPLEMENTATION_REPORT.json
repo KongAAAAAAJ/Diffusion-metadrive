@@ -1,0 +1,183 @@
+{
+  "format": "stage1_grpo_five_dimension_evaluation_implementation_report_v1",
+  "recorded_at": "2026-08-27T23:32:29+08:00",
+  "repository": {
+    "branch": "BEV",
+    "head": "2292abd329b6365e6a277e64c37b08f64e5842da",
+    "project_plan_sha256": "bece0ab0752333dd307677c703453a4241d95cc152c1f5d3d2140e6f33248418"
+  },
+  "scope": "Unified diagnostic Stage1-A versus GRPO-Open S5-S9 closed-loop evaluation across safety, efficiency, cooperation, comfort, and realtime dimensions, with automatic English charts and CSV tables.",
+  "outcome": {
+    "bev_model_evaluation_v3_implemented": true,
+    "repeat_v3_implemented": true,
+    "five_dimension_metrics_implemented": true,
+    "paired_statistics_implemented": true,
+    "automatic_chart_bundle_implemented": true,
+    "launcher_defaults_updated": true,
+    "both_real_checkpoints_loaded": true,
+    "bounded_cuda_smoke_completed": true,
+    "full_800_step_evaluation_completed": false,
+    "formal_eligibility_changed": false,
+    "paper_evidence_eligibility_changed": false,
+    "active_stage1_qualification_gate_changed": false,
+    "latency_gate_relaxed": false
+  },
+  "implementation": {
+    "launcher": {
+      "path": "scripts/run_eval_grpo.sh",
+      "sha256": "3076159ee658fa30067fd9aa0661724161039f7283e8c52aaaff722310435030",
+      "run_mode": "diagnostic",
+      "default_device": "cuda",
+      "default_max_steps": 800,
+      "default_repeats": 1,
+      "default_save_visualizations": false,
+      "default_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare",
+      "evaluator_invocations": 1,
+      "chart_invocations_after_complete_report": 1,
+      "gate_failure_semantics": "Evaluator return code 2 means both models and the report completed but at least one gate failed; charts are still generated and the launcher finally returns 2. Fatal or incomplete evaluation returns nonzero without charting stale output."
+    },
+    "evaluator": {
+      "path": "evaluation/bev_four_model_evaluator.py",
+      "sha256": "8947e310c49ae3831f88aa2c8678b2535221f99b41b0e3f0f3fa312e8cc8b590",
+      "single_report_format": "bev_model_evaluation_v3",
+      "repeat_report_format": "bev_model_fixed_process_repeat_v3",
+      "metric_dimensions": [
+        "safety",
+        "efficiency",
+        "cooperation",
+        "comfort",
+        "realtime"
+      ],
+      "geometry_and_risk": "Shared-corridor oriented-box bumper gaps, threshold exposure and deficit integral, closing-pair TTC, TTC<1.5s observation, and DRAC.",
+      "efficiency_source": "Per-agent navigation travelled_length/total_length snapshots relative to the reset state plus per-step orchestrator functional-success summaries.",
+      "cooperation_source": "RuleMaker formation lock/unlock intervals, target bumper-gap error, locked speed spread, relock recovery, and censored recovery.",
+      "comfort_source": "World pose and speed at decision_dt_s for physical acceleration, jerk, yaw rate, and yaw acceleration; control-command slew is diagnostic only.",
+      "realtime_gate": "Three-vehicle complete planning-tick P95 <= 200 ms; all requested models finish before the report receives completed or completed_with_gate_failure status.",
+      "aggregation": "Episode-first. Continuous overall values are equal-weight S5-S9 scenario macro means. Binary rates retain x/n with two-sided 95% Clopper-Pearson intervals.",
+      "comparison": "Strict (scenario, route, seed) pairs with 10000 fixed-seed scenario-stratified bootstrap samples; repeats verify reproducibility and do not increase n_pairs.",
+      "interpretation": "No composite score and no overall-better verdict. Each metric reports baseline, candidate, candidate-minus-baseline, units, direction, n_pairs, and 95% interval; episode duration is descriptive."
+    },
+    "chart_generator": {
+      "path": "evaluation/bev_comparison_charts.py",
+      "sha256": "3942cbcbf4a92480bb4376040f21d213b60ef3f904fbc41bcf04d09bc3625988",
+      "cli": "python -m evaluation.bev_comparison_charts --report PATH --output-root ROOT",
+      "charts_each_as_300_dpi_png_and_pdf": [
+        "comparison_overview",
+        "safety_rates",
+        "risk_ecdf",
+        "efficiency_paired",
+        "cooperation_paired",
+        "comfort_paired",
+        "latency_breakdown",
+        "scenario_delta_heatmap",
+        "paired_delta_forest"
+      ],
+      "csv_tables": [
+        "episode_metrics.csv",
+        "scenario_metrics.csv",
+        "comparison_metrics.csv"
+      ],
+      "nullable_semantics": "Unavailable TTC, recovery, spacing, success time, and insufficient-history physical comfort observations remain N/A; observed numeric zero remains zero."
+    },
+    "supporting_runtime_changes": [
+      {
+        "path": "envs/platoon_env.py",
+        "sha256": "9e51db628c3f220b5bfdfd3f6b9b66e7f2ae958bce6aa7ab04a4b4bdef649b84",
+        "role": "Cache terminal-frame navigation, geometry, speed, and scenario summaries before agent removal; execute evaluator-precomputed low-level controls once."
+      },
+      {
+        "path": "models/decisioner/risk/risk_event_detector.py",
+        "sha256": "a594a65cb07b6a8eb83d65cf8c176f225e1c901c09b089fb2492a2cb002090c6",
+        "role": "Use current orchestrator summary state without triggering duplicate functional-evidence updates."
+      },
+      {
+        "path": "scenarios/orchestrator.py",
+        "sha256": "3921f50622020fbc02d8fa075fa616b6002a67a0f41b72074f1a71d25c82a57c",
+        "role": "Make S7-S9 stable-formation evidence counters idempotent within one simulator step."
+      }
+    ]
+  },
+  "checkpoints": {
+    "stage1_a": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+      "sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "cpu_loaded_parameter_count": 12420633,
+      "project_qualified": false,
+      "formal_grpo_source_allowed": false
+    },
+    "grpo_open": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/checkpoints/best.pt",
+      "sha256": "2dd1c44467b12cc88284265286fcb8fe29a7642d45f405d5e2ee326f46023a06",
+      "source_stage1_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "reward_domain": "tau_d",
+      "cpu_loaded_parameter_count": 12420633,
+      "diagnostic_only": true,
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false
+    }
+  },
+  "verification": {
+    "static_and_focused_regression": {
+      "commands": [
+        "bash -n scripts/run_eval_grpo.sh",
+        "/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile evaluation/bev_four_model_evaluator.py evaluation/bev_comparison_charts.py envs/platoon_env.py models/decisioner/risk/risk_event_detector.py scenarios/orchestrator.py",
+        "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_bev_four_model_evaluator.py tests/test_bev_comparison_charts.py tests/test_run_eval_grpo_script.py tests/test_bev_model_manifest.py tests/test_bev_trajectory_control.py tests/test_rule_maker.py tests/test_scenario_orchestrator_adjacent_vehicles.py"
+      ],
+      "passed": 221,
+      "failed": 0,
+      "warnings": 22,
+      "warning_classification": "External Gym, Matplotlib/Pyparsing, Pillow, NumPy compatibility, and Pygame/pkg_resources deprecation warnings."
+    },
+    "real_checkpoint_cpu_loader_preflight": {
+      "device": "cpu",
+      "stage1_loaded": true,
+      "grpo_loaded": true,
+      "reward_bindings": [
+        "grpo_open"
+      ]
+    },
+    "smoke_discovered_and_fixed_integration_issue": {
+      "observed": "An episode with no formation unlock correctly emitted recovery_censored=null, but the initial chart validator required a boolean and returned 2 after the complete evaluator report.",
+      "fix": "Accept boolean or null for relock_recovery_success and recovery_censored and add a no-unlock schema regression test.",
+      "post_fix_chart_test": "11 passed",
+      "final_launcher_rerun_completed": true
+    },
+    "bounded_cuda_smoke": {
+      "command": "MPLCONFIGDIR=/tmp/mplconfig_eval_grpo_smoke_final OUTPUT_ROOT=/tmp/run_eval_grpo_unified_v3_smoke_20260827_gpu_final MAX_STEPS=20 REPEATS=1 DEVICE=cuda SAVE_VISUALIZATIONS=0 bash scripts/run_eval_grpo.sh",
+      "output_root": "/tmp/run_eval_grpo_unified_v3_smoke_20260827_gpu_final",
+      "exit_code": 0,
+      "report_format": "bev_model_evaluation_v3",
+      "evaluation_status": "completed",
+      "all_gates_passed": true,
+      "eligible_for_formal_conclusions": false,
+      "scenarios": 5,
+      "seeds": [
+        31,
+        47
+      ],
+      "episodes_per_model": 10,
+      "comparison_metric_count": 125,
+      "stage1_complete_planning_tick_p95_ms": 198.02755585405973,
+      "grpo_complete_planning_tick_p95_ms": 198.1365422019735,
+      "planning_tick_p95_limit_ms": 200,
+      "chart_groups": 9,
+      "chart_files": 18,
+      "csv_tables": 3,
+      "interpretation": "Engineering smoke only. The 20-step horizon is intentionally too short for complete task-efficiency or safety conclusions and does not qualify either checkpoint."
+    }
+  },
+  "boundary": {
+    "classification": "implementation and bounded integration smoke complete; full comparison evaluation remains pending",
+    "full_800_step_evaluation_started": false,
+    "default_diagnostic_seeds_remain": [
+      31,
+      47
+    ],
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification",
+    "historical_v2_reports_retained": true,
+    "training_started": false,
+    "next_action": "Qualify Stage1 run_3 under the unchanged strict gates, then run the default 800-step Stage1-versus-GRPO diagnostic comparison to populate run_3/evaluation/compare with the complete v3 report, charts, and tables."
+  }
+}

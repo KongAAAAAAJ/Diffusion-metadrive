@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T21:45:41+08:00",
+  "updated_at": "2026-08-27T23:33:39+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "19dbdd3f8ff633ce0c434e94f236b39a55db6863",
+    "git_commit": "2292abd329b6365e6a277e64c37b08f64e5842da",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -61,6 +61,7 @@
     "uncommitted_stage2_grpo_v2_safe_stop_batch_fix_present": true,
     "uncommitted_v2_only_training_evaluation_cleanup_present": true,
     "uncommitted_stage1_grpo_evaluation_launcher_present": true,
+    "uncommitted_stage1_grpo_five_dimension_evaluation_present": true,
     "uncommitted_grpo_run_scoped_storage_migration_present": true,
     "uncommitted_grpo_evaluation_output_root_update_present": true
   },
@@ -775,6 +776,11 @@
       "sha256": "5b4bdecacd26c49d391ca918c985fcebde4861d5e4958fe2e1feab81a6c9d972",
       "role": "Records the source-Stage1-scoped evaluation/compare output contract, preserved two-model manifest and single evaluator call, passing launcher tests, untouched existing Stage1 diagnostics, and unchanged checkpoint eligibility and hard gates."
     },
+    "stage1_grpo_five_dimension_evaluation_implementation_report": {
+      "path": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
+      "sha256": "1287acd3ee0b1c3a5bd016f27b078063cecee800a4fcb6511e9a3d4e1b8d303a",
+      "role": "Records the Stage1-versus-GRPO five-dimension bev_model_evaluation_v3 contract, episode-first paired statistics, automatic English PNG/PDF and CSV bundle, 221-test regression, two-checkpoint CPU preflight, successful 20-step CUDA integration smoke, unchanged 200 ms gate, and unchanged diagnostic/formal eligibility."
+    },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
       "sha256": "5ba22c38b010454156233cfc47126a44682d239e82cb1acdf756d791137751de",
@@ -960,8 +966,8 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "cae070c1c6ddc3a1d4c561e7c7539784ed313be4cb44be3ad187cd318da251c8",
-      "role": "Records the quality-accepted 49870-sample Rule-conditioned v2 dataset and Stage1 binding, preserves strict Stage1 run_3 qualification as the active hard gate, freezes GRPO-Open training storage beneath its source Stage1 run, and places comparison evaluation under that run's evaluation/compare directory."
+      "sha256": "bece0ab0752333dd307677c703453a4241d95cc152c1f5d3d2140e6f33248418",
+      "role": "Records the quality-accepted 49870-sample Rule-conditioned v2 dataset and Stage1 binding, preserves strict Stage1 run_3 qualification as the active hard gate, freezes GRPO-Open training storage beneath its source Stage1 run, and freezes the five-dimension v3 comparison, paired statistics, default 800-step horizon, English chart bundle, and CSV tables under evaluation/compare."
     },
     "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
@@ -1780,8 +1786,16 @@
       "training_launcher": "scripts/run_bev_joint_grpo.sh",
       "training_launcher_sha256": "12ac49c0fee8f77310e6ae846824d659992c8ddb9ee8652d8337639ff5fbf8f6",
       "evaluation_launcher": "scripts/run_eval_grpo.sh",
-      "evaluation_launcher_sha256": "a52ffaa8aa506111a4fbe493acca4f8f670debd372b12988e79ddec41625de4f",
+      "evaluation_launcher_sha256": "3076159ee658fa30067fd9aa0661724161039f7283e8c52aaaff722310435030",
       "comparison_evaluation_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare",
+      "evaluation_report_format": "bev_model_evaluation_v3",
+      "evaluation_repeat_report_format": "bev_model_fixed_process_repeat_v3",
+      "comparison_chart_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare/charts",
+      "comparison_table_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare/tables",
+      "comparison_default_max_steps": 800,
+      "comparison_default_save_visualizations": false,
+      "five_dimension_evaluation_implementation_report": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
+      "full_comparison_evaluation_completed": false,
       "evaluation_implementation_report": "evaluation/STAGE1_GRPO_S5_S9_EVALUATION_LAUNCHER_REPORT.json",
       "evaluation_output_root_update_report": "evaluation/STAGE1_GRPO_COMPARISON_OUTPUT_ROOT_UPDATE_REPORT.json",
       "storage_migration_report": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json",
@@ -1790,6 +1804,18 @@
       "bounded_evaluation_smoke_stage1_planning_tick_p95_ms": 203.01,
       "bounded_evaluation_smoke_latency_gate_passed": false,
       "bounded_evaluation_smoke_grpo_model_evaluated": false,
+      "bounded_v3_evaluation_smoke_root": "/tmp/run_eval_grpo_unified_v3_smoke_20260827_gpu_final",
+      "bounded_v3_evaluation_smoke_max_steps": 20,
+      "bounded_v3_evaluation_smoke_exit_code": 0,
+      "bounded_v3_evaluation_smoke_status": "completed",
+      "bounded_v3_evaluation_smoke_stage1_planning_tick_p95_ms": 198.02755585405973,
+      "bounded_v3_evaluation_smoke_grpo_planning_tick_p95_ms": 198.1365422019735,
+      "bounded_v3_evaluation_smoke_latency_gate_passed": true,
+      "bounded_v3_evaluation_smoke_both_models_evaluated": true,
+      "bounded_v3_evaluation_smoke_comparison_metric_count": 125,
+      "bounded_v3_evaluation_smoke_chart_groups": 9,
+      "bounded_v3_evaluation_smoke_csv_tables": 3,
+      "bounded_v3_evaluation_smoke_eligible_for_formal_conclusions": false,
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false
     },

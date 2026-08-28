@@ -269,15 +269,13 @@ class SimpleRuleRiskDetector(RiskDetector):
     @staticmethod
     def _scenario_event_state(env) -> tuple[str, bool, int | None]:
         orchestrator = getattr(env, "_scenario_orchestrator", None)
-        if orchestrator is not None and hasattr(
-            orchestrator, "get_episode_summary"
-        ):
-            summary = dict(orchestrator.get_episode_summary() or {})
-            scenario_id = str(summary.get("scenario_id", ""))
-            trigger_step = summary.get("scenario_trigger_step")
+        summary = getattr(orchestrator, "summary", None)
+        if summary is not None:
+            scenario_id = str(getattr(summary, "scenario_id", ""))
+            trigger_step = getattr(summary, "trigger_step", None)
             return (
                 scenario_id,
-                bool(summary.get("scenario_triggered", False)),
+                bool(getattr(summary, "scenario_triggered", False)),
                 None if trigger_step is None else int(trigger_step),
             )
         scenario_id = str(

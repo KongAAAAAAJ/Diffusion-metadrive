@@ -7,7 +7,40 @@ import pytest
 
 from scenarios.definitions import SCENARIO_BY_ID
 from scenarios.definitions import RecipeSpec, ScenarioDefinition, TriggerSpec
-from scenarios.orchestrator import ScenarioOrchestrator
+from scenarios.orchestrator import ScenarioOrchestrator, _advance_stable_counter_once
+
+
+@pytest.mark.parametrize(
+    "prefix", ("s7_formation", "s8_formation", "s9_recovery")
+)
+def test_s7_s9_stable_counter_advances_only_once_for_same_step(prefix: str) -> None:
+    state = {}
+    counter_key = f"{prefix}_stable_steps"
+    step_key = f"{prefix}_stable_last_step"
+
+    first = _advance_stable_counter_once(
+        state,
+        counter_key=counter_key,
+        step_key=step_key,
+        condition=True,
+        step_count=12,
+    )
+    repeated = _advance_stable_counter_once(
+        state,
+        counter_key=counter_key,
+        step_key=step_key,
+        condition=True,
+        step_count=12,
+    )
+    next_step = _advance_stable_counter_once(
+        state,
+        counter_key=counter_key,
+        step_key=step_key,
+        condition=True,
+        step_count=13,
+    )
+
+    assert (first, repeated, next_step) == (1, 1, 2)
 
 
 class FakeLane:

@@ -29,6 +29,23 @@ class _RouteRoadRef:
     end_node: str
 
 
+def _advance_stable_counter_once(
+    state: dict[str, object],
+    *,
+    counter_key: str,
+    step_key: str,
+    condition: bool,
+    step_count: int,
+) -> int:
+    value = int(state.get(counter_key, 0) or 0)
+    if step_count < 0 or state.get(step_key) == step_count:
+        return value
+    value = value + 1 if condition else 0
+    state[counter_key] = value
+    state[step_key] = int(step_count)
+    return value
+
+
 class _TimedMainlineStreamPolicy(GroundTruthIDMPolicy):
     """IDM stream policy compatible with the sampled 1--2 s headway.
 
@@ -3951,9 +3968,13 @@ class ScenarioOrchestrator:
             if len(ego_speeds_km_h) == 3
             else None
         )
-        stable = int(self._functional_state.get("s7_formation_stable_steps", 0) or 0)
-        stable = stable + 1 if all_entered and recovered else 0
-        self._functional_state["s7_formation_stable_steps"] = stable
+        stable = _advance_stable_counter_once(
+            self._functional_state,
+            counter_key="s7_formation_stable_steps",
+            step_key="s7_formation_stable_last_step",
+            condition=all_entered and recovered,
+            step_count=step_count,
+        )
         self._conflict_evidence.update(
             {
                 "required_actor_roles_present": all(
@@ -3997,7 +4018,6 @@ class ScenarioOrchestrator:
         self._route_completion["no_agent_stranded_on_ramp"] = bool(
             all_entered and not stranded
         )
-        self._functional_state["last_step"] = int(step_count)
 
     def _update_s8_functional_evidence(
         self,
@@ -4227,14 +4247,12 @@ class ScenarioOrchestrator:
             )
         )
         recovered, recovery_gaps = self._platoon_formation_recovered(env)
-        recovery_stable_steps = int(
-            self._functional_state.get("s8_formation_stable_steps", 0) or 0
-        )
-        recovery_stable_steps = (
-            recovery_stable_steps + 1 if all_on_ramp and recovered else 0
-        )
-        self._functional_state["s8_formation_stable_steps"] = (
-            recovery_stable_steps
+        recovery_stable_steps = _advance_stable_counter_once(
+            self._functional_state,
+            counter_key="s8_formation_stable_steps",
+            step_key="s8_formation_stable_last_step",
+            condition=all_on_ramp and recovered,
+            step_count=step_count,
         )
         self._conflict_evidence.update(
             {
@@ -4500,19 +4518,21 @@ class ScenarioOrchestrator:
                 right_completion_steps[str(agent_id)] = int(step_count)
         all_returned = len(right_completion_steps) == 3
         recovered, gaps = self._platoon_formation_recovered(env)
-        stable = int(self._functional_state.get("s9_recovery_stable_steps", 0) or 0)
-        stable = (
-            stable + 1
-            if all_returned
-            and recovered
-            and current_lanes
-            and all(
+        stable = _advance_stable_counter_once(
+            self._functional_state,
+            counter_key="s9_recovery_stable_steps",
+            step_key="s9_recovery_stable_last_step",
+            condition=bool(
+                all_returned
+                and recovered
+                and current_lanes
+                and all(
                 len(lane_index) >= 3 and int(lane_index[2]) == 1
                 for lane_index in current_lanes.values()
-            )
-            else 0
+                )
+            ),
+            step_count=step_count,
         )
-        self._functional_state["s9_recovery_stable_steps"] = stable
         clearance_threshold = float(
             self._resolved_scenario_parameters.get(
                 "latest_lane_change_completion_before_blocker_m", 8.0

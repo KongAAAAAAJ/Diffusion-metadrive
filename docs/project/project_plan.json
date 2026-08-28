@@ -1,7 +1,7 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T21:44:58+08:00",
+  "updated_at": "2026-08-27T23:31:25+08:00",
   "status": "v2_only_training_evaluation_cleanup_implemented_bounded_latency_gate_failed_run3_qualification_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
@@ -22,7 +22,12 @@
     "run_layout": "<stage1_run_root>/grpo_open/run_N",
     "log_layout": "<stage1_run_root>/grpo_open/logs",
     "comparison_evaluation_layout": "<stage1_run_root>/evaluation/compare",
-    "comparison_evaluation_contents": "Stage1-before-GRPO and GRPO-after-finetuning manifest, joint report, logs, and visualization artifacts",
+    "comparison_evaluation_contents": "Stage1-before-GRPO and GRPO-after-finetuning manifest, bev_model_evaluation_v3 joint report, logs, optional qualitative artifacts, English PNG/PDF comparison charts, and CSV metric tables",
+    "comparison_evaluation_default_max_steps": 800,
+    "comparison_evaluation_default_save_visualizations": false,
+    "comparison_chart_layout": "<stage1_run_root>/evaluation/compare/charts",
+    "comparison_table_layout": "<stage1_run_root>/evaluation/compare/tables",
+    "five_dimension_implementation_evidence": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
     "current_migration": "Move only the completed Stage1 run_3 sourced GRPO run_4 into bev_diffusion_stage1/run_3/grpo_open/run_4; preserve Stage1 run_2 sourced run_1/run_2 and the empty historical run_3 in their existing root.",
     "compatibility_policy": "Do not create a symlink or duplicate compatibility copy at the former run_4 path.",
     "semantic_boundary": "Checkpoint payloads, reward/application contracts, diagnostic/formal eligibility, and the active Stage1 qualification gate are unchanged.",
@@ -625,13 +630,33 @@
     ],
     "scenario_scope": "multi-seed S5-S9 using identical episode manifests and model-noise seeds",
     "metric_groups": [
-      "collision, out-of-road, and 5m/7m gap violations",
-      "formation error, maximum formation spread, and recovery time",
-      "progress, completion, and joint reward",
-      "acceleration, jerk, yaw rate, and steering change",
-      "trajectory optimizer intervention and final execution feasibility",
-      "BEV build, model inference, optimizer/surrogate, control mapping, and full planning tick P50/P95 latency"
+      "safety: joint/per-agent collision and out-of-road x/n; shared-corridor 5m/7m gap violations, exposure, minimum gap, and deficit integral; TTC<1.5s observation, minimum TTC, maximum DRAC, and execution rejection",
+      "efficiency: scenario realized, functional success final/ever/stable, stable-success time, navigation route progress, team mean/min progress, completion time, and descriptive episode duration",
+      "cooperation: formation-locked target-spacing error, locked speed spread, unlock count/duration, relock recovery success/time, and censored recovery count",
+      "comfort: physical longitudinal/lateral acceleration, longitudinal jerk, yaw rate, and yaw acceleration; throttle/steering command slew remains diagnostic",
+      "realtime: BEV, model, RuleMaker, optimizer, control mapping, and complete planning-tick P50/P95 plus complete-tick P99/max/>200ms fraction"
     ],
+    "report_format": "bev_model_evaluation_v3",
+    "repeat_report_format": "bev_model_fixed_process_repeat_v3",
+    "comparison_statistics": "Episode-first aggregation; binary x/n with two-sided 95% Clopper-Pearson intervals; continuous equal-weight S5-S9 scenario macro means; strict (scenario, route, seed) paired deltas with 10000-sample fixed-seed scenario-stratified bootstrap 95% intervals; REPEATS verifies reproducibility and never expands the statistical sample.",
+    "chart_generator": "evaluation.bev_comparison_charts",
+    "chart_outputs": [
+      "comparison_overview",
+      "safety_rates",
+      "risk_ecdf",
+      "efficiency_paired",
+      "cooperation_paired",
+      "comfort_paired",
+      "latency_breakdown",
+      "scenario_delta_heatmap",
+      "paired_delta_forest"
+    ],
+    "table_outputs": [
+      "episode_metrics.csv",
+      "scenario_metrics.csv",
+      "comparison_metrics.csv"
+    ],
+    "comparison_interpretation": "Report metric values, candidate-minus-baseline deltas, sample counts, units, direction, and 95% intervals. Do not publish a weighted composite score or an overall-better verdict; episode duration is descriptive rather than directionally favorable.",
     "latency_gate": "The v2 RuleMaker-conditioned three-vehicle complete planning-tick P95 must be no greater than 200 ms. No v1 inference gate remains in the active training/evaluation contract.",
     "optional_secondary_ablation": "Inside GRPO-Exec only, compare surrogate ensemble mean against mean plus uncertainty-aware reward after the three-model main matrix is complete. This is not a Stage1 A/B ablation."
   },

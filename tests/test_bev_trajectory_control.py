@@ -245,3 +245,31 @@ def test_invalid_trajectory_is_rejected(trajectory: np.ndarray) -> None:
     env = _ControlHarness()
     with pytest.raises(ValueError):
         env.trajectory_to_control("agent0", trajectory)
+
+
+def test_three_agent_control_mapping_does_not_recompute_scenario_summary() -> None:
+    class AttrConfig(dict):
+        def __getattr__(self, key):
+            try:
+                return self[key]
+            except KeyError as exc:
+                raise AttributeError(key) from exc
+
+    class Orchestrator:
+        summary = SimpleNamespace(scenario_realized=True)
+
+        def get_episode_summary(self):
+            raise AssertionError("control mapping must not advance functional evidence")
+
+    env = _ControlHarness()
+    env.config = AttrConfig(env.config)
+    env.config["scenario_id"] = "S5_hard_brake_lead"
+    env._scenario_orchestrator = Orchestrator()
+
+    controls = {
+        agent_id: env.trajectory_to_control(agent_id, _trajectory(8.0))
+        for agent_id in env._agent_ids
+    }
+
+    assert set(controls) == set(env._agent_ids)
+    assert all(value.shape == (2,) for value in controls.values())

@@ -246,6 +246,9 @@ class PlatoonEnv(BaseMultiEnv):
         }
         self._last_actions: dict[str, np.ndarray] = {}
         self._last_progress_refs: dict[str, tuple[object, float, np.ndarray]] = {}
+        self._evaluation_metric_snapshots: dict[str, dict[str, object]] = {}
+        self._evaluation_metric_snapshot_pending = False
+        self._evaluation_scenario_summary: Optional[dict[str, object]] = None
         self._multimodal_config = build_transfuser_config("base")
         self._scenario_orchestrator = None
         self._scenario_step_count = 0
@@ -930,6 +933,9 @@ class PlatoonEnv(BaseMultiEnv):
         self._last_progress_refs = {
             agent_id: self._capture_progress_reference(agent_id) for agent_id in self._agent_ids
         }
+        self._evaluation_metric_snapshots = {}
+        self._evaluation_metric_snapshot_pending = False
+        self._evaluation_scenario_summary = None
         self._last_info = {}
         self._platoon_reward_cache = None
         self._trajectory_reward_cache = None
@@ -980,6 +986,7 @@ class PlatoonEnv(BaseMultiEnv):
                 for agent_id, action in actions.items()
             }
             self._platoon_reward_cache = None
+            self._evaluation_metric_snapshot_pending = True
             obs, reward, terminated, truncated, info = super().step(actions)
 
             info = self._build_info_dict("teleport", actions=actions, base_info=info)
@@ -1032,6 +1039,7 @@ class PlatoonEnv(BaseMultiEnv):
         }
         self._platoon_reward_cache = None
         self._trajectory_reward_cache = None
+        self._evaluation_metric_snapshot_pending = True
         # Tick ScenarioOrchestrator before the physics step (mirrors collect_expert behaviour)
         if getattr(self, "_scenario_orchestrator", None) is not None:
             lead_agent_id = self._agent_ids[0]
@@ -1058,6 +1066,11 @@ class PlatoonEnv(BaseMultiEnv):
         and caches the team reward so progress and comfort terms are consumed only
         once; later calls return the same scalar with per-agent diagnostics.
         """
+        # BaseEnv evaluates reward before MultiAgentMetaDrive removes agents that
+        # terminate in this frame.  Capture evaluation-only geometry and route
+        # progress here so _build_info_dict can still report the true terminal
+        # state after that removal.
+        self._refresh_evaluation_metric_snapshots_once()
         if not self._cfg_bool("platoon_reward_enabled", True):
             return super().reward_function(vehicle_id)
         platoon_cache = self._get_platoon_reward_cache()  # 状态的platoon reward
@@ -1631,6 +1644,60 @@ class PlatoonEnv(BaseMultiEnv):
         self._last_progress_refs[agent_id] = (lane, current_s, current_xy)
         return float(progress)
 
+    @staticmethod
+    def _evaluation_metric_snapshot(vehicle: object) -> dict[str, object]:
+        navigation = getattr(vehicle, "navigation", None)
+        travelled = float(getattr(navigation, "travelled_length"))
+        total = float(getattr(navigation, "total_length"))
+        position = np.asarray(getattr(vehicle, "position"), dtype=np.float64).reshape(-1)
+        heading = float(getattr(vehicle, "heading_theta"))
+        speed_km_h = float(getattr(vehicle, "speed_km_h"))
+        length = float(getattr(vehicle, "LENGTH"))
+        width = float(getattr(vehicle, "WIDTH"))
+        values = np.asarray(
+            [travelled, total, *position[:2], heading, speed_km_h, length, width],
+            dtype=np.float64,
+        )
+        if position.size < 2 or not np.isfinite(values).all() or total <= 0.0:
+            raise ValueError("evaluation metric snapshot must be finite with a positive route length")
+        if length <= 0.0 or width <= 0.0:
+            raise ValueError("evaluation metric snapshot vehicle dimensions must be positive")
+        return {
+            "navigation_travelled_length_m": travelled,
+            "navigation_total_length_m": total,
+            "position_xy_m": [float(position[0]), float(position[1])],
+            "heading_rad": heading,
+            "speed_km_h": speed_km_h,
+            "length_m": length,
+            "width_m": width,
+        }
+
+    def _refresh_evaluation_metric_snapshots(self) -> None:
+        cache = getattr(self, "_evaluation_metric_snapshots", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._evaluation_metric_snapshots = cache
+        for agent_id, vehicle in (getattr(self, "agents", {}) or {}).items():
+            if agent_id in self._agent_ids:
+                cache[agent_id] = self._evaluation_metric_snapshot(vehicle)
+
+    def _refresh_evaluation_metric_snapshots_once(self) -> None:
+        if not getattr(self, "_evaluation_metric_snapshot_pending", False):
+            return
+        self._refresh_evaluation_metric_snapshots()
+        self._evaluation_scenario_summary = self._capture_evaluation_scenario_summary()
+        self._evaluation_metric_snapshot_pending = False
+
+    def _capture_evaluation_scenario_summary(self) -> dict[str, object]:
+        orchestrator = getattr(self, "_scenario_orchestrator", None)
+        getter = getattr(orchestrator, "get_episode_summary", None)
+        if not callable(getter):
+            return {}
+        summary = getter()
+        if not isinstance(summary, Mapping):
+            raise RuntimeError("scenario summary must be a mapping")
+        return dict(summary)
+
     def _build_info_dict(
         self,
         control_mode: str,
@@ -1643,10 +1710,15 @@ class PlatoonEnv(BaseMultiEnv):
             for agent_id in self._agent_ids
             if agent_id in base_info
         }
-        scenario_summary = {}
-        scenario_orchestrator = getattr(self, "_scenario_orchestrator", None)
-        if scenario_orchestrator is not None and hasattr(scenario_orchestrator, "get_episode_summary"):
-            scenario_summary = dict(scenario_orchestrator.get_episode_summary())
+        metric_snapshots = getattr(self, "_evaluation_metric_snapshots", {}) or {}
+        for agent_id, agent_info in info.items():
+            snapshot = metric_snapshots.get(agent_id)
+            if snapshot is not None:
+                agent_info["evaluation_metric_snapshot"] = dict(snapshot)
+        scenario_summary = getattr(self, "_evaluation_scenario_summary", None)
+        if scenario_summary is None:
+            scenario_summary = self._capture_evaluation_scenario_summary()
+            self._evaluation_scenario_summary = dict(scenario_summary)
         reward_cache = self._platoon_reward_cache if self._cfg_bool("platoon_reward_enabled", True) else None
         reward_per_agent = (
             reward_cache.get("per_agent", {})
@@ -2113,15 +2185,12 @@ class PlatoonEnv(BaseMultiEnv):
         ):
             return True
         orchestrator = getattr(self, "_scenario_orchestrator", None)
-        getter = getattr(orchestrator, "get_episode_summary", None)
-        if not callable(getter):
+        summary = getattr(orchestrator, "summary", None)
+        if summary is None or not hasattr(summary, "scenario_realized"):
             raise RuntimeError(
                 "hazard trajectory control requires scenario realization state"
             )
-        summary = getter()
-        if not isinstance(summary, Mapping):
-            raise RuntimeError("scenario realization summary is invalid")
-        return not bool(summary.get("scenario_realized", False))
+        return not bool(summary.scenario_realized)
 
     def trajectory_to_control(self, agent_id: str, trajectory: np.ndarray) -> np.ndarray:
         trajectory = np.asarray(trajectory)

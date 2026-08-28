@@ -422,22 +422,26 @@ def test_s5_risk_detector_ignores_stale_previous_episode_brake_marker():
     lead.scenario_role = "hard_brake_lead"
     lead.scenario_id = "S5_hard_brake_lead"
     lead.scenario_brake_trigger_step = 30
-    summary = {
-        "scenario_id": "S5_hard_brake_lead",
-        "scenario_triggered": False,
-        "scenario_trigger_step": None,
-    }
+    summary = SimpleNamespace(
+        scenario_id="S5_hard_brake_lead",
+        scenario_triggered=False,
+        trigger_step=None,
+    )
     env = _env(
         agents={"agent0": _vehicle("agent0", 10.0, 0.0, 1)},
         traffic=[lead],
     )
     env._scenario_orchestrator = SimpleNamespace(
-        get_episode_summary=lambda: dict(summary)
+        summary=summary,
+        get_episode_summary=lambda: (_ for _ in ()).throw(
+            AssertionError("risk detection must not recompute scenario summary")
+        ),
     )
     detector = SimpleRuleRiskDetector(ttc_trigger_s=100.0)
 
     waiting = detector.detect(env, ["agent0"], [lead], "LOCKED")
-    summary.update(scenario_triggered=True, scenario_trigger_step=30)
+    summary.scenario_triggered = True
+    summary.trigger_step = 30
     triggered = detector.detect(env, ["agent0"], [lead], "LOCKED")
 
     assert waiting["next_state"] == "LOCKED"
@@ -500,6 +504,11 @@ def test_s5_releases_lock_before_brake_but_keeps_pretrigger_action():
     env._scenario_orchestrator = SimpleNamespace(
         _actor_manifest={},
         _resolved_scenario_parameters={"brake_trigger_time_s": 3.0},
+        summary=SimpleNamespace(
+            scenario_id="S5_hard_brake_lead",
+            scenario_triggered=False,
+            trigger_step=None,
+        ),
         get_episode_summary=lambda: {
             "scenario_id": "S5_hard_brake_lead",
             "scenario_triggered": False,
@@ -560,6 +569,11 @@ def test_s5_active_hazard_promotes_hard_safe_mixed_direction_actions():
         _initial_agent_lanes={
             name: ("A", "B", 1) for name in env.agents
         },
+        summary=SimpleNamespace(
+            scenario_id="S5_hard_brake_lead",
+            scenario_triggered=True,
+            trigger_step=30,
+        ),
         get_episode_summary=lambda: {
             "scenario_id": "S5_hard_brake_lead",
             "scenario_triggered": True,

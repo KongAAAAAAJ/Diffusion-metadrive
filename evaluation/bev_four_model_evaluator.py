@@ -11,9 +11,10 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence
 
 import numpy as np
+from scipy.stats import beta as beta_distribution
 
 # Must be set before the first CUDA context is created.  The evaluator uses
 # fixed diffusion noise, so allowing non-deterministic GEMM kernels would make
@@ -73,6 +74,7 @@ from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizerConfig,
     TrajectoryOptimizationError,
 )
+from models.platoon_planner.collision_geometry import shared_corridor_gap_series
 from scenarios.bev_round13_contract import (
     BEVScenarioContractError,
     HOLDOUT_SEEDS,
@@ -85,6 +87,13 @@ from scenarios.bev_round13_contract import (
 DIAGNOSTIC_EVAL_SCENARIOS = PRIMARY_S5_S9_SCENARIOS
 FORMAL_EVAL_SCENARIOS = PRIMARY_S5_S9_SCENARIOS
 FORMAL_EVAL_SEEDS = (17, 23, 31, 47, 59)
+BACKGROUND_GAP_THRESHOLD_M = 5.0
+PLATOON_GAP_THRESHOLD_M = 7.0
+TTC_OBSERVATION_THRESHOLD_S = 1.5
+NO_RISK_GAP_M = 1.0e6
+BOOTSTRAP_SAMPLES = 10_000
+BOOTSTRAP_SEED = 20260827
+GATE_FAILURE_EXIT_CODE = 2
 
 
 class ModelEvaluationError(RuntimeError):
@@ -195,6 +204,825 @@ def _configure_deterministic_inference(device: torch.device) -> None:
 
 def _percentile(values: list[float], q: float) -> float:
     return float(np.percentile(values, q)) if values else 0.0
+
+
+def _nullable_percentile(values: Sequence[float], q: float) -> float | None:
+    finite = [float(value) for value in values if math.isfinite(float(value))]
+    return float(np.percentile(finite, q)) if finite else None
+
+
+def _exact_binomial_ci(
+    event_count: int, sample_count: int, *, confidence: float = 0.95
+) -> list[float]:
+    """Return the two-sided Clopper--Pearson interval for one event rate."""
+
+    events = int(event_count)
+    samples = int(sample_count)
+    if samples <= 0 or events < 0 or events > samples:
+        raise ModelEvaluationError("binomial counts are invalid")
+    alpha = 1.0 - float(confidence)
+    lower = (
+        0.0
+        if events == 0
+        else float(beta_distribution.ppf(alpha / 2.0, events, samples - events + 1))
+    )
+    upper = (
+        1.0
+        if events == samples
+        else float(
+            beta_distribution.ppf(
+                1.0 - alpha / 2.0, events + 1, samples - events
+            )
+        )
+    )
+    return [lower, upper]
+
+
+def _vehicle_dimensions(vehicle: object) -> tuple[float, float]:
+    if isinstance(vehicle, Mapping):
+        length = float(vehicle.get("length_m", 5.74))
+        width = float(vehicle.get("width_m", 2.3))
+    else:
+        length = float(getattr(vehicle, "LENGTH", 5.74))
+        width = float(getattr(vehicle, "WIDTH", 2.3))
+    if not math.isfinite(length) or length <= 0.0 or not math.isfinite(width) or width <= 0.0:
+        raise ModelEvaluationError("vehicle dimensions must be positive and finite")
+    return length, width
+
+
+def _vehicle_pose(vehicle: object) -> np.ndarray:
+    if isinstance(vehicle, Mapping):
+        position_value = vehicle.get("position_xy_m")
+        heading_value = vehicle.get("heading_rad")
+    else:
+        position_value = getattr(vehicle, "position")
+        heading_value = getattr(vehicle, "heading_theta")
+    position = np.asarray(position_value, dtype=np.float64).reshape(-1)
+    if position.size < 2:
+        raise ModelEvaluationError("vehicle position must contain x and y")
+    pose = np.asarray(
+        [position[0], position[1], float(heading_value)],
+        dtype=np.float64,
+    )
+    if not np.isfinite(pose).all():
+        raise ModelEvaluationError("vehicle pose must be finite")
+    return pose
+
+
+def _corridor_gap(first: object, second: object) -> float | None:
+    gap = float(
+        shared_corridor_gap_series(
+            _vehicle_pose(first)[None, :],
+            _vehicle_dimensions(first),
+            _vehicle_pose(second)[None, :],
+            _vehicle_dimensions(second),
+            no_risk_gap_m=NO_RISK_GAP_M,
+        )[0]
+    )
+    return None if gap >= NO_RISK_GAP_M else gap
+
+
+def _live_gap_observations(
+    env: object,
+    *,
+    agent_states: Mapping[str, object] | None = None,
+) -> tuple[dict[tuple[str, int], float], dict[tuple[str, str], float]]:
+    """Return same-corridor OBB gaps for background and adjacent platoon pairs."""
+
+    live_agents = dict(getattr(env, "agents", {}) or {})
+    agents = dict(agent_states) if agent_states is not None else live_agents
+    platoon_objects = {id(value) for value in live_agents.values()}
+    background: dict[tuple[str, int], float] = {}
+    for other in _surrounding_vehicles(env):
+        if id(other) in platoon_objects:
+            continue
+        for agent_id in AGENT_IDS:
+            agent = agents.get(agent_id)
+            if agent is None:
+                continue
+            gap = _corridor_gap(agent, other)
+            if gap is not None:
+                background[(agent_id, id(other))] = float(gap)
+    platoon: dict[tuple[str, str], float] = {}
+    for first_id, second_id in zip(AGENT_IDS, AGENT_IDS[1:]):
+        first = agents.get(first_id)
+        second = agents.get(second_id)
+        if first is None or second is None:
+            continue
+        gap = _corridor_gap(first, second)
+        if gap is not None:
+            platoon[(first_id, second_id)] = float(gap)
+    return background, platoon
+
+
+def _closing_risk_observations(
+    current: Mapping[object, float],
+    previous: Mapping[object, float],
+    *,
+    dt_s: float,
+) -> tuple[list[float], list[float]]:
+    """Return TTC and DRAC for pairs that remain in-corridor and are closing."""
+
+    ttc_values: list[float] = []
+    drac_values: list[float] = []
+    for key in current.keys() & previous.keys():
+        gap = float(current[key])
+        closing_speed = (float(previous[key]) - gap) / dt_s
+        if closing_speed <= 0.0:
+            continue
+        effective_gap = max(gap, 0.0)
+        ttc_values.append(effective_gap / closing_speed)
+        drac_values.append((closing_speed * closing_speed) / (2.0 * max(effective_gap, 0.1)))
+    return ttc_values, drac_values
+
+
+def _navigation_snapshot(env: object) -> dict[str, tuple[float, float]]:
+    snapshots = {}
+    for agent_id in AGENT_IDS:
+        vehicle = (getattr(env, "agents", {}) or {}).get(agent_id)
+        navigation = getattr(vehicle, "navigation", None)
+        travelled = getattr(navigation, "travelled_length", None)
+        total = getattr(navigation, "total_length", None)
+        if (
+            isinstance(travelled, bool)
+            or not isinstance(travelled, (int, float))
+            or isinstance(total, bool)
+            or not isinstance(total, (int, float))
+            or not math.isfinite(float(travelled))
+            or not math.isfinite(float(total))
+            or float(total) <= 0.0
+        ):
+            raise ModelEvaluationError(
+                f"navigation progress is unavailable for {agent_id}"
+            )
+        snapshots[agent_id] = (float(travelled), float(total))
+    return snapshots
+
+
+def _post_step_agent_states(
+    env: object, step_info: Mapping[str, object]
+) -> dict[str, object]:
+    """Resolve the true post-step state, including agents removed on termination."""
+
+    live_agents = dict(getattr(env, "agents", {}) or {})
+    resolved: dict[str, object] = {}
+    required_snapshot_fields = {
+        "navigation_travelled_length_m",
+        "navigation_total_length_m",
+        "position_xy_m",
+        "heading_rad",
+        "speed_km_h",
+        "length_m",
+        "width_m",
+    }
+    for agent_id in AGENT_IDS:
+        vehicle = live_agents.get(agent_id)
+        if vehicle is not None:
+            resolved[agent_id] = vehicle
+            continue
+        agent_info = step_info.get(agent_id)
+        snapshot = (
+            agent_info.get("evaluation_metric_snapshot")
+            if isinstance(agent_info, Mapping)
+            else None
+        )
+        if not isinstance(snapshot, Mapping) or not required_snapshot_fields.issubset(
+            snapshot
+        ):
+            raise ModelEvaluationError(
+                f"terminal evaluation metric snapshot is unavailable for {agent_id}"
+            )
+        # Validate geometry here. Navigation is validated by the cache updater.
+        _vehicle_pose(snapshot)
+        _vehicle_dimensions(snapshot)
+        resolved[agent_id] = snapshot
+    return resolved
+
+
+def _scenario_summary_from_step_info(
+    step_info: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Read the one summary already attached by PlatoonEnv._build_info_dict."""
+
+    for agent_id in AGENT_IDS:
+        agent_info = step_info.get(agent_id)
+        if (
+            isinstance(agent_info, Mapping)
+            and "scenario_realized" in agent_info
+            and "functional_success" in agent_info
+        ):
+            return agent_info
+    raise ModelEvaluationError("step info has no S5--S9 scenario summary")
+
+
+def _absolute_distribution(
+    values: Sequence[float], stem: str, unit: str
+) -> dict[str, float | None]:
+    finite = np.abs(np.asarray([float(value) for value in values], dtype=np.float64))
+    if finite.size == 0:
+        return {
+            f"{stem}_abs_mean_{unit}": None,
+            f"{stem}_abs_p95_{unit}": None,
+            f"{stem}_abs_max_{unit}": None,
+        }
+    return {
+        f"{stem}_abs_mean_{unit}": float(np.mean(finite)),
+        f"{stem}_abs_p95_{unit}": float(np.percentile(finite, 95)),
+        f"{stem}_abs_max_{unit}": float(np.max(finite)),
+    }
+
+
+def _timing_distribution(values: Sequence[float]) -> dict[str, float]:
+    finite = [float(value) for value in values]
+    return {
+        "p50_ms": _percentile(finite, 50),
+        "p95_ms": _percentile(finite, 95),
+        "p99_ms": _percentile(finite, 99),
+        "max_ms": max(finite, default=0.0),
+    }
+
+
+def _closed_loop_metric_policy() -> dict[str, dict[str, object]]:
+    """Frozen v3 comparison metrics, addressed from one episode row."""
+
+    policy: dict[str, dict[str, object]] = {
+        "safety.collision_rate": {
+            "episode_path": ("safety", "collision"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "safety.out_of_road_rate": {
+            "episode_path": ("safety", "out_of_road"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "safety.background_gap_violation_rate": {
+            "episode_path": ("safety", "background_gap_violation"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "safety.background_gap_exposure_fraction_mean": {
+            "episode_path": ("safety", "background_gap_exposure_fraction"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "safety.background_gap_deficit_integral_m_s_mean": {
+            "episode_path": ("safety", "background_gap_deficit_integral_m_s"),
+            "unit": "m*s",
+            "direction": "lower",
+        },
+        "safety.minimum_background_gap_m_mean": {
+            "episode_path": ("safety", "minimum_background_gap_m"),
+            "unit": "m",
+            "direction": "higher",
+        },
+        "safety.platoon_gap_violation_rate": {
+            "episode_path": ("safety", "platoon_gap_violation"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "safety.platoon_gap_exposure_fraction_mean": {
+            "episode_path": ("safety", "platoon_gap_exposure_fraction"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "safety.platoon_gap_deficit_integral_m_s_mean": {
+            "episode_path": ("safety", "platoon_gap_deficit_integral_m_s"),
+            "unit": "m*s",
+            "direction": "lower",
+        },
+        "safety.minimum_platoon_gap_m_mean": {
+            "episode_path": ("safety", "minimum_platoon_gap_m"),
+            "unit": "m",
+            "direction": "higher",
+        },
+        "safety.minimum_ttc_s_mean": {
+            "episode_path": ("safety", "minimum_ttc_s"),
+            "unit": "s",
+            "direction": "higher",
+        },
+        "safety.ttc_below_1_5_s_exposure_fraction_mean": {
+            "episode_path": ("safety", "ttc_below_1_5_s_exposure_fraction"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "safety.max_drac_mps2_mean": {
+            "episode_path": ("safety", "max_drac_mps2"),
+            "unit": "m/s^2",
+            "direction": "lower",
+        },
+        "safety.execution_rejection_episode_rate": {
+            "episode_path": ("safety", "execution_rejected"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "safety.execution_rejection_tick_fraction_mean": {
+            "episode_path": ("safety", "execution_rejection_tick_fraction"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "efficiency.scenario_realized_rate": {
+            "episode_path": ("efficiency", "scenario_realized"),
+            "unit": "fraction",
+            "direction": "higher",
+        },
+        "efficiency.functional_success_final_rate": {
+            "episode_path": ("efficiency", "functional_success_final"),
+            "unit": "fraction",
+            "direction": "higher",
+        },
+        "efficiency.functional_success_ever_rate": {
+            "episode_path": ("efficiency", "functional_success_ever"),
+            "unit": "fraction",
+            "direction": "higher",
+        },
+        "efficiency.functional_success_stable_rate": {
+            "episode_path": ("efficiency", "functional_success_stable"),
+            "unit": "fraction",
+            "direction": "higher",
+        },
+        "efficiency.first_stable_success_time_s_mean": {
+            "episode_path": ("efficiency", "first_stable_success_time_s"),
+            "unit": "s",
+            "direction": "lower",
+        },
+        "efficiency.team_mean_route_progress_m_mean": {
+            "episode_path": ("efficiency", "team_mean_route_progress_m"),
+            "unit": "m",
+            "direction": "higher",
+        },
+        "efficiency.team_min_route_progress_m_mean": {
+            "episode_path": ("efficiency", "team_min_route_progress_m"),
+            "unit": "m",
+            "direction": "higher",
+        },
+        "efficiency.team_mean_route_progress_fraction_mean": {
+            "episode_path": ("efficiency", "team_mean_route_progress_fraction"),
+            "unit": "fraction",
+            "direction": "higher",
+        },
+        "efficiency.team_min_route_progress_fraction_mean": {
+            "episode_path": ("efficiency", "team_min_route_progress_fraction"),
+            "unit": "fraction",
+            "direction": "higher",
+        },
+        "efficiency.completion_time_s_mean": {
+            "episode_path": ("efficiency", "completion_time_s"),
+            "unit": "s",
+            "direction": "lower",
+        },
+        "efficiency.episode_duration_s_mean": {
+            "episode_path": ("efficiency", "episode_duration_s"),
+            "unit": "s",
+            "direction": "descriptive",
+        },
+        "cooperation.locked_spacing_error_mean_m": {
+            "episode_path": ("cooperation", "locked_spacing_error_mean_m"),
+            "unit": "m",
+            "direction": "lower",
+        },
+        "cooperation.locked_spacing_error_p95_m_mean": {
+            "episode_path": ("cooperation", "locked_spacing_error_p95_m"),
+            "unit": "m",
+            "direction": "lower",
+        },
+        "cooperation.locked_spacing_error_max_m_mean": {
+            "episode_path": ("cooperation", "locked_spacing_error_max_m"),
+            "unit": "m",
+            "direction": "lower",
+        },
+        "cooperation.locked_speed_spread_mean_mps": {
+            "episode_path": ("cooperation", "locked_speed_spread_mean_mps"),
+            "unit": "m/s",
+            "direction": "lower",
+        },
+        "cooperation.unlock_count_mean": {
+            "episode_path": ("cooperation", "unlock_count"),
+            "unit": "count",
+            "direction": "lower",
+        },
+        "cooperation.unlocked_duration_s_mean": {
+            "episode_path": ("cooperation", "unlocked_duration_s"),
+            "unit": "s",
+            "direction": "lower",
+        },
+        "cooperation.relock_recovery_success_rate": {
+            "episode_path": ("cooperation", "relock_recovery_success"),
+            "unit": "fraction",
+            "direction": "higher",
+        },
+        "cooperation.recovery_censored_rate": {
+            "episode_path": ("cooperation", "recovery_censored"),
+            "unit": "fraction",
+            "direction": "lower",
+        },
+        "cooperation.relock_recovery_time_s_mean": {
+            "episode_path": ("cooperation", "relock_recovery_time_s"),
+            "unit": "s",
+            "direction": "lower",
+        },
+    }
+    for agent_id in AGENT_IDS:
+        policy[f"safety.per_agent.{agent_id}.collision_rate"] = {
+            "episode_path": ("safety", "per_agent", agent_id, "collision"),
+            "unit": "fraction",
+            "direction": "lower",
+        }
+        policy[f"safety.per_agent.{agent_id}.out_of_road_rate"] = {
+            "episode_path": ("safety", "per_agent", agent_id, "out_of_road"),
+            "unit": "fraction",
+            "direction": "lower",
+        }
+        policy[f"efficiency.per_agent.{agent_id}.route_progress_m_mean"] = {
+            "episode_path": (
+                "efficiency",
+                "per_agent",
+                agent_id,
+                "route_progress_m",
+            ),
+            "unit": "m",
+            "direction": "higher",
+        }
+        policy[
+            f"efficiency.per_agent.{agent_id}.route_progress_fraction_mean"
+        ] = {
+            "episode_path": (
+                "efficiency",
+                "per_agent",
+                agent_id,
+                "route_progress_fraction",
+            ),
+            "unit": "fraction",
+            "direction": "higher",
+        }
+    comfort_fields = {
+        "longitudinal_acceleration_abs_mean_mps2": "m/s^2",
+        "longitudinal_acceleration_abs_p95_mps2": "m/s^2",
+        "longitudinal_acceleration_abs_max_mps2": "m/s^2",
+        "lateral_acceleration_abs_mean_mps2": "m/s^2",
+        "lateral_acceleration_abs_p95_mps2": "m/s^2",
+        "lateral_acceleration_abs_max_mps2": "m/s^2",
+        "longitudinal_jerk_abs_mean_mps3": "m/s^3",
+        "longitudinal_jerk_abs_p95_mps3": "m/s^3",
+        "longitudinal_jerk_abs_max_mps3": "m/s^3",
+        "yaw_rate_abs_mean_rad_s": "rad/s",
+        "yaw_rate_abs_p95_rad_s": "rad/s",
+        "yaw_rate_abs_max_rad_s": "rad/s",
+        "yaw_acceleration_abs_mean_rad_s2": "rad/s^2",
+        "yaw_acceleration_abs_p95_rad_s2": "rad/s^2",
+        "yaw_acceleration_abs_max_rad_s2": "rad/s^2",
+        "steering_command_slew_abs_mean_per_s": "command/s",
+        "steering_command_slew_abs_p95_per_s": "command/s",
+        "steering_command_slew_abs_max_per_s": "command/s",
+        "throttle_command_slew_abs_mean_per_s": "command/s",
+        "throttle_command_slew_abs_p95_per_s": "command/s",
+        "throttle_command_slew_abs_max_per_s": "command/s",
+    }
+    for agent_id in AGENT_IDS:
+        for field, unit in comfort_fields.items():
+            policy[f"comfort.per_agent.{agent_id}.{field}"] = {
+                "episode_path": ("comfort", "per_agent", agent_id, field),
+                "unit": unit,
+                "direction": "lower",
+            }
+    for component in (
+        "bev_build_ms",
+        "model_inference_ms",
+        "control_mapping_ms",
+        "planning_tick_ms",
+        "trajectory_optimizer_ms",
+        "rule_maker_ms",
+    ):
+        for percentile in ("p50_ms", "p95_ms"):
+            policy[f"timing.{component}_{percentile}_mean"] = {
+                "episode_path": ("timing", component, percentile),
+                "unit": "ms",
+                "direction": "lower",
+            }
+    for field, unit in (
+        ("p99_ms", "ms"),
+        ("max_ms", "ms"),
+        ("over_200_ms_fraction", "fraction"),
+    ):
+        policy[f"timing.planning_tick_ms_{field}_mean"] = {
+            "episode_path": ("timing", "planning_tick_ms", field),
+            "unit": unit,
+            "direction": "lower",
+        }
+    return policy
+
+
+def _metric_definitions() -> dict[str, dict[str, object]]:
+    return {
+        name: {
+            "unit": str(spec["unit"]),
+            "direction": str(spec["direction"]),
+            "statistical_unit": "episode",
+            "episode_source_path": list(spec["episode_path"]),
+        }
+        for name, spec in _closed_loop_metric_policy().items()
+    }
+
+
+def _episode_value(
+    episode: Mapping[str, object], path: Sequence[str]
+) -> bool | float | int | None:
+    current: object = episode
+    for key in path:
+        if not isinstance(current, Mapping) or key not in current:
+            raise ModelEvaluationError(
+                f"episode metric is missing {'.'.join(path)}"
+            )
+        current = current[key]
+    if current is None or isinstance(current, bool):
+        return current
+    if not isinstance(current, (int, float)) or not math.isfinite(float(current)):
+        raise ModelEvaluationError(
+            f"episode metric {'.'.join(path)} must be finite numeric, boolean, or null"
+        )
+    return current
+
+
+def _mean_episode_path(
+    episodes: Sequence[Mapping[str, object]], path: Sequence[str]
+) -> float | None:
+    values = [
+        float(value)
+        for episode in episodes
+        if (value := _episode_value(episode, path)) is not None
+    ]
+    return float(np.mean(values)) if values else None
+
+
+def _rate_summary(
+    episodes: Sequence[Mapping[str, object]],
+    path: Sequence[str],
+    *,
+    stem: str,
+) -> dict[str, object]:
+    values = [
+        bool(value)
+        for episode in episodes
+        if (value := _episode_value(episode, path)) is not None
+    ]
+    events = sum(values)
+    samples = len(values)
+    if samples == 0:
+        return {
+            f"{stem}_count": 0,
+            f"{stem}_sample_count": 0,
+            f"{stem}_rate": None,
+            f"{stem}_rate_ci95": None,
+        }
+    return {
+        f"{stem}_count": int(events),
+        f"{stem}_sample_count": int(samples),
+        f"{stem}_rate": float(events / samples),
+        f"{stem}_rate_ci95": _exact_binomial_ci(events, samples),
+    }
+
+
+def _aggregate_episode_metrics(
+    episodes: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    if not episodes:
+        raise ModelEvaluationError("cannot aggregate an empty episode set")
+    safety: dict[str, object] = {}
+    safety.update(_rate_summary(episodes, ("safety", "collision"), stem="collision"))
+    safety.update(
+        _rate_summary(episodes, ("safety", "out_of_road"), stem="out_of_road")
+    )
+    safety.update(
+        _rate_summary(
+            episodes,
+            ("safety", "background_gap_violation"),
+            stem="background_gap_violation",
+        )
+    )
+    safety.update(
+        _rate_summary(
+            episodes,
+            ("safety", "platoon_gap_violation"),
+            stem="platoon_gap_violation",
+        )
+    )
+    safety.update(
+        _rate_summary(
+            episodes,
+            ("safety", "execution_rejected"),
+            stem="execution_rejection_episode",
+        )
+    )
+    for field in (
+        "background_gap_exposure_fraction",
+        "background_gap_deficit_integral_m_s",
+        "minimum_background_gap_m",
+        "platoon_gap_exposure_fraction",
+        "platoon_gap_deficit_integral_m_s",
+        "minimum_platoon_gap_m",
+        "minimum_ttc_s",
+        "ttc_below_1_5_s_exposure_fraction",
+        "max_drac_mps2",
+        "execution_rejection_tick_fraction",
+    ):
+        safety[f"{field}_mean"] = _mean_episode_path(
+            episodes, ("safety", field)
+        )
+    safety["per_agent"] = {}
+    for agent_id in AGENT_IDS:
+        agent = {}
+        agent.update(
+            _rate_summary(
+                episodes,
+                ("safety", "per_agent", agent_id, "collision"),
+                stem="collision",
+            )
+        )
+        agent.update(
+            _rate_summary(
+                episodes,
+                ("safety", "per_agent", agent_id, "out_of_road"),
+                stem="out_of_road",
+            )
+        )
+        safety["per_agent"][agent_id] = agent
+
+    efficiency: dict[str, object] = {}
+    for field in (
+        "scenario_realized",
+        "functional_success_final",
+        "functional_success_ever",
+        "functional_success_stable",
+    ):
+        efficiency.update(
+            _rate_summary(episodes, ("efficiency", field), stem=field)
+        )
+    for field in (
+        "first_stable_success_time_s",
+        "team_mean_route_progress_m",
+        "team_min_route_progress_m",
+        "team_mean_route_progress_fraction",
+        "team_min_route_progress_fraction",
+        "completion_time_s",
+        "episode_duration_s",
+    ):
+        efficiency[f"{field}_mean"] = _mean_episode_path(
+            episodes, ("efficiency", field)
+        )
+    efficiency["per_agent"] = {
+        agent_id: {
+            "route_progress_m_mean": _mean_episode_path(
+                episodes,
+                ("efficiency", "per_agent", agent_id, "route_progress_m"),
+            ),
+            "route_progress_fraction_mean": _mean_episode_path(
+                episodes,
+                ("efficiency", "per_agent", agent_id, "route_progress_fraction"),
+            ),
+        }
+        for agent_id in AGENT_IDS
+    }
+
+    cooperation: dict[str, object] = {}
+    for field in (
+        "locked_spacing_error_mean_m",
+        "locked_spacing_error_p95_m",
+        "locked_spacing_error_max_m",
+        "locked_speed_spread_mean_mps",
+        "unlock_count",
+        "unlocked_duration_s",
+        "relock_recovery_time_s",
+    ):
+        output_field = (
+            field
+            if field in ("locked_spacing_error_mean_m", "locked_speed_spread_mean_mps")
+            else f"{field}_mean"
+        )
+        cooperation[output_field] = _mean_episode_path(
+            episodes, ("cooperation", field)
+        )
+    cooperation["relock_recovery_applicable_count"] = sum(
+        _episode_value(episode, ("cooperation", "relock_recovery_success"))
+        is not None
+        for episode in episodes
+    )
+    cooperation.update(
+        _rate_summary(
+            episodes,
+            ("cooperation", "relock_recovery_success"),
+            stem="relock_recovery_success",
+        )
+    )
+    cooperation.update(
+        _rate_summary(
+            episodes,
+            ("cooperation", "recovery_censored"),
+            stem="recovery_censored",
+        )
+    )
+
+    comfort = {"per_agent": {}}
+    for agent_id in AGENT_IDS:
+        source = _episode_value_mapping(
+            episodes[0], ("comfort", "per_agent", agent_id)
+        )
+        comfort["per_agent"][agent_id] = {
+            field: _mean_episode_path(
+                episodes, ("comfort", "per_agent", agent_id, field)
+            )
+            for field in source
+        }
+
+    timing: dict[str, object] = {}
+    timing_source = _episode_value_mapping(episodes[0], ("timing",))
+    for component, component_value in timing_source.items():
+        if not isinstance(component_value, Mapping):
+            raise ModelEvaluationError("episode timing component must be a mapping")
+        for field in component_value:
+            timing[f"{component}_{field}_mean"] = _mean_episode_path(
+                episodes, ("timing", component, field)
+            )
+    return {
+        "episodes": len(episodes),
+        "safety": safety,
+        "efficiency": efficiency,
+        "cooperation": cooperation,
+        "comfort": comfort,
+        "timing": timing,
+    }
+
+
+def _episode_value_mapping(
+    episode: Mapping[str, object], path: Sequence[str]
+) -> Mapping[str, object]:
+    current: object = episode
+    for key in path:
+        if not isinstance(current, Mapping) or key not in current:
+            raise ModelEvaluationError(
+                f"episode metric is missing {'.'.join(path)}"
+            )
+        current = current[key]
+    if not isinstance(current, Mapping):
+        raise ModelEvaluationError(f"episode metric {'.'.join(path)} must be an object")
+    return current
+
+
+def _build_model_aggregates(
+    episodes: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, object], dict[str, object]]:
+    grouped: dict[str, list[Mapping[str, object]]] = {}
+    for episode in episodes:
+        scenario = episode.get("scenario")
+        if not isinstance(scenario, str):
+            raise ModelEvaluationError("episode scenario is invalid")
+        grouped.setdefault(scenario, []).append(episode)
+    counts = {len(rows) for rows in grouped.values()}
+    if len(counts) != 1:
+        raise ModelEvaluationError(
+            "scenario macro aggregation requires equal episode counts per scenario"
+        )
+    by_scenario = {
+        scenario: _aggregate_episode_metrics(rows)
+        for scenario, rows in sorted(grouped.items())
+    }
+    overall = _aggregate_episode_metrics(episodes)
+    _apply_scenario_macro(overall, tuple(by_scenario.values()))
+    overall["aggregation"] = "equal_weight_scenario_macro"
+    overall["scenario_count"] = len(by_scenario)
+    return by_scenario, overall
+
+
+def _apply_scenario_macro(
+    target: dict[str, object], scenario_values: Sequence[Mapping[str, object]]
+) -> None:
+    """Replace scalar estimates by equal-scenario means, retaining pooled counts/CIs."""
+
+    for key, value in tuple(target.items()):
+        if isinstance(value, dict):
+            nested = [
+                scenario[key]
+                for scenario in scenario_values
+                if isinstance(scenario.get(key), Mapping)
+            ]
+            if nested:
+                _apply_scenario_macro(value, nested)
+            continue
+        if (
+            key in ("episodes", "scenario_count")
+            or key.endswith("_count")
+            or key.endswith("_sample_count")
+            or key.endswith("_rate")
+            or key.endswith("_ci95")
+            or key == "aggregation"
+        ):
+            continue
+        values = [
+            float(scenario[key])
+            for scenario in scenario_values
+            if isinstance(scenario.get(key), (int, float))
+            and not isinstance(scenario.get(key), bool)
+        ]
+        target[key] = float(np.mean(values)) if values else None
 
 
 def _validate_grpo_evaluation_eligibility(
@@ -457,6 +1285,7 @@ def _empty_metrics() -> dict[str, object]:
         "rule_condition_failures": 0,
         "s7_feedback_exception_hits": 0,
         "episode_outcomes": [],
+        "episode_metrics": [],
     }
 
 
@@ -497,13 +1326,11 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
                 else 0.0
             ),
         }
-    timing = {
-        name: {
-            "p50_ms": _percentile(values, 50),
-            "p95_ms": _percentile(values, 95),
-        }
-        for name, values in raw["timing"].items()
-    }
+    timing = {name: _timing_distribution(values) for name, values in raw["timing"].items()}
+    timing["planning_tick_ms"]["over_200_ms_fraction"] = (
+        sum(float(value) > 200.0 for value in raw["timing"]["planning_tick_ms"])
+        / max(len(raw["timing"]["planning_tick_ms"]), 1)
+    )
     joint_reward = list(raw["joint_reward"])
     legacy_mode_rewards = {
         str(mode): {
@@ -512,7 +1339,27 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
         }
         for mode, values in sorted(raw.get("mode_rewards", {}).items())
     }
-    return {
+    execution_rejections = list(raw.get("execution_rejections", ()))
+    rejection_episode_keys = {
+        (
+            str(value.get("scenario")),
+            str(value.get("route")),
+            int(value.get("seed")),
+        )
+        for value in execution_rejections
+    }
+    rejection_tick_keys = {
+        (*episode_key, int(value.get("step", -1)))
+        for value in execution_rejections
+        for episode_key in [
+            (
+                str(value.get("scenario")),
+                str(value.get("route")),
+                int(value.get("seed")),
+            )
+        ]
+    }
+    result = {
         "episodes": episode_count,
         "roles": roles,
         "joint_safety": {
@@ -542,9 +1389,18 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
             ),
         },
         "execution": {
-            "rejection_count": len(raw.get("execution_rejections", ())),
-            "rejection_rate": len(raw.get("execution_rejections", ())) / episode_count,
-            "rejections": list(raw.get("execution_rejections", ())),
+            "rejection_count": len(execution_rejections),
+            "rejection_episode_count": len(rejection_episode_keys),
+            "rejection_episode_rate": len(rejection_episode_keys) / episode_count,
+            "rejection_tick_count": len(rejection_tick_keys),
+            "rejection_tick_fraction": (
+                sum(
+                    float(episode["safety"]["execution_rejection_tick_fraction"])
+                    for episode in raw.get("episode_metrics", ())
+                )
+                / max(len(raw.get("episode_metrics", ())), 1)
+            ),
+            "rejections": execution_rejections,
             "mean_modes_removed_per_joint_state": (
                 raw.get("execution_modes_removed", 0)
                 / max(raw.get("execution_mode_masks_built", 0), 1)
@@ -600,6 +1456,13 @@ def _summarize(raw: dict[str, object], episode_count: int) -> dict[str, object]:
             "mode_reward_stats": legacy_mode_rewards,
         },
     }
+    episode_metrics = list(raw.get("episode_metrics", ()))
+    if episode_metrics:
+        by_scenario, overall = _build_model_aggregates(episode_metrics)
+        result["episode_metrics"] = episode_metrics
+        result["by_scenario"] = by_scenario
+        result["overall"] = overall
+    return result
 
 
 def _surrounding_vehicles(env: object) -> tuple[object, ...]:
@@ -627,23 +1490,424 @@ def _surrounding_vehicles(env: object) -> tuple[object, ...]:
 
 
 def _minimum_background_gap(env: object) -> float:
-    platoon_objects = set(id(value) for value in env.agents.values())
-    minimum = float("inf")
-    for other in _surrounding_vehicles(env):
-        if id(other) in platoon_objects:
-            continue
-        other_position = np.asarray(other.position, dtype=np.float64)[:2]
-        other_length = float(getattr(other, "LENGTH", 5.74))
-        for agent_id in AGENT_IDS:
-            if agent_id not in env.agents:
-                continue
-            position = np.asarray(env.agents[agent_id].position, dtype=np.float64)[:2]
-            minimum = min(
-                minimum,
-                float(np.linalg.norm(position - other_position))
-                - 0.5 * (5.74 + other_length),
+    background, _ = _live_gap_observations(env)
+    return min(background.values(), default=float("inf"))
+
+
+def _new_episode_state(env: object, rule_maker: object) -> dict[str, object]:
+    navigation = _navigation_snapshot(env)
+    previous_velocity = {}
+    previous_heading = {}
+    for agent_id in AGENT_IDS:
+        vehicle = env.agents[agent_id]
+        heading = float(vehicle.heading_theta)
+        speed_mps = float(vehicle.speed_km_h) / 3.6
+        previous_velocity[agent_id] = speed_mps * np.asarray(
+            [math.cos(heading), math.sin(heading)], dtype=np.float64
+        )
+        previous_heading[agent_id] = heading
+    return {
+        "initial_navigation": dict(navigation),
+        "last_navigation": dict(navigation),
+        "background_gap_step_min": [],
+        "platoon_gap_step_min": [],
+        "background_gap_deficit_integral_m_s": 0.0,
+        "platoon_gap_deficit_integral_m_s": 0.0,
+        "background_gap_exposure_steps": 0,
+        "platoon_gap_exposure_steps": 0,
+        "previous_background_gaps": {},
+        "previous_platoon_gaps": {},
+        "minimum_ttc_by_step": [],
+        "drac_values": [],
+        "ttc_exposure_steps": 0,
+        "scenario_realized": [],
+        "functional_success": [],
+        "formation_lock_states": [bool(rule_maker.is_formation_locked)],
+        "locked_spacing_errors_m": [],
+        "locked_speed_spreads_mps": [],
+        "previous_velocity": previous_velocity,
+        "previous_heading": previous_heading,
+        "previous_longitudinal_acceleration": {
+            agent_id: None for agent_id in AGENT_IDS
+        },
+        "previous_yaw_rate": {agent_id: None for agent_id in AGENT_IDS},
+        "previous_control": {
+            agent_id: np.zeros((2,), dtype=np.float64) for agent_id in AGENT_IDS
+        },
+        "comfort": {
+            agent_id: {
+                "longitudinal_acceleration": [],
+                "lateral_acceleration": [],
+                "longitudinal_jerk": [],
+                "yaw_rate": [],
+                "yaw_acceleration": [],
+                "steering_command_slew": [],
+                "throttle_command_slew": [],
+            }
+            for agent_id in AGENT_IDS
+        },
+        "timing": {
+            "bev_build_ms": [],
+            "model_inference_ms": [],
+            "control_mapping_ms": [],
+            "planning_tick_ms": [],
+            "trajectory_optimizer_ms": [],
+            "rule_maker_ms": [],
+        },
+        "model_ready_ticks": 0,
+    }
+
+
+def _update_navigation_cache(
+    agent_states: Mapping[str, object], cache: dict[str, tuple[float, float]]
+) -> None:
+    for agent_id in AGENT_IDS:
+        vehicle = agent_states.get(agent_id)
+        if isinstance(vehicle, Mapping):
+            travelled = vehicle.get("navigation_travelled_length_m")
+            total = vehicle.get("navigation_total_length_m")
+        else:
+            navigation = getattr(vehicle, "navigation", None)
+            travelled = getattr(navigation, "travelled_length", None)
+            total = getattr(navigation, "total_length", None)
+        if (
+            isinstance(travelled, bool)
+            or not isinstance(travelled, (int, float))
+            or isinstance(total, bool)
+            or not isinstance(total, (int, float))
+            or not math.isfinite(float(travelled))
+            or not math.isfinite(float(total))
+            or float(total) <= 0.0
+        ):
+            raise ModelEvaluationError(
+                f"navigation progress is unavailable for {agent_id}"
             )
-    return minimum
+        cache[agent_id] = (float(travelled), float(total))
+
+
+def _update_episode_state(
+    state: dict[str, object],
+    *,
+    env: object,
+    rule_maker: object,
+    step_info: Mapping[str, object],
+    pre_poses: np.ndarray,
+    dt_s: float,
+) -> None:
+    agent_states = _post_step_agent_states(env, step_info)
+    background, platoon = _live_gap_observations(
+        env, agent_states=agent_states
+    )
+    background_min = min(background.values(), default=None)
+    platoon_min = min(platoon.values(), default=None)
+    state["current_background_gap"] = (
+        float(background_min) if background_min is not None else float("inf")
+    )
+    state["current_platoon_gap"] = (
+        float(platoon_min) if platoon_min is not None else float("inf")
+    )
+    if background_min is not None:
+        state["background_gap_step_min"].append(float(background_min))
+        deficit = max(BACKGROUND_GAP_THRESHOLD_M - float(background_min), 0.0)
+        state["background_gap_deficit_integral_m_s"] += deficit * dt_s
+        state["background_gap_exposure_steps"] += int(deficit > 0.0)
+    if platoon_min is not None:
+        state["platoon_gap_step_min"].append(float(platoon_min))
+        deficit = max(PLATOON_GAP_THRESHOLD_M - float(platoon_min), 0.0)
+        state["platoon_gap_deficit_integral_m_s"] += deficit * dt_s
+        state["platoon_gap_exposure_steps"] += int(deficit > 0.0)
+    background_ttc, background_drac = _closing_risk_observations(
+        background,
+        state["previous_background_gaps"],
+        dt_s=dt_s,
+    )
+    platoon_ttc, platoon_drac = _closing_risk_observations(
+        platoon,
+        state["previous_platoon_gaps"],
+        dt_s=dt_s,
+    )
+    step_ttc = [*background_ttc, *platoon_ttc]
+    if step_ttc:
+        minimum_ttc = min(step_ttc)
+        state["minimum_ttc_by_step"].append(float(minimum_ttc))
+        state["ttc_exposure_steps"] += int(
+            minimum_ttc < TTC_OBSERVATION_THRESHOLD_S
+        )
+    state["drac_values"].extend([*background_drac, *platoon_drac])
+    state["previous_background_gaps"] = dict(background)
+    state["previous_platoon_gaps"] = dict(platoon)
+
+    _update_navigation_cache(agent_states, state["last_navigation"])
+    summary = _scenario_summary_from_step_info(step_info)
+    state["scenario_realized"].append(
+        bool(summary.get("scenario_realized", False))
+    )
+    state["functional_success"].append(
+        bool(summary.get("functional_success", False))
+    )
+    locked = bool(rule_maker.is_formation_locked)
+    state["formation_lock_states"].append(locked)
+    if locked:
+        ideal_gap = float(getattr(rule_maker, "ideal_following_distance_m", 10.0))
+        state["locked_spacing_errors_m"].extend(
+            abs(float(gap) - ideal_gap) for gap in platoon.values()
+        )
+        speeds = [
+            (
+                float(agent_states[agent_id]["speed_km_h"])
+                if isinstance(agent_states[agent_id], Mapping)
+                else float(agent_states[agent_id].speed_km_h)
+            )
+            / 3.6
+            for agent_id in AGENT_IDS
+        ]
+        state["locked_speed_spreads_mps"].append(max(speeds) - min(speeds))
+
+    controls = getattr(env, "_pending_low_level_actions", {}) or {}
+    for role, agent_id in enumerate(AGENT_IDS):
+        vehicle = agent_states[agent_id]
+        post_pose = _vehicle_pose(vehicle)
+        velocity = (post_pose[:2] - pre_poses[role, :2]) / dt_s
+        acceleration_world = (
+            velocity - state["previous_velocity"][agent_id]
+        ) / dt_s
+        forward = np.asarray(
+            [math.cos(post_pose[2]), math.sin(post_pose[2])], dtype=np.float64
+        )
+        lateral = np.asarray([-forward[1], forward[0]], dtype=np.float64)
+        longitudinal_acceleration = float(np.dot(acceleration_world, forward))
+        lateral_acceleration = float(np.dot(acceleration_world, lateral))
+        heading_delta = math.atan2(
+            math.sin(post_pose[2] - state["previous_heading"][agent_id]),
+            math.cos(post_pose[2] - state["previous_heading"][agent_id]),
+        )
+        yaw_rate = heading_delta / dt_s
+        comfort = state["comfort"][agent_id]
+        comfort["longitudinal_acceleration"].append(longitudinal_acceleration)
+        comfort["lateral_acceleration"].append(lateral_acceleration)
+        prior_acceleration = state["previous_longitudinal_acceleration"][agent_id]
+        if prior_acceleration is not None:
+            comfort["longitudinal_jerk"].append(
+                (longitudinal_acceleration - float(prior_acceleration)) / dt_s
+            )
+        comfort["yaw_rate"].append(yaw_rate)
+        prior_yaw_rate = state["previous_yaw_rate"][agent_id]
+        if prior_yaw_rate is not None:
+            comfort["yaw_acceleration"].append(
+                (yaw_rate - float(prior_yaw_rate)) / dt_s
+            )
+        control = np.asarray(
+            controls.get(agent_id, np.zeros((2,), dtype=np.float64)),
+            dtype=np.float64,
+        ).reshape(-1)
+        if control.shape != (2,) or not np.isfinite(control).all():
+            raise ModelEvaluationError("executed control must be finite [steer, throttle]")
+        slew = (control - state["previous_control"][agent_id]) / dt_s
+        comfort["steering_command_slew"].append(float(slew[0]))
+        comfort["throttle_command_slew"].append(float(slew[1]))
+        state["previous_velocity"][agent_id] = velocity
+        state["previous_heading"][agent_id] = float(post_pose[2])
+        state["previous_longitudinal_acceleration"][agent_id] = (
+            longitudinal_acceleration
+        )
+        state["previous_yaw_rate"][agent_id] = yaw_rate
+        state["previous_control"][agent_id] = control
+
+
+def _stable_success_time(
+    values: Sequence[bool], *, dt_s: float
+) -> tuple[bool, float | None]:
+    if not values or not values[-1]:
+        return False, None
+    index = len(values) - 1
+    while index > 0 and values[index - 1]:
+        index -= 1
+    return True, float((index + 1) * dt_s)
+
+
+def _formation_recovery(
+    lock_states: Sequence[bool], *, dt_s: float
+) -> dict[str, object]:
+    unlock_count = 0
+    unlock_start: int | None = None
+    completed_durations = []
+    for index, (previous, current) in enumerate(zip(lock_states, lock_states[1:]), start=1):
+        if previous and not current:
+            unlock_count += 1
+            unlock_start = index
+        elif not previous and current and unlock_start is not None:
+            completed_durations.append((index - unlock_start) * dt_s)
+            unlock_start = None
+    if unlock_count == 0:
+        success: bool | None = None
+        censored: bool | None = None
+        recovery_time: float | None = None
+    else:
+        success = unlock_start is None
+        censored = not success
+        recovery_time = (
+            float(np.mean(completed_durations))
+            if success and completed_durations
+            else None
+        )
+    return {
+        "unlock_count": int(unlock_count),
+        "unlocked_duration_s": float(sum(not value for value in lock_states[1:]) * dt_s),
+        "relock_recovery_success": success,
+        "recovery_censored": censored,
+        "relock_recovery_time_s": recovery_time,
+    }
+
+
+def _finish_episode_metrics(
+    state: Mapping[str, object],
+    *,
+    model_id: str,
+    scenario: Sequence[str],
+    seed: int,
+    dt_s: float,
+    executed_steps: int,
+    collision: bool,
+    out_of_road: bool,
+    role_collision: Mapping[str, bool],
+    role_out: Mapping[str, bool],
+    execution_rejected: bool,
+    rejection_steps: Sequence[int],
+) -> dict[str, object]:
+    initial_navigation = state["initial_navigation"]
+    last_navigation = state["last_navigation"]
+    per_agent_progress = {}
+    route_progress_m = []
+    route_progress_fraction = []
+    for agent_id in AGENT_IDS:
+        initial, total = initial_navigation[agent_id]
+        final, final_total = last_navigation[agent_id]
+        if not math.isclose(total, final_total, rel_tol=0.0, abs_tol=1.0e-6):
+            raise ModelEvaluationError(f"navigation total length changed for {agent_id}")
+        progress = float(final - initial)
+        remaining = max(total - initial, 1.0e-6)
+        fraction = float(np.clip(progress / remaining, 0.0, 1.0))
+        per_agent_progress[agent_id] = {
+            "route_progress_m": progress,
+            "route_progress_fraction": fraction,
+        }
+        route_progress_m.append(progress)
+        route_progress_fraction.append(fraction)
+    functional_values = list(state["functional_success"])
+    stable_success, first_stable_time = _stable_success_time(
+        functional_values, dt_s=dt_s
+    )
+    background_gaps = list(state["background_gap_step_min"])
+    platoon_gaps = list(state["platoon_gap_step_min"])
+    minimum_ttc = min(state["minimum_ttc_by_step"], default=None)
+    comfort = {"per_agent": {}}
+    comfort_specs = (
+        ("longitudinal_acceleration", "longitudinal_acceleration", "mps2"),
+        ("lateral_acceleration", "lateral_acceleration", "mps2"),
+        ("longitudinal_jerk", "longitudinal_jerk", "mps3"),
+        ("yaw_rate", "yaw_rate", "rad_s"),
+        ("yaw_acceleration", "yaw_acceleration", "rad_s2"),
+        ("steering_command_slew", "steering_command_slew", "per_s"),
+        ("throttle_command_slew", "throttle_command_slew", "per_s"),
+    )
+    for agent_id in AGENT_IDS:
+        values = state["comfort"][agent_id]
+        summary = {}
+        for source, stem, unit in comfort_specs:
+            summary.update(_absolute_distribution(values[source], stem, unit))
+        comfort["per_agent"][agent_id] = summary
+    timing = {
+        component: _timing_distribution(values)
+        for component, values in state["timing"].items()
+    }
+    timing["planning_tick_ms"]["over_200_ms_fraction"] = (
+        sum(value > 200.0 for value in state["timing"]["planning_tick_ms"])
+        / max(len(state["timing"]["planning_tick_ms"]), 1)
+    )
+    recovery = _formation_recovery(state["formation_lock_states"], dt_s=dt_s)
+    spacing = list(state["locked_spacing_errors_m"])
+    speed_spread = list(state["locked_speed_spreads_mps"])
+    model_ready_ticks = int(state["model_ready_ticks"])
+    rejection_tick_count = len(set(int(value) for value in rejection_steps))
+    return {
+        "model": model_id,
+        "scenario": str(scenario[0]),
+        "route": str(scenario[1]),
+        "seed": int(seed),
+        "dt_s": float(dt_s),
+        "steps": int(executed_steps),
+        "safety": {
+            "collision": bool(collision),
+            "out_of_road": bool(out_of_road),
+            "per_agent": {
+                agent_id: {
+                    "collision": bool(role_collision[agent_id]),
+                    "out_of_road": bool(role_out[agent_id]),
+                }
+                for agent_id in AGENT_IDS
+            },
+            "background_gap_violation": bool(
+                background_gaps and min(background_gaps) < BACKGROUND_GAP_THRESHOLD_M
+            ),
+            "background_gap_exposure_fraction": float(
+                state["background_gap_exposure_steps"] / max(executed_steps, 1)
+            ),
+            "background_gap_deficit_integral_m_s": float(
+                state["background_gap_deficit_integral_m_s"]
+            ),
+            "minimum_background_gap_m": min(background_gaps, default=None),
+            "platoon_gap_violation": bool(
+                platoon_gaps and min(platoon_gaps) < PLATOON_GAP_THRESHOLD_M
+            ),
+            "platoon_gap_exposure_fraction": float(
+                state["platoon_gap_exposure_steps"] / max(executed_steps, 1)
+            ),
+            "platoon_gap_deficit_integral_m_s": float(
+                state["platoon_gap_deficit_integral_m_s"]
+            ),
+            "minimum_platoon_gap_m": min(platoon_gaps, default=None),
+            "minimum_ttc_s": minimum_ttc,
+            "ttc_below_1_5_s_exposure_fraction": float(
+                state["ttc_exposure_steps"] / max(executed_steps, 1)
+            ),
+            "max_drac_mps2": max(state["drac_values"], default=0.0),
+            "execution_rejected": bool(execution_rejected),
+            "execution_rejection_tick_fraction": float(
+                rejection_tick_count / max(model_ready_ticks, 1)
+            ),
+        },
+        "efficiency": {
+            "scenario_realized": bool(any(state["scenario_realized"])),
+            "functional_success_final": bool(
+                functional_values[-1] if functional_values else False
+            ),
+            "functional_success_ever": bool(any(functional_values)),
+            "functional_success_stable": bool(stable_success),
+            "first_stable_success_time_s": first_stable_time,
+            "per_agent": per_agent_progress,
+            "team_mean_route_progress_m": float(np.mean(route_progress_m)),
+            "team_min_route_progress_m": float(min(route_progress_m)),
+            "team_mean_route_progress_fraction": float(
+                np.mean(route_progress_fraction)
+            ),
+            "team_min_route_progress_fraction": float(min(route_progress_fraction)),
+            "completion_time_s": first_stable_time,
+            "episode_duration_s": float(executed_steps * dt_s),
+        },
+        "cooperation": {
+            "locked_spacing_error_mean_m": (
+                float(np.mean(spacing)) if spacing else None
+            ),
+            "locked_spacing_error_p95_m": _nullable_percentile(spacing, 95),
+            "locked_spacing_error_max_m": max(spacing, default=None),
+            "locked_speed_spread_mean_mps": (
+                float(np.mean(speed_spread)) if speed_spread else None
+            ),
+            **recovery,
+        },
+        "comfort": comfort,
+        "timing": timing,
+    }
 
 
 def _initial_state_signature(env: object) -> np.ndarray:
@@ -782,6 +2046,74 @@ def _execution_mask_or_record_rejection(
         return None
 
 
+def _record_safe_stop_rejection(
+    raw: dict[str, object], rejection: Mapping[str, object]
+) -> bool:
+    """Record a RuleMaker/model mismatch and mark its episode as rejected."""
+
+    raw["execution_rejections"].append(dict(rejection))
+    return True
+
+
+def _formal_conclusions_eligible(run_mode: str, all_gates_passed: bool) -> bool:
+    return run_mode == "formal" and bool(all_gates_passed)
+
+
+def _timed_optimizer_call(
+    elapsed_ms: list[float],
+    function: Callable[..., object],
+    *args: object,
+    **kwargs: object,
+) -> object:
+    start = time.perf_counter()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        elapsed_ms[0] += (time.perf_counter() - start) * 1000.0
+
+
+def _map_trajectory_controls(
+    env: object,
+    trajectories: Mapping[str, np.ndarray],
+    *,
+    model_id: str,
+    scenario: Sequence[str],
+    seed: int,
+    step_index: int,
+) -> dict[str, np.ndarray]:
+    controls = {}
+    for agent_id in AGENT_IDS:
+        try:
+            control = np.asarray(
+                env.trajectory_to_control(agent_id, trajectories[agent_id]),
+                dtype=np.float32,
+            )
+        except Exception as exc:
+            raise ModelEvaluationError(
+                "trajectory control failed for "
+                f"model={model_id} scenario={scenario[0]} "
+                f"seed={seed} step={step_index} agent={agent_id}: {exc}"
+            ) from exc
+        if control.shape != (2,) or not np.isfinite(control).all():
+            raise ModelEvaluationError("trajectory control must be finite [steer, throttle]")
+        controls[agent_id] = control
+    return controls
+
+
+def _step_precomputed_trajectory_controls(
+    env: object,
+    trajectories: Mapping[str, np.ndarray],
+    controls: Mapping[str, np.ndarray],
+) -> tuple[object, object, object, object, object]:
+    """Execute exactly the controls already timed by the evaluator."""
+
+    env._pending_step_trajectories = {
+        agent_id: np.asarray(trajectories[agent_id], dtype=np.float32)
+        for agent_id in AGENT_IDS
+    }
+    return env.low_level_step(dict(controls), control_mode="trajectory")
+
+
 @torch.no_grad()
 def evaluate_models(
     manifest_path: Path,
@@ -879,6 +2211,8 @@ def evaluate_models(
                     )
                 rule_maker = make_rule_maker(dict(env.config))
                 rule_maker.reset(env, list(AGENT_IDS))
+                episode_state = _new_episode_state(env, rule_maker)
+                episode_rejection_start = len(raw["execution_rejections"])
                 committed_execution_id: int | None = None
                 committed_plan_actions: dict[str, int] | None = None
                 dt_s = simulator_decision_dt_s(env)
@@ -894,7 +2228,6 @@ def evaluate_models(
                 episode_min_platoon_gap = float("inf")
                 role_collision = {agent_id: False for agent_id in AGENT_IDS}
                 role_out = {agent_id: False for agent_id in AGENT_IDS}
-                recovered_at = None
                 previous_speed = {agent_id: None for agent_id in AGENT_IDS}
                 previous_heading = {
                     agent_id: float(env.agents[agent_id].heading_theta)
@@ -921,12 +2254,14 @@ def evaluate_models(
                             dtype=np.float64,
                         )
                         trajectories = None
+                        precomputed_controls = None
                         step_bev = None
                         builder.capture_state(env, step_index * dt_s)
                         if not builder.history_ready():
                             action = constant_velocity_actions(env)
                             selected_modes = None
                         else:
+                            episode_state["model_ready_ticks"] += 1
                             tick_start = time.perf_counter()
                             bev_start = tick_start
                             values = builder.build_model_inputs(env)
@@ -1063,8 +2398,11 @@ def evaluate_models(
                             )
                             pending_rule_acceptance = None
                             forced_safe_stop = False
+                            optimizer_elapsed_ms = [0.0]
                             try:
-                                optimization = optimize_selected_model_trajectories(
+                                optimization = _timed_optimizer_call(
+                                    optimizer_elapsed_ms,
+                                    optimize_selected_model_trajectories,
                                     values,
                                     raw_trajectories,
                                     selected_mode_array,
@@ -1083,7 +2421,9 @@ def evaluate_models(
                                 )
                                 episode_execution_rejected = True
                                 raw["rule_condition_failures"] += 1
-                                optimization = optimize_safe_stop_trajectories(
+                                optimization = _timed_optimizer_call(
+                                    optimizer_elapsed_ms,
+                                    optimize_safe_stop_trajectories,
                                     values, optimizer=trajectory_optimizer
                                 )
                                 forced_safe_stop = True
@@ -1111,19 +2451,24 @@ def evaluate_models(
                                     )
                                     if not compatible:
                                         raw["rule_condition_failures"] += 1
-                                        raw["execution_rejections"].append(
-                                            {
-                                                "scenario": scenario[0],
-                                                "route": scenario[1],
-                                                "seed": int(seed),
-                                                "step": int(step_index),
-                                                "stage": "active_commitment_compatibility",
-                                                "physical_actions": physical_actions,
-                                                "feedback_actions": feedback_actions,
-                                                "required_actions": rule_condition,
-                                            }
+                                        episode_execution_rejected = (
+                                            _record_safe_stop_rejection(
+                                                raw,
+                                                {
+                                                    "scenario": scenario[0],
+                                                    "route": scenario[1],
+                                                    "seed": int(seed),
+                                                    "step": int(step_index),
+                                                    "stage": "active_commitment_compatibility",
+                                                    "physical_actions": physical_actions,
+                                                    "feedback_actions": feedback_actions,
+                                                    "required_actions": rule_condition,
+                                                },
+                                            )
                                         )
-                                        optimization = optimize_safe_stop_trajectories(
+                                        optimization = _timed_optimizer_call(
+                                            optimizer_elapsed_ms,
+                                            optimize_safe_stop_trajectories,
                                             values, optimizer=trajectory_optimizer
                                         )
                                         forced_safe_stop = True
@@ -1143,18 +2488,23 @@ def evaluate_models(
                                     )
                                     if matched is None:
                                         raw["rule_condition_failures"] += 1
-                                        raw["execution_rejections"].append(
-                                            {
-                                                "scenario": scenario[0],
-                                                "route": scenario[1],
-                                                "seed": int(seed),
-                                                "step": int(step_index),
-                                                "stage": "proposal_action_match",
-                                                "physical_actions": physical_actions,
-                                                "feedback_actions": feedback_actions,
-                                            }
+                                        episode_execution_rejected = (
+                                            _record_safe_stop_rejection(
+                                                raw,
+                                                {
+                                                    "scenario": scenario[0],
+                                                    "route": scenario[1],
+                                                    "seed": int(seed),
+                                                    "step": int(step_index),
+                                                    "stage": "proposal_action_match",
+                                                    "physical_actions": physical_actions,
+                                                    "feedback_actions": feedback_actions,
+                                                },
+                                            )
                                         )
-                                        optimization = optimize_safe_stop_trajectories(
+                                        optimization = _timed_optimizer_call(
+                                            optimizer_elapsed_ms,
+                                            optimize_safe_stop_trajectories,
                                             values, optimizer=trajectory_optimizer
                                         )
                                         forced_safe_stop = True
@@ -1167,24 +2517,20 @@ def evaluate_models(
                             selected_modes = selected_mode_array.tolist()
                             action = joint_trajectory_action(trajectories)
                             control_start = time.perf_counter()
-                            for agent_id in AGENT_IDS:
-                                try:
-                                    control = env.trajectory_to_control(
-                                        agent_id, action[agent_id]
-                                    )
-                                except Exception as exc:
-                                    raise ModelEvaluationError(
-                                        "trajectory control failed for "
-                                        f"model={name} scenario={scenario[0]} "
-                                        f"seed={seed} step={step_index} "
-                                        f"agent={agent_id}: {exc}"
-                                    ) from exc
-                                if not np.isfinite(control).all():
-                                    raise ModelEvaluationError(
-                                        "trajectory control is non-finite"
-                                    )
+                            precomputed_controls = _map_trajectory_controls(
+                                env,
+                                action,
+                                model_id=name,
+                                scenario=scenario,
+                                seed=int(seed),
+                                step_index=step_index,
+                            )
+                            control_ms = (
+                                time.perf_counter() - control_start
+                            ) * 1000.0
                             if pending_rule_acceptance is not None:
                                 assert rule_batch is not None
+                                acceptance_start = time.perf_counter()
                                 try:
                                     rule_maker.accept_joint_action(
                                         rule_batch.batch_id,
@@ -1194,6 +2540,9 @@ def evaluate_models(
                                     raise ModelEvaluationError(
                                         f"diffusion proposal acceptance failed: {exc}"
                                     ) from exc
+                                rule_maker_ms += (
+                                    time.perf_counter() - acceptance_start
+                                ) * 1000.0
                                 raw["rule_proposal_matches"] += 1
                                 raw["rule_accepted_ranks"].append(
                                     int(pending_rule_acceptance.rank)
@@ -1203,21 +2552,23 @@ def evaluate_models(
                                     committed_plan_actions = joint_proposal_actions(
                                         pending_rule_acceptance, AGENT_IDS
                                     )
-                            control_ms = (time.perf_counter() - control_start) * 1000.0
-                            raw["timing"]["bev_build_ms"].append(bev_ms)
-                            raw["timing"]["model_inference_ms"].append(inference_ms)
-                            raw["timing"]["control_mapping_ms"].append(control_ms)
-                            raw["timing"]["planning_tick_ms"].append(
-                                max(
+                            timing_values = {
+                                "bev_build_ms": bev_ms,
+                                "model_inference_ms": inference_ms,
+                                "control_mapping_ms": control_ms,
+                                "planning_tick_ms": max(
                                     0.0,
                                     (time.perf_counter() - tick_start) * 1000.0
                                     - deterministic_probe_ms,
+                                ),
+                                "trajectory_optimizer_ms": optimizer_elapsed_ms[0],
+                                "rule_maker_ms": rule_maker_ms,
+                            }
+                            for timing_name, timing_value in timing_values.items():
+                                raw["timing"][timing_name].append(timing_value)
+                                episode_state["timing"][timing_name].append(
+                                    timing_value
                                 )
-                            )
-                            raw["timing"]["trajectory_optimizer_ms"].append(
-                                optimization.elapsed_ms
-                            )
-                            raw["timing"]["rule_maker_ms"].append(rule_maker_ms)
                             raw["trajectory_intervention_ade_m"].extend(
                                 optimization.intervention_ade_m.tolist()
                             )
@@ -1239,40 +2590,38 @@ def evaluate_models(
                                 pre_poses=pre_poses,
                                 trajectories=trajectories,
                             )
-                        _, reward, terminated, truncated, info = env.step(action)
+                        if precomputed_controls is None:
+                            _, reward, terminated, truncated, info = env.step(action)
+                        else:
+                            (
+                                _,
+                                reward,
+                                terminated,
+                                truncated,
+                                info,
+                            ) = _step_precomputed_trajectory_controls(
+                                env, action, precomputed_controls
+                            )
                         executed_steps += 1
                         live_agents = dict(env.agents)
-                        poses = {
-                            agent_id: np.asarray(
-                                live_agents[agent_id].position, dtype=np.float64
-                            )
-                            for agent_id in AGENT_IDS
-                            if agent_id in live_agents
-                        }
-                        adjacent_gaps = []
-                        for first, second in zip(AGENT_IDS, AGENT_IDS[1:]):
-                            if first in poses and second in poses:
-                                adjacent_gaps.append(
-                                    float(
-                                        np.linalg.norm(poses[first] - poses[second])
-                                        - 5.74
-                                    )
-                                )
-                            else:
-                                # Removal is represented by the authoritative
-                                # crash/out/arrival terminal flags below.  Do
-                                # not manufacture a geometric gap sample after
-                                # MetaDrive has deleted an agent object.
-                                adjacent_gaps.append(float("inf"))
-                        background_gap = _minimum_background_gap(env)
+                        _update_episode_state(
+                            episode_state,
+                            env=env,
+                            rule_maker=rule_maker,
+                            step_info=info,
+                            pre_poses=pre_poses,
+                            dt_s=dt_s,
+                        )
+                        background_gap = episode_state["current_background_gap"]
+                        platoon_gap = episode_state["current_platoon_gap"]
                         episode_min_background_gap = min(
                             episode_min_background_gap, background_gap
                         )
                         episode_min_platoon_gap = min(
-                            episode_min_platoon_gap, min(adjacent_gaps)
+                            episode_min_platoon_gap, platoon_gap
                         )
-                        episode_gap5 |= background_gap < 5.0
-                        episode_gap7 |= min(adjacent_gaps) < 7.0
+                        episode_gap5 |= background_gap < BACKGROUND_GAP_THRESHOLD_M
+                        episode_gap7 |= platoon_gap < PLATOON_GAP_THRESHOLD_M
                         formation_values = []
                         for role, agent_id in enumerate(AGENT_IDS):
                             agent_info = info.get(agent_id, {})
@@ -1306,9 +2655,11 @@ def evaluate_models(
                                 )
                             )
                             role_values["speed_km_h"].append(speed)
-                            role_values["minimum_gap_m"].append(
-                                min(min(adjacent_gaps), background_gap)
-                            )
+                            role_minimum_gap = min(platoon_gap, background_gap)
+                            if math.isfinite(role_minimum_gap):
+                                role_values["minimum_gap_m"].append(
+                                    role_minimum_gap
+                                )
                             formation_value = float(
                                 agent_info.get("formation_error", 0.0)
                             )
@@ -1347,11 +2698,6 @@ def evaluate_models(
                         raw["formation_spread"].append(
                             float(max(formation_values, default=0.0))
                         )
-                        if (
-                            recovered_at is None
-                            and max(formation_values, default=0.0) <= 2.0
-                        ):
-                            recovered_at = step_index * dt_s
                         raw["joint_reward"].append(
                             float(
                                 np.mean(
@@ -1412,13 +2758,32 @@ def evaluate_models(
                                 raw["episode_completed"] += 1
                                 episode_completed = True
                             break
-                    raw["recovery_time_s"].append(
-                        float(
-                            recovered_at
-                            if recovered_at is not None
-                            else cfg.max_steps * dt_s
-                        )
+                    episode_rejections = raw["execution_rejections"][
+                        episode_rejection_start:
+                    ]
+                    rejection_steps = [
+                        int(value.get("step", -1)) for value in episode_rejections
+                    ]
+                    episode_metrics = _finish_episode_metrics(
+                        episode_state,
+                        model_id=name,
+                        scenario=scenario,
+                        seed=int(seed),
+                        dt_s=dt_s,
+                        executed_steps=executed_steps,
+                        collision=episode_collision,
+                        out_of_road=episode_out,
+                        role_collision=role_collision,
+                        role_out=role_out,
+                        execution_rejected=episode_execution_rejected,
+                        rejection_steps=rejection_steps,
                     )
+                    raw["episode_metrics"].append(episode_metrics)
+                    recovery_time = episode_metrics["cooperation"][
+                        "relock_recovery_time_s"
+                    ]
+                    if recovery_time is not None:
+                        raw["recovery_time_s"].append(float(recovery_time))
                     raw["episode_lengths"].append(executed_steps)
                     raw["episode_collision"] += int(episode_collision)
                     raw["episode_out_of_road"] += int(episode_out)
@@ -1450,6 +2815,11 @@ def evaluate_models(
                                 if math.isfinite(episode_min_platoon_gap)
                                 else None
                             ),
+                            "functional_success_stable": bool(
+                                episode_metrics["efficiency"][
+                                    "functional_success_stable"
+                                ]
+                            ),
                         }
                     )
                     if artifact_writer is not None and artifact_episode_id is not None:
@@ -1460,11 +2830,14 @@ def evaluate_models(
         if artifact_writer is not None:
             summary["artifacts"] = artifact_writer.finalize()
         planning_p95 = summary["timing"]["planning_tick_ms"]["p95_ms"]
-        if planning_p95 > cfg.v2_planning_tick_p95_limit_ms:
-            raise ModelEvaluationError(
-                f"{name} v2 complete planning tick P95 {planning_p95:.2f}ms "
-                f"exceeds {cfg.v2_planning_tick_p95_limit_ms:.2f}ms"
-            )
+        latency_gate_passed = planning_p95 <= cfg.v2_planning_tick_p95_limit_ms
+        summary["gate_results"] = {
+            "planning_tick_p95_ms": {
+                "threshold_ms": cfg.v2_planning_tick_p95_limit_ms,
+                "observed_ms": planning_p95,
+                "passed": latency_gate_passed,
+            }
+        }
         summary["online_rule_maker_contract"] = {
             "implementation": "MultiAgentRuleMaker",
             "normal_planner_called": False,
@@ -1477,11 +2850,30 @@ def evaluate_models(
         summary["deterministic_probe"] = deterministic_probe
         model_reports[name] = summary
 
+    all_gates_passed = all(
+        bool(
+            model["gate_results"]["planning_tick_p95_ms"]["passed"]
+        )
+        for model in model_reports.values()
+    )
+    dt_values = {
+        float(episode["dt_s"])
+        for model in model_reports.values()
+        for episode in model["episode_metrics"]
+    }
+    if len(dt_values) != 1:
+        raise ModelEvaluationError("evaluation decision dt changed across episodes")
     report = {
-        "format": "bev_model_evaluation_v2",
+        "format": "bev_model_evaluation_v3",
+        "evaluation_status": (
+            "completed" if all_gates_passed else "completed_with_gate_failure"
+        ),
+        "all_gates_passed": all_gates_passed,
         "run_mode": cfg.run_mode,
         "diagnostic_only": cfg.run_mode != "formal",
-        "eligible_for_formal_conclusions": cfg.run_mode == "formal",
+        "eligible_for_formal_conclusions": _formal_conclusions_eligible(
+            cfg.run_mode, all_gates_passed
+        ),
         "common_scenarios": [list(value) for value in cfg.scenarios],
         "common_seeds": list(cfg.seeds),
         "common_noise_seed_by_episode": True,
@@ -1500,6 +2892,59 @@ def evaluate_models(
             "tf32": False,
         },
         "scenario_contract": primary_scenario_contract(cfg.scenarios),
+        "evaluation_protocol": {
+            "scenarios": [list(value) for value in cfg.scenarios],
+            "seeds": list(cfg.seeds),
+            "max_steps": int(cfg.max_steps),
+            "decision_dt_s": next(iter(dt_values)),
+            "statistical_unit": "episode",
+            "pairing_key": ["scenario", "route", "seed"],
+            "overall_aggregation": "episode_first_equal_weight_scenario_macro",
+            "background_gap_threshold_m": BACKGROUND_GAP_THRESHOLD_M,
+            "platoon_gap_threshold_m": PLATOON_GAP_THRESHOLD_M,
+            "gap_geometry": (
+                "shared-corridor oriented-box bumper gap with relative-heading support"
+            ),
+            "gap_exposure_denominator": "all executed simulator steps",
+            "gap_deficit_integral": (
+                "sum(max(threshold - minimum in-corridor gap at tick, 0) * dt)"
+            ),
+            "ttc_observation_threshold_s": TTC_OBSERVATION_THRESHOLD_S,
+            "ttc_no_closing_value": None,
+            "ttc_definition": (
+                "current bumper gap divided by positive closing speed for the same "
+                "pair in consecutive shared-corridor samples"
+            ),
+            "drac_definition": (
+                "closing_speed^2 / (2 * max(current_gap, 0.1m))"
+            ),
+            "route_progress_source": (
+                "navigation.travelled_length delta divided by reset-time remaining "
+                "navigation.total_length"
+            ),
+            "functional_success_stable": (
+                "earliest successful step whose suffix remains successful through "
+                "episode end"
+            ),
+            "formation_recovery": (
+                "RuleMaker locked-to-unlocked transition through subsequent relock; "
+                "episodes without unlock are not applicable and unfinished intervals "
+                "are censored"
+            ),
+            "comfort_source": (
+                "world pose, speed-equivalent reset velocity, decision dt, and executed "
+                "low-level control commands"
+            ),
+            "bootstrap_samples": BOOTSTRAP_SAMPLES,
+            "bootstrap_seed": BOOTSTRAP_SEED,
+            "rate_confidence_interval": "two-sided 95% Clopper-Pearson",
+            "comparison_confidence_interval": (
+                "95% scenario-stratified paired bootstrap"
+            ),
+            "planning_tick_p95_limit_ms": cfg.v2_planning_tick_p95_limit_ms,
+            "repeats_are_independent_samples": False,
+        },
+        "metric_definitions": _metric_definitions(),
         "grpo_reward_binding": common_reward_binding,
         "manifest": str(manifest.path),
         "manifest_sha256": file_sha256(manifest.path),
@@ -1515,7 +2960,6 @@ def evaluate_models(
             for spec in manifest.models
         },
         "models": model_reports,
-        "comparison_policy": _closed_loop_metric_policy(),
         "comparisons": compare_models(model_reports, manifest.comparisons),
     }
     output_path = Path(output_path)
@@ -1543,66 +2987,23 @@ def _behavior_sha256(report: Mapping[str, object]) -> str:
         value = models.get(name)
         if not isinstance(value, Mapping):
             raise ModelEvaluationError(f"evaluation report is missing {name}")
-        behavior[name] = {
-            key: item
-            for key, item in value.items()
-            if key not in ("timing", "artifacts")
-        }
+        behavior[name] = _without_timing(value)
     encoded = json.dumps(
         behavior, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _nested_float(value: Mapping[str, object], path: Sequence[str]) -> float:
-    current: object = value
-    for key in path:
-        if not isinstance(current, Mapping) or key not in current:
-            raise ModelEvaluationError(
-                f"repeat report is missing metric {'.'.join(path)}"
-            )
-        current = current[key]
-    if isinstance(current, bool) or not isinstance(current, (int, float)):
-        raise ModelEvaluationError(f"repeat metric {'.'.join(path)} is not numeric")
-    result = float(current)
-    if not math.isfinite(result):
-        raise ModelEvaluationError(f"repeat metric {'.'.join(path)} is non-finite")
-    return result
-
-
-def _normalized_mode_distribution(
-    model: Mapping[str, object], agent_id: str
-) -> dict[str, float]:
-    roles = model.get("roles")
-    if not isinstance(roles, Mapping) or not isinstance(roles.get(agent_id), Mapping):
-        raise ModelEvaluationError(f"repeat report is missing role {agent_id}")
-    distribution = roles[agent_id].get("mode_distribution")
-    if not isinstance(distribution, Mapping):
-        raise ModelEvaluationError("mode_distribution is missing")
-    counts = {str(key): int(value) for key, value in distribution.items()}
-    total = sum(counts.values())
-    return {key: value / max(total, 1) for key, value in counts.items()}
-
-
-def _episode_outcome_index(
-    model: Mapping[str, object],
-) -> dict[tuple[str, str, int], Mapping[str, object]]:
-    outcomes = model.get("episode_outcomes")
-    if not isinstance(outcomes, list):
-        raise ModelEvaluationError("repeat report has no episode outcomes")
-    indexed = {}
-    for item in outcomes:
-        if not isinstance(item, Mapping):
-            raise ModelEvaluationError("episode outcome must be an object")
-        key = (
-            str(item.get("scenario")),
-            str(item.get("route")),
-            int(item.get("seed")),
-        )
-        if key in indexed:
-            raise ModelEvaluationError(f"duplicate episode outcome {key}")
-        indexed[key] = item
-    return indexed
+def _without_timing(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_timing(item)
+            for key, item in value.items()
+            if key not in ("timing", "gate_results", "artifacts")
+        }
+    if isinstance(value, list):
+        return [_without_timing(item) for item in value]
+    return value
 
 
 def _conclusion_label(delta: float, tolerance: float) -> str:
@@ -1619,47 +3020,40 @@ def _exceeds_tolerance(delta: float, tolerance: float) -> bool:
     return delta > tolerance + epsilon
 
 
-def _closed_loop_metric_policy(
-    tolerance: ReproducibilityToleranceConfig | None = None,
-) -> dict[str, dict[str, object]]:
-    cfg = tolerance or ReproducibilityToleranceConfig()
-    return {
-        "joint_safety.collision_rate": {
-            "path": ("joint_safety", "collision_rate"),
-            "direction": "lower",
-            "equivalence_tolerance": 0.0,
-        },
-        "joint_safety.out_of_road_rate": {
-            "path": ("joint_safety", "out_of_road_rate"),
-            "direction": "lower",
-            "equivalence_tolerance": 0.0,
-        },
-        "joint_safety.gap_5m_violation_rate": {
-            "path": ("joint_safety", "gap_5m_violation_rate"),
-            "direction": "lower",
-            "equivalence_tolerance": cfg.rate,
-        },
-        "joint_safety.gap_7m_violation_rate": {
-            "path": ("joint_safety", "gap_7m_violation_rate"),
-            "direction": "lower",
-            "equivalence_tolerance": cfg.rate,
-        },
-        "formation.mean_error_m": {
-            "path": ("formation", "mean_error_m"),
-            "direction": "lower",
-            "equivalence_tolerance": cfg.distance_m,
-        },
-        "efficiency.completion_rate": {
-            "path": ("efficiency", "completion_rate"),
-            "direction": "higher",
-            "equivalence_tolerance": cfg.rate,
-        },
-        "efficiency.joint_reward_mean": {
-            "path": ("efficiency", "joint_reward_mean"),
-            "direction": "higher",
-            "equivalence_tolerance": cfg.reward,
-        },
-    }
+def _repeat_metric_tolerance(
+    metric: str, unit: str, cfg: ReproducibilityToleranceConfig
+) -> float:
+    if unit == "fraction":
+        return cfg.rate if metric.endswith("_rate") else cfg.fraction
+    if unit == "m":
+        return cfg.distance_m
+    if unit == "km/h":
+        return cfg.speed_km_h
+    if unit == "reward":
+        return cfg.reward
+    return cfg.comfort
+
+
+def _critical_repeat_episode_paths() -> tuple[tuple[str, ...], ...]:
+    paths: list[tuple[str, ...]] = [
+        ("safety", "collision"),
+        ("safety", "out_of_road"),
+        ("safety", "execution_rejected"),
+        ("efficiency", "scenario_realized"),
+        ("efficiency", "functional_success_final"),
+        ("efficiency", "functional_success_ever"),
+        ("efficiency", "functional_success_stable"),
+        ("cooperation", "relock_recovery_success"),
+        ("cooperation", "recovery_censored"),
+    ]
+    for agent_id in AGENT_IDS:
+        paths.extend(
+            (
+                ("safety", "per_agent", agent_id, "collision"),
+                ("safety", "per_agent", agent_id, "out_of_road"),
+            )
+        )
+    return tuple(paths)
 
 
 def compare_models(
@@ -1667,30 +3061,48 @@ def compare_models(
     comparisons: Sequence[ComparisonSpec],
     tolerance: ReproducibilityToleranceConfig | None = None,
 ) -> dict[str, object]:
-    policy = _closed_loop_metric_policy(tolerance)
+    del tolerance
+    policy = _closed_loop_metric_policy()
     results = {}
     for comparison in comparisons:
         baseline = models.get(comparison.baseline)
         candidate = models.get(comparison.candidate)
         if not isinstance(baseline, Mapping) or not isinstance(candidate, Mapping):
             raise ModelEvaluationError("comparison model set is incomplete")
+        baseline_episodes = _paired_episode_index(baseline)
+        candidate_episodes = _paired_episode_index(candidate)
+        if baseline_episodes.keys() != candidate_episodes.keys():
+            raise ModelEvaluationError(
+                f"comparison {comparison.comparison_id} episode sets do not match"
+            )
         metric_results = {}
         for metric, rule in policy.items():
-            path = rule["path"]
+            path = rule["episode_path"]
             direction = str(rule["direction"])
-            equivalence_tolerance = float(rule["equivalence_tolerance"])
-            baseline_value = _nested_float(baseline, path)
-            candidate_value = _nested_float(candidate, path)
-            raw_delta = candidate_value - baseline_value
-            improvement = raw_delta if direction == "higher" else -raw_delta
+            paired = []
+            for key in baseline_episodes:
+                baseline_value = _episode_value(baseline_episodes[key], path)
+                candidate_value = _episode_value(candidate_episodes[key], path)
+                if baseline_value is None or candidate_value is None:
+                    continue
+                paired.append(
+                    (
+                        key[0],
+                        float(baseline_value),
+                        float(candidate_value),
+                    )
+                )
+            baseline_value, candidate_value, raw_delta, ci95 = (
+                _paired_scenario_macro_bootstrap(paired, metric=metric)
+            )
             metric_results[metric] = {
                 "baseline": baseline_value,
                 "candidate": candidate_value,
                 "candidate_minus_baseline": raw_delta,
-                "improvement": improvement,
+                "unit": str(rule["unit"]),
                 "direction": direction,
-                "equivalence_tolerance": equivalence_tolerance,
-                "conclusion": _conclusion_label(improvement, equivalence_tolerance),
+                "n_pairs": len(paired),
+                "ci95": ci95,
             }
         results[comparison.comparison_id] = {
             "baseline": comparison.baseline,
@@ -1700,43 +3112,114 @@ def compare_models(
     return results
 
 
-def _report_comparison_specs(
-    report: Mapping[str, object],
-) -> tuple[ComparisonSpec, ...]:
-    values = report.get("comparisons")
-    if not isinstance(values, Mapping):
-        raise ModelEvaluationError("evaluation report comparisons are missing")
-    specs = []
-    for comparison_id, value in values.items():
-        if not isinstance(comparison_id, str) or not isinstance(value, Mapping):
-            raise ModelEvaluationError("evaluation report comparison is invalid")
-        baseline = value.get("baseline")
-        candidate = value.get("candidate")
-        if not isinstance(baseline, str) or not isinstance(candidate, str):
-            raise ModelEvaluationError("evaluation report comparison ids are invalid")
-        specs.append(ComparisonSpec(comparison_id, baseline, candidate))
-    return tuple(specs)
+def _paired_episode_index(
+    model: Mapping[str, object],
+) -> dict[tuple[str, str, int], Mapping[str, object]]:
+    episodes = model.get("episode_metrics")
+    if not isinstance(episodes, list):
+        raise ModelEvaluationError("comparison model has no episode_metrics")
+    indexed = {}
+    for episode in episodes:
+        if not isinstance(episode, Mapping):
+            raise ModelEvaluationError("episode_metrics row must be an object")
+        key = (
+            str(episode.get("scenario")),
+            str(episode.get("route")),
+            int(episode.get("seed")),
+        )
+        if key in indexed:
+            raise ModelEvaluationError(f"duplicate comparison episode {key}")
+        indexed[key] = episode
+    return indexed
+
+
+def _paired_scenario_macro_bootstrap(
+    paired: Sequence[tuple[str, float, float]], *, metric: str
+) -> tuple[float | None, float | None, float | None, list[float] | None]:
+    if not paired:
+        return None, None, None, None
+    grouped: dict[str, list[tuple[float, float]]] = {}
+    for scenario, baseline, candidate in paired:
+        grouped.setdefault(scenario, []).append((baseline, candidate))
+    baseline_value = float(
+        np.mean(
+            [np.mean([value[0] for value in values]) for values in grouped.values()]
+        )
+    )
+    candidate_value = float(
+        np.mean(
+            [np.mean([value[1] for value in values]) for values in grouped.values()]
+        )
+    )
+    raw_delta = candidate_value - baseline_value
+    seed_offset = int(hashlib.sha256(metric.encode("utf-8")).hexdigest()[:8], 16)
+    generator = np.random.default_rng(BOOTSTRAP_SEED + seed_offset)
+    arrays = {
+        scenario: np.asarray(values, dtype=np.float64)
+        for scenario, values in grouped.items()
+    }
+    scenario_bootstrap = []
+    for values in arrays.values():
+        deltas = values[:, 1] - values[:, 0]
+        indices = generator.integers(
+            0, len(values), size=(BOOTSTRAP_SAMPLES, len(values))
+        )
+        scenario_bootstrap.append(np.mean(deltas[indices], axis=1))
+    bootstrap = np.mean(np.stack(scenario_bootstrap, axis=0), axis=0)
+    return (
+        baseline_value,
+        candidate_value,
+        raw_delta,
+        [
+            float(np.percentile(bootstrap, 2.5)),
+            float(np.percentile(bootstrap, 97.5)),
+        ],
+    )
 
 
 def _report_conclusions(
     report: Mapping[str, object], cfg: ReproducibilityToleranceConfig
 ) -> dict[str, str]:
-    models = report.get("models")
-    if not isinstance(models, Mapping):
-        raise ModelEvaluationError("repeat report has no models")
-    comparisons = compare_models(models, _report_comparison_specs(report), cfg)
-    return {
-        f"{comparison_id}/{metric}": str(metric_result["conclusion"])
-        for comparison_id, comparison in comparisons.items()
-        for metric, metric_result in comparison["metrics"].items()
-    }
+    comparisons = report.get("comparisons")
+    if not isinstance(comparisons, Mapping):
+        raise ModelEvaluationError("repeat report has no comparisons")
+    conclusions = {}
+    for comparison_id, comparison in comparisons.items():
+        if not isinstance(comparison, Mapping) or not isinstance(
+            comparison.get("metrics"), Mapping
+        ):
+            raise ModelEvaluationError("repeat report comparison is invalid")
+        for metric, metric_result in comparison["metrics"].items():
+            if not isinstance(metric_result, Mapping):
+                raise ModelEvaluationError("repeat comparison metric is invalid")
+            if str(metric).startswith("timing."):
+                continue
+            delta = metric_result["candidate_minus_baseline"]
+            if delta is None:
+                conclusions[f"{comparison_id}/{metric}"] = "not_applicable"
+                continue
+            unit = str(metric_result["unit"])
+            tolerance = _repeat_metric_tolerance(str(metric), unit, cfg)
+            direction = str(metric_result["direction"])
+            if direction == "descriptive":
+                conclusions[f"{comparison_id}/{metric}"] = (
+                    "stable"
+                    if not _exceeds_tolerance(abs(float(delta)), tolerance)
+                    else "changed"
+                )
+            else:
+                improvement = float(delta) if direction == "higher" else -float(delta)
+                conclusions[f"{comparison_id}/{metric}"] = _conclusion_label(
+                    improvement, tolerance
+                )
+    return conclusions
 
 
 def compare_repeated_reports(
     reports: Sequence[Mapping[str, object]],
     tolerance: ReproducibilityToleranceConfig | None = None,
 ) -> dict[str, object]:
-    """Compare closed-loop repeats without requiring bit-exact physics."""
+    """Compare every v3 non-timing episode metric across fixed-process repeats."""
 
     if len(reports) < 2:
         raise ModelEvaluationError("repeat comparison requires at least two reports")
@@ -1753,14 +3236,13 @@ def compare_repeated_reports(
         or set(model_order) != set(baseline_models)
     ):
         raise ModelEvaluationError("baseline model_order is invalid")
+    baseline_conclusions = _report_conclusions(baseline, cfg)
     for repeat_index, report in enumerate(reports[1:], start=2):
         if report.get("model_order") != model_order:
             raise ModelEvaluationError(
                 f"repeat {repeat_index} model_order does not match baseline"
             )
-        if set(_report_conclusions(report, cfg)) != set(
-            _report_conclusions(baseline, cfg)
-        ):
+        if set(_report_conclusions(report, cfg)) != set(baseline_conclusions):
             raise ModelEvaluationError(
                 f"repeat {repeat_index} comparison set does not match baseline"
             )
@@ -1775,40 +3257,22 @@ def compare_repeated_reports(
         and bool(initial_scene_hashes[0])
         and len(set(initial_scene_hashes)) == 1
     )
-    critical_mismatches = []
-    boundary_disagreements = []
-    continuous_violations = []
-    probe_evidence = {}
-
-    scalar_metrics = (
-        (("joint_safety", "gap_5m_violation_rate"), cfg.rate),
-        (("joint_safety", "gap_7m_violation_rate"), cfg.rate),
-        (("formation", "mean_error_m"), cfg.distance_m),
-        (("formation", "p95_error_m"), cfg.distance_m),
-        (("formation", "maximum_spread_m"), cfg.distance_m),
-        (("formation", "recovery_time_mean_s"), cfg.comfort),
-        (("efficiency", "joint_reward_mean"), cfg.reward),
-        (("execution", "mean_modes_removed_per_joint_state"), cfg.fraction),
-        (("trajectory_optimization", "intervention_ade_mean_m"), cfg.distance_m),
-        (("trajectory_optimization", "intervention_fde_mean_m"), cfg.distance_m),
-        (("trajectory_optimization", "retained_raw_fraction_mean"), cfg.fraction),
-    )
-    role_metrics = (
-        ("progress_mean_m", cfg.distance_m),
-        ("speed_mean_km_h", cfg.speed_km_h),
-        ("minimum_gap_m", cfg.distance_m),
-        ("stop_rate", cfg.fraction),
-        ("acceleration_abs_mean_mps2", cfg.comfort),
-        ("jerk_abs_mean", cfg.comfort),
-        ("yaw_rate_abs_mean_rad_s", cfg.comfort),
-        ("steering_change_abs_mean", cfg.comfort),
-    )
+    critical_mismatches: list[str] = []
+    boundary_disagreements: list[str] = []
+    continuous_violations: list[str] = []
+    probe_evidence: dict[str, object] = {}
+    critical_paths = set(_critical_repeat_episode_paths())
+    metric_policy = {
+        metric: rule
+        for metric, rule in _closed_loop_metric_policy().items()
+        if not metric.startswith("timing.")
+    }
 
     for model_name in model_order:
         baseline_model = baseline_models.get(model_name)
         if not isinstance(baseline_model, Mapping):
             raise ModelEvaluationError(f"baseline is missing {model_name}")
-        baseline_outcomes = _episode_outcome_index(baseline_model)
+        baseline_episodes = _paired_episode_index(baseline_model)
         baseline_probe = baseline_model.get("deterministic_probe")
         if not isinstance(baseline_probe, Mapping):
             raise ModelEvaluationError("deterministic probe is missing")
@@ -1820,96 +3284,81 @@ def compare_repeated_reports(
                 raise ModelEvaluationError(
                     f"repeat {repeat_index} is missing {model_name}"
                 )
-            outcomes = _episode_outcome_index(model)
-            if outcomes.keys() != baseline_outcomes.keys():
+            episodes = _paired_episode_index(model)
+            if episodes.keys() != baseline_episodes.keys():
                 critical_mismatches.append(
                     f"{model_name}/repeat_{repeat_index}/episode_set"
                 )
-            for key in baseline_outcomes.keys() & outcomes.keys():
-                first = baseline_outcomes[key]
-                second = outcomes[key]
-                for field in (
-                    "collision",
-                    "out_of_road",
-                    "completed",
-                    "execution_rejected",
-                ):
-                    if bool(first.get(field)) != bool(second.get(field)):
+            for key in baseline_episodes.keys() & episodes.keys():
+                first = baseline_episodes[key]
+                second = episodes[key]
+                key_label = f"{key[0]}/{key[1]}/{key[2]}"
+                for path in critical_paths:
+                    if _episode_value(first, path) != _episode_value(second, path):
                         critical_mismatches.append(
-                            f"{model_name}/repeat_{repeat_index}/{key}/{field}"
+                            f"{model_name}/repeat_{repeat_index}/{key_label}/"
+                            f"{'.'.join(path)}"
                         )
-                for field, threshold in (
-                    ("gap_5m_violation", 5.0),
-                    ("gap_7m_violation", 7.0),
-                ):
-                    if bool(first.get(field)) != bool(second.get(field)):
-                        distance_field = (
-                            "minimum_background_gap_m"
-                            if field == "gap_5m_violation"
-                            else "minimum_platoon_gap_m"
-                        )
-                        values = (first.get(distance_field), second.get(distance_field))
-                        near_boundary = all(
-                            isinstance(value, (int, float))
+                gap_boundary_paths = (
+                    (
+                        ("safety", "background_gap_violation"),
+                        ("safety", "minimum_background_gap_m"),
+                        BACKGROUND_GAP_THRESHOLD_M,
+                    ),
+                    (
+                        ("safety", "platoon_gap_violation"),
+                        ("safety", "minimum_platoon_gap_m"),
+                        PLATOON_GAP_THRESHOLD_M,
+                    ),
+                )
+                for flag_path, distance_path, threshold in gap_boundary_paths:
+                    first_flag = _episode_value(first, flag_path)
+                    second_flag = _episode_value(second, flag_path)
+                    if first_flag == second_flag:
+                        continue
+                    distances = (
+                        _episode_value(first, distance_path),
+                        _episode_value(second, distance_path),
+                    )
+                    target = (
+                        boundary_disagreements
+                        if all(
+                            value is not None
                             and abs(float(value) - threshold) <= cfg.distance_m
-                            for value in values
+                            for value in distances
                         )
-                        target = (
-                            boundary_disagreements
-                            if near_boundary
-                            else critical_mismatches
-                        )
-                        target.append(
-                            f"{model_name}/repeat_{repeat_index}/{key}/{field}"
-                        )
-                for distance_field in (
-                    "minimum_background_gap_m",
-                    "minimum_platoon_gap_m",
-                ):
-                    first_value = first.get(distance_field)
-                    second_value = second.get(distance_field)
+                        else critical_mismatches
+                    )
+                    target.append(
+                        f"{model_name}/repeat_{repeat_index}/{key_label}/"
+                        f"{'.'.join(flag_path)}"
+                    )
+                for metric, rule in metric_policy.items():
+                    path = tuple(rule["episode_path"])
+                    if path in critical_paths or path in {
+                        ("safety", "background_gap_violation"),
+                        ("safety", "platoon_gap_violation"),
+                    }:
+                        continue
+                    first_value = _episode_value(first, path)
+                    second_value = _episode_value(second, path)
                     if first_value is None and second_value is None:
                         continue
-                    if (
-                        first_value is None
-                        or second_value is None
-                        or _exceeds_tolerance(
-                            abs(float(first_value) - float(second_value)),
-                            cfg.distance_m,
-                        )
-                    ):
+                    allowed = _repeat_metric_tolerance(
+                        metric, str(rule["unit"]), cfg
+                    )
+                    if first_value is None or second_value is None:
                         continuous_violations.append(
-                            f"{model_name}/repeat_{repeat_index}/{key}/{distance_field}"
+                            f"{model_name}/repeat_{repeat_index}/{key_label}/{metric}="
+                            "applicability_changed"
                         )
-            for path, allowed in scalar_metrics:
-                delta = abs(
-                    _nested_float(model, path) - _nested_float(baseline_model, path)
-                )
-                if _exceeds_tolerance(delta, allowed):
-                    continuous_violations.append(
-                        f"{model_name}/repeat_{repeat_index}/{'.'.join(path)}={delta:.6g}>{allowed:.6g}"
-                    )
-            for agent_id in AGENT_IDS:
-                for metric, allowed in role_metrics:
-                    path = ("roles", agent_id, metric)
-                    delta = abs(
-                        _nested_float(model, path) - _nested_float(baseline_model, path)
-                    )
+                        continue
+                    delta = abs(float(first_value) - float(second_value))
                     if _exceeds_tolerance(delta, allowed):
                         continuous_violations.append(
-                            f"{model_name}/repeat_{repeat_index}/{'.'.join(path)}={delta:.6g}>{allowed:.6g}"
+                            f"{model_name}/repeat_{repeat_index}/{key_label}/{metric}="
+                            f"{delta:.6g}>{allowed:.6g}"
                         )
-                first_modes = _normalized_mode_distribution(baseline_model, agent_id)
-                second_modes = _normalized_mode_distribution(model, agent_id)
-                total_variation = 0.5 * sum(
-                    abs(first_modes.get(mode, 0.0) - second_modes.get(mode, 0.0))
-                    for mode in first_modes.keys() | second_modes.keys()
-                )
-                if _exceeds_tolerance(total_variation, cfg.fraction):
-                    continuous_violations.append(
-                        f"{model_name}/repeat_{repeat_index}/{agent_id}/mode_total_variation="
-                        f"{total_variation:.6g}>{cfg.fraction:.6g}"
-                    )
             probe = model.get("deterministic_probe")
             if not isinstance(probe, Mapping):
                 raise ModelEvaluationError("deterministic probe is missing")
@@ -1996,11 +3445,20 @@ def evaluate_models_repeated(
         hashes.append(_behavior_sha256(report))
     exact_match = len(set(hashes)) == 1
     tolerance_comparison = compare_repeated_reports(reports, tolerance)
+    all_gates_passed = all(
+        bool(report["all_gates_passed"]) for report in reports
+    ) and bool(tolerance_comparison["tolerance_gate_passed"])
     combined = {
-        "format": "bev_model_fixed_process_repeat_v2",
+        "format": "bev_model_fixed_process_repeat_v3",
+        "evaluation_status": (
+            "completed" if all_gates_passed else "completed_with_gate_failure"
+        ),
+        "all_gates_passed": all_gates_passed,
         "run_mode": config.run_mode,
         "diagnostic_only": config.run_mode != "formal",
-        "eligible_for_formal_conclusions": config.run_mode == "formal",
+        "eligible_for_formal_conclusions": _formal_conclusions_eligible(
+            config.run_mode, all_gates_passed
+        ),
         "repeat_count": int(repeats),
         "fixed_process_reproducibility": {
             "exact_behavior_match": exact_match,
@@ -2009,9 +3467,10 @@ def evaluate_models_repeated(
             "tolerance_comparison": tolerance_comparison,
         },
         "model_order": reports[0]["model_order"],
+        "evaluation_protocol": reports[0]["evaluation_protocol"],
+        "metric_definitions": reports[0]["metric_definitions"],
         "grpo_reward_binding": reports[0].get("grpo_reward_binding"),
         "models": reports[0]["models"],
-        "comparison_policy": reports[0]["comparison_policy"],
         "comparisons": reports[0]["comparisons"],
         "repeat_reports": reports,
     }
@@ -2072,7 +3531,7 @@ def main() -> int:
         )
     )
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
+    return 0 if report["all_gates_passed"] else GATE_FAILURE_EXIT_CODE
 
 
 if __name__ == "__main__":
