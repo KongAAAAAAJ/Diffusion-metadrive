@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-29T19:40:09+08:00",
-  "status": "v2_only_training_evaluation_cleanup_implemented_bounded_latency_gate_failed_run3_qualification_pending",
+  "updated_at": "2026-08-29T20:10:26+08:00",
+  "status": "legacy_full_evaluation_cleanup_complete_run3_qualification_entry_reimplementation_required",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -28,7 +28,7 @@
     "comparison_boxplot_layout": "<stage1_run_root>/evaluation/reward_compare/boxplots",
     "comparison_boxplot_count": 9,
     "historical_five_dimension_implementation_evidence": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
-    "historical_five_dimension_policy": "Preserve the old v3 report, tables, charts, evaluator, chart generator, and all existing output as historical and Stage1-evaluation evidence; scripts/run_eval_grpo.sh no longer invokes them.",
+    "historical_five_dimension_policy": "Superseded on 2026-08-29 by explicit user authorization to permanently delete the legacy evaluation/compare data and remove the legacy full evaluator and chart generator. Historical JSON implementation reports remain as records of past work, but their deleted commands and artifacts are no longer reproducible.",
     "current_migration": "Move only the completed Stage1 run_3 sourced GRPO run_4 into bev_diffusion_stage1/run_3/grpo_open/run_4; preserve Stage1 run_2 sourced run_1/run_2 and the empty historical run_3 in their existing root.",
     "compatibility_policy": "Do not create a symlink or duplicate compatibility copy at the former run_4 path.",
     "semantic_boundary": "Checkpoint payloads, reward/application contracts, diagnostic/formal eligibility, and the active Stage1 qualification gate are unchanged.",
@@ -66,9 +66,24 @@
     ],
     "component_semantics": "The eight component columns are signed weighted contributions and must sum to total_reward within 1e-6.",
     "outputs": "Exactly one reward CSV, two operational logs, and one two-checkpoint PNG boxplot for total reward and each of the eight signed sub-rewards.",
-    "history_policy": "Do not delete or overwrite historical v3 reports, charts, tables, videos, or other evaluation output; the new launcher writes to the separate reward_compare root and atomically replaces only its own completed step_rewards.csv.",
+    "history_policy": "The separate reward_compare output remains active. The legacy evaluation/compare output and its full evaluator/chart implementation are authorized for permanent deletion; historical repository reports remain descriptive records only.",
     "formal_boundary": "Diagnostic comparison only. It does not qualify either checkpoint, replace the future three-model formal evaluation matrix, or change the strict Stage1 run_3 hard gate.",
     "implementation_evidence": "evaluation/STAGE1_GRPO_REWARD_ONLY_EVALUATION_IMPLEMENTATION_REPORT.json"
+  },
+  "legacy_evaluation_cleanup": {
+    "authorized_on": "2026-08-29",
+    "status": "complete",
+    "external_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare",
+    "external_output_scope": "Delete only the resolved legacy compare directory; preserve sibling stage1_a_diagnostic and the separate reward_compare output.",
+    "production_modules": [
+      "evaluation/bev_four_model_evaluator.py",
+      "evaluation/bev_comparison_charts.py"
+    ],
+    "dependent_legacy_launcher": "scripts/run_stage1_a_evaluation.sh",
+    "implementation_policy": "Move the runtime helpers required by evaluation.bev_reward_comparison into that focused module, then delete the obsolete full evaluator, chart generator, dedicated tests, and legacy Stage1 launcher without a compatibility wrapper.",
+    "qualification_impact": "The reward-only comparator is not a Stage1 qualification evaluator. After cleanup, strict Stage1 run_3 qualification remains blocked on implementing a replacement full S5-S9 closed-loop qualification entry.",
+    "verification": "The legacy output root is absent while stage1_a_diagnostic remains; 42 focused tests passed, static checks passed, and both real checkpoints load through the independent reward-only evaluator on CPU.",
+    "evidence": "evaluation/STAGE1_GRPO_LEGACY_EVALUATION_CLEANUP_REPORT.json"
   },
   "trigger_phrases": [
     "项目计划",
@@ -655,7 +670,7 @@
     "surrogate_update_during_grpo": false
   },
   "formal_evaluation": {
-    "current_grpo_diagnostic_entrypoint_boundary": "scripts/run_eval_grpo.sh now implements only the separate two-checkpoint raw-tau_d reward distribution diagnostic. The formal three-model metric matrix below remains a future contract and continues to use the preserved full evaluator/chart modules.",
+    "current_grpo_diagnostic_entrypoint_boundary": "scripts/run_eval_grpo.sh implements only the separate two-checkpoint raw-tau_d reward distribution diagnostic. The legacy full evaluator/chart implementation has been removed under explicit authorization, so the formal three-model metric matrix below is a future contract with no current runnable implementation.",
     "main_model_matrix": [
       "Stage1-A",
       "Stage1-A+GRPO-Open",
@@ -677,7 +692,9 @@
     "report_format": "bev_model_evaluation_v3",
     "repeat_report_format": "bev_model_fixed_process_repeat_v3",
     "comparison_statistics": "Episode-first aggregation; binary x/n with two-sided 95% Clopper-Pearson intervals; continuous equal-weight S5-S9 scenario macro means; strict (scenario, route, seed) paired deltas with 10000-sample fixed-seed scenario-stratified bootstrap 95% intervals; REPEATS verifies reproducibility and never expands the statistical sample.",
-    "chart_generator": "evaluation.bev_comparison_charts",
+    "implementation_status": "pending_reimplementation_after_legacy_full_evaluator_cleanup",
+    "chart_generator": null,
+    "chart_generator_status": "pending_reimplementation",
     "chart_outputs": [
       "comparison_overview",
       "safety_rates",
@@ -781,5 +798,5 @@
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
   "implementation_evidence_sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
-  "current_next_action": "In a separate execution thread, qualify the completed Stage1 run_3 checkpoint under strict reload, open-loop, and full S5-S9 closed-loop gates. Keep the bounded 202.51 ms result failed until a qualifying run passes the unchanged 200 ms complete-planning-tick gate."
+  "current_next_action": "Implement a replacement strict Stage1 v2 run_3 qualification entry for reload, open-loop, and full S5-S9 closed-loop gates; then run qualification. The reward-only GRPO comparison cannot satisfy this gate, and the bounded 202.51 ms result remains failed until a qualifying run passes the unchanged 200 ms complete-planning-tick gate."
 }

@@ -9,8 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import argparse
 import csv
+import hashlib
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
@@ -20,14 +22,6 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import torch
 
-from evaluation.bev_four_model_evaluator import (
-    _configure_deterministic_inference,
-    _initial_scene_sha256,
-    _initial_state_signature,
-    _load_policy,
-    _sync,
-    _validate_common_reward_binding,
-)
 from evaluation.bev_model_manifest import ModelSpec, file_sha256
 from expert_dataset.collect_joint_bev import (
     JointBEVSampleBuilder,
@@ -35,13 +29,19 @@ from expert_dataset.collect_joint_bev import (
     simulator_decision_dt_s,
 )
 from models.bev_planner.joint_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+    JOINT_REWARD_CONTRACT,
+    JOINT_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
+    JointRewardError,
     JointRewardResult,
     JointTrajectoryProxyReward,
     joint_reward_config_sha256,
 )
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizer,
+    KinematicTrajectoryOptimizerConfig,
     TrajectoryOptimizationError,
 )
 from models.decisioner.rule_decisioner import (
@@ -59,6 +59,7 @@ from scenarios.bev_round13_contract import (
     deterministic_initial_speed_km_h,
     primary_scenario_contract,
 )
+from train.bev_joint_grpo import load_grpo_checkpoint, load_stage1_a_for_grpo
 from train.train_bev_diffusion_stage1 import planner_forward_from_batch
 from train.train_bev_joint_grpo_online import (
     AGENT_IDS,
@@ -96,6 +97,302 @@ CSV_COLUMNS = (
 
 class RewardComparisonError(RuntimeError):
     """Raised when a reward-only comparison violates its frozen contract."""
+
+
+def _sync(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _configure_deterministic_inference(device: torch.device) -> None:
+    if os.environ.get("PYTHONHASHSEED") != "0":
+        raise RewardComparisonError(
+            "reward comparison requires PYTHONHASHSEED=0 at process startup"
+        )
+    torch.use_deterministic_algorithms(True)
+    torch.manual_seed(0)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(0)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+
+
+def _surrounding_vehicles(env: object) -> tuple[object, ...]:
+    seen: set[int] = set()
+    vehicles: list[object] = []
+    agents = getattr(env, "agents", {}) or {}
+    agent_values = agents.values() if isinstance(agents, Mapping) else agents
+    engine = getattr(env, "engine", None)
+    traffic_manager = getattr(engine, "traffic_manager", None)
+    traffic = getattr(traffic_manager, "traffic_vehicles", None)
+    if traffic is None:
+        traffic = getattr(traffic_manager, "_traffic_vehicles", ()) or ()
+    try:
+        traffic_values = tuple(traffic)
+    except TypeError:
+        traffic_values = ()
+    for vehicle in (*tuple(agent_values), *traffic_values):
+        if vehicle is None or id(vehicle) in seen:
+            continue
+        seen.add(id(vehicle))
+        vehicles.append(vehicle)
+    return tuple(vehicles)
+
+
+def _initial_state_signature(env: object) -> np.ndarray:
+    rows = []
+    for agent_id in AGENT_IDS:
+        if agent_id not in env.agents:
+            raise RewardComparisonError(
+                f"initial state is missing required agent {agent_id}"
+            )
+        vehicle = env.agents[agent_id]
+        position = np.asarray(vehicle.position, dtype=np.float64).reshape(-1)
+        rows.append(
+            (
+                float(position[0]),
+                float(position[1]),
+                float(vehicle.heading_theta),
+                float(vehicle.speed_km_h),
+            )
+        )
+    signature = np.asarray(rows, dtype=np.float64)
+    if signature.shape != (3, 4) or not np.isfinite(signature).all():
+        raise RewardComparisonError("initial vehicle state is invalid")
+    return signature
+
+
+def _initial_scene_sha256(env: object) -> str:
+    """Hash platoon and background actors without unstable object UUIDs."""
+
+    agent_objects = {
+        id(vehicle): agent_id
+        for agent_id, vehicle in (getattr(env, "agents", {}) or {}).items()
+    }
+    rows = []
+    engine = getattr(env, "engine", None)
+    get_policy = getattr(engine, "get_policy", None)
+    for vehicle in _surrounding_vehicles(env):
+        position = np.asarray(getattr(vehicle, "position", ()), dtype=np.float64)
+        if position.shape[0] < 2 or not np.isfinite(position[:2]).all():
+            raise RewardComparisonError("initial scene vehicle position is invalid")
+        lane = getattr(vehicle, "lane", None)
+        lane_index = getattr(lane, "index", getattr(vehicle, "lane_index", None))
+        policy = (
+            get_policy(getattr(vehicle, "name", ""))
+            if callable(get_policy)
+            else None
+        )
+        rows.append(
+            {
+                "role": agent_objects.get(id(vehicle), "background"),
+                "vehicle_class": type(vehicle).__name__,
+                "position": [float(position[0]), float(position[1])],
+                "heading": float(getattr(vehicle, "heading_theta", 0.0)),
+                "speed_km_h": float(getattr(vehicle, "speed_km_h", 0.0)),
+                "lane_index": repr(lane_index),
+                "policy_class": type(policy).__name__ if policy is not None else None,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            row["role"],
+            row["vehicle_class"],
+            row["position"][0],
+            row["position"][1],
+            row["lane_index"],
+        )
+    )
+    encoded = json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_grpo_checkpoint_contract(
+    payload: Mapping[str, object],
+) -> tuple[str, str, str]:
+    required_fields = {
+        "run_mode",
+        "reward_contract_version",
+        "reward_contract_sha256",
+        "reward_config",
+        "reward_config_sha256",
+        "reward_application_contract",
+        "reward_application_contract_sha256",
+        "reward_input_domain",
+        "candidate_selection_domain",
+        "execution_input_domain",
+        "best_checkpoint_metric",
+        "tracking_expansion_enabled",
+        "calibration_required",
+        "diagnostic_only",
+        "eligible_for_formal_training",
+        "scenario_seeds",
+        "environment_steps",
+        "scenario_contract_sha256",
+        "trajectory_optimizer_config",
+        "trajectory_optimizer_sha256",
+    }
+    missing = sorted(required_fields.difference(payload))
+    if missing:
+        raise RewardComparisonError(
+            f"grpo_open checkpoint is missing contract fields: {missing}"
+        )
+    expected_diagnostic = {
+        "run_mode": "smoke",
+        "diagnostic_only": True,
+        "eligible_for_formal_training": False,
+        "calibration_required": False,
+    }
+    for field, expected in expected_diagnostic.items():
+        if payload.get(field) != expected:
+            raise RewardComparisonError(
+                f"grpo_open diagnostic checkpoint {field} mismatch"
+            )
+
+    raw_application = payload.get("reward_application_contract")
+    application_sha = payload.get("reward_application_contract_sha256")
+    if not isinstance(raw_application, Mapping) or not isinstance(
+        application_sha, str
+    ):
+        raise RewardComparisonError("grpo_open reward application contract is missing")
+    canonical_application_sha = hashlib.sha256(
+        json.dumps(
+            dict(raw_application),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        dict(raw_application) != GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+        or application_sha != canonical_application_sha
+        or application_sha != GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+    ):
+        raise RewardComparisonError(
+            "grpo_open must use the frozen raw-tau_d application contract"
+        )
+    for field in (
+        "reward_input_domain",
+        "candidate_selection_domain",
+        "execution_input_domain",
+        "best_checkpoint_metric",
+        "tracking_expansion_enabled",
+        "calibration_required",
+    ):
+        if payload.get(field) != raw_application.get(field):
+            raise RewardComparisonError(
+                f"grpo_open reward application metadata mismatch: {field}"
+            )
+
+    raw_reward_config = payload.get("reward_config")
+    try:
+        parsed_reward_config = (
+            JointRewardConfig(**dict(raw_reward_config))
+            if isinstance(raw_reward_config, Mapping)
+            else None
+        )
+    except (TypeError, ValueError, JointRewardError) as exc:
+        raise RewardComparisonError("grpo_open reward config is invalid") from exc
+    expected_reward_config = JointRewardConfig()
+    expected_reward_version = JOINT_REWARD_CONTRACT["version"]
+    if (
+        parsed_reward_config is None
+        or dict(raw_reward_config) != asdict(parsed_reward_config)
+        or parsed_reward_config != expected_reward_config
+        or payload.get("reward_contract_version") != expected_reward_version
+        or payload.get("reward_contract_sha256") != JOINT_REWARD_CONTRACT_SHA256
+        or payload.get("reward_config_sha256")
+        != joint_reward_config_sha256(parsed_reward_config)
+    ):
+        raise RewardComparisonError(
+            "grpo_open is not bound to the active frozen joint reward config"
+        )
+
+    optimizer_config = KinematicTrajectoryOptimizerConfig()
+    if (
+        payload.get("trajectory_optimizer_config") != asdict(optimizer_config)
+        or payload.get("trajectory_optimizer_sha256") != optimizer_config.sha256()
+    ):
+        raise RewardComparisonError(
+            "grpo_open trajectory optimizer contract mismatch"
+        )
+    if (
+        payload.get("scenario_contract_sha256")
+        != primary_scenario_contract()["sha256"]
+    ):
+        raise RewardComparisonError("grpo_open S5-S9 scenario contract mismatch")
+    return (
+        str(expected_reward_version),
+        JOINT_REWARD_CONTRACT_SHA256,
+        joint_reward_config_sha256(parsed_reward_config),
+    )
+
+
+def _load_policy(
+    spec: ModelSpec,
+    *,
+    device: torch.device,
+    reward_bindings: dict[str, tuple[str, str, str]],
+) -> torch.nn.Module:
+    if spec.model_id == "stage1_a":
+        if spec.kind != "stage1" or spec.variant != "A":
+            raise RewardComparisonError("stage1_a model spec is invalid")
+        trainer, _, source_sha = load_stage1_a_for_grpo(
+            spec.checkpoint,
+            device=device,
+            allow_diagnostic_source=True,
+        )
+        if source_sha != spec.checkpoint_sha256:
+            raise RewardComparisonError("stage1_a checkpoint SHA mismatch")
+    elif spec.model_id == "grpo_open":
+        if (
+            spec.kind != "grpo"
+            or spec.variant != "A"
+            or spec.reward_domain != "tau_d"
+            or spec.source_checkpoint is None
+            or spec.source_checkpoint_sha256 is None
+        ):
+            raise RewardComparisonError("grpo_open model spec is invalid")
+        trainer, _, source_sha = load_stage1_a_for_grpo(
+            spec.source_checkpoint,
+            device=device,
+            allow_diagnostic_source=True,
+        )
+        if source_sha != spec.source_checkpoint_sha256:
+            raise RewardComparisonError("grpo_open source Stage1 SHA mismatch")
+        payload = load_grpo_checkpoint(
+            spec.checkpoint,
+            trainer,
+            expected_source_stage1_sha256=source_sha,
+        )
+        reward_bindings[spec.model_id] = _validate_grpo_checkpoint_contract(payload)
+    else:
+        raise RewardComparisonError(
+            "reward comparison supports only stage1_a and grpo_open"
+        )
+    trainer.planner.eval()
+    return trainer.planner
+
+
+def _validate_common_reward_binding(
+    bindings: Mapping[str, tuple[str, str, str]],
+) -> dict[str, str] | None:
+    if not bindings:
+        return None
+    if set(bindings) != {"grpo_open"}:
+        raise RewardComparisonError(
+            "reward comparison requires exactly one grpo_open reward binding"
+        )
+    version, contract_sha, config_sha = bindings["grpo_open"]
+    return {
+        "reward_contract_version": version,
+        "reward_contract_sha256": contract_sha,
+        "reward_config_sha256": config_sha,
+    }
 
 
 @dataclass(frozen=True)
@@ -156,7 +453,6 @@ def _load_models(
         spec.model_id: _load_policy(
             spec,
             device=device,
-            formal=False,
             reward_bindings=reward_bindings,
         )
         for spec in _model_specs(stage1_checkpoint, grpo_checkpoint)

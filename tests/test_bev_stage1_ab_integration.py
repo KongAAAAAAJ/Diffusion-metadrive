@@ -164,8 +164,8 @@ def test_evaluation_loader_reconstructs_v2_planner_from_checkpoint(
     assert validate_closed_loop(loaded_planner, device=torch.device("cpu")) == {
         "status": "not_applicable",
         "reason": (
-            "v2 closed-loop validation is S5-S9-only and is handled by "
-            "evaluation.bev_four_model_evaluator"
+            "v2 closed-loop validation is S5-S9-only; the legacy evaluator was "
+            "removed and a strict replacement qualification entry is pending"
         ),
     }
 

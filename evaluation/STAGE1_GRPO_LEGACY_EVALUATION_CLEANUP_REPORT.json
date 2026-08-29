@@ -1,0 +1,97 @@
+{
+  "format": "stage1_grpo_legacy_evaluation_cleanup_report_v1",
+  "recorded_at": "2026-08-29T20:10:38+08:00",
+  "repository": {
+    "branch": "BEV",
+    "head_before_cleanup_commit": "fa62a18350d9e014ec9886841437ffcb75b68291",
+    "project_plan_sha256": "17d7ff037dc15fb430887ef882f13e866a0eb5912389379389f1932803d3381b"
+  },
+  "authorization": {
+    "authorized_by_user": true,
+    "authorized_on": "2026-08-29",
+    "scope": "Permanently delete the legacy evaluation/compare data and directly remove the legacy evaluator and chart modules. Remove their obsolete dependent launcher and dedicated tests rather than leave a broken entrypoint or compatibility wrapper."
+  },
+  "external_data_cleanup": {
+    "deleted_path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare",
+    "pre_delete_apparent_size_bytes": 346805713,
+    "pre_delete_disk_usage": "356 MiB",
+    "pre_delete_regular_files": 12731,
+    "pre_delete_child_directories": 102,
+    "pre_delete_file_types": {
+      "png": 9458,
+      "json": 3190,
+      "mp4": 60,
+      "jsonl": 22,
+      "log": 1
+    },
+    "post_delete_path_absent": true,
+    "preserved_sibling": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/stage1_a_diagnostic",
+    "reward_compare_touched": false,
+    "recoverability": "The external comparison data was permanently deleted and is recoverable only from an independently retained external backup, if one exists."
+  },
+  "repository_cleanup": {
+    "deleted_production_modules": [
+      "evaluation/bev_four_model_evaluator.py",
+      "evaluation/bev_comparison_charts.py"
+    ],
+    "deleted_obsolete_launcher": "scripts/run_stage1_a_evaluation.sh",
+    "deleted_dedicated_tests": [
+      "tests/test_bev_four_model_evaluator.py",
+      "tests/test_bev_comparison_charts.py",
+      "tests/test_run_stage1_a_evaluation_script.py"
+    ],
+    "deleted_ignored_bytecode": [
+      "evaluation/__pycache__/bev_four_model_evaluator.cpython-39.pyc",
+      "evaluation/__pycache__/bev_four_model_evaluator.cpython-312.pyc",
+      "evaluation/__pycache__/bev_comparison_charts.cpython-39.pyc",
+      "evaluation/__pycache__/bev_comparison_charts.cpython-312.pyc"
+    ],
+    "tracked_code_recoverability": "The deleted tracked code remains recoverable from Git commit fa62a18350d9e014ec9886841437ffcb75b68291."
+  },
+  "active_reward_only_path": {
+    "evaluator": "evaluation/bev_reward_comparison.py",
+    "evaluator_sha256": "c1b4af1dc8366e75b720939370be6fc98eb440c44395e839fd6657f6589a93ed",
+    "plotter": "evaluation/plot_grpo_reward_boxplots.py",
+    "plotter_sha256": "7069bde6995d487b2fdb9fa2f55b0593d0c2330c434e814d90c9d2da7e2d9e71",
+    "launcher": "scripts/run_eval_grpo.sh",
+    "launcher_sha256": "557571437bb1f9208790228e02c4f0d260455ab303283cb4b80676d970239759",
+    "legacy_module_dependency_removed": true,
+    "migrated_runtime_contracts": "The focused evaluator now owns deterministic inference, initial reset/scene comparison, Stage1-A and GRPO-Open loading, diagnostic eligibility, frozen raw-tau_d reward/application/config binding, optimizer binding, and S5-S9 scenario binding.",
+    "semantics_unchanged": "One raw [3,8,3] three-vehicle joint trajectory is scored before optimization at every model-ready step; Stage1 and GRPO use identical per-seed diffusion-noise streams."
+  },
+  "verification": {
+    "reward_only_regression": {
+      "command": "python -m pytest tests/test_bev_reward_comparison.py tests/test_plot_grpo_reward_boxplots.py tests/test_run_eval_grpo_script.py -q",
+      "passed": 22,
+      "failed": 0
+    },
+    "affected_stage1_and_rulemaker_regression": {
+      "command": "python -m pytest tests/test_bev_stage1_ab_integration.py tests/test_bev_rule_conditioned_v2.py tests/test_validate_bev_stage1_models.py -q",
+      "passed": 20,
+      "failed": 0
+    },
+    "static_checks": {
+      "py_compile": true,
+      "run_eval_grpo_bash_syntax": true,
+      "project_plan_json": true,
+      "git_diff_check": true
+    },
+    "real_checkpoint_cpu_loader_preflight": {
+      "stage1_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+      "grpo_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/checkpoints/best.pt",
+      "stage1_parameter_count": 12420633,
+      "grpo_parameter_count": 12420633,
+      "passed": true
+    },
+    "legacy_external_path_absent": true,
+    "preserved_sibling_present": true
+  },
+  "boundary": {
+    "historical_reports_policy": "Existing JSON and Markdown reports that describe the removed implementation are retained as historical records; their deleted commands and external artifacts are no longer reproducible.",
+    "reward_only_is_not_qualification": true,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification",
+    "blocker": "A replacement strict full S5-S9 closed-loop Stage1 qualification entry must be implemented before run_3 can be qualified. The reward-only comparator cannot satisfy that gate.",
+    "formal_eligibility_changed": false,
+    "training_started": false
+  }
+}

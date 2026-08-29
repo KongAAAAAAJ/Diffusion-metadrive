@@ -315,7 +315,7 @@ def test_v2_bundle_protocol_and_sidecar_base_binding_are_validated(
 def test_online_path_directly_reuses_rule_maker_without_decision_wrapper() -> None:
     root = Path(__file__).resolve().parents[1]
     evaluator_source = (
-        root / "evaluation" / "bev_four_model_evaluator.py"
+        root / "evaluation" / "bev_reward_comparison.py"
     ).read_text(encoding="utf-8")
     collector_source = (
         root / "expert_dataset" / "collect_joint_bev.py"

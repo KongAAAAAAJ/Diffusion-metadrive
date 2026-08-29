@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import csv
+import copy
 import math
 from collections import Counter
+from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -20,7 +23,19 @@ from evaluation.bev_reward_comparison import (
     _write_reward_csv,
     reward_values,
 )
-from models.bev_planner.joint_reward import JointRewardConfig, compose_joint_reward
+from models.bev_planner.joint_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+    JOINT_REWARD_CONTRACT,
+    JOINT_REWARD_CONTRACT_SHA256,
+    JointRewardConfig,
+    compose_joint_reward,
+    joint_reward_config_sha256,
+)
+from models.bev_planner.trajectory_optimizer import (
+    KinematicTrajectoryOptimizerConfig,
+)
+from scenarios.bev_round13_contract import primary_scenario_contract
 
 
 def _result():
@@ -38,6 +53,108 @@ def _result():
         config=config,
     )
     return config, result
+
+
+def _valid_grpo_contract_payload() -> dict[str, object]:
+    reward_config = JointRewardConfig()
+    optimizer_config = KinematicTrajectoryOptimizerConfig()
+    application = dict(GRPO_OPEN_REWARD_APPLICATION_CONTRACT)
+    return {
+        "run_mode": "smoke",
+        "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
+        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+        "reward_config": asdict(reward_config),
+        "reward_config_sha256": joint_reward_config_sha256(reward_config),
+        "reward_application_contract": application,
+        "reward_application_contract_sha256": (
+            GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        ),
+        "reward_input_domain": application["reward_input_domain"],
+        "candidate_selection_domain": application["candidate_selection_domain"],
+        "execution_input_domain": application["execution_input_domain"],
+        "best_checkpoint_metric": application["best_checkpoint_metric"],
+        "tracking_expansion_enabled": application["tracking_expansion_enabled"],
+        "calibration_required": application["calibration_required"],
+        "diagnostic_only": True,
+        "eligible_for_formal_training": False,
+        "scenario_seeds": [31, 47],
+        "environment_steps": 77_500,
+        "scenario_contract_sha256": primary_scenario_contract()["sha256"],
+        "trajectory_optimizer_config": asdict(optimizer_config),
+        "trajectory_optimizer_sha256": optimizer_config.sha256(),
+    }
+
+
+def test_reward_comparator_has_no_legacy_evaluator_dependency() -> None:
+    source = Path(reward_comparison.__file__).read_text(encoding="utf-8")
+
+    assert "bev_four_model_evaluator" not in source
+
+
+def test_grpo_checkpoint_contract_accepts_only_frozen_diagnostic_tau_d() -> None:
+    payload = _valid_grpo_contract_payload()
+
+    binding = reward_comparison._validate_grpo_checkpoint_contract(payload)
+
+    assert binding == (
+        JOINT_REWARD_CONTRACT["version"],
+        JOINT_REWARD_CONTRACT_SHA256,
+        joint_reward_config_sha256(JointRewardConfig()),
+    )
+
+    wrong_application = copy.deepcopy(payload)
+    wrong_application["reward_input_domain"] = "tau_a"
+    with pytest.raises(RewardComparisonError, match="application metadata"):
+        reward_comparison._validate_grpo_checkpoint_contract(wrong_application)
+
+    wrong_reward = copy.deepcopy(payload)
+    wrong_reward_config = dict(wrong_reward["reward_config"])
+    wrong_reward_config["progress_weight"] = 0.5
+    wrong_reward["reward_config"] = wrong_reward_config
+    wrong_reward["reward_config_sha256"] = joint_reward_config_sha256(
+        JointRewardConfig(**wrong_reward_config)
+    )
+    with pytest.raises(RewardComparisonError, match="active frozen joint reward"):
+        reward_comparison._validate_grpo_checkpoint_contract(wrong_reward)
+
+    formal = copy.deepcopy(payload)
+    formal["run_mode"] = "formal"
+    with pytest.raises(RewardComparisonError, match="run_mode mismatch"):
+        reward_comparison._validate_grpo_checkpoint_contract(formal)
+
+
+def test_initial_scene_hash_is_order_stable_and_scene_sensitive() -> None:
+    class Vehicle:
+        def __init__(self, name: str, x: float) -> None:
+            self.name = name
+            self.position = np.asarray([x, 1.0], dtype=np.float64)
+            self.heading_theta = 0.1
+            self.speed_km_h = 20.0
+            self.lane_index = ("road", 0, 0)
+
+    agents = {
+        agent_id: Vehicle(agent_id, float(index))
+        for index, agent_id in enumerate(reward_comparison.AGENT_IDS)
+    }
+    background_a = Vehicle("background_a", 10.0)
+    background_b = Vehicle("background_b", 20.0)
+    traffic_manager = SimpleNamespace(
+        traffic_vehicles=[background_a, background_b]
+    )
+    engine = SimpleNamespace(
+        traffic_manager=traffic_manager,
+        get_policy=lambda name: SimpleNamespace(),
+    )
+    env = SimpleNamespace(agents=agents, engine=engine)
+
+    first = reward_comparison._initial_scene_sha256(env)
+    traffic_manager.traffic_vehicles.reverse()
+    reordered = reward_comparison._initial_scene_sha256(env)
+    background_a.position[0] += 1.0
+    changed = reward_comparison._initial_scene_sha256(env)
+
+    assert reordered == first
+    assert changed != first
 
 
 def test_signed_reward_terms_sum_to_total_reward() -> None:
