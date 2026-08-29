@@ -1,11 +1,11 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T23:33:39+08:00",
+  "updated_at": "2026-08-29T19:40:09+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "2292abd329b6365e6a277e64c37b08f64e5842da",
-    "worktree_clean_before_this_update": true,
+    "git_commit": "bff3b4e983813f72fd6c0324fccc903644c0c03b",
+    "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
@@ -63,7 +63,8 @@
     "uncommitted_stage1_grpo_evaluation_launcher_present": true,
     "uncommitted_stage1_grpo_five_dimension_evaluation_present": true,
     "uncommitted_grpo_run_scoped_storage_migration_present": true,
-    "uncommitted_grpo_evaluation_output_root_update_present": true
+    "uncommitted_grpo_evaluation_output_root_update_present": true,
+    "uncommitted_stage1_grpo_reward_only_evaluation_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
@@ -753,6 +754,9 @@
     "grpo_evaluation_output_root_update_authorized": true,
     "grpo_evaluation_output_root_update_authorized_on": "2026-08-27",
     "grpo_evaluation_output_root_update_scope": "Store the Stage1-before-GRPO and GRPO-after-finetuning comparison manifest, joint report, logs, and visualization artifacts beneath the source Stage1 run's evaluation/compare directory; preserve output overrides and all evaluator hard gates.",
+    "stage1_grpo_reward_only_evaluation_authorized": true,
+    "stage1_grpo_reward_only_evaluation_authorized_on": "2026-08-29",
+    "stage1_grpo_reward_only_evaluation_scope": "Preserve all historical comparison data and full evaluator modules; replace only scripts/run_eval_grpo.sh with a two-checkpoint raw-tau_d reward-only diagnostic that writes one unified per-step CSV, two logs, and nine reward boxplots under evaluation/reward_compare. Keep checkpoint eligibility and the active Stage1 qualification gate unchanged.",
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. Future GRPO-Open artifacts are stored beneath their exact source Stage1 run; no formal eligibility was granted."
   },
   "source_of_truth": {
@@ -780,6 +784,11 @@
       "path": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
       "sha256": "1287acd3ee0b1c3a5bd016f27b078063cecee800a4fcb6511e9a3d4e1b8d303a",
       "role": "Records the Stage1-versus-GRPO five-dimension bev_model_evaluation_v3 contract, episode-first paired statistics, automatic English PNG/PDF and CSV bundle, 221-test regression, two-checkpoint CPU preflight, successful 20-step CUDA integration smoke, unchanged 200 ms gate, and unchanged diagnostic/formal eligibility."
+    },
+    "stage1_grpo_reward_only_evaluation_implementation_report": {
+      "path": "evaluation/STAGE1_GRPO_REWARD_ONLY_EVALUATION_IMPLEMENTATION_REPORT.json",
+      "sha256": "28d893359138613039e8082109049ccbdcab9f9f51d19cf973ef63a9709625fc",
+      "role": "Records the preserved-history reward-only Stage1-versus-GRPO diagnostic, raw-tau_d joint reward semantics, one unified per-step CSV, nine signed-reward boxplots, 19-test regression, two-checkpoint CPU preflight, successful 12-step CUDA smoke, and unchanged diagnostic/formal boundary."
     },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
@@ -966,8 +975,8 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "bece0ab0752333dd307677c703453a4241d95cc152c1f5d3d2140e6f33248418",
-      "role": "Records the quality-accepted 49870-sample Rule-conditioned v2 dataset and Stage1 binding, preserves strict Stage1 run_3 qualification as the active hard gate, freezes GRPO-Open training storage beneath its source Stage1 run, and freezes the five-dimension v3 comparison, paired statistics, default 800-step horizon, English chart bundle, and CSV tables under evaluation/compare."
+      "sha256": "4deb3b4daed1a606b85dd56f9c1e7ec9804509b30c0c712ffb3ec6315283ebcb",
+      "role": "Records the quality-accepted 49870-sample Rule-conditioned v2 dataset and Stage1 binding, preserves strict Stage1 run_3 qualification as the active hard gate, keeps the future three-model formal evaluation contract, and freezes the current two-checkpoint raw-tau_d reward-only diagnostic under evaluation/reward_compare while retaining all historical v3 comparison evidence."
     },
     "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
@@ -1786,17 +1795,20 @@
       "training_launcher": "scripts/run_bev_joint_grpo.sh",
       "training_launcher_sha256": "12ac49c0fee8f77310e6ae846824d659992c8ddb9ee8652d8337639ff5fbf8f6",
       "evaluation_launcher": "scripts/run_eval_grpo.sh",
-      "evaluation_launcher_sha256": "3076159ee658fa30067fd9aa0661724161039f7283e8c52aaaff722310435030",
-      "comparison_evaluation_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare",
-      "evaluation_report_format": "bev_model_evaluation_v3",
-      "evaluation_repeat_report_format": "bev_model_fixed_process_repeat_v3",
-      "comparison_chart_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare/charts",
-      "comparison_table_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare/tables",
+      "evaluation_launcher_sha256": "557571437bb1f9208790228e02c4f0d260455ab303283cb4b80676d970239759",
+      "comparison_evaluation_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare",
+      "evaluation_report_format": "stage1_grpo_reward_step_csv_v1",
+      "comparison_reward_csv": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare/step_rewards.csv",
+      "comparison_boxplot_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare/boxplots",
+      "comparison_boxplot_count": 9,
       "comparison_default_max_steps": 800,
-      "comparison_default_save_visualizations": false,
-      "five_dimension_evaluation_implementation_report": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
-      "full_comparison_evaluation_completed": false,
-      "evaluation_implementation_report": "evaluation/STAGE1_GRPO_S5_S9_EVALUATION_LAUNCHER_REPORT.json",
+      "reward_domain_for_comparison": "raw_tau_d_before_kinematic_optimizer",
+      "reward_component_policy": "total plus eight signed weighted components that sum to total within 1e-6",
+      "historical_five_dimension_evaluation_implementation_report": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
+      "historical_five_dimension_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/compare",
+      "historical_five_dimension_outputs_retained": true,
+      "full_reward_only_evaluation_completed": false,
+      "evaluation_implementation_report": "evaluation/STAGE1_GRPO_REWARD_ONLY_EVALUATION_IMPLEMENTATION_REPORT.json",
       "evaluation_output_root_update_report": "evaluation/STAGE1_GRPO_COMPARISON_OUTPUT_ROOT_UPDATE_REPORT.json",
       "storage_migration_report": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json",
       "bounded_evaluation_smoke_root": "/tmp/run_eval_grpo_smoke_20260827_v2",
@@ -1816,6 +1828,18 @@
       "bounded_v3_evaluation_smoke_chart_groups": 9,
       "bounded_v3_evaluation_smoke_csv_tables": 3,
       "bounded_v3_evaluation_smoke_eligible_for_formal_conclusions": false,
+      "bounded_reward_only_smoke_root": "/tmp/grpo_reward_only_smoke",
+      "bounded_reward_only_smoke_max_steps": 12,
+      "bounded_reward_only_smoke_seeds": [
+        31
+      ],
+      "bounded_reward_only_smoke_exit_code": 0,
+      "bounded_reward_only_smoke_both_models_evaluated": true,
+      "bounded_reward_only_smoke_total_rows": 20,
+      "bounded_reward_only_smoke_rows_per_model": 10,
+      "bounded_reward_only_smoke_csv_files": 1,
+      "bounded_reward_only_smoke_boxplot_files": 9,
+      "bounded_reward_only_smoke_eligible_for_formal_conclusions": false,
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false
     },
@@ -1926,6 +1950,7 @@
   ],
   "next_actions": [
     "Qualify the completed Stage1 run_3 checkpoint under strict Stage1 reload, open-loop, and full S5-S9 closed-loop gates before any formal GRPO claim; the passing v2 GRPO one-step smoke is diagnostic compatibility evidence only, and the bounded 202.51 ms planning-tick result remains failed against the unchanged 200 ms gate.",
+    "When a full diagnostic reward distribution is desired, run scripts/run_eval_grpo.sh at its default 800-step horizon to populate evaluation/reward_compare/step_rewards.csv and nine boxplots. Preserve evaluation/compare and all other historical artifacts; the resulting reward-only output remains non-formal.",
     "The bounded Stage 1 single-step smoke passed. Continue retaining the original 50070-sample backup; no permanent backup deletion is authorized.",
     "The S5 release30 append is installed and fully verified at 50260 samples with all 233 prior base episodes preserved. Bind any consumer to base fingerprint e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511 and sidecar fingerprint a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6; retain the complete pre-append backup unless a separate cleanup round is explicitly authorized.",
     "Preserve the failed candidate-v4 S5 supplement root as immutable historical evidence; do not rewrite, relabel, or resume it after the sidecar out-of-road fix.",

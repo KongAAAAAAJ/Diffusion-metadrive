@@ -1,7 +1,7 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-27T23:31:25+08:00",
+  "updated_at": "2026-08-29T19:40:09+08:00",
   "status": "v2_only_training_evaluation_cleanup_implemented_bounded_latency_gate_failed_run3_qualification_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
@@ -21,17 +21,54 @@
     "default_output_root": "<stage1_run_root>/grpo_open",
     "run_layout": "<stage1_run_root>/grpo_open/run_N",
     "log_layout": "<stage1_run_root>/grpo_open/logs",
-    "comparison_evaluation_layout": "<stage1_run_root>/evaluation/compare",
-    "comparison_evaluation_contents": "Stage1-before-GRPO and GRPO-after-finetuning manifest, bev_model_evaluation_v3 joint report, logs, optional qualitative artifacts, English PNG/PDF comparison charts, and CSV metric tables",
+    "comparison_evaluation_layout": "<stage1_run_root>/evaluation/reward_compare",
+    "comparison_evaluation_contents": "One unified step_rewards.csv containing Stage1-before-GRPO and GRPO-after-finetuning raw-tau_d joint reward rows, evaluator/plot logs, and nine two-checkpoint PNG reward boxplots",
     "comparison_evaluation_default_max_steps": 800,
-    "comparison_evaluation_default_save_visualizations": false,
-    "comparison_chart_layout": "<stage1_run_root>/evaluation/compare/charts",
-    "comparison_table_layout": "<stage1_run_root>/evaluation/compare/tables",
-    "five_dimension_implementation_evidence": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
+    "comparison_reward_csv": "<stage1_run_root>/evaluation/reward_compare/step_rewards.csv",
+    "comparison_boxplot_layout": "<stage1_run_root>/evaluation/reward_compare/boxplots",
+    "comparison_boxplot_count": 9,
+    "historical_five_dimension_implementation_evidence": "evaluation/STAGE1_GRPO_FIVE_DIMENSION_EVALUATION_IMPLEMENTATION_REPORT.json",
+    "historical_five_dimension_policy": "Preserve the old v3 report, tables, charts, evaluator, chart generator, and all existing output as historical and Stage1-evaluation evidence; scripts/run_eval_grpo.sh no longer invokes them.",
     "current_migration": "Move only the completed Stage1 run_3 sourced GRPO run_4 into bev_diffusion_stage1/run_3/grpo_open/run_4; preserve Stage1 run_2 sourced run_1/run_2 and the empty historical run_3 in their existing root.",
     "compatibility_policy": "Do not create a symlink or duplicate compatibility copy at the former run_4 path.",
     "semantic_boundary": "Checkpoint payloads, reward/application contracts, diagnostic/formal eligibility, and the active Stage1 qualification gate are unchanged.",
     "evidence": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json"
+  },
+  "stage1_grpo_reward_only_evaluation": {
+    "authorized_on": "2026-08-29",
+    "version": "stage1_grpo_reward_step_csv_v1",
+    "launcher": "scripts/run_eval_grpo.sh",
+    "evaluator": "evaluation.bev_reward_comparison",
+    "plotter": "evaluation.plot_grpo_reward_boxplots",
+    "models": [
+      "stage1_a",
+      "grpo_open"
+    ],
+    "scenario_scope": "S5-S9 with the frozen holdout seeds and identical per-seed diffusion-noise streams across checkpoints",
+    "row_granularity": "One row per checkpoint, scenario, seed, and model-ready simulator step; warm-up steps have no checkpoint output and are not written.",
+    "joint_trajectory_semantics": "Planner output [3,8,3] is one three-vehicle joint trajectory, not three independent joint candidates. The frozen joint reward already averages progress/comfort over vehicles and formation over vehicle pairs while gap/TTC/road use joint worst-risk aggregation, so no second divide-by-three is applied.",
+    "reward_domain": "raw tau_d before KinematicTrajectoryOptimizer; optimized tau_cmd is used only to advance the closed-loop environment",
+    "csv_columns": [
+      "model",
+      "scenario",
+      "route",
+      "seed",
+      "step",
+      "total_reward",
+      "progress_reward",
+      "formation_reward",
+      "gap_reward",
+      "ttc_reward",
+      "road_reward",
+      "comfort_reward",
+      "collision_reward",
+      "out_of_drivable_reward"
+    ],
+    "component_semantics": "The eight component columns are signed weighted contributions and must sum to total_reward within 1e-6.",
+    "outputs": "Exactly one reward CSV, two operational logs, and one two-checkpoint PNG boxplot for total reward and each of the eight signed sub-rewards.",
+    "history_policy": "Do not delete or overwrite historical v3 reports, charts, tables, videos, or other evaluation output; the new launcher writes to the separate reward_compare root and atomically replaces only its own completed step_rewards.csv.",
+    "formal_boundary": "Diagnostic comparison only. It does not qualify either checkpoint, replace the future three-model formal evaluation matrix, or change the strict Stage1 run_3 hard gate.",
+    "implementation_evidence": "evaluation/STAGE1_GRPO_REWARD_ONLY_EVALUATION_IMPLEMENTATION_REPORT.json"
   },
   "trigger_phrases": [
     "项目计划",
@@ -618,6 +655,7 @@
     "surrogate_update_during_grpo": false
   },
   "formal_evaluation": {
+    "current_grpo_diagnostic_entrypoint_boundary": "scripts/run_eval_grpo.sh now implements only the separate two-checkpoint raw-tau_d reward distribution diagnostic. The formal three-model metric matrix below remains a future contract and continues to use the preserved full evaluator/chart modules.",
     "main_model_matrix": [
       "Stage1-A",
       "Stage1-A+GRPO-Open",

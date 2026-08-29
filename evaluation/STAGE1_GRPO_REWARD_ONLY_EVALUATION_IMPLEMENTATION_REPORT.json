@@ -1,0 +1,159 @@
+{
+  "format": "stage1_grpo_reward_only_evaluation_implementation_report_v1",
+  "recorded_at": "2026-08-29T19:40:09+08:00",
+  "repository": {
+    "branch": "BEV",
+    "head": "bff3b4e983813f72fd6c0324fccc903644c0c03b",
+    "project_plan_sha256": "4deb3b4daed1a606b85dd56f9c1e7ec9804509b30c0c712ffb3ec6315283ebcb"
+  },
+  "scope": "Replace the active Stage1-before-GRPO versus GRPO-after-finetuning diagnostic entrypoint with a reward-only comparison that persists one unified per-step CSV and nine two-checkpoint reward boxplots.",
+  "user_semantics": {
+    "history_policy": "Interpret 全不删除 literally: no historical comparison output, report, table, chart, video, evaluator, or test was deleted. The new output is isolated under evaluation/reward_compare.",
+    "joint_trajectory_correction": "The planner tensor [3,8,3] contains three vehicle trajectories that form one joint trajectory, not three independent joint candidates. The frozen joint reward already performs the vehicle/pair/joint risk aggregation, so the recorded scalar is not divided by three again.",
+    "row_policy": "Write one row for each checkpoint, scenario, seed, and model-ready simulator step. Warm-up steps have no checkpoint trajectory and are not written."
+  },
+  "outcome": {
+    "reward_only_evaluator_implemented": true,
+    "unified_step_csv_implemented": true,
+    "nine_reward_boxplots_implemented": true,
+    "launcher_switched_to_reward_only_modules": true,
+    "historical_outputs_deleted": false,
+    "historical_five_dimension_modules_modified": false,
+    "both_real_checkpoints_loaded": true,
+    "bounded_cuda_smoke_completed": true,
+    "full_800_step_evaluation_completed": false,
+    "formal_eligibility_changed": false,
+    "paper_evidence_eligibility_changed": false,
+    "active_stage1_qualification_gate_changed": false
+  },
+  "implementation": {
+    "launcher": {
+      "path": "scripts/run_eval_grpo.sh",
+      "sha256": "557571437bb1f9208790228e02c4f0d260455ab303283cb4b80676d970239759",
+      "default_device": "cuda",
+      "default_max_steps": 800,
+      "default_output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare",
+      "reward_csv": "step_rewards.csv",
+      "logs": [
+        "logs/reward_evaluation.log",
+        "logs/reward_boxplots.log"
+      ],
+      "atomic_csv_policy": "Validate a process-scoped attempt CSV, then replace only the active reward_compare/step_rewards.csv. A failed or incomplete evaluation preserves the previous completed CSV.",
+      "legacy_outputs_no_longer_generated": [
+        "manifest_v2.json",
+        "bev_model_evaluation_v3 JSON",
+        "aggregate metric CSV tables",
+        "five-dimension chart bundle",
+        "qualitative videos"
+      ]
+    },
+    "evaluator": {
+      "path": "evaluation/bev_reward_comparison.py",
+      "sha256": "b23a4bbe7c1ee2096894d18b83688c941f95fa20ac36a60f988f1694fd7e00eb",
+      "models": [
+        "stage1_a",
+        "grpo_open"
+      ],
+      "scenario_seed_scope": "Frozen S5-S9 primary contract with holdout seeds 31 and 47 by default",
+      "fairness": "Each checkpoint receives an independently reset environment with an identical initial-state signature, initial scene, seed, and diffusion-noise stream. After the first action each model advances its own closed-loop state, which is the intended reward-distribution comparison.",
+      "reward_domain": "JointTrajectoryProxyReward.score on raw selected tau_d before KinematicTrajectoryOptimizer; optimized tau_cmd only advances the environment.",
+      "csv_columns": [
+        "model",
+        "scenario",
+        "route",
+        "seed",
+        "step",
+        "total_reward",
+        "progress_reward",
+        "formation_reward",
+        "gap_reward",
+        "ttc_reward",
+        "road_reward",
+        "comfort_reward",
+        "collision_reward",
+        "out_of_drivable_reward"
+      ],
+      "signed_reward_formula": "total_reward = 0.47*progress_score - 1.0*formation_penalty - 1.185*gap_penalty - 0.5*ttc_penalty - 0.5*road_penalty - 0.0225*comfort_penalty - 5.0*collision - 4.0*out_of_drivable",
+      "sum_invariant": "The eight signed weighted component columns sum to total_reward within relative/absolute tolerance 1e-6. unsafe and clearance_violation remain diagnostics and are not extra reward terms."
+    },
+    "plotter": {
+      "path": "evaluation/plot_grpo_reward_boxplots.py",
+      "sha256": "7069bde6995d487b2fdb9fa2f55b0593d0c2330c434e814d90c9d2da7e2d9e71",
+      "cli": "python -m evaluation.plot_grpo_reward_boxplots --input-csv PATH --output-dir DIR",
+      "outputs": "One PNG for total_reward and each of the eight signed component rewards; every figure contains stage1_a and grpo_open box distributions plus mean markers and values.",
+      "input_validation": "Require both and only the two model IDs, all nine finite reward columns, and at least one row per model."
+    },
+    "preserved_legacy_modules": [
+      "evaluation/bev_four_model_evaluator.py",
+      "evaluation/bev_comparison_charts.py",
+      "scripts/run_stage1_a_evaluation.sh"
+    ]
+  },
+  "checkpoints": {
+    "stage1_a": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+      "sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "cpu_loaded_parameter_count": 12420633,
+      "project_qualified": false
+    },
+    "grpo_open": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/checkpoints/best.pt",
+      "sha256": "2dd1c44467b12cc88284265286fcb8fe29a7642d45f405d5e2ee326f46023a06",
+      "source_stage1_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "reward_domain": "tau_d",
+      "cpu_loaded_parameter_count": 12420633,
+      "diagnostic_only": true,
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false
+    }
+  },
+  "verification": {
+    "static_checks": {
+      "commands": [
+        "bash -n scripts/run_eval_grpo.sh",
+        "/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile evaluation/bev_reward_comparison.py evaluation/plot_grpo_reward_boxplots.py"
+      ],
+      "passed": true
+    },
+    "focused_regression": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_reward_comparison.py tests/test_plot_grpo_reward_boxplots.py tests/test_run_eval_grpo_script.py -q",
+      "passed": 19,
+      "failed": 0,
+      "warnings": 15,
+      "warning_classification": "Existing NumPy compatibility, Gym, Matplotlib/Pyparsing, and Pygame/pkg_resources deprecation warnings.",
+      "core_behavior_covered": "The fake closed-loop main-loop regression checks warm-up omission, exactly one row per model-ready step, raw [1,3,8,3] scoring before optimization, and identical per-seed diffusion noise for both checkpoints."
+    },
+    "real_checkpoint_cpu_loader_preflight": {
+      "stage1_loaded": true,
+      "grpo_loaded": true,
+      "parameter_count_each": 12420633,
+      "source_checkpoint_binding_passed": true,
+      "reward_config_binding_passed": true
+    },
+    "bounded_cuda_smoke": {
+      "output_root": "/tmp/grpo_reward_only_smoke",
+      "device": "cuda",
+      "scenarios": 5,
+      "seeds": [
+        31
+      ],
+      "max_steps_per_episode": 12,
+      "model_ready_rows": 20,
+      "stage1_rows": 10,
+      "grpo_rows": 10,
+      "csv_files": 1,
+      "boxplot_files": 9,
+      "exit_code": 0,
+      "interpretation": "Engineering smoke only. The horizon and one-seed scope are intentionally insufficient for a final reward-distribution conclusion and do not qualify either checkpoint."
+    }
+  },
+  "boundary": {
+    "classification": "Implementation and bounded integration smoke complete; default 800-step reward comparison remains pending.",
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification",
+    "old_comparison_output_retained": true,
+    "training_started": false,
+    "next_action": "When the diagnostic comparison is desired, run scripts/run_eval_grpo.sh to populate run_3/evaluation/reward_compare. Do not interpret the output as formal checkpoint qualification."
+  }
+}
