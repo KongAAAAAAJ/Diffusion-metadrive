@@ -36,6 +36,7 @@ from models.bev_planner import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
+    JointGRPOConfig,
     JointRewardConfig,
     JointRewardError,
     JointTrajectoryProxyReward,
@@ -86,6 +87,7 @@ class OnlineGRPOError(RuntimeError):
 class JointGRPOOnlineConfig:
     device: str = "cuda"
     seed: int = 17
+    group_size: int = 4
     total_optimizer_steps: int = 5000
     resume_checkpoint: Path | None = None
     scenarios: tuple[tuple[str, str], ...] = PRIMARY_S5_S9_SCENARIOS
@@ -99,6 +101,14 @@ class JointGRPOOnlineConfig:
             raise OnlineGRPOError("online GRPO device must be cpu or cuda")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise OnlineGRPOError("online GRPO seed must be an integer")
+        if (
+            isinstance(self.group_size, bool)
+            or not isinstance(self.group_size, int)
+            or self.group_size < 2
+        ):
+            raise OnlineGRPOError(
+                "group_size must be an integer greater than or equal to 2"
+            )
         for name in (
             "total_optimizer_steps",
             "environment_steps_per_episode",
@@ -460,6 +470,7 @@ def _load_trainer(
     source_checkpoint: Path,
     device: torch.device,
     *,
+    grpo_config: JointGRPOConfig,
     allow_diagnostic_source: bool,
 ):
     loader = (
@@ -468,6 +479,7 @@ def _load_trainer(
     return loader(
         source_checkpoint,
         device=device,
+        config=grpo_config,
         allow_diagnostic_source=allow_diagnostic_source,
     )
 
@@ -491,13 +503,27 @@ def _reward_contract_version() -> str:
 
 
 def _joint_rewards_are_informative(
-    rewards: np.ndarray, *, minimum_span: float = 1e-6
+    rewards: np.ndarray,
+    *,
+    group_size: int,
+    minimum_span: float = 1e-6,
 ) -> bool:
     """Whether a sampled group can carry non-zero signed GRPO credit."""
 
+    if (
+        isinstance(group_size, bool)
+        or not isinstance(group_size, int)
+        or group_size < 2
+    ):
+        raise OnlineGRPOError(
+            "group_size must be an integer greater than or equal to 2"
+        )
     values = np.asarray(rewards)
-    if values.shape != (4,) or values.dtype not in (np.float32, np.float64):
-        raise OnlineGRPOError("joint proxy rewards must be float [4]")
+    if (
+        values.shape != (group_size,)
+        or values.dtype not in (np.float32, np.float64)
+    ):
+        raise OnlineGRPOError(f"joint proxy rewards must be float [{group_size}]")
     if not np.isfinite(values).all():
         raise OnlineGRPOError("joint proxy rewards must be finite")
     if not math.isfinite(minimum_span) or minimum_span < 0.0:
@@ -530,14 +556,29 @@ def _write_advantage_vector_summary(
     optimizer_step: int,
     target_steps: int,
     interval_steps: int,
+    *,
+    group_size: int,
 ) -> bool:
+    if (
+        isinstance(group_size, bool)
+        or not isinstance(group_size, int)
+        or group_size < 2
+    ):
+        raise OnlineGRPOError(
+            "group_size must be an integer greater than or equal to 2"
+        )
     if not _should_record_advantage_vector(
         optimizer_step, target_steps, interval_steps
     ):
         return False
     vector = advantages.detach().cpu()
-    if vector.dtype != torch.float32 or tuple(vector.shape) != (1, 4):
-        raise OnlineGRPOError("advantage vector must be float32 with shape [1,4]")
+    if (
+        vector.dtype != torch.float32
+        or tuple(vector.shape) != (1, group_size)
+    ):
+        raise OnlineGRPOError(
+            f"advantage vector must be float32 with shape [1,{group_size}]"
+        )
     if not bool(torch.isfinite(vector).all()):
         raise OnlineGRPOError("advantage vector must be finite")
     writer.add_tensor(ADVANTAGE_VECTOR_TAG, vector, optimizer_step)
@@ -1036,6 +1077,7 @@ def _resume_best_checkpoint_anchor(
         "format",
         "variant",
         "predecessor_condition",
+        "grpo_config",
         "source_stage1_sha256",
         "run_mode",
         "reward_contract_version",
@@ -1134,10 +1176,12 @@ def run_joint_grpo_training(
     except BEVScenarioContractError as exc:
         raise OnlineGRPOError(str(exc)) from exc
     torch_device = _device(config.device)
+    grpo_config = JointGRPOConfig(group_size=config.group_size)
     trainer, source_payload, source_sha = _load_trainer(
         variant,
         Path(source_checkpoint),
         torch_device,
+        grpo_config=grpo_config,
         allow_diagnostic_source=run_mode == "smoke",
     )
     if run_mode == "formal" and source_payload.get(
@@ -1363,7 +1407,10 @@ def run_joint_grpo_training(
                             rule_diagnostics[name] += int(value)
                         sampled_rollouts += 1
                         bucket_sample_counts[bucket_index] += 1
-                        informative = _joint_rewards_are_informative(proxy.rewards)
+                        informative = _joint_rewards_are_informative(
+                            proxy.rewards,
+                            group_size=trainer.config.group_size,
+                        )
                         if informative:
                             rewards = torch.from_numpy(
                                 proxy.rewards.reshape(1, -1)
@@ -1427,6 +1474,7 @@ def run_joint_grpo_training(
                                 trainer.optimizer_step,
                                 target_steps,
                                 config.advantage_vector_log_interval_steps,
+                                group_size=trainer.config.group_size,
                             ):
                                 advantage_vector_record_count += 1
                             for metric_name, metric_value in last_metrics.items():
@@ -1589,6 +1637,7 @@ def run_joint_grpo_training(
         variant,
         Path(source_checkpoint),
         torch_device,
+        grpo_config=grpo_config,
         allow_diagnostic_source=run_mode == "smoke",
     )
     loaded = checkpoint_loader(
@@ -1724,6 +1773,7 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
     return JointGRPOOnlineConfig(
         device=str(online.get("device", "cuda")),
         seed=int(online.get("seed", 17)),
+        group_size=online.get("group_size", 4),
         total_optimizer_steps=int(online.get("total_optimizer_steps", 5000)),
         resume_checkpoint=(
             Path(str(online["resume_checkpoint"]))

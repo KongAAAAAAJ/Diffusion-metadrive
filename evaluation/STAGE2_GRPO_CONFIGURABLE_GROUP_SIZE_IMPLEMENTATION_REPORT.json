@@ -1,0 +1,140 @@
+{
+  "format": "stage2_grpo_configurable_group_size_implementation_report_v1",
+  "created_at": "2026-08-29T23:04:16+08:00",
+  "repository": {
+    "branch": "BEV",
+    "base_git_commit": "fb7558c6e7de36a516acb10ac3cc015f5f125a1d",
+    "stale_project_state_index_reconciled_before_code_changes": true
+  },
+  "implementation_gate": {
+    "name": "stage2_grpo_configurable_group_size",
+    "passed": true,
+    "scope": "online GRPO configuration, dynamic group dimensions, checkpoint-config restoration for evaluation, focused regression, isolated G=3 CUDA smoke, and project-state update",
+    "long_training_started": false,
+    "specialist_skill_available": false,
+    "specialist_skill_maintenance_gap": "No GRPO specialist skill is installed; repository-local workflow and simple-code gates were used."
+  },
+  "configuration": {
+    "yaml_path": "configs/train/bev_joint_grpo.yaml",
+    "yaml_key": "online.group_size",
+    "default": 4,
+    "accepted_values": "non-boolean integer greater than or equal to 2",
+    "invalid_values_rejected": [
+      true,
+      0,
+      1,
+      -1
+    ],
+    "propagation": [
+      "JointGRPOOnlineConfig.group_size",
+      "JointGRPOConfig(group_size=...)",
+      "load_stage1_a_for_grpo(..., config=grpo_config)",
+      "JointGRPOTrainer.config.group_size",
+      "sample_groups, reward-shape validation, advantage normalization, and TensorBoard vector validation"
+    ]
+  },
+  "runtime_contract": {
+    "reward_or_loss_formula_changed": false,
+    "checkpoint_schema_changed": false,
+    "launcher_process_contract_changed": false,
+    "default_behavior_changed": false,
+    "advantage_tensor_shape": "[1,G]",
+    "joint_reward_shape": "[G]",
+    "resume_best_and_last_bind_grpo_config": true,
+    "checkpoint_evaluator_restores_grpo_config_before_trainer_construction": true,
+    "existing_run4_modified_or_backfilled": false,
+    "memory_note": "Candidate sampling and training memory grow with G; no artificial upper bound was introduced."
+  },
+  "verification": {
+    "focused_regression": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_bev_reward_comparison.py tests/test_plot_grpo.py tests/test_run_bev_joint_grpo_launcher.py tests/test_run_eval_grpo_script.py -q",
+      "passed": 115,
+      "failed": 0,
+      "warnings": 15
+    },
+    "python_compile_passed": true,
+    "git_diff_check_passed": true,
+    "dynamic_core_groups_tested": [
+      3,
+      5
+    ],
+    "dynamic_advantage_vector_groups_tested": [
+      3,
+      4,
+      5
+    ],
+    "checkpoint_config_restore_group_tested": 3
+  },
+  "smoke": {
+    "classification": "isolated one-optimizer-step G=3 CUDA diagnostic; formal-ineligible",
+    "command": "CONFIG=/tmp/grpo_group_size_config_smoke_20260829_v1/config_group3.yaml ARTIFACT_ROOT=/tmp/grpo_group_size_config_smoke_20260829_v1/artifacts OUTPUT_ROOT=/tmp/grpo_group_size_config_smoke_20260829_v1/artifacts LOG_ROOT=/tmp/grpo_group_size_config_smoke_20260829_v1/logs MAX_OPTIMIZER_STEPS=1 bash scripts/run_bev_joint_grpo.sh",
+    "artifact_root": "/tmp/grpo_group_size_config_smoke_20260829_v1/artifacts/run_1",
+    "exit_code": 0,
+    "configured_group_size": 3,
+    "optimizer_steps": 1,
+    "environment_steps": 33,
+    "sampled_rollouts": 1,
+    "uninformative_rollouts": 0,
+    "checkpoint_round_trip": true,
+    "advantage_tensor": {
+      "tag": "advantage/vector",
+      "record_count": 1,
+      "step": 1,
+      "shape": [
+        1,
+        3
+      ],
+      "dtype": "float32",
+      "finite": true,
+      "values": [
+        1.293150544166565,
+        -1.1419857740402222,
+        -0.15110130608081818
+      ]
+    },
+    "plots": {
+      "advantage_heatmap": {
+        "path": "/tmp/grpo_group_size_config_smoke_20260829_v1/artifacts/run_1/plots/advantage_vector_heatmap.png",
+        "bytes": 73090,
+        "visually_inspected_dynamic_slots": true
+      },
+      "reward_curve": {
+        "path": "/tmp/grpo_group_size_config_smoke_20260829_v1/artifacts/run_1/plots/reward_curve.png",
+        "bytes": 68196
+      },
+      "grpo_loss_curve": {
+        "path": "/tmp/grpo_group_size_config_smoke_20260829_v1/artifacts/run_1/plots/grpo_loss_curve.png",
+        "bytes": 50370
+      },
+      "kl_loss_curve": {
+        "path": "/tmp/grpo_group_size_config_smoke_20260829_v1/artifacts/run_1/plots/kl_loss_curve.png",
+        "bytes": 68084
+      }
+    },
+    "checkpoint_and_evaluator_preflight": {
+      "checkpoint_group_size": 3,
+      "constructed_trainer_group_size": 3,
+      "loaded_payload_group_size": 3,
+      "loaded_optimizer_step": 1,
+      "passed": true
+    }
+  },
+  "remaining_boundary": {
+    "online_launcher_configurable": true,
+    "reward_evaluator_supports_configurable_checkpoints": true,
+    "standalone_legacy_diagnostic_cli_configurable": false,
+    "standalone_legacy_diagnostic_paths": [
+      "train/bev_joint_grpo_diagnostic.py",
+      "scripts/smoke_bev_joint_grpo_a.py",
+      "scripts/smoke_bev_joint_grpo_b.py"
+    ],
+    "impact": "The requested run_bev_joint_grpo.sh online training path is complete; the separate legacy diagnostic CLI retains its historical G=4-only contract."
+  },
+  "qualification": {
+    "implementation_verified": true,
+    "formal_qualification_passed": false,
+    "checkpoint_eligibility_changed": false,
+    "paper_evidence_allowed": false,
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification"
+  }
+}

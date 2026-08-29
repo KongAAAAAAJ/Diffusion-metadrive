@@ -46,8 +46,14 @@ class JointGRPOConfig:
     heading_bc_weight: float = 0.2
 
     def __post_init__(self) -> None:
-        if self.group_size != 4:
-            raise JointGRPOError("group_size is frozen to 4")
+        if (
+            isinstance(self.group_size, bool)
+            or not isinstance(self.group_size, int)
+            or self.group_size < 2
+        ):
+            raise JointGRPOError(
+                "group_size must be an integer greater than or equal to 2"
+            )
         if self.initial_noise_timestep != 8:
             raise JointGRPOError("initial_noise_timestep is frozen to 8")
         if self.denoise_steps != 4:
@@ -318,6 +324,14 @@ FrozenVariantAReference = FrozenGRPOReference
 def normalize_signed_advantages(
     rewards: Tensor, *, group_size: int = 4, eps: float = 1e-6
 ) -> Tensor:
+    if (
+        isinstance(group_size, bool)
+        or not isinstance(group_size, int)
+        or group_size < 2
+    ):
+        raise JointGRPOError(
+            "group_size must be an integer greater than or equal to 2"
+        )
     if not isinstance(rewards, Tensor):
         raise JointGRPOError("rewards must be a torch.Tensor")
     if rewards.dtype != torch.float32:

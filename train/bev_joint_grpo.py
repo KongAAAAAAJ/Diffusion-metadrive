@@ -346,6 +346,41 @@ def save_grpo_checkpoint(
     return checkpoint_path
 
 
+def load_grpo_config_from_checkpoint(
+    path: Path | str,
+) -> JointGRPOConfig:
+    """Rebuild the exact joint-GRPO config stored in a checkpoint."""
+
+    checkpoint_path = Path(path)
+    try:
+        payload = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise JointGRPOError(
+            f"unable to load GRPO checkpoint: {checkpoint_path}"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise JointGRPOError("GRPO checkpoint must be a mapping")
+    raw_config = payload.get("grpo_config")
+    if not isinstance(raw_config, Mapping):
+        raise JointGRPOError("GRPO checkpoint config must be a mapping")
+
+    default_values = dataclasses.asdict(JointGRPOConfig())
+    if set(raw_config) != set(default_values) or any(
+        type(raw_config[name]) is not type(default_values[name])
+        for name in default_values
+    ):
+        raise JointGRPOError("GRPO checkpoint config is invalid")
+    try:
+        config = JointGRPOConfig(**dict(raw_config))
+    except (TypeError, ValueError, JointGRPOError) as exc:
+        raise JointGRPOError("GRPO checkpoint config is invalid") from exc
+    if dict(raw_config) != dataclasses.asdict(config):
+        raise JointGRPOError("GRPO checkpoint config is invalid")
+    return config
+
+
 def _load_grpo_checkpoint(
     path: Path | str,
     trainer: JointGRPOTrainerA | JointGRPOTrainerB,
@@ -486,6 +521,7 @@ __all__ = [
     "grpo_checkpoint_payload",
     "load_grpo_b_checkpoint",
     "load_grpo_checkpoint",
+    "load_grpo_config_from_checkpoint",
     "load_stage1_a_for_grpo",
     "load_stage1_b_for_grpo",
     "save_grpo_checkpoint",

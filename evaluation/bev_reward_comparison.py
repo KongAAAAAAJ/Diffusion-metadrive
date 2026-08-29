@@ -59,7 +59,11 @@ from scenarios.bev_round13_contract import (
     deterministic_initial_speed_km_h,
     primary_scenario_contract,
 )
-from train.bev_joint_grpo import load_grpo_checkpoint, load_stage1_a_for_grpo
+from train.bev_joint_grpo import (
+    load_grpo_checkpoint,
+    load_grpo_config_from_checkpoint,
+    load_stage1_a_for_grpo,
+)
 from train.train_bev_diffusion_stage1 import planner_forward_from_batch
 from train.train_bev_joint_grpo_online import (
     AGENT_IDS,
@@ -357,9 +361,11 @@ def _load_policy(
             or spec.source_checkpoint_sha256 is None
         ):
             raise RewardComparisonError("grpo_open model spec is invalid")
+        grpo_config = load_grpo_config_from_checkpoint(spec.checkpoint)
         trainer, _, source_sha = load_stage1_a_for_grpo(
             spec.source_checkpoint,
             device=device,
+            config=grpo_config,
             allow_diagnostic_source=True,
         )
         if source_sha != spec.source_checkpoint_sha256:

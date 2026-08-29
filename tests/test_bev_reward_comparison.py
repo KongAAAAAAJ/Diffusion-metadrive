@@ -32,10 +32,12 @@ from models.bev_planner.joint_reward import (
     compose_joint_reward,
     joint_reward_config_sha256,
 )
+from models.bev_planner.joint_grpo import JointGRPOConfig, JointGRPOError
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizerConfig,
 )
 from scenarios.bev_round13_contract import primary_scenario_contract
+from train.bev_joint_grpo import load_grpo_config_from_checkpoint
 
 
 def _result():
@@ -237,6 +239,129 @@ def test_model_specs_bind_grpo_to_exact_stage1_checkpoint(tmp_path) -> None:
     assert candidate.reward_domain == "tau_d"
     assert candidate.source_checkpoint == stage1.resolve()
     assert candidate.source_checkpoint_sha256 == baseline.checkpoint_sha256
+
+
+def test_grpo_checkpoint_config_round_trips_group_size_three(
+    tmp_path: Path,
+) -> None:
+    expected = JointGRPOConfig(group_size=3)
+    checkpoint = tmp_path / "grpo.pt"
+    torch.save({"grpo_config": asdict(expected)}, checkpoint)
+
+    restored = load_grpo_config_from_checkpoint(checkpoint)
+
+    assert restored == expected
+    assert restored.group_size == 3
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.pop("group_size"),
+        lambda value: value.update({"unexpected": 1}),
+        lambda value: value.update({"group_size": 1}),
+        lambda value: value.update({"group_size": "3"}),
+    ],
+)
+def test_grpo_checkpoint_config_rejects_invalid_mapping(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    raw = asdict(JointGRPOConfig(group_size=3))
+    mutate(raw)
+    checkpoint = tmp_path / "invalid_grpo.pt"
+    torch.save({"grpo_config": raw}, checkpoint)
+
+    with pytest.raises(JointGRPOError, match="config"):
+        load_grpo_config_from_checkpoint(checkpoint)
+
+
+def test_load_policy_passes_exact_checkpoint_config_to_stage1_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_config = JointGRPOConfig(group_size=3)
+    planner = torch.nn.Identity()
+    trainer = SimpleNamespace(planner=planner)
+    observed: dict[str, object] = {}
+    source_sha = "a" * 64
+    spec = SimpleNamespace(
+        model_id="grpo_open",
+        kind="grpo",
+        variant="A",
+        reward_domain="tau_d",
+        checkpoint=tmp_path / "grpo.pt",
+        checkpoint_sha256="b" * 64,
+        source_checkpoint=tmp_path / "stage1.pt",
+        source_checkpoint_sha256=source_sha,
+    )
+
+    def fake_config_loader(path: Path) -> JointGRPOConfig:
+        observed["config_path"] = path
+        return expected_config
+
+    def fake_stage1_loader(
+        path: Path,
+        *,
+        device: torch.device,
+        config: JointGRPOConfig,
+        allow_diagnostic_source: bool,
+    ):
+        observed.update(
+            {
+                "source_path": path,
+                "device": device,
+                "config": config,
+                "allow_diagnostic_source": allow_diagnostic_source,
+            }
+        )
+        return trainer, {}, source_sha
+
+    def fake_checkpoint_loader(
+        path: Path,
+        loaded_trainer,
+        *,
+        expected_source_stage1_sha256: str,
+    ):
+        observed.update(
+            {
+                "checkpoint_path": path,
+                "trainer": loaded_trainer,
+                "expected_source_sha": expected_source_stage1_sha256,
+            }
+        )
+        return _valid_grpo_contract_payload()
+
+    monkeypatch.setattr(
+        reward_comparison,
+        "load_grpo_config_from_checkpoint",
+        fake_config_loader,
+    )
+    monkeypatch.setattr(
+        reward_comparison,
+        "load_stage1_a_for_grpo",
+        fake_stage1_loader,
+    )
+    monkeypatch.setattr(
+        reward_comparison,
+        "load_grpo_checkpoint",
+        fake_checkpoint_loader,
+    )
+
+    result = reward_comparison._load_policy(
+        spec,
+        device=torch.device("cpu"),
+        reward_bindings={},
+    )
+
+    assert result is planner
+    assert observed["config_path"] == spec.checkpoint
+    assert observed["config"] is expected_config
+    assert observed["config"] == JointGRPOConfig(group_size=3)
+    assert observed["source_path"] == spec.source_checkpoint
+    assert observed["checkpoint_path"] == spec.checkpoint
+    assert observed["trainer"] is trainer
+    assert observed["expected_source_sha"] == source_sha
 
 
 def test_reward_comparison_config_rejects_invalid_step_cap() -> None:

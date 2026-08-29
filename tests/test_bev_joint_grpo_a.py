@@ -165,6 +165,8 @@ def _source_metadata(*, diagnostic: bool = True) -> dict[str, object]:
 def test_config_and_signed_advantage_contract() -> None:
     config = JointGRPOConfig()
     assert config.group_size == 4
+    assert JointGRPOConfig(group_size=3).group_size == 3
+    assert JointGRPOConfig(group_size=5).group_size == 5
     assert config.initial_noise_timestep == 8
     assert config.denoise_steps == 4
     assert config.roll_timesteps == (15, 10, 5, 0)
@@ -173,8 +175,6 @@ def test_config_and_signed_advantage_contract() -> None:
     assert config.mode_pg_weight == config.trajectory_pg_weight == 1.0
     assert config.bc_weight == 0.1
     assert config.reference_kl_weight == 0.02
-    with pytest.raises(JointGRPOError, match="group_size"):
-        JointGRPOConfig(group_size=3)
     with pytest.raises(JointGRPOError, match="initial_noise_timestep"):
         JointGRPOConfig(initial_noise_timestep=9)
     with pytest.raises(JointGRPOError, match="non-negative"):
@@ -197,6 +197,14 @@ def test_config_and_signed_advantage_contract() -> None:
     bad[0, 0] = torch.nan
     with pytest.raises(JointGRPOError, match="finite"):
         normalize_signed_advantages(bad)
+
+
+@pytest.mark.parametrize("invalid_group_size", [True, False, 1, 0, -1])
+def test_config_rejects_invalid_group_size(invalid_group_size: object) -> None:
+    with pytest.raises(JointGRPOError, match="group_size"):
+        JointGRPOConfig(
+            group_size=invalid_group_size  # type: ignore[arg-type]
+        )
 
 
 def test_standard_gaussian_ddim_sampling_replay_and_schedule() -> None:
@@ -292,6 +300,48 @@ def test_joint_rollout_shapes_seed_and_hard_mask(rollout_pair) -> None:
         stop_rollout.sampled_modes,
         torch.full_like(stop_rollout.sampled_modes, 9),
     )
+
+
+@pytest.mark.parametrize("group_size", [3, 5])
+def test_joint_rollout_and_update_shapes_follow_group_size(
+    group_size: int,
+) -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(),
+        JointGRPOConfig(group_size=group_size),
+    )
+    rollout = trainer.sample_groups(
+        _model_inputs(),
+        generator=torch.Generator().manual_seed(101 + group_size),
+    )
+
+    assert rollout.group_size == group_size
+    assert rollout.chains_normalized.shape == (
+        1,
+        group_size,
+        5,
+        3,
+        10,
+        8,
+        2,
+    )
+    assert rollout.sampled_modes.shape == (1, group_size, 3)
+    assert rollout.selected_trajectories.shape == (1, group_size, 3, 8, 3)
+    assert rollout.old_mode_log_prob.shape == (1, group_size)
+    assert rollout.old_trajectory_log_prob.shape == (1, group_size, 3)
+
+    rewards = torch.linspace(
+        -1.0,
+        1.0,
+        steps=group_size,
+        dtype=torch.float32,
+    ).unsqueeze(0)
+    update = trainer.update(rollout, rewards)
+
+    assert update.optimizer_step == 1
+    assert update.loss.advantages.shape == (1, group_size)
+    assert update.loss.new_mode_log_prob.shape == (1, group_size)
+    assert update.loss.new_trajectory_log_prob.shape == (1, group_size, 3)
 
 
 def test_joint_probability_replay_zero_kl_and_weighted_loss(
