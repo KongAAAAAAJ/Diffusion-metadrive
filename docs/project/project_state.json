@@ -1,13 +1,13 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-29T20:11:09+08:00",
+  "updated_at": "2026-08-29T20:21:38+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "fa62a18350d9e014ec9886841437ffcb75b68291",
+    "git_commit": "95bf8f86a7e6cb2db0422afaab43c8956b832331",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
-    "uncommitted_plan_update_present": true,
+    "uncommitted_plan_update_present": false,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
     "uncommitted_stage2_calibration_bypass_present": false,
     "uncommitted_stage2_bare_launcher_fix_present": false,
@@ -65,18 +65,19 @@
     "uncommitted_grpo_run_scoped_storage_migration_present": true,
     "uncommitted_grpo_evaluation_output_root_update_present": true,
     "uncommitted_stage1_grpo_reward_only_evaluation_present": false,
-    "uncommitted_legacy_evaluation_cleanup_present": true
+    "uncommitted_legacy_evaluation_cleanup_present": false,
+    "uncommitted_reward_only_smoke_evidence_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "legacy-full-evaluation-cleanup-20260829",
-    "status": "legacy_full_evaluation_cleanup_complete_run3_qualification_entry_reimplementation_required",
+    "round": "stage1-grpo-reward-only-smoke-20260829",
+    "status": "bounded_reward_only_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "legacy_full_evaluation_cleanup_complete_run3_qualification_entry_reimplementation_required",
+      "status": "bounded_reward_only_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -813,6 +814,11 @@
       "path": "evaluation/STAGE1_GRPO_LEGACY_EVALUATION_CLEANUP_REPORT.json",
       "sha256": "d285c7d084dedf580c23467176780800b0c7e973cae0492c17c8f621d33679c5",
       "role": "Records permanent deletion of the 356 MiB legacy evaluation/compare output, removal of the legacy evaluator/chart/launcher and dedicated tests, reward-only evaluator independence, 42 passing focused tests, real two-checkpoint CPU loader preflight, and the resulting need to reimplement a strict Stage1 qualification entry."
+    },
+    "stage1_grpo_reward_only_smoke_20260829_report": {
+      "path": "evaluation/STAGE1_GRPO_REWARD_ONLY_SMOKE_20260829_REPORT.json",
+      "sha256": "dd53850b268322ba8a2431a173054cc1ca0f969537d28b396532623a96595031",
+      "role": "Records the passing 12-step CUDA reward-only smoke over S5-S9, holdout seeds 31/47 and both checkpoints, 40 finite reward rows, nine boxplots, descriptive total-reward mean delta +0.04893, and the unchanged nonformal/qualification boundary."
     },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
@@ -1869,6 +1875,26 @@
       "bounded_reward_only_smoke_csv_files": 1,
       "bounded_reward_only_smoke_boxplot_files": 9,
       "bounded_reward_only_smoke_eligible_for_formal_conclusions": false,
+      "latest_reward_only_smoke": {
+        "recorded_on": "2026-08-29",
+        "output_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare_smoke_20260829T2018",
+        "report": "evaluation/STAGE1_GRPO_REWARD_ONLY_SMOKE_20260829_REPORT.json",
+        "device": "cuda",
+        "max_steps": 12,
+        "scenarios": 5,
+        "seeds": [31, 47],
+        "exit_code": 0,
+        "both_models_evaluated": true,
+        "total_rows": 40,
+        "rows_per_model": 20,
+        "csv_files": 1,
+        "boxplot_files": 9,
+        "stage1_total_reward_mean": -1.7475589006207883,
+        "grpo_total_reward_mean": -1.6986313588917255,
+        "grpo_minus_stage1_total_reward_mean": 0.048927541729062884,
+        "eligible_for_formal_conclusions": false,
+        "strict_stage1_qualification_gate_evaluated": false
+      },
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false
     },
