@@ -1,0 +1,106 @@
+{
+  "format": "stage2_grpo_advantage_vector_heatmap_implementation_report_v1",
+  "created_at": "2026-08-29T22:05:49+08:00",
+  "repository": {
+    "branch": "BEV",
+    "base_git_commit": "c2e6e1909b12d2236165214e8ea9ef1e8b70703d",
+    "initial_worktree_clean": true,
+    "stale_project_state_index_reconciled_before_code_changes": true
+  },
+  "implementation_gate": {
+    "name": "stage2_grpo_advantage_vector_tensorboard_and_heatmap",
+    "passed": true,
+    "scope": "code, focused regression, isolated one-step CUDA smoke, TensorBoard tensor inspection, automatic heatmap inspection, and checkpoint round-trip",
+    "long_training_started": false
+  },
+  "contract_boundary": {
+    "reward_input_domain": "tau_d",
+    "reward_application_contract": "stage2_grpo_open_application_v1",
+    "reward_application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
+    "reward_config_sha256": "d8ee4366681b5f2b69b1dfad376b4cfd551822dc1996adff79eed4955e4218a3",
+    "reward_loss_or_checkpoint_contract_changed": false,
+    "existing_scalar_advantage_metrics_changed": false,
+    "existing_run4_modified_or_backfilled": false
+  },
+  "implementation": {
+    "tensorboard_tag": "advantage/vector",
+    "tensor_shape": [1, 4],
+    "tensor_dtype": "float32",
+    "default_interval_optimizer_steps": 100,
+    "final_optimizer_step_forced": true,
+    "uninformative_rollout_vector_policy": "do_not_record",
+    "storage": "TensorBoard tensor summary only; metrics.jsonl and checkpoints remain scalar-only",
+    "heatmap_output": "<run_N>/plots/advantage_vector_heatmap.png",
+    "heatmap_axes": {
+      "x": "absolute optimizer step",
+      "y": "raw random sample slot g0 through g3"
+    },
+    "heatmap_color_scale": "RdBu_r, symmetric around zero",
+    "resume_scope": "current numbered run only; previous run TensorBoard events are not merged",
+    "automatic_order": [
+      "record sparse exact advantage tensors after informative optimizer updates",
+      "close and flush TensorBoard writer",
+      "save and round-trip the final checkpoint",
+      "load every tensor event with TENSORS size guidance set to zero",
+      "generate the heatmap",
+      "write report.json with artifact metadata"
+    ]
+  },
+  "verification": {
+    "focused_regression": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_plot_grpo_advantage_heatmap.py tests/test_run_bev_joint_grpo_launcher.py -q",
+      "passed": 64,
+      "failed": 0,
+      "warnings": 15
+    },
+    "python_compile_passed": true,
+    "heatmap_cli_help_passed": true,
+    "git_diff_check_passed": true,
+    "black_check": "not_run_module_unavailable"
+  },
+  "smoke": {
+    "classification": "isolated one-optimizer-step CUDA diagnostic; formal-ineligible",
+    "command": "ARTIFACT_ROOT=/tmp/grpo_advantage_vector_smoke_20260829_v1 OUTPUT_ROOT=/tmp/grpo_advantage_vector_smoke_20260829_v1 LOG_ROOT=/tmp/grpo_advantage_vector_smoke_20260829_v1/logs MAX_OPTIMIZER_STEPS=1 bash scripts/run_bev_joint_grpo.sh",
+    "artifact_root": "/tmp/grpo_advantage_vector_smoke_20260829_v1/run_1",
+    "exit_code": 0,
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "optimizer_steps": 1,
+    "environment_steps": 33,
+    "sampled_rollouts": 1,
+    "uninformative_rollouts": 0,
+    "checkpoint_round_trip": true,
+    "tensorboard": {
+      "event_file": "/tmp/grpo_advantage_vector_smoke_20260829_v1/run_1/tb/events.out.tfevents.1788012240.Server.3524967.0",
+      "event_file_sha256": "e6b44dfab1a227f394f210557eba669f9198e97b38f203dd0c79f0a966e6eee0",
+      "event_file_bytes": 3419,
+      "tag": "advantage/vector",
+      "record_count": 1,
+      "step": 1,
+      "shape": [1, 4],
+      "dtype": "float32",
+      "values": [0.4043966233730316, -1.2392330169677734, -0.5704215168952942, 1.4052150249481201]
+    },
+    "heatmap": {
+      "path": "/tmp/grpo_advantage_vector_smoke_20260829_v1/run_1/plots/advantage_vector_heatmap.png",
+      "sha256": "7f17faa49538eb425b5ad9d5acaee2a0d1a85480939dac2439913b56862b3eb7",
+      "bytes": 74310,
+      "dimensions_px": [1950, 958],
+      "visually_inspected": true
+    },
+    "report": {
+      "path": "/tmp/grpo_advantage_vector_smoke_20260829_v1/run_1/report.json",
+      "sha256": "87c85cb6f56cf04b09be060024b24aa95eec224ae361d288b29dcc7cec026c81"
+    },
+    "best_checkpoint_sha256": "3d1704434bcf0a3aa754dcfd938b20dbd6af8a7e124d327273ae1ee4b768f1a8",
+    "last_checkpoint_sha256": "4ac10a7d3db636fdcab0445ac595c030036ef53e95652b5fa319ec21f968ee1b",
+    "metrics_jsonl_contains_vector_payload": false
+  },
+  "qualification": {
+    "implementation_verified": true,
+    "formal_qualification_passed": false,
+    "checkpoint_eligibility_changed": false,
+    "paper_evidence_allowed": false,
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification"
+  }
+}

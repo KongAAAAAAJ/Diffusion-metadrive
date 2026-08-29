@@ -17,6 +17,10 @@ import torch
 import yaml
 from torch.utils.tensorboard import SummaryWriter
 
+from evaluation.plot_grpo_advantage_heatmap import (
+    ADVANTAGE_VECTOR_TAG,
+    generate_advantage_heatmap,
+)
 from evaluation.joint_simulator_branch import (
     JointEpisodeSpec,
     JointSimulatorBranchEvaluator,
@@ -88,6 +92,7 @@ class JointGRPOOnlineConfig:
     scenario_seeds: tuple[int, ...] = DEVELOPMENT_SEEDS
     environment_steps_per_episode: int = 100
     validation_interval_steps: int = 100
+    advantage_vector_log_interval_steps: int = 100
 
     def __post_init__(self) -> None:
         if self.device not in ("cpu", "cuda"):
@@ -98,6 +103,7 @@ class JointGRPOOnlineConfig:
             "total_optimizer_steps",
             "environment_steps_per_episode",
             "validation_interval_steps",
+            "advantage_vector_log_interval_steps",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -499,6 +505,43 @@ def _joint_rewards_are_informative(
             "minimum reward span must be finite and non-negative"
         )
     return float(np.ptp(values.astype(np.float64, copy=False))) > minimum_span
+
+
+def _should_record_advantage_vector(
+    optimizer_step: int,
+    target_steps: int,
+    interval_steps: int,
+) -> bool:
+    for name, value in (
+        ("optimizer_step", optimizer_step),
+        ("target_steps", target_steps),
+        ("interval_steps", interval_steps),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise OnlineGRPOError(f"{name} must be a positive integer")
+    if optimizer_step > target_steps:
+        raise OnlineGRPOError("optimizer_step cannot exceed target_steps")
+    return optimizer_step % interval_steps == 0 or optimizer_step == target_steps
+
+
+def _write_advantage_vector_summary(
+    writer: SummaryWriter,
+    advantages: torch.Tensor,
+    optimizer_step: int,
+    target_steps: int,
+    interval_steps: int,
+) -> bool:
+    if not _should_record_advantage_vector(
+        optimizer_step, target_steps, interval_steps
+    ):
+        return False
+    vector = advantages.detach().cpu()
+    if vector.dtype != torch.float32 or tuple(vector.shape) != (1, 4):
+        raise OnlineGRPOError("advantage vector must be float32 with shape [1,4]")
+    if not bool(torch.isfinite(vector).all()):
+        raise OnlineGRPOError("advantage vector must be finite")
+    writer.add_tensor(ADVANTAGE_VECTOR_TAG, vector, optimizer_step)
+    return True
 
 
 def _round_robin_training_buckets(
@@ -1122,6 +1165,7 @@ def run_joint_grpo_training(
     environment_steps = 0
     sampled_rollouts = 0
     uninformative_rollouts = 0
+    advantage_vector_record_count = 0
     rule_diagnostics = {
         "conditioned_rollouts": 0,
         "proposal_match_attempts": 0,
@@ -1159,6 +1203,7 @@ def run_joint_grpo_training(
                 "resume checkpoint already reached requested optimizer steps"
             )
 
+    run_start_optimizer_step = trainer.optimizer_step
     run_dir = _next_run_directory(Path(output_root))
     online_config = dataclasses.asdict(config)
     online_config["resume_checkpoint"] = (
@@ -1376,6 +1421,14 @@ def run_joint_grpo_training(
                             for name, value in update.gradient_norms.items():
                                 last_metrics[f"gradient/{name}"] = float(value)
                             bucket_update_counts[bucket_index] += 1
+                            if _write_advantage_vector_summary(
+                                writer,
+                                update.loss.advantages,
+                                trainer.optimizer_step,
+                                target_steps,
+                                config.advantage_vector_log_interval_steps,
+                            ):
+                                advantage_vector_record_count += 1
                             for metric_name, metric_value in last_metrics.items():
                                 writer.add_scalar(
                                     metric_name,
@@ -1551,6 +1604,11 @@ def run_joint_grpo_training(
         scenario_seeds=config.scenario_seeds,
     )
 
+    heatmap_path = generate_advantage_heatmap(
+        run_dir / "tb",
+        run_dir / "plots" / "advantage_vector_heatmap.png",
+    )
+
     report = {
         "format": "bev_joint_grpo_online_report_v3",
         "variant": variant,
@@ -1599,6 +1657,22 @@ def run_joint_grpo_training(
         "best_validation_reward": best_reward,
         "metrics": last_metrics,
         "checkpoint_round_trip": True,
+        "advantage_vector_logging": {
+            "storage": "tensorboard_tensor",
+            "tensorboard_tag": ADVANTAGE_VECTOR_TAG,
+            "tensorboard_dir": str((run_dir / "tb").resolve()),
+            "shape": [1, int(trainer.config.group_size)],
+            "interval_optimizer_steps": (
+                config.advantage_vector_log_interval_steps
+            ),
+            "record_count": advantage_vector_record_count,
+            "scope": "current_run_only",
+            "run_start_optimizer_step": run_start_optimizer_step,
+            "group_axis_semantics": (
+                "independent_random_sample_slot_without_cross_step_identity"
+            ),
+            "heatmap": str(heatmap_path.resolve()),
+        },
     }
     (run_dir / "report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1639,6 +1713,9 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
         ),
         validation_interval_steps=int(
             online.get("validation_interval_steps", 100)
+        ),
+        advantage_vector_log_interval_steps=online.get(
+            "advantage_vector_log_interval_steps", 100
         ),
     )
 

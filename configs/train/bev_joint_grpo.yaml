@@ -5,6 +5,7 @@ online:
   resume_checkpoint: null
   environment_steps_per_episode: 100
   validation_interval_steps: 100
+  advantage_vector_log_interval_steps: 100
   scenario_seeds: [17, 23]
   scenarios:
     - {scenario: S5_hard_brake_lead, route: R1_entry_straight}

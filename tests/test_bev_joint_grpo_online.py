@@ -33,6 +33,7 @@ from train.train_bev_joint_grpo_online import (
     JointGRPOOnlineConfig,
     OnlineGRPOError,
     _checkpoint_file_sha256,
+    _config_from_yaml,
     _condition_online_model_inputs,
     _finalize_online_rule_action,
     _fixed_raw_proxy_and_simulator_validation,
@@ -43,10 +44,12 @@ from train.train_bev_joint_grpo_online import (
     _round_robin_training_buckets,
     _scenario_ready_for_primary_sampling,
     _score_select_and_optimize_raw_candidates,
+    _should_record_advantage_vector,
     _validate_online_checkpoint_metadata,
     _validate_raw_reward_config,
     _validation_raw_proxy_reward,
     _validation_reward_comparison_metrics,
+    _write_advantage_vector_summary,
     constant_velocity_actions,
     episode_has_ended,
     execution_mode_valid_mask,
@@ -106,6 +109,7 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
         JointGRPOOnlineConfig(device="auto")
     with pytest.raises(OnlineGRPOError):
         JointGRPOOnlineConfig(total_optimizer_steps=0)
+    assert JointGRPOOnlineConfig().advantage_vector_log_interval_steps == 100
     with pytest.raises(OnlineGRPOError, match="complete ordered S5--S9"):
         JointGRPOOnlineConfig(
             scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),)
@@ -119,6 +123,135 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
             source_checkpoint=tmp_path / "missing.pt",
             output_root=tmp_path / "output",
             max_optimizer_steps=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_interval",
+    [0, -1, True, False],
+)
+def test_online_config_rejects_invalid_advantage_vector_log_interval(
+    invalid_interval: object,
+) -> None:
+    with pytest.raises(OnlineGRPOError, match="advantage_vector_log_interval_steps"):
+        JointGRPOOnlineConfig(
+            advantage_vector_log_interval_steps=invalid_interval  # type: ignore[arg-type]
+        )
+
+
+def test_online_config_loads_advantage_vector_log_interval_from_yaml(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "online.yaml"
+    config_path.write_text(
+        "online:\n"
+        "  device: cpu\n"
+        "  advantage_vector_log_interval_steps: 37\n",
+        encoding="utf-8",
+    )
+
+    config = _config_from_yaml(config_path)
+
+    assert config.advantage_vector_log_interval_steps == 37
+
+
+def test_advantage_vector_recording_schedule_uses_interval_or_final_step() -> None:
+    assert not _should_record_advantage_vector(
+        optimizer_step=1,
+        target_steps=350,
+        interval_steps=100,
+    )
+    assert _should_record_advantage_vector(
+        optimizer_step=100,
+        target_steps=350,
+        interval_steps=100,
+    )
+    assert _should_record_advantage_vector(
+        optimizer_step=350,
+        target_steps=350,
+        interval_steps=100,
+    )
+
+
+def test_advantage_vector_summary_is_sparse_and_preserves_tensor_values() -> None:
+    class RecordingWriter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, torch.Tensor, int]] = []
+
+        def add_tensor(
+            self, tag: str, tensor: torch.Tensor, step: int
+        ) -> None:
+            self.calls.append((tag, tensor, step))
+
+    writer = RecordingWriter()
+    advantages = torch.tensor(
+        [[-1.25, -0.25, 0.5, 1.0]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+
+    assert not _write_advantage_vector_summary(
+        writer,
+        advantages,
+        optimizer_step=99,
+        target_steps=350,
+        interval_steps=100,
+    )
+    assert writer.calls == []
+
+    assert _write_advantage_vector_summary(
+        writer,
+        advantages,
+        optimizer_step=100,
+        target_steps=350,
+        interval_steps=100,
+    )
+    assert len(writer.calls) == 1
+    tag, recorded, step = writer.calls[0]
+    assert tag == "advantage/vector"
+    assert step == 100
+    assert recorded.shape == (1, 4)
+    assert recorded.dtype == torch.float32
+    assert recorded.device.type == "cpu"
+    assert not recorded.requires_grad
+    torch.testing.assert_close(recorded, advantages.detach().cpu())
+
+    assert _write_advantage_vector_summary(
+        writer,
+        advantages,
+        optimizer_step=350,
+        target_steps=350,
+        interval_steps=100,
+    )
+    assert [call[2] for call in writer.calls] == [100, 350]
+
+
+@pytest.mark.parametrize(
+    "invalid_advantages",
+    [
+        torch.zeros(4, dtype=torch.float32),
+        torch.zeros((2, 4), dtype=torch.float32),
+        torch.zeros((1, 3), dtype=torch.float32),
+        torch.zeros((1, 4), dtype=torch.float64),
+        torch.zeros((1, 4), dtype=torch.int64),
+        torch.tensor([[0.0, 1.0, float("nan"), -1.0]], dtype=torch.float32),
+        torch.tensor([[0.0, 1.0, float("inf"), -1.0]], dtype=torch.float32),
+    ],
+)
+def test_advantage_vector_summary_rejects_invalid_tensor_contract(
+    invalid_advantages: torch.Tensor,
+) -> None:
+    class FailingWriter:
+        def add_tensor(self, *args: object) -> None:
+            raise AssertionError("invalid advantages must not reach writer")
+
+    with pytest.raises(OnlineGRPOError):
+        _write_advantage_vector_summary(
+            FailingWriter(),
+            invalid_advantages,
+            optimizer_step=100,
+            target_steps=350,
+            interval_steps=100,
         )
 
 
