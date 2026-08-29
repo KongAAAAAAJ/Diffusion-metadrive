@@ -1,0 +1,179 @@
+{
+  "format": "stage2_grpo_plot_suite_implementation_report_v1",
+  "created_at": "2026-08-29T22:35:02+08:00",
+  "repository": {
+    "branch": "BEV",
+    "base_git_commit": "8ec8023e99a8a8036c711c5e1769488a21e5b723",
+    "initial_worktree_clean": true,
+    "stale_project_state_index_reconciled_before_code_changes": true
+  },
+  "implementation_gate": {
+    "name": "stage2_grpo_tensorboard_plot_suite",
+    "passed": true,
+    "scope": "module rename, TensorBoard plot implementation, focused regression, isolated one-step CUDA smoke, artifact inspection, and project-state update",
+    "long_training_started": false
+  },
+  "contract_boundary": {
+    "reward_input_domain": "tau_d",
+    "reward_application_contract": "stage2_grpo_open_application_v1",
+    "reward_loss_or_checkpoint_contract_changed": false,
+    "advantage_tensor_contract_changed": false,
+    "training_launcher_process_contract_changed": false,
+    "existing_run4_modified_or_backfilled": false
+  },
+  "implementation": {
+    "module": "evaluation.plot_grpo",
+    "superseded_module": "evaluation.plot_grpo_advantage_heatmap",
+    "compatibility_shim_added": false,
+    "cli": "python -m evaluation.plot_grpo --tensorboard-dir <run_N/tb> --output-dir <run_N/plots>",
+    "fixed_outputs": {
+      "advantage_heatmap": "advantage_vector_heatmap.png",
+      "reward_curve": "reward_curve.png",
+      "grpo_loss_curve": "grpo_loss_curve.png",
+      "kl_loss_curve": "kl_loss_curve.png"
+    },
+    "tensorboard_loading": {
+      "tensor_size_guidance": 0,
+      "scalar_size_guidance": 0,
+      "finite_values_required": true,
+      "unique_optimizer_steps_required_per_tag": true,
+      "related_scalar_tags_require_aligned_steps": true
+    },
+    "advantage_heatmap": {
+      "tag": "advantage/vector",
+      "event_shape": [1, 4],
+      "matrix_orientation": "group_slot_by_optimizer_step",
+      "group_slot_order_preserved": true,
+      "color_scale": "RdBu_r symmetric around zero",
+      "cross_step_slot_identity": false
+    },
+    "reward_curve": {
+      "tags": [
+        "raw_proxy_reward_mean",
+        "raw_proxy_reward_max",
+        "validation/raw_proxy_reward_mean",
+        "validation/pretrain_reward"
+      ],
+      "domain": "raw_tau_d",
+      "training_mean_semantics": "mean reward over the G raw joint-trajectory samples at one informative optimizer update",
+      "training_max_semantics": "maximum reward over the same G raw samples",
+      "validation_semantics": "fixed S5-S9 holdout raw-tau_d proxy reward and its pretraining baseline"
+    },
+    "grpo_loss_curve": {
+      "tags": [
+        "loss/total",
+        "loss/mode_pg",
+        "loss/trajectory_pg"
+      ],
+      "total_semantics": "the complete optimized objective already recorded by training",
+      "smoothing": "none"
+    },
+    "kl_loss_curve": {
+      "tags": [
+        "loss/reference_kl",
+        "loss/mode_reference_kl",
+        "loss/trajectory_reference_kl"
+      ],
+      "values_are_weighted_contributions": false,
+      "training_total_reference_kl_weight": 0.02,
+      "smoothing": "none"
+    },
+    "x_axis": "absolute optimizer step from each TensorBoard event",
+    "automatic_order": [
+      "close and flush TensorBoard writer",
+      "save and round-trip the final checkpoint",
+      "load complete tensor and scalar event series",
+      "generate all four plots",
+      "write report.json with all plot paths and tag semantics"
+    ]
+  },
+  "verification": {
+    "focused_regression": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_plot_grpo.py tests/test_run_bev_joint_grpo_launcher.py -q",
+      "passed": 70,
+      "failed": 0,
+      "warnings": 15
+    },
+    "plot_and_training_integration_subset": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_plot_grpo.py tests/test_bev_joint_grpo_online.py tests/test_run_bev_joint_grpo_launcher.py -q",
+      "passed": 55,
+      "failed": 0,
+      "warnings": 15
+    },
+    "python_compile_passed": true,
+    "cli_help_passed": true,
+    "git_diff_check_passed": true,
+    "old_module_imports_remaining": false,
+    "real_run4_scalar_curve_visual_audit": {
+      "source_tensorboard_dir": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_4/tb",
+      "temporary_output_dir": "/tmp/grpo_run4_scalar_plot_audit_20260829",
+      "optimizer_steps": 5000,
+      "reward_curve_inspected": true,
+      "grpo_loss_curve_inspected": true,
+      "kl_loss_curve_inspected": true,
+      "run4_artifacts_modified": false,
+      "advantage_heatmap_fabricated": false
+    }
+  },
+  "smoke": {
+    "classification": "isolated one-optimizer-step CUDA diagnostic; formal-ineligible",
+    "command": "ARTIFACT_ROOT=/tmp/grpo_plot_auto_smoke_20260829_v1 OUTPUT_ROOT=/tmp/grpo_plot_auto_smoke_20260829_v1 LOG_ROOT=/tmp/grpo_plot_auto_smoke_20260829_v1/logs MAX_OPTIMIZER_STEPS=1 bash scripts/run_bev_joint_grpo.sh",
+    "artifact_root": "/tmp/grpo_plot_auto_smoke_20260829_v1/run_1",
+    "exit_code": 0,
+    "optimizer_steps": 1,
+    "environment_steps": 33,
+    "sampled_rollouts": 1,
+    "uninformative_rollouts": 0,
+    "checkpoint_round_trip": true,
+    "advantage_tensor": {
+      "tag": "advantage/vector",
+      "record_count": 1,
+      "step": 1,
+      "shape": [1, 4],
+      "dtype": "float32"
+    },
+    "scalar_tag_counts": {
+      "raw_proxy_reward_mean": 1,
+      "raw_proxy_reward_max": 1,
+      "validation/raw_proxy_reward_mean": 1,
+      "validation/pretrain_reward": 1,
+      "loss/total": 1,
+      "loss/mode_pg": 1,
+      "loss/trajectory_pg": 1,
+      "loss/reference_kl": 1,
+      "loss/mode_reference_kl": 1,
+      "loss/trajectory_reference_kl": 1
+    },
+    "plots": {
+      "advantage_heatmap": {
+        "path": "/tmp/grpo_plot_auto_smoke_20260829_v1/run_1/plots/advantage_vector_heatmap.png",
+        "bytes": 74310,
+        "dimensions_px": [1950, 958]
+      },
+      "reward_curve": {
+        "path": "/tmp/grpo_plot_auto_smoke_20260829_v1/run_1/plots/reward_curve.png",
+        "bytes": 68344,
+        "dimensions_px": [1820, 1017]
+      },
+      "grpo_loss_curve": {
+        "path": "/tmp/grpo_plot_auto_smoke_20260829_v1/run_1/plots/grpo_loss_curve.png",
+        "bytes": 50363,
+        "dimensions_px": [1819, 1017]
+      },
+      "kl_loss_curve": {
+        "path": "/tmp/grpo_plot_auto_smoke_20260829_v1/run_1/plots/kl_loss_curve.png",
+        "bytes": 69604,
+        "dimensions_px": [1820, 1017]
+      }
+    },
+    "all_plots_visually_inspected": true,
+    "report_contains_all_plot_paths": true
+  },
+  "qualification": {
+    "implementation_verified": true,
+    "formal_qualification_passed": false,
+    "checkpoint_eligibility_changed": false,
+    "paper_evidence_allowed": false,
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification"
+  }
+}

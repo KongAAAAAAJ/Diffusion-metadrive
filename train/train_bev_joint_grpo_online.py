@@ -17,9 +17,9 @@ import torch
 import yaml
 from torch.utils.tensorboard import SummaryWriter
 
-from evaluation.plot_grpo_advantage_heatmap import (
+from evaluation.plot_grpo import (
     ADVANTAGE_VECTOR_TAG,
-    generate_advantage_heatmap,
+    generate_grpo_plots,
 )
 from evaluation.joint_simulator_branch import (
     JointEpisodeSpec,
@@ -1604,9 +1604,9 @@ def run_joint_grpo_training(
         scenario_seeds=config.scenario_seeds,
     )
 
-    heatmap_path = generate_advantage_heatmap(
+    plot_paths = generate_grpo_plots(
         run_dir / "tb",
-        run_dir / "plots" / "advantage_vector_heatmap.png",
+        run_dir / "plots",
     )
 
     report = {
@@ -1671,7 +1671,33 @@ def run_joint_grpo_training(
             "group_axis_semantics": (
                 "independent_random_sample_slot_without_cross_step_identity"
             ),
-            "heatmap": str(heatmap_path.resolve()),
+            "heatmap": str(plot_paths["advantage_heatmap"].resolve()),
+        },
+        "training_plots": {
+            "reward_curve": str(plot_paths["reward_curve"].resolve()),
+            "reward_tags": [
+                "raw_proxy_reward_mean",
+                "raw_proxy_reward_max",
+                "validation/raw_proxy_reward_mean",
+                "validation/pretrain_reward",
+            ],
+            "reward_domain": "raw_tau_d",
+            "grpo_loss_curve": str(
+                plot_paths["grpo_loss_curve"].resolve()
+            ),
+            "grpo_loss_tags": [
+                "loss/total",
+                "loss/mode_pg",
+                "loss/trajectory_pg",
+            ],
+            "kl_loss_curve": str(plot_paths["kl_loss_curve"].resolve()),
+            "kl_loss_tags": [
+                "loss/reference_kl",
+                "loss/mode_reference_kl",
+                "loss/trajectory_reference_kl",
+            ],
+            "reference_kl_weighted": False,
+            "x_axis": "absolute_optimizer_step",
         },
     }
     (run_dir / "report.json").write_text(

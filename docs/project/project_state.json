@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-29T22:07:20+08:00",
+  "updated_at": "2026-08-29T22:36:00+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "c2e6e1909b12d2236165214e8ea9ef1e8b70703d",
+    "git_commit": "8ec8023e99a8a8036c711c5e1769488a21e5b723",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": false,
@@ -69,18 +69,19 @@
     "uncommitted_reward_only_smoke_evidence_present": false,
     "uncommitted_reward_boxplot_scatter_present": false,
     "uncommitted_reward_boxplot_grouping_present": false,
-    "uncommitted_stage2_grpo_advantage_vector_heatmap_present": true
+    "uncommitted_stage2_grpo_advantage_vector_heatmap_present": false,
+    "uncommitted_stage2_grpo_plot_suite_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "stage2-grpo-advantage-vector-heatmap-20260829",
-    "status": "grpo_advantage_vector_tensorboard_heatmap_implemented_cuda_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
+    "round": "stage2-grpo-plot-suite-20260829",
+    "status": "grpo_plot_suite_implemented_cuda_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "grpo_advantage_vector_tensorboard_heatmap_implemented_cuda_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
+      "status": "grpo_plot_suite_implemented_cuda_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -786,6 +787,9 @@
     "stage1_grpo_reward_boxplot_grouping_authorized": true,
     "stage1_grpo_reward_boxplot_grouping_authorized_on": "2026-08-29",
     "stage1_grpo_reward_boxplot_grouping_scope": "Combine total, progress, TTC, and comfort rewards into one 2-by-2 figure; retain formation, gap, road, collision, and out-of-drivable as individual figures; preserve raw scatter overlays, reward values, CSV contents, evaluator semantics, checkpoint eligibility, and the active qualification gate.",
+    "stage2_grpo_plot_suite_authorized": true,
+    "stage2_grpo_plot_suite_authorized_on": "2026-08-29",
+    "stage2_grpo_plot_suite_scope": "Rename the standalone advantage heatmap module to evaluation.plot_grpo; retain the exact sparse advantage/vector heatmap and add raw-tau_d reward, total/PG loss, and unweighted reference-KL curves from complete TensorBoard events; generate all four plots automatically after a successful checkpoint round-trip without changing reward, loss, checkpoint, launcher, eligibility, or the active qualification gate, and do not backfill run_4.",
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. Future GRPO-Open artifacts are stored beneath their exact source Stage1 run; no formal eligibility was granted."
   },
   "source_of_truth": {
@@ -843,6 +847,11 @@
       "path": "evaluation/STAGE2_GRPO_ADVANTAGE_VECTOR_HEATMAP_IMPLEMENTATION_REPORT.json",
       "sha256": "5c3474f46e047ee383e5340f1571cc93cd7713d1f0e984282c858417599100c0",
       "role": "Records exact sparse [1,G] float32 advantage tensors under TensorBoard tag advantage/vector, forced final-step recording, complete TENSORS:0 event recovery, automatic raw-slot heatmap generation, 64 passing focused tests, an isolated one-optimizer-step CUDA smoke, preserved checkpoint round-trip, and the unchanged diagnostic/formal boundary."
+    },
+    "stage2_grpo_plot_suite_implementation_report": {
+      "path": "evaluation/STAGE2_GRPO_PLOT_SUITE_IMPLEMENTATION_REPORT.json",
+      "sha256": "0c01e5e08633fa6a3e50c32f33cac8346cda20c7f67a1c7f3a7b61dae6b258fd",
+      "role": "Records the evaluation.plot_grpo module rename, complete TensorBoard tensor/scalar loading, automatic advantage heatmap plus raw-tau_d reward, GRPO objective and unweighted reference-KL curves, 70 passing focused tests, real run_4 scalar-curve visual audit, an isolated one-step CUDA automatic-generation smoke, preserved checkpoint round-trip, and the unchanged diagnostic/formal boundary."
     },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
@@ -1865,6 +1874,44 @@
       "advantage_vector_smoke_record_count": 1,
       "advantage_vector_smoke_heatmap": "/tmp/grpo_advantage_vector_smoke_20260829_v1/run_1/plots/advantage_vector_heatmap.png",
       "advantage_vector_smoke_formal_eligible": false,
+      "grpo_plot_suite_implemented_for_future_runs": true,
+      "grpo_plot_module": "evaluation.plot_grpo",
+      "grpo_plot_cli": "python -m evaluation.plot_grpo --tensorboard-dir <run_N/tb> --output-dir <run_N/plots>",
+      "grpo_plot_auto_generation_after_checkpoint_round_trip": true,
+      "grpo_plot_outputs": [
+        "<run_N>/plots/advantage_vector_heatmap.png",
+        "<run_N>/plots/reward_curve.png",
+        "<run_N>/plots/grpo_loss_curve.png",
+        "<run_N>/plots/kl_loss_curve.png"
+      ],
+      "grpo_plot_reward_tags": [
+        "raw_proxy_reward_mean",
+        "raw_proxy_reward_max",
+        "validation/raw_proxy_reward_mean",
+        "validation/pretrain_reward"
+      ],
+      "grpo_plot_reward_domain": "raw_tau_d",
+      "grpo_plot_loss_tags": [
+        "loss/total",
+        "loss/mode_pg",
+        "loss/trajectory_pg"
+      ],
+      "grpo_plot_kl_tags": [
+        "loss/reference_kl",
+        "loss/mode_reference_kl",
+        "loss/trajectory_reference_kl"
+      ],
+      "grpo_plot_kl_values_weighted": false,
+      "grpo_plot_reference_kl_weight_in_total": 0.02,
+      "grpo_plot_existing_run4_backfilled": false,
+      "grpo_plot_implementation_report": "evaluation/STAGE2_GRPO_PLOT_SUITE_IMPLEMENTATION_REPORT.json",
+      "grpo_plot_implementation_report_sha256": "0c01e5e08633fa6a3e50c32f33cac8346cda20c7f67a1c7f3a7b61dae6b258fd",
+      "grpo_plot_smoke_root": "/tmp/grpo_plot_auto_smoke_20260829_v1/run_1",
+      "grpo_plot_smoke_exit_code": 0,
+      "grpo_plot_smoke_optimizer_steps": 1,
+      "grpo_plot_smoke_output_count": 4,
+      "grpo_plot_smoke_checkpoint_round_trip": true,
+      "grpo_plot_smoke_formal_eligible": false,
       "reward_domain": "tau_d",
       "application_contract": "stage2_grpo_open_application_v1",
       "training_launcher": "scripts/run_bev_joint_grpo.sh",
@@ -2075,7 +2122,7 @@
     "Treat the observed S5 background actor counts as descriptive evidence rather than an acceptance hard gate; no explicit background-quota waiver continuation switch exists in the current collector.",
     "Use tools/visualize_dataset_episode.py for read-only scenario/episode listing and world-topdown MP4 rendering; keep outputs outside dataset roots.",
     "Preserve run_3 as the user-terminated incomplete diagnostic artifact at metrics step 4532 and checkpoint step 4500; do not backfill or otherwise modify its TensorBoard event or checkpoints.",
-    "For any future bounded diagnostic GRPO-Open process, use the selected Stage1 source checkpoint and its colocated grpo_open root; with the current Stage1 run_3 artifacts, the next allocation is run_5. New runs record exact [1,G] advantage/vector TensorBoard tensors every 100 optimizer steps and at the final optimizer step, then generate the current-run-only raw-slot heatmap automatically. Do not backfill run_4, run calibration/preflight, resume the preserved user-terminated historical standalone GRPO run_3, or read its historical calibration report; retain raw validation/pretrain_reward and validation/reward_gain plus non-gating Simulator diagnostics.",
+    "For any future bounded diagnostic GRPO-Open process, use the selected Stage1 source checkpoint and its colocated grpo_open root; with the current Stage1 run_3 artifacts, the next allocation is run_5. New runs record exact [1,G] advantage/vector TensorBoard tensors every 100 optimizer steps and at the final optimizer step, then use evaluation.plot_grpo to generate the current-run-only raw-slot heatmap, raw-tau_d reward curve, GRPO objective curve, and unweighted reference-KL curve automatically after checkpoint round-trip. Do not backfill run_4, run calibration/preflight, resume the preserved user-terminated historical standalone GRPO run_3, or read its historical calibration report; retain raw validation/pretrain_reward and validation/reward_gain plus non-gating Simulator diagnostics.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",
