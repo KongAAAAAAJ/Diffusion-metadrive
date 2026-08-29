@@ -1,0 +1,76 @@
+{
+  "format": "stage1_grpo_reward_boxplot_grouping_implementation_report_v1",
+  "recorded_at": "2026-08-29T20:51:10+08:00",
+  "repository": {
+    "branch": "BEV",
+    "head_at_start": "e1e70c1345309c38e3ab7e6900943ba51dbaf17c",
+    "worktree_clean_before_change": false,
+    "preserved_prior_uncommitted_scatter_overlay_round": true
+  },
+  "request": "Combine total_reward, progress_reward, ttc_reward and comfort_reward into one 2-by-2 figure while retaining individual plots for the remaining reward components.",
+  "implementation": {
+    "plotter": "evaluation/plot_grpo_reward_boxplots.py",
+    "plotter_test": "tests/test_plot_grpo_reward_boxplots.py",
+    "launcher_contract_test": "tests/test_run_eval_grpo_script.py",
+    "launcher_modified": false,
+    "grouped_output_filename": "total_progress_ttc_comfort_reward_boxplots.png",
+    "grouped_layout": [2, 2],
+    "grouped_subplot_order": [
+      "total_reward",
+      "progress_reward",
+      "ttc_reward",
+      "comfort_reward"
+    ],
+    "grouped_subplots_have_independent_y_axes": true,
+    "grouped_figure_uses_one_shared_mean_legend": true,
+    "individual_reward_outputs": [
+      "formation_reward_boxplot.png",
+      "gap_reward_boxplot.png",
+      "road_reward_boxplot.png",
+      "collision_reward_boxplot.png",
+      "out_of_drivable_reward_boxplot.png"
+    ],
+    "total_png_outputs": 6,
+    "raw_scatter_overlay_preserved": true,
+    "reward_values_modified": false,
+    "reward_csv_contract_changed": false,
+    "reward_computation_changed": false,
+    "old_grouped_component_single_plots_removed_after_successful_render": true,
+    "unknown_output_files_removed": false
+  },
+  "validation": {
+    "focused_test_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp/grpo_reward_grouped_pytest /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_plot_grpo_reward_boxplots.py tests/test_run_eval_grpo_script.py -q",
+    "focused_tests_passed": 13,
+    "focused_tests_failed": 0,
+    "two_by_two_grid_verified": true,
+    "scatter_calls_verified": 18,
+    "synthetic_raw_points_verified": 72,
+    "legacy_single_plot_cleanup_verified": true,
+    "launcher_six_plot_contract_verified": true,
+    "temporary_render_root": "/tmp/grpo_reward_grouped_smoke.TRVLbx",
+    "temporary_render_exit_code": 0,
+    "grouped_figure_visually_reviewed": true,
+    "visual_review_passed": true,
+    "external_regeneration_exit_code": 0,
+    "external_png_count": 6,
+    "external_pngs_nonempty": true,
+    "observed_warnings": "Existing NumPy compatibility, Gym maintenance, and Matplotlib/Pyparsing deprecation warnings only.",
+    "git_diff_check_passed_before_evidence_update": true
+  },
+  "regenerated_smoke_artifacts": {
+    "input_csv": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare_smoke_20260829T2018/step_rewards.csv",
+    "output_dir": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare_smoke_20260829T2018/boxplots",
+    "csv_rows": 40,
+    "model_evaluation_rerun": false,
+    "checkpoint_loading_rerun": false,
+    "csv_modified": false
+  },
+  "boundary": {
+    "classification": "diagnostic visualization-only update",
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false,
+    "checkpoint_eligibility_changed": false,
+    "strict_stage1_qualification_gate_evaluated": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification"
+  }
+}

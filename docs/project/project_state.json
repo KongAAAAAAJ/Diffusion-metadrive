@@ -1,11 +1,11 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-29T20:21:38+08:00",
+  "updated_at": "2026-08-29T20:51:10+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "95bf8f86a7e6cb2db0422afaab43c8956b832331",
-    "worktree_clean_before_this_update": true,
+    "git_commit": "e1e70c1345309c38e3ab7e6900943ba51dbaf17c",
+    "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": false,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
@@ -66,18 +66,20 @@
     "uncommitted_grpo_evaluation_output_root_update_present": true,
     "uncommitted_stage1_grpo_reward_only_evaluation_present": false,
     "uncommitted_legacy_evaluation_cleanup_present": false,
-    "uncommitted_reward_only_smoke_evidence_present": true
+    "uncommitted_reward_only_smoke_evidence_present": false,
+    "uncommitted_reward_boxplot_scatter_present": true,
+    "uncommitted_reward_boxplot_grouping_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "stage1-grpo-reward-only-smoke-20260829",
-    "status": "bounded_reward_only_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
+    "round": "stage1-grpo-reward-boxplot-grouping-20260829",
+    "status": "reward_boxplot_grouping_implemented_smoke_plots_regenerated_nonformal_run3_qualification_entry_reimplementation_required",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "bounded_reward_only_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
+      "status": "reward_boxplot_grouping_implemented_smoke_plots_regenerated_nonformal_run3_qualification_entry_reimplementation_required",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -777,6 +779,12 @@
     "legacy_full_evaluation_cleanup_authorized_on": "2026-08-29",
     "legacy_full_evaluation_cleanup_scope": "Permanently delete only run_3/evaluation/compare; delete evaluation/bev_four_model_evaluator.py, evaluation/bev_comparison_charts.py, their dedicated tests and the obsolete scripts/run_stage1_a_evaluation.sh entry; migrate only the helpers needed by evaluation.bev_reward_comparison; preserve stage1_a_diagnostic and the separate reward_compare path.",
     "legacy_full_evaluation_cleanup_supersedes_prior_preservation_policy": true,
+    "stage1_grpo_reward_boxplot_scatter_authorized": true,
+    "stage1_grpo_reward_boxplot_scatter_authorized_on": "2026-08-29",
+    "stage1_grpo_reward_boxplot_scatter_scope": "Overlay every original per-step CSV reward observation on each of the nine Stage1-versus-GRPO boxplots with semi-transparent deterministic horizontal jitter; preserve reward values, CSV contents, evaluator semantics, checkpoint eligibility, and the active qualification gate.",
+    "stage1_grpo_reward_boxplot_grouping_authorized": true,
+    "stage1_grpo_reward_boxplot_grouping_authorized_on": "2026-08-29",
+    "stage1_grpo_reward_boxplot_grouping_scope": "Combine total, progress, TTC, and comfort rewards into one 2-by-2 figure; retain formation, gap, road, collision, and out-of-drivable as individual figures; preserve raw scatter overlays, reward values, CSV contents, evaluator semantics, checkpoint eligibility, and the active qualification gate.",
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. Future GRPO-Open artifacts are stored beneath their exact source Stage1 run; no formal eligibility was granted."
   },
   "source_of_truth": {
@@ -819,6 +827,16 @@
       "path": "evaluation/STAGE1_GRPO_REWARD_ONLY_SMOKE_20260829_REPORT.json",
       "sha256": "dd53850b268322ba8a2431a173054cc1ca0f969537d28b396532623a96595031",
       "role": "Records the passing 12-step CUDA reward-only smoke over S5-S9, holdout seeds 31/47 and both checkpoints, 40 finite reward rows, nine boxplots, descriptive total-reward mean delta +0.04893, and the unchanged nonformal/qualification boundary."
+    },
+    "stage1_grpo_reward_boxplot_scatter_implementation_report": {
+      "path": "evaluation/STAGE1_GRPO_REWARD_BOXPLOT_SCATTER_IMPLEMENTATION_REPORT.json",
+      "sha256": "75304b7c1a8605c55655a6c2d0812797972d6f2da64c43fcf4d06279ca8fd9cb",
+      "role": "Records the semi-transparent raw-sample overlay on all nine Stage1-versus-GRPO reward boxplots, deterministic horizontal jitter, duplicate-flier removal, seven passing focused tests, regeneration and visual review of the existing 40-row smoke plots, and the unchanged diagnostic/formal boundary."
+    },
+    "stage1_grpo_reward_boxplot_grouping_implementation_report": {
+      "path": "evaluation/STAGE1_GRPO_REWARD_BOXPLOT_GROUPING_IMPLEMENTATION_REPORT.json",
+      "sha256": "ba15e7b75cf5417028229f66b8fc4c72a30886e9d9ae2df9298a7df8c19adff6",
+      "role": "Records the total/progress/TTC/comfort 2-by-2 group figure, five retained individual reward figures, preserved raw scatter overlays, cleanup of four superseded single plots, 13 passing focused tests, regeneration and visual review of the existing smoke plots, and the unchanged diagnostic/formal boundary."
     },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
@@ -1832,7 +1850,10 @@
       "evaluation_report_format": "stage1_grpo_reward_step_csv_v1",
       "comparison_reward_csv": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare/step_rewards.csv",
       "comparison_boxplot_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare/boxplots",
-      "comparison_boxplot_count": 9,
+      "comparison_boxplot_count": 6,
+      "comparison_grouped_boxplot": "total_progress_ttc_comfort_reward_boxplots.png",
+      "comparison_grouped_reward_columns": ["total_reward", "progress_reward", "ttc_reward", "comfort_reward"],
+      "comparison_individual_boxplot_count": 5,
       "comparison_default_max_steps": 800,
       "reward_domain_for_comparison": "raw_tau_d_before_kinematic_optimizer",
       "reward_component_policy": "total plus eight signed weighted components that sum to total within 1e-6",
@@ -1888,7 +1909,21 @@
         "total_rows": 40,
         "rows_per_model": 20,
         "csv_files": 1,
-        "boxplot_files": 9,
+        "boxplot_files": 6,
+        "boxplots_last_regenerated_at": "2026-08-29T20:51:10+08:00",
+        "boxplot_raw_scatter_overlay": true,
+        "boxplot_grouped_layout": [2, 2],
+        "boxplot_grouped_file": "total_progress_ttc_comfort_reward_boxplots.png",
+        "boxplot_grouped_rewards": ["total_reward", "progress_reward", "ttc_reward", "comfort_reward"],
+        "boxplot_individual_files": 5,
+        "raw_points_per_model_per_plot": 20,
+        "scatter_alpha": 0.3,
+        "scatter_horizontal_jitter_range": [-0.14, 0.14],
+        "scatter_jitter_seed": 0,
+        "boxplot_scatter_report": "evaluation/STAGE1_GRPO_REWARD_BOXPLOT_SCATTER_IMPLEMENTATION_REPORT.json",
+        "boxplot_grouping_report": "evaluation/STAGE1_GRPO_REWARD_BOXPLOT_GROUPING_IMPLEMENTATION_REPORT.json",
+        "model_evaluation_rerun_for_scatter_update": false,
+        "model_evaluation_rerun_for_grouping_update": false,
         "stage1_total_reward_mean": -1.7475589006207883,
         "grpo_total_reward_mean": -1.6986313588917255,
         "grpo_minus_stage1_total_reward_mean": 0.048927541729062884,
@@ -2007,7 +2042,7 @@
   ],
   "next_actions": [
     "Implement a replacement strict Stage1 v2 qualification entry, then qualify run_3 under reload, full 1500-sample open-loop, and full S5-S9 closed-loop gates before any formal GRPO claim; the reward-only comparator cannot satisfy this gate, and the bounded 202.51 ms planning-tick result remains failed against the unchanged 200 ms gate.",
-    "When a full diagnostic reward distribution is desired, run scripts/run_eval_grpo.sh at its default 800-step horizon to populate evaluation/reward_compare/step_rewards.csv and nine boxplots. The deleted evaluation/compare output must not be treated as available evidence; the reward-only output remains non-formal.",
+    "When a full diagnostic reward distribution is desired, run scripts/run_eval_grpo.sh at its default 800-step horizon to populate evaluation/reward_compare/step_rewards.csv, one total/progress/TTC/comfort 2-by-2 figure, and five individual reward figures. The deleted evaluation/compare output must not be treated as available evidence; the reward-only output remains non-formal.",
     "The bounded Stage 1 single-step smoke passed. Continue retaining the original 50070-sample backup; no permanent backup deletion is authorized.",
     "The S5 release30 append is installed and fully verified at 50260 samples with all 233 prior base episodes preserved. Bind any consumer to base fingerprint e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511 and sidecar fingerprint a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6; retain the complete pre-append backup unless a separate cleanup round is explicitly authorized.",
     "Preserve the failed candidate-v4 S5 supplement root as immutable historical evidence; do not rewrite, relabel, or resume it after the sidecar out-of-road fix.",

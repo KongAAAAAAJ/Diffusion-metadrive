@@ -1,0 +1,63 @@
+{
+  "format": "stage1_grpo_reward_boxplot_scatter_implementation_report_v1",
+  "recorded_at": "2026-08-29T20:36:02+08:00",
+  "repository": {
+    "branch": "BEV",
+    "head_at_start": "e1e70c1345309c38e3ab7e6900943ba51dbaf17c",
+    "worktree_clean_before_change": true
+  },
+  "request": "Overlay the original per-step reward observations as semi-transparent scatter points on every Stage1-versus-GRPO reward boxplot.",
+  "implementation": {
+    "plotter": "evaluation/plot_grpo_reward_boxplots.py",
+    "test": "tests/test_plot_grpo_reward_boxplots.py",
+    "plots_changed": 9,
+    "models_per_plot": 2,
+    "scatter_alpha": 0.3,
+    "scatter_size": 16,
+    "horizontal_jitter_range": [-0.14, 0.14],
+    "horizontal_jitter_seed": 0,
+    "vertical_values_modified": false,
+    "model_colors_preserved": true,
+    "boxplot_fliers_disabled": true,
+    "boxplot_fliers_disabled_reason": "Every original observation is now drawn once by the scatter layer, so separate flier markers would duplicate outliers.",
+    "mean_and_median_drawn_above_scatter": true,
+    "reward_csv_contract_changed": false,
+    "reward_computation_changed": false,
+    "evaluator_or_launcher_changed": false
+  },
+  "validation": {
+    "focused_test_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp/grpo_reward_scatter_pytest /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_plot_grpo_reward_boxplots.py -q",
+    "focused_tests_passed": 7,
+    "focused_tests_failed": 0,
+    "scatter_calls_verified": 18,
+    "synthetic_raw_points_verified": 72,
+    "scatter_style_and_jitter_bounds_verified": true,
+    "png_generation_verified": true,
+    "observed_warnings": "Existing NumPy compatibility, Gym maintenance, and Matplotlib/Pyparsing deprecation warnings only.",
+    "render_exit_code": 0,
+    "rendered_png_count": 9,
+    "rendered_pngs_nonempty": true,
+    "visually_reviewed": [
+      "total_reward_boxplot.png",
+      "collision_reward_boxplot.png"
+    ],
+    "visual_review_passed": true
+  },
+  "regenerated_smoke_artifacts": {
+    "input_csv": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare_smoke_20260829T2018/step_rewards.csv",
+    "output_dir": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/evaluation/reward_compare_smoke_20260829T2018/boxplots",
+    "csv_rows": 40,
+    "raw_points_per_model_per_plot": 20,
+    "model_evaluation_rerun": false,
+    "checkpoint_loading_rerun": false,
+    "csv_modified": false
+  },
+  "boundary": {
+    "classification": "diagnostic visualization-only update",
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false,
+    "checkpoint_eligibility_changed": false,
+    "strict_stage1_qualification_gate_evaluated": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification"
+  }
+}

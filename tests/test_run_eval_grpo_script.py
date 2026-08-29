@@ -75,7 +75,8 @@ if [[ "$module" == "evaluation.plot_grpo_reward_boxplots" ]]; then
     exit "$FAKE_PLOT_EXIT"
   fi
   mkdir -p "$output_dir"
-  for name in total progress formation gap ttc road comfort collision out_of_drivable; do
+  printf 'fake png\n' > "$output_dir/total_progress_ttc_comfort_reward_boxplots.png"
+  for name in formation gap road collision out_of_drivable; do
     printf 'fake png\n' > "$output_dir/${name}_reward_boxplot.png"
   done
   exit 0
@@ -132,7 +133,7 @@ def test_launcher_defaults_to_reward_only_comparison() -> None:
     assert "evaluation.bev_comparison_charts" not in source
 
 
-def test_launcher_writes_one_csv_and_nine_boxplots(tmp_path: Path) -> None:
+def test_launcher_writes_one_csv_and_six_boxplots(tmp_path: Path) -> None:
     environment, _, _ = _environment(tmp_path)
 
     subprocess.run(
@@ -146,7 +147,12 @@ def test_launcher_writes_one_csv_and_nine_boxplots(tmp_path: Path) -> None:
 
     output_root = Path(environment["OUTPUT_ROOT"])
     assert (output_root / "step_rewards.csv").is_file()
-    assert len(list((output_root / "boxplots").glob("*.png"))) == 9
+    assert len(list((output_root / "boxplots").glob("*.png"))) == 6
+    assert (
+        output_root
+        / "boxplots"
+        / "total_progress_ttc_comfort_reward_boxplots.png"
+    ).is_file()
     assert (output_root / "logs" / "reward_evaluation.log").is_file()
     assert (output_root / "logs" / "reward_boxplots.log").is_file()
     assert not (output_root / "manifest_v2.json").exists()
@@ -181,7 +187,7 @@ def test_launcher_defaults_outputs_beneath_stage1_run(tmp_path: Path) -> None:
 
     root = stage1.parents[1] / "evaluation" / "reward_compare"
     assert (root / "step_rewards.csv").is_file()
-    assert len(list((root / "boxplots").glob("*.png"))) == 9
+    assert len(list((root / "boxplots").glob("*.png"))) == 6
 
 
 def test_launcher_overrides_steps_and_rejects_bad_inputs(tmp_path: Path) -> None:

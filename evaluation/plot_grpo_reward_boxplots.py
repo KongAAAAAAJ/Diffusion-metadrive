@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
 from matplotlib.lines import Line2D
 
 
@@ -40,6 +41,22 @@ REWARD_COLUMNS = (
     "comfort_reward",
     "collision_reward",
     "out_of_drivable_reward",
+)
+GROUPED_REWARD_COLUMNS = (
+    "total_reward",
+    "progress_reward",
+    "ttc_reward",
+    "comfort_reward",
+)
+SINGLE_REWARD_COLUMNS = (
+    "formation_reward",
+    "gap_reward",
+    "road_reward",
+    "collision_reward",
+    "out_of_drivable_reward",
+)
+GROUPED_REWARD_BOXPLOT_FILENAME = (
+    "total_progress_ttc_comfort_reward_boxplots.png"
 )
 REWARD_LABELS = {
     "total_reward": "Total reward",
@@ -122,41 +139,66 @@ def load_step_rewards(csv_path: Path) -> dict[str, dict[str, np.ndarray]]:
     }
 
 
-def _plot_reward(
+def _mean_legend_handle() -> Line2D:
+    return Line2D(
+        [0],
+        [0],
+        marker="D",
+        color="none",
+        markerfacecolor="white",
+        markeredgecolor="black",
+        markersize=6,
+        label="Mean",
+    )
+
+
+def _draw_reward(
+    ax: Axes,
     reward: str,
     values: dict[str, dict[str, np.ndarray]],
-    output_path: Path,
 ) -> None:
     distributions = [values[model][reward] for model in MODEL_ORDER]
     positions = np.arange(1, len(MODEL_ORDER) + 1)
 
-    fig, ax = plt.subplots(figsize=(7.2, 5.4))
     boxplot = ax.boxplot(
         distributions,
         positions=positions,
         widths=0.55,
         patch_artist=True,
+        showfliers=False,
         showmeans=True,
         meanprops={
             "marker": "D",
             "markerfacecolor": "white",
             "markeredgecolor": "black",
             "markersize": 6,
+            "zorder": 5,
         },
-        medianprops={"color": "black", "linewidth": 1.5},
+        medianprops={"color": "black", "linewidth": 1.5, "zorder": 4},
         whiskerprops={"linewidth": 1.2},
         capprops={"linewidth": 1.2},
-        flierprops={
-            "marker": "o",
-            "markerfacecolor": "none",
-            "markeredgecolor": "#666666",
-            "markersize": 4,
-            "alpha": 0.65,
-        },
     )
     for patch, model in zip(boxplot["boxes"], MODEL_ORDER):
         patch.set_facecolor(MODEL_COLORS[model])
         patch.set_alpha(0.72)
+
+    jitter_rng = np.random.default_rng(0)
+    for position, model, distribution in zip(
+        positions, MODEL_ORDER, distributions
+    ):
+        jittered_positions = position + jitter_rng.uniform(
+            -0.14, 0.14, size=len(distribution)
+        )
+        ax.scatter(
+            jittered_positions,
+            distribution,
+            marker="o",
+            s=16,
+            alpha=0.30,
+            color=MODEL_COLORS[model],
+            edgecolors="none",
+            zorder=3,
+        )
 
     means = [float(np.mean(distribution)) for distribution in distributions]
     for position, mean in zip(positions, means):
@@ -171,24 +213,23 @@ def _plot_reward(
 
     ax.set_xticks(positions, [MODEL_LABELS[model] for model in MODEL_ORDER])
     ax.set_ylabel("Weighted signed reward")
-    ax.set_title(f"Per-step distribution: {REWARD_LABELS[reward]}")
+    ax.set_title(REWARD_LABELS[reward])
     ax.grid(axis="y", color="#D9D9D9", linewidth=0.8, alpha=0.75)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+
+
+def _plot_reward(
+    reward: str,
+    values: dict[str, dict[str, np.ndarray]],
+    output_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(7.2, 5.4))
+    _draw_reward(ax, reward, values)
+    ax.set_title(f"Per-step distribution: {REWARD_LABELS[reward]}")
     ax.legend(
-        handles=[
-            Line2D(
-                [0],
-                [0],
-                marker="D",
-                color="none",
-                markerfacecolor="white",
-                markeredgecolor="black",
-                markersize=6,
-                label="Mean",
-            )
-        ],
+        handles=[_mean_legend_handle()],
         loc="best",
         frameon=False,
     )
@@ -197,18 +238,43 @@ def _plot_reward(
     plt.close(fig)
 
 
+def _plot_grouped_rewards(
+    values: dict[str, dict[str, np.ndarray]],
+    output_path: Path,
+) -> None:
+    fig, axes = plt.subplots(2, 2, figsize=(14.4, 10.8))
+    for ax, reward in zip(axes.flat, GROUPED_REWARD_COLUMNS):
+        _draw_reward(ax, reward, values)
+
+    fig.suptitle("Per-step reward distributions", fontsize=16)
+    fig.legend(
+        handles=[_mean_legend_handle()],
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.965),
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def generate_reward_boxplots(csv_path: Path, output_dir: Path) -> tuple[Path, ...]:
-    """Generate one two-checkpoint PNG boxplot for every reward column."""
+    """Generate one grouped and five individual two-checkpoint reward plots."""
 
     values = load_step_rewards(csv_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    outputs = []
-    for reward in REWARD_COLUMNS:
+    grouped_output = output_dir / GROUPED_REWARD_BOXPLOT_FILENAME
+    _plot_grouped_rewards(values, grouped_output)
+    outputs = [grouped_output]
+    for reward in SINGLE_REWARD_COLUMNS:
         output_path = output_dir / f"{reward}_boxplot.png"
         _plot_reward(reward, values, output_path)
         outputs.append(output_path)
+
+    for reward in GROUPED_REWARD_COLUMNS:
+        (output_dir / f"{reward}_boxplot.png").unlink(missing_ok=True)
     return tuple(outputs)
 
 
