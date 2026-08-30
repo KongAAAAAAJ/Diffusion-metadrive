@@ -43,6 +43,9 @@ def _run_config(arm: str, seed: int) -> dict[str, object]:
             "update_epochs": update_epochs,
             "clip_epsilon": comparison.CLIP_EPSILON,
         },
+        "rollout_collection_contract": (
+            comparison._expected_rollout_collection_contract(200)
+        ),
         "online_config": {
             "device": "cuda",
             "seed": seed,
@@ -59,7 +62,10 @@ def _run_config(arm: str, seed: int) -> dict[str, object]:
                 ["S9_narrow_channel_negotiation", "R8_narrow_channel"],
             ],
             "scenario_seeds": list(comparison.SCENARIO_SEEDS),
-            "environment_steps_per_episode": 100,
+            "environment_steps_per_episode": 200,
+            "rollout_groups_per_bucket_visit": (
+                comparison.ROLLOUT_GROUPS_PER_BUCKET_VISIT
+            ),
             "validation_interval_rollouts": (
                 comparison.VALIDATION_INTERVAL_ROLLOUTS
             ),
@@ -74,12 +80,47 @@ def _run_report(
     uninformative_rollouts: int = 0,
     wall_time_seconds: float = 12.5,
 ) -> dict[str, object]:
+    update_epochs = comparison.ARM_UPDATE_EPOCHS[arm]
     optimizer_steps = (
         comparison.TOTAL_ROLLOUT_GROUPS - uninformative_rollouts
-    ) * comparison.ARM_UPDATE_EPOCHS[arm]
+    ) * update_epochs
+    remaining_uninformative = uninformative_rollouts
+    bucket_counters = []
+    bucket_count = len(comparison.SCENARIOS) * len(comparison.SCENARIO_SEEDS)
+    base_target, remainder = divmod(
+        comparison.TOTAL_ROLLOUT_GROUPS, bucket_count
+    )
+    buckets = (
+        (scenario, scenario_seed)
+        for scenario in comparison.SCENARIOS
+        for scenario_seed in comparison.SCENARIO_SEEDS
+    )
+    for bucket_index, (scenario, scenario_seed) in enumerate(buckets):
+        target_rollouts = base_target + int(bucket_index < remainder)
+        bucket_uninformative = min(
+            remaining_uninformative, target_rollouts
+        )
+        remaining_uninformative -= bucket_uninformative
+        bucket_counters.append(
+            {
+                "scenario": scenario[0],
+                "route": scenario[1],
+                "seed": scenario_seed,
+                "target_rollouts": target_rollouts,
+                "sampled_rollouts": target_rollouts,
+                "environment_episodes": 1,
+                "optimizer_steps": (
+                    target_rollouts - bucket_uninformative
+                )
+                * update_epochs,
+            }
+        )
     return {
         "format": comparison.ONLINE_REPORT_FORMAT,
         "grpo_config": dict(comparison.EXPECTED_GRPO_CONFIG),
+        "rollout_collection_contract": (
+            comparison._expected_rollout_collection_contract(200)
+        ),
         "diagnostic_only": True,
         "eligible_for_formal_training": False,
         "checkpoint_round_trip": True,
@@ -89,6 +130,10 @@ def _run_report(
         "uninformative_rollouts": uninformative_rollouts,
         "optimizer_steps": optimizer_steps,
         "optimizer_steps_this_run": optimizer_steps,
+        "environment_steps": 130,
+        "environment_episode_count": 10,
+        "warmup_environment_steps": 30,
+        "training_bucket_counters": bucket_counters,
         "wall_time_seconds": wall_time_seconds,
         "validation_seeds": list(comparison.VALIDATION_SEEDS),
     }
@@ -175,6 +220,9 @@ def test_expected_grpo_config_matches_core_training_defaults() -> None:
     assert comparison.EXPECTED_GRPO_CONFIG == dataclasses.asdict(
         JointGRPOConfig(group_size=comparison.GROUP_SIZE)
     )
+    assert comparison._run_binding(_run_config("baseline", 17))[
+        "rollout_collection_contract"
+    ] == comparison._expected_rollout_collection_contract(200)
 
 
 def test_compare_grpo_stability_emits_passing_report_and_png(
@@ -246,6 +294,11 @@ def test_compare_grpo_stability_rejects_incomplete_pair_manifest(
     [
         ("update_epochs", 2, "update_epochs mismatch"),
         ("group_size", 8, "group_size mismatch"),
+        (
+            "rollout_groups_per_bucket_visit",
+            5,
+            "rollout_groups_per_bucket_visit mismatch",
+        ),
         ("resume_checkpoint", "/tmp/legacy.pt", "resume_checkpoint mismatch"),
     ],
 )
@@ -322,6 +375,73 @@ def test_compare_grpo_stability_rejects_cross_run_fairness_drift(
         compare_grpo_stability(manifest_path, tmp_path / "output")
 
 
+def test_compare_grpo_stability_rejects_non_positive_environment_cap(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    config_path = tmp_path / "clipped_42" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["online_config"]["environment_steps_per_episode"] = 0
+    _write_json(config_path, config)
+
+    with pytest.raises(GRPOStabilityComparisonError, match="positive integer"):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+def test_compare_grpo_stability_rejects_cross_run_environment_cap_drift(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    config_path = tmp_path / "clipped_23" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["online_config"]["environment_steps_per_episode"] = 201
+    config["rollout_collection_contract"]["environment_steps_per_episode"] = 201
+    _write_json(config_path, config)
+    report_path = tmp_path / "clipped_23" / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["rollout_collection_contract"]["environment_steps_per_episode"] = 201
+    _write_json(report_path, report)
+
+    with pytest.raises(GRPOStabilityComparisonError, match="fairness binding"):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize("artifact", ["config", "report"])
+def test_compare_grpo_stability_requires_rollout_collection_contract(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    artifact_path = tmp_path / "baseline_17" / f"{artifact}.json"
+    value = json.loads(artifact_path.read_text(encoding="utf-8"))
+    value.pop("rollout_collection_contract")
+    _write_json(artifact_path, value)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError,
+        match=rf"{artifact} rollout collection contract mismatch",
+    ):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize("artifact", ["config", "report"])
+def test_compare_grpo_stability_rejects_rollout_collection_contract_drift(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    artifact_path = tmp_path / "baseline_17" / f"{artifact}.json"
+    value = json.loads(artifact_path.read_text(encoding="utf-8"))
+    value["rollout_collection_contract"]["episode_reuse"] = "reset every group"
+    _write_json(artifact_path, value)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError,
+        match=rf"{artifact} rollout collection contract mismatch",
+    ):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
 @pytest.mark.parametrize(
     ("kind", "message"),
     [
@@ -374,6 +494,89 @@ def test_compare_grpo_stability_rejects_invalid_run_report(
     _write_json(report_path, report)
 
     with pytest.raises(GRPOStabilityComparisonError, match=message):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "environment_episode_count",
+            131,
+            "environment_episode_count exceeds environment_steps",
+        ),
+        (
+            "warmup_environment_steps",
+            29,
+            "warmup environment-step count mismatch",
+        ),
+    ],
+)
+def test_compare_grpo_stability_rejects_environment_counter_errors(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    report_path = tmp_path / "clipped_17" / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report[field] = value
+    _write_json(report_path, report)
+
+    with pytest.raises(GRPOStabilityComparisonError, match=message):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+def test_compare_grpo_stability_accepts_empty_environment_episodes(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    for arm in comparison.ARM_UPDATE_EPOCHS:
+        for seed in comparison.PAIRED_SEEDS:
+            report_path = tmp_path / f"{arm}_{seed}" / "report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["environment_steps"] = 210
+            report["environment_episode_count"] = 110
+            report["warmup_environment_steps"] = 110
+            for counter in report["training_bucket_counters"]:
+                counter["environment_episodes"] = 11
+            _write_json(report_path, report)
+
+    report = compare_grpo_stability(manifest_path, tmp_path / "output")
+
+    assert report["summary"]["passed"] is True
+
+
+def test_compare_grpo_stability_rejects_unbalanced_bucket_targets(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    report_path = tmp_path / "clipped_17" / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["training_bucket_counters"][0]["target_rollouts"] = 9
+    report["training_bucket_counters"][1]["target_rollouts"] = 11
+    _write_json(report_path, report)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError, match="target_rollouts mismatch"
+    ):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+def test_compare_grpo_stability_rejects_incomplete_bucket_sampling(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    report_path = tmp_path / "clipped_17" / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["training_bucket_counters"][0]["sampled_rollouts"] = 9
+    _write_json(report_path, report)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError,
+        match="sampled_rollouts must equal target_rollouts",
+    ):
         compare_grpo_stability(manifest_path, tmp_path / "output")
 
 

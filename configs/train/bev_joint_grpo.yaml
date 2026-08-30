@@ -6,7 +6,8 @@ online:
   update_epochs: 10
   clip_epsilon: 0.2
   resume_checkpoint: null
-  environment_steps_per_episode: 100
+  environment_steps_per_episode: 200
+  rollout_groups_per_bucket_visit: 10
   validation_interval_rollouts: 20
   advantage_vector_log_interval_rollouts: 20
   scenario_seeds: [17, 23]

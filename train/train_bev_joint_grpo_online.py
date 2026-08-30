@@ -84,6 +84,9 @@ from scenarios.bev_round13_contract import (
 
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
+ROLLOUT_COLLECTION_CONTRACT_VERSION = (
+    "stage2_joint_grpo_persistent_episode_v1"
+)
 
 
 class OnlineGRPOError(RuntimeError):
@@ -102,6 +105,7 @@ class JointGRPOOnlineConfig:
     scenarios: tuple[tuple[str, str], ...] = PRIMARY_S5_S9_SCENARIOS
     scenario_seeds: tuple[int, ...] = DEVELOPMENT_SEEDS
     environment_steps_per_episode: int = 100
+    rollout_groups_per_bucket_visit: int = 10
     validation_interval_rollouts: int = 20
     advantage_vector_log_interval_rollouts: int = 20
 
@@ -122,6 +126,7 @@ class JointGRPOOnlineConfig:
             "total_rollout_groups",
             "update_epochs",
             "environment_steps_per_episode",
+            "rollout_groups_per_bucket_visit",
             "validation_interval_rollouts",
             "advantage_vector_log_interval_rollouts",
         ):
@@ -155,6 +160,37 @@ class JointGRPOOnlineConfig:
             object.__setattr__(
                 self, "resume_checkpoint", Path(self.resume_checkpoint)
             )
+
+
+def rollout_collection_contract(
+    config: JointGRPOOnlineConfig,
+) -> dict[str, object]:
+    """Return the exact persistent-episode collection protocol."""
+
+    return {
+        "version": ROLLOUT_COLLECTION_CONTRACT_VERSION,
+        "budget_unit": "fresh_rollout_group",
+        "bucket_order": "ordered_scenario_then_seed",
+        "bucket_target_assignment": (
+            "balanced_floor_with_remainder_to_lower_bucket_indices"
+        ),
+        "rollout_groups_per_bucket_visit": int(
+            config.rollout_groups_per_bucket_visit
+        ),
+        "environment_steps_per_episode": int(
+            config.environment_steps_per_episode
+        ),
+        "validation_interval_rollouts": int(
+            config.validation_interval_rollouts
+        ),
+        "selected_environment_steps_per_rollout": 1,
+        "uninformative_rollout_execution": "selected_action_once_no_update",
+        "episode_reuse": "persistent_within_bucket_visit",
+        "interrupted_visit_resume": "same_bucket_same_visit_progress",
+        "checkpoint_boundary": "closed_environment_only",
+        "active_environment_serialized": False,
+        "rule_maker_commitment_scope": "live_environment_episode",
+    }
 
 
 def _device(name: str) -> torch.device:
@@ -371,37 +407,92 @@ def _new_online_rule_maker(planner: object, env: object) -> object:
     return rule_maker
 
 
+@dataclass(frozen=True)
+class _OnlineRuleCondition:
+    model_inputs: object
+    proposal_batch: object | None
+    rule_actions: dict[str, int]
+    is_commitment: bool
+    committed_execution_id: int | None
+    committed_plan_actions: dict[str, int] | None
+
+
 def _condition_online_model_inputs(
     rule_maker: object,
     env: object,
     builder: JointBEVSampleBuilder,
     values: object,
-) -> tuple[object, object]:
+    *,
+    committed_execution_id: int | None,
+    committed_plan_actions: Mapping[str, int] | None,
+) -> _OnlineRuleCondition:
+    proposal_batch = None
+    rule_condition: dict[str, int] | None = None
+    rule_condition_is_commitment = False
+    committed_actions = (
+        None
+        if committed_plan_actions is None
+        else {
+            agent_id: int(committed_plan_actions[agent_id])
+            for agent_id in AGENT_IDS
+        }
+    )
     try:
         hard_modes = hard_valid_modes_by_rule_action(
             AGENT_IDS, np.asarray(values.mode_valid_mask)
         )
-        proposal_batch = rule_maker.propose_joint_actions(
-            env,
-            list(AGENT_IDS),
-            getattr(env, "_last_planner_batch", None) or {},
-            hard_valid_modes_by_action=hard_modes,
-        )
-        rule_condition = (
-            joint_proposal_actions(proposal_batch.proposals[0], AGENT_IDS)
-            if proposal_batch.proposals
-            else {agent_id: 0 for agent_id in AGENT_IDS}
-        )
+        if rule_maker.has_active_lane_change_commitments:
+            if committed_execution_id is None or committed_actions is None:
+                raise OnlineGRPOError(
+                    "online RuleMaker commitment has no execution state"
+                )
+            rule_maker.advance_committed_execution(
+                env,
+                list(AGENT_IDS),
+                committed_execution_id,
+            )
+            if rule_maker.has_active_lane_change_commitments:
+                rule_condition = {
+                    agent_id: int(action)
+                    for agent_id, action in (
+                        rule_maker.committed_execution_rule_actions(
+                            env, committed_actions
+                        )
+                    ).items()
+                }
+                rule_condition_is_commitment = True
+            else:
+                committed_execution_id = None
+                committed_actions = None
+        if rule_condition is None:
+            proposal_batch = rule_maker.propose_joint_actions(
+                env,
+                list(AGENT_IDS),
+                getattr(env, "_last_planner_batch", None) or {},
+                hard_valid_modes_by_action=hard_modes,
+            )
+            rule_condition = (
+                joint_proposal_actions(proposal_batch.proposals[0], AGENT_IDS)
+                if proposal_batch.proposals
+                else {agent_id: 0 for agent_id in AGENT_IDS}
+            )
     except LaneChangeCommitmentError as exc:
         raise OnlineGRPOError(f"online RuleMaker proposal failed: {exc}") from exc
-    return (
-        builder.augment_v2_model_inputs(
-            env,
-            values,
-            rule_action_condition=rule_condition,
-            rule_formation_state=rule_maker.is_formation_locked,
-        ),
-        proposal_batch,
+    conditioned = builder.augment_v2_model_inputs(
+        env,
+        values,
+        rule_action_condition=rule_condition,
+        rule_formation_state=rule_maker.is_formation_locked,
+    )
+    return _OnlineRuleCondition(
+        model_inputs=conditioned,
+        proposal_batch=proposal_batch,
+        rule_actions={
+            agent_id: int(rule_condition[agent_id]) for agent_id in AGENT_IDS
+        },
+        is_commitment=rule_condition_is_commitment,
+        committed_execution_id=committed_execution_id,
+        committed_plan_actions=committed_actions,
     )
 
 
@@ -426,7 +517,7 @@ def _validate_online_trajectory_controls(
 
 def _finalize_online_rule_action(
     rule_maker: object,
-    proposal_batch: object,
+    condition: _OnlineRuleCondition,
     *,
     env: object,
     scenario: tuple[str, str],
@@ -434,7 +525,12 @@ def _finalize_online_rule_action(
     selected_modes: np.ndarray,
     optimization: TrajectoryOptimizationResult,
     optimizer: KinematicTrajectoryOptimizer,
-) -> tuple[TrajectoryOptimizationResult, dict[str, int]]:
+) -> tuple[
+    TrajectoryOptimizationResult,
+    dict[str, int],
+    int | None,
+    dict[str, int] | None,
+]:
     diagnostics = {
         "conditioned_rollouts": 0,
         "proposal_match_attempts": 0,
@@ -442,9 +538,11 @@ def _finalize_online_rule_action(
         "condition_failures": 0,
         "forced_safe_stops": 0,
         "s7_feedback_exception_hits": 0,
+        "commitment_conditioned_rollouts": 0,
+        "commitment_feedback_incompatible": 0,
     }
     diagnostics["conditioned_rollouts"] = 1
-    diagnostics["proposal_match_attempts"] = 1
+    diagnostics["proposal_match_attempts"] = int(not condition.is_commitment)
     try:
         _, feedback_actions, s7_exceptions = diffusion_mode_feedback_actions(
             np.asarray(selected_modes, dtype=np.int64).tolist(),
@@ -452,9 +550,23 @@ def _finalize_online_rule_action(
             scenario_id=scenario[0],
             local_route=scenario[1],
         )
-        matched = match_joint_action_proposal(
-            proposal_batch, feedback_actions, AGENT_IDS
-        )
+        if condition.is_commitment:
+            diagnostics["commitment_conditioned_rollouts"] = 1
+            compatible = all(
+                feedback_actions[agent_id]
+                == int(condition.rule_actions[agent_id])
+                for agent_id in AGENT_IDS
+            )
+            matched = None
+        else:
+            compatible = True
+            matched = (
+                None
+                if condition.proposal_batch is None
+                else match_joint_action_proposal(
+                    condition.proposal_batch, feedback_actions, AGENT_IDS
+                )
+            )
     except LaneChangeCommitmentError as exc:
         raise OnlineGRPOError(
             f"online RuleMaker action matching failed: {exc}"
@@ -463,9 +575,12 @@ def _finalize_online_rule_action(
         int(value) for value in s7_exceptions.values()
     )
 
-    if matched is None:
+    if not compatible or (not condition.is_commitment and matched is None):
         diagnostics["condition_failures"] = 1
         diagnostics["forced_safe_stops"] = 1
+        diagnostics["commitment_feedback_incompatible"] = int(
+            condition.is_commitment and not compatible
+        )
         coarse = np.asarray(values.coarse_trajectories)
         raw_stop = np.asarray(
             coarse[:, int(ModeIndex.STOP)], dtype=np.float32
@@ -477,22 +592,34 @@ def _finalize_online_rule_action(
             optimizer=optimizer,
         )
     else:
-        diagnostics["proposal_matches"] = 1
+        diagnostics["proposal_matches"] = int(not condition.is_commitment)
         resolved = optimization
 
     _validate_online_trajectory_controls(
         env, resolved.optimized_trajectories[0]
     )
+    committed_execution_id = condition.committed_execution_id
+    committed_plan_actions = condition.committed_plan_actions
     if matched is not None:
+        if condition.proposal_batch is None:
+            raise OnlineGRPOError("matched RuleMaker action has no proposal batch")
         try:
             rule_maker.accept_joint_action(
-                proposal_batch.batch_id, matched.proposal_id
+                condition.proposal_batch.batch_id, matched.proposal_id
             )
         except LaneChangeCommitmentError as exc:
             raise OnlineGRPOError(
                 f"online RuleMaker proposal acceptance failed: {exc}"
             ) from exc
-    return resolved, diagnostics
+        if rule_maker.has_active_lane_change_commitments:
+            committed_execution_id = int(condition.proposal_batch.batch_id)
+            committed_plan_actions = joint_proposal_actions(matched, AGENT_IDS)
+    return (
+        resolved,
+        diagnostics,
+        committed_execution_id,
+        committed_plan_actions,
+    )
 
 
 def _load_trainer(
@@ -677,6 +804,61 @@ def _round_robin_training_buckets(
     return buckets
 
 
+def _balanced_bucket_targets(
+    total_rollout_groups: int, bucket_count: int
+) -> list[int]:
+    for name, value in (
+        ("total_rollout_groups", total_rollout_groups),
+        ("bucket_count", bucket_count),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise OnlineGRPOError(f"{name} must be a positive integer")
+    base, remainder = divmod(total_rollout_groups, bucket_count)
+    return [
+        base + int(bucket_index < remainder)
+        for bucket_index in range(bucket_count)
+    ]
+
+
+def _next_unfinished_bucket_index(
+    bucket_sample_counts: Sequence[int],
+    bucket_target_counts: Sequence[int],
+    *,
+    start_index: int,
+) -> int | None:
+    if len(bucket_sample_counts) != len(bucket_target_counts) or not (
+        bucket_sample_counts
+    ):
+        raise OnlineGRPOError("training bucket counters are invalid")
+    bucket_count = len(bucket_sample_counts)
+    if (
+        isinstance(start_index, bool)
+        or not isinstance(start_index, int)
+        or not 0 <= start_index < bucket_count
+    ):
+        raise OnlineGRPOError("training bucket start cursor is invalid")
+    for offset in range(bucket_count):
+        index = (start_index + offset) % bucket_count
+        if bucket_sample_counts[index] < bucket_target_counts[index]:
+            return index
+    return None
+
+
+def _bucket_visit_is_complete(
+    *,
+    bucket_index: int,
+    bucket_sample_counts: Sequence[int],
+    bucket_target_counts: Sequence[int],
+    current_visit_progress: int,
+    rollout_groups_per_bucket_visit: int,
+) -> bool:
+    return (
+        current_visit_progress >= rollout_groups_per_bucket_visit
+        or bucket_sample_counts[bucket_index]
+        >= bucket_target_counts[bucket_index]
+    )
+
+
 def _scenario_summary(env: object) -> dict[str, object]:
     orchestrator = getattr(env, "_scenario_orchestrator", None)
     getter = getattr(orchestrator, "get_episode_summary", None)
@@ -780,26 +962,35 @@ def _sampler_state(
     *,
     sampled_rollouts: int,
     uninformative_rollouts: int,
+    bucket_target_counts: Sequence[int],
     bucket_sample_counts: Sequence[int],
     bucket_optimizer_step_counts: Sequence[int],
+    bucket_episode_counts: Sequence[int],
     next_bucket_index: int,
+    current_visit_progress: int,
     generator_state: torch.Tensor,
     last_validated_rollout: int,
+    rollout_groups_per_bucket_visit: int,
     update_epochs: int,
     optimizer_step: int,
 ) -> dict[str, object]:
     raw = {
         "sampled_rollouts": sampled_rollouts,
         "uninformative_rollouts": uninformative_rollouts,
+        "bucket_target_counts": list(bucket_target_counts),
         "bucket_sample_counts": list(bucket_sample_counts),
         "bucket_optimizer_step_counts": list(bucket_optimizer_step_counts),
+        "bucket_episode_counts": list(bucket_episode_counts),
         "next_bucket_index": next_bucket_index,
+        "current_visit_progress": current_visit_progress,
         "generator_state": generator_state.detach().cpu().clone(),
         "last_validated_rollout": last_validated_rollout,
     }
     return _validate_sampler_state(
         raw,
         bucket_count=len(bucket_sample_counts),
+        expected_bucket_target_counts=bucket_target_counts,
+        rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
         update_epochs=update_epochs,
         optimizer_step=optimizer_step,
     )
@@ -809,6 +1000,8 @@ def _validate_sampler_state(
     raw: object,
     *,
     bucket_count: int,
+    expected_bucket_target_counts: Sequence[int],
+    rollout_groups_per_bucket_visit: int,
     update_epochs: int,
     optimizer_step: int,
 ) -> dict[str, object]:
@@ -820,10 +1013,17 @@ def _validate_sampler_state(
         or bucket_count <= 0
     ):
         raise OnlineGRPOError("training bucket count must be a positive integer")
+    if (
+        isinstance(rollout_groups_per_bucket_visit, bool)
+        or not isinstance(rollout_groups_per_bucket_visit, int)
+        or rollout_groups_per_bucket_visit <= 0
+    ):
+        raise OnlineGRPOError("rollout bucket visit quota is invalid")
     for name, minimum in (
         ("sampled_rollouts", 0),
         ("uninformative_rollouts", 0),
         ("next_bucket_index", 0),
+        ("current_visit_progress", 0),
         ("last_validated_rollout", -1),
     ):
         value = raw.get(name)
@@ -838,14 +1038,20 @@ def _validate_sampler_state(
     sampled = int(raw["sampled_rollouts"])
     uninformative = int(raw["uninformative_rollouts"])
     next_bucket = int(raw["next_bucket_index"])
+    current_visit_progress = int(raw["current_visit_progress"])
     last_validated = int(raw["last_validated_rollout"])
     if uninformative > sampled or last_validated > sampled:
         raise OnlineGRPOError("online GRPO checkpoint sampler counters conflict")
-    if next_bucket >= bucket_count or next_bucket != sampled % bucket_count:
+    if next_bucket >= bucket_count:
         raise OnlineGRPOError("online GRPO checkpoint bucket cursor is invalid")
 
     counts: dict[str, list[int]] = {}
-    for name in ("bucket_sample_counts", "bucket_optimizer_step_counts"):
+    for name in (
+        "bucket_target_counts",
+        "bucket_sample_counts",
+        "bucket_optimizer_step_counts",
+        "bucket_episode_counts",
+    ):
         values = raw.get(name)
         if (
             not isinstance(values, (list, tuple))
@@ -861,6 +1067,12 @@ def _validate_sampler_state(
                 f"online GRPO checkpoint sampler_state {name} is invalid"
             )
         counts[name] = [int(value) for value in values]
+    expected_targets = [int(value) for value in expected_bucket_target_counts]
+    if (
+        len(expected_targets) != bucket_count
+        or counts["bucket_target_counts"] != expected_targets
+    ):
+        raise OnlineGRPOError("online GRPO checkpoint bucket targets mismatch")
     if sum(counts["bucket_sample_counts"]) != sampled:
         raise OnlineGRPOError("online GRPO checkpoint bucket samples conflict")
     if sum(counts["bucket_optimizer_step_counts"]) != optimizer_step:
@@ -869,6 +1081,58 @@ def _validate_sampler_state(
         raise OnlineGRPOError(
             "online GRPO checkpoint rollout and optimizer counters conflict"
         )
+    if any(
+        sampled_count > target_count
+        for sampled_count, target_count in zip(
+            counts["bucket_sample_counts"],
+            counts["bucket_target_counts"],
+        )
+    ):
+        raise OnlineGRPOError("online GRPO checkpoint bucket target exceeded")
+    if any(
+        sampled_count > 0 and episode_count == 0
+        for sampled_count, episode_count in zip(
+            counts["bucket_sample_counts"],
+            counts["bucket_episode_counts"],
+        )
+    ):
+        raise OnlineGRPOError("online GRPO checkpoint bucket episodes conflict")
+
+    unfinished = _next_unfinished_bucket_index(
+        counts["bucket_sample_counts"],
+        counts["bucket_target_counts"],
+        start_index=next_bucket,
+    )
+    if unfinished is None:
+        if next_bucket != 0 or current_visit_progress != 0:
+            raise OnlineGRPOError(
+                "online GRPO checkpoint completed bucket cursor is invalid"
+            )
+    else:
+        if unfinished != next_bucket:
+            raise OnlineGRPOError("online GRPO checkpoint bucket cursor is invalid")
+        expected_progress = (
+            counts["bucket_sample_counts"][next_bucket]
+            % rollout_groups_per_bucket_visit
+        )
+        if current_visit_progress != expected_progress:
+            raise OnlineGRPOError(
+                "online GRPO checkpoint current visit progress is invalid"
+            )
+    for index, (sample_count, target_count) in enumerate(
+        zip(
+            counts["bucket_sample_counts"],
+            counts["bucket_target_counts"],
+        )
+    ):
+        if (
+            index != next_bucket
+            and sample_count < target_count
+            and sample_count % rollout_groups_per_bucket_visit != 0
+        ):
+            raise OnlineGRPOError(
+                "online GRPO checkpoint has multiple partial bucket visits"
+            )
 
     generator_state = raw.get("generator_state")
     if (
@@ -885,6 +1149,7 @@ def _validate_sampler_state(
         "uninformative_rollouts": uninformative,
         **counts,
         "next_bucket_index": next_bucket,
+        "current_visit_progress": current_visit_progress,
         "generator_state": generator_state.detach().cpu().clone(),
         "last_validated_rollout": last_validated,
     }
@@ -906,6 +1171,7 @@ def _checkpoint_payload(
     best_validation_reward: float,
     best_checkpoint_sha256: str | None,
     policy_update: JointGRPOPolicyUpdateConfig,
+    collection_contract: Mapping[str, object],
     sampler_state: Mapping[str, object],
 ) -> dict[str, object]:
     _validate_raw_reward_config(reward_config)
@@ -959,6 +1225,7 @@ def _checkpoint_payload(
             "policy_update_contract_sha256": (
                 joint_grpo_optimizer_contract_sha256(policy_update)
             ),
+            "rollout_collection_contract": dict(collection_contract),
             "sampler_state": dict(sampler_state),
             "trajectory_optimizer_config": dataclasses.asdict(
                 KinematicTrajectoryOptimizerConfig()
@@ -979,7 +1246,10 @@ def _validate_online_checkpoint_metadata(
     scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
     policy_update: JointGRPOPolicyUpdateConfig,
+    collection_contract: Mapping[str, object],
     bucket_count: int,
+    bucket_target_counts: Sequence[int],
+    rollout_groups_per_bucket_visit: int,
     optimizer_step: int,
 ) -> dict[str, object]:
     _validate_raw_reward_config(reward_config)
@@ -1015,6 +1285,7 @@ def _validate_online_checkpoint_metadata(
         "policy_update_contract_sha256": (
             joint_grpo_optimizer_contract_sha256(policy_update)
         ),
+        "rollout_collection_contract": dict(collection_contract),
         "scenario_contract_sha256": scenario_contract_sha,
         "scenario_seeds": [int(value) for value in scenario_seeds],
         "trajectory_optimizer_config": dataclasses.asdict(
@@ -1064,6 +1335,8 @@ def _validate_online_checkpoint_metadata(
     return _validate_sampler_state(
         payload.get("sampler_state"),
         bucket_count=bucket_count,
+        expected_bucket_target_counts=bucket_target_counts,
+        rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
         update_epochs=policy_update.update_epochs,
         optimizer_step=optimizer_step,
     )
@@ -1126,9 +1399,15 @@ def _fixed_raw_proxy_and_simulator_validation(
                         "fixed validation never reached a realized S5--S9 state"
                     )
                 values = builder.build_model_inputs(env)
-                values, _ = _condition_online_model_inputs(
-                    rule_maker, env, builder, values
+                condition = _condition_online_model_inputs(
+                    rule_maker,
+                    env,
+                    builder,
+                    values,
+                    committed_execution_id=None,
+                    committed_plan_actions=None,
                 )
+                values = condition.model_inputs
                 execution_mask = execution_mode_valid_mask(
                     values, optimizer=trajectory_optimizer
                 )
@@ -1322,6 +1601,7 @@ def _resume_best_checkpoint_anchor(
         "calibration_required",
         "policy_update_contract",
         "policy_update_contract_sha256",
+        "rollout_collection_contract",
         "scenario_contract_sha256",
         "trajectory_optimizer_sha256",
     )
@@ -1443,6 +1723,10 @@ def run_joint_grpo_training(
     training_buckets = _round_robin_training_buckets(
         config.scenarios, config.scenario_seeds
     )
+    bucket_target_counts = _balanced_bucket_targets(
+        target_rollout_groups, len(training_buckets)
+    )
+    collection_contract = rollout_collection_contract(config)
     generator = torch.Generator(device=torch_device)
     generator.manual_seed(config.seed)
     environment_steps = 0
@@ -1450,7 +1734,9 @@ def run_joint_grpo_training(
     uninformative_rollouts = 0
     bucket_sample_counts = [0 for _ in training_buckets]
     bucket_optimizer_step_counts = [0 for _ in training_buckets]
+    bucket_episode_counts = [0 for _ in training_buckets]
     next_bucket_index = 0
+    current_visit_progress = 0
     last_validated_rollout = -1
     advantage_vector_record_count = 0
     rule_diagnostics = {
@@ -1460,6 +1746,8 @@ def run_joint_grpo_training(
         "condition_failures": 0,
         "forced_safe_stops": 0,
         "s7_feedback_exception_hits": 0,
+        "commitment_conditioned_rollouts": 0,
+        "commitment_feedback_incompatible": 0,
     }
     last_metrics: dict[str, float] = {}
     resume_best_path: Path | None = None
@@ -1477,7 +1765,12 @@ def run_joint_grpo_training(
             scenario_contract_sha=scenario_contract_sha,
             scenario_seeds=config.scenario_seeds,
             policy_update=policy_update,
+            collection_contract=collection_contract,
             bucket_count=len(training_buckets),
+            bucket_target_counts=bucket_target_counts,
+            rollout_groups_per_bucket_visit=(
+                config.rollout_groups_per_bucket_visit
+            ),
             optimizer_step=trainer.optimizer_step,
         )
         environment_steps = int(resume_payload["environment_steps"])
@@ -1491,7 +1784,13 @@ def run_joint_grpo_training(
         bucket_optimizer_step_counts = list(
             restored_sampler_state["bucket_optimizer_step_counts"]
         )
+        bucket_episode_counts = list(
+            restored_sampler_state["bucket_episode_counts"]
+        )
         next_bucket_index = int(restored_sampler_state["next_bucket_index"])
+        current_visit_progress = int(
+            restored_sampler_state["current_visit_progress"]
+        )
         last_validated_rollout = int(
             restored_sampler_state["last_validated_rollout"]
         )
@@ -1518,7 +1817,7 @@ def run_joint_grpo_training(
         else None
     )
     frozen = {
-        "format": "bev_joint_grpo_online_config_v4",
+        "format": "bev_joint_grpo_online_config_v5",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -1530,6 +1829,7 @@ def run_joint_grpo_training(
         "policy_update_contract_sha256": (
             joint_grpo_optimizer_contract_sha256(policy_update)
         ),
+        "rollout_collection_contract": collection_contract,
         "reward_contract_version": _reward_contract_version(),
         "reward_contract": JOINT_REWARD_CONTRACT,
         "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
@@ -1577,18 +1877,31 @@ def run_joint_grpo_training(
     try:
         while sampled_rollouts < target_rollout_groups:
             bucket_index = next_bucket_index
+            if (
+                bucket_sample_counts[bucket_index]
+                >= bucket_target_counts[bucket_index]
+            ):
+                raise OnlineGRPOError(
+                    "training bucket cursor points to a completed target"
+                )
             scenario, seed = training_buckets[bucket_index]
             samples_at_episode_start = sampled_rollouts
             env = _new_env(scenario, seed)
+            bucket_episode_counts[bucket_index] += 1
             builder = JointBEVSampleBuilder(AGENT_IDS)
             builder.reset()
             rule_maker = _new_online_rule_maker(trainer.planner, env)
+            committed_execution_id: int | None = None
+            committed_plan_actions: dict[str, int] | None = None
             dt_s = simulator_decision_dt_s(env)
             episode_step = 0
             try:
                 while (
                     sampled_rollouts < target_rollout_groups
-                    and sampled_rollouts == samples_at_episode_start
+                    and bucket_sample_counts[bucket_index]
+                    < bucket_target_counts[bucket_index]
+                    and current_visit_progress
+                    < config.rollout_groups_per_bucket_visit
                     and episode_step < config.environment_steps_per_episode
                 ):
                     builder.capture_state(env, episode_step * dt_s)
@@ -1599,8 +1912,20 @@ def run_joint_grpo_training(
                         action = route_following_warmup_actions(env, builder)
                     else:
                         values = builder.build_model_inputs(env)
-                        values, proposal_batch = _condition_online_model_inputs(
-                            rule_maker, env, builder, values
+                        condition = _condition_online_model_inputs(
+                            rule_maker,
+                            env,
+                            builder,
+                            values,
+                            committed_execution_id=committed_execution_id,
+                            committed_plan_actions=committed_plan_actions,
+                        )
+                        values = condition.model_inputs
+                        committed_execution_id = (
+                            condition.committed_execution_id
+                        )
+                        committed_plan_actions = (
+                            condition.committed_plan_actions
                         )
                         execution_mask = execution_mode_valid_mask(
                             values, optimizer=trajectory_optimizer
@@ -1654,9 +1979,14 @@ def run_joint_grpo_training(
                                 ),
                             )
                             raise
-                        optimization, rule_event = _finalize_online_rule_action(
+                        (
+                            optimization,
+                            rule_event,
+                            committed_execution_id,
+                            committed_plan_actions,
+                        ) = _finalize_online_rule_action(
                             rule_maker,
-                            proposal_batch,
+                            condition,
                             env=env,
                             scenario=scenario,
                             values=values,
@@ -1668,9 +1998,7 @@ def run_joint_grpo_training(
                             rule_diagnostics[name] += int(value)
                         sampled_rollouts += 1
                         bucket_sample_counts[bucket_index] += 1
-                        next_bucket_index = (bucket_index + 1) % len(
-                            training_buckets
-                        )
+                        current_visit_progress += 1
                         informative = _joint_rewards_are_informative(
                             proxy.rewards,
                             group_size=trainer.config.group_size,
@@ -1821,6 +2149,22 @@ def run_joint_grpo_training(
                     episode_step += 1
                     if episode_has_ended(terminated, truncated, info):
                         break
+                    if sampled_rollouts > samples_at_episode_start and (
+                        _bucket_visit_is_complete(
+                            bucket_index=bucket_index,
+                            bucket_sample_counts=bucket_sample_counts,
+                            bucket_target_counts=bucket_target_counts,
+                            current_visit_progress=current_visit_progress,
+                            rollout_groups_per_bucket_visit=(
+                                config.rollout_groups_per_bucket_visit
+                            ),
+                        )
+                        or sampled_rollouts == target_rollout_groups
+                        or sampled_rollouts
+                        % config.validation_interval_rollouts
+                        == 0
+                    ):
+                        break
             finally:
                 env.close()
             if sampled_rollouts == samples_at_episode_start:
@@ -1833,6 +2177,26 @@ def run_joint_grpo_training(
                     )
             else:
                 consecutive_empty_episodes = 0
+            if _bucket_visit_is_complete(
+                bucket_index=bucket_index,
+                bucket_sample_counts=bucket_sample_counts,
+                bucket_target_counts=bucket_target_counts,
+                current_visit_progress=current_visit_progress,
+                rollout_groups_per_bucket_visit=(
+                    config.rollout_groups_per_bucket_visit
+                ),
+            ):
+                current_visit_progress = 0
+                unfinished_bucket = _next_unfinished_bucket_index(
+                    bucket_sample_counts,
+                    bucket_target_counts,
+                    start_index=(bucket_index + 1) % len(training_buckets),
+                )
+                next_bucket_index = (
+                    0 if unfinished_bucket is None else unfinished_bucket
+                )
+            else:
+                next_bucket_index = bucket_index
             _reject_exhausted_uninformative_budget(
                 sampled_rollouts=sampled_rollouts,
                 target_rollout_groups=target_rollout_groups,
@@ -1903,13 +2267,19 @@ def run_joint_grpo_training(
                 current_sampler_state = _sampler_state(
                     sampled_rollouts=sampled_rollouts,
                     uninformative_rollouts=uninformative_rollouts,
+                    bucket_target_counts=bucket_target_counts,
                     bucket_sample_counts=bucket_sample_counts,
                     bucket_optimizer_step_counts=(
                         bucket_optimizer_step_counts
                     ),
+                    bucket_episode_counts=bucket_episode_counts,
                     next_bucket_index=next_bucket_index,
+                    current_visit_progress=current_visit_progress,
                     generator_state=generator.get_state(),
                     last_validated_rollout=last_validated_rollout,
+                    rollout_groups_per_bucket_visit=(
+                        config.rollout_groups_per_bucket_visit
+                    ),
                     update_epochs=config.update_epochs,
                     optimizer_step=trainer.optimizer_step,
                 )
@@ -1931,6 +2301,7 @@ def run_joint_grpo_training(
                         best_validation_reward=best_reward,
                         best_checkpoint_sha256=None,
                         policy_update=policy_update,
+                        collection_contract=collection_contract,
                         sampler_state=current_sampler_state,
                     )
                     save_grpo_checkpoint(best_path, best_checkpoint)
@@ -1952,6 +2323,7 @@ def run_joint_grpo_training(
                     best_validation_reward=best_reward,
                     best_checkpoint_sha256=best_checkpoint_sha256,
                     policy_update=policy_update,
+                    collection_contract=collection_contract,
                     sampler_state=current_sampler_state,
                 )
                 save_grpo_checkpoint(last_path, checkpoint)
@@ -1963,11 +2335,17 @@ def run_joint_grpo_training(
     final_sampler_state = _sampler_state(
         sampled_rollouts=sampled_rollouts,
         uninformative_rollouts=uninformative_rollouts,
+        bucket_target_counts=bucket_target_counts,
         bucket_sample_counts=bucket_sample_counts,
         bucket_optimizer_step_counts=bucket_optimizer_step_counts,
+        bucket_episode_counts=bucket_episode_counts,
         next_bucket_index=next_bucket_index,
+        current_visit_progress=current_visit_progress,
         generator_state=generator.get_state(),
         last_validated_rollout=last_validated_rollout,
+        rollout_groups_per_bucket_visit=(
+            config.rollout_groups_per_bucket_visit
+        ),
         update_epochs=config.update_epochs,
         optimizer_step=trainer.optimizer_step,
     )
@@ -1986,6 +2364,7 @@ def run_joint_grpo_training(
         best_validation_reward=best_reward,
         best_checkpoint_sha256=best_checkpoint_sha256,
         policy_update=policy_update,
+        collection_contract=collection_contract,
         sampler_state=final_sampler_state,
     )
     last_path = save_grpo_checkpoint(last_path, payload)
@@ -2010,7 +2389,12 @@ def run_joint_grpo_training(
         scenario_contract_sha=scenario_contract_sha,
         scenario_seeds=config.scenario_seeds,
         policy_update=policy_update,
+        collection_contract=collection_contract,
         bucket_count=len(training_buckets),
+        bucket_target_counts=bucket_target_counts,
+        rollout_groups_per_bucket_visit=(
+            config.rollout_groups_per_bucket_visit
+        ),
         optimizer_step=restored.optimizer_step,
     )
 
@@ -2020,7 +2404,7 @@ def run_joint_grpo_training(
     )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v4",
+        "format": "bev_joint_grpo_online_report_v5",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -2031,6 +2415,8 @@ def run_joint_grpo_training(
             trainer.optimizer_step - run_start_optimizer_step
         ),
         "environment_steps": environment_steps,
+        "environment_episode_count": sum(bucket_episode_counts),
+        "warmup_environment_steps": environment_steps - sampled_rollouts,
         "sampled_rollouts": sampled_rollouts,
         "sampled_rollouts_this_run": (
             sampled_rollouts - run_start_rollout_group
@@ -2060,6 +2446,7 @@ def run_joint_grpo_training(
         "policy_update_contract_sha256": (
             joint_grpo_optimizer_contract_sha256(policy_update)
         ),
+        "rollout_collection_contract": collection_contract,
         "simulator_validation_role": "diagnostic_only",
         "simulator_diagnostic_errors": simulator_diagnostic_errors,
         "scenario_contract_sha256": scenario_contract_sha,
@@ -2070,7 +2457,9 @@ def run_joint_grpo_training(
                 "scenario": scenario[0],
                 "route": scenario[1],
                 "seed": seed,
+                "target_rollouts": bucket_target_counts[index],
                 "sampled_rollouts": bucket_sample_counts[index],
+                "environment_episodes": bucket_episode_counts[index],
                 "optimizer_steps": bucket_optimizer_step_counts[index],
             }
             for index, (scenario, seed) in enumerate(training_buckets)
@@ -2182,6 +2571,9 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
         ),
         environment_steps_per_episode=int(
             online.get("environment_steps_per_episode", 100)
+        ),
+        rollout_groups_per_bucket_visit=online.get(
+            "rollout_groups_per_bucket_visit", 10
         ),
         validation_interval_rollouts=online.get(
             "validation_interval_rollouts", 20

@@ -1,0 +1,126 @@
+{
+  "format": "stage2_grpo_persistent_episode_implementation_report_v1",
+  "created_at": "2026-08-30T14:25:27+08:00",
+  "repository_commit_at_implementation": "b11176e885028110346a4ecd06f0e2907fe5199f",
+  "implementation_gate": {
+    "name": "stage2_joint_grpo_persistent_episode_v1_implementation",
+    "passed": true,
+    "scope": "persistent live-episode rollout collection, balanced bucket visits, cross-step RuleMaker commitments, strict closed-environment checkpoint resume, v5 online artifacts, A/B fairness binding, focused regression, and one bounded real CUDA multi-group smoke",
+    "long_training_started": false,
+    "paired_100_rollout_ab_started": false
+  },
+  "formal_boundary": {
+    "classification": "diagnostic_only",
+    "eligible_for_formal_training": false,
+    "paper_evidence_allowed": false,
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635"
+  },
+  "rollout_collection_contract": {
+    "version": "stage2_joint_grpo_persistent_episode_v1",
+    "budget_unit": "fresh_rollout_group",
+    "bucket_order": "ordered_scenario_then_seed",
+    "bucket_target_assignment": "balanced_floor_with_remainder_to_lower_bucket_indices",
+    "rollout_groups_per_bucket_visit": 10,
+    "environment_steps_per_episode": 200,
+    "validation_interval_rollouts": 20,
+    "selected_environment_steps_per_rollout": 1,
+    "uninformative_rollout_execution": "selected_action_once_no_update",
+    "episode_reuse": "persistent_within_bucket_visit",
+    "interrupted_visit_resume": "same_bucket_same_visit_progress",
+    "checkpoint_boundary": "closed_environment_only",
+    "active_environment_serialized": false,
+    "rule_maker_commitment_scope": "live_environment_episode"
+  },
+  "collection_semantics": {
+    "per_live_episode": "reset and warm up once, then collect consecutive fresh groups from successive usable states until a natural terminal, episode step cap, visit quota, bucket target, validation boundary, or total budget boundary",
+    "per_group": "sample one complete G-entry behavior-policy group, score raw tau_d, freeze advantages, perform every configured optimizer epoch when informative, then execute exactly one selected tau_cmd env.step",
+    "bucket_fairness": "deterministically balance the rollout budget over ordered scenario-by-seed buckets; visit at most ten groups before advancing",
+    "validation_boundary": "close the live environment before validation and checkpoint persistence",
+    "resume": "restore bucket targets, sample/update/episode counters, bucket cursor, partial visit progress, last validation index, and Torch generator state; do not serialize an active MetaDrive environment",
+    "legacy_resume": "checkpoints without the exact rollout collection contract are rejected"
+  },
+  "rule_maker_state_machine": {
+    "persistent_state": [
+      "the live environment",
+      "JointBEVSampleBuilder history",
+      "the same RuleMaker instance",
+      "committed execution batch id",
+      "committed joint plan actions"
+    ],
+    "active_commitment": "advance against the current live pose and condition on committed actions while active; do not request a new proposal",
+    "completed_commitment": "clear external commitment state and allow a new proposal in the same decision step",
+    "incompatible_feedback": "execute the optimized safe STOP action while preserving an active commitment for the next step",
+    "compatible_new_proposal": "accept the matched proposal and retain its batch id and joint plan actions if it creates an active commitment"
+  },
+  "artifacts": {
+    "online_config_format": "bev_joint_grpo_online_config_v5",
+    "online_report_format": "bev_joint_grpo_online_report_v5",
+    "checkpoint_collection_contract_top_level": true,
+    "best_last_collection_contract_binding": true,
+    "ab_comparator_requires_v5_and_exact_collection_contract": true,
+    "historical_runs_4_through_7_modified": false
+  },
+  "focused_regression": {
+    "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_online.py tests/test_compare_grpo_stability.py tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_plot_grpo.py tests/test_run_bev_joint_grpo_launcher.py tests/test_bev_reward_comparison.py -q",
+    "passed": 194,
+    "failed": 0,
+    "warnings": 15,
+    "git_diff_check_passed": true,
+    "covered": [
+      "one live fake environment collecting three consecutive rollout groups",
+      "one selected environment step per group and exactly update_epochs optimizer steps per informative group",
+      "uninformative group execution with zero optimizer steps",
+      "validation and natural-terminal interruption continuing the same bucket visit",
+      "balanced bucket targets and strict sampler-state round-trip",
+      "legacy collection-contract rejection and best-to-last binding",
+      "RuleMaker compatible, incompatible, and completed commitment paths",
+      "v5 report/config and six-run A/B fairness validation"
+    ]
+  },
+  "cuda_multi_group_smoke": {
+    "classification": "bounded diagnostic, formal-ineligible",
+    "artifact_root": "/tmp/stage2_grpo_persistent_episode_smoke/run_1",
+    "report_sha256": "e237fabb5b14544153496c47485bdc384feec4493b16745dbd92b55e4631fa1d",
+    "group_size": 3,
+    "update_epochs": 2,
+    "sampled_rollouts": 6,
+    "optimizer_steps": 12,
+    "uninformative_rollouts": 0,
+    "environment_episode_count": 5,
+    "environment_steps": 78,
+    "warmup_environment_steps": 72,
+    "first_bucket_target_rollouts": 2,
+    "first_bucket_sampled_rollouts": 2,
+    "first_bucket_environment_episodes": 1,
+    "first_bucket_optimizer_steps": 4,
+    "episode_reuse_observed": true,
+    "checkpoint_round_trip": true,
+    "cuda_peak_memory_bytes": 129990144,
+    "cuda_peak_memory_gib": 0.1210627555847168,
+    "cuda_peak_memory_limit_gib": 15.0,
+    "cuda_peak_memory_gate_passed": true,
+    "wall_time_seconds": 70.84786512283608,
+    "plot_count": 6
+  },
+  "configuration_note": {
+    "code_default_update_epochs": 4,
+    "short_ab_clipped_update_epochs": 4,
+    "current_yaml_update_epochs": 10,
+    "current_yaml_environment_steps_per_episode": 200,
+    "current_yaml_rollout_groups_per_bucket_visit": 10,
+    "operator_consequence": "a direct launch with the current YAML performs ten optimizer epochs per informative rollout group; the planned clipped A/B must use four explicitly"
+  },
+  "maintenance_note": {
+    "missing_indexed_phase_file": "docs/phases/phase6.md",
+    "impact": "the repository AGENTS index points to a Phase 6 file that is absent; the frozen machine-readable project plan and current implementation contracts were used as authority"
+  },
+  "qualification": {
+    "persistent_episode_implementation_verified": true,
+    "short_ab_complete": false,
+    "formal_qualification_passed": false,
+    "paper_evidence_allowed": false
+  },
+  "next_hard_gate": "Keep strict_stage1_v2_run3_qualification as the formal gate. The diagnostic run_8 through run_13 A/B may run only in a separate frozen-code training thread using the exact persistent-episode v1 collection contract."
+}

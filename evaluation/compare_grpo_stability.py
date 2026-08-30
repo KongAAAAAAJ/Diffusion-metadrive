@@ -29,8 +29,9 @@ absolute or relative to the manifest):
 
 ``runs`` must contain exactly one baseline and one clipped entry for each of
 the three paired seeds (six entries total). The command validates each run's
-v4 config/report, the complete frozen ``JointGRPOConfig``, and the
-``validation/reward_gain`` TensorBoard series, then writes ``report.json`` and
+v5 config/report, exact persistent-episode rollout collection contract, the
+complete frozen ``JointGRPOConfig``, and the ``validation/reward_gain``
+TensorBoard series, then writes ``report.json`` and
 ``validation_reward_gain_ab.png``. Results remain diagnostic-only and do not
 authorize formal conclusions.
 """
@@ -58,14 +59,15 @@ from tensorboard.backend.event_processing import event_accumulator
 
 MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v1"
 REPORT_FORMAT = "stage2_grpo_stability_ab_report_v1"
-ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v4"
-ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v4"
+ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v5"
+ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v5"
 VALIDATION_REWARD_GAIN_TAG = "validation/reward_gain"
 PAIRED_SEEDS = (17, 23, 42)
 ARM_UPDATE_EPOCHS = {"baseline": 1, "clipped": 4}
 GROUP_SIZE = 24
 TOTAL_ROLLOUT_GROUPS = 100
 VALIDATION_INTERVAL_ROLLOUTS = 20
+ROLLOUT_GROUPS_PER_BUCKET_VISIT = 10
 CLIP_EPSILON = 0.2
 SCENARIO_SEEDS = (17, 23)
 VALIDATION_SEEDS = (31, 47)
@@ -76,6 +78,7 @@ SCENARIOS = (
     ("S8_ego_exit_to_ramp", "R6_exit_to_ramp"),
     ("S9_narrow_channel_negotiation", "R8_narrow_channel"),
 )
+ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v1"
 EXPECTED_GRPO_CONFIG = {
     "group_size": GROUP_SIZE,
     "initial_noise_timestep": 8,
@@ -193,6 +196,45 @@ def _validate_grpo_config(value: object, *, label: str) -> dict[str, object]:
             raise GRPOStabilityComparisonError(
                 f"{label} {name} mismatch: expected {expected!r}"
             )
+    return {str(name): item for name, item in value.items()}
+
+
+def _expected_rollout_collection_contract(
+    environment_steps_per_episode: int,
+) -> dict[str, object]:
+    return {
+        "version": ROLLOUT_COLLECTION_CONTRACT_VERSION,
+        "budget_unit": "fresh_rollout_group",
+        "bucket_order": "ordered_scenario_then_seed",
+        "bucket_target_assignment": (
+            "balanced_floor_with_remainder_to_lower_bucket_indices"
+        ),
+        "rollout_groups_per_bucket_visit": ROLLOUT_GROUPS_PER_BUCKET_VISIT,
+        "environment_steps_per_episode": environment_steps_per_episode,
+        "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
+        "selected_environment_steps_per_rollout": 1,
+        "uninformative_rollout_execution": "selected_action_once_no_update",
+        "episode_reuse": "persistent_within_bucket_visit",
+        "interrupted_visit_resume": "same_bucket_same_visit_progress",
+        "checkpoint_boundary": "closed_environment_only",
+        "active_environment_serialized": False,
+        "rule_maker_commitment_scope": "live_environment_episode",
+    }
+
+
+def _validate_rollout_collection_contract(
+    value: object,
+    *,
+    expected: Mapping[str, object],
+    label: str,
+) -> dict[str, object]:
+    if (
+        not isinstance(value, Mapping)
+        or dict(value) != dict(expected)
+    ):
+        raise GRPOStabilityComparisonError(
+            f"{label} rollout collection contract mismatch"
+        )
     return {str(name): item for name, item in value.items()}
 
 
@@ -354,6 +396,9 @@ def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
             for name, value in policy_update.items()
             if name != "update_epochs"
         },
+        "rollout_collection_contract": config.get(
+            "rollout_collection_contract"
+        ),
         "device": online.get("device"),
         "scenarios": online.get("scenarios"),
         "scenario_seeds": online.get("scenario_seeds"),
@@ -366,7 +411,109 @@ def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
         "validation_interval_rollouts": online.get(
             "validation_interval_rollouts"
         ),
+        "rollout_groups_per_bucket_visit": online.get(
+            "rollout_groups_per_bucket_visit"
+        ),
     }
+
+
+def _validate_training_bucket_counters(
+    value: object,
+    *,
+    arm: str,
+    seed: int,
+    update_epochs: int,
+    optimizer_steps: int,
+    environment_episode_count: int,
+) -> None:
+    label = f"{arm}/{seed} training_bucket_counters"
+    expected_buckets = tuple(
+        (scenario, scenario_seed)
+        for scenario in SCENARIOS
+        for scenario_seed in SCENARIO_SEEDS
+    )
+    if not isinstance(value, list) or len(value) != len(expected_buckets):
+        raise GRPOStabilityComparisonError(
+            f"{label} must contain {len(expected_buckets)} ordered buckets"
+        )
+    base_target, remainder = divmod(
+        TOTAL_ROLLOUT_GROUPS, len(expected_buckets)
+    )
+    sampled_total = 0
+    target_total = 0
+    episode_total = 0
+    optimizer_total = 0
+    required_fields = {
+        "scenario",
+        "route",
+        "seed",
+        "target_rollouts",
+        "sampled_rollouts",
+        "environment_episodes",
+        "optimizer_steps",
+    }
+    for index, (counter, (scenario, scenario_seed)) in enumerate(
+        zip(value, expected_buckets)
+    ):
+        counter_label = f"{label}[{index}]"
+        if not isinstance(counter, Mapping) or not required_fields.issubset(counter):
+            raise GRPOStabilityComparisonError(
+                f"{counter_label} is missing required fields"
+            )
+        expected_target = base_target + int(index < remainder)
+        if (
+            counter.get("scenario") != scenario[0]
+            or counter.get("route") != scenario[1]
+            or counter.get("seed") != scenario_seed
+        ):
+            raise GRPOStabilityComparisonError(
+                f"{counter_label} bucket identity mismatch"
+            )
+        target = _positive_int(
+            counter.get("target_rollouts"),
+            label=f"{counter_label}.target_rollouts",
+        )
+        sampled = _positive_int(
+            counter.get("sampled_rollouts"),
+            label=f"{counter_label}.sampled_rollouts",
+        )
+        episodes = _positive_int(
+            counter.get("environment_episodes"),
+            label=f"{counter_label}.environment_episodes",
+        )
+        bucket_optimizer_steps = _non_negative_int(
+            counter.get("optimizer_steps"),
+            label=f"{counter_label}.optimizer_steps",
+        )
+        if target != expected_target:
+            raise GRPOStabilityComparisonError(
+                f"{counter_label} target_rollouts mismatch"
+            )
+        if sampled != target:
+            raise GRPOStabilityComparisonError(
+                f"{counter_label} sampled_rollouts must equal target_rollouts"
+            )
+        if bucket_optimizer_steps > sampled * update_epochs:
+            raise GRPOStabilityComparisonError(
+                f"{counter_label} optimizer_steps exceeds its rollout budget"
+            )
+        target_total += target
+        sampled_total += sampled
+        episode_total += episodes
+        optimizer_total += bucket_optimizer_steps
+    if (
+        target_total != TOTAL_ROLLOUT_GROUPS
+        or sampled_total != TOTAL_ROLLOUT_GROUPS
+    ):
+        raise GRPOStabilityComparisonError(f"{label} rollout totals mismatch")
+    if episode_total != environment_episode_count:
+        raise GRPOStabilityComparisonError(
+            f"{label} environment episode total mismatch"
+        )
+    if optimizer_total != optimizer_steps:
+        raise GRPOStabilityComparisonError(
+            f"{label} optimizer-step total mismatch"
+        )
 
 
 def _load_run(
@@ -409,7 +556,7 @@ def _load_run(
         "update_epochs": ARM_UPDATE_EPOCHS[arm],
         "clip_epsilon": CLIP_EPSILON,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
-        "environment_steps_per_episode": 100,
+        "rollout_groups_per_bucket_visit": ROLLOUT_GROUPS_PER_BUCKET_VISIT,
         "scenarios": [list(value) for value in SCENARIOS],
         "scenario_seeds": list(SCENARIO_SEEDS),
         "resume_checkpoint": None,
@@ -420,6 +567,23 @@ def _load_run(
             raise GRPOStabilityComparisonError(
                 f"{arm}/{seed} online_config {name} mismatch"
             )
+    environment_steps_per_episode = _positive_int(
+        online.get("environment_steps_per_episode"),
+        label=f"{arm}/{seed} online_config environment_steps_per_episode",
+    )
+    expected_collection_contract = _expected_rollout_collection_contract(
+        environment_steps_per_episode
+    )
+    _validate_rollout_collection_contract(
+        config.get("rollout_collection_contract"),
+        expected=expected_collection_contract,
+        label=f"{arm}/{seed} config",
+    )
+    _validate_rollout_collection_contract(
+        report.get("rollout_collection_contract"),
+        expected=expected_collection_contract,
+        label=f"{arm}/{seed} report",
+    )
     if config.get("source_stage1_sha256") != source_sha:
         raise GRPOStabilityComparisonError(
             f"{arm}/{seed} source Stage1 checkpoint mismatch"
@@ -493,6 +657,34 @@ def _load_run(
         raise GRPOStabilityComparisonError(
             f"{arm}/{seed} validation seeds mismatch"
         )
+    environment_steps = _positive_int(
+        report.get("environment_steps"),
+        label=f"{arm}/{seed} environment_steps",
+    )
+    environment_episode_count = _positive_int(
+        report.get("environment_episode_count"),
+        label=f"{arm}/{seed} environment_episode_count",
+    )
+    if environment_episode_count > environment_steps:
+        raise GRPOStabilityComparisonError(
+            f"{arm}/{seed} environment_episode_count exceeds environment_steps"
+        )
+    warmup_environment_steps = _non_negative_int(
+        report.get("warmup_environment_steps"),
+        label=f"{arm}/{seed} warmup_environment_steps",
+    )
+    if warmup_environment_steps != environment_steps - sampled:
+        raise GRPOStabilityComparisonError(
+            f"{arm}/{seed} warmup environment-step count mismatch"
+        )
+    _validate_training_bucket_counters(
+        report.get("training_bucket_counters"),
+        arm=arm,
+        seed=seed,
+        update_epochs=ARM_UPDATE_EPOCHS[arm],
+        optimizer_steps=optimizer_steps,
+        environment_episode_count=environment_episode_count,
+    )
     wall_time_seconds = _finite_float(
         report.get("wall_time_seconds"),
         label=f"{arm}/{seed} wall_time_seconds",
