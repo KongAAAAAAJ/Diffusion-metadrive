@@ -4,6 +4,7 @@ import copy
 import gc
 import weakref
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import torch
@@ -19,10 +20,14 @@ from models.bev_planner import (
 )
 from models.bev_planner.bev_only_diffusion_planner import MAX_BACKGROUND_ACTORS
 from models.bev_planner.joint_grpo import (
+    JointGRPOPolicyUpdateConfig,
+    _clipped_grpo_surrogate,
     _gather_modes,
     _repeat_context,
     _repeat_groups,
     _trajectory_bc,
+    joint_grpo_optimizer_contract,
+    joint_grpo_optimizer_contract_sha256,
 )
 from train.bev_joint_grpo import (
     GRPO_CHECKPOINT_FORMAT,
@@ -199,6 +204,81 @@ def test_config_and_signed_advantage_contract() -> None:
         normalize_signed_advantages(bad)
 
 
+def test_policy_update_config_contract_and_sha() -> None:
+    policy_update = JointGRPOPolicyUpdateConfig()
+    assert policy_update.update_epochs == 4
+    assert policy_update.clip_epsilon == 0.2
+    contract = joint_grpo_optimizer_contract(policy_update)
+    assert contract["version"] == "stage2_joint_grpo_optimizer_v2"
+    assert contract["update_epochs"] == 4
+    assert contract["clip_epsilon"] == 0.2
+    assert contract["mode_ratio_factorization"].endswith("[B,G]")
+    assert contract["trajectory_ratio_factorization"].endswith("[B,G,S]")
+    digest = joint_grpo_optimizer_contract_sha256(policy_update)
+    assert len(digest) == 64
+    assert digest == joint_grpo_optimizer_contract_sha256(policy_update)
+    assert digest != joint_grpo_optimizer_contract_sha256(
+        JointGRPOPolicyUpdateConfig(update_epochs=1)
+    )
+    for invalid_epochs in (True, False, 0, -1):
+        with pytest.raises(JointGRPOError, match="update_epochs"):
+            JointGRPOPolicyUpdateConfig(
+                update_epochs=invalid_epochs,  # type: ignore[arg-type]
+            )
+    for invalid_epsilon in (0.0, 1.0, -0.1, float("inf"), float("nan")):
+        with pytest.raises(JointGRPOError, match="clip_epsilon"):
+            JointGRPOPolicyUpdateConfig(clip_epsilon=invalid_epsilon)
+
+
+def test_clipped_grpo_surrogate_positive_negative_advantages() -> None:
+    ratios = torch.tensor(
+        [[0.5, 0.5, 1.0, 1.5, 1.5]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    advantages = torch.tensor(
+        [[1.0, -1.0, 1.0, 1.0, -1.0]],
+        dtype=torch.float32,
+    )
+    loss = _clipped_grpo_surrogate(
+        ratios,
+        advantages,
+        clip_epsilon=0.2,
+    )
+    expected_terms = torch.tensor(
+        [[0.5, -0.8, 1.0, 1.2, -1.5]],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(loss, -expected_terms.mean())
+    loss.backward()
+    torch.testing.assert_close(
+        ratios.grad,
+        torch.tensor(
+            [[-0.2, 0.0, -0.2, 0.0, 0.2]],
+            dtype=torch.float32,
+        ),
+    )
+
+    trajectory_ratios = torch.tensor(
+        [[[0.7, 1.0, 1.3], [1.3, 0.7, 1.0]]],
+        dtype=torch.float32,
+    )
+    trajectory_advantages = torch.tensor(
+        [[[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]],
+        dtype=torch.float32,
+    )
+    trajectory_loss = _clipped_grpo_surrogate(
+        trajectory_ratios,
+        trajectory_advantages,
+        clip_epsilon=0.2,
+    )
+    manual = -torch.minimum(
+        trajectory_ratios * trajectory_advantages,
+        trajectory_ratios.clamp(0.8, 1.2) * trajectory_advantages,
+    ).mean()
+    torch.testing.assert_close(trajectory_loss, manual)
+
+
 @pytest.mark.parametrize("invalid_group_size", [True, False, 1, 0, -1])
 def test_config_rejects_invalid_group_size(invalid_group_size: object) -> None:
     with pytest.raises(JointGRPOError, match="group_size"):
@@ -362,6 +442,33 @@ def test_joint_probability_replay_zero_kl_and_weighted_loss(
         rtol=0,
         atol=2e-5,
     )
+    torch.testing.assert_close(
+        result.mode_importance_ratio,
+        torch.ones_like(result.mode_importance_ratio),
+        rtol=0,
+        atol=2e-6,
+    )
+    torch.testing.assert_close(
+        result.trajectory_importance_ratio,
+        torch.ones_like(result.trajectory_importance_ratio),
+        rtol=0,
+        atol=2e-5,
+    )
+    assert result.mode_clip_fraction_low.item() == 0.0
+    assert result.mode_clip_fraction_high.item() == 0.0
+    assert result.trajectory_clip_fraction_low.item() == 0.0
+    assert result.trajectory_clip_fraction_high.item() == 0.0
+    assert result.mode_old_policy_approx_kl.item() >= 0.0
+    assert result.trajectory_old_policy_approx_kl.item() >= 0.0
+    policy_metrics = result.scalar_metrics()
+    assert policy_metrics["policy/mode_ratio_mean"] == pytest.approx(
+        1.0, abs=2e-6
+    )
+    assert policy_metrics["policy/trajectory_ratio_mean"] == pytest.approx(
+        1.0, abs=2e-5
+    )
+    assert policy_metrics["policy/mode_clip_fraction"] == 0.0
+    assert policy_metrics["policy/trajectory_clip_fraction"] == 0.0
 
     groups = rollout.group_size
     flat_count = rollout.batch_size * groups
@@ -535,6 +642,123 @@ def test_exactly_one_update_changes_only_trainable_policy() -> None:
         torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
     )
     assert second.optimizer_step == trainer.optimizer_step == 2
+
+
+def test_multi_epoch_update_reuses_frozen_rollout_and_advantage() -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(),
+        JointGRPOConfig(group_size=3),
+    )
+    rollout = trainer.sample_groups(
+        _model_inputs(),
+        generator=torch.Generator().manual_seed(211),
+    )
+    rewards = torch.tensor([[-1.0, 0.0, 1.0]], dtype=torch.float32)
+    old_mode_log_prob = rollout.old_mode_log_prob.clone()
+    old_trajectory_log_prob = rollout.old_trajectory_log_prob.clone()
+    old_chains = rollout.chains_normalized.clone()
+    decoder_before = _state(trainer.planner.diffusion_decoder)
+    mode_before = _state(trainer.planner.mode_head)
+    backbone_before = _state(trainer.planner.backbone)
+    reference_before = _state(trainer.reference)
+
+    with mock.patch(
+        "models.bev_planner.joint_grpo.normalize_signed_advantages",
+        wraps=normalize_signed_advantages,
+    ) as normalize:
+        result = trainer.update(
+            rollout,
+            rewards,
+            policy_update=JointGRPOPolicyUpdateConfig(
+                update_epochs=2,
+                clip_epsilon=0.2,
+            ),
+        )
+
+    assert normalize.call_count == 1
+    assert len(result.epoch_results) == 2
+    assert [epoch.epoch_in_rollout for epoch in result.epoch_results] == [1, 2]
+    assert [epoch.optimizer_step for epoch in result.epoch_results] == [1, 2]
+    assert result.optimizer_step == trainer.optimizer_step == 2
+    assert result.loss is result.epoch_results[-1].loss
+    assert result.gradient_norms is result.epoch_results[-1].gradient_norms
+    assert (
+        result.epoch_results[0].loss.advantages.data_ptr()
+        == result.epoch_results[1].loss.advantages.data_ptr()
+    )
+    torch.testing.assert_close(
+        result.epoch_results[0].loss.advantages,
+        result.epoch_results[1].loss.advantages,
+    )
+    torch.testing.assert_close(rollout.old_mode_log_prob, old_mode_log_prob)
+    torch.testing.assert_close(
+        rollout.old_trajectory_log_prob,
+        old_trajectory_log_prob,
+    )
+    torch.testing.assert_close(rollout.chains_normalized, old_chains)
+    torch.testing.assert_close(
+        result.epoch_results[0].loss.new_mode_log_prob,
+        old_mode_log_prob,
+        rtol=0,
+        atol=2e-6,
+    )
+    assert not torch.equal(
+        result.epoch_results[1].loss.mode_importance_ratio,
+        result.epoch_results[0].loss.mode_importance_ratio,
+    )
+    for epoch in result.epoch_results:
+        for value in vars(epoch.loss).values():
+            assert isinstance(value, torch.Tensor)
+            assert value.requires_grad is False
+            assert value.grad_fn is None
+        assert epoch.gradient_norms["diffusion_decoder"] > 0.0
+        assert epoch.gradient_norms["mode_head"] > 0.0
+    assert _changed(decoder_before, _state(trainer.planner.diffusion_decoder))
+    assert _changed(mode_before, _state(trainer.planner.mode_head))
+    assert _state_equal(backbone_before, _state(trainer.planner.backbone))
+    assert _state_equal(reference_before, _state(trainer.reference))
+    with pytest.raises(JointGRPOError, match="enter update exactly once"):
+        trainer.update(
+            rollout,
+            rewards,
+            policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
+        )
+
+
+def test_partial_multi_epoch_failure_still_consumes_live_rollout() -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(),
+        JointGRPOConfig(group_size=2),
+    )
+    rollout = trainer.sample_groups(
+        _model_inputs(),
+        generator=torch.Generator().manual_seed(223),
+    )
+    rewards = torch.tensor([[-1.0, 1.0]], dtype=torch.float32)
+    original_step = trainer.optimizer.step
+    step_calls = 0
+
+    def fail_second_step(*args, **kwargs):
+        nonlocal step_calls
+        step_calls += 1
+        if step_calls == 2:
+            raise RuntimeError("injected second epoch failure")
+        return original_step(*args, **kwargs)
+
+    with mock.patch.object(
+        trainer.optimizer,
+        "step",
+        side_effect=fail_second_step,
+    ):
+        with pytest.raises(RuntimeError, match="second epoch"):
+            trainer.update(
+                rollout,
+                rewards,
+                policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
+            )
+    assert trainer.optimizer_step == 1
+    with pytest.raises(JointGRPOError, match="enter update exactly once"):
+        trainer.update(rollout, rewards)
 
 
 def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:

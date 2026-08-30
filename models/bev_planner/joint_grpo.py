@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 import weakref
 from dataclasses import dataclass
@@ -91,6 +93,87 @@ class JointGRPOConfig:
     @property
     def stochastic_timesteps(self) -> tuple[int, ...]:
         return tuple(value for value in self.roll_timesteps if value > 0)
+
+
+@dataclass(frozen=True)
+class JointGRPOPolicyUpdateConfig:
+    """PPO-style update semantics applied to one frozen joint rollout."""
+
+    update_epochs: int = 4
+    clip_epsilon: float = 0.2
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.update_epochs, bool)
+            or not isinstance(self.update_epochs, int)
+            or self.update_epochs < 1
+        ):
+            raise JointGRPOError("update_epochs must be a positive integer")
+        clip_epsilon = float(self.clip_epsilon)
+        if (
+            not math.isfinite(clip_epsilon)
+            or clip_epsilon <= 0.0
+            or clip_epsilon >= 1.0
+        ):
+            raise JointGRPOError("clip_epsilon must be finite and in (0,1)")
+
+
+def joint_grpo_optimizer_contract(
+    config: JointGRPOPolicyUpdateConfig | None = None,
+) -> dict[str, object]:
+    """Return the machine-readable Stage-2 clipped-GRPO optimizer contract."""
+
+    policy_update = config if config is not None else JointGRPOPolicyUpdateConfig()
+    return {
+        "version": "stage2_joint_grpo_optimizer_v2",
+        "behavior_policy_snapshot": (
+            "detached sampled mode and stochastic DDIM-transition log "
+            "probabilities captured before any policy update"
+        ),
+        "update_epochs": int(policy_update.update_epochs),
+        "clip_epsilon": float(policy_update.clip_epsilon),
+        "mode_ratio_factorization": (
+            "one ratio per joint sampled mode group entry [B,G]"
+        ),
+        "trajectory_ratio_factorization": (
+            "one ratio per stochastic DDIM transition [B,G,S]"
+        ),
+        "clipped_surrogate": (
+            "negative mean of min(ratio*advantage, "
+            "clip(ratio,1-epsilon,1+epsilon)*advantage)"
+        ),
+        "advantage_reuse": (
+            "group-normalize once, detach, and freeze across all epochs of "
+            "the rollout"
+        ),
+        "rollout_consumption": (
+            "one external update call consumes one live rollout and performs "
+            "exactly update_epochs serial optimizer steps when informative"
+        ),
+        "minibatch_semantics": "none; reuse the complete joint group each epoch",
+        "reference_regularization": (
+            "recompute behavior-cloning and frozen-Stage1 reference KL every epoch"
+        ),
+        "kl_early_stop": False,
+        "budget_unit": "fresh_rollout_group",
+        "checkpoint_boundary": (
+            "after a complete rollout and all of its optimizer epochs"
+        ),
+        "trainable_modules": ["diffusion_decoder", "mode_head"],
+    }
+
+
+def joint_grpo_optimizer_contract_sha256(
+    config: JointGRPOPolicyUpdateConfig | None = None,
+) -> str:
+    """Return the canonical digest for a concrete optimizer contract."""
+
+    encoded = json.dumps(
+        joint_grpo_optimizer_contract(config),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -261,6 +344,14 @@ class JointGRPOLossResult:
     advantages: Tensor
     new_mode_log_prob: Tensor
     new_trajectory_log_prob: Tensor
+    mode_importance_ratio: Tensor
+    trajectory_importance_ratio: Tensor
+    mode_clip_fraction_low: Tensor
+    mode_clip_fraction_high: Tensor
+    trajectory_clip_fraction_low: Tensor
+    trajectory_clip_fraction_high: Tensor
+    mode_old_policy_approx_kl: Tensor
+    trajectory_old_policy_approx_kl: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -275,8 +366,84 @@ class JointGRPOLossResult:
             "advantage/std": self.advantages.std(unbiased=False),
             "advantage/min": self.advantages.min(),
             "advantage/max": self.advantages.max(),
+            "policy/mode_ratio_mean": self.mode_importance_ratio.mean(),
+            "policy/mode_ratio_min": self.mode_importance_ratio.min(),
+            "policy/mode_ratio_max": self.mode_importance_ratio.max(),
+            "policy/trajectory_ratio_mean": (
+                self.trajectory_importance_ratio.mean()
+            ),
+            "policy/trajectory_ratio_min": (
+                self.trajectory_importance_ratio.min()
+            ),
+            "policy/trajectory_ratio_max": (
+                self.trajectory_importance_ratio.max()
+            ),
+            "policy/mode_clip_fraction_low": self.mode_clip_fraction_low,
+            "policy/mode_clip_fraction_high": self.mode_clip_fraction_high,
+            "policy/mode_clip_fraction": (
+                self.mode_clip_fraction_low + self.mode_clip_fraction_high
+            ),
+            "policy/trajectory_clip_fraction_low": (
+                self.trajectory_clip_fraction_low
+            ),
+            "policy/trajectory_clip_fraction_high": (
+                self.trajectory_clip_fraction_high
+            ),
+            "policy/trajectory_clip_fraction": (
+                self.trajectory_clip_fraction_low
+                + self.trajectory_clip_fraction_high
+            ),
+            "policy/mode_old_policy_approx_kl": (
+                self.mode_old_policy_approx_kl
+            ),
+            "policy/trajectory_old_policy_approx_kl": (
+                self.trajectory_old_policy_approx_kl
+            ),
         }
         return {name: float(value.detach().cpu()) for name, value in values.items()}
+
+    def detached(self) -> JointGRPOLossResult:
+        """Return a graph-free result safe to retain across optimizer epochs."""
+
+        return JointGRPOLossResult(
+            total=self.total.detach(),
+            mode_pg=self.mode_pg.detach(),
+            trajectory_pg=self.trajectory_pg.detach(),
+            behavior_cloning=self.behavior_cloning.detach(),
+            mode_reference_kl=self.mode_reference_kl.detach(),
+            trajectory_reference_kl=self.trajectory_reference_kl.detach(),
+            reference_kl=self.reference_kl.detach(),
+            advantages=self.advantages.detach(),
+            new_mode_log_prob=self.new_mode_log_prob.detach(),
+            new_trajectory_log_prob=self.new_trajectory_log_prob.detach(),
+            mode_importance_ratio=self.mode_importance_ratio.detach(),
+            trajectory_importance_ratio=(
+                self.trajectory_importance_ratio.detach()
+            ),
+            mode_clip_fraction_low=self.mode_clip_fraction_low.detach(),
+            mode_clip_fraction_high=self.mode_clip_fraction_high.detach(),
+            trajectory_clip_fraction_low=(
+                self.trajectory_clip_fraction_low.detach()
+            ),
+            trajectory_clip_fraction_high=(
+                self.trajectory_clip_fraction_high.detach()
+            ),
+            mode_old_policy_approx_kl=(
+                self.mode_old_policy_approx_kl.detach()
+            ),
+            trajectory_old_policy_approx_kl=(
+                self.trajectory_old_policy_approx_kl.detach()
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class JointGRPOEpochUpdateResult:
+    epoch_in_rollout: int
+    loss: JointGRPOLossResult
+    gradient_norms: Mapping[str, float]
+    total_gradient_norm: float
+    optimizer_step: int
 
 
 @dataclass(frozen=True)
@@ -285,6 +452,7 @@ class JointGRPOUpdateResult:
     gradient_norms: Mapping[str, float]
     total_gradient_norm: float
     optimizer_step: int
+    epoch_results: tuple[JointGRPOEpochUpdateResult, ...]
 
 
 class FrozenGRPOReference(nn.Module):
@@ -343,6 +511,38 @@ def normalize_signed_advantages(
     centered = rewards - rewards.mean(dim=1, keepdim=True)
     scale = rewards.std(dim=1, unbiased=False, keepdim=True)
     return centered / (scale + float(eps))
+
+
+def _clipped_grpo_surrogate(
+    importance_ratio: Tensor,
+    advantages: Tensor,
+    *,
+    clip_epsilon: float,
+) -> Tensor:
+    """Return the negative PPO clipped surrogate for aligned components."""
+
+    unclipped = importance_ratio * advantages
+    clipped = importance_ratio.clamp(
+        1.0 - float(clip_epsilon),
+        1.0 + float(clip_epsilon),
+    ) * advantages
+    return -torch.minimum(unclipped, clipped).mean()
+
+
+def _importance_ratio_diagnostics(
+    log_ratio: Tensor,
+    importance_ratio: Tensor,
+    *,
+    clip_epsilon: float,
+) -> tuple[Tensor, Tensor, Tensor]:
+    detached_log_ratio = log_ratio.detach()
+    detached_ratio = importance_ratio.detach()
+    low = (detached_ratio < 1.0 - float(clip_epsilon)).float().mean()
+    high = (detached_ratio > 1.0 + float(clip_epsilon)).float().mean()
+    approximate_kl = (
+        detached_ratio - 1.0 - detached_log_ratio
+    ).mean().clamp_min(0.0)
+    return low, high, approximate_kl
 
 
 def _repeat_context(context: BEVPlannerContext, groups: int) -> BEVPlannerContext:
@@ -436,7 +636,7 @@ def _trajectory_bc(current: Tensor, reference: Tensor, config: JointGRPOConfig) 
 
 
 class _JointGRPOTrainerBase:
-    """Variant-neutral one-update-per-rollout joint GRPO implementation."""
+    """Variant-neutral clipped joint GRPO implementation."""
 
     variant = ""
     predecessor_condition = ""
@@ -735,13 +935,34 @@ class _JointGRPOTrainerBase:
         )
 
     def compute_loss(
-        self, rollout: JointGRPORollout, rewards: Tensor
+        self,
+        rollout: JointGRPORollout,
+        rewards: Tensor,
+        *,
+        clip_epsilon: float = 0.2,
     ) -> JointGRPOLossResult:
+        policy_update = JointGRPOPolicyUpdateConfig(
+            update_epochs=1,
+            clip_epsilon=clip_epsilon,
+        )
         advantages = normalize_signed_advantages(
             rewards,
             group_size=self.config.group_size,
             eps=self.config.advantage_eps,
-        ).to(device=rollout.old_mode_log_prob.device)
+        ).to(device=rollout.old_mode_log_prob.device).detach()
+        return self._compute_loss_from_advantages(
+            rollout,
+            advantages,
+            clip_epsilon=policy_update.clip_epsilon,
+        )
+
+    def _compute_loss_from_advantages(
+        self,
+        rollout: JointGRPORollout,
+        advantages: Tensor,
+        *,
+        clip_epsilon: float,
+    ) -> JointGRPOLossResult:
         if tuple(advantages.shape) != (
             rollout.batch_size,
             rollout.group_size,
@@ -862,14 +1083,40 @@ class _JointGRPOTrainerBase:
         new_mode_log_prob = role_mode_log_prob.sum(dim=-1).reshape(
             batch_size, groups
         )
-        mode_ratio = torch.exp(new_mode_log_prob - rollout.old_mode_log_prob)
-        trajectory_ratio = torch.exp(
+        mode_log_ratio = new_mode_log_prob - rollout.old_mode_log_prob
+        trajectory_log_ratio = (
             new_trajectory_log_prob - rollout.old_trajectory_log_prob
         )
-        mode_pg = -(advantages * mode_ratio).mean()
-        trajectory_pg = -(
-            advantages.unsqueeze(-1) * trajectory_ratio
-        ).mean()
+        mode_ratio = torch.exp(mode_log_ratio)
+        trajectory_ratio = torch.exp(trajectory_log_ratio)
+        mode_pg = _clipped_grpo_surrogate(
+            mode_ratio,
+            advantages,
+            clip_epsilon=clip_epsilon,
+        )
+        trajectory_pg = _clipped_grpo_surrogate(
+            trajectory_ratio,
+            advantages.unsqueeze(-1).expand_as(trajectory_ratio),
+            clip_epsilon=clip_epsilon,
+        )
+        (
+            mode_clip_fraction_low,
+            mode_clip_fraction_high,
+            mode_old_policy_approx_kl,
+        ) = _importance_ratio_diagnostics(
+            mode_log_ratio,
+            mode_ratio,
+            clip_epsilon=clip_epsilon,
+        )
+        (
+            trajectory_clip_fraction_low,
+            trajectory_clip_fraction_high,
+            trajectory_old_policy_approx_kl,
+        ) = _importance_ratio_diagnostics(
+            trajectory_log_ratio,
+            trajectory_ratio,
+            clip_epsilon=clip_epsilon,
+        )
 
         current_selected = _gather_modes(final_current_candidates, modes)
         reference_selected = _gather_modes(final_reference_candidates, modes)
@@ -901,6 +1148,10 @@ class _JointGRPOTrainerBase:
             reference_kl,
             new_mode_log_prob,
             new_trajectory_log_prob,
+            mode_ratio,
+            trajectory_ratio,
+            mode_old_policy_approx_kl,
+            trajectory_old_policy_approx_kl,
         )
         if not all(bool(torch.isfinite(value).all()) for value in tensors):
             raise JointGRPOError("joint GRPO loss contains non-finite values")
@@ -919,6 +1170,14 @@ class _JointGRPOTrainerBase:
             advantages=advantages,
             new_mode_log_prob=new_mode_log_prob,
             new_trajectory_log_prob=new_trajectory_log_prob,
+            mode_importance_ratio=mode_ratio,
+            trajectory_importance_ratio=trajectory_ratio,
+            mode_clip_fraction_low=mode_clip_fraction_low,
+            mode_clip_fraction_high=mode_clip_fraction_high,
+            trajectory_clip_fraction_low=trajectory_clip_fraction_low,
+            trajectory_clip_fraction_high=trajectory_clip_fraction_high,
+            mode_old_policy_approx_kl=mode_old_policy_approx_kl,
+            trajectory_old_policy_approx_kl=trajectory_old_policy_approx_kl,
         )
 
     @staticmethod
@@ -948,47 +1207,105 @@ class _JointGRPOTrainerBase:
         return {}
 
     def update(
-        self, rollout: JointGRPORollout, rewards: Tensor
+        self,
+        rollout: JointGRPORollout,
+        rewards: Tensor,
+        *,
+        policy_update: JointGRPOPolicyUpdateConfig | None = None,
     ) -> JointGRPOUpdateResult:
+        update_config = (
+            policy_update
+            if policy_update is not None
+            else JointGRPOPolicyUpdateConfig(update_epochs=1)
+        )
+        if not isinstance(update_config, JointGRPOPolicyUpdateConfig):
+            raise JointGRPOError(
+                "policy_update must be a JointGRPOPolicyUpdateConfig"
+            )
         rollout_id = id(rollout)
         if self._consumed_rollouts.get(rollout_id) is rollout:
-            raise JointGRPOError("each joint rollout may be updated exactly once")
-        self.optimizer.zero_grad(set_to_none=True)
-        loss = self.compute_loss(rollout, rewards)
-        loss.total.backward()
-        gradient_norms = {
-            "diffusion_decoder": self._module_gradient_norm(
-                self.planner.diffusion_decoder
-            ),
-            "mode_head": self._module_gradient_norm(self.planner.mode_head),
-        }
-        gradient_norms.update(self._extra_gradient_norms())
-        if any(not math.isfinite(value) for value in gradient_norms.values()):
-            raise JointGRPOError("joint GRPO gradients must be finite")
-        if any(
-            gradient_norms[name] <= 0.0
-            for name in ("diffusion_decoder", "mode_head")
-        ):
             raise JointGRPOError(
-                "mode head and diffusion decoder require finite non-zero gradients"
+                "each live joint rollout may enter update exactly once"
             )
+        advantages = normalize_signed_advantages(
+            rewards,
+            group_size=self.config.group_size,
+            eps=self.config.advantage_eps,
+        ).to(device=rollout.old_mode_log_prob.device).detach()
+        self.optimizer.zero_grad(set_to_none=True)
+        first_loss = self._compute_loss_from_advantages(
+            rollout,
+            advantages,
+            clip_epsilon=update_config.clip_epsilon,
+        )
+        # Register consumption before the first optimizer mutation.  A failed
+        # later epoch must never make a partially-updated rollout reusable.
+        self._consumed_rollouts[rollout_id] = rollout
         trainable = [
             *self.planner.diffusion_decoder.parameters(),
             *self.planner.mode_head.parameters(),
         ]
-        total_norm = torch.nn.utils.clip_grad_norm_(
-            trainable, float(self.config.max_grad_norm)
-        )
-        if not bool(torch.isfinite(total_norm)):
-            raise JointGRPOError("joint GRPO total gradient norm is non-finite")
-        self.optimizer.step()
-        self.optimizer_step += 1
-        self._consumed_rollouts[rollout_id] = rollout
+        epoch_results = []
+        for epoch_index in range(update_config.update_epochs):
+            if epoch_index == 0:
+                loss = first_loss
+                del first_loss
+            else:
+                self.optimizer.zero_grad(set_to_none=True)
+                loss = self._compute_loss_from_advantages(
+                    rollout,
+                    advantages,
+                    clip_epsilon=update_config.clip_epsilon,
+                )
+            loss.total.backward()
+            gradient_norms = {
+                "diffusion_decoder": self._module_gradient_norm(
+                    self.planner.diffusion_decoder
+                ),
+                "mode_head": self._module_gradient_norm(
+                    self.planner.mode_head
+                ),
+            }
+            gradient_norms.update(self._extra_gradient_norms())
+            if any(
+                not math.isfinite(value) for value in gradient_norms.values()
+            ):
+                raise JointGRPOError("joint GRPO gradients must be finite")
+            if any(
+                gradient_norms[name] <= 0.0
+                for name in ("diffusion_decoder", "mode_head")
+            ):
+                raise JointGRPOError(
+                    "mode head and diffusion decoder require finite non-zero "
+                    "gradients"
+                )
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                trainable, float(self.config.max_grad_norm)
+            )
+            if not bool(torch.isfinite(total_norm)):
+                raise JointGRPOError(
+                    "joint GRPO total gradient norm is non-finite"
+                )
+            self.optimizer.step()
+            self.optimizer_step += 1
+            epoch_results.append(
+                JointGRPOEpochUpdateResult(
+                    epoch_in_rollout=epoch_index + 1,
+                    loss=loss.detached(),
+                    gradient_norms=gradient_norms,
+                    total_gradient_norm=float(total_norm.detach().cpu()),
+                    optimizer_step=self.optimizer_step,
+                )
+            )
+            del loss
+        frozen_epoch_results = tuple(epoch_results)
+        final_epoch = frozen_epoch_results[-1]
         return JointGRPOUpdateResult(
-            loss=loss,
-            gradient_norms=gradient_norms,
-            total_gradient_norm=float(total_norm.detach().cpu()),
-            optimizer_step=self.optimizer_step,
+            loss=final_epoch.loss,
+            gradient_norms=final_epoch.gradient_norms,
+            total_gradient_norm=final_epoch.total_gradient_norm,
+            optimizer_step=final_epoch.optimizer_step,
+            epoch_results=frozen_epoch_results,
         )
 
 
@@ -1231,13 +1548,17 @@ __all__ = [
     "FrozenVariantAReference",
     "GaussianDDIMStep",
     "JointGRPOConfig",
+    "JointGRPOEpochUpdateResult",
     "JointGRPOError",
     "JointGRPOLossResult",
+    "JointGRPOPolicyUpdateConfig",
     "JointGRPORollout",
     "JointGRPORolloutB",
     "JointGRPOTrainerA",
     "JointGRPOTrainerB",
     "JointGRPOUpdateResult",
     "StandardGaussianDDIM",
+    "joint_grpo_optimizer_contract",
+    "joint_grpo_optimizer_contract_sha256",
     "normalize_signed_advantages",
 ]

@@ -12,6 +12,7 @@ LEGACY_ENV = (
     "ALLOW_FAILED_CALIBRATION_DIAGNOSTIC",
     "DEVELOPMENT_REPORT",
     "CALIBRATION_REPORT",
+    "MAX_OPTIMIZER_STEPS",
 )
 
 
@@ -36,7 +37,7 @@ def _environment(tmp_path: Path) -> dict[str, str]:
         "SOURCE_CHECKPOINT": str(checkpoint),
         "ARTIFACT_ROOT": str(tmp_path / "artifacts"),
         "CALL_LOG": str(tmp_path / "calls.log"),
-        "MAX_OPTIMIZER_STEPS": "37",
+        "MAX_ROLLOUT_GROUPS": "37",
     }
     for name in LEGACY_ENV:
         environment.pop(name, None)
@@ -58,7 +59,7 @@ def test_launcher_directly_starts_bounded_tau_d_training(tmp_path: Path) -> None
     assert "-m train.train_bev_joint_grpo_online" in calls[0]
     assert "--variant A" in calls[0]
     assert "--run-mode smoke" in calls[0]
-    assert "--max-optimizer-steps 37" in calls[0]
+    assert "--max-rollout-groups 37" in calls[0]
     assert "calibrat" not in calls[0]
     assert f"--output-root {environment['ARTIFACT_ROOT']}" in calls[0]
     assert (
@@ -101,6 +102,24 @@ def test_formal_mode_is_rejected_before_training(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "requires RUN_MODE=smoke" in result.stderr
+    assert not Path(environment["CALL_LOG"]).exists()
+
+
+def test_launcher_rejects_invalid_rollout_group_cap(tmp_path: Path) -> None:
+    environment = _environment(tmp_path)
+    environment["MAX_ROLLOUT_GROUPS"] = "0"
+
+    result = subprocess.run(
+        ["bash", str(LAUNCHER)],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "MAX_ROLLOUT_GROUPS must be a positive integer" in result.stderr
     assert not Path(environment["CALL_LOG"]).exists()
 
 

@@ -17,6 +17,7 @@ from models.bev_planner import (
 )
 from models.bev_planner.bev_only_diffusion_planner import MAX_BACKGROUND_ACTORS
 from models.bev_planner.joint_grpo import (
+    JointGRPOPolicyUpdateConfig,
     _repeat_context,
     _repeat_groups,
 )
@@ -416,10 +417,21 @@ def test_zero_gate_and_nonzero_gate_gradient_phases() -> None:
     fusion_before = _state(planner.bev_fusion)
     context_before = _state(planner.context_encoder)
     reference_before = _state(trainer.reference)
-    update = trainer.update(rollout, rewards)
-    assert update.optimizer_step == 1
-    assert update.gradient_norms["predecessor_action_encoder"] > 0
-    assert update.gradient_norms["predecessor_residual_gate"] > 0
+    update = trainer.update(
+        rollout,
+        rewards,
+        policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
+    )
+    assert update.optimizer_step == 2
+    assert len(update.epoch_results) == 2
+    assert all(
+        epoch.gradient_norms["predecessor_action_encoder"] > 0
+        for epoch in update.epoch_results
+    )
+    assert all(
+        epoch.gradient_norms["predecessor_residual_gate"] > 0
+        for epoch in update.epoch_results
+    )
     assert _changed(decoder_before, _state(planner.diffusion_decoder))
     assert _changed(mode_before, _state(planner.mode_head))
     assert encoder is not None

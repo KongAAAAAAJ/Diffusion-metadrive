@@ -11,9 +11,14 @@ from torch.utils.tensorboard import SummaryWriter
 import evaluation.plot_grpo as plot_grpo
 from evaluation.plot_grpo import (
     ADVANTAGE_VECTOR_TAG,
+    CLIP_FRACTION_TAGS,
     GRPO_LOSS_CURVE_TAGS,
     KL_LOSS_CURVE_TAGS,
+    MODE_RATIO_TAGS,
+    OLD_POLICY_APPROX_KL_TAGS,
+    POLICY_STABILITY_CURVE_TAGS,
     REWARD_CURVE_TAGS,
+    TRAJECTORY_RATIO_TAGS,
     VALIDATION_REWARD_CURVE_TAGS,
     AdvantageHeatmapError,
     generate_advantage_heatmap,
@@ -127,7 +132,7 @@ def test_generate_advantage_heatmap_uses_group_by_step_orientation_and_png(
         "g2",
         "g3",
     ]
-    assert axis.get_xlabel() == "Optimizer step"
+    assert axis.get_xlabel() == "Fresh rollout group"
     assert any(
         "no identity across steps" in text.get_text()
         for text in axis.figure.texts
@@ -220,6 +225,7 @@ def _write_complete_grpo_events(tb_dir: Path) -> dict[str, tuple[np.ndarray, np.
             *VALIDATION_REWARD_CURVE_TAGS,
             *GRPO_LOSS_CURVE_TAGS,
             *KL_LOSS_CURVE_TAGS,
+            *POLICY_STABILITY_CURVE_TAGS,
         )
     ):
         steps = (
@@ -250,7 +256,7 @@ def _write_complete_grpo_events(tb_dir: Path) -> dict[str, tuple[np.ndarray, np.
     return scalar_series
 
 
-def test_generate_grpo_plots_round_trips_tags_steps_and_writes_five_pngs(
+def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tb_dir = tmp_path / "tb"
@@ -302,6 +308,7 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_five_pngs(
         "validation_reward_curve",
         "grpo_loss_curve",
         "kl_loss_curve",
+        "policy_stability_curve",
     }
     assert {key: path.name for key, path in outputs.items()} == {
         "advantage_heatmap": "advantage_vector_heatmap.png",
@@ -309,6 +316,7 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_five_pngs(
         "validation_reward_curve": "validation_reward_curve.png",
         "grpo_loss_curve": "grpo_loss_curve.png",
         "kl_loss_curve": "kl_loss_curve.png",
+        "policy_stability_curve": "policy_stability_curve.png",
     }
     for path in outputs.values():
         assert path.is_file()
@@ -321,14 +329,19 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_five_pngs(
             plot_grpo.event_accumulator.SCALARS: 0,
         }
     ]
-    assert len(plot_calls) == 11
+    assert len(plot_calls) == 21
     calls_by_tag = {tag: (axis, steps, values) for axis, tag, steps, values in plot_calls}
     assert set(calls_by_tag) == set(expected_series)
     for tag, (expected_steps, expected_values) in expected_series.items():
         axis, actual_steps, actual_values = calls_by_tag[tag]
         np.testing.assert_array_equal(actual_steps, expected_steps)
         np.testing.assert_allclose(actual_values, expected_values, rtol=0, atol=1e-6)
-        assert axis.get_xlabel() == "Optimizer step"
+        expected_xlabel = (
+            "Fresh rollout group"
+            if tag in (*REWARD_CURVE_TAGS, *VALIDATION_REWARD_CURVE_TAGS)
+            else "Optimizer step"
+        )
+        assert axis.get_xlabel() == expected_xlabel
 
     reward_axes = {calls_by_tag[tag][0] for tag in REWARD_CURVE_TAGS}
     validation_reward_axes = {
@@ -336,6 +349,14 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_five_pngs(
     }
     grpo_axes = {calls_by_tag[tag][0] for tag in GRPO_LOSS_CURVE_TAGS}
     kl_axes = {calls_by_tag[tag][0] for tag in KL_LOSS_CURVE_TAGS}
+    mode_ratio_axes = {calls_by_tag[tag][0] for tag in MODE_RATIO_TAGS}
+    trajectory_ratio_axes = {
+        calls_by_tag[tag][0] for tag in TRAJECTORY_RATIO_TAGS
+    }
+    clip_axes = {calls_by_tag[tag][0] for tag in CLIP_FRACTION_TAGS}
+    old_policy_kl_axes = {
+        calls_by_tag[tag][0] for tag in OLD_POLICY_APPROX_KL_TAGS
+    }
     assert (
         len(reward_axes)
         == len(validation_reward_axes)
@@ -353,6 +374,20 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_five_pngs(
     )
     assert next(iter(grpo_axes)).get_ylabel() == "Loss"
     assert next(iter(kl_axes)).get_ylabel() == "Unweighted KL divergence"
+    assert (
+        len(mode_ratio_axes)
+        == len(trajectory_ratio_axes)
+        == len(clip_axes)
+        == len(old_policy_kl_axes)
+        == 1
+    )
+    assert mode_ratio_axes.isdisjoint(trajectory_ratio_axes)
+    assert next(iter(mode_ratio_axes)).get_ylabel() == "Importance ratio"
+    assert next(iter(trajectory_ratio_axes)).get_ylabel() == "Importance ratio"
+    clip_axis = next(iter(clip_axes))
+    assert clip_axis.get_ylabel() == "Fraction"
+    assert tuple(round(value, 8) for value in clip_axis.get_ylim()) == (0.0, 1.0)
+    assert next(iter(old_policy_kl_axes)).get_ylabel() == "Approximate KL"
 
 
 def _write_all_scalar_tags(
@@ -366,6 +401,7 @@ def _write_all_scalar_tags(
         *VALIDATION_REWARD_CURVE_TAGS,
         *GRPO_LOSS_CURVE_TAGS,
         *KL_LOSS_CURVE_TAGS,
+        *POLICY_STABILITY_CURVE_TAGS,
     ):
         value = np.nan if tag == non_finite_tag else 0.25
         writer.add_scalar(tag, value, global_step=1)
@@ -447,7 +483,66 @@ def test_generate_grpo_plots_rejects_misaligned_validation_scalar_steps(
         _write_all_scalar_tags(writer)
         writer.add_scalar("validation/reward_gain", 0.5, global_step=2)
 
-    with pytest.raises(AdvantageHeatmapError, match="aligned optimizer steps"):
+    with pytest.raises(AdvantageHeatmapError, match="aligned steps"):
+        generate_grpo_plots(tb_dir, tmp_path / "plots")
+
+
+def test_generate_grpo_plots_rejects_missing_policy_stability_tag(
+    tmp_path: Path,
+) -> None:
+    tb_dir = tmp_path / "tb"
+    with SummaryWriter(log_dir=str(tb_dir)) as writer:
+        writer.add_tensor(
+            ADVANTAGE_VECTOR_TAG,
+            torch.zeros((1, 4), dtype=torch.float32),
+            global_step=1,
+        )
+        for tag in (
+            *REWARD_CURVE_TAGS,
+            *VALIDATION_REWARD_CURVE_TAGS,
+            *GRPO_LOSS_CURVE_TAGS,
+            *KL_LOSS_CURVE_TAGS,
+            *POLICY_STABILITY_CURVE_TAGS,
+        ):
+            if tag != "policy/trajectory_old_policy_approx_kl":
+                writer.add_scalar(tag, 0.25, global_step=1)
+
+    with pytest.raises(AdvantageHeatmapError, match="missing required scalar tags"):
+        generate_grpo_plots(tb_dir, tmp_path / "plots")
+
+
+@pytest.mark.parametrize(
+    ("invalid_kind", "expected_message"),
+    [
+        ("duplicate", "duplicate step 1"),
+        ("non_finite", "must be finite"),
+        ("misaligned", "aligned steps"),
+    ],
+)
+def test_generate_grpo_plots_rejects_invalid_policy_stability_series(
+    tmp_path: Path,
+    invalid_kind: str,
+    expected_message: str,
+) -> None:
+    tb_dir = tmp_path / "tb"
+    invalid_tag = "policy/mode_ratio_mean"
+    with SummaryWriter(log_dir=str(tb_dir)) as writer:
+        writer.add_tensor(
+            ADVANTAGE_VECTOR_TAG,
+            torch.zeros((1, 4), dtype=torch.float32),
+            global_step=1,
+        )
+        _write_all_scalar_tags(
+            writer,
+            duplicate_tag=invalid_tag if invalid_kind == "duplicate" else None,
+            non_finite_tag=(
+                invalid_tag if invalid_kind == "non_finite" else None
+            ),
+        )
+        if invalid_kind == "misaligned":
+            writer.add_scalar(invalid_tag, 0.5, global_step=2)
+
+    with pytest.raises(AdvantageHeatmapError, match=expected_message):
         generate_grpo_plots(tb_dir, tmp_path / "plots")
 
 

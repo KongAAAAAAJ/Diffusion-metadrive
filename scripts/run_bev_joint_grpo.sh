@@ -7,10 +7,10 @@ VARIANT="${VARIANT:-A}"
 RUN_MODE="${RUN_MODE:-smoke}"
 CONFIG="${CONFIG:-${PROJECT_ROOT}/configs/train/bev_joint_grpo.yaml}"
 SOURCE_CHECKPOINT="${SOURCE_CHECKPOINT:-/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt}"
-MAX_OPTIMIZER_STEPS="${MAX_OPTIMIZER_STEPS:-5000}"
+MAX_ROLLOUT_GROUPS="${MAX_ROLLOUT_GROUPS:-100}"
 
-if [[ -v PIPELINE_STAGE || -v ALLOW_FAILED_CALIBRATION_DIAGNOSTIC || -v DEVELOPMENT_REPORT || -v CALIBRATION_REPORT ]]; then
-  echo "calibration and pipeline-stage environment variables are no longer accepted" >&2
+if [[ -v PIPELINE_STAGE || -v ALLOW_FAILED_CALIBRATION_DIAGNOSTIC || -v DEVELOPMENT_REPORT || -v CALIBRATION_REPORT || -v MAX_OPTIMIZER_STEPS ]]; then
+  echo "legacy calibration, pipeline-stage, and optimizer-step environment variables are no longer accepted" >&2
   exit 2
 fi
 if [[ "$VARIANT" != "A" ]]; then
@@ -21,8 +21,8 @@ if [[ "$RUN_MODE" != "smoke" ]]; then
   echo "at-risk GRPO-Open requires RUN_MODE=smoke" >&2
   exit 2
 fi
-if [[ ! "$MAX_OPTIMIZER_STEPS" =~ ^[1-9][0-9]*$ ]]; then
-  echo "MAX_OPTIMIZER_STEPS must be a positive integer" >&2
+if [[ ! "$MAX_ROLLOUT_GROUPS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAX_ROLLOUT_GROUPS must be a positive integer" >&2
   exit 2
 fi
 if [[ ! -f "$SOURCE_CHECKPOINT" ]]; then
@@ -41,7 +41,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$ARTIFACT_ROOT}"
 LOG_ROOT="${LOG_ROOT:-${ARTIFACT_ROOT}/logs}"
 
 echo "[GRPO] application=stage2_grpo_open_application_v1 reward_domain=tau_d"
-echo "[GRPO] run_mode=$RUN_MODE variant=$VARIANT max_optimizer_steps=$MAX_OPTIMIZER_STEPS"
+echo "[GRPO] run_mode=$RUN_MODE variant=$VARIANT max_rollout_groups=$MAX_ROLLOUT_GROUPS"
 echo "[GRPO] output_root=$OUTPUT_ROOT"
 
 mkdir -p "$OUTPUT_ROOT" "$LOG_ROOT"
@@ -51,5 +51,5 @@ mkdir -p "$OUTPUT_ROOT" "$LOG_ROOT"
   --run-mode "$RUN_MODE" \
   --source-checkpoint "$SOURCE_CHECKPOINT" \
   --output-root "$OUTPUT_ROOT" \
-  --max-optimizer-steps "$MAX_OPTIMIZER_STEPS" \
+  --max-rollout-groups "$MAX_ROLLOUT_GROUPS" \
   2>&1 | tee "${LOG_ROOT}/grpo-open-training.log"

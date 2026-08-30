@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-29T20:10:26+08:00",
-  "status": "legacy_full_evaluation_cleanup_complete_run3_qualification_entry_reimplementation_required",
+  "updated_at": "2026-08-30T13:10:38+08:00",
+  "status": "stage2_clipped_multi_epoch_grpo_implementation_verified_short_ab_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -529,19 +529,60 @@
   },
   "stage2_at_risk_grpo_open": {
     "name": "At-risk diagnostic GRPO-Open",
-    "status": "tau_d_application_v1_implementation_verified",
-    "authorization_recorded_on": "2026-08-18",
-    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_1/checkpoints/best.pt",
-    "source_checkpoint_classification": "user-authorized at-risk diagnostic source; embedded formal eligibility metadata does not override the unaccepted dataset boundary",
+    "status": "clipped_multi_epoch_v2_implementation_verified_short_ab_pending",
+    "authorization_recorded_on": "2026-08-30",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_checkpoint_classification": "unqualified Stage1 v2 diagnostic source; bounded optimizer implementation smokes and the paired short A/B remain diagnostic-only and cannot bypass strict Stage1 qualification",
     "reward_domain": "tau_d",
     "run_mode": "smoke",
     "variant": "A",
-    "bounded_max_optimizer_steps_required": true,
+    "bounded_total_rollout_groups_required": true,
     "calibration_required": false,
     "tracking_expansion_enabled": false,
     "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
     "application_contract_version": "stage2_grpo_open_application_v1",
     "application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
+    "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
+    "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
+    "default_update_epochs": 4,
+    "default_clip_epsilon": 0.2,
+    "budget_unit": "fresh_rollout_group",
+    "implementation_evidence": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
+    "implementation_evidence_sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
+    "implementation_verification": {
+      "focused_tests_passed": 175,
+      "legacy_runs_4_through_7_evaluator_load_passed": true,
+      "cuda_g3_epochs2_rollout1_passed": true,
+      "cuda_g24_epochs4_rollout1_passed": true,
+      "cuda_g24_peak_memory_bytes": 467396096,
+      "cuda_peak_memory_limit_bytes": 16106127360,
+      "long_training_started": false
+    },
+    "short_stability_ab": {
+      "status": "pending_separate_frozen_code_training_thread",
+      "manifest_format": "stage2_grpo_stability_ab_manifest_v1",
+      "paired_training_seeds": [
+        17,
+        23,
+        42
+      ],
+      "baseline_update_epochs": 1,
+      "clipped_update_epochs": 4,
+      "clip_epsilon": 0.2,
+      "group_size": 24,
+      "rollout_groups_per_run": 100,
+      "validation_interval_rollouts": 20,
+      "run_allocation": {
+        "run_8": "baseline seed 17",
+        "run_9": "clipped seed 17",
+        "run_10": "baseline seed 23",
+        "run_11": "clipped seed 23",
+        "run_12": "baseline seed 42",
+        "run_13": "clipped seed 42"
+      },
+      "comparison_entry": "evaluation.compare_grpo_stability",
+      "diagnostic_only": true
+    },
     "historical_run3": {
       "status": "user_terminated_under_legacy_reward",
       "authorization_recorded_on": "2026-08-17",
@@ -573,7 +614,7 @@
     "name": "Formal joint GRPO refinement",
     "source_checkpoint": "the same frozen eligible Stage1-A checkpoint",
     "grpo_open_artifact_layout": "<source_stage1_run_root>/grpo_open/run_N",
-    "group_size": 4,
+    "group_size": 24,
     "policy_sample": "tau_d",
     "policy_probability": "raw diffusion/DDIM rollout and sampled-mode log-probability",
     "command_optimization": "tau_cmd = KinematicTrajectoryOptimizer(tau_d)",
@@ -614,14 +655,36 @@
       "state/relation/context encoders",
       "reference policy"
     ],
-    "optimizer_semantics": "one optimizer step per joint group; no sequential-role optimizer and no PPO multi-epoch replay",
+    "optimizer_contract": {
+      "version": "stage2_joint_grpo_optimizer_v2",
+      "machine_source": "models.bev_planner.joint_grpo.joint_grpo_optimizer_contract",
+      "behavior_policy_snapshot": "detached sampled mode and stochastic DDIM-transition log probabilities captured before any policy update",
+      "update_epochs": 4,
+      "clip_epsilon": 0.2,
+      "mode_ratio_factorization": "one ratio per joint sampled mode group entry [B,G]",
+      "trajectory_ratio_factorization": "one ratio per stochastic DDIM transition [B,G,S]",
+      "clipped_surrogate": "negative mean of min(ratio*advantage, clip(ratio,1-epsilon,1+epsilon)*advantage)",
+      "advantage_reuse": "group-normalize once, detach, and freeze across all epochs of the rollout",
+      "rollout_consumption": "one external update call consumes one live rollout and performs exactly update_epochs serial optimizer steps when informative",
+      "minibatch_semantics": "none; reuse the complete joint group each epoch",
+      "reference_regularization": "recompute behavior-cloning and frozen-Stage1 reference KL every epoch",
+      "kl_early_stop": false,
+      "budget_unit": "fresh_rollout_group",
+      "checkpoint_boundary": "after a complete rollout and all of its optimizer epochs",
+      "trainable_modules": [
+        "diffusion_decoder",
+        "mode_head"
+      ],
+      "contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175"
+    },
+    "optimizer_semantics": "sample one fresh joint group with the behavior policy, freeze its old log-probabilities and advantages, then perform four serial PPO-clipped optimizer steps; no sequential-role optimizer",
     "environment_semantics": "Never step the G candidates as G MetaDrive branches. Each branch-specific application contract freezes its reward-domain transform and selection order; only the final selected tau_cmd is sent to one MetaDrive env.step().",
     "fairness_constants": [
       "formal dataset and Stage1-A checkpoint",
       "scenario set and seeds",
       "G and diffusion timesteps",
       "optimizer, learning rate, KL and BC weights",
-      "training update budget",
+      "fresh rollout-group budget and clipped multi-epoch optimizer contract",
       "trainable and frozen planner modules",
       "trajectory optimizer",
       "stage2_joint_reward_v2 contract SHA and exact reward-config SHA",
@@ -798,5 +861,7 @@
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
   "implementation_evidence_sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
-  "current_next_action": "Implement a replacement strict Stage1 v2 run_3 qualification entry for reload, open-loop, and full S5-S9 closed-loop gates; then run qualification. The reward-only GRPO comparison cannot satisfy this gate, and the bounded 202.51 ms result remains failed until a qualifying run passes the unchanged 200 ms complete-planning-tick gate."
+  "stage2_clipped_multi_epoch_implementation_evidence": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
+  "stage2_clipped_multi_epoch_implementation_evidence_sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
+  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 under the frozen stage2_joint_grpo_optimizer_v2 A/B allocation, then run evaluation.compare_grpo_stability; even a passing A/B cannot authorize formal or paper conclusions."
 }

@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
@@ -39,6 +40,7 @@ from models.bev_planner import (
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
     JointGRPOConfig,
+    JointGRPOPolicyUpdateConfig,
     JointRewardConfig,
     JointRewardError,
     JointTrajectoryProxyReward,
@@ -47,6 +49,9 @@ from models.bev_planner import (
     TrajectoryOptimizationError,
     TrajectoryOptimizationResult,
     joint_reward_config_sha256,
+    joint_grpo_optimizer_contract,
+    joint_grpo_optimizer_contract_sha256,
+    normalize_signed_advantages,
 )
 from models.bev_planner.mode_contract import ModeIndex
 from models.decisioner.rule_decisioner import (
@@ -89,14 +94,16 @@ class OnlineGRPOError(RuntimeError):
 class JointGRPOOnlineConfig:
     device: str = "cuda"
     seed: int = 17
-    group_size: int = 4
-    total_optimizer_steps: int = 5000
+    group_size: int = 24
+    total_rollout_groups: int = 100
+    update_epochs: int = 4
+    clip_epsilon: float = 0.2
     resume_checkpoint: Path | None = None
     scenarios: tuple[tuple[str, str], ...] = PRIMARY_S5_S9_SCENARIOS
     scenario_seeds: tuple[int, ...] = DEVELOPMENT_SEEDS
     environment_steps_per_episode: int = 100
-    validation_interval_steps: int = 100
-    advantage_vector_log_interval_steps: int = 100
+    validation_interval_rollouts: int = 20
+    advantage_vector_log_interval_rollouts: int = 20
 
     def __post_init__(self) -> None:
         if self.device not in ("cpu", "cuda"):
@@ -112,14 +119,24 @@ class JointGRPOOnlineConfig:
                 "group_size must be an integer greater than or equal to 2"
             )
         for name in (
-            "total_optimizer_steps",
+            "total_rollout_groups",
+            "update_epochs",
             "environment_steps_per_episode",
-            "validation_interval_steps",
-            "advantage_vector_log_interval_steps",
+            "validation_interval_rollouts",
+            "advantage_vector_log_interval_rollouts",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise OnlineGRPOError(f"{name} must be a positive integer")
+        if (
+            isinstance(self.clip_epsilon, bool)
+            or not isinstance(self.clip_epsilon, (int, float))
+            or not math.isfinite(float(self.clip_epsilon))
+            or not 0.0 < float(self.clip_epsilon) < 1.0
+        ):
+            raise OnlineGRPOError(
+                "clip_epsilon must be a finite scalar strictly between 0 and 1"
+            )
         if not self.scenarios or any(
             len(value) != 2 or not value[0] or not value[1]
             for value in self.scenarios
@@ -144,6 +161,17 @@ def _device(name: str) -> torch.device:
     if name == "cuda" and not torch.cuda.is_available():
         raise OnlineGRPOError("CUDA was requested but is unavailable")
     return torch.device(name)
+
+
+def _reset_cuda_peak_memory(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def _cuda_peak_memory_bytes(device: torch.device) -> int | None:
+    if device.type != "cuda":
+        return None
+    return int(torch.cuda.max_memory_allocated(device))
 
 
 def model_inputs_to_batch(
@@ -536,28 +564,33 @@ def _joint_rewards_are_informative(
 
 
 def _should_record_advantage_vector(
-    optimizer_step: int,
-    target_steps: int,
-    interval_steps: int,
+    rollout_group: int,
+    target_rollout_groups: int,
+    interval_rollouts: int,
 ) -> bool:
     for name, value in (
-        ("optimizer_step", optimizer_step),
-        ("target_steps", target_steps),
-        ("interval_steps", interval_steps),
+        ("rollout_group", rollout_group),
+        ("target_rollout_groups", target_rollout_groups),
+        ("interval_rollouts", interval_rollouts),
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise OnlineGRPOError(f"{name} must be a positive integer")
-    if optimizer_step > target_steps:
-        raise OnlineGRPOError("optimizer_step cannot exceed target_steps")
-    return optimizer_step % interval_steps == 0 or optimizer_step == target_steps
+    if rollout_group > target_rollout_groups:
+        raise OnlineGRPOError(
+            "rollout_group cannot exceed target_rollout_groups"
+        )
+    return (
+        rollout_group % interval_rollouts == 0
+        or rollout_group == target_rollout_groups
+    )
 
 
 def _write_advantage_vector_summary(
     writer: SummaryWriter,
     advantages: torch.Tensor,
-    optimizer_step: int,
-    target_steps: int,
-    interval_steps: int,
+    rollout_group: int,
+    target_rollout_groups: int,
+    interval_rollouts: int,
     *,
     group_size: int,
 ) -> bool:
@@ -570,7 +603,7 @@ def _write_advantage_vector_summary(
             "group_size must be an integer greater than or equal to 2"
         )
     if not _should_record_advantage_vector(
-        optimizer_step, target_steps, interval_steps
+        rollout_group, target_rollout_groups, interval_rollouts
     ):
         return False
     vector = advantages.detach().cpu()
@@ -583,8 +616,52 @@ def _write_advantage_vector_summary(
         )
     if not bool(torch.isfinite(vector).all()):
         raise OnlineGRPOError("advantage vector must be finite")
-    writer.add_tensor(ADVANTAGE_VECTOR_TAG, vector, optimizer_step)
+    writer.add_tensor(ADVANTAGE_VECTOR_TAG, vector, rollout_group)
     return True
+
+
+def _split_loss_metrics_by_step_axis(
+    metrics: Mapping[str, float],
+) -> tuple[dict[str, float], dict[str, float]]:
+    rollout_metrics = {
+        name: float(value)
+        for name, value in metrics.items()
+        if name.startswith("advantage/")
+    }
+    optimizer_metrics = {
+        name: float(value)
+        for name, value in metrics.items()
+        if not name.startswith("advantage/")
+    }
+    return rollout_metrics, optimizer_metrics
+
+
+def _advantage_scalar_metrics(advantages: torch.Tensor) -> dict[str, float]:
+    return {
+        "advantage/mean": float(advantages.mean().detach().cpu()),
+        "advantage/std": float(
+            advantages.std(unbiased=False).detach().cpu()
+        ),
+        "advantage/min": float(advantages.min().detach().cpu()),
+        "advantage/max": float(advantages.max().detach().cpu()),
+    }
+
+
+def _reject_exhausted_uninformative_budget(
+    *,
+    sampled_rollouts: int,
+    target_rollout_groups: int,
+    optimizer_step: int,
+    run_start_optimizer_step: int,
+) -> None:
+    if (
+        sampled_rollouts >= target_rollout_groups
+        and optimizer_step == run_start_optimizer_step
+    ):
+        raise OnlineGRPOError(
+            "rollout budget was exhausted but every fresh group was "
+            "uninformative; no optimizer update occurred"
+        )
 
 
 def _round_robin_training_buckets(
@@ -684,6 +761,135 @@ def _validate_raw_reward_config(config: JointRewardConfig) -> None:
         )
 
 
+def _policy_update_config(
+    config: JointGRPOOnlineConfig,
+) -> JointGRPOPolicyUpdateConfig:
+    return JointGRPOPolicyUpdateConfig(
+        update_epochs=config.update_epochs,
+        clip_epsilon=float(config.clip_epsilon),
+    )
+
+
+def _grpo_config_artifact_payload(
+    config: JointGRPOConfig,
+) -> dict[str, object]:
+    return dataclasses.asdict(config)
+
+
+def _sampler_state(
+    *,
+    sampled_rollouts: int,
+    uninformative_rollouts: int,
+    bucket_sample_counts: Sequence[int],
+    bucket_optimizer_step_counts: Sequence[int],
+    next_bucket_index: int,
+    generator_state: torch.Tensor,
+    last_validated_rollout: int,
+    update_epochs: int,
+    optimizer_step: int,
+) -> dict[str, object]:
+    raw = {
+        "sampled_rollouts": sampled_rollouts,
+        "uninformative_rollouts": uninformative_rollouts,
+        "bucket_sample_counts": list(bucket_sample_counts),
+        "bucket_optimizer_step_counts": list(bucket_optimizer_step_counts),
+        "next_bucket_index": next_bucket_index,
+        "generator_state": generator_state.detach().cpu().clone(),
+        "last_validated_rollout": last_validated_rollout,
+    }
+    return _validate_sampler_state(
+        raw,
+        bucket_count=len(bucket_sample_counts),
+        update_epochs=update_epochs,
+        optimizer_step=optimizer_step,
+    )
+
+
+def _validate_sampler_state(
+    raw: object,
+    *,
+    bucket_count: int,
+    update_epochs: int,
+    optimizer_step: int,
+) -> dict[str, object]:
+    if not isinstance(raw, Mapping):
+        raise OnlineGRPOError("online GRPO checkpoint sampler_state is invalid")
+    if (
+        isinstance(bucket_count, bool)
+        or not isinstance(bucket_count, int)
+        or bucket_count <= 0
+    ):
+        raise OnlineGRPOError("training bucket count must be a positive integer")
+    for name, minimum in (
+        ("sampled_rollouts", 0),
+        ("uninformative_rollouts", 0),
+        ("next_bucket_index", 0),
+        ("last_validated_rollout", -1),
+    ):
+        value = raw.get(name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < minimum
+        ):
+            raise OnlineGRPOError(
+                f"online GRPO checkpoint sampler_state {name} is invalid"
+            )
+    sampled = int(raw["sampled_rollouts"])
+    uninformative = int(raw["uninformative_rollouts"])
+    next_bucket = int(raw["next_bucket_index"])
+    last_validated = int(raw["last_validated_rollout"])
+    if uninformative > sampled or last_validated > sampled:
+        raise OnlineGRPOError("online GRPO checkpoint sampler counters conflict")
+    if next_bucket >= bucket_count or next_bucket != sampled % bucket_count:
+        raise OnlineGRPOError("online GRPO checkpoint bucket cursor is invalid")
+
+    counts: dict[str, list[int]] = {}
+    for name in ("bucket_sample_counts", "bucket_optimizer_step_counts"):
+        values = raw.get(name)
+        if (
+            not isinstance(values, (list, tuple))
+            or len(values) != bucket_count
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                for value in values
+            )
+        ):
+            raise OnlineGRPOError(
+                f"online GRPO checkpoint sampler_state {name} is invalid"
+            )
+        counts[name] = [int(value) for value in values]
+    if sum(counts["bucket_sample_counts"]) != sampled:
+        raise OnlineGRPOError("online GRPO checkpoint bucket samples conflict")
+    if sum(counts["bucket_optimizer_step_counts"]) != optimizer_step:
+        raise OnlineGRPOError("online GRPO checkpoint bucket updates conflict")
+    if optimizer_step != (sampled - uninformative) * update_epochs:
+        raise OnlineGRPOError(
+            "online GRPO checkpoint rollout and optimizer counters conflict"
+        )
+
+    generator_state = raw.get("generator_state")
+    if (
+        not isinstance(generator_state, torch.Tensor)
+        or generator_state.dtype != torch.uint8
+        or generator_state.ndim != 1
+        or generator_state.numel() == 0
+    ):
+        raise OnlineGRPOError(
+            "online GRPO checkpoint generator_state is invalid"
+        )
+    return {
+        "sampled_rollouts": sampled,
+        "uninformative_rollouts": uninformative,
+        **counts,
+        "next_bucket_index": next_bucket,
+        "generator_state": generator_state.detach().cpu().clone(),
+        "last_validated_rollout": last_validated,
+    }
+
+
 def _checkpoint_payload(
     *,
     variant: str,
@@ -699,6 +905,8 @@ def _checkpoint_payload(
     environment_steps: int,
     best_validation_reward: float,
     best_checkpoint_sha256: str | None,
+    policy_update: JointGRPOPolicyUpdateConfig,
+    sampler_state: Mapping[str, object],
 ) -> dict[str, object]:
     _validate_raw_reward_config(reward_config)
     if not math.isfinite(float(best_validation_reward)):
@@ -745,6 +953,13 @@ def _checkpoint_payload(
             "environment_steps": int(environment_steps),
             "best_validation_reward": float(best_validation_reward),
             "best_checkpoint_sha256": best_checkpoint_sha256,
+            "policy_update_contract": joint_grpo_optimizer_contract(
+                policy_update
+            ),
+            "policy_update_contract_sha256": (
+                joint_grpo_optimizer_contract_sha256(policy_update)
+            ),
+            "sampler_state": dict(sampler_state),
             "trajectory_optimizer_config": dataclasses.asdict(
                 KinematicTrajectoryOptimizerConfig()
             ),
@@ -763,7 +978,10 @@ def _validate_online_checkpoint_metadata(
     reward_config: JointRewardConfig,
     scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
-) -> None:
+    policy_update: JointGRPOPolicyUpdateConfig,
+    bucket_count: int,
+    optimizer_step: int,
+) -> dict[str, object]:
     _validate_raw_reward_config(reward_config)
     legacy_fields = (
         "calibration_report_sha256",
@@ -793,6 +1011,10 @@ def _validate_online_checkpoint_metadata(
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
+        "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
+        "policy_update_contract_sha256": (
+            joint_grpo_optimizer_contract_sha256(policy_update)
+        ),
         "scenario_contract_sha256": scenario_contract_sha,
         "scenario_seeds": [int(value) for value in scenario_seeds],
         "trajectory_optimizer_config": dataclasses.asdict(
@@ -839,6 +1061,12 @@ def _validate_online_checkpoint_metadata(
             raise OnlineGRPOError(
                 "online GRPO checkpoint best_checkpoint_sha256 is invalid"
             ) from exc
+    return _validate_sampler_state(
+        payload.get("sampler_state"),
+        bucket_count=bucket_count,
+        update_epochs=policy_update.update_epochs,
+        optimizer_step=optimizer_step,
+    )
 
 
 @torch.no_grad()
@@ -1092,6 +1320,8 @@ def _resume_best_checkpoint_anchor(
         "best_checkpoint_metric",
         "tracking_expansion_enabled",
         "calibration_required",
+        "policy_update_contract",
+        "policy_update_contract_sha256",
         "scenario_contract_sha256",
         "trajectory_optimizer_sha256",
     )
@@ -1148,24 +1378,25 @@ def run_joint_grpo_training(
     run_mode: Literal["formal", "smoke"],
     source_checkpoint: Path,
     output_root: Path,
-    max_optimizer_steps: int | None = None,
+    max_rollout_groups: int | None = None,
 ) -> dict[str, object]:
+    started_at = time.monotonic()
     if variant not in ("A", "B"):
         raise OnlineGRPOError("online GRPO variant must be A or B")
     if run_mode == "smoke":
         if (
-            isinstance(max_optimizer_steps, bool)
-            or not isinstance(max_optimizer_steps, int)
-            or max_optimizer_steps <= 0
+            isinstance(max_rollout_groups, bool)
+            or not isinstance(max_rollout_groups, int)
+            or max_rollout_groups <= 0
         ):
             raise OnlineGRPOError(
-                "smoke mode requires a positive max_optimizer_steps"
+                "smoke mode requires a positive max_rollout_groups"
             )
-        target_steps = max_optimizer_steps
+        target_rollout_groups = max_rollout_groups
     elif run_mode == "formal":
-        if max_optimizer_steps is not None:
-            raise OnlineGRPOError("formal mode forbids a diagnostic step cap")
-        target_steps = config.total_optimizer_steps
+        if max_rollout_groups is not None:
+            raise OnlineGRPOError("formal mode forbids a diagnostic rollout cap")
+        target_rollout_groups = config.total_rollout_groups
     else:
         raise OnlineGRPOError("run_mode must be formal or smoke")
 
@@ -1179,6 +1410,7 @@ def run_joint_grpo_training(
         raise OnlineGRPOError(str(exc)) from exc
     torch_device = _device(config.device)
     grpo_config = JointGRPOConfig(group_size=config.group_size)
+    policy_update = _policy_update_config(config)
     trainer, source_payload, source_sha = _load_trainer(
         variant,
         Path(source_checkpoint),
@@ -1208,9 +1440,18 @@ def run_joint_grpo_training(
     checkpoint_loader = (
         load_grpo_checkpoint if variant == "A" else load_grpo_b_checkpoint
     )
+    training_buckets = _round_robin_training_buckets(
+        config.scenarios, config.scenario_seeds
+    )
+    generator = torch.Generator(device=torch_device)
+    generator.manual_seed(config.seed)
     environment_steps = 0
     sampled_rollouts = 0
     uninformative_rollouts = 0
+    bucket_sample_counts = [0 for _ in training_buckets]
+    bucket_optimizer_step_counts = [0 for _ in training_buckets]
+    next_bucket_index = 0
+    last_validated_rollout = -1
     advantage_vector_record_count = 0
     rule_diagnostics = {
         "conditioned_rollouts": 0,
@@ -1229,14 +1470,32 @@ def run_joint_grpo_training(
             trainer,
             expected_source_stage1_sha256=source_sha,
         )
-        _validate_online_checkpoint_metadata(
+        restored_sampler_state = _validate_online_checkpoint_metadata(
             resume_payload,
             run_mode=run_mode,
             reward_config=reward_config,
             scenario_contract_sha=scenario_contract_sha,
             scenario_seeds=config.scenario_seeds,
+            policy_update=policy_update,
+            bucket_count=len(training_buckets),
+            optimizer_step=trainer.optimizer_step,
         )
         environment_steps = int(resume_payload["environment_steps"])
+        sampled_rollouts = int(restored_sampler_state["sampled_rollouts"])
+        uninformative_rollouts = int(
+            restored_sampler_state["uninformative_rollouts"]
+        )
+        bucket_sample_counts = list(
+            restored_sampler_state["bucket_sample_counts"]
+        )
+        bucket_optimizer_step_counts = list(
+            restored_sampler_state["bucket_optimizer_step_counts"]
+        )
+        next_bucket_index = int(restored_sampler_state["next_bucket_index"])
+        last_validated_rollout = int(
+            restored_sampler_state["last_validated_rollout"]
+        )
+        generator.set_state(restored_sampler_state["generator_state"])
         last_metrics = {
             str(name): float(value)
             for name, value in resume_payload["metrics"].items()
@@ -1244,12 +1503,13 @@ def run_joint_grpo_training(
         resume_best_path, best_reward = _resume_best_checkpoint_anchor(
             Path(config.resume_checkpoint), resume_payload
         )
-        if trainer.optimizer_step >= target_steps:
+        if sampled_rollouts >= target_rollout_groups:
             raise OnlineGRPOError(
-                "resume checkpoint already reached requested optimizer steps"
+                "resume checkpoint already reached requested rollout groups"
             )
 
     run_start_optimizer_step = trainer.optimizer_step
+    run_start_rollout_group = sampled_rollouts
     run_dir = _next_run_directory(Path(output_root))
     online_config = dataclasses.asdict(config)
     online_config["resume_checkpoint"] = (
@@ -1258,12 +1518,18 @@ def run_joint_grpo_training(
         else None
     )
     frozen = {
-        "format": "bev_joint_grpo_online_config_v3",
+        "format": "bev_joint_grpo_online_config_v4",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
         "eligible_for_formal_training": run_mode == "formal",
         "online_config": online_config,
+        "grpo_config": _grpo_config_artifact_payload(grpo_config),
+        "source_stage1_sha256": source_sha,
+        "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
+        "policy_update_contract_sha256": (
+            joint_grpo_optimizer_contract_sha256(policy_update)
+        ),
         "reward_contract_version": _reward_contract_version(),
         "reward_contract": JOINT_REWARD_CONTRACT,
         "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
@@ -1295,13 +1561,6 @@ def run_joint_grpo_training(
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
     proxy_backend = JointTrajectoryProxyReward(reward_config)
     trajectory_optimizer = KinematicTrajectoryOptimizer()
-    generator = torch.Generator(device=torch_device)
-    generator.manual_seed(config.seed)
-    training_buckets = _round_robin_training_buckets(
-        config.scenarios, config.scenario_seeds
-    )
-    bucket_sample_counts = [0 for _ in training_buckets]
-    bucket_update_counts = [0 for _ in training_buckets]
     consecutive_empty_episodes = 0
     best_path = run_dir / "checkpoints" / "best.pt"
     last_path = run_dir / "checkpoints" / "last.pt"
@@ -1309,15 +1568,15 @@ def run_joint_grpo_training(
     if resume_best_path is not None:
         shutil.copyfile(resume_best_path, best_path)
         best_checkpoint_sha256 = _checkpoint_file_sha256(best_path)
-    last_validated_step = -1
     simulator_diagnostic_errors: list[dict[str, object]] = [
         {"optimizer_step": 0, "stage1_baseline": True, **dict(value)}
         for value in pretrain_simulator_errors
     ]
 
+    _reset_cuda_peak_memory(torch_device)
     try:
-        while trainer.optimizer_step < target_steps:
-            bucket_index = sampled_rollouts % len(training_buckets)
+        while sampled_rollouts < target_rollout_groups:
+            bucket_index = next_bucket_index
             scenario, seed = training_buckets[bucket_index]
             samples_at_episode_start = sampled_rollouts
             env = _new_env(scenario, seed)
@@ -1328,7 +1587,7 @@ def run_joint_grpo_training(
             episode_step = 0
             try:
                 while (
-                    trainer.optimizer_step < target_steps
+                    sampled_rollouts < target_rollout_groups
                     and sampled_rollouts == samples_at_episode_start
                     and episode_step < config.environment_steps_per_episode
                 ):
@@ -1409,93 +1668,150 @@ def run_joint_grpo_training(
                             rule_diagnostics[name] += int(value)
                         sampled_rollouts += 1
                         bucket_sample_counts[bucket_index] += 1
+                        next_bucket_index = (bucket_index + 1) % len(
+                            training_buckets
+                        )
                         informative = _joint_rewards_are_informative(
                             proxy.rewards,
                             group_size=trainer.config.group_size,
                         )
+                        rewards = torch.from_numpy(
+                            proxy.rewards.reshape(1, -1)
+                        ).to(torch_device)
                         if informative:
-                            rewards = torch.from_numpy(
-                                proxy.rewards.reshape(1, -1)
-                            ).to(torch_device)
-                            update = trainer.update(rollout, rewards)
-                            last_metrics = update.loss.scalar_metrics()
-                            last_metrics.update(
-                                {
-                                    "optimizer_step": float(trainer.optimizer_step),
-                                    "environment_steps": float(environment_steps),
-                                    "sampled_rollouts": float(sampled_rollouts),
-                                    "uninformative_rollouts": float(
-                                        uninformative_rollouts
-                                    ),
-                                    "training_bucket_index": float(bucket_index),
-                                    "raw_proxy_reward_mean": float(
-                                        proxy.rewards.mean()
-                                    ),
-                                    "raw_proxy_reward_max": float(
-                                        proxy.rewards.max()
-                                    ),
-                                    "raw_proxy_unsafe_rate": float(
-                                        proxy.unsafe.mean()
-                                    ),
-                                    "selected_raw_candidate_index": float(
-                                        selected_index
-                                    ),
-                                    "gradient_total": float(
-                                        update.total_gradient_norm
-                                    ),
-                                    "selected_trajectory_optimizer_ms": float(
-                                        optimization.elapsed_ms
-                                    ),
-                                    "selected_trajectory_intervention_ade_m": float(
-                                        optimization.intervention_ade_m.mean()
-                                    ),
-                                    "selected_trajectory_intervention_fde_m": float(
-                                        optimization.intervention_fde_m.mean()
-                                    ),
-                                    "selected_raw_trajectory_valid_rate": float(
-                                        optimization.raw_valid.mean()
-                                    ),
-                                    "selected_trajectory_retained_raw_fraction": float(
-                                        optimization.retained_raw_fraction.mean()
-                                    ),
-                                    "selected_optimized_trajectory_valid_rate": float(
-                                        optimization.optimized_valid.mean()
-                                    ),
-                                    **{
-                                        f"diagnostic/v2_rule_{name}": float(value)
-                                        for name, value in rule_diagnostics.items()
-                                    },
-                                }
+                            update = trainer.update(
+                                rollout,
+                                rewards,
+                                policy_update=policy_update,
                             )
-                            for name, value in update.gradient_norms.items():
-                                last_metrics[f"gradient/{name}"] = float(value)
-                            bucket_update_counts[bucket_index] += 1
-                            if _write_advantage_vector_summary(
-                                writer,
-                                update.loss.advantages,
-                                trainer.optimizer_step,
-                                target_steps,
-                                config.advantage_vector_log_interval_steps,
-                                group_size=trainer.config.group_size,
-                            ):
-                                advantage_vector_record_count += 1
-                            for metric_name, metric_value in last_metrics.items():
-                                writer.add_scalar(
-                                    metric_name,
-                                    metric_value,
-                                    trainer.optimizer_step,
+                            if len(update.epoch_results) != config.update_epochs:
+                                raise OnlineGRPOError(
+                                    "joint GRPO update did not complete every "
+                                    "configured epoch"
                                 )
-                            with metrics_path.open("a", encoding="utf-8") as stream:
-                                stream.write(
-                                    json.dumps(last_metrics, sort_keys=True) + "\n"
+                            bucket_optimizer_step_counts[bucket_index] += len(
+                                update.epoch_results
+                            )
+                            rollout_advantages = update.loss.advantages
+                            for epoch in update.epoch_results:
+                                _, optimizer_metrics = (
+                                    _split_loss_metrics_by_step_axis(
+                                        epoch.loss.scalar_metrics()
+                                    )
                                 )
+                                optimizer_metrics.update(
+                                    {
+                                        "optimizer_step": float(
+                                            epoch.optimizer_step
+                                        ),
+                                        "rollout_group": float(sampled_rollouts),
+                                        "epoch_in_rollout": float(
+                                            epoch.epoch_in_rollout
+                                        ),
+                                        "gradient_total": float(
+                                            epoch.total_gradient_norm
+                                        ),
+                                    }
+                                )
+                                for name, value in epoch.gradient_norms.items():
+                                    optimizer_metrics[f"gradient/{name}"] = float(
+                                        value
+                                    )
+                                for metric_name, metric_value in (
+                                    optimizer_metrics.items()
+                                ):
+                                    writer.add_scalar(
+                                        metric_name,
+                                        metric_value,
+                                        epoch.optimizer_step,
+                                    )
+                                with metrics_path.open(
+                                    "a", encoding="utf-8"
+                                ) as stream:
+                                    stream.write(
+                                        json.dumps(
+                                            {
+                                                "event": "optimizer_epoch",
+                                                **optimizer_metrics,
+                                            },
+                                            sort_keys=True,
+                                        )
+                                        + "\n"
+                                    )
+                                last_metrics.update(optimizer_metrics)
                         else:
                             uninformative_rollouts += 1
+                            rollout_advantages = normalize_signed_advantages(
+                                rewards,
+                                group_size=trainer.config.group_size,
+                                eps=trainer.config.advantage_eps,
+                            ).detach()
+                        if _write_advantage_vector_summary(
+                            writer,
+                            rollout_advantages,
+                            sampled_rollouts,
+                            target_rollout_groups,
+                            config.advantage_vector_log_interval_rollouts,
+                            group_size=trainer.config.group_size,
+                        ):
+                            advantage_vector_record_count += 1
+                        rollout_advantage_metrics = _advantage_scalar_metrics(
+                            rollout_advantages
+                        )
+                        rollout_metrics = {
+                            "environment_steps": float(environment_steps),
+                            "sampled_rollouts": float(sampled_rollouts),
+                            "uninformative_rollouts": float(
+                                uninformative_rollouts
+                            ),
+                            "training_bucket_index": float(bucket_index),
+                            "raw_proxy_reward_mean": float(
+                                proxy.rewards.mean()
+                            ),
+                            "raw_proxy_reward_max": float(proxy.rewards.max()),
+                            "raw_proxy_unsafe_rate": float(proxy.unsafe.mean()),
+                            "selected_raw_candidate_index": float(
+                                selected_index
+                            ),
+                            "selected_trajectory_optimizer_ms": float(
+                                optimization.elapsed_ms
+                            ),
+                            "selected_trajectory_intervention_ade_m": float(
+                                optimization.intervention_ade_m.mean()
+                            ),
+                            "selected_trajectory_intervention_fde_m": float(
+                                optimization.intervention_fde_m.mean()
+                            ),
+                            "selected_raw_trajectory_valid_rate": float(
+                                optimization.raw_valid.mean()
+                            ),
+                            "selected_trajectory_retained_raw_fraction": float(
+                                optimization.retained_raw_fraction.mean()
+                            ),
+                            "selected_optimized_trajectory_valid_rate": float(
+                                optimization.optimized_valid.mean()
+                            ),
+                            **{
+                                f"diagnostic/v2_rule_{name}": float(value)
+                                for name, value in rule_diagnostics.items()
+                            },
+                            **rollout_advantage_metrics,
+                        }
+                        for metric_name, metric_value in rollout_metrics.items():
                             writer.add_scalar(
-                                "diagnostic/uninformative_rollouts",
-                                float(uninformative_rollouts),
-                                environment_steps,
+                                metric_name,
+                                metric_value,
+                                sampled_rollouts,
                             )
+                        with metrics_path.open("a", encoding="utf-8") as stream:
+                            stream.write(
+                                json.dumps(
+                                    {"event": "rollout", **rollout_metrics},
+                                    sort_keys=True,
+                                )
+                                + "\n"
+                            )
+                        last_metrics.update(rollout_metrics)
                         action = joint_trajectory_action(
                             optimization.optimized_trajectories[0]
                         )
@@ -1517,12 +1833,18 @@ def run_joint_grpo_training(
                     )
             else:
                 consecutive_empty_episodes = 0
-            if trainer.optimizer_step != last_validated_step and (
-                trainer.optimizer_step == target_steps
+            _reject_exhausted_uninformative_budget(
+                sampled_rollouts=sampled_rollouts,
+                target_rollout_groups=target_rollout_groups,
+                optimizer_step=trainer.optimizer_step,
+                run_start_optimizer_step=run_start_optimizer_step,
+            )
+            if sampled_rollouts != last_validated_rollout and (
+                sampled_rollouts == target_rollout_groups
                 or (
-                    trainer.optimizer_step > 0
-                    and trainer.optimizer_step
-                    % config.validation_interval_steps
+                    sampled_rollouts > 0
+                    and sampled_rollouts
+                    % config.validation_interval_rollouts
                     == 0
                 )
             ):
@@ -1560,6 +1882,7 @@ def run_joint_grpo_training(
                 for value in simulator_errors:
                     error_record = {
                         "optimizer_step": int(trainer.optimizer_step),
+                        "rollout_group": int(sampled_rollouts),
                         "stage1_baseline": False,
                         **dict(value),
                     }
@@ -1567,13 +1890,29 @@ def run_joint_grpo_training(
                     writer.add_text(
                         "validation/simulator_error",
                         json.dumps(error_record, sort_keys=True),
-                        trainer.optimizer_step,
+                        sampled_rollouts,
                     )
                 last_metrics.update(validation)
                 for metric_name, metric_value in validation.items():
                     writer.add_scalar(
-                        metric_name, metric_value, trainer.optimizer_step
+                        metric_name, metric_value, sampled_rollouts
                     )
+                last_validated_rollout = sampled_rollouts
+                if trainer.optimizer_step == run_start_optimizer_step:
+                    continue
+                current_sampler_state = _sampler_state(
+                    sampled_rollouts=sampled_rollouts,
+                    uninformative_rollouts=uninformative_rollouts,
+                    bucket_sample_counts=bucket_sample_counts,
+                    bucket_optimizer_step_counts=(
+                        bucket_optimizer_step_counts
+                    ),
+                    next_bucket_index=next_bucket_index,
+                    generator_state=generator.get_state(),
+                    last_validated_rollout=last_validated_rollout,
+                    update_epochs=config.update_epochs,
+                    optimizer_step=trainer.optimizer_step,
+                )
                 validation_reward = _validation_raw_proxy_reward(validation)
                 if best_reward is None or validation_reward > best_reward:
                     best_reward = validation_reward
@@ -1591,6 +1930,8 @@ def run_joint_grpo_training(
                         environment_steps=environment_steps,
                         best_validation_reward=best_reward,
                         best_checkpoint_sha256=None,
+                        policy_update=policy_update,
+                        sampler_state=current_sampler_state,
                     )
                     save_grpo_checkpoint(best_path, best_checkpoint)
                     best_checkpoint_sha256 = _checkpoint_file_sha256(best_path)
@@ -1610,14 +1951,26 @@ def run_joint_grpo_training(
                     environment_steps=environment_steps,
                     best_validation_reward=best_reward,
                     best_checkpoint_sha256=best_checkpoint_sha256,
+                    policy_update=policy_update,
+                    sampler_state=current_sampler_state,
                 )
                 save_grpo_checkpoint(last_path, checkpoint)
-                last_validated_step = trainer.optimizer_step
     finally:
         writer.close()
 
     if best_reward is None or best_checkpoint_sha256 is None:
         raise OnlineGRPOError("online GRPO never completed fixed validation")
+    final_sampler_state = _sampler_state(
+        sampled_rollouts=sampled_rollouts,
+        uninformative_rollouts=uninformative_rollouts,
+        bucket_sample_counts=bucket_sample_counts,
+        bucket_optimizer_step_counts=bucket_optimizer_step_counts,
+        next_bucket_index=next_bucket_index,
+        generator_state=generator.get_state(),
+        last_validated_rollout=last_validated_rollout,
+        update_epochs=config.update_epochs,
+        optimizer_step=trainer.optimizer_step,
+    )
     payload = _checkpoint_payload(
         variant=variant,
         trainer=trainer,
@@ -1632,8 +1985,11 @@ def run_joint_grpo_training(
         environment_steps=environment_steps,
         best_validation_reward=best_reward,
         best_checkpoint_sha256=best_checkpoint_sha256,
+        policy_update=policy_update,
+        sampler_state=final_sampler_state,
     )
     last_path = save_grpo_checkpoint(last_path, payload)
+    cuda_peak_memory_bytes = _cuda_peak_memory_bytes(torch_device)
 
     restored, _, _ = _load_trainer(
         variant,
@@ -1653,6 +2009,9 @@ def run_joint_grpo_training(
         reward_config=reward_config,
         scenario_contract_sha=scenario_contract_sha,
         scenario_seeds=config.scenario_seeds,
+        policy_update=policy_update,
+        bucket_count=len(training_buckets),
+        optimizer_step=restored.optimizer_step,
     )
 
     plot_paths = generate_grpo_plots(
@@ -1661,15 +2020,25 @@ def run_joint_grpo_training(
     )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v3",
+        "format": "bev_joint_grpo_online_report_v4",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
         "eligible_for_formal_training": run_mode == "formal",
+        "grpo_config": _grpo_config_artifact_payload(grpo_config),
         "optimizer_steps": trainer.optimizer_step,
+        "optimizer_steps_this_run": (
+            trainer.optimizer_step - run_start_optimizer_step
+        ),
         "environment_steps": environment_steps,
         "sampled_rollouts": sampled_rollouts,
+        "sampled_rollouts_this_run": (
+            sampled_rollouts - run_start_rollout_group
+        ),
+        "target_rollout_groups": target_rollout_groups,
         "uninformative_rollouts": uninformative_rollouts,
+        "wall_time_seconds": time.monotonic() - started_at,
+        "cuda_peak_memory_bytes": cuda_peak_memory_bytes,
         "v2_rule_conditioning": {
             "enabled": True,
             **rule_diagnostics,
@@ -1687,18 +2056,22 @@ def run_joint_grpo_training(
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
+        "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
+        "policy_update_contract_sha256": (
+            joint_grpo_optimizer_contract_sha256(policy_update)
+        ),
         "simulator_validation_role": "diagnostic_only",
         "simulator_diagnostic_errors": simulator_diagnostic_errors,
         "scenario_contract_sha256": scenario_contract_sha,
         "training_scenarios": [list(value) for value in config.scenarios],
         "training_seeds": [int(value) for value in config.scenario_seeds],
-        "training_bucket_updates": [
+        "training_bucket_counters": [
             {
                 "scenario": scenario[0],
                 "route": scenario[1],
                 "seed": seed,
                 "sampled_rollouts": bucket_sample_counts[index],
-                "optimizer_updates": bucket_update_counts[index],
+                "optimizer_steps": bucket_optimizer_step_counts[index],
             }
             for index, (scenario, seed) in enumerate(training_buckets)
         ],
@@ -1713,16 +2086,18 @@ def run_joint_grpo_training(
             "tensorboard_tag": ADVANTAGE_VECTOR_TAG,
             "tensorboard_dir": str((run_dir / "tb").resolve()),
             "shape": [1, int(trainer.config.group_size)],
-            "interval_optimizer_steps": (
-                config.advantage_vector_log_interval_steps
+            "interval_rollout_groups": (
+                config.advantage_vector_log_interval_rollouts
             ),
             "record_count": advantage_vector_record_count,
             "scope": "current_run_only",
             "run_start_optimizer_step": run_start_optimizer_step,
+            "run_start_rollout_group": run_start_rollout_group,
             "group_axis_semantics": (
                 "independent_random_sample_slot_without_cross_step_identity"
             ),
             "heatmap": str(plot_paths["advantage_heatmap"].resolve()),
+            "x_axis": "absolute_rollout_group",
         },
         "training_plots": {
             "reward_curve": str(plot_paths["reward_curve"].resolve()),
@@ -1749,7 +2124,12 @@ def run_joint_grpo_training(
                 "loss/trajectory_reference_kl",
             ],
             "reference_kl_weighted": False,
-            "x_axis": "absolute_optimizer_step",
+            "policy_stability_curve": str(
+                plot_paths["policy_stability_curve"].resolve()
+            ),
+            "reward_x_axis": "absolute_rollout_group",
+            "validation_reward_x_axis": "absolute_rollout_group",
+            "optimizer_x_axis": "absolute_optimizer_step",
         },
     }
     (run_dir / "report.json").write_text(
@@ -1768,6 +2148,17 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
     online = payload.get("online")
     if not isinstance(online, Mapping):
         raise OnlineGRPOError("online GRPO YAML requires an online mapping")
+    legacy_fields = {
+        "total_optimizer_steps",
+        "validation_interval_steps",
+        "advantage_vector_log_interval_steps",
+    }
+    present_legacy = sorted(legacy_fields.intersection(online))
+    if present_legacy:
+        raise OnlineGRPOError(
+            "online GRPO YAML contains legacy optimizer-step fields: "
+            + ", ".join(present_legacy)
+        )
     scenarios = tuple(
         (str(value["scenario"]), str(value["route"]))
         for value in online.get("scenarios", ())
@@ -1775,9 +2166,11 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
     )
     return JointGRPOOnlineConfig(
         device=str(online.get("device", "cuda")),
-        seed=int(online.get("seed", 17)),
-        group_size=online.get("group_size", 4),
-        total_optimizer_steps=int(online.get("total_optimizer_steps", 5000)),
+        seed=online.get("seed", 17),
+        group_size=online.get("group_size", 24),
+        total_rollout_groups=online.get("total_rollout_groups", 100),
+        update_epochs=online.get("update_epochs", 4),
+        clip_epsilon=online.get("clip_epsilon", 0.2),
         resume_checkpoint=(
             Path(str(online["resume_checkpoint"]))
             if online.get("resume_checkpoint")
@@ -1790,11 +2183,11 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
         environment_steps_per_episode=int(
             online.get("environment_steps_per_episode", 100)
         ),
-        validation_interval_steps=int(
-            online.get("validation_interval_steps", 100)
+        validation_interval_rollouts=online.get(
+            "validation_interval_rollouts", 20
         ),
-        advantage_vector_log_interval_steps=online.get(
-            "advantage_vector_log_interval_steps", 100
+        advantage_vector_log_interval_rollouts=online.get(
+            "advantage_vector_log_interval_rollouts", 20
         ),
     )
 
@@ -1806,7 +2199,7 @@ def main() -> int:
     parser.add_argument("--run-mode", choices=("formal", "smoke"), required=True)
     parser.add_argument("--source-checkpoint", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--max-optimizer-steps", type=int)
+    parser.add_argument("--max-rollout-groups", type=int)
     arguments = parser.parse_args()
     config = _config_from_yaml(arguments.config)
     report = run_joint_grpo_training(
@@ -1815,7 +2208,7 @@ def main() -> int:
         run_mode=arguments.run_mode,
         source_checkpoint=arguments.source_checkpoint,
         output_root=arguments.output_root,
-        max_optimizer_steps=arguments.max_optimizer_steps,
+        max_rollout_groups=arguments.max_rollout_groups,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

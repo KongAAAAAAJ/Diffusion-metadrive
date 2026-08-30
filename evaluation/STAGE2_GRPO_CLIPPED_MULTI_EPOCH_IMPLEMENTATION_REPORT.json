@@ -1,0 +1,179 @@
+{
+  "format": "stage2_grpo_clipped_multi_epoch_implementation_report_v1",
+  "created_at": "2026-08-30T13:09:21+08:00",
+  "repository_commit_at_implementation": "9ef0abde7ded7c45bfc72d87e5f821b208d87617",
+  "implementation_gate": {
+    "name": "stage2_joint_grpo_optimizer_v2_implementation",
+    "passed": true,
+    "scope": "machine-plan revision, clipped multi-epoch core loss, rollout-budget online training, strict checkpoint/resume, launcher, diagnostics, focused regression, legacy evaluator loading, and two bounded CUDA smokes",
+    "long_training_started": false,
+    "paired_100_rollout_ab_started": false
+  },
+  "formal_boundary": {
+    "classification": "diagnostic_only",
+    "eligible_for_formal_training": false,
+    "paper_evidence_allowed": false,
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635"
+  },
+  "contracts": {
+    "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
+    "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
+    "default_update_epochs": 4,
+    "default_clip_epsilon": 0.2,
+    "budget_unit": "fresh_rollout_group",
+    "default_group_size": 24,
+    "trainable_modules": [
+      "diffusion_decoder",
+      "mode_head"
+    ],
+    "reward_contract_version": "stage2_joint_reward_v2",
+    "reward_contract_sha256": "0e95826028f77e86d8130e2f4bc6ac4ed617001d5adef99b600df8f061fb2ab9",
+    "reward_config_sha256": "d8ee4366681b5f2b69b1dfad376b4cfd551822dc1996adff79eed4955e4218a3",
+    "reward_application_contract_version": "stage2_grpo_open_application_v1",
+    "reward_application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
+    "reward_application_contract_changed": false,
+    "model_checkpoint_container": "bev_joint_grpo_a_v1",
+    "model_checkpoint_container_changed": false,
+    "online_config_format": "bev_joint_grpo_online_config_v4",
+    "online_report_format": "bev_joint_grpo_online_report_v4"
+  },
+  "algorithm": {
+    "mode_shape": "[B,G]",
+    "trajectory_shape": "[B,G,S]",
+    "mode_ratio": "exp(new_mode_log_prob - old_mode_log_prob)",
+    "trajectory_ratio": "exp(new_transition_log_prob - old_transition_log_prob) independently for every stochastic DDIM transition",
+    "clipped_surrogate": "-mean(min(ratio * advantage, clamp(ratio, 1-epsilon, 1+epsilon) * advantage))",
+    "ratio_factorization": "mode and DDIM-transition ratios are not multiplied into one joint ratio",
+    "advantage_semantics": "normalize once per fresh rollout, detach, and reuse unchanged for every optimizer epoch",
+    "behavior_policy_semantics": "old mode log-probabilities, old transition log-probabilities, and sampled DDIM chains are detached at rollout time and remain unchanged",
+    "regularization_semantics": "behavior cloning and frozen Stage1 reference KL are recomputed every epoch",
+    "graph_lifetime": "one fresh graph per epoch; no retain_graph and only detached epoch results are retained",
+    "rollout_consumption": "one external update call per live rollout; partial multi-epoch failure still consumes the rollout"
+  },
+  "online_training": {
+    "termination_field": "online.total_rollout_groups",
+    "launcher_budget": "MAX_ROLLOUT_GROUPS",
+    "legacy_optimizer_step_budget_rejected": true,
+    "informative_rollout": "exactly update_epochs serial optimizer steps followed by one selected tau_cmd env.step",
+    "uninformative_rollout": "counts against the fresh-rollout budget, logs diagnostic advantage on the rollout axis, and performs zero optimizer steps",
+    "all_uninformative_budget": "typed OnlineGRPOError before successful checkpoint/report/plot completion",
+    "step_axes": {
+      "reward_validation_advantage": "fresh rollout group",
+      "loss_ratio_clip_gradient_kl": "optimizer step"
+    },
+    "checkpoint_boundary": "only after all epochs of the current rollout are complete",
+    "sampler_state_restored": [
+      "sampled rollout count",
+      "uninformative rollout count",
+      "per-bucket rollout counts",
+      "per-bucket optimizer-step counts",
+      "next round-robin bucket cursor",
+      "Torch generator state",
+      "last validated rollout"
+    ],
+    "resume_policy": "require exact policy-update, GRPO, reward, scenario, and trajectory-optimizer bindings; legacy one-update online checkpoints are not resumable",
+    "plots": [
+      "advantage_vector_heatmap.png",
+      "reward_curve.png",
+      "validation_reward_curve.png",
+      "grpo_loss_curve.png",
+      "kl_loss_curve.png",
+      "policy_stability_curve.png"
+    ]
+  },
+  "focused_regression": {
+    "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_bev_reward_comparison.py tests/test_plot_grpo.py tests/test_compare_grpo_stability.py tests/test_run_bev_joint_grpo_launcher.py tests/test_run_eval_grpo_script.py -q",
+    "passed": 175,
+    "failed": 0,
+    "warnings": 15,
+    "py_compile_passed": true,
+    "git_diff_check_passed": true,
+    "covered": [
+      "positive and negative clipped-surrogate branches for mode and trajectory shapes",
+      "first-epoch ratio replay and later-epoch policy drift",
+      "frozen rollout data and graph-free epoch results",
+      "single-consumption and partial-failure semantics",
+      "rollout budgets, uninformative groups, metric axes, and launcher rejection",
+      "strict policy-update checkpoint binding and sampler-state round-trip",
+      "six diagnostic plots and six-run A/B fairness comparison"
+    ]
+  },
+  "legacy_compatibility": {
+    "runs_checked": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "check": "evaluation.bev_reward_comparison._load_policy on CPU, including Stage1 construction, GRPO weight restoration, and stage2_joint_reward_v2 binding",
+    "all_loaded": true,
+    "legacy_read_only_evaluation_allowed": true,
+    "legacy_resume_into_v2_allowed": false,
+    "historical_artifacts_modified": false
+  },
+  "cuda_smokes": {
+    "classification": "bounded diagnostic, formal-ineligible",
+    "small": {
+      "artifact_root": "/tmp/stage2_grpo_smoke_g3/run_1",
+      "report_sha256": "cd82cf0139f70441eed5fb10df8bdebdfdbd0054ae3944cd2de0b9b3c64e831c",
+      "group_size": 3,
+      "update_epochs": 2,
+      "sampled_rollouts": 1,
+      "optimizer_steps": 2,
+      "uninformative_rollouts": 0,
+      "checkpoint_round_trip": true,
+      "first_epoch_mode_ratio_mean": 1.0,
+      "first_epoch_trajectory_ratio_mean": 1.0,
+      "last_epoch_trajectory_clip_fraction": 0.4444444477558136,
+      "cuda_peak_memory_bytes": 129972224,
+      "wall_time_seconds": 65.42710419604555,
+      "plot_count": 6
+    },
+    "full_group": {
+      "artifact_root": "/tmp/stage2_grpo_smoke_g24/run_1",
+      "report_sha256": "07fae6252f824bc620b57e9e39f5907ab57f4b46347e881278c228fa3ae3e4af",
+      "group_size": 24,
+      "update_epochs": 4,
+      "sampled_rollouts": 1,
+      "optimizer_steps": 4,
+      "uninformative_rollouts": 0,
+      "checkpoint_round_trip": true,
+      "first_epoch_mode_ratio_mean": 1.0,
+      "first_epoch_trajectory_ratio_mean": 1.0,
+      "last_epoch_trajectory_clip_fraction": 0.625,
+      "cuda_peak_memory_bytes": 467396096,
+      "cuda_peak_memory_gib": 0.43529653549194336,
+      "cuda_peak_memory_limit_gib": 15.0,
+      "cuda_peak_memory_gate_passed": true,
+      "wall_time_seconds": 65.72529069893062,
+      "plot_count": 6
+    }
+  },
+  "short_ab": {
+    "status": "implementation_ready_training_not_started",
+    "manifest_format": "stage2_grpo_stability_ab_manifest_v1",
+    "comparison_command": "python -m evaluation.compare_grpo_stability --manifest <manifest.json> --output-dir <output_dir>",
+    "run_allocation": {
+      "run_8": "seed 17, update_epochs 1",
+      "run_9": "seed 17, update_epochs 4",
+      "run_10": "seed 23, update_epochs 1",
+      "run_11": "seed 23, update_epochs 4",
+      "run_12": "seed 42, update_epochs 1",
+      "run_13": "seed 42, update_epochs 4"
+    },
+    "per_run": "100 fresh rollout groups, G=24, clip_epsilon=0.2, validation every 20 rollout groups",
+    "fairness_binding": "exact Stage1 SHA, scenarios, scenario seeds, validation seeds, full JointGRPOConfig, reward contracts, policy-update common fields, and trajectory optimizer",
+    "promotion_gate": "at least two of three clipped runs reduce the population standard deviation of adjacent validation/reward_gain differences, and the clipped three-seed final reward-gain mean is not below the single-epoch mean",
+    "execution_boundary": "run the six jobs only in a separate frozen-code training thread"
+  },
+  "qualification": {
+    "optimizer_implementation_verified": true,
+    "stage2_training_complete": false,
+    "short_ab_complete": false,
+    "formal_qualification_passed": false,
+    "paper_evidence_allowed": false
+  },
+  "next_hard_gate": "Keep strict_stage1_v2_run3_qualification as the formal gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 and evaluate them with evaluation.compare_grpo_stability; A/B success cannot replace Stage1 qualification."
+}

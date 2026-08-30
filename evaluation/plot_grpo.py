@@ -40,12 +40,37 @@ KL_LOSS_CURVE_TAGS = (
     "loss/mode_reference_kl",
     "loss/trajectory_reference_kl",
 )
+MODE_RATIO_TAGS = (
+    "policy/mode_ratio_mean",
+    "policy/mode_ratio_min",
+    "policy/mode_ratio_max",
+)
+TRAJECTORY_RATIO_TAGS = (
+    "policy/trajectory_ratio_mean",
+    "policy/trajectory_ratio_min",
+    "policy/trajectory_ratio_max",
+)
+CLIP_FRACTION_TAGS = (
+    "policy/mode_clip_fraction",
+    "policy/trajectory_clip_fraction",
+)
+OLD_POLICY_APPROX_KL_TAGS = (
+    "policy/mode_old_policy_approx_kl",
+    "policy/trajectory_old_policy_approx_kl",
+)
+POLICY_STABILITY_CURVE_TAGS = (
+    *MODE_RATIO_TAGS,
+    *TRAJECTORY_RATIO_TAGS,
+    *CLIP_FRACTION_TAGS,
+    *OLD_POLICY_APPROX_KL_TAGS,
+)
 
 _SCALAR_STEP_ALIGNMENT_GROUPS = (
     REWARD_CURVE_TAGS,
     VALIDATION_REWARD_CURVE_TAGS,
     GRPO_LOSS_CURVE_TAGS,
     KL_LOSS_CURVE_TAGS,
+    POLICY_STABILITY_CURVE_TAGS,
 )
 
 _CURVE_SPECS = {
@@ -54,24 +79,28 @@ _CURVE_SPECS = {
         REWARD_CURVE_TAGS,
         "GRPO raw reward curves",
         "Raw tau_d reward",
+        "Fresh rollout group",
     ),
     "validation_reward_curve": (
         "validation_reward_curve.png",
         VALIDATION_REWARD_CURVE_TAGS,
         "GRPO validation reward and gain curves",
         "Raw tau_d reward / gain",
+        "Fresh rollout group",
     ),
     "grpo_loss_curve": (
         "grpo_loss_curve.png",
         GRPO_LOSS_CURVE_TAGS,
         "GRPO loss curves",
         "Loss",
+        "Optimizer step",
     ),
     "kl_loss_curve": (
         "kl_loss_curve.png",
         KL_LOSS_CURVE_TAGS,
         "GRPO reference KL curves",
         "Unweighted KL divergence",
+        "Optimizer step",
     ),
 }
 
@@ -156,7 +185,7 @@ def load_advantage_vectors(
     tb_dir: Path,
     tag: str = ADVANTAGE_VECTOR_TAG,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Load all ``[1, G]`` advantage tensors ordered by optimizer step."""
+    """Load all ``[1, G]`` advantage tensors ordered by fresh rollout group."""
 
     return _load_advantage_vectors_from_accumulator(
         _load_event_accumulator(tb_dir), tag
@@ -196,9 +225,9 @@ def _render_advantage_heatmap(
         np.arange(values.shape[1]),
         [f"g{index}" for index in range(values.shape[1])],
     )
-    ax.set_xlabel("Optimizer step")
+    ax.set_xlabel("Fresh rollout group")
     ax.set_ylabel("GRPO sample slot")
-    ax.set_title("GRPO advantage by optimizer step and sample slot")
+    ax.set_title("GRPO advantage by rollout group and sample slot")
     colorbar = fig.colorbar(image, ax=ax, pad=0.02)
     colorbar.set_label("Normalized advantage")
     fig.text(
@@ -219,7 +248,7 @@ def _render_advantage_heatmap(
 
 
 def generate_advantage_heatmap(tb_dir: Path, output_path: Path) -> Path:
-    """Generate a raw group-slot-by-optimizer-step advantage heatmap."""
+    """Generate a raw group-slot-by-fresh-rollout advantage heatmap."""
 
     steps, values = load_advantage_vectors(tb_dir)
     return _render_advantage_heatmap(steps, values, output_path)
@@ -273,6 +302,7 @@ def _render_scalar_curve(
     *,
     title: str,
     ylabel: str,
+    xlabel: str,
     output_path: Path,
 ) -> Path:
     fig, ax = plt.subplots(figsize=(9.2, 5.2))
@@ -287,7 +317,7 @@ def _render_scalar_curve(
             linewidth=1.5,
             label=tag,
         )
-    ax.set_xlabel("Optimizer step")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.ticklabel_format(style="plain", axis="x", useOffset=False)
@@ -305,6 +335,71 @@ def _render_scalar_curve(
     return output_path
 
 
+def _render_policy_stability_curve(
+    series: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    output_path: Path,
+) -> Path:
+    fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.0))
+    panels = (
+        (
+            axes[0, 0],
+            MODE_RATIO_TAGS,
+            "Mode importance ratio",
+            "Importance ratio",
+        ),
+        (
+            axes[0, 1],
+            TRAJECTORY_RATIO_TAGS,
+            "DDIM-transition importance ratio",
+            "Importance ratio",
+        ),
+        (
+            axes[1, 0],
+            CLIP_FRACTION_TAGS,
+            "Clipped sample fraction",
+            "Fraction",
+        ),
+        (
+            axes[1, 1],
+            OLD_POLICY_APPROX_KL_TAGS,
+            "Approximate KL from rollout policy",
+            "Approximate KL",
+        ),
+    )
+    for ax, tags, title, ylabel in panels:
+        for tag in tags:
+            steps, values = series[tag]
+            marker = "o" if len(steps) <= 100 else None
+            ax.plot(
+                steps,
+                values,
+                marker=marker,
+                markersize=3.0,
+                linewidth=1.4,
+                label=tag,
+            )
+        ax.set_xlabel("Optimizer step")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.ticklabel_format(style="plain", axis="x", useOffset=False)
+        ax.grid(color="#D9D9D9", linewidth=0.8, alpha=0.75)
+        ax.set_axisbelow(True)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(frameon=False, fontsize=7.5)
+    for ax in (axes[0, 0], axes[0, 1]):
+        ax.axhspan(0.8, 1.2, color="#59A14F", alpha=0.08)
+    axes[1, 0].set_ylim(0.0, 1.0)
+    fig.suptitle("GRPO policy-update stability", fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def _validate_aligned_scalar_steps(
     series: Mapping[str, tuple[np.ndarray, np.ndarray]],
 ) -> None:
@@ -313,7 +408,7 @@ def _validate_aligned_scalar_steps(
         for tag in tags[1:]:
             if not np.array_equal(series[tag][0], expected_steps):
                 raise AdvantageHeatmapError(
-                    "TensorBoard scalar tags must use aligned optimizer steps: "
+                    "TensorBoard scalar tags must use aligned steps: "
                     + ", ".join(tags)
                 )
 
@@ -330,9 +425,10 @@ def generate_grpo_plots(
     )
     all_scalar_tags = tuple(
         tag
-        for _, tags, _, _ in _CURVE_SPECS.values()
+        for _, tags, _, _, _ in _CURVE_SPECS.values()
         for tag in tags
     )
+    all_scalar_tags += POLICY_STABILITY_CURVE_TAGS
     scalar_series = _load_scalar_series(accumulator, all_scalar_tags)
     _validate_aligned_scalar_steps(scalar_series)
 
@@ -345,14 +441,19 @@ def generate_grpo_plots(
             output_dir / "advantage_vector_heatmap.png",
         )
     }
-    for key, (filename, tags, title, ylabel) in _CURVE_SPECS.items():
+    for key, (filename, tags, title, ylabel, xlabel) in _CURVE_SPECS.items():
         outputs[key] = _render_scalar_curve(
             scalar_series,
             tags,
             title=title,
             ylabel=ylabel,
+            xlabel=xlabel,
             output_path=output_dir / filename,
         )
+    outputs["policy_stability_curve"] = _render_policy_stability_curve(
+        scalar_series,
+        output_dir / "policy_stability_curve.png",
+    )
     return outputs
 
 

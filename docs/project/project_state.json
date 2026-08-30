@@ -1,13 +1,13 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-30T11:46:52+08:00",
+  "updated_at": "2026-08-30T13:10:38+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "3536481c130d1ae4c4c3cc4584cdb7ecf8a81e3f",
-    "worktree_clean_before_this_update": false,
+    "git_commit": "9ef0abde7ded7c45bfc72d87e5f821b208d87617",
+    "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
-    "uncommitted_plan_update_present": false,
+    "uncommitted_plan_update_present": true,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
     "uncommitted_stage2_calibration_bypass_present": false,
     "uncommitted_stage2_bare_launcher_fix_present": false,
@@ -43,7 +43,7 @@
     "uncommitted_stage2_grpo_open_tau_d_v1_report_present": false,
     "uncommitted_stage2_grpo_rollout_identity_fix_present": false,
     "uncommitted_bev_only_diffusion_planner_v2_present": false,
-    "uncommitted_state_reconciliation_present": true,
+    "uncommitted_state_reconciliation_present": false,
     "uncommitted_rule_conditioned_v2_dataset_preparation_present": false,
     "uncommitted_rule_conditioned_v2_diagnostic_verifier_fix_present": false,
     "uncommitted_rule_conditioned_v2_parallel_collection_preparation_present": false,
@@ -71,20 +71,22 @@
     "uncommitted_reward_boxplot_grouping_present": false,
     "uncommitted_stage2_grpo_advantage_vector_heatmap_present": false,
     "uncommitted_stage2_grpo_plot_suite_present": false,
-    "uncommitted_stage2_grpo_configurable_group_size_present": true,
-    "uncommitted_stage2_grpo_run5_run7_state_reconciliation_present": true,
-    "uncommitted_stage2_grpo_validation_reward_plot_present": true
+    "uncommitted_stage2_grpo_configurable_group_size_present": false,
+    "uncommitted_stage2_grpo_run5_run7_state_reconciliation_present": false,
+    "uncommitted_stage2_grpo_validation_reward_plot_present": false,
+    "uncommitted_stage2_grpo_clipped_multi_epoch_present": true,
+    "uncommitted_stage2_grpo_clipped_multi_epoch_report_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "stage2-grpo-validation-reward-plot-20260830",
-    "status": "validation_reward_plot_implemented_run5_run7_backfilled_smoke_passed_nonformal",
+    "round": "stage2-grpo-clipped-multi-epoch-20260830",
+    "status": "clipped_multi_epoch_v2_implementation_verified_short_ab_pending_nonformal",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "validation_reward_plot_implemented_run5_run7_backfilled_smoke_passed_nonformal",
+      "status": "clipped_multi_epoch_v2_implementation_verified_short_ab_pending_nonformal",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -131,6 +133,25 @@
         "real_checkpoint_cpu_loader_preflight_passed": true,
         "strict_stage1_qualification_entry_available": false,
         "checkpoint_eligibility_changed": false,
+        "formal_experiment_status_changed": false
+      },
+      "stage2_clipped_multi_epoch_grpo": {
+        "status": "implementation_verified_short_ab_pending",
+        "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
+        "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
+        "default_group_size": 24,
+        "default_update_epochs": 4,
+        "default_clip_epsilon": 0.2,
+        "budget_unit": "fresh_rollout_group",
+        "focused_tests_passed": 175,
+        "legacy_runs_4_through_7_evaluator_load_passed": true,
+        "cuda_g3_epochs2_rollout1_passed": true,
+        "cuda_g24_epochs4_rollout1_passed": true,
+        "cuda_g24_peak_memory_bytes": 467396096,
+        "cuda_peak_memory_limit_bytes": 16106127360,
+        "implementation_report": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
+        "implementation_report_sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
+        "short_ab_status": "pending_separate_frozen_code_training_thread",
         "formal_experiment_status_changed": false
       },
       "short_closed_loop": {
@@ -799,9 +820,18 @@
     "stage2_grpo_validation_reward_plot_authorized": true,
     "stage2_grpo_validation_reward_plot_authorized_on": "2026-08-30",
     "stage2_grpo_validation_reward_plot_scope": "Add an independent validation reward/gain curve from the three persisted validation TensorBoard tags; keep reward_curve training-only, preserve raw values and strict step alignment, update future v3 training reports, backfill only derived plots and report training_plots metadata for diagnostic run_5 through run_7, allocate run_8 next, and leave events, checkpoints, metrics, formal eligibility, standalone run_3, run_4, and the active Stage1 qualification gate unchanged.",
-    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. Future GRPO-Open artifacts are stored beneath their exact source Stage1 run; no formal eligibility was granted."
+    "stage2_grpo_clipped_multi_epoch_authorized": true,
+    "stage2_grpo_clipped_multi_epoch_authorized_on": "2026-08-30",
+    "stage2_grpo_clipped_multi_epoch_scope": "Replace the one-rollout/one-update Stage 2 optimizer protocol with detached old-policy mode and per-transition DDIM ratios, PPO clipping at epsilon 0.2, four serial epochs over each informative G=24 fresh rollout, fresh-rollout budgets, strict sampler-state resume, policy-stability diagnostics, and a separate six-run 100-rollout A/B. Preserve stage2_grpo_open_application_v1 and its SHA, run_4 through run_7 as immutable legacy diagnostic artifacts, strict Stage1 run_3 qualification as the formal hard gate, and all new evidence as diagnostic-only.",
+    "stage2_grpo_clipped_multi_epoch_long_training_authorized_in_this_thread": false,
+    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. Stage1 v2 run_3 remains unqualified and is the diagnostic source for legacy GRPO run_4 through run_7 and the pending clipped-GRPO A/B. On 2026-08-30 stage2_joint_grpo_optimizer_v2 was implemented and bounded CUDA smokes passed without changing stage2_grpo_open_application_v1. Formal eligibility was not granted; run_8 through run_13 remain pending in a separate frozen-code training thread."
   },
   "source_of_truth": {
+    "stage2_grpo_clipped_multi_epoch_implementation_report": {
+      "path": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
+      "sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
+      "role": "Records the exact stage2_joint_grpo_optimizer_v2 contract and SHA, clipped mode and per-DDIM-transition objectives, rollout-group budget and sampler-state resume semantics, 175 passing focused tests, full evaluator loading for legacy run_4 through run_7, passing G=3/E=2 and G=24/E=4 CUDA smokes, the 0.435 GiB full-group peak, six diagnostic plots, and the still-pending diagnostic run_8 through run_13 A/B."
+    },
     "v2_only_training_evaluation_cleanup_report": {
       "path": "evaluation/V2_ONLY_TRAINING_EVALUATION_CLEANUP_REPORT.json",
       "sha256": "cab7ce5f33ef38fc1c163d40364c53e20100a86cbda97d812819ce02623d8e2a",
@@ -1062,8 +1092,8 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "17d7ff037dc15fb430887ef882f13e866a0eb5912389379389f1932803d3381b",
-      "role": "Records the completed legacy full-evaluation cleanup, preserves the independent two-checkpoint raw-tau_d reward-only diagnostic, keeps strict Stage1 run_3 qualification as the active hard gate, and marks the replacement full S5-S9 qualification/formal evaluator as pending reimplementation."
+      "sha256": "60f30a24b63ebcdba9ed8041e10a83ba46662c2c96686aecc7e75c814cd9997b",
+      "role": "Freezes stage2_joint_grpo_optimizer_v2 with G=24, four clipped epochs, epsilon 0.2, fresh-rollout budgets, strict checkpoint/resume and common Open/Exec fairness; records implementation verification and the separate diagnostic run_8 through run_13 A/B while retaining strict Stage1 v2 run_3 qualification as the active formal hard gate."
     },
     "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
@@ -1830,6 +1860,47 @@
       "required_by_current_plan": false,
       "status": "removed_from_revised_formal_mainline"
     },
+    "grpo_open_clipped_multi_epoch_v2": {
+      "available": true,
+      "eligible": false,
+      "diagnostic_only": true,
+      "implementation_verified": true,
+      "training_started": false,
+      "source": "stage1_a_v2_run3_unqualified",
+      "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+      "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "storage_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
+      "next_default_run": "run_8",
+      "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
+      "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
+      "application_contract": "stage2_grpo_open_application_v1",
+      "application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
+      "default_group_size": 24,
+      "default_update_epochs": 4,
+      "default_clip_epsilon": 0.2,
+      "budget_unit": "fresh_rollout_group",
+      "launcher_budget": "MAX_ROLLOUT_GROUPS",
+      "online_config_format": "bev_joint_grpo_online_config_v4",
+      "online_report_format": "bev_joint_grpo_online_report_v4",
+      "legacy_runs_4_through_7_read_only_evaluator_load_passed": true,
+      "legacy_runs_4_through_7_resume_allowed": false,
+      "cuda_smoke_g3_e2": "/tmp/stage2_grpo_smoke_g3/run_1",
+      "cuda_smoke_g24_e4": "/tmp/stage2_grpo_smoke_g24/run_1",
+      "cuda_smoke_g24_peak_memory_bytes": 467396096,
+      "cuda_peak_memory_limit_bytes": 16106127360,
+      "checkpoint_round_trip_passed": true,
+      "short_ab_runs": [
+        "run_8 baseline seed17",
+        "run_9 clipped seed17",
+        "run_10 baseline seed23",
+        "run_11 clipped seed23",
+        "run_12 baseline seed42",
+        "run_13 clipped seed42"
+      ],
+      "short_ab_status": "pending_separate_frozen_code_training_thread",
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false
+    },
     "grpo_open_formal": {
       "available": false,
       "eligible": false,
@@ -2234,7 +2305,8 @@
     "The current Stage1-A v2 path uses the fully verified 49870-sample Rule-conditioned bundle under the explicit user quota waiver; never describe it as satisfying the original exact 50070-total or 10000-S6 quota.",
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen.",
-    "GRPO-Open must retain the stage2_grpo_open_application_v1 SHA, raw tau_d reward/selection/best semantics, zero tracking expansion, selected-only trajectory optimization, and calibration_required=false. Every new run must be stored under its exact source Stage1 run's grpo_open root; resuming the preserved user-terminated historical standalone GRPO run_3 and metadata promotion remain forbidden."
+    "GRPO-Open must retain the stage2_grpo_open_application_v1 SHA, raw tau_d reward/selection/best semantics, zero tracking expansion, selected-only trajectory optimization, and calibration_required=false. Every new run must be stored under its exact source Stage1 run's grpo_open root; resuming the preserved user-terminated historical standalone GRPO run_3 and metadata promotion remain forbidden.",
+    "Future GRPO-Open and GRPO-Exec runs must share stage2_joint_grpo_optimizer_v2 SHA 0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175, G=24, four clipped epochs at epsilon 0.2, the complete JointGRPOConfig, fresh-rollout budgets, trainable modules, and checkpoint-boundary semantics. Legacy run_4 through run_7 remain read-only diagnostic artifacts and cannot resume into v2."
   ],
   "next_actions": [
     "Implement a replacement strict Stage1 v2 qualification entry, then qualify run_3 under reload, full 1500-sample open-loop, and full S5-S9 closed-loop gates before any formal GRPO claim; the reward-only comparator cannot satisfy this gate, and the bounded 202.51 ms planning-tick result remains failed against the unchanged 200 ms gate.",
@@ -2246,7 +2318,7 @@
     "Treat the observed S5 background actor counts as descriptive evidence rather than an acceptance hard gate; no explicit background-quota waiver continuation switch exists in the current collector.",
     "Use tools/visualize_dataset_episode.py for read-only scenario/episode listing and world-topdown MP4 rendering; keep outputs outside dataset roots.",
     "Preserve run_3 as the user-terminated incomplete diagnostic artifact at metrics step 4532 and checkpoint step 4500; do not backfill or otherwise modify its TensorBoard event or checkpoints.",
-    "For any future bounded diagnostic GRPO-Open process, use the selected Stage1 source checkpoint and its colocated grpo_open root; completed run_5 through run_7 remain diagnostic-only and the next allocation is run_8. Select G through online.group_size (default 4, integer at least 2); higher G increases sampling and training memory. New runs record exact [1,G] advantage/vector TensorBoard tensors every 100 optimizer steps and at the final optimizer step, then automatically generate five current-run-only plots after checkpoint round-trip: advantage heatmap, training reward, validation reward/gain, GRPO objective, and unweighted reference KL. The derived plots and v3 report metadata are already backfilled for run_5 through run_7. Do not backfill run_4, run calibration/preflight, resume the preserved user-terminated historical standalone GRPO run_3, or read its historical calibration report; retain raw validation/pretrain_reward and validation/reward_gain plus non-gating Simulator diagnostics.",
+    "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 as paired seeds 17/23/42 with one-epoch baselines and four-epoch clipped runs, each using 100 fresh rollout groups, G=24, epsilon 0.2 and validation every 20 rollouts; then run evaluation.compare_grpo_stability. Preserve run_4 through run_7 as immutable legacy diagnostic artifacts, reject their resume into v2, use fresh-rollout axes for reward/validation/advantage and optimizer-step axes for loss/policy metrics, and generate all six current-run plots. A passing A/B does not grant formal or paper eligibility.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",

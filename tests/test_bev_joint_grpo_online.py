@@ -8,7 +8,13 @@ import numpy as np
 import pytest
 import torch
 
-from models.bev_planner.joint_grpo import JointGRPOConfig
+from models.bev_planner.joint_grpo import (
+    JointGRPOConfig,
+    JointGRPOPolicyUpdateConfig,
+    joint_grpo_optimizer_contract,
+    joint_grpo_optimizer_contract_sha256,
+    normalize_signed_advantages,
+)
 from models.bev_planner.joint_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
@@ -36,19 +42,26 @@ from train.train_bev_joint_grpo_online import (
     _checkpoint_file_sha256,
     _config_from_yaml,
     _condition_online_model_inputs,
+    _cuda_peak_memory_bytes,
     _finalize_online_rule_action,
     _fixed_raw_proxy_and_simulator_validation,
+    _grpo_config_artifact_payload,
     _joint_rewards_are_informative,
     _load_trainer,
     _new_online_rule_maker,
     _next_run_directory,
     _resume_best_checkpoint_anchor,
+    _reject_exhausted_uninformative_budget,
+    _reset_cuda_peak_memory,
     _round_robin_training_buckets,
+    _sampler_state,
     _scenario_ready_for_primary_sampling,
     _score_select_and_optimize_raw_candidates,
     _should_record_advantage_vector,
+    _split_loss_metrics_by_step_axis,
     _validate_online_checkpoint_metadata,
     _validate_raw_reward_config,
+    _validate_sampler_state,
     _validation_raw_proxy_reward,
     _validation_reward_comparison_metrics,
     _write_advantage_vector_summary,
@@ -75,6 +88,8 @@ def test_next_run_directory_continues_after_migrated_run4(tmp_path: Path) -> Non
 def _binding() -> dict[str, object]:
     reward_config = JointRewardConfig()
     optimizer_config = KinematicTrajectoryOptimizerConfig()
+    policy_update = JointGRPOPolicyUpdateConfig()
+    generator_state = torch.Generator().manual_seed(17).get_state()
     return {
         "schema_version": 1,
         "format": "bev_joint_grpo_a_v1",
@@ -82,6 +97,7 @@ def _binding() -> dict[str, object]:
         "predecessor_condition": "A",
         "source_stage1_sha256": "a" * 64,
         "grpo_config": dataclasses.asdict(JointGRPOConfig()),
+        "optimizer_step": 4,
         "run_mode": "smoke",
         "diagnostic_only": True,
         "eligible_for_formal_training": False,
@@ -99,11 +115,24 @@ def _binding() -> dict[str, object]:
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
+        "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
+        "policy_update_contract_sha256": (
+            joint_grpo_optimizer_contract_sha256(policy_update)
+        ),
         "scenario_contract_sha256": primary_scenario_contract()["sha256"],
         "scenario_seeds": [17, 23],
         "trajectory_optimizer_config": dataclasses.asdict(optimizer_config),
         "trajectory_optimizer_sha256": optimizer_config.sha256(),
         "environment_steps": 1,
+        "sampler_state": {
+            "sampled_rollouts": 1,
+            "uninformative_rollouts": 0,
+            "bucket_sample_counts": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "bucket_optimizer_step_counts": [4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "next_bucket_index": 1,
+            "generator_state": generator_state,
+            "last_validated_rollout": 1,
+        },
     }
 
 
@@ -111,11 +140,14 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
     with pytest.raises(OnlineGRPOError):
         JointGRPOOnlineConfig(device="auto")
     with pytest.raises(OnlineGRPOError):
-        JointGRPOOnlineConfig(total_optimizer_steps=0)
-    assert JointGRPOOnlineConfig().group_size == 4
+        JointGRPOOnlineConfig(total_rollout_groups=0)
+    assert JointGRPOOnlineConfig().group_size == 24
     assert JointGRPOOnlineConfig(group_size=3).group_size == 3
     assert JointGRPOOnlineConfig(group_size=5).group_size == 5
-    assert JointGRPOOnlineConfig().advantage_vector_log_interval_steps == 100
+    assert JointGRPOOnlineConfig().update_epochs == 4
+    assert JointGRPOOnlineConfig().clip_epsilon == pytest.approx(0.2)
+    assert JointGRPOOnlineConfig().validation_interval_rollouts == 20
+    assert JointGRPOOnlineConfig().advantage_vector_log_interval_rollouts == 20
     with pytest.raises(OnlineGRPOError, match="complete ordered S5--S9"):
         JointGRPOOnlineConfig(
             scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),)
@@ -128,8 +160,37 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
             run_mode="smoke",
             source_checkpoint=tmp_path / "missing.pt",
             output_root=tmp_path / "output",
-            max_optimizer_steps=0,
+            max_rollout_groups=0,
         )
+
+
+def test_cuda_peak_memory_is_reset_and_reported_only_for_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_devices: list[torch.device] = []
+    queried_devices: list[torch.device] = []
+    monkeypatch.setattr(
+        torch.cuda,
+        "reset_peak_memory_stats",
+        lambda device: reset_devices.append(device),
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "max_memory_allocated",
+        lambda device: queried_devices.append(device) or 123456,
+    )
+
+    cpu = torch.device("cpu")
+    _reset_cuda_peak_memory(cpu)
+    assert _cuda_peak_memory_bytes(cpu) is None
+    assert reset_devices == []
+    assert queried_devices == []
+
+    cuda = torch.device("cuda")
+    _reset_cuda_peak_memory(cuda)
+    assert _cuda_peak_memory_bytes(cuda) == 123456
+    assert reset_devices == [cuda]
+    assert queried_devices == [cuda]
 
 
 @pytest.mark.parametrize("invalid_group_size", [True, False, 1, 0, -1])
@@ -149,13 +210,15 @@ def test_online_config_rejects_invalid_group_size(
 def test_online_config_rejects_invalid_advantage_vector_log_interval(
     invalid_interval: object,
 ) -> None:
-    with pytest.raises(OnlineGRPOError, match="advantage_vector_log_interval_steps"):
+    with pytest.raises(
+        OnlineGRPOError, match="advantage_vector_log_interval_rollouts"
+    ):
         JointGRPOOnlineConfig(
-            advantage_vector_log_interval_steps=invalid_interval  # type: ignore[arg-type]
+            advantage_vector_log_interval_rollouts=invalid_interval  # type: ignore[arg-type]
         )
 
 
-def test_online_config_loads_group_size_and_advantage_interval_from_yaml(
+def test_online_config_loads_clipped_rollout_contract_from_yaml(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "online.yaml"
@@ -163,14 +226,22 @@ def test_online_config_loads_group_size_and_advantage_interval_from_yaml(
         "online:\n"
         "  device: cpu\n"
         "  group_size: 5\n"
-        "  advantage_vector_log_interval_steps: 37\n",
+        "  total_rollout_groups: 41\n"
+        "  update_epochs: 3\n"
+        "  clip_epsilon: 0.15\n"
+        "  validation_interval_rollouts: 11\n"
+        "  advantage_vector_log_interval_rollouts: 37\n",
         encoding="utf-8",
     )
 
     config = _config_from_yaml(config_path)
 
     assert config.group_size == 5
-    assert config.advantage_vector_log_interval_steps == 37
+    assert config.total_rollout_groups == 41
+    assert config.update_epochs == 3
+    assert config.clip_epsilon == pytest.approx(0.15)
+    assert config.validation_interval_rollouts == 11
+    assert config.advantage_vector_log_interval_rollouts == 37
 
 
 @pytest.mark.parametrize("yaml_value", ["true", "false", "1", "0", "-1"])
@@ -185,6 +256,50 @@ def test_online_config_rejects_invalid_yaml_group_size(
     )
 
     with pytest.raises(OnlineGRPOError, match="group_size"):
+        _config_from_yaml(config_path)
+
+
+@pytest.mark.parametrize("invalid_update_epochs", [True, False, 0, -1, 1.5])
+def test_online_config_rejects_invalid_update_epochs(
+    invalid_update_epochs: object,
+) -> None:
+    with pytest.raises(OnlineGRPOError, match="update_epochs"):
+        JointGRPOOnlineConfig(
+            update_epochs=invalid_update_epochs  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_clip_epsilon", [True, False, 0.0, 1.0, -0.1, float("nan")]
+)
+def test_online_config_rejects_invalid_clip_epsilon(
+    invalid_clip_epsilon: object,
+) -> None:
+    with pytest.raises(OnlineGRPOError, match="clip_epsilon"):
+        JointGRPOOnlineConfig(
+            clip_epsilon=invalid_clip_epsilon  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "legacy_field",
+    [
+        "total_optimizer_steps",
+        "validation_interval_steps",
+        "advantage_vector_log_interval_steps",
+    ],
+)
+def test_online_config_rejects_legacy_optimizer_step_fields(
+    tmp_path: Path,
+    legacy_field: str,
+) -> None:
+    config_path = tmp_path / f"legacy_{legacy_field}.yaml"
+    config_path.write_text(
+        f"online:\n  device: cpu\n  {legacy_field}: 1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(OnlineGRPOError, match="legacy optimizer-step fields"):
         _config_from_yaml(config_path)
 
 
@@ -237,22 +352,56 @@ def test_online_loader_forwards_exact_core_config(
     assert observed["config"] is core_config
 
 
-def test_advantage_vector_recording_schedule_uses_interval_or_final_step() -> None:
+def test_grpo_artifact_payload_preserves_fairness_hyperparameters() -> None:
+    config = JointGRPOConfig(group_size=24)
+
+    payload = _grpo_config_artifact_payload(config)
+
+    assert payload == dataclasses.asdict(config)
+    assert payload["group_size"] == 24
+    for name in (
+        "learning_rate",
+        "mode_pg_weight",
+        "trajectory_pg_weight",
+        "bc_weight",
+        "reference_kl_weight",
+    ):
+        assert name in payload
+
+
+def test_advantage_vector_recording_schedule_uses_rollout_interval_or_final() -> None:
     assert not _should_record_advantage_vector(
-        optimizer_step=1,
-        target_steps=350,
-        interval_steps=100,
+        rollout_group=1,
+        target_rollout_groups=350,
+        interval_rollouts=100,
     )
     assert _should_record_advantage_vector(
-        optimizer_step=100,
-        target_steps=350,
-        interval_steps=100,
+        rollout_group=100,
+        target_rollout_groups=350,
+        interval_rollouts=100,
     )
     assert _should_record_advantage_vector(
-        optimizer_step=350,
-        target_steps=350,
-        interval_steps=100,
+        rollout_group=350,
+        target_rollout_groups=350,
+        interval_rollouts=100,
     )
+
+
+def test_loss_metrics_use_rollout_and_optimizer_axes_without_duplication() -> None:
+    rollout_metrics, optimizer_metrics = _split_loss_metrics_by_step_axis(
+        {
+            "advantage/mean": 0.0,
+            "advantage/std": 1.0,
+            "loss/total": 2.0,
+            "policy/mode_ratio_mean": 1.1,
+        }
+    )
+
+    assert rollout_metrics == {"advantage/mean": 0.0, "advantage/std": 1.0}
+    assert optimizer_metrics == {
+        "loss/total": 2.0,
+        "policy/mode_ratio_mean": 1.1,
+    }
 
 
 @pytest.mark.parametrize("group_size", [3, 4, 5])
@@ -280,9 +429,9 @@ def test_advantage_vector_summary_is_sparse_and_preserves_tensor_values(
     assert not _write_advantage_vector_summary(
         writer,
         advantages,
-        optimizer_step=99,
-        target_steps=350,
-        interval_steps=100,
+        rollout_group=99,
+        target_rollout_groups=350,
+        interval_rollouts=100,
         group_size=group_size,
     )
     assert writer.calls == []
@@ -290,9 +439,9 @@ def test_advantage_vector_summary_is_sparse_and_preserves_tensor_values(
     assert _write_advantage_vector_summary(
         writer,
         advantages,
-        optimizer_step=100,
-        target_steps=350,
-        interval_steps=100,
+        rollout_group=100,
+        target_rollout_groups=350,
+        interval_rollouts=100,
         group_size=group_size,
     )
     assert len(writer.calls) == 1
@@ -308,12 +457,41 @@ def test_advantage_vector_summary_is_sparse_and_preserves_tensor_values(
     assert _write_advantage_vector_summary(
         writer,
         advantages,
-        optimizer_step=350,
-        target_steps=350,
-        interval_steps=100,
+        rollout_group=350,
+        target_rollout_groups=350,
+        interval_rollouts=100,
         group_size=group_size,
     )
     assert [call[2] for call in writer.calls] == [100, 350]
+
+
+def test_scheduled_uninformative_rollout_writes_diagnostic_advantage() -> None:
+    class RecordingWriter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, torch.Tensor, int]] = []
+
+        def add_tensor(
+            self, tag: str, tensor: torch.Tensor, step: int
+        ) -> None:
+            self.calls.append((tag, tensor.clone(), step))
+
+    writer = RecordingWriter()
+    rewards = torch.full((1, 24), -1.0, dtype=torch.float32)
+    advantages = normalize_signed_advantages(rewards, group_size=24)
+
+    assert _write_advantage_vector_summary(
+        writer,  # type: ignore[arg-type]
+        advantages,
+        rollout_group=20,
+        target_rollout_groups=100,
+        interval_rollouts=20,
+        group_size=24,
+    )
+    assert len(writer.calls) == 1
+    tag, persisted, step = writer.calls[0]
+    assert tag == "advantage/vector"
+    assert step == 20
+    torch.testing.assert_close(persisted, torch.zeros_like(persisted))
 
 
 @pytest.mark.parametrize(
@@ -341,10 +519,104 @@ def test_advantage_vector_summary_rejects_invalid_tensor_contract(
         _write_advantage_vector_summary(
             FailingWriter(),
             invalid_advantages,
-            optimizer_step=100,
-            target_steps=350,
-            interval_steps=100,
+            rollout_group=100,
+            target_rollout_groups=350,
+            interval_rollouts=100,
             group_size=4,
+        )
+
+
+def test_sampler_state_round_trip_preserves_counters_and_generator_sequence() -> None:
+    generator = torch.Generator().manual_seed(17)
+    torch.randn((5,), generator=generator)
+    state = _sampler_state(
+        sampled_rollouts=3,
+        uninformative_rollouts=1,
+        bucket_sample_counts=[2, 1],
+        bucket_optimizer_step_counts=[4, 4],
+        next_bucket_index=1,
+        generator_state=generator.get_state(),
+        last_validated_rollout=2,
+        update_epochs=4,
+        optimizer_step=8,
+    )
+
+    restored = _validate_sampler_state(
+        state,
+        bucket_count=2,
+        update_epochs=4,
+        optimizer_step=8,
+    )
+    resumed_generator = torch.Generator()
+    resumed_generator.set_state(restored["generator_state"])
+
+    assert restored["sampled_rollouts"] == 3
+    assert restored["uninformative_rollouts"] == 1
+    assert restored["next_bucket_index"] == 1
+    assert restored["last_validated_rollout"] == 2
+    assert restored["bucket_sample_counts"] == [2, 1]
+    assert restored["bucket_optimizer_step_counts"] == [4, 4]
+    torch.testing.assert_close(
+        torch.randn((8,), generator=resumed_generator),
+        torch.randn((8,), generator=generator),
+    )
+
+
+def test_exhausted_all_uninformative_budget_is_not_a_successful_run() -> None:
+    _reject_exhausted_uninformative_budget(
+        sampled_rollouts=3,
+        target_rollout_groups=4,
+        optimizer_step=0,
+        run_start_optimizer_step=0,
+    )
+    _reject_exhausted_uninformative_budget(
+        sampled_rollouts=4,
+        target_rollout_groups=4,
+        optimizer_step=4,
+        run_start_optimizer_step=0,
+    )
+    with pytest.raises(OnlineGRPOError, match="every fresh group was uninformative"):
+        _reject_exhausted_uninformative_budget(
+            sampled_rollouts=4,
+            target_rollout_groups=4,
+            optimizer_step=8,
+            run_start_optimizer_step=8,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("next_bucket_index", 0, "bucket cursor"),
+        ("bucket_sample_counts", [1, 1], "bucket samples"),
+        ("bucket_optimizer_step_counts", [4, 0], "bucket updates"),
+        ("uninformative_rollouts", 2, "rollout and optimizer counters"),
+        ("generator_state", torch.zeros(2), "generator_state"),
+    ],
+)
+def test_sampler_state_rejects_counter_and_generator_drift(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    generator = torch.Generator().manual_seed(17)
+    state: dict[str, object] = {
+        "sampled_rollouts": 3,
+        "uninformative_rollouts": 1,
+        "bucket_sample_counts": [2, 1],
+        "bucket_optimizer_step_counts": [4, 4],
+        "next_bucket_index": 1,
+        "generator_state": generator.get_state(),
+        "last_validated_rollout": 2,
+    }
+    state[field] = value
+
+    with pytest.raises(OnlineGRPOError, match=message):
+        _validate_sampler_state(
+            state,
+            bucket_count=2,
+            update_epochs=4,
+            optimizer_step=8,
         )
 
 
@@ -486,6 +758,19 @@ def test_resume_inherits_verified_historical_raw_best(tmp_path: Path) -> None:
         _resume_best_checkpoint_anchor(
             tmp_path / "last.pt", mismatched_group_size
         )
+    mismatched_policy = {
+        **last_payload,
+        "policy_update_contract": joint_grpo_optimizer_contract(
+            JointGRPOPolicyUpdateConfig(update_epochs=2)
+        ),
+        "policy_update_contract_sha256": (
+            joint_grpo_optimizer_contract_sha256(
+                JointGRPOPolicyUpdateConfig(update_epochs=2)
+            )
+        ),
+    }
+    with pytest.raises(OnlineGRPOError, match="contract binding mismatch"):
+        _resume_best_checkpoint_anchor(tmp_path / "last.pt", mismatched_policy)
     last_payload["best_checkpoint_sha256"] = "0" * 64
     with pytest.raises(OnlineGRPOError, match="SHA256 mismatch"):
         _resume_best_checkpoint_anchor(tmp_path / "last.pt", last_payload)
@@ -503,6 +788,9 @@ def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
         reward_config=JointRewardConfig(),
         scenario_contract_sha=primary_scenario_contract()["sha256"],
         scenario_seeds=(17, 23),
+        policy_update=JointGRPOPolicyUpdateConfig(),
+        bucket_count=10,
+        optimizer_step=4,
     )
     payload["reward_input_domain"] = "tau_cmd"
     with pytest.raises(OnlineGRPOError, match="reward_input_domain mismatch"):
@@ -512,6 +800,45 @@ def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
             reward_config=JointRewardConfig(),
             scenario_contract_sha=primary_scenario_contract()["sha256"],
             scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            bucket_count=10,
+            optimizer_step=4,
+        )
+    legacy_policy = _binding()
+    legacy_policy.pop("policy_update_contract")
+    legacy_policy.pop("policy_update_contract_sha256")
+    with pytest.raises(OnlineGRPOError, match="policy_update_contract"):
+        _validate_online_checkpoint_metadata(
+            legacy_policy,
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            bucket_count=10,
+            optimizer_step=4,
+        )
+    with pytest.raises(OnlineGRPOError, match="policy_update_contract"):
+        _validate_online_checkpoint_metadata(
+            _binding(),
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
+            bucket_count=10,
+            optimizer_step=4,
+        )
+    with pytest.raises(OnlineGRPOError, match="policy_update_contract"):
+        _validate_online_checkpoint_metadata(
+            _binding(),
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(clip_epsilon=0.1),
+            bucket_count=10,
+            optimizer_step=4,
         )
     payload = {**_binding(), "calibration_report_sha256": "b" * 64}
     with pytest.raises(OnlineGRPOError, match="legacy calibration semantics"):
@@ -521,6 +848,9 @@ def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
             reward_config=JointRewardConfig(),
             scenario_contract_sha=primary_scenario_contract()["sha256"],
             scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            bucket_count=10,
+            optimizer_step=4,
         )
 
 
@@ -690,7 +1020,7 @@ def test_pretrain_raw_baseline_runs_once_before_resume(
             run_mode="smoke",
             source_checkpoint=tmp_path / "stage1.pt",
             output_root=tmp_path / "output",
-            max_optimizer_steps=1,
+            max_rollout_groups=1,
         )
     assert validation_planners == [source_planner]
 
