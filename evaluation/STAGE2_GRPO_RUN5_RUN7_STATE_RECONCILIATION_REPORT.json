@@ -1,0 +1,78 @@
+{
+  "format": "stage2_grpo_run5_run7_state_reconciliation_report_v1",
+  "created_at": "2026-08-30T11:39:59+08:00",
+  "repository": {
+    "branch": "BEV",
+    "git_commit_at_reconciliation": "3536481c130d1ae4c4c3cc4584cdb7ecf8a81e3f",
+    "preserved_unrelated_worktree_change": "configs/train/bev_joint_grpo.yaml"
+  },
+  "stale_state": {
+    "previous_next_default_run": "run_5",
+    "observed_completed_runs_missing_from_state": [
+      "run_5",
+      "run_6",
+      "run_7"
+    ]
+  },
+  "reconciled_runs": [
+    {
+      "run": "run_5",
+      "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_5",
+      "group_size": 8,
+      "optimizer_steps": 5000,
+      "environment_steps": 77500,
+      "checkpoint_round_trip": true,
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false,
+      "validation_event_count_per_tag": 50,
+      "validation_optimizer_steps": {
+        "first": 100,
+        "last": 5000,
+        "interval": 100
+      },
+      "validation_reward_gain_identity_max_abs_error": 4.76837158203125e-07
+    },
+    {
+      "run": "run_6",
+      "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_6",
+      "group_size": 16,
+      "optimizer_steps": 5000,
+      "environment_steps": 77500,
+      "checkpoint_round_trip": true,
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false,
+      "validation_event_count_per_tag": 50,
+      "validation_optimizer_steps": {
+        "first": 100,
+        "last": 5000,
+        "interval": 100
+      },
+      "validation_reward_gain_identity_max_abs_error": 2.384185791015625e-07
+    },
+    {
+      "run": "run_7",
+      "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_7",
+      "group_size": 24,
+      "optimizer_steps": 5000,
+      "environment_steps": 77500,
+      "checkpoint_round_trip": true,
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false,
+      "validation_event_count_per_tag": 50,
+      "validation_optimizer_steps": {
+        "first": 100,
+        "last": 5000,
+        "interval": 100
+      },
+      "validation_reward_gain_identity_max_abs_error": 2.384185791015625e-07
+    }
+  ],
+  "resolution": {
+    "next_default_run": "run_8",
+    "active_hard_gate": "strict_stage1_v2_run3_qualification",
+    "formal_qualification_changed": false,
+    "training_artifacts_modified": false,
+    "standalone_run_3_modified": false,
+    "run_4_modified": false
+  }
+}

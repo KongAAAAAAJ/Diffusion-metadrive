@@ -1,11 +1,11 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-29T23:04:16+08:00",
+  "updated_at": "2026-08-30T11:46:52+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "fb7558c6e7de36a516acb10ac3cc015f5f125a1d",
-    "worktree_clean_before_this_update": true,
+    "git_commit": "3536481c130d1ae4c4c3cc4584cdb7ecf8a81e3f",
+    "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": false,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
@@ -71,18 +71,20 @@
     "uncommitted_reward_boxplot_grouping_present": false,
     "uncommitted_stage2_grpo_advantage_vector_heatmap_present": false,
     "uncommitted_stage2_grpo_plot_suite_present": false,
-    "uncommitted_stage2_grpo_configurable_group_size_present": true
+    "uncommitted_stage2_grpo_configurable_group_size_present": true,
+    "uncommitted_stage2_grpo_run5_run7_state_reconciliation_present": true,
+    "uncommitted_stage2_grpo_validation_reward_plot_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "stage2-grpo-configurable-group-size-20260829",
-    "status": "grpo_group_size_configurable_g3_cuda_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
+    "round": "stage2-grpo-validation-reward-plot-20260830",
+    "status": "validation_reward_plot_implemented_run5_run7_backfilled_smoke_passed_nonformal",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "grpo_group_size_configurable_g3_cuda_smoke_passed_nonformal_run3_qualification_entry_reimplementation_required",
+      "status": "validation_reward_plot_implemented_run5_run7_backfilled_smoke_passed_nonformal",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -794,6 +796,9 @@
     "stage2_grpo_configurable_group_size_authorized": true,
     "stage2_grpo_configurable_group_size_authorized_on": "2026-08-29",
     "stage2_grpo_configurable_group_size_scope": "Expose online.group_size in the GRPO YAML, propagate it through online trainer construction, sampling, reward and advantage shapes, TensorBoard vectors, resume binding and reward-evaluator checkpoint restoration; retain default G=4, unchanged reward/loss/checkpoint schema/launcher semantics, diagnostic-only evidence, and the active Stage1 qualification gate.",
+    "stage2_grpo_validation_reward_plot_authorized": true,
+    "stage2_grpo_validation_reward_plot_authorized_on": "2026-08-30",
+    "stage2_grpo_validation_reward_plot_scope": "Add an independent validation reward/gain curve from the three persisted validation TensorBoard tags; keep reward_curve training-only, preserve raw values and strict step alignment, update future v3 training reports, backfill only derived plots and report training_plots metadata for diagnostic run_5 through run_7, allocate run_8 next, and leave events, checkpoints, metrics, formal eligibility, standalone run_3, run_4, and the active Stage1 qualification gate unchanged.",
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. The completed Stage1-A run_1 remains an at-risk diagnostic source. Historical run_3 was user-terminated at metrics step 4532 and remains immutable. On 2026-08-18 the unchanged stage2_joint_reward_v2 formula was rebound by stage2_grpo_open_application_v1 to raw tau_d reward, raw candidate selection and raw best-checkpoint ranking; calibration/preflight were removed, tracking expansion was fixed to zero, and an isolated one-step smoke passed. Future GRPO-Open artifacts are stored beneath their exact source Stage1 run; no formal eligibility was granted."
   },
   "source_of_truth": {
@@ -861,6 +866,16 @@
       "path": "evaluation/STAGE2_GRPO_CONFIGURABLE_GROUP_SIZE_IMPLEMENTATION_REPORT.json",
       "sha256": "5493355a5de0ca208baf25efc19ec0a723c23267bd1721a7ed7d5bce0794b914",
       "role": "Records the online.group_size configuration contract, dynamic G sampling/reward/advantage propagation, resume and evaluator checkpoint-config binding, 115 passing focused tests, an isolated one-step G=3 CUDA smoke with exact [1,3] TensorBoard advantage data and four plots, and the unchanged diagnostic/formal boundary."
+    },
+    "stage2_grpo_run5_run7_state_reconciliation_report": {
+      "path": "evaluation/STAGE2_GRPO_RUN5_RUN7_STATE_RECONCILIATION_REPORT.json",
+      "sha256": "fdf22f7ca53f195e40ef2fef613fa0231d93be0842abae6b5b1742421b49d81b",
+      "role": "Records the completed diagnostic-only G=8, G=16, and G=24 run_5 through run_7 artifacts, their 5000 optimizer steps and aligned 50-event validation series, run_8 as the next allocation, the preserved user config edit, and the unchanged formal eligibility and strict Stage1 qualification hard gate."
+    },
+    "stage2_grpo_validation_reward_plot_implementation_report": {
+      "path": "evaluation/STAGE2_GRPO_VALIDATION_REWARD_PLOT_IMPLEMENTATION_REPORT.json",
+      "sha256": "b672e25b896d17e4ea348315c7fd007837e851d5f25f4632ef61e9263ee2fb7e",
+      "role": "Records the independent raw validation reward, pretrain baseline and reward-gain curve; 67 passing focused tests; the passing one-step G=24 CUDA auto-generation and checkpoint-round-trip smoke; five decoded plots and visually reviewed validation curves for backfilled run_5 through run_7; protected events, checkpoints and metrics remaining unchanged; and the unchanged nonformal qualification boundary."
     },
     "bev_rule_conditioned_v2_formal49870_curated_acceptance_report": {
       "path": "evaluation/BEV_RULE_CONDITIONED_V2_FORMAL49870_CURATED_ACCEPTANCE_REPORT.json",
@@ -1860,7 +1875,7 @@
       "run_report_sha256": "67b403be49c16d1e2019089f44f2f66c594ee60e8e830fe8ec60fc54e739f1be",
       "training_log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/logs/grpo-open-training.log",
       "storage_layout": "<source_stage1_run_root>/grpo_open/run_N",
-      "next_default_run": "run_5",
+      "next_default_run": "run_8",
       "optimizer_steps": 5000,
       "best_checkpoint_optimizer_step": 100,
       "environment_steps": 77500,
@@ -1906,14 +1921,18 @@
       "grpo_plot_outputs": [
         "<run_N>/plots/advantage_vector_heatmap.png",
         "<run_N>/plots/reward_curve.png",
+        "<run_N>/plots/validation_reward_curve.png",
         "<run_N>/plots/grpo_loss_curve.png",
         "<run_N>/plots/kl_loss_curve.png"
       ],
       "grpo_plot_reward_tags": [
         "raw_proxy_reward_mean",
-        "raw_proxy_reward_max",
+        "raw_proxy_reward_max"
+      ],
+      "grpo_plot_validation_reward_tags": [
         "validation/raw_proxy_reward_mean",
-        "validation/pretrain_reward"
+        "validation/pretrain_reward",
+        "validation/reward_gain"
       ],
       "grpo_plot_reward_domain": "raw_tau_d",
       "grpo_plot_loss_tags": [
@@ -1937,6 +1956,19 @@
       "grpo_plot_smoke_output_count": 4,
       "grpo_plot_smoke_checkpoint_round_trip": true,
       "grpo_plot_smoke_formal_eligible": false,
+      "grpo_validation_reward_plot_output": "<run_N>/plots/validation_reward_curve.png",
+      "grpo_validation_reward_plot_title": "GRPO validation reward and gain curves",
+      "grpo_validation_reward_plot_y_axis": "Raw tau_d reward / gain",
+      "grpo_validation_reward_plot_raw_unsmoothed": true,
+      "grpo_validation_reward_plot_implementation_report": "evaluation/STAGE2_GRPO_VALIDATION_REWARD_PLOT_IMPLEMENTATION_REPORT.json",
+      "grpo_validation_reward_plot_implementation_report_sha256": "b672e25b896d17e4ea348315c7fd007837e851d5f25f4632ef61e9263ee2fb7e",
+      "grpo_validation_reward_plot_smoke_root": "/tmp/grpo_validation_reward_auto_smoke_20260830_v1/run_1",
+      "grpo_validation_reward_plot_smoke_exit_code": 0,
+      "grpo_validation_reward_plot_smoke_optimizer_steps": 1,
+      "grpo_validation_reward_plot_smoke_group_size": 24,
+      "grpo_validation_reward_plot_smoke_output_count": 5,
+      "grpo_validation_reward_plot_smoke_checkpoint_round_trip": true,
+      "grpo_validation_reward_plot_smoke_formal_eligible": false,
       "reward_domain": "tau_d",
       "application_contract": "stage2_grpo_open_application_v1",
       "training_launcher": "scripts/run_bev_joint_grpo.sh",
@@ -2029,6 +2061,73 @@
       },
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false
+    },
+    "grpo_open_v2_group_size_diagnostics": {
+      "available": true,
+      "eligible": false,
+      "diagnostic_only": true,
+      "source": "stage1_a_v2_run3_unqualified",
+      "storage_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
+      "next_default_run": "run_8",
+      "runs": {
+        "run_5": {
+          "group_size": 8,
+          "optimizer_steps": 5000,
+          "environment_steps": 77500,
+          "checkpoint_round_trip": true,
+          "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_5",
+          "validation_event_count_per_tag": 50,
+          "validation_optimizer_step_first": 100,
+          "validation_optimizer_step_last": 5000,
+          "validation_optimizer_step_interval": 100,
+          "validation_reward_gain_identity_max_abs_error": 4.76837158203125e-07,
+          "validation_reward_plot_backfilled": true,
+          "validation_reward_plot": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_5/plots/validation_reward_curve.png",
+          "training_plot_report_metadata_updated": true
+        },
+        "run_6": {
+          "group_size": 16,
+          "optimizer_steps": 5000,
+          "environment_steps": 77500,
+          "checkpoint_round_trip": true,
+          "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_6",
+          "validation_event_count_per_tag": 50,
+          "validation_optimizer_step_first": 100,
+          "validation_optimizer_step_last": 5000,
+          "validation_optimizer_step_interval": 100,
+          "validation_reward_gain_identity_max_abs_error": 2.384185791015625e-07,
+          "validation_reward_plot_backfilled": true,
+          "validation_reward_plot": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_6/plots/validation_reward_curve.png",
+          "training_plot_report_metadata_updated": true
+        },
+        "run_7": {
+          "group_size": 24,
+          "optimizer_steps": 5000,
+          "environment_steps": 77500,
+          "checkpoint_round_trip": true,
+          "run_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_7",
+          "validation_event_count_per_tag": 50,
+          "validation_optimizer_step_first": 100,
+          "validation_optimizer_step_last": 5000,
+          "validation_optimizer_step_interval": 100,
+          "validation_reward_gain_identity_max_abs_error": 2.384185791015625e-07,
+          "validation_reward_plot_backfilled": true,
+          "validation_reward_plot": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_7/plots/validation_reward_curve.png",
+          "training_plot_report_metadata_updated": true
+        }
+      },
+      "validation_tags": [
+        "validation/raw_proxy_reward_mean",
+        "validation/pretrain_reward",
+        "validation/reward_gain"
+      ],
+      "formal_evaluation_allowed": false,
+      "paper_evidence_allowed": false,
+      "state_reconciliation_report": "evaluation/STAGE2_GRPO_RUN5_RUN7_STATE_RECONCILIATION_REPORT.json",
+      "validation_reward_plot_implementation_report": "evaluation/STAGE2_GRPO_VALIDATION_REWARD_PLOT_IMPLEMENTATION_REPORT.json",
+      "protected_tensorboard_checkpoint_and_metrics_artifacts_unchanged": true,
+      "standalone_run3_modified": false,
+      "run4_modified": false
     },
     "grpo_open_at_risk": {
       "available": true,
@@ -2147,7 +2246,7 @@
     "Treat the observed S5 background actor counts as descriptive evidence rather than an acceptance hard gate; no explicit background-quota waiver continuation switch exists in the current collector.",
     "Use tools/visualize_dataset_episode.py for read-only scenario/episode listing and world-topdown MP4 rendering; keep outputs outside dataset roots.",
     "Preserve run_3 as the user-terminated incomplete diagnostic artifact at metrics step 4532 and checkpoint step 4500; do not backfill or otherwise modify its TensorBoard event or checkpoints.",
-    "For any future bounded diagnostic GRPO-Open process, use the selected Stage1 source checkpoint and its colocated grpo_open root; with the current Stage1 run_3 artifacts, the next allocation is run_5. Select G through online.group_size (default 4, integer at least 2); higher G increases sampling and training memory. New runs record exact [1,G] advantage/vector TensorBoard tensors every 100 optimizer steps and at the final optimizer step, then use evaluation.plot_grpo to generate the current-run-only raw-slot heatmap, raw-tau_d reward curve, GRPO objective curve, and unweighted reference-KL curve automatically after checkpoint round-trip. Do not backfill run_4, run calibration/preflight, resume the preserved user-terminated historical standalone GRPO run_3, or read its historical calibration report; retain raw validation/pretrain_reward and validation/reward_gain plus non-gating Simulator diagnostics.",
+    "For any future bounded diagnostic GRPO-Open process, use the selected Stage1 source checkpoint and its colocated grpo_open root; completed run_5 through run_7 remain diagnostic-only and the next allocation is run_8. Select G through online.group_size (default 4, integer at least 2); higher G increases sampling and training memory. New runs record exact [1,G] advantage/vector TensorBoard tensors every 100 optimizer steps and at the final optimizer step, then automatically generate five current-run-only plots after checkpoint round-trip: advantage heatmap, training reward, validation reward/gain, GRPO objective, and unweighted reference KL. The derived plots and v3 report metadata are already backfilled for run_5 through run_7. Do not backfill run_4, run calibration/preflight, resume the preserved user-terminated historical standalone GRPO run_3, or read its historical calibration report; retain raw validation/pretrain_reward and validation/reward_gain plus non-gating Simulator diagnostics.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",

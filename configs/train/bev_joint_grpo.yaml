@@ -1,7 +1,7 @@
 online:
   device: cuda
   seed: 17
-  group_size: 16
+  group_size: 24  # 8 16 24
   total_optimizer_steps: 100
   resume_checkpoint: null
   environment_steps_per_episode: 100

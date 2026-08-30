@@ -1,0 +1,139 @@
+{
+  "format": "stage2_grpo_validation_reward_plot_implementation_report_v1",
+  "created_at": "2026-08-30T11:46:52+08:00",
+  "repository": {
+    "branch": "BEV",
+    "git_commit_at_implementation": "3536481c130d1ae4c4c3cc4584cdb7ecf8a81e3f",
+    "preserved_unrelated_worktree_change": "configs/train/bev_joint_grpo.yaml",
+    "git_diff_check_passed": true
+  },
+  "implementation": {
+    "plot_module": "evaluation.plot_grpo",
+    "training_reward_tags": [
+      "raw_proxy_reward_mean",
+      "raw_proxy_reward_max"
+    ],
+    "validation_reward_tags": [
+      "validation/raw_proxy_reward_mean",
+      "validation/pretrain_reward",
+      "validation/reward_gain"
+    ],
+    "validation_output_key": "validation_reward_curve",
+    "validation_output_filename": "validation_reward_curve.png",
+    "validation_title": "GRPO validation reward and gain curves",
+    "validation_y_axis": "Raw tau_d reward / gain",
+    "raw_values_without_smoothing": true,
+    "missing_value_fill": false,
+    "validation_steps_must_be_finite_unique_and_fully_aligned": true,
+    "future_plot_count": 5,
+    "report_format": "bev_joint_grpo_online_report_v3",
+    "report_format_changed": false
+  },
+  "focused_regression": {
+    "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_plot_grpo.py tests/test_bev_joint_grpo_online.py -q",
+    "passed": 67,
+    "failed": 0,
+    "warnings": 15,
+    "validation_error_cases": [
+      "missing tag",
+      "duplicate optimizer step",
+      "non-finite value",
+      "misaligned optimizer steps"
+    ]
+  },
+  "real_event_cli_verification": {
+    "source_tensorboard_dir": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_7/tb",
+    "output_dir": "/tmp/grpo_validation_reward_plot_run7_20260830T1145",
+    "exit_code": 0,
+    "output_count": 5,
+    "validation_curve_visual_check_passed": true
+  },
+  "automatic_generation_smoke": {
+    "command": "XDG_CACHE_HOME=/tmp/grpo_validation_reward_xdg MPLCONFIGDIR=/tmp/grpo_validation_reward_mpl PYTHONUNBUFFERED=1 ARTIFACT_ROOT=/tmp/grpo_validation_reward_auto_smoke_20260830_v1 OUTPUT_ROOT=/tmp/grpo_validation_reward_auto_smoke_20260830_v1 LOG_ROOT=/tmp/grpo_validation_reward_auto_smoke_20260830_v1/logs MAX_OPTIMIZER_STEPS=1 bash scripts/run_bev_joint_grpo.sh",
+    "artifact_root": "/tmp/grpo_validation_reward_auto_smoke_20260830_v1/run_1",
+    "sandbox_attempt_exit_code": 1,
+    "sandbox_attempt_failure": "CUDA was requested but is unavailable inside the filesystem sandbox",
+    "gpu_retry_exit_code": 0,
+    "group_size": 24,
+    "optimizer_steps": 1,
+    "environment_steps": 33,
+    "checkpoint_round_trip": true,
+    "output_count": 5,
+    "report_format": "bev_joint_grpo_online_report_v3",
+    "report_training_tags_split": true,
+    "diagnostic_only": true,
+    "eligible_for_formal_training": false
+  },
+  "backfill": {
+    "runs": [
+      {
+        "run": "run_5",
+        "group_size": 8,
+        "validation_event_count_per_tag": 50,
+        "validation_optimizer_step_first": 100,
+        "validation_optimizer_step_last": 5000,
+        "validation_optimizer_step_interval": 100,
+        "validation_reward_gain_identity_max_abs_error": 4.76837158203125e-07,
+        "png_count": 5,
+        "validation_png_size": [
+          1820,
+          1017
+        ],
+        "validation_png_decoded": true,
+        "validation_png_visual_check_passed": true,
+        "report_training_plots_updated": true
+      },
+      {
+        "run": "run_6",
+        "group_size": 16,
+        "validation_event_count_per_tag": 50,
+        "validation_optimizer_step_first": 100,
+        "validation_optimizer_step_last": 5000,
+        "validation_optimizer_step_interval": 100,
+        "validation_reward_gain_identity_max_abs_error": 2.384185791015625e-07,
+        "png_count": 5,
+        "validation_png_size": [
+          1820,
+          1017
+        ],
+        "validation_png_decoded": true,
+        "validation_png_visual_check_passed": true,
+        "report_training_plots_updated": true
+      },
+      {
+        "run": "run_7",
+        "group_size": 24,
+        "validation_event_count_per_tag": 50,
+        "validation_optimizer_step_first": 100,
+        "validation_optimizer_step_last": 5000,
+        "validation_optimizer_step_interval": 100,
+        "validation_reward_gain_identity_max_abs_error": 2.384185791015625e-07,
+        "png_count": 5,
+        "validation_png_size": [
+          1820,
+          1017
+        ],
+        "validation_png_decoded": true,
+        "validation_png_visual_check_passed": true,
+        "report_training_plots_updated": true
+      }
+    ],
+    "modified_artifact_classes": [
+      "derived PNG plots",
+      "report.json training_plots metadata"
+    ],
+    "protected_artifact_count": 12,
+    "protected_artifact_size_and_mtime_snapshot_unchanged": true,
+    "tensorboard_events_modified": false,
+    "checkpoints_modified": false,
+    "metrics_jsonl_modified": false,
+    "standalone_run_3_modified": false,
+    "run_4_modified": false
+  },
+  "project_status": {
+    "next_default_run": "run_8",
+    "active_hard_gate": "strict_stage1_v2_run3_qualification",
+    "formal_qualification_changed": false,
+    "paper_evidence_allowed": false
+  }
+}

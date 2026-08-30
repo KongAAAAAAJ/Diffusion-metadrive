@@ -24,8 +24,11 @@ ADVANTAGE_VECTOR_TAG = "advantage/vector"
 REWARD_CURVE_TAGS = (
     "raw_proxy_reward_mean",
     "raw_proxy_reward_max",
+)
+VALIDATION_REWARD_CURVE_TAGS = (
     "validation/raw_proxy_reward_mean",
     "validation/pretrain_reward",
+    "validation/reward_gain",
 )
 GRPO_LOSS_CURVE_TAGS = (
     "loss/total",
@@ -39,8 +42,8 @@ KL_LOSS_CURVE_TAGS = (
 )
 
 _SCALAR_STEP_ALIGNMENT_GROUPS = (
-    REWARD_CURVE_TAGS[:2],
-    REWARD_CURVE_TAGS[2:],
+    REWARD_CURVE_TAGS,
+    VALIDATION_REWARD_CURVE_TAGS,
     GRPO_LOSS_CURVE_TAGS,
     KL_LOSS_CURVE_TAGS,
 )
@@ -51,6 +54,12 @@ _CURVE_SPECS = {
         REWARD_CURVE_TAGS,
         "GRPO raw reward curves",
         "Raw tau_d reward",
+    ),
+    "validation_reward_curve": (
+        "validation_reward_curve.png",
+        VALIDATION_REWARD_CURVE_TAGS,
+        "GRPO validation reward and gain curves",
+        "Raw tau_d reward / gain",
     ),
     "grpo_loss_curve": (
         "grpo_loss_curve.png",
@@ -313,7 +322,7 @@ def generate_grpo_plots(
     tb_dir: Path,
     output_dir: Path,
 ) -> Mapping[str, Path]:
-    """Generate the fixed GRPO advantage, reward, loss, and KL plots."""
+    """Generate the fixed GRPO advantage, reward, validation, loss, and KL plots."""
 
     accumulator = _load_event_accumulator(tb_dir)
     steps, advantages = _load_advantage_vectors_from_accumulator(

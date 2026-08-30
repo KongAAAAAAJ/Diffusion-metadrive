@@ -19,6 +19,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from evaluation.plot_grpo import (
     ADVANTAGE_VECTOR_TAG,
+    REWARD_CURVE_TAGS,
+    VALIDATION_REWARD_CURVE_TAGS,
     generate_grpo_plots,
 )
 from evaluation.joint_simulator_branch import (
@@ -1724,12 +1726,13 @@ def run_joint_grpo_training(
         },
         "training_plots": {
             "reward_curve": str(plot_paths["reward_curve"].resolve()),
-            "reward_tags": [
-                "raw_proxy_reward_mean",
-                "raw_proxy_reward_max",
-                "validation/raw_proxy_reward_mean",
-                "validation/pretrain_reward",
-            ],
+            "reward_tags": list(REWARD_CURVE_TAGS),
+            "validation_reward_curve": str(
+                plot_paths["validation_reward_curve"].resolve()
+            ),
+            "validation_reward_tags": list(
+                VALIDATION_REWARD_CURVE_TAGS
+            ),
             "reward_domain": "raw_tau_d",
             "grpo_loss_curve": str(
                 plot_paths["grpo_loss_curve"].resolve()

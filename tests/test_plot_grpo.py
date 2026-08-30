@@ -14,6 +14,7 @@ from evaluation.plot_grpo import (
     GRPO_LOSS_CURVE_TAGS,
     KL_LOSS_CURVE_TAGS,
     REWARD_CURVE_TAGS,
+    VALIDATION_REWARD_CURVE_TAGS,
     AdvantageHeatmapError,
     generate_advantage_heatmap,
     generate_grpo_plots,
@@ -214,7 +215,12 @@ def _write_complete_grpo_events(tb_dir: Path) -> dict[str, tuple[np.ndarray, np.
     validation_steps = np.asarray([5, 10, 15], dtype=np.int64)
     scalar_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for tag_index, tag in enumerate(
-        (*REWARD_CURVE_TAGS, *GRPO_LOSS_CURVE_TAGS, *KL_LOSS_CURVE_TAGS)
+        (
+            *REWARD_CURVE_TAGS,
+            *VALIDATION_REWARD_CURVE_TAGS,
+            *GRPO_LOSS_CURVE_TAGS,
+            *KL_LOSS_CURVE_TAGS,
+        )
     ):
         steps = (
             validation_steps
@@ -244,7 +250,7 @@ def _write_complete_grpo_events(tb_dir: Path) -> dict[str, tuple[np.ndarray, np.
     return scalar_series
 
 
-def test_generate_grpo_plots_round_trips_tags_steps_and_writes_four_pngs(
+def test_generate_grpo_plots_round_trips_tags_steps_and_writes_five_pngs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tb_dir = tmp_path / "tb"
@@ -293,12 +299,14 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_four_pngs(
     assert set(outputs) == {
         "advantage_heatmap",
         "reward_curve",
+        "validation_reward_curve",
         "grpo_loss_curve",
         "kl_loss_curve",
     }
     assert {key: path.name for key, path in outputs.items()} == {
         "advantage_heatmap": "advantage_vector_heatmap.png",
         "reward_curve": "reward_curve.png",
+        "validation_reward_curve": "validation_reward_curve.png",
         "grpo_loss_curve": "grpo_loss_curve.png",
         "kl_loss_curve": "kl_loss_curve.png",
     }
@@ -313,7 +321,7 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_four_pngs(
             plot_grpo.event_accumulator.SCALARS: 0,
         }
     ]
-    assert len(plot_calls) == 10
+    assert len(plot_calls) == 11
     calls_by_tag = {tag: (axis, steps, values) for axis, tag, steps, values in plot_calls}
     assert set(calls_by_tag) == set(expected_series)
     for tag, (expected_steps, expected_values) in expected_series.items():
@@ -323,10 +331,26 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_four_pngs(
         assert axis.get_xlabel() == "Optimizer step"
 
     reward_axes = {calls_by_tag[tag][0] for tag in REWARD_CURVE_TAGS}
+    validation_reward_axes = {
+        calls_by_tag[tag][0] for tag in VALIDATION_REWARD_CURVE_TAGS
+    }
     grpo_axes = {calls_by_tag[tag][0] for tag in GRPO_LOSS_CURVE_TAGS}
     kl_axes = {calls_by_tag[tag][0] for tag in KL_LOSS_CURVE_TAGS}
-    assert len(reward_axes) == len(grpo_axes) == len(kl_axes) == 1
+    assert (
+        len(reward_axes)
+        == len(validation_reward_axes)
+        == len(grpo_axes)
+        == len(kl_axes)
+        == 1
+    )
+    assert reward_axes.isdisjoint(validation_reward_axes)
     assert next(iter(reward_axes)).get_ylabel() == "Raw tau_d reward"
+    validation_reward_axis = next(iter(validation_reward_axes))
+    assert validation_reward_axis.get_ylabel() == "Raw tau_d reward / gain"
+    assert (
+        validation_reward_axis.get_title()
+        == "GRPO validation reward and gain curves"
+    )
     assert next(iter(grpo_axes)).get_ylabel() == "Loss"
     assert next(iter(kl_axes)).get_ylabel() == "Unweighted KL divergence"
 
@@ -339,6 +363,7 @@ def _write_all_scalar_tags(
 ) -> None:
     for tag in (
         *REWARD_CURVE_TAGS,
+        *VALIDATION_REWARD_CURVE_TAGS,
         *GRPO_LOSS_CURVE_TAGS,
         *KL_LOSS_CURVE_TAGS,
     ):
@@ -348,7 +373,9 @@ def _write_all_scalar_tags(
             writer.add_scalar(tag, 0.5, global_step=1)
 
 
-def test_generate_grpo_plots_rejects_missing_scalar_tag(tmp_path: Path) -> None:
+def test_generate_grpo_plots_rejects_missing_validation_scalar_tag(
+    tmp_path: Path,
+) -> None:
     tb_dir = tmp_path / "tb"
     with SummaryWriter(log_dir=str(tb_dir)) as writer:
         writer.add_tensor(
@@ -358,30 +385,20 @@ def test_generate_grpo_plots_rejects_missing_scalar_tag(tmp_path: Path) -> None:
         )
         for tag in (
             *REWARD_CURVE_TAGS,
+            *VALIDATION_REWARD_CURVE_TAGS,
             *GRPO_LOSS_CURVE_TAGS,
-            *KL_LOSS_CURVE_TAGS[:-1],
+            *KL_LOSS_CURVE_TAGS,
         ):
-            writer.add_scalar(tag, 0.25, global_step=1)
+            if tag != "validation/reward_gain":
+                writer.add_scalar(tag, 0.25, global_step=1)
 
     with pytest.raises(AdvantageHeatmapError, match="missing required scalar tags"):
         generate_grpo_plots(tb_dir, tmp_path / "plots")
 
 
-def test_generate_grpo_plots_rejects_duplicate_scalar_step(tmp_path: Path) -> None:
-    tb_dir = tmp_path / "tb"
-    with SummaryWriter(log_dir=str(tb_dir)) as writer:
-        writer.add_tensor(
-            ADVANTAGE_VECTOR_TAG,
-            torch.zeros((1, 4), dtype=torch.float32),
-            global_step=1,
-        )
-        _write_all_scalar_tags(writer, duplicate_tag="loss/total")
-
-    with pytest.raises(AdvantageHeatmapError, match="duplicate step 1"):
-        generate_grpo_plots(tb_dir, tmp_path / "plots")
-
-
-def test_generate_grpo_plots_rejects_non_finite_scalar(tmp_path: Path) -> None:
+def test_generate_grpo_plots_rejects_duplicate_validation_scalar_step(
+    tmp_path: Path,
+) -> None:
     tb_dir = tmp_path / "tb"
     with SummaryWriter(log_dir=str(tb_dir)) as writer:
         writer.add_tensor(
@@ -391,14 +408,33 @@ def test_generate_grpo_plots_rejects_non_finite_scalar(tmp_path: Path) -> None:
         )
         _write_all_scalar_tags(
             writer,
-            non_finite_tag="raw_proxy_reward_mean",
+            duplicate_tag="validation/reward_gain",
+        )
+
+    with pytest.raises(AdvantageHeatmapError, match="duplicate step 1"):
+        generate_grpo_plots(tb_dir, tmp_path / "plots")
+
+
+def test_generate_grpo_plots_rejects_non_finite_validation_scalar(
+    tmp_path: Path,
+) -> None:
+    tb_dir = tmp_path / "tb"
+    with SummaryWriter(log_dir=str(tb_dir)) as writer:
+        writer.add_tensor(
+            ADVANTAGE_VECTOR_TAG,
+            torch.zeros((1, 4), dtype=torch.float32),
+            global_step=1,
+        )
+        _write_all_scalar_tags(
+            writer,
+            non_finite_tag="validation/pretrain_reward",
         )
 
     with pytest.raises(AdvantageHeatmapError, match="must be finite"):
         generate_grpo_plots(tb_dir, tmp_path / "plots")
 
 
-def test_generate_grpo_plots_rejects_misaligned_scalar_steps(
+def test_generate_grpo_plots_rejects_misaligned_validation_scalar_steps(
     tmp_path: Path,
 ) -> None:
     tb_dir = tmp_path / "tb"
@@ -409,7 +445,7 @@ def test_generate_grpo_plots_rejects_misaligned_scalar_steps(
             global_step=1,
         )
         _write_all_scalar_tags(writer)
-        writer.add_scalar("raw_proxy_reward_max", 0.5, global_step=2)
+        writer.add_scalar("validation/reward_gain", 0.5, global_step=2)
 
     with pytest.raises(AdvantageHeatmapError, match="aligned optimizer steps"):
         generate_grpo_plots(tb_dir, tmp_path / "plots")
