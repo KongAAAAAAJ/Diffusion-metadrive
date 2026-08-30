@@ -8,6 +8,8 @@ online:
   resume_checkpoint: null
   environment_steps_per_episode: 200
   rollout_groups_per_bucket_visit: 10
+  rollout_start_offset_max_steps: 200
+  rollout_start_min_remaining_steps: 10
   validation_interval_rollouts: 20
   advantage_vector_log_interval_rollouts: 20
   scenario_seeds: [17, 23]

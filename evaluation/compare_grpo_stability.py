@@ -6,7 +6,7 @@ absolute or relative to the manifest):
 .. code-block:: json
 
    {
-     "format": "stage2_grpo_stability_ab_manifest_v1",
+     "format": "stage2_grpo_stability_ab_manifest_v2",
      "source_stage1_sha256": "<64 lowercase hex characters>",
      "paired_seeds": [17, 23, 42],
      "baseline_update_epochs": 1,
@@ -14,6 +14,10 @@ absolute or relative to the manifest):
      "group_size": 24,
      "total_rollout_groups": 100,
      "validation_interval_rollouts": 20,
+     "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v2",
+     "rollout_groups_per_bucket_visit": 10,
+     "rollout_start_offset_max_steps": 200,
+     "rollout_start_min_remaining_steps": 10,
      "clip_epsilon": 0.2,
      "scenario_seeds": [17, 23],
      "validation_seeds": [31, 47],
@@ -29,7 +33,7 @@ absolute or relative to the manifest):
 
 ``runs`` must contain exactly one baseline and one clipped entry for each of
 the three paired seeds (six entries total). The command validates each run's
-v5 config/report, exact persistent-episode rollout collection contract, the
+v6 config/report, exact randomized-start persistent-episode collection contract, the
 complete frozen ``JointGRPOConfig``, and the ``validation/reward_gain``
 TensorBoard series, then writes ``report.json`` and
 ``validation_reward_gain_ab.png``. Results remain diagnostic-only and do not
@@ -57,10 +61,10 @@ import numpy as np
 from tensorboard.backend.event_processing import event_accumulator
 
 
-MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v1"
-REPORT_FORMAT = "stage2_grpo_stability_ab_report_v1"
-ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v5"
-ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v5"
+MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v2"
+REPORT_FORMAT = "stage2_grpo_stability_ab_report_v2"
+ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v6"
+ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v6"
 VALIDATION_REWARD_GAIN_TAG = "validation/reward_gain"
 PAIRED_SEEDS = (17, 23, 42)
 ARM_UPDATE_EPOCHS = {"baseline": 1, "clipped": 4}
@@ -68,6 +72,8 @@ GROUP_SIZE = 24
 TOTAL_ROLLOUT_GROUPS = 100
 VALIDATION_INTERVAL_ROLLOUTS = 20
 ROLLOUT_GROUPS_PER_BUCKET_VISIT = 10
+ROLLOUT_START_OFFSET_MAX_STEPS = 200
+ROLLOUT_START_MIN_REMAINING_STEPS = 10
 CLIP_EPSILON = 0.2
 SCENARIO_SEEDS = (17, 23)
 VALIDATION_SEEDS = (31, 47)
@@ -78,7 +84,7 @@ SCENARIOS = (
     ("S8_ego_exit_to_ramp", "R6_exit_to_ramp"),
     ("S9_narrow_channel_negotiation", "R8_narrow_channel"),
 )
-ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v1"
+ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v2"
 EXPECTED_GRPO_CONFIG = {
     "group_size": GROUP_SIZE,
     "initial_noise_timestep": 8,
@@ -219,6 +225,48 @@ def _expected_rollout_collection_contract(
         "checkpoint_boundary": "closed_environment_only",
         "active_environment_serialized": False,
         "rule_maker_commitment_scope": "live_environment_episode",
+        "rollout_start_ready_gate": (
+            "history_ready_and_primary_scenario_ready"
+        ),
+        "rollout_start_offset_distribution": "inclusive_uniform_integer",
+        "rollout_start_generator": "shared_training_torch_generator",
+        "rollout_start_offset_max_steps": ROLLOUT_START_OFFSET_MAX_STEPS,
+        "rollout_start_min_remaining_steps": (
+            ROLLOUT_START_MIN_REMAINING_STEPS
+        ),
+        "rollout_start_rng_draws": (
+            "exactly_one_per_feasible_live_training_episode_including_zero_upper_bound"
+        ),
+        "rollout_start_upper_bound": (
+            "min(configured_max,episode_cap_minus_t_ready_minus_min_remaining)"
+        ),
+        "scenario_window_close": {
+            "S5_hard_brake_lead": (
+                "conflict_evidence.formation_recovered_after_hazard"
+            ),
+            "S6_background_merge_in": (
+                "conflict_evidence.formation_recovered_after_merge"
+            ),
+            "S7_ego_merge_from_ramp": (
+                "route_completion.all_agents_entered_mainline_and_"
+                "conflict_evidence.formation_recovered_after_merge"
+            ),
+            "S8_ego_exit_to_ramp": (
+                "route_completion.all_agents_continued_on_exit_ramp_and_"
+                "conflict_evidence.formation_recovered_on_ramp"
+            ),
+            "S9_narrow_channel_negotiation": (
+                "route_completion.all_agents_returned_to_original_lane_and_"
+                "conflict_evidence.formation_recovered_after_return"
+            ),
+        },
+        "late_target_retry": (
+            "same_bucket_same_visit_with_temporary_observed_last_open_upper_bound"
+        ),
+        "partial_visit_policy": (
+            "retain_completed_rollouts_and_updates_then_new_episode_fresh_offset"
+        ),
+        "validation_start": "earliest_ready_without_random_offset",
     }
 
 
@@ -300,6 +348,10 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
             "group_size",
             "total_rollout_groups",
             "validation_interval_rollouts",
+            "rollout_collection_contract_version",
+            "rollout_groups_per_bucket_visit",
+            "rollout_start_offset_max_steps",
+            "rollout_start_min_remaining_steps",
             "clip_epsilon",
             "scenario_seeds",
             "validation_seeds",
@@ -315,6 +367,14 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
         "group_size": GROUP_SIZE,
         "total_rollout_groups": TOTAL_ROLLOUT_GROUPS,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
+        "rollout_collection_contract_version": (
+            ROLLOUT_COLLECTION_CONTRACT_VERSION
+        ),
+        "rollout_groups_per_bucket_visit": ROLLOUT_GROUPS_PER_BUCKET_VISIT,
+        "rollout_start_offset_max_steps": ROLLOUT_START_OFFSET_MAX_STEPS,
+        "rollout_start_min_remaining_steps": (
+            ROLLOUT_START_MIN_REMAINING_STEPS
+        ),
         "clip_epsilon": CLIP_EPSILON,
         "scenario_seeds": list(SCENARIO_SEEDS),
         "validation_seeds": list(VALIDATION_SEEDS),
@@ -413,6 +473,12 @@ def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
         ),
         "rollout_groups_per_bucket_visit": online.get(
             "rollout_groups_per_bucket_visit"
+        ),
+        "rollout_start_offset_max_steps": online.get(
+            "rollout_start_offset_max_steps"
+        ),
+        "rollout_start_min_remaining_steps": online.get(
+            "rollout_start_min_remaining_steps"
         ),
     }
 
@@ -516,6 +582,62 @@ def _validate_training_bucket_counters(
         )
 
 
+def _validate_rollout_start_diagnostics(
+    value: object,
+    *,
+    arm: str,
+    seed: int,
+) -> None:
+    label = f"{arm}/{seed} rollout_start_diagnostics_this_run"
+    if not isinstance(value, Mapping):
+        raise GRPOStabilityComparisonError(f"{label} must be an object")
+    _require_exact_keys(
+        value,
+        {
+            "attempt_count",
+            "accepted_count",
+            "rejected_count",
+            "offset_min_steps",
+            "offset_mean_steps",
+            "offset_max_steps",
+        },
+        label=label,
+    )
+    attempt_count = _non_negative_int(
+        value.get("attempt_count"), label=f"{label}.attempt_count"
+    )
+    accepted_count = _positive_int(
+        value.get("accepted_count"), label=f"{label}.accepted_count"
+    )
+    rejected_count = _non_negative_int(
+        value.get("rejected_count"), label=f"{label}.rejected_count"
+    )
+    if attempt_count != accepted_count + rejected_count:
+        raise GRPOStabilityComparisonError(
+            f"{label} attempt_count must equal accepted_count plus rejected_count"
+        )
+    offset_min = _finite_float(
+        value.get("offset_min_steps"), label=f"{label}.offset_min_steps"
+    )
+    offset_mean = _finite_float(
+        value.get("offset_mean_steps"), label=f"{label}.offset_mean_steps"
+    )
+    offset_max = _finite_float(
+        value.get("offset_max_steps"), label=f"{label}.offset_max_steps"
+    )
+    if not (
+        0.0
+        <= offset_min
+        <= offset_mean
+        <= offset_max
+        <= float(ROLLOUT_START_OFFSET_MAX_STEPS)
+    ):
+        raise GRPOStabilityComparisonError(
+            f"{label} offset statistics must satisfy "
+            "0 <= min <= mean <= max <= rollout-start maximum"
+        )
+
+
 def _load_run(
     manifest_path: Path,
     entry: Mapping[str, object],
@@ -557,6 +679,8 @@ def _load_run(
         "clip_epsilon": CLIP_EPSILON,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
         "rollout_groups_per_bucket_visit": ROLLOUT_GROUPS_PER_BUCKET_VISIT,
+        "rollout_start_offset_max_steps": ROLLOUT_START_OFFSET_MAX_STEPS,
+        "rollout_start_min_remaining_steps": ROLLOUT_START_MIN_REMAINING_STEPS,
         "scenarios": [list(value) for value in SCENARIOS],
         "scenario_seeds": list(SCENARIO_SEEDS),
         "resume_checkpoint": None,
@@ -677,6 +801,11 @@ def _load_run(
         raise GRPOStabilityComparisonError(
             f"{arm}/{seed} warmup environment-step count mismatch"
         )
+    _validate_rollout_start_diagnostics(
+        report.get("rollout_start_diagnostics_this_run"),
+        arm=arm,
+        seed=seed,
+    )
     _validate_training_bucket_counters(
         report.get("training_bucket_counters"),
         arm=arm,
@@ -835,6 +964,14 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
         "group_size": GROUP_SIZE,
         "total_rollout_groups_per_run": TOTAL_ROLLOUT_GROUPS,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
+        "rollout_collection_contract_version": (
+            ROLLOUT_COLLECTION_CONTRACT_VERSION
+        ),
+        "rollout_groups_per_bucket_visit": ROLLOUT_GROUPS_PER_BUCKET_VISIT,
+        "rollout_start_offset_max_steps": ROLLOUT_START_OFFSET_MAX_STEPS,
+        "rollout_start_min_remaining_steps": (
+            ROLLOUT_START_MIN_REMAINING_STEPS
+        ),
         "baseline_update_epochs": ARM_UPDATE_EPOCHS["baseline"],
         "clipped_update_epochs": ARM_UPDATE_EPOCHS["clipped"],
         "clip_epsilon": CLIP_EPSILON,
@@ -873,7 +1010,7 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         type=Path,
         help=(
-            "stage2_grpo_stability_ab_manifest_v1 JSON; relative run_dir "
+            "stage2_grpo_stability_ab_manifest_v2 JSON; relative run_dir "
             "values resolve from this file"
         ),
     )

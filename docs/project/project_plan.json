@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-30T14:08:28+08:00",
-  "status": "stage2_persistent_episode_collection_v1_verified_short_ab_pending",
+  "updated_at": "2026-08-30T15:08:10+08:00",
+  "status": "stage2_random_start_collection_v2_verified_short_ab_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -529,7 +529,7 @@
   },
   "stage2_at_risk_grpo_open": {
     "name": "At-risk diagnostic GRPO-Open",
-    "status": "clipped_multi_epoch_v2_and_persistent_episode_v1_verified_short_ab_pending",
+    "status": "random_start_collection_v2_verified_short_ab_pending",
     "authorization_recorded_on": "2026-08-30",
     "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
     "source_checkpoint_classification": "unqualified Stage1 v2 diagnostic source; bounded optimizer implementation smokes and the paired short A/B remain diagnostic-only and cannot bypass strict Stage1 qualification",
@@ -547,12 +547,17 @@
     "default_update_epochs": 4,
     "default_clip_epsilon": 0.2,
     "budget_unit": "fresh_rollout_group",
-    "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v1",
+    "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v2",
     "default_rollout_groups_per_bucket_visit": 10,
+    "default_rollout_start_offset_max_steps": 200,
+    "default_rollout_start_min_remaining_steps": 10,
+    "current_yaml_update_epochs": 10,
     "implementation_evidence": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
     "implementation_evidence_sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
     "persistent_episode_implementation_evidence": "evaluation/STAGE2_GRPO_PERSISTENT_EPISODE_IMPLEMENTATION_REPORT.json",
     "persistent_episode_implementation_evidence_sha256": "4568c05a58eb7aeafc86cdd3bca4b1cc87cbb4260e9176d1c6f2d38abeb4efd5",
+    "random_start_implementation_evidence": "evaluation/STAGE2_GRPO_RANDOM_START_IMPLEMENTATION_REPORT.json",
+    "random_start_implementation_evidence_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
     "implementation_verification": {
       "focused_tests_passed": 175,
       "legacy_runs_4_through_7_evaluator_load_passed": true,
@@ -572,9 +577,23 @@
       "checkpoint_round_trip_passed": true,
       "long_training_started": false
     },
+    "random_start_implementation_verification": {
+      "focused_tests_passed": 237,
+      "cuda_g3_epochs2_rollouts6_passed": true,
+      "cuda_sampled_rollouts": 6,
+      "cuda_optimizer_steps": 12,
+      "cuda_rollout_start_attempts": 7,
+      "cuda_rollout_start_rejections": 2,
+      "cuda_sampled_offset_min_steps": 16,
+      "cuda_sampled_offset_max_steps": 167,
+      "cuda_s5_rollouts_in_one_accepted_episode": 2,
+      "cuda_peak_memory_bytes": 129990144,
+      "checkpoint_round_trip_passed": true,
+      "long_training_started": false
+    },
     "short_stability_ab": {
       "status": "pending_separate_frozen_code_training_thread",
-      "manifest_format": "stage2_grpo_stability_ab_manifest_v1",
+      "manifest_format": "stage2_grpo_stability_ab_manifest_v2",
       "paired_training_seeds": [
         17,
         23,
@@ -586,8 +605,11 @@
       "group_size": 24,
       "rollout_groups_per_run": 100,
       "validation_interval_rollouts": 20,
-      "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v1",
+      "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v2",
       "rollout_groups_per_bucket_visit": 10,
+      "rollout_start_offset_max_steps": 200,
+      "rollout_start_min_remaining_steps": 10,
+      "epoch_config_policy": "The main YAML remains update_epochs=10; the six-run A/B must use explicit one-epoch and four-epoch configs and must not treat the main YAML as the clipped arm.",
       "run_allocation": {
         "run_8": "baseline seed 17",
         "run_9": "clipped seed 17",
@@ -694,11 +716,25 @@
       "contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175"
     },
     "rollout_collection_contract": {
-      "version": "stage2_joint_grpo_persistent_episode_v1",
+      "version": "stage2_joint_grpo_persistent_episode_v2",
       "machine_source": "train.train_bev_joint_grpo_online.rollout_collection_contract",
       "budget_allocation": "deterministically balance the total fresh-rollout-group budget across the ordered scenario-by-seed buckets; lower bucket indices receive any remainder",
       "rollout_groups_per_bucket_visit": 10,
-      "episode_reuse": "reset and warm up once, then collect consecutive fresh rollout groups from successive usable states in the same live MetaDrive episode",
+      "rollout_start": "At the first history-ready and primary-scenario-ready state t_ready, draw one inclusive uniform integer offset from the shared training torch.Generator before policy sampling; the upper bound is min(200, environment_steps_per_episode - t_ready - 10).",
+      "rollout_start_offset_max_steps": 200,
+      "rollout_start_min_remaining_steps": 10,
+      "rollout_start_rng_draws": "exactly one per feasible live training episode, including an upper bound of zero",
+      "scenario_window_close": {
+        "S5_hard_brake_lead": "formation_recovered_after_hazard",
+        "S6_background_merge_in": "formation_recovered_after_merge",
+        "S7_ego_merge_from_ramp": "all_agents_entered_mainline and formation_recovered_after_merge",
+        "S8_ego_exit_to_ramp": "all_agents_continued_on_exit_ramp and formation_recovered_on_ramp",
+        "S9_narrow_channel_negotiation": "all_agents_returned_to_original_lane and formation_recovered_after_return"
+      },
+      "late_target_retry": "If the sampled target is not reached before scenario-window closure or natural episode end, close and retry the same bucket visit with a temporary upper bound tightened to the observed last-open offset; clear it after the first accepted rollout.",
+      "partial_visit_policy": "Retain every completed rollout and optimizer update; if the scenario window or episode ends mid-visit, resume the remaining visit in a new episode with a fresh offset.",
+      "validation_start": "fixed validation remains earliest-ready and never consumes a random start offset",
+      "episode_reuse": "after the randomized start, collect consecutive fresh rollout groups from successive scenario-valid states in the same live MetaDrive episode",
       "per_group_order": "sample one G-entry behavior-policy group, compute raw tau_d rewards and frozen advantages, finish all optimizer epochs, then execute the selected tau_cmd with exactly one env.step",
       "segment_boundaries": "close the live environment only at natural termination or truncation, environment_steps_per_episode, the bucket-visit quota, the bucket final target, the next validation rollout boundary, or the total rollout budget",
       "rule_maker_commitment": "within a live episode, advance active committed execution and condition on committed actions before allowing a new proposal; preserve exact feedback compatibility and safe-STOP behavior",
@@ -706,14 +742,14 @@
       "legacy_resume": "checkpoints without this exact collection contract and its sampler state are not resumable"
     },
     "optimizer_semantics": "sample one fresh joint group with the behavior policy, freeze its old log-probabilities and advantages, then perform four serial PPO-clipped optimizer steps; no sequential-role optimizer",
-    "environment_semantics": "Never step the G candidates as G MetaDrive branches. Reuse one live episode for consecutive usable decision states under stage2_joint_grpo_persistent_episode_v1; each fresh group still sends only its final selected tau_cmd to exactly one MetaDrive env.step().",
+    "environment_semantics": "Never step the G candidates as G MetaDrive branches. Under stage2_joint_grpo_persistent_episode_v2, choose one reproducible randomized scenario-valid start per live training episode and then reuse that episode for consecutive valid decision states; each fresh group still sends only its final selected tau_cmd to exactly one MetaDrive env.step().",
     "fairness_constants": [
       "formal dataset and Stage1-A checkpoint",
       "scenario set and seeds",
       "G and diffusion timesteps",
       "optimizer, learning rate, KL and BC weights",
       "fresh rollout-group budget and clipped multi-epoch optimizer contract",
-      "persistent-episode rollout collection contract, bucket targets, and visit quota",
+      "randomized-start persistent-episode rollout collection contract, bucket targets, visit quota, offset distribution, and minimum remaining-step reserve",
       "trainable and frozen planner modules",
       "trajectory optimizer",
       "stage2_joint_reward_v2 contract SHA and exact reward-config SHA",
@@ -894,5 +930,7 @@
   "stage2_clipped_multi_epoch_implementation_evidence_sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
   "stage2_persistent_episode_implementation_evidence": "evaluation/STAGE2_GRPO_PERSISTENT_EPISODE_IMPLEMENTATION_REPORT.json",
   "stage2_persistent_episode_implementation_evidence_sha256": "4568c05a58eb7aeafc86cdd3bca4b1cc87cbb4260e9176d1c6f2d38abeb4efd5",
-  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 with stage2_joint_grpo_persistent_episode_v1 and then run evaluation.compare_grpo_stability; even a passing A/B cannot authorize formal or paper conclusions."
+  "stage2_random_start_implementation_evidence": "evaluation/STAGE2_GRPO_RANDOM_START_IMPLEMENTATION_REPORT.json",
+  "stage2_random_start_implementation_evidence_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
+  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 with stage2_joint_grpo_persistent_episode_v2 and explicit E1/E4 configs, then run evaluation.compare_grpo_stability; the main update_epochs=10 YAML is not an A/B arm, and even a passing A/B cannot authorize formal or paper conclusions."
 }

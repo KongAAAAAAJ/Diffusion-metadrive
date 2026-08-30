@@ -85,7 +85,7 @@ from scenarios.bev_round13_contract import (
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
 ROLLOUT_COLLECTION_CONTRACT_VERSION = (
-    "stage2_joint_grpo_persistent_episode_v1"
+    "stage2_joint_grpo_persistent_episode_v2"
 )
 
 
@@ -106,6 +106,8 @@ class JointGRPOOnlineConfig:
     scenario_seeds: tuple[int, ...] = DEVELOPMENT_SEEDS
     environment_steps_per_episode: int = 100
     rollout_groups_per_bucket_visit: int = 10
+    rollout_start_offset_max_steps: int = 200
+    rollout_start_min_remaining_steps: int = 10
     validation_interval_rollouts: int = 20
     advantage_vector_log_interval_rollouts: int = 20
 
@@ -133,6 +135,43 @@ class JointGRPOOnlineConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise OnlineGRPOError(f"{name} must be a positive integer")
+        if (
+            isinstance(self.rollout_start_offset_max_steps, bool)
+            or not isinstance(self.rollout_start_offset_max_steps, int)
+            or self.rollout_start_offset_max_steps < 0
+        ):
+            raise OnlineGRPOError(
+                "rollout_start_offset_max_steps must be a non-negative integer"
+            )
+        if (
+            isinstance(self.rollout_start_min_remaining_steps, bool)
+            or not isinstance(self.rollout_start_min_remaining_steps, int)
+            or self.rollout_start_min_remaining_steps < 0
+        ):
+            raise OnlineGRPOError(
+                "rollout_start_min_remaining_steps must be a non-negative "
+                "integer"
+            )
+        if self.environment_steps_per_episode < 10:
+            raise OnlineGRPOError(
+                "environment_steps_per_episode must be at least 10"
+            )
+        if (
+            self.rollout_start_min_remaining_steps
+            < self.rollout_groups_per_bucket_visit
+        ):
+            raise OnlineGRPOError(
+                "rollout_start_min_remaining_steps must be greater than or "
+                "equal to rollout_groups_per_bucket_visit"
+            )
+        if (
+            self.environment_steps_per_episode
+            < self.rollout_start_min_remaining_steps
+        ):
+            raise OnlineGRPOError(
+                "environment_steps_per_episode must be greater than or equal "
+                "to rollout_start_min_remaining_steps"
+            )
         if (
             isinstance(self.clip_epsilon, bool)
             or not isinstance(self.clip_epsilon, (int, float))
@@ -190,6 +229,53 @@ def rollout_collection_contract(
         "checkpoint_boundary": "closed_environment_only",
         "active_environment_serialized": False,
         "rule_maker_commitment_scope": "live_environment_episode",
+        "rollout_start_ready_gate": (
+            "history_ready_and_primary_scenario_ready"
+        ),
+        "rollout_start_offset_distribution": "inclusive_uniform_integer",
+        "rollout_start_generator": "shared_training_torch_generator",
+        "rollout_start_offset_max_steps": int(
+            config.rollout_start_offset_max_steps
+        ),
+        "rollout_start_min_remaining_steps": int(
+            config.rollout_start_min_remaining_steps
+        ),
+        "rollout_start_rng_draws": (
+            "exactly_one_per_feasible_live_training_episode_including_zero_"
+            "upper_bound"
+        ),
+        "rollout_start_upper_bound": (
+            "min(configured_max,episode_cap_minus_t_ready_minus_min_remaining)"
+        ),
+        "scenario_window_close": {
+            "S5_hard_brake_lead": (
+                "conflict_evidence.formation_recovered_after_hazard"
+            ),
+            "S6_background_merge_in": (
+                "conflict_evidence.formation_recovered_after_merge"
+            ),
+            "S7_ego_merge_from_ramp": (
+                "route_completion.all_agents_entered_mainline_and_conflict_"
+                "evidence.formation_recovered_after_merge"
+            ),
+            "S8_ego_exit_to_ramp": (
+                "route_completion.all_agents_continued_on_exit_ramp_and_"
+                "conflict_evidence.formation_recovered_on_ramp"
+            ),
+            "S9_narrow_channel_negotiation": (
+                "route_completion.all_agents_returned_to_original_lane_and_"
+                "conflict_evidence.formation_recovered_after_return"
+            ),
+        },
+        "late_target_retry": (
+            "same_bucket_same_visit_with_temporary_observed_last_open_upper_"
+            "bound"
+        ),
+        "partial_visit_policy": (
+            "retain_completed_rollouts_and_updates_then_new_episode_fresh_"
+            "offset"
+        ),
+        "validation_start": "earliest_ready_without_random_offset",
     }
 
 
@@ -870,8 +956,9 @@ def _scenario_summary(env: object) -> dict[str, object]:
     return dict(value)
 
 
-def _scenario_ready_for_primary_sampling(env: object) -> bool:
-    summary = _scenario_summary(env)
+def _scenario_ready_from_summary(summary: Mapping[str, object]) -> bool:
+    """Return whether one already-captured scenario summary is trainable."""
+
     if not bool(summary.get("scenario_realized", False)):
         return False
     scenario_id = str(summary.get("scenario_id", ""))
@@ -896,6 +983,146 @@ def _scenario_ready_for_primary_sampling(env: object) -> bool:
     }:
         return bool(summary.get("scenario_recipes_complete", False))
     return True
+
+
+def _scenario_ready_for_primary_sampling(env: object) -> bool:
+    return _scenario_ready_from_summary(_scenario_summary(env))
+
+
+def _scenario_sampling_window_closed_from_summary(
+    summary: Mapping[str, object],
+) -> bool:
+    """Return the scenario-specific, sticky end of the training window."""
+
+    scenario_id = str(summary.get("scenario_id", ""))
+    conflict = summary.get("conflict_evidence", {})
+    route = summary.get("route_completion", {})
+    if not isinstance(conflict, Mapping) or not isinstance(route, Mapping):
+        raise OnlineGRPOError("scenario realization summary evidence is invalid")
+    if scenario_id == "S5_hard_brake_lead":
+        return bool(conflict.get("formation_recovered_after_hazard", False))
+    if scenario_id == "S6_background_merge_in":
+        return bool(conflict.get("formation_recovered_after_merge", False))
+    if scenario_id == "S7_ego_merge_from_ramp":
+        return bool(route.get("all_agents_entered_mainline", False)) and bool(
+            conflict.get("formation_recovered_after_merge", False)
+        )
+    if scenario_id == "S8_ego_exit_to_ramp":
+        return bool(
+            route.get("all_agents_continued_on_exit_ramp", False)
+        ) and bool(conflict.get("formation_recovered_on_ramp", False))
+    if scenario_id == "S9_narrow_channel_negotiation":
+        return bool(
+            route.get("all_agents_returned_to_original_lane", False)
+        ) and bool(conflict.get("formation_recovered_after_return", False))
+    raise OnlineGRPOError(
+        f"unsupported primary scenario sampling window: {scenario_id}"
+    )
+
+
+def _scenario_sampling_window_closed(env: object) -> bool:
+    return _scenario_sampling_window_closed_from_summary(_scenario_summary(env))
+
+
+def _rollout_start_offset_upper_bound(
+    config: JointGRPOOnlineConfig,
+    ready_step: int,
+    temporary_max_offset_steps: int | None = None,
+) -> int:
+    """Return the inclusive feasible offset upper bound for one episode."""
+
+    if (
+        isinstance(ready_step, bool)
+        or not isinstance(ready_step, int)
+        or ready_step < 0
+    ):
+        raise OnlineGRPOError("rollout ready step must be a non-negative integer")
+    if temporary_max_offset_steps is not None and (
+        isinstance(temporary_max_offset_steps, bool)
+        or not isinstance(temporary_max_offset_steps, int)
+        or temporary_max_offset_steps < 0
+    ):
+        raise OnlineGRPOError(
+            "temporary rollout start offset bound must be a non-negative integer"
+        )
+    remaining_upper = (
+        config.environment_steps_per_episode
+        - ready_step
+        - config.rollout_start_min_remaining_steps
+    )
+    if remaining_upper < 0:
+        raise OnlineGRPOError(
+            "no feasible rollout start offset leaves the configured minimum "
+            "remaining steps"
+        )
+    upper = min(config.rollout_start_offset_max_steps, remaining_upper)
+    if temporary_max_offset_steps is not None:
+        upper = min(upper, temporary_max_offset_steps)
+    return int(upper)
+
+
+def _sample_rollout_start_offset(
+    config: JointGRPOOnlineConfig,
+    ready_step: int,
+    generator: torch.Generator,
+    temporary_max_offset_steps: int | None = None,
+) -> tuple[int, int]:
+    """Draw one inclusive uniform offset from the shared training generator."""
+
+    if not isinstance(generator, torch.Generator):
+        raise OnlineGRPOError("rollout start sampling requires a torch.Generator")
+    upper = _rollout_start_offset_upper_bound(
+        config,
+        ready_step,
+        temporary_max_offset_steps=temporary_max_offset_steps,
+    )
+    # torch.randint advances the generator even when the only possible result
+    # is zero.  This makes the one-draw-per-feasible-episode contract explicit.
+    offset = int(
+        torch.randint(
+            0,
+            upper + 1,
+            (1,),
+            generator=generator,
+            device=generator.device,
+            dtype=torch.int64,
+        ).item()
+    )
+    return offset, upper
+
+
+def _write_rollout_start_event(
+    path: Path,
+    *,
+    optimizer_step: int,
+    rollout_group: int,
+    bucket_index: int,
+    scenario: tuple[str, str],
+    seed: int,
+    bucket_episode: int,
+    ready_step: int,
+    upper_bound: int,
+    sampled_offset: int,
+    target_step: int,
+    status: str,
+) -> None:
+    record = {
+        "event": "rollout_start",
+        "optimizer_step": int(optimizer_step),
+        "rollout_group": int(rollout_group),
+        "training_bucket_index": int(bucket_index),
+        "scenario": str(scenario[0]),
+        "route": str(scenario[1]),
+        "seed": int(seed),
+        "bucket_episode": int(bucket_episode),
+        "t_ready": int(ready_step),
+        "feasible_upper_bound": int(upper_bound),
+        "sampled_offset": int(sampled_offset),
+        "target_step": int(target_step),
+        "status": str(status),
+    }
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _next_run_directory(output_root: Path) -> Path:
@@ -1739,6 +1966,10 @@ def run_joint_grpo_training(
     current_visit_progress = 0
     last_validated_rollout = -1
     advantage_vector_record_count = 0
+    rollout_start_offsets_this_run: list[int] = []
+    rollout_start_accepted_count = 0
+    rollout_start_rejected_count = 0
+    temporary_start_offset_upper_bound: int | None = None
     rule_diagnostics = {
         "conditioned_rollouts": 0,
         "proposal_match_attempts": 0,
@@ -1817,7 +2048,7 @@ def run_joint_grpo_training(
         else None
     )
     frozen = {
-        "format": "bev_joint_grpo_online_config_v5",
+        "format": "bev_joint_grpo_online_config_v6",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -1895,6 +2126,13 @@ def run_joint_grpo_training(
             committed_plan_actions: dict[str, int] | None = None
             dt_s = simulator_decision_dt_s(env)
             episode_step = 0
+            start_ready_step: int | None = None
+            start_offset: int | None = None
+            start_upper_bound: int | None = None
+            start_target_step: int | None = None
+            start_accepted = False
+            retryable_start_rejection = False
+            scenario_window_closed = False
             try:
                 while (
                     sampled_rollouts < target_rollout_groups
@@ -1905,12 +2143,104 @@ def run_joint_grpo_training(
                     and episode_step < config.environment_steps_per_episode
                 ):
                     builder.capture_state(env, episode_step * dt_s)
-                    if not (
-                        builder.history_ready()
-                        and _scenario_ready_for_primary_sampling(env)
+                    history_ready = builder.history_ready()
+                    if history_ready:
+                        scenario_summary = _scenario_summary(env)
+                        ready_now = _scenario_ready_from_summary(
+                            scenario_summary
+                        )
+                        window_closed_now = (
+                            _scenario_sampling_window_closed_from_summary(
+                                scenario_summary
+                            )
+                        )
+                    else:
+                        ready_now = False
+                        window_closed_now = False
+                    scenario_window_closed = bool(
+                        scenario_window_closed
+                        or window_closed_now
+                    )
+                    if scenario_window_closed:
+                        if start_target_step is not None and not start_accepted:
+                            assert start_ready_step is not None
+                            assert start_offset is not None
+                            assert start_upper_bound is not None
+                            last_open_offset = (
+                                episode_step - start_ready_step - 1
+                            )
+                            if last_open_offset >= 0:
+                                temporary_start_offset_upper_bound = min(
+                                    last_open_offset,
+                                    temporary_start_offset_upper_bound
+                                    if temporary_start_offset_upper_bound
+                                    is not None
+                                    else last_open_offset,
+                                )
+                                retryable_start_rejection = True
+                            rollout_start_rejected_count += 1
+                            _write_rollout_start_event(
+                                metrics_path,
+                                optimizer_step=trainer.optimizer_step,
+                                rollout_group=sampled_rollouts,
+                                bucket_index=bucket_index,
+                                scenario=scenario,
+                                seed=seed,
+                                bucket_episode=(
+                                    bucket_episode_counts[bucket_index]
+                                ),
+                                ready_step=start_ready_step,
+                                upper_bound=start_upper_bound,
+                                sampled_offset=start_offset,
+                                target_step=start_target_step,
+                                status=(
+                                    "rejected_window_closed_before_target"
+                                ),
+                            )
+                        break
+                    if start_ready_step is None and ready_now:
+                        start_ready_step = episode_step
+                        start_offset, start_upper_bound = (
+                            _sample_rollout_start_offset(
+                                config,
+                                start_ready_step,
+                                generator=generator,
+                                temporary_max_offset_steps=(
+                                    temporary_start_offset_upper_bound
+                                ),
+                            )
+                        )
+                        start_target_step = start_ready_step + start_offset
+                        rollout_start_offsets_this_run.append(start_offset)
+                    if (
+                        start_target_step is None
+                        or episode_step < start_target_step
                     ):
                         action = route_following_warmup_actions(env, builder)
                     else:
+                        if not start_accepted:
+                            assert start_ready_step is not None
+                            assert start_offset is not None
+                            assert start_upper_bound is not None
+                            start_accepted = True
+                            temporary_start_offset_upper_bound = None
+                            rollout_start_accepted_count += 1
+                            _write_rollout_start_event(
+                                metrics_path,
+                                optimizer_step=trainer.optimizer_step,
+                                rollout_group=sampled_rollouts + 1,
+                                bucket_index=bucket_index,
+                                scenario=scenario,
+                                seed=seed,
+                                bucket_episode=(
+                                    bucket_episode_counts[bucket_index]
+                                ),
+                                ready_step=start_ready_step,
+                                upper_bound=start_upper_bound,
+                                sampled_offset=start_offset,
+                                target_step=start_target_step,
+                                status="accepted",
+                            )
                         values = builder.build_model_inputs(env)
                         condition = _condition_online_model_inputs(
                             rule_maker,
@@ -2144,10 +2474,44 @@ def run_joint_grpo_training(
                             optimization.optimized_trajectories[0]
                         )
 
+                    stepped_from = episode_step
                     _, _, terminated, truncated, info = env.step(action)
                     environment_steps += 1
                     episode_step += 1
                     if episode_has_ended(terminated, truncated, info):
+                        if start_target_step is not None and not start_accepted:
+                            assert start_ready_step is not None
+                            assert start_offset is not None
+                            assert start_upper_bound is not None
+                            last_open_offset = stepped_from - start_ready_step
+                            if last_open_offset >= 0:
+                                temporary_start_offset_upper_bound = min(
+                                    last_open_offset,
+                                    temporary_start_offset_upper_bound
+                                    if temporary_start_offset_upper_bound
+                                    is not None
+                                    else last_open_offset,
+                                )
+                                retryable_start_rejection = True
+                            rollout_start_rejected_count += 1
+                            _write_rollout_start_event(
+                                metrics_path,
+                                optimizer_step=trainer.optimizer_step,
+                                rollout_group=sampled_rollouts,
+                                bucket_index=bucket_index,
+                                scenario=scenario,
+                                seed=seed,
+                                bucket_episode=(
+                                    bucket_episode_counts[bucket_index]
+                                ),
+                                ready_step=start_ready_step,
+                                upper_bound=start_upper_bound,
+                                sampled_offset=start_offset,
+                                target_step=start_target_step,
+                                status=(
+                                    "rejected_episode_ended_before_target"
+                                ),
+                            )
                         break
                     if sampled_rollouts > samples_at_episode_start and (
                         _bucket_visit_is_complete(
@@ -2168,13 +2532,17 @@ def run_joint_grpo_training(
             finally:
                 env.close()
             if sampled_rollouts == samples_at_episode_start:
-                consecutive_empty_episodes += 1
-                if consecutive_empty_episodes >= 3:
-                    raise OnlineGRPOError(
-                        "three consecutive episodes produced no online state "
-                        f"rollout for training bucket {bucket_index}: "
-                        f"{scenario[0]}/{scenario[1]} seed={seed}"
-                    )
+                if retryable_start_rejection:
+                    consecutive_empty_episodes = 0
+                else:
+                    consecutive_empty_episodes += 1
+                    if consecutive_empty_episodes >= 3:
+                        raise OnlineGRPOError(
+                            "three consecutive episodes produced no feasible "
+                            "online state rollout for training bucket "
+                            f"{bucket_index}: {scenario[0]}/{scenario[1]} "
+                            f"seed={seed}"
+                        )
             else:
                 consecutive_empty_episodes = 0
             if _bucket_visit_is_complete(
@@ -2195,6 +2563,7 @@ def run_joint_grpo_training(
                 next_bucket_index = (
                     0 if unfinished_bucket is None else unfinished_bucket
                 )
+                temporary_start_offset_upper_bound = None
             else:
                 next_bucket_index = bucket_index
             _reject_exhausted_uninformative_budget(
@@ -2402,9 +2771,16 @@ def run_joint_grpo_training(
         run_dir / "tb",
         run_dir / "plots",
     )
+    if (
+        rollout_start_accepted_count + rollout_start_rejected_count
+        != len(rollout_start_offsets_this_run)
+    ):
+        raise OnlineGRPOError(
+            "rollout start diagnostics contain an unresolved sampling attempt"
+        )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v5",
+        "format": "bev_joint_grpo_online_report_v6",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -2423,6 +2799,26 @@ def run_joint_grpo_training(
         ),
         "target_rollout_groups": target_rollout_groups,
         "uninformative_rollouts": uninformative_rollouts,
+        "rollout_start_diagnostics_this_run": {
+            "attempt_count": len(rollout_start_offsets_this_run),
+            "accepted_count": rollout_start_accepted_count,
+            "rejected_count": rollout_start_rejected_count,
+            "offset_min_steps": (
+                min(rollout_start_offsets_this_run)
+                if rollout_start_offsets_this_run
+                else None
+            ),
+            "offset_mean_steps": (
+                float(np.mean(rollout_start_offsets_this_run))
+                if rollout_start_offsets_this_run
+                else None
+            ),
+            "offset_max_steps": (
+                max(rollout_start_offsets_this_run)
+                if rollout_start_offsets_this_run
+                else None
+            ),
+        },
         "wall_time_seconds": time.monotonic() - started_at,
         "cuda_peak_memory_bytes": cuda_peak_memory_bytes,
         "v2_rule_conditioning": {
@@ -2574,6 +2970,12 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
         ),
         rollout_groups_per_bucket_visit=online.get(
             "rollout_groups_per_bucket_visit", 10
+        ),
+        rollout_start_offset_max_steps=online.get(
+            "rollout_start_offset_max_steps", 200
+        ),
+        rollout_start_min_remaining_steps=online.get(
+            "rollout_start_min_remaining_steps", 10
         ),
         validation_interval_rollouts=online.get(
             "validation_interval_rollouts", 20

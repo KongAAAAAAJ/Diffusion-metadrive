@@ -66,6 +66,12 @@ def _run_config(arm: str, seed: int) -> dict[str, object]:
             "rollout_groups_per_bucket_visit": (
                 comparison.ROLLOUT_GROUPS_PER_BUCKET_VISIT
             ),
+            "rollout_start_offset_max_steps": (
+                comparison.ROLLOUT_START_OFFSET_MAX_STEPS
+            ),
+            "rollout_start_min_remaining_steps": (
+                comparison.ROLLOUT_START_MIN_REMAINING_STEPS
+            ),
             "validation_interval_rollouts": (
                 comparison.VALIDATION_INTERVAL_ROLLOUTS
             ),
@@ -133,6 +139,14 @@ def _run_report(
         "environment_steps": 130,
         "environment_episode_count": 10,
         "warmup_environment_steps": 30,
+        "rollout_start_diagnostics_this_run": {
+            "attempt_count": 10,
+            "accepted_count": 10,
+            "rejected_count": 0,
+            "offset_min_steps": 0,
+            "offset_mean_steps": 50.0,
+            "offset_max_steps": 100,
+        },
         "training_bucket_counters": bucket_counters,
         "wall_time_seconds": wall_time_seconds,
         "validation_seeds": list(comparison.VALIDATION_SEEDS),
@@ -206,6 +220,18 @@ def _write_manifest(
         "validation_interval_rollouts": (
             comparison.VALIDATION_INTERVAL_ROLLOUTS
         ),
+        "rollout_collection_contract_version": (
+            comparison.ROLLOUT_COLLECTION_CONTRACT_VERSION
+        ),
+        "rollout_groups_per_bucket_visit": (
+            comparison.ROLLOUT_GROUPS_PER_BUCKET_VISIT
+        ),
+        "rollout_start_offset_max_steps": (
+            comparison.ROLLOUT_START_OFFSET_MAX_STEPS
+        ),
+        "rollout_start_min_remaining_steps": (
+            comparison.ROLLOUT_START_MIN_REMAINING_STEPS
+        ),
         "clip_epsilon": comparison.CLIP_EPSILON,
         "scenario_seeds": list(comparison.SCENARIO_SEEDS),
         "validation_seeds": list(comparison.VALIDATION_SEEDS),
@@ -217,12 +243,25 @@ def _write_manifest(
 
 
 def test_expected_grpo_config_matches_core_training_defaults() -> None:
+    from train.train_bev_joint_grpo_online import (
+        JointGRPOOnlineConfig,
+        rollout_collection_contract,
+    )
+
     assert comparison.EXPECTED_GRPO_CONFIG == dataclasses.asdict(
         JointGRPOConfig(group_size=comparison.GROUP_SIZE)
     )
-    assert comparison._run_binding(_run_config("baseline", 17))[
-        "rollout_collection_contract"
-    ] == comparison._expected_rollout_collection_contract(200)
+    binding = comparison._run_binding(_run_config("baseline", 17))
+    assert binding["rollout_collection_contract"] == (
+        comparison._expected_rollout_collection_contract(200)
+    )
+    assert binding["rollout_start_offset_max_steps"] == 200
+    assert binding["rollout_start_min_remaining_steps"] == 10
+    assert comparison._expected_rollout_collection_contract(200) == (
+        rollout_collection_contract(
+            JointGRPOOnlineConfig(environment_steps_per_episode=200)
+        )
+    )
 
 
 def test_compare_grpo_stability_emits_passing_report_and_png(
@@ -236,6 +275,11 @@ def test_compare_grpo_stability_emits_passing_report_and_png(
     assert report["format"] == comparison.REPORT_FORMAT
     assert report["diagnostic_only"] is True
     assert report["eligible_for_formal_conclusions"] is False
+    assert report["rollout_collection_contract_version"] == (
+        comparison.ROLLOUT_COLLECTION_CONTRACT_VERSION
+    )
+    assert report["rollout_start_offset_max_steps"] == 200
+    assert report["rollout_start_min_remaining_steps"] == 10
     assert report["summary"]["volatility_reduced_pair_count"] == 2
     assert report["summary"]["volatility_gate_passed"] is True
     assert report["summary"]["final_mean_non_degraded"] is True
@@ -289,15 +333,98 @@ def test_compare_grpo_stability_rejects_incomplete_pair_manifest(
         compare_grpo_stability(manifest_path, tmp_path / "output")
 
 
+def test_compare_grpo_stability_rejects_v1_manifest(tmp_path: Path) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["format"] = "stage2_grpo_stability_ab_manifest_v1"
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(GRPOStabilityComparisonError, match="manifest format mismatch"):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "rollout_collection_contract_version",
+            "stage2_joint_grpo_persistent_episode_v1",
+        ),
+        ("rollout_groups_per_bucket_visit", 5),
+        ("rollout_start_offset_max_steps", 199),
+        ("rollout_start_min_remaining_steps", 11),
+    ],
+)
+def test_compare_grpo_stability_rejects_manifest_collection_drift(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = value
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError, match=rf"manifest {field} mismatch"
+    ):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+def test_compare_grpo_stability_rejects_missing_v2_manifest_field(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("rollout_start_offset_max_steps")
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(GRPOStabilityComparisonError, match="fields mismatch"):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize(
+    ("artifact", "legacy_format", "message"),
+    [
+        ("config", "bev_joint_grpo_online_config_v5", "config format mismatch"),
+        ("report", "bev_joint_grpo_online_report_v5", "report format mismatch"),
+    ],
+)
+def test_compare_grpo_stability_rejects_v5_online_artifacts(
+    tmp_path: Path,
+    artifact: str,
+    legacy_format: str,
+    message: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    artifact_path = tmp_path / "baseline_17" / f"{artifact}.json"
+    value = json.loads(artifact_path.read_text(encoding="utf-8"))
+    value["format"] = legacy_format
+    _write_json(artifact_path, value)
+
+    with pytest.raises(GRPOStabilityComparisonError, match=message):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("update_epochs", 2, "update_epochs mismatch"),
+        ("update_epochs", 10, "update_epochs mismatch"),
         ("group_size", 8, "group_size mismatch"),
         (
             "rollout_groups_per_bucket_visit",
             5,
             "rollout_groups_per_bucket_visit mismatch",
+        ),
+        (
+            "rollout_start_offset_max_steps",
+            199,
+            "rollout_start_offset_max_steps mismatch",
+        ),
+        (
+            "rollout_start_min_remaining_steps",
+            11,
+            "rollout_start_min_remaining_steps mismatch",
         ),
         ("resume_checkpoint", "/tmp/legacy.pt", "resume_checkpoint mismatch"),
     ],
@@ -443,6 +570,33 @@ def test_compare_grpo_stability_rejects_rollout_collection_contract_drift(
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("version", "stage2_joint_grpo_persistent_episode_v1"),
+        ("rollout_start_offset_distribution", "exclusive_uniform_integer"),
+        ("rollout_start_generator", "separate_start_generator"),
+        ("validation_start", "randomized_after_ready"),
+    ],
+)
+def test_compare_grpo_stability_rejects_random_start_contract_drift(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    config_path = tmp_path / "baseline_17" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["rollout_collection_contract"][field] = value
+    _write_json(config_path, config)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError,
+        match="config rollout collection contract mismatch",
+    ):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize(
     ("kind", "message"),
     [
         ("missing", "was not found"),
@@ -525,6 +679,57 @@ def test_compare_grpo_stability_rejects_environment_counter_errors(
     _write_json(report_path, report)
 
     with pytest.raises(GRPOStabilityComparisonError, match=message):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"accepted_count": 0}, "accepted_count must be a positive integer"),
+        (
+            {"attempt_count": 11},
+            "attempt_count must equal accepted_count plus rejected_count",
+        ),
+        (
+            {"offset_min_steps": 51.0},
+            "offset statistics must satisfy",
+        ),
+        (
+            {"offset_max_steps": 201},
+            "offset statistics must satisfy",
+        ),
+        (
+            {"offset_mean_steps": float("nan")},
+            "offset_mean_steps must be a finite scalar",
+        ),
+    ],
+)
+def test_compare_grpo_stability_rejects_invalid_start_diagnostics(
+    tmp_path: Path,
+    updates: dict[str, object],
+    message: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    report_path = tmp_path / "clipped_17" / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["rollout_start_diagnostics_this_run"].update(updates)
+    _write_json(report_path, report)
+
+    with pytest.raises(GRPOStabilityComparisonError, match=message):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+def test_compare_grpo_stability_requires_start_diagnostics(tmp_path: Path) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    report_path = tmp_path / "baseline_17" / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report.pop("rollout_start_diagnostics_this_run")
+    _write_json(report_path, report)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError,
+        match="rollout_start_diagnostics_this_run must be an object",
+    ):
         compare_grpo_stability(manifest_path, tmp_path / "output")
 
 

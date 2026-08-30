@@ -1,0 +1,161 @@
+{
+  "format": "stage2_grpo_random_start_implementation_report_v1",
+  "created_at": "2026-08-30T15:08:10+08:00",
+  "repository_commit_at_implementation": "5f93cb11627498dd670afc0f551a496a66df3fd9",
+  "implementation_gate": {
+    "name": "stage2_joint_grpo_persistent_episode_v2_random_start_implementation",
+    "passed": true,
+    "scope": "reproducible randomized training starts, frozen S5-S9 scenario-window closure, observed-window retry tightening, partial-visit continuation, v6 online artifacts, v2 A/B binding, focused regression, and one bounded real CUDA smoke",
+    "long_training_started": false,
+    "paired_100_rollout_ab_started": false
+  },
+  "formal_boundary": {
+    "classification": "diagnostic_only",
+    "eligible_for_formal_training": false,
+    "paper_evidence_allowed": false,
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635"
+  },
+  "rollout_collection_contract": {
+    "version": "stage2_joint_grpo_persistent_episode_v2",
+    "budget_unit": "fresh_rollout_group",
+    "bucket_order": "ordered_scenario_then_seed",
+    "bucket_target_assignment": "balanced_floor_with_remainder_to_lower_bucket_indices",
+    "rollout_groups_per_bucket_visit": 10,
+    "environment_steps_per_episode": 200,
+    "validation_interval_rollouts": 20,
+    "selected_environment_steps_per_rollout": 1,
+    "uninformative_rollout_execution": "selected_action_once_no_update",
+    "episode_reuse": "persistent_within_bucket_visit",
+    "interrupted_visit_resume": "same_bucket_same_visit_progress",
+    "checkpoint_boundary": "closed_environment_only",
+    "active_environment_serialized": false,
+    "rule_maker_commitment_scope": "live_environment_episode",
+    "rollout_start_ready_gate": "history_ready_and_primary_scenario_ready",
+    "rollout_start_offset_distribution": "inclusive_uniform_integer",
+    "rollout_start_generator": "shared_training_torch_generator",
+    "rollout_start_offset_max_steps": 200,
+    "rollout_start_min_remaining_steps": 10,
+    "rollout_start_rng_draws": "exactly_one_per_feasible_live_training_episode_including_zero_upper_bound",
+    "rollout_start_upper_bound": "min(configured_max,episode_cap_minus_t_ready_minus_min_remaining)",
+    "scenario_window_close": {
+      "S5_hard_brake_lead": "conflict_evidence.formation_recovered_after_hazard",
+      "S6_background_merge_in": "conflict_evidence.formation_recovered_after_merge",
+      "S7_ego_merge_from_ramp": "route_completion.all_agents_entered_mainline_and_conflict_evidence.formation_recovered_after_merge",
+      "S8_ego_exit_to_ramp": "route_completion.all_agents_continued_on_exit_ramp_and_conflict_evidence.formation_recovered_on_ramp",
+      "S9_narrow_channel_negotiation": "route_completion.all_agents_returned_to_original_lane_and_conflict_evidence.formation_recovered_after_return"
+    },
+    "late_target_retry": "same_bucket_same_visit_with_temporary_observed_last_open_upper_bound",
+    "partial_visit_policy": "retain_completed_rollouts_and_updates_then_new_episode_fresh_offset",
+    "validation_start": "earliest_ready_without_random_offset"
+  },
+  "random_start_semantics": {
+    "ready_state": "capture history first; before history readiness do not query the mutating scenario summary; afterwards capture the summary exactly once per decision state",
+    "draw": "at the first jointly ready state, consume exactly one inclusive torch.randint call from the shared training generator, including when the upper bound is zero",
+    "wait": "advance with route-following warm-up actions until t_ready plus the sampled offset while checking the sticky scenario-window predicate and natural termination every step",
+    "accepted_segment": "after the randomized start, reuse the same live environment for up to ten consecutive rollout groups and execute exactly one selected env.step per group",
+    "validation": "fixed validation retains the historical earliest-ready start and never consumes a training offset draw"
+  },
+  "retry_and_resume": {
+    "late_target": "on window closure or natural termination before the target, keep the bucket and visit cursor fixed and tighten only the next live episode to the observed last-open offset",
+    "temporary_bound_reset": "clear the temporary bound immediately after the first accepted rollout in the retrying episode",
+    "partial_visit": "never roll back completed rollout groups or optimizer epochs when a live segment ends",
+    "checkpoint": "save only after closing the live environment; generator state, bucket counters, cursor, and visit progress reproduce the next offset and diffusion-noise sequence",
+    "legacy_resume": "v1/v5 artifacts remain read-only but fail the exact v2/v6 resume contract"
+  },
+  "artifacts": {
+    "online_config_format": "bev_joint_grpo_online_config_v6",
+    "online_report_format": "bev_joint_grpo_online_report_v6",
+    "ab_manifest_format": "stage2_grpo_stability_ab_manifest_v2",
+    "ab_report_format": "stage2_grpo_stability_ab_report_v2",
+    "checkpoint_collection_contract_top_level": true,
+    "best_last_collection_contract_binding": true,
+    "historical_runs_4_through_7_modified": false
+  },
+  "focused_regression": {
+    "command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_online.py tests/test_compare_grpo_stability.py tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_plot_grpo.py tests/test_run_bev_joint_grpo_launcher.py tests/test_bev_reward_comparison.py -q",
+    "passed": 237,
+    "failed": 0,
+    "warnings": 15,
+    "covered": [
+      "inclusive offset sampling and the t_ready 190/191 cap boundary",
+      "zero-upper-bound RNG consumption and uninterrupted-versus-resumed offset/noise equality",
+      "all five frozen scenario-window close predicates",
+      "no scenario-summary read before history readiness and one summary read per later state",
+      "one draw per live episode, exact t_ready plus offset start, and ten consecutive groups in one fake environment",
+      "natural-terminal and window-close retry tightening without false three-empty failure",
+      "partial-visit continuation, uninformative execution, and fixed-validation earliest-ready behavior",
+      "v6 config/report, exact v2 checkpoint contract, and strict v2 A/B fairness binding",
+      "core clipped GRPO, plotting, launcher, and legacy reward-evaluator compatibility"
+    ]
+  },
+  "cuda_random_start_smoke": {
+    "classification": "bounded diagnostic, formal-ineligible",
+    "artifact_root": "/tmp/stage2_grpo_random_start_smoke_v1/run_1",
+    "report_sha256": "c087e7b13f37436a7250953971451c58fe9ae62de924d581133dfcf8f678feb8",
+    "training_generator_seed": 38,
+    "scenario_seeds": [
+      17
+    ],
+    "group_size": 3,
+    "update_epochs": 2,
+    "sampled_rollouts": 6,
+    "optimizer_steps": 12,
+    "uninformative_rollouts": 0,
+    "environment_episode_count": 7,
+    "environment_steps": 527,
+    "warmup_environment_steps": 521,
+    "rollout_start_attempt_count": 7,
+    "rollout_start_accepted_count": 5,
+    "rollout_start_rejected_count": 2,
+    "sampled_offset_min_steps": 16,
+    "sampled_offset_mean_steps": 71.28571428571429,
+    "sampled_offset_max_steps": 167,
+    "natural_terminal_retry_observed": true,
+    "scenario_window_retry_observed": true,
+    "s5_first_attempt": {
+      "t_ready": 32,
+      "upper_bound": 158,
+      "sampled_offset": 69,
+      "status": "rejected_episode_ended_before_target"
+    },
+    "s5_tightened_retry": {
+      "t_ready": 32,
+      "upper_bound": 17,
+      "sampled_offset": 16,
+      "status": "accepted"
+    },
+    "episode_reuse_observed": true,
+    "episode_reuse_evidence": "the accepted S5 bucket episode produced rollout groups 1 and 2 at consecutive training environment steps 98 and 99 from one reset",
+    "checkpoint_round_trip": true,
+    "cuda_peak_memory_bytes": 129990144,
+    "cuda_peak_memory_gib": 0.1210627555847168,
+    "cuda_peak_memory_limit_gib": 15.0,
+    "cuda_peak_memory_gate_passed": true,
+    "wall_time_seconds": 115.09132647933438,
+    "plot_count": 6
+  },
+  "configuration_note": {
+    "code_default_update_epochs": 4,
+    "short_ab_baseline_update_epochs": 1,
+    "short_ab_clipped_update_epochs": 4,
+    "current_yaml_update_epochs": 10,
+    "current_yaml_environment_steps_per_episode": 200,
+    "current_yaml_rollout_groups_per_bucket_visit": 10,
+    "current_yaml_rollout_start_offset_max_steps": 200,
+    "current_yaml_rollout_start_min_remaining_steps": 10,
+    "operator_consequence": "a direct launch with the main YAML performs ten optimizer epochs per informative rollout; the future paired A/B must use explicit E1 and E4 configs"
+  },
+  "maintenance_note": {
+    "missing_indexed_phase_file": "docs/phases/phase6.md",
+    "impact": "the repository AGENTS index points to an absent Phase 6 file; the frozen machine-readable project plan and current Stage 2 contracts were used as authority"
+  },
+  "qualification": {
+    "random_start_v2_implementation_verified": true,
+    "short_ab_complete": false,
+    "formal_qualification_passed": false,
+    "paper_evidence_allowed": false
+  },
+  "next_hard_gate": "Keep strict_stage1_v2_run3_qualification as the formal gate. The diagnostic run_8 through run_13 A/B may run only in a separate frozen-code training thread with explicit E1/E4 configs and the exact v2 collection contract."
+}
