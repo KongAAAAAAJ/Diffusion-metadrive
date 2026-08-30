@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,6 +42,7 @@ from train.train_bev_joint_grpo_online import (
     PRIMARY_S5_S9_SCENARIOS,
     ROLLOUT_COLLECTION_CONTRACT_VERSION,
     JointGRPOOnlineConfig,
+    JointGRPOTrainingConfig,
     OnlineGRPOError,
     _OnlineRuleCondition,
     _balanced_bucket_targets,
@@ -80,9 +82,18 @@ from train.train_bev_joint_grpo_online import (
     execution_mode_valid_mask,
     joint_trajectory_action,
     model_inputs_to_batch,
+    main as online_main,
     optimize_selected_model_trajectories,
     rollout_collection_contract,
     run_joint_grpo_training,
+)
+
+
+RUN_YAML_HEADER = (
+    "run:\n"
+    "  variant: A\n"
+    "  run_mode: smoke\n"
+    "  source_checkpoint: /tmp/stage1.pt\n"
 )
 
 
@@ -178,15 +189,50 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
         JointGRPOOnlineConfig(
             scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),)
         )
-    config = JointGRPOOnlineConfig(device="cpu")
-    with pytest.raises(OnlineGRPOError, match="positive"):
+    online = JointGRPOOnlineConfig(device="cpu")
+    training = JointGRPOTrainingConfig(
+        variant="A",
+        run_mode="smoke",
+        source_checkpoint=tmp_path / "stage1.pt",
+        online=online,
+    )
+    assert training.online is online
+    with pytest.raises(OnlineGRPOError, match="training_config"):
         run_joint_grpo_training(
-            config,
+            online,  # type: ignore[arg-type]
+            output_root=tmp_path / "output",
+        )
+
+
+def test_training_config_wrapper_is_strict(tmp_path: Path) -> None:
+    online = JointGRPOOnlineConfig(device="cpu")
+    with pytest.raises(OnlineGRPOError, match="variant"):
+        JointGRPOTrainingConfig(
+            variant="C",  # type: ignore[arg-type]
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "stage1.pt",
+            online=online,
+        )
+    with pytest.raises(OnlineGRPOError, match="run_mode"):
+        JointGRPOTrainingConfig(
+            variant="A",
+            run_mode="preview",  # type: ignore[arg-type]
+            source_checkpoint=tmp_path / "stage1.pt",
+            online=online,
+        )
+    with pytest.raises(OnlineGRPOError, match="source_checkpoint"):
+        JointGRPOTrainingConfig(
             variant="A",
             run_mode="smoke",
-            source_checkpoint=tmp_path / "missing.pt",
-            output_root=tmp_path / "output",
-            max_rollout_groups=0,
+            source_checkpoint="stage1.pt",  # type: ignore[arg-type]
+            online=online,
+        )
+    with pytest.raises(OnlineGRPOError, match="online"):
+        JointGRPOTrainingConfig(
+            variant="A",
+            run_mode="smoke",
+            source_checkpoint=tmp_path / "stage1.pt",
+            online=object(),  # type: ignore[arg-type]
         )
 
 
@@ -249,7 +295,8 @@ def test_online_config_loads_clipped_rollout_contract_from_yaml(
 ) -> None:
     config_path = tmp_path / "online.yaml"
     config_path.write_text(
-        "online:\n"
+        RUN_YAML_HEADER
+        + "online:\n"
         "  device: cpu\n"
         "  group_size: 5\n"
         "  total_rollout_groups: 41\n"
@@ -263,8 +310,12 @@ def test_online_config_loads_clipped_rollout_contract_from_yaml(
         encoding="utf-8",
     )
 
-    config = _config_from_yaml(config_path)
+    training = _config_from_yaml(config_path)
+    config = training.online
 
+    assert training.variant == "A"
+    assert training.run_mode == "smoke"
+    assert training.source_checkpoint == Path("/tmp/stage1.pt")
     assert config.group_size == 5
     assert config.total_rollout_groups == 41
     assert config.update_epochs == 3
@@ -276,6 +327,69 @@ def test_online_config_loads_clipped_rollout_contract_from_yaml(
     assert config.advantage_vector_log_interval_rollouts == 37
 
 
+def test_yaml_requires_run_mapping(tmp_path: Path) -> None:
+    config_path = tmp_path / "missing-run.yaml"
+    config_path.write_text("online:\n  device: cpu\n", encoding="utf-8")
+
+    with pytest.raises(OnlineGRPOError, match="requires a run mapping"):
+        _config_from_yaml(config_path)
+
+
+def test_cli_rejects_legacy_max_rollout_groups(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_bev_joint_grpo_online",
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--output-root",
+            str(tmp_path / "output"),
+            "--max-rollout-groups",
+            "1",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        online_main()
+
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments: --max-rollout-groups 1" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "run_yaml",
+    [
+        "run: {}\n",
+        "run:\n  run_mode: smoke\n  source_checkpoint: /tmp/stage1.pt\n",
+        "run:\n  variant: A\n  source_checkpoint: /tmp/stage1.pt\n",
+        "run:\n  variant: A\n  run_mode: smoke\n",
+        (
+            "run:\n"
+            "  variant: A\n"
+            "  run_mode: smoke\n"
+            "  source_checkpoint: /tmp/stage1.pt\n"
+            "  total_rollout_groups: 1\n"
+        ),
+    ],
+)
+def test_yaml_run_mapping_requires_exact_three_fields(
+    tmp_path: Path,
+    run_yaml: str,
+) -> None:
+    config_path = tmp_path / "invalid-run.yaml"
+    config_path.write_text(
+        run_yaml + "online:\n  device: cpu\n", encoding="utf-8"
+    )
+
+    with pytest.raises(OnlineGRPOError, match="must contain exactly"):
+        _config_from_yaml(config_path)
+
+
 @pytest.mark.parametrize("yaml_value", ["true", "false", "1", "0", "-1"])
 def test_online_config_rejects_invalid_yaml_group_size(
     tmp_path: Path,
@@ -283,7 +397,8 @@ def test_online_config_rejects_invalid_yaml_group_size(
 ) -> None:
     config_path = tmp_path / f"invalid_group_{yaml_value}.yaml"
     config_path.write_text(
-        f"online:\n  device: cpu\n  group_size: {yaml_value}\n",
+        RUN_YAML_HEADER
+        + f"online:\n  device: cpu\n  group_size: {yaml_value}\n",
         encoding="utf-8",
     )
 
@@ -381,7 +496,7 @@ def test_online_config_rejects_legacy_optimizer_step_fields(
 ) -> None:
     config_path = tmp_path / f"legacy_{legacy_field}.yaml"
     config_path.write_text(
-        f"online:\n  device: cpu\n  {legacy_field}: 1\n",
+        RUN_YAML_HEADER + f"online:\n  device: cpu\n  {legacy_field}: 1\n",
         encoding="utf-8",
     )
 
@@ -1219,17 +1334,20 @@ def test_pretrain_raw_baseline_runs_once_before_resume(
     monkeypatch.setattr(
         "train.train_bev_joint_grpo_online.load_grpo_checkpoint", resume_loader
     )
-    config = JointGRPOOnlineConfig(
-        device="cpu", resume_checkpoint=tmp_path / "resume.pt"
+    training_config = JointGRPOTrainingConfig(
+        variant="A",
+        run_mode="smoke",
+        source_checkpoint=tmp_path / "stage1.pt",
+        online=JointGRPOOnlineConfig(
+            device="cpu",
+            total_rollout_groups=1,
+            resume_checkpoint=tmp_path / "resume.pt",
+        ),
     )
     with pytest.raises(OnlineGRPOError, match="resume loader reached"):
         run_joint_grpo_training(
-            config,
-            variant="A",
-            run_mode="smoke",
-            source_checkpoint=tmp_path / "stage1.pt",
+            training_config,
             output_root=tmp_path / "output",
-            max_rollout_groups=1,
         )
     assert validation_planners == [source_planner]
 
@@ -1822,23 +1940,25 @@ def _run_fake_persistent_collection(
             lambda scenarios, seeds: ((scenarios[0], seeds[0]),),
         )
 
-    config = JointGRPOOnlineConfig(
-        device="cpu",
-        group_size=group_size,
-        update_epochs=update_epochs,
-        environment_steps_per_episode=environment_steps_per_episode,
-        rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
-        rollout_start_offset_max_steps=rollout_start_offset_max_steps,
-        validation_interval_rollouts=validation_interval_rollouts,
-        advantage_vector_log_interval_rollouts=max_rollout_groups,
-    )
-    report = run_joint_grpo_training(
-        config,
+    training_config = JointGRPOTrainingConfig(
         variant="A",
         run_mode="smoke",
         source_checkpoint=tmp_path / "stage1.pt",
+        online=JointGRPOOnlineConfig(
+            device="cpu",
+            group_size=group_size,
+            total_rollout_groups=max_rollout_groups,
+            update_epochs=update_epochs,
+            environment_steps_per_episode=environment_steps_per_episode,
+            rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
+            rollout_start_offset_max_steps=rollout_start_offset_max_steps,
+            validation_interval_rollouts=validation_interval_rollouts,
+            advantage_vector_log_interval_rollouts=max_rollout_groups,
+        ),
+    )
+    report = run_joint_grpo_training(
+        training_config,
         output_root=tmp_path / "output",
-        max_rollout_groups=max_rollout_groups,
     )
     return report, envs, validation_rollouts, trainer
 

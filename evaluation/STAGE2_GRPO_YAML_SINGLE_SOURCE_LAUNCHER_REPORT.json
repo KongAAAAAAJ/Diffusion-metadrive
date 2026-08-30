@@ -1,0 +1,91 @@
+{
+  "format": "stage2_grpo_yaml_single_source_launcher_report_v1",
+  "created_at": "2026-08-30T19:22:47+08:00",
+  "repository_commit_at_implementation": "ee9ffc6f59674201b7c0166132195ba23c084fb0",
+  "implementation_gate": {
+    "name": "stage2_grpo_yaml_single_training_parameter_source",
+    "passed": true,
+    "scope": "Move every GRPO training-semantic launcher input into the YAML config and remove the smoke rollout-budget override.",
+    "long_training_started": false,
+    "cuda_training_started": false,
+    "paired_ab_started": false
+  },
+  "problem_evidence": {
+    "artifact": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_10",
+    "yaml_total_rollout_groups": 500,
+    "former_launcher_default_max_rollout_groups": 100,
+    "observed_sampled_rollouts": 100,
+    "observed_optimizer_steps": 1000,
+    "root_cause": "Smoke mode replaced online.total_rollout_groups with the launcher --max-rollout-groups value."
+  },
+  "configuration_contract": {
+    "config": "configs/train/bev_joint_grpo.yaml",
+    "yaml_run_fields": [
+      "variant",
+      "run_mode",
+      "source_checkpoint"
+    ],
+    "yaml_online_fields": "all JointGRPOOnlineConfig fields, including total_rollout_groups",
+    "rollout_budget_source": "online.total_rollout_groups in every run mode",
+    "launcher_training_semantic_overrides": false,
+    "launcher_operational_inputs": [
+      "PYTHON_BIN",
+      "CONFIG",
+      "ARTIFACT_ROOT",
+      "OUTPUT_ROOT",
+      "LOG_ROOT"
+    ],
+    "rejected_legacy_training_environment_variables": [
+      "VARIANT",
+      "RUN_MODE",
+      "SOURCE_CHECKPOINT",
+      "MAX_ROLLOUT_GROUPS"
+    ],
+    "cli_arguments": [
+      "--config",
+      "--output-root"
+    ]
+  },
+  "resolved_main_yaml": {
+    "variant": "A",
+    "run_mode": "smoke",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "group_size": 72,
+    "total_rollout_groups": 500,
+    "update_epochs": 10,
+    "clip_epsilon": 0.2
+  },
+  "compatibility": {
+    "online_artifact_format": "bev_joint_grpo_online_config_v6",
+    "online_report_format": "bev_joint_grpo_online_report_v6",
+    "model_checkpoint_container_changed": false,
+    "optimizer_contract_changed": false,
+    "rollout_collection_contract_changed": false,
+    "historical_artifacts_modified": false,
+    "old_cli_and_environment_overrides_supported": false,
+    "run_10_resume_to_500_supported": false,
+    "run_10_resume_reason": "Its persisted ten-bucket targets are 10 groups each; a 500-group run requires 50 groups each, so strict sampler-state resume rejects the mismatch. Start a new run for 500 groups."
+  },
+  "verification": {
+    "focused_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_bev_joint_grpo_online.py tests/test_run_bev_joint_grpo_launcher.py",
+    "focused_passed": 131,
+    "broader_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_bev_joint_grpo_online.py tests/test_compare_grpo_stability.py tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_plot_grpo.py tests/test_run_bev_joint_grpo_launcher.py tests/test_bev_reward_comparison.py",
+    "broader_passed": 251,
+    "failed": 0,
+    "warnings": 15,
+    "bash_syntax_passed": true,
+    "python_compile_passed": true,
+    "main_yaml_runtime_projection": "A smoke G72 total_rollout_groups=500 update_epochs=10",
+    "git_diff_check_passed": true
+  },
+  "formal_boundary": {
+    "classification": "diagnostic_only",
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "source_checkpoint_formally_eligible": false,
+    "paper_evidence_allowed": false
+  },
+  "maintenance_note": {
+    "missing_indexed_phase_file": "docs/phases/phase6.md",
+    "authority_used": "docs/project/project_plan.json and the frozen Stage 2 machine contracts"
+  }
+}

@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-30T15:08:10+08:00",
-  "status": "stage2_random_start_collection_v2_verified_short_ab_pending",
+  "updated_at": "2026-08-30T19:24:19+08:00",
+  "status": "stage2_yaml_single_source_launcher_verified_short_ab_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -529,13 +529,30 @@
   },
   "stage2_at_risk_grpo_open": {
     "name": "At-risk diagnostic GRPO-Open",
-    "status": "random_start_collection_v2_verified_short_ab_pending",
+    "status": "yaml_single_source_launcher_verified_short_ab_pending",
     "authorization_recorded_on": "2026-08-30",
     "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
     "source_checkpoint_classification": "unqualified Stage1 v2 diagnostic source; bounded optimizer implementation smokes and the paired short A/B remain diagnostic-only and cannot bypass strict Stage1 qualification",
     "reward_domain": "tau_d",
     "run_mode": "smoke",
     "variant": "A",
+    "training_parameter_source": {
+      "config": "configs/train/bev_joint_grpo.yaml",
+      "yaml_only_fields": [
+        "run.variant",
+        "run.run_mode",
+        "run.source_checkpoint",
+        "online.*"
+      ],
+      "launcher_semantic_overrides_allowed": false,
+      "launcher_operational_inputs": [
+        "PYTHON_BIN",
+        "CONFIG",
+        "ARTIFACT_ROOT",
+        "OUTPUT_ROOT",
+        "LOG_ROOT"
+      ]
+    },
     "bounded_total_rollout_groups_required": true,
     "calibration_required": false,
     "tracking_expansion_enabled": false,
@@ -551,6 +568,8 @@
     "default_rollout_groups_per_bucket_visit": 10,
     "default_rollout_start_offset_max_steps": 200,
     "default_rollout_start_min_remaining_steps": 10,
+    "current_yaml_group_size": 72,
+    "current_yaml_total_rollout_groups": 500,
     "current_yaml_update_epochs": 10,
     "implementation_evidence": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
     "implementation_evidence_sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
@@ -932,5 +951,7 @@
   "stage2_persistent_episode_implementation_evidence_sha256": "4568c05a58eb7aeafc86cdd3bca4b1cc87cbb4260e9176d1c6f2d38abeb4efd5",
   "stage2_random_start_implementation_evidence": "evaluation/STAGE2_GRPO_RANDOM_START_IMPLEMENTATION_REPORT.json",
   "stage2_random_start_implementation_evidence_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
-  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 with stage2_joint_grpo_persistent_episode_v2 and explicit E1/E4 configs, then run evaluation.compare_grpo_stability; the main update_epochs=10 YAML is not an A/B arm, and even a passing A/B cannot authorize formal or paper conclusions."
+  "stage2_yaml_single_source_launcher_evidence": "evaluation/STAGE2_GRPO_YAML_SINGLE_SOURCE_LAUNCHER_REPORT.json",
+  "stage2_yaml_single_source_launcher_evidence_sha256": "e7b2ef99d2f1b658d938c73655bd29b425f54527cac1baafc59c54d4ffb4a568",
+  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 with stage2_joint_grpo_persistent_episode_v2 and explicit G24/E1 and G24/E4 configs, then run evaluation.compare_grpo_stability; the main G72/E10/500-rollout YAML is not an A/B arm, and even a passing A/B cannot authorize formal or paper conclusions."
 }

@@ -201,6 +201,24 @@ class JointGRPOOnlineConfig:
             )
 
 
+@dataclass(frozen=True)
+class JointGRPOTrainingConfig:
+    variant: Literal["A", "B"]
+    run_mode: Literal["formal", "smoke"]
+    source_checkpoint: Path
+    online: JointGRPOOnlineConfig
+
+    def __post_init__(self) -> None:
+        if self.variant not in ("A", "B"):
+            raise OnlineGRPOError("online GRPO variant must be A or B")
+        if self.run_mode not in ("formal", "smoke"):
+            raise OnlineGRPOError("run_mode must be formal or smoke")
+        if not isinstance(self.source_checkpoint, Path):
+            raise OnlineGRPOError("source_checkpoint must be a Path")
+        if not isinstance(self.online, JointGRPOOnlineConfig):
+            raise OnlineGRPOError("online must be a JointGRPOOnlineConfig")
+
+
 def rollout_collection_contract(
     config: JointGRPOOnlineConfig,
 ) -> dict[str, object]:
@@ -1879,33 +1897,20 @@ def _score_select_and_optimize_raw_candidates(
 
 
 def run_joint_grpo_training(
-    config: JointGRPOOnlineConfig,
+    training_config: JointGRPOTrainingConfig,
     *,
-    variant: Literal["A", "B"],
-    run_mode: Literal["formal", "smoke"],
-    source_checkpoint: Path,
     output_root: Path,
-    max_rollout_groups: int | None = None,
 ) -> dict[str, object]:
     started_at = time.monotonic()
-    if variant not in ("A", "B"):
-        raise OnlineGRPOError("online GRPO variant must be A or B")
-    if run_mode == "smoke":
-        if (
-            isinstance(max_rollout_groups, bool)
-            or not isinstance(max_rollout_groups, int)
-            or max_rollout_groups <= 0
-        ):
-            raise OnlineGRPOError(
-                "smoke mode requires a positive max_rollout_groups"
-            )
-        target_rollout_groups = max_rollout_groups
-    elif run_mode == "formal":
-        if max_rollout_groups is not None:
-            raise OnlineGRPOError("formal mode forbids a diagnostic rollout cap")
-        target_rollout_groups = config.total_rollout_groups
-    else:
-        raise OnlineGRPOError("run_mode must be formal or smoke")
+    if not isinstance(training_config, JointGRPOTrainingConfig):
+        raise OnlineGRPOError(
+            "training_config must be a JointGRPOTrainingConfig"
+        )
+    config = training_config.online
+    variant = training_config.variant
+    run_mode = training_config.run_mode
+    source_checkpoint = training_config.source_checkpoint
+    target_rollout_groups = config.total_rollout_groups
 
     reward_config = JointRewardConfig()
     _validate_raw_reward_config(reward_config)
@@ -2923,13 +2928,36 @@ def run_joint_grpo_training(
     return report
 
 
-def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
+def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise OnlineGRPOError(f"unable to read online GRPO config: {path}") from exc
     if not isinstance(payload, Mapping):
         raise OnlineGRPOError("online GRPO YAML root must be a mapping")
+    run = payload.get("run")
+    if not isinstance(run, Mapping):
+        raise OnlineGRPOError("online GRPO YAML requires a run mapping")
+    required_run_fields = {"variant", "run_mode", "source_checkpoint"}
+    if (
+        any(not isinstance(name, str) for name in run)
+        or set(run) != required_run_fields
+    ):
+        raise OnlineGRPOError(
+            "online GRPO YAML run mapping must contain exactly variant, "
+            "run_mode, and source_checkpoint"
+        )
+    variant = run["variant"]
+    if not isinstance(variant, str) or variant not in ("A", "B"):
+        raise OnlineGRPOError("online GRPO variant must be A or B")
+    run_mode = run["run_mode"]
+    if not isinstance(run_mode, str) or run_mode not in ("formal", "smoke"):
+        raise OnlineGRPOError("run_mode must be formal or smoke")
+    source_checkpoint = run["source_checkpoint"]
+    if not isinstance(source_checkpoint, str) or not source_checkpoint.strip():
+        raise OnlineGRPOError(
+            "source_checkpoint must be a non-empty path string"
+        )
     online = payload.get("online")
     if not isinstance(online, Mapping):
         raise OnlineGRPOError("online GRPO YAML requires an online mapping")
@@ -2949,7 +2977,7 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
         for value in online.get("scenarios", ())
         if isinstance(value, Mapping)
     )
-    return JointGRPOOnlineConfig(
+    online_config = JointGRPOOnlineConfig(
         device=str(online.get("device", "cuda")),
         seed=online.get("seed", 17),
         group_size=online.get("group_size", 24),
@@ -2984,25 +3012,23 @@ def _config_from_yaml(path: Path) -> JointGRPOOnlineConfig:
             "advantage_vector_log_interval_rollouts", 20
         ),
     )
+    return JointGRPOTrainingConfig(
+        variant=variant,
+        run_mode=run_mode,
+        source_checkpoint=Path(source_checkpoint),
+        online=online_config,
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--variant", choices=("A", "B"), required=True)
-    parser.add_argument("--run-mode", choices=("formal", "smoke"), required=True)
-    parser.add_argument("--source-checkpoint", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--max-rollout-groups", type=int)
     arguments = parser.parse_args()
-    config = _config_from_yaml(arguments.config)
+    training_config = _config_from_yaml(arguments.config)
     report = run_joint_grpo_training(
-        config,
-        variant=arguments.variant,
-        run_mode=arguments.run_mode,
-        source_checkpoint=arguments.source_checkpoint,
+        training_config,
         output_root=arguments.output_root,
-        max_rollout_groups=arguments.max_rollout_groups,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
@@ -3013,6 +3039,7 @@ __all__ = [
     "HOLDOUT_SEEDS",
     "PRIMARY_S5_S9_SCENARIOS",
     "JointGRPOOnlineConfig",
+    "JointGRPOTrainingConfig",
     "OnlineGRPOError",
     "constant_velocity_actions",
     "episode_has_ended",

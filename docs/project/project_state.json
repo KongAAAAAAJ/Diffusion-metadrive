@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-30T15:08:10+08:00",
+  "updated_at": "2026-08-30T19:24:19+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "5f93cb11627498dd670afc0f551a496a66df3fd9",
+    "git_commit": "ee9ffc6f59674201b7c0166132195ba23c084fb0",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -78,19 +78,21 @@
     "uncommitted_stage2_grpo_clipped_multi_epoch_report_present": false,
     "uncommitted_stage2_grpo_persistent_episode_present": false,
     "uncommitted_stage2_grpo_persistent_episode_report_present": false,
-    "uncommitted_stage2_grpo_random_start_present": true,
-    "uncommitted_stage2_grpo_random_start_report_present": true
+    "uncommitted_stage2_grpo_random_start_present": false,
+    "uncommitted_stage2_grpo_random_start_report_present": false,
+    "uncommitted_stage2_grpo_yaml_single_source_launcher_present": true,
+    "uncommitted_stage2_grpo_yaml_single_source_launcher_report_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "stage2-grpo-random-start-20260830",
-    "status": "random_start_collection_v2_verified_short_ab_pending_nonformal",
+    "round": "stage2-grpo-yaml-single-source-launcher-20260830",
+    "status": "yaml_single_source_launcher_verified_short_ab_pending_nonformal",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "random_start_collection_v2_verified_short_ab_pending_nonformal",
+      "status": "yaml_single_source_launcher_verified_short_ab_pending_nonformal",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -140,7 +142,7 @@
         "formal_experiment_status_changed": false
       },
       "stage2_clipped_multi_epoch_grpo": {
-        "status": "optimizer_v2_random_start_collection_v2_verified_short_ab_pending",
+        "status": "optimizer_v2_random_start_collection_v2_yaml_single_source_verified_short_ab_pending",
         "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
         "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
         "default_group_size": 24,
@@ -184,6 +186,17 @@
         "random_start_checkpoint_round_trip_passed": true,
         "random_start_implementation_report": "evaluation/STAGE2_GRPO_RANDOM_START_IMPLEMENTATION_REPORT.json",
         "random_start_implementation_report_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
+        "training_parameter_source": "configs/train/bev_joint_grpo.yaml",
+        "launcher_training_semantic_overrides": false,
+        "main_yaml_variant": "A",
+        "main_yaml_run_mode": "smoke",
+        "main_yaml_group_size": 72,
+        "main_yaml_total_rollout_groups": 500,
+        "main_yaml_update_epochs": 10,
+        "yaml_single_source_focused_tests_passed": 131,
+        "yaml_single_source_broader_tests_passed": 251,
+        "yaml_single_source_implementation_report": "evaluation/STAGE2_GRPO_YAML_SINGLE_SOURCE_LAUNCHER_REPORT.json",
+        "yaml_single_source_implementation_report_sha256": "e7b2ef99d2f1b658d938c73655bd29b425f54527cac1baafc59c54d4ffb4a568",
         "short_ab_manifest_format": "stage2_grpo_stability_ab_manifest_v2",
         "short_ab_report_format": "stage2_grpo_stability_ab_report_v2",
         "short_ab_status": "pending_separate_frozen_code_training_thread",
@@ -863,6 +876,10 @@
     "stage2_grpo_random_start_collection_v2_authorized_on": "2026-08-30",
     "stage2_grpo_random_start_collection_v2_scope": "After the first history-ready and primary-scenario-ready state in each live training episode, draw one inclusive uniform integer offset from the shared training torch.Generator with max 200 and a ten-step episode-cap reserve; close at the frozen S5-S9 completion predicates, retain partial visits, keep fixed validation earliest-ready, preserve update_epochs=10 in the main YAML, and do not launch long A/B training in this implementation thread.",
     "stage2_grpo_random_start_collection_v2_long_training_authorized_in_this_thread": false,
+    "stage2_grpo_yaml_single_source_launcher_authorized": true,
+    "stage2_grpo_yaml_single_source_launcher_authorized_on": "2026-08-30",
+    "stage2_grpo_yaml_single_source_launcher_scope": "Move variant, run mode, source Stage1 checkpoint, and every online GRPO training parameter into configs/train/bev_joint_grpo.yaml; remove shell and CLI semantic overrides, keep only operational interpreter/config/output/log paths in the launcher, preserve the main G72/E10/500-rollout values, retain diagnostic smoke classification for the unqualified run_3 source, and do not start training in this implementation thread.",
+    "stage2_grpo_yaml_single_source_launcher_long_training_authorized_in_this_thread": false,
     "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. Stage1 v2 run_3 remains unqualified and is the diagnostic source for legacy GRPO run_4 through run_7 and the pending clipped-GRPO A/B. Stage2_joint_grpo_persistent_episode_v2 randomized scenario-valid starts passed 237 focused tests and a bounded G=3/E=2 six-rollout CUDA smoke on 2026-08-30; formal eligibility is unchanged, and run_8 through run_13 remain pending in a separate frozen-code training thread."
   },
   "source_of_truth": {
@@ -880,6 +897,11 @@
       "path": "evaluation/STAGE2_GRPO_RANDOM_START_IMPLEMENTATION_REPORT.json",
       "sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
       "role": "Records stage2_joint_grpo_persistent_episode_v2 randomized scenario-valid starts, exact shared-generator and S5-S9 close semantics, v6 online and v2 A/B artifacts, 237 passing focused tests, and the real G=3/E=2 six-group CUDA smoke with two observed retry paths and two consecutive S5 groups from one accepted episode."
+    },
+    "stage2_grpo_yaml_single_source_launcher_report": {
+      "path": "evaluation/STAGE2_GRPO_YAML_SINGLE_SOURCE_LAUNCHER_REPORT.json",
+      "sha256": "e7b2ef99d2f1b658d938c73655bd29b425f54527cac1baafc59c54d4ffb4a568",
+      "role": "Records the YAML-only GRPO training-semantic source, removal and rejection of launcher/CLI variant, run-mode, source-checkpoint and rollout-budget overrides, the resolved A/smoke/G72/E10/500 main config, 251 passing related tests, and unchanged diagnostic/formal eligibility."
     },
     "v2_only_training_evaluation_cleanup_report": {
       "path": "evaluation/V2_ONLY_TRAINING_EVALUATION_CLEANUP_REPORT.json",
