@@ -176,8 +176,58 @@ def joint_grpo_optimizer_contract_sha256(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def joint_grpo_transition_noise_contract() -> dict[str, object]:
+    """Return the machine-readable Stage-2 transition-noise contract."""
+
+    return {
+        "version": "stage2_joint_grpo_transition_noise_v1",
+        "initial_noising": {
+            "domain": "normalized_xy",
+            "method": "standard_additive_ddim",
+            "timestep": 8,
+            "noise_shape": "[B*G,role,mode,waypoint,xy]",
+            "ppo_ratio_included": False,
+        },
+        "reverse_transition": {
+            "domain": "normalized_xy",
+            "method": "per_trajectory_axis_multiplicative",
+            "formula": (
+                "prev_sample = mean * (1 + sampling_std * epsilon_axis)"
+            ),
+            "axis_order": ["longitudinal_x", "lateral_y"],
+            "epsilon_shape": "[B*G,role,mode,1,2]",
+            "waypoint_broadcast": True,
+            "sampling_std": "max(ddim_sigma_t,0.04)",
+            "stochastic_transition_count": 3,
+            "terminal_t0": "deterministic",
+        },
+        "pseudo_log_probability": {
+            "method": "diffusiondrive_v2_additive_residual_approximation",
+            "formula": (
+                "Normal(prev_sample - mean; 0, max(ddim_sigma_t,0.1))"
+            ),
+            "reduction": "sum_over_waypoint_and_xy_then_selected_roles",
+            "exact_rank2_likelihood": False,
+        },
+        "heading_noise": "excluded_and_reconstructed_from_xy",
+    }
+
+
+def joint_grpo_transition_noise_contract_sha256() -> str:
+    """Return the canonical digest of the transition-noise contract."""
+
+    encoded = json.dumps(
+        joint_grpo_transition_noise_contract(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class GaussianDDIMStep:
+    """One reverse step; ``std`` is the pseudo-likelihood standard deviation."""
+
     prev_sample: Tensor
     mean: Tensor
     std: Tensor
@@ -185,7 +235,7 @@ class GaussianDDIMStep:
 
 
 class StandardGaussianDDIM:
-    """DDIM transition with additive Gaussian noise and exact log-probability."""
+    """DDIM mean with axis-wise multiplicative reverse-transition noise."""
 
     def __init__(self, num_train_timesteps: int = 1000) -> None:
         self.scheduler = DDIMScheduler(
@@ -262,20 +312,26 @@ class StandardGaussianDDIM:
             / (1.0 - alpha_t).clamp_min(torch.finfo(dtype).eps)
             * (1.0 - alpha_t / alpha_previous)
         ).clamp_min(0.0)
-        std = float(eta) * variance.sqrt()
-        direction_scale = (1.0 - alpha_previous - std.square()).clamp_min(0.0)
+        raw_sigma = float(eta) * variance.sqrt()
+        direction_scale = (
+            1.0 - alpha_previous - raw_sigma.square()
+        ).clamp_min(0.0)
         mean = alpha_previous.sqrt() * prediction + direction_scale.sqrt() * epsilon
 
-        stochastic = bool(float(std.detach().cpu()) > 0.0)
+        stochastic = timestep > 0
+        likelihood_std = (
+            raw_sigma.clamp_min(0.1) if stochastic else raw_sigma
+        )
         if prev_sample is None:
             if stochastic:
-                noise = torch.randn(
-                    sample.shape,
+                sampling_std = raw_sigma.clamp_min(0.04)
+                epsilon_axis = torch.randn(
+                    mean.shape[:-2] + (1, 2),
                     dtype=dtype,
                     device=device,
                     generator=generator,
                 )
-                sampled = mean + std * noise
+                sampled = mean * (1.0 + sampling_std * epsilon_axis)
             else:
                 sampled = mean
         else:
@@ -294,15 +350,16 @@ class StandardGaussianDDIM:
         log_prob = None
         if stochastic:
             elementwise = (
-                -0.5 * ((sampled.detach() - mean) / std).square()
-                - torch.log(std)
+                -0.5
+                * ((sampled.detach() - mean) / likelihood_std).square()
+                - torch.log(likelihood_std)
                 - 0.5 * math.log(2.0 * math.pi)
             )
             log_prob = elementwise.sum(dim=(-2, -1))
         return GaussianDDIMStep(
             prev_sample=sampled,
             mean=mean,
-            std=std,
+            std=likelihood_std,
             log_prob=log_prob,
         )
 
@@ -1681,5 +1738,7 @@ __all__ = [
     "StandardGaussianDDIM",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
+    "joint_grpo_transition_noise_contract",
+    "joint_grpo_transition_noise_contract_sha256",
     "normalize_signed_advantages",
 ]

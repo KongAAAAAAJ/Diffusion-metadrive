@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-31T21:37:14+08:00",
-  "status": "stage2_run_scoped_logging_verified_short_ab_pending",
+  "updated_at": "2026-09-01T00:02:08+08:00",
+  "status": "stage2_multiplicative_transition_noise_verified_short_ab_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -559,7 +559,7 @@
   },
   "stage2_at_risk_grpo_open": {
     "name": "At-risk diagnostic GRPO-Open",
-    "status": "run_scoped_logging_verified_short_ab_pending",
+    "status": "multiplicative_transition_noise_verified_short_ab_pending",
     "authorization_recorded_on": "2026-08-30",
     "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
     "source_checkpoint_classification": "unqualified Stage1 v2 diagnostic source; bounded optimizer implementation smokes and the paired short A/B remain diagnostic-only and cannot bypass strict Stage1 qualification",
@@ -590,6 +590,10 @@
     "application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
     "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
     "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
+    "transition_noise_contract_version": "stage2_joint_grpo_transition_noise_v1",
+    "transition_noise_contract_sha256": "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137",
+    "online_config_format": "bev_joint_grpo_online_config_v7",
+    "online_report_format": "bev_joint_grpo_online_report_v7",
     "default_update_epochs": 4,
     "default_clip_epsilon": 0.2,
     "budget_unit": "fresh_rollout_group",
@@ -631,6 +635,27 @@
     "random_start_implementation_evidence_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
     "run_scoped_logging_implementation_evidence": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
     "run_scoped_logging_implementation_evidence_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
+    "multiplicative_transition_noise_implementation_evidence": "evaluation/STAGE2_GRPO_MULTIPLICATIVE_TRANSITION_NOISE_IMPLEMENTATION_REPORT.json",
+    "multiplicative_transition_noise_implementation_evidence_sha256": "83c2417a61107b60bea779396e7a6bdbbb7ee64e7c45f56c9e06a8cd264e573c",
+    "multiplicative_transition_noise_implementation_verification": {
+      "focused_tests_passed": 243,
+      "focused_tests_failed": 0,
+      "cuda_g3_epochs2_rollout1_passed": true,
+      "cuda_sampled_rollouts": 1,
+      "cuda_optimizer_steps": 2,
+      "cuda_selected_environment_steps": 1,
+      "cuda_checkpoint_round_trip_passed": true,
+      "cuda_peak_memory_bytes": 129973248,
+      "cuda_peak_memory_limit_bytes": 16106127360,
+      "online_config_format": "bev_joint_grpo_online_config_v7",
+      "online_report_format": "bev_joint_grpo_online_report_v7",
+      "stability_ab_manifest_format": "stage2_grpo_stability_ab_manifest_v3",
+      "stability_ab_report_format": "stage2_grpo_stability_ab_report_v3",
+      "legacy_noise_checkpoint_resume_allowed": false,
+      "historical_checkpoint_read_only_evaluation_allowed": true,
+      "long_training_started": false,
+      "formal_ab_started": false
+    },
     "implementation_verification": {
       "focused_tests_passed": 175,
       "legacy_runs_4_through_7_evaluator_load_passed": true,
@@ -726,7 +751,10 @@
     },
     "short_stability_ab": {
       "status": "pending_future_actual_path_manifest_not_started",
-      "manifest_format": "stage2_grpo_stability_ab_manifest_v2",
+      "manifest_format": "stage2_grpo_stability_ab_manifest_v3",
+      "report_format": "stage2_grpo_stability_ab_report_v3",
+      "transition_noise_contract_version": "stage2_joint_grpo_transition_noise_v1",
+      "transition_noise_contract_sha256": "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137",
       "paired_training_seeds": [
         17,
         23,
@@ -743,7 +771,7 @@
       "rollout_start_offset_max_steps": 200,
       "rollout_start_min_remaining_steps": 10,
       "epoch_config_policy": "The main YAML remains update_epochs=10; the six-run A/B must use explicit one-epoch and four-epoch configs and must not treat the main YAML as the clipped arm.",
-      "run_allocation_policy": "Do not preassign numbered directories. After run-scoped logging is verified, bind each of the six fresh runs to its actual immutable run path in the v2 A/B manifest; occupied run_8 through run_15 are not A/B arms.",
+      "run_allocation_policy": "Do not preassign numbered directories. In a separate frozen-code training thread, bind each of the six future fresh runs to its actual immutable run path in the v3 A/B manifest; occupied run_8 through run_15 are not A/B arms.",
       "comparison_entry": "evaluation.compare_grpo_stability",
       "diagnostic_only": true
     },
@@ -781,6 +809,36 @@
     "group_size": 24,
     "policy_sample": "tau_d",
     "policy_probability": "raw diffusion/DDIM rollout and sampled-mode log-probability",
+    "transition_noise_contract": {
+      "version": "stage2_joint_grpo_transition_noise_v1",
+      "machine_source": "models.bev_planner.joint_grpo.joint_grpo_transition_noise_contract",
+      "initial_noising": {
+        "domain": "normalized_xy",
+        "method": "standard_additive_ddim",
+        "timestep": 8,
+        "noise_shape": "[B*G,role,mode,waypoint,xy]",
+        "ppo_ratio_included": false
+      },
+      "reverse_transition": {
+        "domain": "normalized_xy",
+        "method": "per_trajectory_axis_multiplicative",
+        "formula": "prev_sample = mean * (1 + sampling_std * epsilon_axis)",
+        "axis_order": ["longitudinal_x", "lateral_y"],
+        "epsilon_shape": "[B*G,role,mode,1,2]",
+        "waypoint_broadcast": true,
+        "sampling_std": "max(ddim_sigma_t,0.04)",
+        "stochastic_transition_count": 3,
+        "terminal_t0": "deterministic"
+      },
+      "pseudo_log_probability": {
+        "method": "diffusiondrive_v2_additive_residual_approximation",
+        "formula": "Normal(prev_sample - mean; 0, max(ddim_sigma_t,0.1))",
+        "reduction": "sum_over_waypoint_and_xy_then_selected_roles",
+        "exact_rank2_likelihood": false
+      },
+      "heading_noise": "excluded_and_reconstructed_from_xy",
+      "contract_sha256": "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137"
+    },
     "command_optimization": "tau_cmd = KinematicTrajectoryOptimizer(tau_d)",
     "reward_contract": {
       "version": "stage2_joint_reward_v2",
@@ -875,6 +933,7 @@
       "G and diffusion timesteps",
       "optimizer, learning rate, KL and BC weights",
       "fresh rollout-group budget and clipped multi-epoch optimizer contract",
+      "stage2_joint_grpo_transition_noise_v1 contract SHA and two-axis multiplicative reverse-transition semantics",
       "randomized-start persistent-episode rollout collection contract, bucket targets, visit quota, offset distribution, and minimum remaining-step reserve",
       "trainable and frozen planner modules",
       "trajectory optimizer",
@@ -1042,6 +1101,7 @@
     "Do not start formal GRPO before the Stage1-A checkpoint is eligible.",
     "Do not start formal GRPO-Exec with a synthetic-only surrogate.",
     "Do not compare branches whose source checkpoint, seeds, budget, reward semantics, or trajectory optimizer differ.",
+    "Do not resume additive-transition or otherwise noise-contract-mismatched GRPO checkpoints into the multiplicative-transition implementation; historical checkpoints remain read-only evaluation evidence.",
     "Do not convert diagnostic artifacts into formal artifacts by editing metadata.",
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision.",
@@ -1062,5 +1122,7 @@
   "stage2_yaml_single_source_launcher_evidence_sha256": "e7b2ef99d2f1b658d938c73655bd29b425f54527cac1baafc59c54d4ffb4a568",
   "stage2_run_scoped_logging_implementation_evidence": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
   "stage2_run_scoped_logging_implementation_evidence_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
-  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, create the v2 A/B manifest by binding six future freshly allocated actual run paths to explicit G24/E1 and G24/E4 configs, then execute only those diagnostic paired runs; occupied run_8 through run_15 are not A/B arms, no future A/B run has started in this round, and even a passing A/B cannot authorize formal or paper conclusions."
+  "stage2_multiplicative_transition_noise_implementation_evidence": "evaluation/STAGE2_GRPO_MULTIPLICATIVE_TRANSITION_NOISE_IMPLEMENTATION_REPORT.json",
+  "stage2_multiplicative_transition_noise_implementation_evidence_sha256": "83c2417a61107b60bea779396e7a6bdbbb7ee64e7c45f56c9e06a8cd264e573c",
+  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. The multiplicative transition-noise implementation is verified; in a separate frozen-code training thread create the v3 A/B manifest by binding six future freshly allocated actual run paths to explicit G24/E1 and G24/E4 configs with the exact transition-noise contract and SHA, then execute only those diagnostic paired runs. Occupied run_8 through run_15 are not A/B arms, no future A/B run has started in this round, and even a passing A/B cannot authorize formal or paper conclusions."
 }

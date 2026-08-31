@@ -33,6 +33,12 @@ def _run_config(arm: str, seed: int) -> dict[str, object]:
         "format": comparison.ONLINE_CONFIG_FORMAT,
         "grpo_config": dict(comparison.EXPECTED_GRPO_CONFIG),
         "source_stage1_sha256": SOURCE_SHA,
+        "transition_noise_contract": (
+            comparison.joint_grpo_transition_noise_contract()
+        ),
+        "transition_noise_contract_sha256": (
+            comparison.TRANSITION_NOISE_CONTRACT_SHA256
+        ),
         "reward_contract_sha256": "b" * 64,
         "reward_config_sha256": "c" * 64,
         "reward_application_contract_sha256": "d" * 64,
@@ -124,6 +130,12 @@ def _run_report(
     return {
         "format": comparison.ONLINE_REPORT_FORMAT,
         "grpo_config": dict(comparison.EXPECTED_GRPO_CONFIG),
+        "transition_noise_contract": (
+            comparison.joint_grpo_transition_noise_contract()
+        ),
+        "transition_noise_contract_sha256": (
+            comparison.TRANSITION_NOISE_CONTRACT_SHA256
+        ),
         "rollout_collection_contract": (
             comparison._expected_rollout_collection_contract(200)
         ),
@@ -212,6 +224,12 @@ def _write_manifest(
     manifest = {
         "format": comparison.MANIFEST_FORMAT,
         "source_stage1_sha256": SOURCE_SHA,
+        "transition_noise_contract": (
+            comparison.joint_grpo_transition_noise_contract()
+        ),
+        "transition_noise_contract_sha256": (
+            comparison.TRANSITION_NOISE_CONTRACT_SHA256
+        ),
         "paired_seeds": list(comparison.PAIRED_SEEDS),
         "baseline_update_epochs": 1,
         "clipped_update_epochs": 4,
@@ -262,6 +280,9 @@ def test_expected_grpo_config_matches_core_training_defaults() -> None:
             JointGRPOOnlineConfig(environment_steps_per_episode=200)
         )
     )
+    assert comparison.joint_grpo_transition_noise_contract_sha256() == (
+        comparison.TRANSITION_NOISE_CONTRACT_SHA256
+    )
 
 
 def test_compare_grpo_stability_emits_passing_report_and_png(
@@ -280,6 +301,18 @@ def test_compare_grpo_stability_emits_passing_report_and_png(
     )
     assert report["rollout_start_offset_max_steps"] == 200
     assert report["rollout_start_min_remaining_steps"] == 10
+    assert report["transition_noise_contract"] == (
+        comparison.joint_grpo_transition_noise_contract()
+    )
+    assert report["transition_noise_contract_sha256"] == (
+        comparison.TRANSITION_NOISE_CONTRACT_SHA256
+    )
+    assert report["fairness_binding"]["transition_noise_contract"] == (
+        report["transition_noise_contract"]
+    )
+    assert report["fairness_binding"][
+        "transition_noise_contract_sha256"
+    ] == report["transition_noise_contract_sha256"]
     assert report["summary"]["volatility_reduced_pair_count"] == 2
     assert report["summary"]["volatility_gate_passed"] is True
     assert report["summary"]["final_mean_non_degraded"] is True
@@ -333,10 +366,10 @@ def test_compare_grpo_stability_rejects_incomplete_pair_manifest(
         compare_grpo_stability(manifest_path, tmp_path / "output")
 
 
-def test_compare_grpo_stability_rejects_v1_manifest(tmp_path: Path) -> None:
+def test_compare_grpo_stability_rejects_v2_manifest(tmp_path: Path) -> None:
     manifest_path = _write_manifest(tmp_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["format"] = "stage2_grpo_stability_ab_manifest_v1"
+    manifest["format"] = "stage2_grpo_stability_ab_manifest_v2"
     _write_json(manifest_path, manifest)
 
     with pytest.raises(GRPOStabilityComparisonError, match="manifest format mismatch"):
@@ -371,7 +404,7 @@ def test_compare_grpo_stability_rejects_manifest_collection_drift(
         compare_grpo_stability(manifest_path, tmp_path / "output")
 
 
-def test_compare_grpo_stability_rejects_missing_v2_manifest_field(
+def test_compare_grpo_stability_rejects_missing_v3_manifest_field(
     tmp_path: Path,
 ) -> None:
     manifest_path = _write_manifest(tmp_path)
@@ -384,13 +417,50 @@ def test_compare_grpo_stability_rejects_missing_v2_manifest_field(
 
 
 @pytest.mark.parametrize(
+    "field",
+    ["transition_noise_contract", "transition_noise_contract_sha256"],
+)
+def test_compare_grpo_stability_requires_manifest_transition_noise_binding(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop(field)
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(GRPOStabilityComparisonError, match="fields mismatch"):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize("field", ["contract", "sha256"])
+def test_compare_grpo_stability_rejects_manifest_transition_noise_drift(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if field == "contract":
+        manifest["transition_noise_contract"]["version"] = "additive_noise"
+    else:
+        manifest["transition_noise_contract_sha256"] = "0" * 64
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError,
+        match="manifest transition noise contract",
+    ):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize(
     ("artifact", "legacy_format", "message"),
     [
-        ("config", "bev_joint_grpo_online_config_v5", "config format mismatch"),
-        ("report", "bev_joint_grpo_online_report_v5", "report format mismatch"),
+        ("config", "bev_joint_grpo_online_config_v6", "config format mismatch"),
+        ("report", "bev_joint_grpo_online_report_v6", "report format mismatch"),
     ],
 )
-def test_compare_grpo_stability_rejects_v5_online_artifacts(
+def test_compare_grpo_stability_rejects_v6_online_artifacts(
     tmp_path: Path,
     artifact: str,
     legacy_format: str,
@@ -403,6 +473,52 @@ def test_compare_grpo_stability_rejects_v5_online_artifacts(
     _write_json(artifact_path, value)
 
     with pytest.raises(GRPOStabilityComparisonError, match=message):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize("artifact", ["config", "report"])
+@pytest.mark.parametrize(
+    "field",
+    ["transition_noise_contract", "transition_noise_contract_sha256"],
+)
+def test_compare_grpo_stability_requires_run_transition_noise_binding(
+    tmp_path: Path,
+    artifact: str,
+    field: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    artifact_path = tmp_path / "clipped_23" / f"{artifact}.json"
+    value = json.loads(artifact_path.read_text(encoding="utf-8"))
+    value.pop(field)
+    _write_json(artifact_path, value)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError,
+        match=rf"clipped/23 {artifact} transition noise contract",
+    ):
+        compare_grpo_stability(manifest_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize("artifact", ["config", "report"])
+@pytest.mark.parametrize("field", ["contract", "sha256"])
+def test_compare_grpo_stability_rejects_run_transition_noise_drift(
+    tmp_path: Path,
+    artifact: str,
+    field: str,
+) -> None:
+    manifest_path = _write_manifest(tmp_path)
+    artifact_path = tmp_path / "clipped_23" / f"{artifact}.json"
+    value = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if field == "contract":
+        value["transition_noise_contract"]["version"] = "additive_noise"
+    else:
+        value["transition_noise_contract_sha256"] = "0" * 64
+    _write_json(artifact_path, value)
+
+    with pytest.raises(
+        GRPOStabilityComparisonError,
+        match=rf"clipped/23 {artifact} transition noise contract",
+    ):
         compare_grpo_stability(manifest_path, tmp_path / "output")
 
 

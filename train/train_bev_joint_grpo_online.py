@@ -52,6 +52,8 @@ from models.bev_planner import (
     joint_reward_config_sha256,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
+    joint_grpo_transition_noise_contract,
+    joint_grpo_transition_noise_contract_sha256,
     normalize_signed_advantages,
 )
 from models.bev_planner.mode_contract import ModeIndex
@@ -1484,6 +1486,12 @@ def _checkpoint_payload(
             "policy_update_contract_sha256": (
                 joint_grpo_optimizer_contract_sha256(policy_update)
             ),
+            "transition_noise_contract": (
+                joint_grpo_transition_noise_contract()
+            ),
+            "transition_noise_contract_sha256": (
+                joint_grpo_transition_noise_contract_sha256()
+            ),
             "rollout_collection_contract": dict(collection_contract),
             "sampler_state": dict(sampler_state),
             "trajectory_optimizer_config": dataclasses.asdict(
@@ -1543,6 +1551,10 @@ def _validate_online_checkpoint_metadata(
         "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
         "policy_update_contract_sha256": (
             joint_grpo_optimizer_contract_sha256(policy_update)
+        ),
+        "transition_noise_contract": joint_grpo_transition_noise_contract(),
+        "transition_noise_contract_sha256": (
+            joint_grpo_transition_noise_contract_sha256()
         ),
         "rollout_collection_contract": dict(collection_contract),
         "scenario_contract_sha256": scenario_contract_sha,
@@ -1860,6 +1872,8 @@ def _resume_best_checkpoint_anchor(
         "calibration_required",
         "policy_update_contract",
         "policy_update_contract_sha256",
+        "transition_noise_contract",
+        "transition_noise_contract_sha256",
         "rollout_collection_contract",
         "scenario_contract_sha256",
         "trajectory_optimizer_sha256",
@@ -2091,7 +2105,7 @@ def run_joint_grpo_training(
         else None
     )
     frozen = {
-        "format": "bev_joint_grpo_online_config_v6",
+        "format": "bev_joint_grpo_online_config_v7",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -2102,6 +2116,10 @@ def run_joint_grpo_training(
         "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
         "policy_update_contract_sha256": (
             joint_grpo_optimizer_contract_sha256(policy_update)
+        ),
+        "transition_noise_contract": joint_grpo_transition_noise_contract(),
+        "transition_noise_contract_sha256": (
+            joint_grpo_transition_noise_contract_sha256()
         ),
         "rollout_collection_contract": collection_contract,
         "reward_contract_version": _reward_contract_version(),
@@ -2850,7 +2868,7 @@ def run_joint_grpo_training(
         )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v6",
+        "format": "bev_joint_grpo_online_report_v7",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -2912,6 +2930,10 @@ def run_joint_grpo_training(
         "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
         "policy_update_contract_sha256": (
             joint_grpo_optimizer_contract_sha256(policy_update)
+        ),
+        "transition_noise_contract": joint_grpo_transition_noise_contract(),
+        "transition_noise_contract_sha256": (
+            joint_grpo_transition_noise_contract_sha256()
         ),
         "rollout_collection_contract": collection_contract,
         "simulator_validation_role": "diagnostic_only",

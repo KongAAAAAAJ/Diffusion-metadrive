@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import gc
+import json
 import weakref
 from pathlib import Path
 from unittest import mock
@@ -16,6 +17,8 @@ from models.bev_planner import (
     JointGRPOError,
     JointGRPOTrainerA,
     StandardGaussianDDIM,
+    joint_grpo_transition_noise_contract,
+    joint_grpo_transition_noise_contract_sha256,
     normalize_signed_advantages,
 )
 from models.bev_planner.bev_only_diffusion_planner import MAX_BACKGROUND_ACTORS
@@ -230,6 +233,25 @@ def test_policy_update_config_contract_and_sha() -> None:
             JointGRPOPolicyUpdateConfig(clip_epsilon=invalid_epsilon)
 
 
+def test_transition_noise_contract_matches_project_plan() -> None:
+    plan_path = Path(__file__).parents[1] / "docs/project/project_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    expected = dict(
+        plan["stage2_common_contract"]["transition_noise_contract"]
+    )
+    assert expected.pop("machine_source") == (
+        "models.bev_planner.joint_grpo."
+        "joint_grpo_transition_noise_contract"
+    )
+    expected_sha256 = expected.pop("contract_sha256")
+
+    assert joint_grpo_transition_noise_contract() == expected
+    assert joint_grpo_transition_noise_contract_sha256() == expected_sha256
+    assert expected_sha256 == (
+        "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137"
+    )
+
+
 def test_clipped_grpo_surrogate_positive_negative_advantages() -> None:
     ratios = torch.tensor(
         [[0.5, 0.5, 1.0, 1.5, 1.5]],
@@ -291,24 +313,60 @@ def test_standard_gaussian_ddim_sampling_replay_and_schedule() -> None:
     transition = StandardGaussianDDIM()
     sample = torch.zeros((2, 3, 10, 8, 2), dtype=torch.float32)
     prediction = torch.full_like(sample, 0.25)
-    first = transition.step(
-        model_output=prediction,
-        timestep=15,
-        previous_timestep=10,
-        sample=sample,
-        eta=1.0,
-        generator=torch.Generator().manual_seed(7),
+    epsilon_axis = torch.linspace(
+        -0.75,
+        0.75,
+        steps=2 * 3 * 10 * 2,
+        dtype=torch.float32,
+    ).reshape(2, 3, 10, 1, 2)
+    with mock.patch(
+        "models.bev_planner.joint_grpo.torch.randn",
+        return_value=epsilon_axis,
+    ) as randn:
+        first = transition.step(
+            model_output=prediction,
+            timestep=15,
+            previous_timestep=10,
+            sample=sample,
+            eta=1.0,
+            generator=torch.Generator().manual_seed(7),
+        )
+    assert randn.call_args.args[0] == torch.Size((2, 3, 10, 1, 2))
+    alpha_t = transition.scheduler.alphas_cumprod[15]
+    alpha_previous = transition.scheduler.alphas_cumprod[10]
+    variance = (
+        (1.0 - alpha_previous)
+        / (1.0 - alpha_t)
+        * (1.0 - alpha_t / alpha_previous)
+    ).clamp_min(0.0)
+    raw_sigma = variance.sqrt()
+    sampling_std = raw_sigma.clamp_min(0.04)
+    torch.testing.assert_close(
+        first.prev_sample,
+        first.mean * (1.0 + sampling_std * epsilon_axis),
     )
+    observed_axis_noise = (
+        (first.prev_sample / first.mean) - 1.0
+    ) / sampling_std
+    torch.testing.assert_close(
+        observed_axis_noise,
+        epsilon_axis.expand_as(first.mean),
+    )
+    assert first.std.item() == pytest.approx(0.1)
     assert first.log_prob is not None
     assert first.log_prob.shape == (2, 3, 10)
+    replay_generator = torch.Generator().manual_seed(23)
+    replay_generator_state = replay_generator.get_state().clone()
     replay = transition.step(
         model_output=prediction,
         timestep=15,
         previous_timestep=10,
         sample=sample,
         eta=1.0,
+        generator=replay_generator,
         prev_sample=first.prev_sample,
     )
+    assert torch.equal(replay_generator.get_state(), replay_generator_state)
     torch.testing.assert_close(replay.mean, first.mean)
     torch.testing.assert_close(replay.log_prob, first.log_prob)
     standardized = (first.prev_sample - first.mean) / first.std
@@ -328,6 +386,7 @@ def test_standard_gaussian_ddim_sampling_replay_and_schedule() -> None:
     )
     assert terminal.log_prob is None
     assert terminal.std.item() == 0.0
+    torch.testing.assert_close(terminal.prev_sample, terminal.mean)
     with pytest.raises(JointGRPOError, match="previous_timestep"):
         transition.step(
             model_output=prediction,
@@ -336,6 +395,48 @@ def test_standard_gaussian_ddim_sampling_replay_and_schedule() -> None:
             sample=sample,
             eta=1.0,
         )
+
+
+def test_standard_gaussian_ddim_seed_reproduction_and_initial_add_noise() -> None:
+    transition = StandardGaussianDDIM()
+    sample = torch.linspace(
+        -0.8,
+        0.8,
+        steps=2 * 3 * 10 * 8 * 2,
+        dtype=torch.float32,
+    ).reshape(2, 3, 10, 8, 2)
+    prediction = torch.full_like(sample, 0.2)
+
+    def sampled_with_seed(seed: int) -> torch.Tensor:
+        return transition.step(
+            model_output=prediction,
+            timestep=15,
+            previous_timestep=10,
+            sample=sample,
+            eta=1.0,
+            generator=torch.Generator().manual_seed(seed),
+        ).prev_sample
+
+    torch.testing.assert_close(sampled_with_seed(31), sampled_with_seed(31))
+    assert not torch.equal(sampled_with_seed(31), sampled_with_seed(32))
+
+    original = sample.reshape(6, 10, 8, 2)
+    additive_noise = torch.linspace(
+        0.7,
+        -0.7,
+        steps=original.numel(),
+        dtype=torch.float32,
+    ).reshape_as(original)
+    timesteps = torch.full((original.shape[0],), 8, dtype=torch.int64)
+    noised = transition.add_noise(original, additive_noise, timesteps)
+    alpha = transition.scheduler.alphas_cumprod[timesteps].reshape(
+        original.shape[0], 1, 1, 1
+    )
+    expected_additive = (
+        alpha.sqrt() * original
+        + (1.0 - alpha).sqrt() * additive_noise
+    )
+    torch.testing.assert_close(noised, expected_additive)
 
 
 @pytest.fixture(scope="module")

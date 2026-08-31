@@ -71,6 +71,8 @@ from .joint_grpo import (
     StandardGaussianDDIM,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
+    joint_grpo_transition_noise_contract,
+    joint_grpo_transition_noise_contract_sha256,
     normalize_signed_advantages,
 )
 from .joint_reward import (
@@ -142,6 +144,8 @@ __all__ = [
     "StandardGaussianDDIM",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
+    "joint_grpo_transition_noise_contract",
+    "joint_grpo_transition_noise_contract_sha256",
     "ModeContractError",
     "ModeIndex",
     "ModeTopology",

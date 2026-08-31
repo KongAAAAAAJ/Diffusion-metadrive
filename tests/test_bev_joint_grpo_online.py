@@ -15,6 +15,8 @@ from models.bev_planner.joint_grpo import (
     JointGRPOPolicyUpdateConfig,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
+    joint_grpo_transition_noise_contract,
+    joint_grpo_transition_noise_contract_sha256,
     normalize_signed_advantages,
 )
 from models.bev_planner.joint_reward import (
@@ -49,6 +51,7 @@ from train.train_bev_joint_grpo_online import (
     _balanced_bucket_targets,
     _bucket_visit_is_complete,
     _checkpoint_file_sha256,
+    _checkpoint_payload,
     _config_from_yaml,
     _condition_online_model_inputs,
     _cuda_peak_memory_bytes,
@@ -132,6 +135,10 @@ def _binding() -> dict[str, object]:
         "policy_update_contract_sha256": (
             joint_grpo_optimizer_contract_sha256(policy_update)
         ),
+        "transition_noise_contract": joint_grpo_transition_noise_contract(),
+        "transition_noise_contract_sha256": (
+            joint_grpo_transition_noise_contract_sha256()
+        ),
         "rollout_collection_contract": rollout_collection_contract(
             online_config
         ),
@@ -153,6 +160,43 @@ def _binding() -> dict[str, object]:
             "last_validated_rollout": 1,
         },
     }
+
+
+def test_checkpoint_payload_binds_transition_noise_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.grpo_checkpoint_payload",
+        lambda **kwargs: {
+            "diagnostic_only": kwargs["diagnostic_only"],
+            "eligible_for_formal_training": False,
+        },
+    )
+    online_config = JointGRPOOnlineConfig(device="cpu")
+    payload = _checkpoint_payload(
+        variant="A",
+        trainer=object(),
+        source_sha="a" * 64,
+        source_payload={},
+        metrics={},
+        diagnostic_only=True,
+        run_mode="smoke",
+        reward_config=JointRewardConfig(),
+        scenario_contract_sha=primary_scenario_contract()["sha256"],
+        scenario_seeds=(17, 23),
+        environment_steps=0,
+        best_validation_reward=-7.0,
+        best_checkpoint_sha256=None,
+        policy_update=JointGRPOPolicyUpdateConfig(),
+        collection_contract=rollout_collection_contract(online_config),
+        sampler_state={},
+    )
+    assert payload["transition_noise_contract"] == (
+        joint_grpo_transition_noise_contract()
+    )
+    assert payload["transition_noise_contract_sha256"] == (
+        "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137"
+    )
 
 
 def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
@@ -1104,6 +1148,14 @@ def test_resume_inherits_verified_historical_raw_best(tmp_path: Path) -> None:
         _resume_best_checkpoint_anchor(
             tmp_path / "last.pt", mismatched_collection
         )
+    mismatched_transition_noise = {
+        **last_payload,
+        "transition_noise_contract": {"version": "legacy_additive"},
+    }
+    with pytest.raises(OnlineGRPOError, match="contract binding mismatch"):
+        _resume_best_checkpoint_anchor(
+            tmp_path / "last.pt", mismatched_transition_noise
+        )
     last_payload["best_checkpoint_sha256"] = "0" * 64
     with pytest.raises(OnlineGRPOError, match="SHA256 mismatch"):
         _resume_best_checkpoint_anchor(tmp_path / "last.pt", last_payload)
@@ -1131,6 +1183,65 @@ def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
         rollout_groups_per_bucket_visit=10,
         optimizer_step=4,
     )
+    legacy_transition_noise = _binding()
+    legacy_transition_noise.pop("transition_noise_contract")
+    legacy_transition_noise.pop("transition_noise_contract_sha256")
+    with pytest.raises(
+        OnlineGRPOError, match="transition_noise_contract mismatch"
+    ):
+        _validate_online_checkpoint_metadata(
+            legacy_transition_noise,
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            collection_contract=collection,
+            bucket_count=10,
+            bucket_target_counts=bucket_targets,
+            rollout_groups_per_bucket_visit=10,
+            optimizer_step=4,
+        )
+    drifted_transition_noise = {
+        **_binding(),
+        "transition_noise_contract": {"version": "legacy_additive"},
+    }
+    with pytest.raises(
+        OnlineGRPOError, match="transition_noise_contract mismatch"
+    ):
+        _validate_online_checkpoint_metadata(
+            drifted_transition_noise,
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            collection_contract=collection,
+            bucket_count=10,
+            bucket_target_counts=bucket_targets,
+            rollout_groups_per_bucket_visit=10,
+            optimizer_step=4,
+        )
+    drifted_transition_noise_sha = {
+        **_binding(),
+        "transition_noise_contract_sha256": "0" * 64,
+    }
+    with pytest.raises(
+        OnlineGRPOError, match="transition_noise_contract_sha256 mismatch"
+    ):
+        _validate_online_checkpoint_metadata(
+            drifted_transition_noise_sha,
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            collection_contract=collection,
+            bucket_count=10,
+            bucket_target_counts=bucket_targets,
+            rollout_groups_per_bucket_visit=10,
+            optimizer_step=4,
+        )
     pre_persistent = _binding()
     pre_persistent.pop("rollout_collection_contract")
     with pytest.raises(
@@ -1984,6 +2095,12 @@ def _run_fake_persistent_collection(
             "environment_steps": kwargs["environment_steps"],
             "best_validation_reward": kwargs["best_validation_reward"],
             "best_checkpoint_sha256": kwargs["best_checkpoint_sha256"],
+            "transition_noise_contract": (
+                joint_grpo_transition_noise_contract()
+            ),
+            "transition_noise_contract_sha256": (
+                joint_grpo_transition_noise_contract_sha256()
+            ),
             "rollout_collection_contract": dict(
                 kwargs["collection_contract"]
             ),
@@ -1996,6 +2113,12 @@ def _run_fake_persistent_collection(
         return payload
 
     def validate_checkpoint(payload, **kwargs):
+        assert payload["transition_noise_contract"] == (
+            joint_grpo_transition_noise_contract()
+        )
+        assert payload["transition_noise_contract_sha256"] == (
+            joint_grpo_transition_noise_contract_sha256()
+        )
         assert payload["rollout_collection_contract"] == dict(
             kwargs["collection_contract"]
         )
@@ -2130,6 +2253,12 @@ def _run_fake_persistent_collection(
             "environment_steps": resume_sampled_rollouts + 1,
             "best_validation_reward": 1.0,
             "best_checkpoint_sha256": None,
+            "transition_noise_contract": (
+                joint_grpo_transition_noise_contract()
+            ),
+            "transition_noise_contract_sha256": (
+                joint_grpo_transition_noise_contract_sha256()
+            ),
             "rollout_collection_contract": rollout_collection_contract(
                 online_config
             ),
@@ -2182,7 +2311,22 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
         )
     )
 
-    assert report["format"] == "bev_joint_grpo_online_report_v6"
+    expected_transition_noise_contract = (
+        joint_grpo_transition_noise_contract()
+    )
+    expected_transition_noise_sha256 = (
+        joint_grpo_transition_noise_contract_sha256()
+    )
+    assert expected_transition_noise_sha256 == (
+        "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137"
+    )
+    assert report["format"] == "bev_joint_grpo_online_report_v7"
+    assert report["transition_noise_contract"] == (
+        expected_transition_noise_contract
+    )
+    assert report["transition_noise_contract_sha256"] == (
+        expected_transition_noise_sha256
+    )
     assert report["sampled_rollouts"] == 21
     assert report["uninformative_rollouts"] == 1
     assert report["optimizer_steps"] == 40
@@ -2215,7 +2359,13 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     )
     run_dir = Path(report["last_checkpoint"]).parent.parent
     frozen_config = json.loads((run_dir / "config.json").read_text())
-    assert frozen_config["format"] == "bev_joint_grpo_online_config_v6"
+    assert frozen_config["format"] == "bev_joint_grpo_online_config_v7"
+    assert frozen_config["transition_noise_contract"] == (
+        expected_transition_noise_contract
+    )
+    assert frozen_config["transition_noise_contract_sha256"] == (
+        expected_transition_noise_sha256
+    )
     assert frozen_config["rollout_collection_contract"] == report[
         "rollout_collection_contract"
     ]
@@ -2249,6 +2399,12 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     ]
     checkpoint = torch.load(
         report["last_checkpoint"], map_location="cpu", weights_only=False
+    )
+    assert checkpoint["transition_noise_contract"] == (
+        expected_transition_noise_contract
+    )
+    assert checkpoint["transition_noise_contract_sha256"] == (
+        expected_transition_noise_sha256
     )
     assert checkpoint["rollout_collection_contract"] == report[
         "rollout_collection_contract"

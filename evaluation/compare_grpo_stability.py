@@ -6,8 +6,13 @@ absolute or relative to the manifest):
 .. code-block:: json
 
    {
-     "format": "stage2_grpo_stability_ab_manifest_v2",
+     "format": "stage2_grpo_stability_ab_manifest_v3",
      "source_stage1_sha256": "<64 lowercase hex characters>",
+     "transition_noise_contract": {
+       "version": "stage2_joint_grpo_transition_noise_v1",
+       "...": "..."
+     },
+     "transition_noise_contract_sha256": "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137",
      "paired_seeds": [17, 23, 42],
      "baseline_update_epochs": 1,
      "clipped_update_epochs": 4,
@@ -22,19 +27,20 @@ absolute or relative to the manifest):
      "scenario_seeds": [17, 23],
      "validation_seeds": [31, 47],
      "runs": [
-       {"arm": "baseline", "seed": 17, "run_dir": "run_8"},
-       {"arm": "clipped", "seed": 17, "run_dir": "run_9"},
-       {"arm": "baseline", "seed": 23, "run_dir": "run_10"},
-       {"arm": "clipped", "seed": 23, "run_dir": "run_11"},
-       {"arm": "baseline", "seed": 42, "run_dir": "run_12"},
-       {"arm": "clipped", "seed": 42, "run_dir": "run_13"}
+       {"arm": "baseline", "seed": 17, "run_dir": "baseline_seed17_run_dir"},
+       {"arm": "clipped", "seed": 17, "run_dir": "clipped_seed17_run_dir"},
+       {"arm": "baseline", "seed": 23, "run_dir": "baseline_seed23_run_dir"},
+       {"arm": "clipped", "seed": 23, "run_dir": "clipped_seed23_run_dir"},
+       {"arm": "baseline", "seed": 42, "run_dir": "baseline_seed42_run_dir"},
+       {"arm": "clipped", "seed": 42, "run_dir": "clipped_seed42_run_dir"}
      ]
    }
 
 ``runs`` must contain exactly one baseline and one clipped entry for each of
 the three paired seeds (six entries total). The command validates each run's
-v6 config/report, exact randomized-start persistent-episode collection contract, the
-complete frozen ``JointGRPOConfig``, and the ``validation/reward_gain``
+v7 config/report, exact multiplicative transition-noise and randomized-start
+persistent-episode collection contracts, the complete frozen
+``JointGRPOConfig``, and the ``validation/reward_gain``
 TensorBoard series, then writes ``report.json`` and
 ``validation_reward_gain_ab.png``. Results remain diagnostic-only and do not
 authorize formal conclusions.
@@ -60,11 +66,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tensorboard.backend.event_processing import event_accumulator
 
+from models.bev_planner.joint_grpo import (
+    joint_grpo_transition_noise_contract,
+    joint_grpo_transition_noise_contract_sha256,
+)
 
-MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v2"
-REPORT_FORMAT = "stage2_grpo_stability_ab_report_v2"
-ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v6"
-ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v6"
+
+MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v3"
+REPORT_FORMAT = "stage2_grpo_stability_ab_report_v3"
+ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v7"
+ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v7"
+TRANSITION_NOISE_CONTRACT_SHA256 = (
+    "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137"
+)
 VALIDATION_REWARD_GAIN_TAG = "validation/reward_gain"
 PAIRED_SEEDS = (17, 23, 42)
 ARM_UPDATE_EPOCHS = {"baseline": 1, "clipped": 4}
@@ -190,6 +204,36 @@ def _sha256(value: object, *, label: str) -> str:
             f"{label} must be a SHA256 digest"
         ) from exc
     return value
+
+
+def _validate_transition_noise_binding(
+    contract_value: object,
+    sha_value: object,
+    *,
+    label: str,
+) -> tuple[dict[str, object], str]:
+    expected_contract = joint_grpo_transition_noise_contract()
+    expected_sha = joint_grpo_transition_noise_contract_sha256()
+    if expected_sha != TRANSITION_NOISE_CONTRACT_SHA256:
+        raise GRPOStabilityComparisonError(
+            "canonical transition noise contract SHA mismatch"
+        )
+    if (
+        not isinstance(contract_value, Mapping)
+        or dict(contract_value) != expected_contract
+    ):
+        raise GRPOStabilityComparisonError(
+            f"{label} transition noise contract mismatch"
+        )
+    actual_sha = _sha256(
+        sha_value,
+        label=f"{label} transition noise contract SHA",
+    )
+    if actual_sha != TRANSITION_NOISE_CONTRACT_SHA256:
+        raise GRPOStabilityComparisonError(
+            f"{label} transition noise contract SHA mismatch"
+        )
+    return dict(expected_contract), actual_sha
 
 
 def _validate_grpo_config(value: object, *, label: str) -> dict[str, object]:
@@ -335,13 +379,22 @@ def _load_reward_gain(tb_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return steps, values
 
 
-def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...]]:
+def _validate_manifest(
+    path: Path,
+) -> tuple[
+    str,
+    dict[str, object],
+    str,
+    tuple[Mapping[str, object], ...],
+]:
     manifest = _load_json(path, label="GRPO stability A/B manifest")
     _require_exact_keys(
         manifest,
         {
             "format",
             "source_stage1_sha256",
+            "transition_noise_contract",
+            "transition_noise_contract_sha256",
             "paired_seeds",
             "baseline_update_epochs",
             "clipped_update_epochs",
@@ -387,6 +440,13 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
         manifest.get("source_stage1_sha256"),
         label="manifest source_stage1_sha256",
     )
+    transition_noise_contract, transition_noise_sha = (
+        _validate_transition_noise_binding(
+            manifest.get("transition_noise_contract"),
+            manifest.get("transition_noise_contract_sha256"),
+            label="manifest",
+        )
+    )
     raw_runs = manifest.get("runs")
     if not isinstance(raw_runs, list) or len(raw_runs) != 6:
         raise GRPOStabilityComparisonError("manifest runs must contain six entries")
@@ -427,7 +487,12 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
         raise GRPOStabilityComparisonError(
             "manifest must contain one baseline and clipped run for each paired seed"
         )
-    return source_sha, tuple(runs)
+    return (
+        source_sha,
+        transition_noise_contract,
+        transition_noise_sha,
+        tuple(runs),
+    )
 
 
 def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
@@ -442,6 +507,12 @@ def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
     return {
         "grpo_config": config.get("grpo_config"),
         "source_stage1_sha256": config.get("source_stage1_sha256"),
+        "transition_noise_contract": config.get(
+            "transition_noise_contract"
+        ),
+        "transition_noise_contract_sha256": config.get(
+            "transition_noise_contract_sha256"
+        ),
         "reward_contract_sha256": config.get("reward_contract_sha256"),
         "reward_config_sha256": config.get("reward_config_sha256"),
         "reward_application_contract_sha256": config.get(
@@ -643,6 +714,8 @@ def _load_run(
     entry: Mapping[str, object],
     *,
     source_sha: str,
+    transition_noise_contract: Mapping[str, object],
+    transition_noise_sha: str,
     expected_binding: Mapping[str, object] | None,
 ) -> tuple[_RunSeries, dict[str, object]]:
     arm = str(entry["arm"])
@@ -657,6 +730,29 @@ def _load_run(
         raise GRPOStabilityComparisonError(f"{arm}/{seed} config format mismatch")
     if report.get("format") != ONLINE_REPORT_FORMAT:
         raise GRPOStabilityComparisonError(f"{arm}/{seed} report format mismatch")
+    config_noise_contract, config_noise_sha = (
+        _validate_transition_noise_binding(
+            config.get("transition_noise_contract"),
+            config.get("transition_noise_contract_sha256"),
+            label=f"{arm}/{seed} config",
+        )
+    )
+    report_noise_contract, report_noise_sha = (
+        _validate_transition_noise_binding(
+            report.get("transition_noise_contract"),
+            report.get("transition_noise_contract_sha256"),
+            label=f"{arm}/{seed} report",
+        )
+    )
+    if (
+        config_noise_contract != dict(transition_noise_contract)
+        or config_noise_sha != transition_noise_sha
+        or report_noise_contract != config_noise_contract
+        or report_noise_sha != config_noise_sha
+    ):
+        raise GRPOStabilityComparisonError(
+            f"{arm}/{seed} transition noise binding differs from the manifest"
+        )
     config_grpo = _validate_grpo_config(
         config.get("grpo_config"), label=f"{arm}/{seed} config grpo_config"
     )
@@ -896,7 +992,12 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
     """Validate six paired runs and emit the frozen diagnostic A/B result."""
 
     manifest_path = Path(manifest_path).resolve()
-    source_sha, entries = _validate_manifest(manifest_path)
+    (
+        source_sha,
+        transition_noise_contract,
+        transition_noise_sha,
+        entries,
+    ) = _validate_manifest(manifest_path)
     runs: dict[tuple[str, int], _RunSeries] = {}
     fairness_binding: dict[str, object] | None = None
     for entry in entries:
@@ -904,6 +1005,8 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
             manifest_path,
             entry,
             source_sha=source_sha,
+            transition_noise_contract=transition_noise_contract,
+            transition_noise_sha=transition_noise_sha,
             expected_binding=fairness_binding,
         )
         if fairness_binding is None:
@@ -960,6 +1063,9 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
         "eligible_for_formal_conclusions": False,
         "manifest": str(manifest_path),
         "source_stage1_sha256": source_sha,
+        "transition_noise_contract": transition_noise_contract,
+        "transition_noise_contract_sha256": transition_noise_sha,
+        "fairness_binding": fairness_binding,
         "paired_seeds": list(PAIRED_SEEDS),
         "group_size": GROUP_SIZE,
         "total_rollout_groups_per_run": TOTAL_ROLLOUT_GROUPS,
@@ -1010,7 +1116,7 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         type=Path,
         help=(
-            "stage2_grpo_stability_ab_manifest_v2 JSON; relative run_dir "
+            f"{MANIFEST_FORMAT} JSON; relative run_dir "
             "values resolve from this file"
         ),
     )

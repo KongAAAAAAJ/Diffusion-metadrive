@@ -1,0 +1,201 @@
+{
+  "format": "stage2_grpo_multiplicative_transition_noise_implementation_report_v1",
+  "created_at": "2026-09-01T00:02:08+08:00",
+  "repository": {
+    "branch": "test_noise",
+    "commit_at_implementation": "41d601a1008c3895b6dc749e1cbfc3c207e00872",
+    "implementation_uncommitted": true
+  },
+  "implementation_gate": {
+    "name": "stage2_grpo_two_dof_multiplicative_reverse_transition_noise",
+    "passed": true,
+    "scope": "Replace only the three stochastic reverse DDIM transitions used by joint GRPO with per-trajectory longitudinal/lateral multiplicative noise while preserving standard full-coordinate additive initial noising at t=8, deterministic termination at t=0, trajectory-chain tensor shapes, rollout semantics, and the existing pseudo-Gaussian PPO data flow.",
+    "implementation_files": [
+      "models/bev_planner/joint_grpo.py",
+      "models/bev_planner/__init__.py",
+      "train/train_bev_joint_grpo_online.py",
+      "evaluation/compare_grpo_stability.py",
+      "tests/test_bev_joint_grpo_a.py",
+      "tests/test_bev_joint_grpo_online.py",
+      "tests/test_compare_grpo_stability.py"
+    ],
+    "yaml_switch_added": false,
+    "legacy_train_refine_grpo_changed": false,
+    "frozen_planner_inference_noise_changed": false,
+    "long_training_started": false,
+    "formal_ab_started": false,
+    "historical_run_4_through_run_15_modified": false
+  },
+  "transition_noise_contract": {
+    "version": "stage2_joint_grpo_transition_noise_v1",
+    "initial_noising": {
+      "domain": "normalized_xy",
+      "method": "standard_additive_ddim",
+      "timestep": 8,
+      "noise_shape": "[B*G,role,mode,waypoint,xy]",
+      "ppo_ratio_included": false
+    },
+    "reverse_transition": {
+      "domain": "normalized_xy",
+      "method": "per_trajectory_axis_multiplicative",
+      "formula": "prev_sample = mean * (1 + sampling_std * epsilon_axis)",
+      "axis_order": [
+        "longitudinal_x",
+        "lateral_y"
+      ],
+      "epsilon_shape": "[B*G,role,mode,1,2]",
+      "waypoint_broadcast": true,
+      "sampling_std": "max(ddim_sigma_t,0.04)",
+      "stochastic_transition_count": 3,
+      "terminal_t0": "deterministic"
+    },
+    "pseudo_log_probability": {
+      "method": "diffusiondrive_v2_additive_residual_approximation",
+      "formula": "Normal(prev_sample - mean; 0, max(ddim_sigma_t,0.1))",
+      "reduction": "sum_over_waypoint_and_xy_then_selected_roles",
+      "exact_rank2_likelihood": false
+    },
+    "heading_noise": "excluded_and_reconstructed_from_xy"
+  },
+  "transition_noise_contract_sha256": "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137",
+  "implementation": {
+    "sampling_random_shape": "[B*G,role,mode,1,2]",
+    "random_degrees_of_freedom_per_vehicle_candidate": 2,
+    "random_degrees_of_freedom_per_three_vehicle_candidate_transition": 6,
+    "independence": "batch, group, vehicle role, and mode are independent; all eight waypoints share one longitudinal and one lateral draw",
+    "heading": "not sampled directly; reconstructed from XY",
+    "sampling_std_floor": 0.04,
+    "pseudo_likelihood_std_floor": 0.1,
+    "terminal_step_std": 0.0,
+    "initial_additive_noising_unchanged": true,
+    "replay_with_supplied_prev_sample_consumes_rng": false,
+    "public_contract_apis": [
+      "joint_grpo_transition_noise_contract",
+      "joint_grpo_transition_noise_contract_sha256"
+    ]
+  },
+  "artifact_contracts": {
+    "online_config_format": "bev_joint_grpo_online_config_v7",
+    "online_report_format": "bev_joint_grpo_online_report_v7",
+    "stability_ab_manifest_format": "stage2_grpo_stability_ab_manifest_v3",
+    "stability_ab_report_format": "stage2_grpo_stability_ab_report_v3",
+    "noise_contract_persisted_in_config": true,
+    "noise_contract_persisted_in_report": true,
+    "noise_contract_persisted_in_checkpoint": true,
+    "noise_contract_bound_to_best_checkpoint": true,
+    "checkpoint_schema_version": 1,
+    "checkpoint_core_format_unchanged": "bev_joint_grpo_a_v1 / bev_joint_grpo_b_v1",
+    "resume_requires_exact_noise_contract_and_sha": true,
+    "missing_or_additive_legacy_checkpoint_resume_allowed": false,
+    "historical_checkpoint_read_only_evaluation_allowed": true,
+    "ab_requires_identical_noise_contract_for_every_arm": true
+  },
+  "unchanged_contracts": {
+    "reward_contract_version": "stage2_joint_reward_v2",
+    "reward_contract_sha256": "0e95826028f77e86d8130e2f4bc6ac4ed617001d5adef99b600df8f061fb2ab9",
+    "reward_application_contract_version": "stage2_grpo_open_application_v1",
+    "reward_application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
+    "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
+    "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175"
+  },
+  "verification": {
+    "focused_command": "XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=/home/kong/diffusion_codes/Diffusion-meta/Diffusion-metadrive-test-noise /home/kong/anaconda3/envs/meta_drive/bin/python -c <metadata-filter-and-pytest> -- tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_bev_reward_comparison.py tests/test_compare_grpo_stability.py",
+    "focused_tests_passed": 243,
+    "focused_tests_failed": 0,
+    "focused_test_warnings": 15,
+    "covered": [
+      "exact DiffusionDriveV2-style multiplicative formula and the 0.04 sampling floor",
+      "two axis draws broadcast over eight waypoints with independent batch, group, role, and mode draws",
+      "fixed-seed repeatability and replay without RNG consumption",
+      "0.1 pseudo-likelihood floor, waypoint/XY reduction, deterministic t=0, and unchanged additive t=8 initial noising",
+      "behavior-policy replay ratio equals one before perturbation and finite ratio, clipping, KL, loss, and gradients after perturbation",
+      "v7 config/report/checkpoint persistence, best-checkpoint binding, exact resume acceptance, and legacy or drifted resume rejection",
+      "v3 A/B manifest/report persistence and rejection of cross-arm transition-noise drift"
+    ],
+    "expanded_selection": {
+      "selected_tests": 292,
+      "passed": 291,
+      "failed": 1,
+      "implementation_failures": 0,
+      "environment_failure": "The launcher child process enumerated the pre-existing repository-root metadrive_simulator.egg-info whose metadata is missing and failed inside CuPy before reaching the intended missing-source assertion; the five focused implementation suites pass with a process-local importlib.metadata filter."
+    },
+    "json_and_diff_checks_passed": true
+  },
+  "cuda_smoke": {
+    "classification": "bounded diagnostic, formal-ineligible",
+    "artifact_root": "/tmp/stage2_grpo_multiplicative_transition_noise_smoke/run_1",
+    "configuration": "A/smoke/G3/E2/1 fresh rollout; complete ordered S5-S9 contract; training seed 17; validation seeds 31 and 47",
+    "real_model_and_metadrive_executed": true,
+    "sampled_rollouts": 1,
+    "optimizer_steps": 2,
+    "warmup_environment_steps": 32,
+    "environment_steps": 33,
+    "selected_environment_steps": 1,
+    "checkpoint_round_trip": true,
+    "online_config_format": "bev_joint_grpo_online_config_v7",
+    "online_report_format": "bev_joint_grpo_online_report_v7",
+    "transition_noise_contract_sha256": "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137",
+    "first_epoch_behavior_replay": {
+      "mode_ratio_min_mean_max": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "trajectory_ratio_min_mean_max": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mode_old_policy_approx_kl": 0.0,
+      "trajectory_old_policy_approx_kl": 0.0,
+      "gradient_total": 7.325714588165283
+    },
+    "second_epoch_after_policy_update": {
+      "mode_ratio_min": 0.9314338564872742,
+      "mode_ratio_max": 1.0134798288345337,
+      "trajectory_ratio_min": 0.9958581924438477,
+      "trajectory_ratio_max": 1.0163522958755493,
+      "mode_old_policy_approx_kl": 0.0008802165975794196,
+      "trajectory_old_policy_approx_kl": 0.000017656220734352246,
+      "gradient_total": 7.030052185058594
+    },
+    "trajectory_ratio_min": 0.9958581924438477,
+    "trajectory_ratio_max": 1.0163522958755493,
+    "trajectory_old_policy_approx_kl": 0.000017656220734352246,
+    "gradient_total": 7.030052185058594,
+    "finite_policy_metrics": true,
+    "cuda_peak_memory_bytes": 129973248,
+    "cuda_peak_memory_gib": 0.121047,
+    "cuda_peak_memory_limit_bytes": 16106127360,
+    "cuda_peak_memory_gate_passed": true,
+    "wall_time_seconds": 107.28586901212111,
+    "config_sha256": "1f092a376e049bf51c7fb1b07ddfc7a6bde3a696c250a27e9adf5cf3426b4e5d",
+    "report_sha256": "8a870f18223605ca3d768acc1a84dd03c4b32afe675ce1f7582abd80a2acab5c",
+    "last_checkpoint_sha256": "8058bc6b7d9609f14defb9435ec356dfb862062b3e617e7b97209b61c85bdc10",
+    "best_checkpoint_sha256": "92a53b4a1e438be57ec21ad51c761d1a5db43bea86945b795de86f56d75106bd"
+  },
+  "smoke_quality_observation": {
+    "raw_proxy_unsafe_rate": 1.0,
+    "selected_raw_trajectory_valid_rate": 0.0,
+    "selected_optimized_trajectory_valid_rate": 1.0,
+    "selected_trajectory_intervention_ade_m": 11.11922836303711,
+    "selected_trajectory_intervention_fde_m": 18.60918426513672,
+    "interpretation": "The bounded smoke verifies execution, persistence, likelihood replay, gradients, and memory only. Its single unsafe raw group and large optimizer intervention are not evidence of learned-policy quality or formal eligibility."
+  },
+  "environment_notes": {
+    "pre_existing_malformed_distribution": "metadrive_simulator.egg-info lacks package metadata; direct pytest/CuPy distribution enumeration fails before test collection",
+    "verification_workaround": "Use a process-local importlib.metadata.distributions filter that excludes only entries with metadata=None before importing pytest or MetaDrive/CuPy; no repository compatibility layer was added.",
+    "metadrive_assets": "The first CUDA smoke refreshed MetaDrive 0.4.3 runtime assets automatically; no additional tracked asset change appears in git status."
+  },
+  "formal_boundary": {
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "source_checkpoint_formally_eligible": false,
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false,
+    "long_training_started": false,
+    "formal_ab_started": false
+  },
+  "next_action": "Keep strict_stage1_v2_run3_qualification as the active formal gate. If diagnostic stability evidence is desired, use a separate frozen-code training thread to bind six future freshly allocated v3 A/B arms with this exact transition-noise contract and SHA before running them."
+}
