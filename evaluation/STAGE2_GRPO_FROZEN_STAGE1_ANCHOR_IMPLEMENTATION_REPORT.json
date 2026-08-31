@@ -1,0 +1,106 @@
+{
+  "format": "stage2_grpo_frozen_stage1_anchor_implementation_report_v1",
+  "created_at": "2026-08-31T23:42:01+08:00",
+  "repository": {
+    "branch": "test_anchor",
+    "source_base_commit": "41d601a1008c3895b6dc749e1cbfc3c207e00872",
+    "state_reconciliation_commit": "5627815ac6347d8f3a7237cf2d34ad492f06d655",
+    "implementation_commit": "2a1e08baddd33eeb8063fd9c4cb0ca8ac24ec1b2"
+  },
+  "implementation_gate": {
+    "name": "stage2_grpo_frozen_stage1_anchor_v1",
+    "passed": true,
+    "scope": "For each fresh GRPO rollout group, run one deterministic frozen Stage1 diffusion inference on the live state, use all ten per-role raw tau_d candidates as the per-mode initial-noise XY anchor, retain dynamic coarse trajectories for conditioning and execution semantics, and reuse the cached selected frozen trajectory for the existing diagnostic reward.",
+    "implementation_files": [
+      "models/bev_planner/joint_grpo.py",
+      "models/bev_planner/__init__.py",
+      "train/train_bev_joint_grpo_online.py",
+      "evaluation/compare_grpo_stability.py",
+      "tests/test_bev_joint_grpo_a.py",
+      "tests/test_bev_joint_grpo_b.py",
+      "tests/test_bev_joint_grpo_online.py",
+      "tests/test_compare_grpo_stability.py"
+    ],
+    "long_training_started": false,
+    "formal_training_started": false
+  },
+  "anchor_contract": {
+    "version": "stage2_grpo_frozen_stage1_anchor_v1",
+    "sha256": "78f08bfb9a237ff0202978b3c05f376b1130ab86c0da095d2b268dba0f64231f",
+    "cadence": "once_per_fresh_rollout_group",
+    "candidate_scope": "all_per_mode_raw_tau_d_[B,3,10,8,3]",
+    "anchor_application": "normalized_xy_initial_noise_center_only",
+    "coarse_trajectory_conditioning_preserved": true,
+    "training_generator_consumed_by_frozen_inference": false,
+    "frozen_forward_count_per_fresh_rollout": 1,
+    "cached_rollout_fields": [
+      "frozen_pretrain_trajectory_candidates",
+      "frozen_pretrain_selected_trajectory",
+      "frozen_pretrain_selected_mode"
+    ],
+    "cached_tensor_semantics": "ordinary detached non-inference tensors",
+    "reward_application_changed": false,
+    "bc_or_reference_kl_formula_changed": false,
+    "ddim_parameters_changed": false
+  },
+  "persistence": {
+    "online_config_format": "bev_joint_grpo_online_config_v7",
+    "online_report_format": "bev_joint_grpo_online_report_v7",
+    "checkpoint_tensor_schema_changed": false,
+    "anchor_contract_bound_to_checkpoint": true,
+    "legacy_coarse_anchor_training_resume_allowed": false,
+    "legacy_weight_only_evaluation_allowed": true,
+    "stability_comparator_requires_v7_and_exact_anchor_contract": true
+  },
+  "verification": {
+    "focused_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -p no:cacheprovider -q tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py tests/test_bev_joint_grpo_online.py tests/test_plot_grpo.py tests/test_run_bev_joint_grpo_launcher.py tests/test_compare_grpo_stability.py",
+    "focused_tests_passed": 266,
+    "focused_tests_failed": 0,
+    "focused_test_warnings": 15,
+    "git_diff_check_passed": true,
+    "covered": [
+      "frozen all-mode candidate bank equality with standard Stage1 inference",
+      "exact initial chain construction around frozen candidates rather than dynamic coarse trajectories",
+      "dynamic coarse decoder conditioning preservation",
+      "one frozen forward per fresh rollout and cached diagnostic reward reuse",
+      "training-generator invariance and ordinary detached cached tensors",
+      "A and B backward, replay, behavior-cloning and reference-KL regression",
+      "v7 config, report and checkpoint anchor binding",
+      "missing, coarse-anchor and mismatched checkpoint resume rejection",
+      "v7 stability-comparison fairness binding"
+    ]
+  },
+  "cuda_smoke": {
+    "classification": "bounded diagnostic, formal-ineligible",
+    "artifact_root": "/tmp/stage2_grpo_frozen_stage1_anchor_smoke.fuCGHF/run_2",
+    "configuration": "A/smoke/G3/E2/1 fresh rollout; complete ordered S5-S9 contract; seed 17; validation seeds 31 and 47",
+    "sandbox_preflight_run": "/tmp/stage2_grpo_frozen_stage1_anchor_smoke.fuCGHF/run_1",
+    "sandbox_preflight_result": "rejected before model load because CUDA was unavailable inside the sandbox",
+    "sampled_rollouts": 1,
+    "optimizer_steps": 2,
+    "uninformative_rollouts": 0,
+    "checkpoint_round_trip": true,
+    "all_required_metrics_finite": true,
+    "raw_proxy_reward_mean": -0.9651446342468262,
+    "raw_proxy_reward_max": -0.9030823111534119,
+    "frozen_pretrain_raw_proxy_reward": -6.19392728805542,
+    "loss_total_last": -0.09682726114988327,
+    "cuda_peak_memory_bytes": 129976320,
+    "cuda_peak_memory_limit_bytes": 16106127360,
+    "cuda_peak_memory_gate_passed": true,
+    "wall_time_seconds": 90.73802821105346,
+    "report_sha256": "5b81587101780c66174af67a62f258a46c78b61f4e32ac6c76a3c66661d4566f",
+    "last_checkpoint_sha256": "b4ead435140e9b34b5dae26de2690c6a56f3c6f9856f8f9973252e2ec0f955e3",
+    "best_checkpoint_sha256": "60a164c28afb7fb58307c0d12cd68812de068b5fdd6e34c380f18be51fe88ec4"
+  },
+  "formal_boundary": {
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "source_checkpoint_formally_eligible": false,
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false
+  },
+  "state_reconciliation_report": "evaluation/STAGE2_GRPO_FROZEN_STAGE1_ANCHOR_STATE_RECONCILIATION_REPORT.json",
+  "next_action": "Keep the test_anchor code frozen. Any larger diagnostic training run must use a fresh output path in a separate training-only thread; it cannot change formal or paper eligibility."
+}
