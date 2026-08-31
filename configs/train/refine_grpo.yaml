@@ -88,7 +88,7 @@ w_progress:       2   # forward progress (leader only)
 w_formation_lon:  5   # longitudinal gap tracking (followers only): exp(-|lon_err - desired_gap| / lon_decay_m)
 w_formation_lat:  20   # lateral alignment (followers only): exp(-lat_err / lat_decay_m)
 w_speed:          3   # speed matching
-w_anchor:         5   # anchor reward: L2 distance to coarse trajectory (exp(-dist/anchor_decay_m))
+w_anchor:         0   # disable anchor-distance reward
 w_comfort:        6   # heading smoothness
 w_consistency:    0   # consistency with selected trajectory (set >0 to penalize deviation)
 w_preference:     15   # leader preference-point proximity (set >0 to reward leader approaching target point)

@@ -821,7 +821,9 @@ class _JointGRPOTrainerBase:
                 sample=sample.reshape(flat_shape),
             ).prev_sample.reshape_as(sample)
         if candidates is None or raw_logits is None:
-            raise JointGRPOError("frozen pretrain inference produced no denoising steps")
+            raise JointGRPOError(
+                "frozen pretrain inference produced no denoising steps"
+            )
         selected = self.planner._select(candidates, raw_logits, valid_mask)
         return {
             "selected_trajectory": selected["selected_trajectory"],

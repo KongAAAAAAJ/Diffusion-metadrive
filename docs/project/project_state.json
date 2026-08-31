@@ -1,13 +1,13 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-31T21:37:14+08:00",
+  "updated_at": "2026-08-31T22:03:51+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "ed76143334bdcfff723602bd2e8636179a0f8a43",
+    "git_commit": "e419bfd1e5f146a23d3b1486b98ecfbab815f94e",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
-    "uncommitted_plan_update_present": true,
+    "uncommitted_plan_update_present": false,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
     "uncommitted_stage2_calibration_bypass_present": false,
     "uncommitted_stage2_bare_launcher_fix_present": false,
@@ -82,19 +82,21 @@
     "uncommitted_stage2_grpo_random_start_report_present": false,
     "uncommitted_stage2_grpo_yaml_single_source_launcher_present": false,
     "uncommitted_stage2_grpo_yaml_single_source_launcher_report_present": false,
-    "uncommitted_stage2_grpo_run_scoped_logging_implementation_present": true,
-    "uncommitted_stage2_grpo_run_scoped_logging_report_present": true
+    "uncommitted_stage2_grpo_run_scoped_logging_implementation_present": false,
+    "uncommitted_stage2_grpo_run_scoped_logging_report_present": false,
+    "uncommitted_stage2_grpo_frozen_pretrain_per_rollout_reward_present": true,
+    "uncommitted_stage2_grpo_frozen_pretrain_per_rollout_reward_report_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "stage2-grpo-run-scoped-logging-20260831",
-    "status": "run_scoped_logging_verified_short_ab_pending",
+    "round": "stage2-grpo-frozen-pretrain-per-rollout-reward-20260831",
+    "status": "frozen_pretrain_per_rollout_reward_verified_short_ab_pending",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "run_scoped_logging_verified_short_ab_pending",
+      "status": "frozen_pretrain_per_rollout_reward_verified_short_ab_pending",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -144,7 +146,7 @@
         "formal_experiment_status_changed": false
       },
       "stage2_clipped_multi_epoch_grpo": {
-        "status": "optimizer_v2_random_start_collection_v2_yaml_single_source_run_scoped_logging_verified_short_ab_pending",
+        "status": "optimizer_v2_random_start_collection_v2_yaml_single_source_run_scoped_logging_frozen_pretrain_reward_verified_short_ab_pending",
         "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
         "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
         "default_group_size": 24,
@@ -193,10 +195,12 @@
         "yaml_projection_reconciliation": {
           "last_verified_report_projection": "A/smoke/G72/E10/500",
           "head_ed761433_projection": "A/formal/G24/E10/5000",
+          "head_e419bfd_projection": "A/formal/G72/E10/5000",
           "working_tree_observation": "A/formal/G72/E10/5000",
           "working_tree_owned_by_user": true,
+          "user_projection_committed_before_this_state_update": true,
           "canonical_projection_selected_by_this_round": false,
-          "policy": "Preserve the dirty YAML exactly and do not use it to waive the unqualified-source formal hard gate."
+          "policy": "Preserve the user YAML exactly and do not use it to waive the unqualified-source formal hard gate."
         },
         "yaml_single_source_focused_tests_passed": 131,
         "yaml_single_source_broader_tests_passed": 251,
@@ -240,6 +244,35 @@
           "long_training_started": false,
           "implementation_report": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
           "implementation_report_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55"
+        },
+        "frozen_pretrain_per_rollout_reward": {
+          "status": "verified_complete",
+          "tensorboard_tag": "frozen_pretrain_raw_proxy_reward",
+          "metrics_jsonl_field": "frozen_pretrain_raw_proxy_reward",
+          "step_axis": "absolute_fresh_rollout_group",
+          "same_live_state_as_current_exploration": true,
+          "trajectory_aggregation": "single_standard_deterministic_stage1_selected_trajectory",
+          "reward_domain": "raw_tau_d",
+          "diagnostic_only": true,
+          "training_behavior_changed": false,
+          "validation_pretrain_reward_semantics_changed": false,
+          "training_reward_plot_tags": [
+            "raw_proxy_reward_mean",
+            "raw_proxy_reward_max",
+            "frozen_pretrain_raw_proxy_reward"
+          ],
+          "historical_two_tag_plot_compatible": true,
+          "historical_run_4_through_run_15_backfilled": false,
+          "focused_tests_passed": 181,
+          "launcher_regression_tests_passed": 17,
+          "cuda_smoke": "/tmp/stage2_grpo_frozen_reward_smoke/run_1",
+          "cuda_smoke_sampled_rollouts": 1,
+          "cuda_smoke_optimizer_steps": 2,
+          "cuda_smoke_checkpoint_round_trip_passed": true,
+          "cuda_smoke_peak_memory_bytes": 129973248,
+          "cuda_peak_memory_limit_bytes": 16106127360,
+          "implementation_report": "evaluation/STAGE2_GRPO_FROZEN_PRETRAIN_PER_ROLLOUT_REWARD_IMPLEMENTATION_REPORT.json",
+          "implementation_report_sha256": "2b73caef3b0a03a33bf38951daf644a2f0e392c556093b47678ef01548e6ac93"
         },
         "formal_experiment_status_changed": false
       },
@@ -926,7 +959,12 @@
     "stage2_grpo_run_scoped_logging_scope": "Replace the shared truncating GRPO launcher log with one unique launch log bound to the actual allocated run directory; preserve existing logs and run artifacts, YAML-only training semantics, all GRPO algorithm contracts, checkpoint and online artifact formats, and the strict Stage1 qualification gate.",
     "stage2_grpo_run_scoped_logging_implementation_complete": true,
     "stage2_grpo_run_scoped_logging_long_training_authorized_in_this_thread": false,
-    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. Stage1 v2 run_3 remains unqualified. Run_11 through run_13 are occupied nonformal diagnostic G24/G48/G72 E10 sweeps, while run_14 and run_15 are incomplete historical artifacts; none is a clipped E1/E4 A/B arm or formal evidence. Run-scoped logging is verified complete, and the next diagnostic A/B may proceed only in a separate frozen-code thread after its v2 manifest binds six future freshly allocated actual run paths."
+    "stage2_grpo_frozen_pretrain_per_rollout_reward_authorized": true,
+    "stage2_grpo_frozen_pretrain_per_rollout_reward_authorized_on": "2026-08-31",
+    "stage2_grpo_frozen_pretrain_per_rollout_reward_scope": "For each fresh rollout group, before update and env.step, run one deterministic frozen Stage1 standard inference on the same live state, score its raw tau_d with the existing proxy reward, persist frozen_pretrain_raw_proxy_reward on the rollout axis, and add it to automatic reward plots. Preserve training behavior, v6 artifacts, checkpoint schema, validation/pretrain_reward semantics, historical runs, and the active qualification gate.",
+    "stage2_grpo_frozen_pretrain_per_rollout_reward_implementation_complete": true,
+    "stage2_grpo_frozen_pretrain_per_rollout_reward_long_training_authorized_in_this_thread": false,
+    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. Stage1 v2 run_3 remains unqualified. Run_11 through run_13 are occupied nonformal diagnostic G24/G48/G72 E10 sweeps, while run_14 and run_15 are incomplete historical artifacts; none is a clipped E1/E4 A/B arm or formal evidence. Run-scoped logging and per-rollout frozen Stage1 reward logging are verified complete. Historical run_4 through run_15 remain untouched, and the next diagnostic A/B may proceed only in a separate frozen-code thread after its v2 manifest binds six future freshly allocated actual run paths."
   },
   "source_of_truth": {
     "stage2_grpo_clipped_multi_epoch_implementation_report": {
@@ -953,6 +991,11 @@
       "path": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
       "sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
       "role": "Records launcher-owned atomic run_N allocation, one run_N/training.log per launch, strict --run-dir overwrite protection, Python-first tee exit-status propagation, the preserved historical shared log, 143 passing tests with 15 warnings, the real CPU missing-source failure boundary, and unchanged GRPO contracts and formal eligibility."
+    },
+    "stage2_grpo_frozen_pretrain_per_rollout_reward_implementation_report": {
+      "path": "evaluation/STAGE2_GRPO_FROZEN_PRETRAIN_PER_ROLLOUT_REWARD_IMPLEMENTATION_REPORT.json",
+      "sha256": "2b73caef3b0a03a33bf38951daf644a2f0e392c556093b47678ef01548e6ac93",
+      "role": "Records the same-live-state frozen Stage1 single-trajectory raw tau_d reward contract, per-fresh-rollout TB/JSONL/checkpoint/report persistence, strict new-run and compatible historical plotting, 181 focused plus 17 launcher regression tests, and the passing A/G3/E2/one-rollout CUDA smoke with checkpoint round-trip and 129973248-byte peak memory."
     },
     "v2_only_training_evaluation_cleanup_report": {
       "path": "evaluation/V2_ONLY_TRAINING_EVALUATION_CLEANUP_REPORT.json",
@@ -2057,6 +2100,20 @@
       "run_scoped_logging_implementation_report_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
       "run_scoped_logging_total_tests_passed": 143,
       "run_scoped_logging_warnings": 15,
+      "frozen_pretrain_per_rollout_reward_status": "verified_complete",
+      "frozen_pretrain_reward_tag": "frozen_pretrain_raw_proxy_reward",
+      "frozen_pretrain_reward_step_axis": "absolute_fresh_rollout_group",
+      "frozen_pretrain_reward_same_live_state": true,
+      "frozen_pretrain_reward_single_deterministic_trajectory": true,
+      "frozen_pretrain_reward_domain": "raw_tau_d",
+      "frozen_pretrain_reward_diagnostic_only": true,
+      "frozen_pretrain_reward_historical_backfill": false,
+      "frozen_pretrain_reward_focused_tests_passed": 181,
+      "frozen_pretrain_reward_cuda_smoke": "/tmp/stage2_grpo_frozen_reward_smoke/run_1",
+      "frozen_pretrain_reward_cuda_peak_memory_bytes": 129973248,
+      "frozen_pretrain_reward_checkpoint_round_trip_passed": true,
+      "frozen_pretrain_reward_implementation_report": "evaluation/STAGE2_GRPO_FROZEN_PRETRAIN_PER_ROLLOUT_REWARD_IMPLEMENTATION_REPORT.json",
+      "frozen_pretrain_reward_implementation_report_sha256": "2b73caef3b0a03a33bf38951daf644a2f0e392c556093b47678ef01548e6ac93",
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false
     },
@@ -2157,8 +2214,11 @@
       ],
       "grpo_plot_reward_tags": [
         "raw_proxy_reward_mean",
-        "raw_proxy_reward_max"
+        "raw_proxy_reward_max",
+        "frozen_pretrain_raw_proxy_reward"
       ],
+      "grpo_plot_frozen_pretrain_tag_required_for_new_online_runs": true,
+      "grpo_plot_legacy_two_reward_tag_logs_supported": true,
       "grpo_plot_validation_reward_tags": [
         "validation/raw_proxy_reward_mean",
         "validation/pretrain_reward",
@@ -2477,7 +2537,7 @@
     "Treat the observed S5 background actor counts as descriptive evidence rather than an acceptance hard gate; no explicit background-quota waiver continuation switch exists in the current collector.",
     "Use tools/visualize_dataset_episode.py for read-only scenario/episode listing and world-topdown MP4 rendering; keep outputs outside dataset roots.",
     "Preserve run_3 as the user-terminated incomplete diagnostic artifact at metrics step 4532 and checkpoint step 4500; do not backfill or otherwise modify its TensorBoard event or checkpoints.",
-    "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. Run-scoped logging is verified complete. In a separate frozen-code training thread, first bind six future freshly allocated actual paths in the v2 A/B manifest for explicit E1/E4 configs, G=24, 100 rollout groups and validation every 20 groups, then execute only those diagnostic paired runs; occupied run_8 through run_15 are not A/B arms, no future A/B run has started in this round, and a passing A/B cannot grant formal or paper eligibility.",
+    "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. Run-scoped logging and per-fresh-rollout frozen Stage1 reward logging are verified complete. New runs record frozen_pretrain_raw_proxy_reward without backfilling run_4 through run_15. In a separate frozen-code training thread, first bind six future freshly allocated actual paths in the v2 A/B manifest for explicit E1/E4 configs, G=24, 100 rollout groups and validation every 20 groups, then execute only those diagnostic paired runs; occupied run_8 through run_15 are not A/B arms, no future A/B run has started in this round, and a passing A/B cannot grant formal or paper eligibility.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",

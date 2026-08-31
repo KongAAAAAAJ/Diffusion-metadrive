@@ -1659,6 +1659,7 @@ def _run_fake_persistent_collection(
     environment_steps_per_episode: int = 50,
     history_ready_step: int = 1,
     external_envs: list[object] | None = None,
+    resume_sampled_rollouts: int = 0,
 ) -> tuple[dict[str, object], list[object], list[int], object]:
     group_size = 3
     update_epochs = 2
@@ -1990,7 +1991,9 @@ def _run_fake_persistent_collection(
         }
 
     def checkpoint_loader(path, restored, **kwargs):
-        return torch.load(path, map_location="cpu", weights_only=False)
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        restored.optimizer_step = int(payload["optimizer_step"])
+        return payload
 
     def validate_checkpoint(payload, **kwargs):
         assert payload["rollout_collection_contract"] == dict(
@@ -2093,22 +2096,71 @@ def _run_fake_persistent_collection(
             lambda scenarios, seeds: ((scenarios[0], seeds[0]),),
         )
 
+    resume_checkpoint = (
+        tmp_path / "resume" / "last.pt"
+        if resume_sampled_rollouts
+        else None
+    )
+    online_config = JointGRPOOnlineConfig(
+        device="cpu",
+        group_size=group_size,
+        total_rollout_groups=max_rollout_groups,
+        update_epochs=update_epochs,
+        resume_checkpoint=resume_checkpoint,
+        environment_steps_per_episode=environment_steps_per_episode,
+        rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
+        rollout_start_offset_max_steps=rollout_start_offset_max_steps,
+        validation_interval_rollouts=validation_interval_rollouts,
+        advantage_vector_log_interval_rollouts=max_rollout_groups,
+    )
     training_config = JointGRPOTrainingConfig(
         variant="A",
         run_mode="smoke",
         source_checkpoint=tmp_path / "stage1.pt",
-        online=JointGRPOOnlineConfig(
-            device="cpu",
-            group_size=group_size,
-            total_rollout_groups=max_rollout_groups,
-            update_epochs=update_epochs,
-            environment_steps_per_episode=environment_steps_per_episode,
-            rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
-            rollout_start_offset_max_steps=rollout_start_offset_max_steps,
-            validation_interval_rollouts=validation_interval_rollouts,
-            advantage_vector_log_interval_rollouts=max_rollout_groups,
-        ),
+        online=online_config,
     )
+    if resume_checkpoint is not None:
+        assert single_training_bucket
+        assert 0 < resume_sampled_rollouts < max_rollout_groups
+        resume_checkpoint.parent.mkdir(parents=True)
+        optimizer_step = resume_sampled_rollouts * update_epochs
+        resume_payload = {
+            "metrics": {"validation/raw_proxy_reward_mean": 1.0},
+            "optimizer_step": optimizer_step,
+            "environment_steps": resume_sampled_rollouts + 1,
+            "best_validation_reward": 1.0,
+            "best_checkpoint_sha256": None,
+            "rollout_collection_contract": rollout_collection_contract(
+                online_config
+            ),
+            "sampler_state": _sampler_state(
+                sampled_rollouts=resume_sampled_rollouts,
+                uninformative_rollouts=0,
+                bucket_target_counts=[max_rollout_groups],
+                bucket_sample_counts=[resume_sampled_rollouts],
+                bucket_optimizer_step_counts=[optimizer_step],
+                bucket_episode_counts=[1],
+                next_bucket_index=0,
+                current_visit_progress=(
+                    resume_sampled_rollouts
+                    % rollout_groups_per_bucket_visit
+                ),
+                generator_state=torch.Generator().manual_seed(17).get_state(),
+                last_validated_rollout=resume_sampled_rollouts,
+                rollout_groups_per_bucket_visit=(
+                    rollout_groups_per_bucket_visit
+                ),
+                update_epochs=update_epochs,
+                optimizer_step=optimizer_step,
+            ),
+        }
+        torch.save(resume_payload, resume_checkpoint)
+        best_path = resume_checkpoint.with_name("best.pt")
+        torch.save(resume_payload, best_path)
+        monkeypatch.setattr(
+            "train.train_bev_joint_grpo_online._resume_best_checkpoint_anchor",
+            lambda path, payload: (best_path, 1.0),
+        )
     run_dir = tmp_path / "run_1"
     run_dir.mkdir(parents=True)
     report = run_joint_grpo_training(
@@ -2270,6 +2322,49 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     ]
     assert [step for _, step in frozen_tb] == list(range(1, 22))
     assert all(np.isfinite(value) for value, _ in frozen_tb)
+
+
+def test_frozen_pretrain_reward_resume_uses_absolute_rollout_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report, _, _, trainer = _run_fake_persistent_collection(
+        tmp_path,
+        monkeypatch,
+        validation_interval_rollouts=3,
+        terminal_after_environment_steps=None,
+        max_rollout_groups=3,
+        rollout_groups_per_bucket_visit=3,
+        single_training_bucket=True,
+        first_rollout_informative=True,
+        resume_sampled_rollouts=2,
+    )
+
+    assert report["sampled_rollouts"] == 3
+    assert report["sampled_rollouts_this_run"] == 1
+    assert report["optimizer_steps"] == 6
+    assert report["optimizer_steps_this_run"] == 2
+    run_dir = Path(report["last_checkpoint"]).parent.parent
+    rollout_events = [
+        json.loads(line)
+        for line in (run_dir / "metrics.jsonl").read_text().splitlines()
+        if json.loads(line)["event"] == "rollout"
+    ]
+    assert len(rollout_events) == 1
+    assert rollout_events[0]["sampled_rollouts"] == 3.0
+    assert np.isfinite(
+        rollout_events[0][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG]
+    )
+    assert [
+        step
+        for tag, _, step in trainer.writer_scalars
+        if tag == FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG
+    ] == [3]
+    checkpoint = torch.load(
+        report["last_checkpoint"], map_location="cpu", weights_only=False
+    )
+    assert checkpoint["metrics"][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG] == (
+        rollout_events[0][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG]
+    )
 
 
 def test_random_start_hits_exact_target_then_collects_ten_consecutive_groups(

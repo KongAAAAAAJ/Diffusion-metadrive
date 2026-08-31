@@ -1966,9 +1966,6 @@ def run_joint_grpo_training(
         grpo_config=grpo_config,
         allow_diagnostic_source=run_mode == "smoke",
     )
-    frozen_pretrain_reward_logging = (
-        _frozen_pretrain_reward_logging_metadata(trainer.planner)
-    )
     if run_mode == "formal" and source_payload.get(
         "eligible_for_formal_training"
     ) is not True:
@@ -2082,6 +2079,9 @@ def run_joint_grpo_training(
                 "resume checkpoint already reached requested rollout groups"
             )
 
+    frozen_pretrain_reward_logging = (
+        _frozen_pretrain_reward_logging_metadata(trainer.planner)
+    )
     run_start_optimizer_step = trainer.optimizer_step
     run_start_rollout_group = sampled_rollouts
     online_config = dataclasses.asdict(config)
