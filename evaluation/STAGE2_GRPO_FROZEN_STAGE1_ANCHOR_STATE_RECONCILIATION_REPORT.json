@@ -1,0 +1,45 @@
+{
+  "format": "stage2_grpo_frozen_stage1_anchor_state_reconciliation_v1",
+  "created_at": "2026-08-31T23:27:30+08:00",
+  "reconciliation_gate": {
+    "passed": true,
+    "branch": "test_anchor",
+    "source_base_commit": "41d601a1008c3895b6dc749e1cbfc3c207e00872",
+    "worktree_clean_before_reconciliation": true,
+    "purpose": "Isolate the frozen-Stage1-trajectory anchor ablation from BEV and the other test worktrees before implementation.",
+    "implementation_started": false,
+    "long_training_started": false
+  },
+  "diagnostic_contract": {
+    "version": "stage2_grpo_frozen_stage1_anchor_v1",
+    "step_semantics": "one deterministic frozen Stage1 inference before each fresh GRPO rollout group",
+    "anchor_bank": "all ten raw tau_d mode candidates per role",
+    "anchor_application": "replace only the normalized XY initial-noise center",
+    "coarse_trajectory_preserved_for": [
+      "decoder_conditioning",
+      "mode_semantics",
+      "heading_baseline",
+      "safe_stop",
+      "trajectory_optimizer"
+    ],
+    "old_coarse_anchor_checkpoint_resume_allowed": false,
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false
+  },
+  "formal_boundary": {
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "source_stage1_checkpoint_formally_eligible": false,
+    "bev_branch_state_modified": false,
+    "other_test_worktrees_modified": false
+  },
+  "authority": {
+    "phase6_index_present": false,
+    "fallback_sources": [
+      "docs/project/project_state.json",
+      "evaluation/STAGE2_GRPO_FROZEN_PRETRAIN_PER_ROLLOUT_REWARD_IMPLEMENTATION_REPORT.json",
+      "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
+      "evaluation/STAGE2_GRPO_PERSISTENT_EPISODE_IMPLEMENTATION_REPORT.json"
+    ]
+  },
+  "next_action": "Implement and verify the fixed frozen-Stage1 per-mode anchor contract on test_anchor without starting long training."
+}
