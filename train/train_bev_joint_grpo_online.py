@@ -36,6 +36,8 @@ from expert_dataset.collect_joint_bev import (
     simulator_decision_dt_s,
 )
 from models.bev_planner import (
+    GRPO_ANCHOR_CONTRACT,
+    GRPO_ANCHOR_CONTRACT_SHA256,
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     JOINT_REWARD_CONTRACT,
@@ -118,7 +120,9 @@ def _frozen_pretrain_reward_logging_metadata(
         ),
         "fixed_inference_noise": True,
         "diagnostic_only": True,
-        "affects_training_or_environment_action": False,
+        "reward_affects_training_or_environment_action": False,
+        "frozen_trajectory_affects_training_or_environment_action": True,
+        "frozen_trajectory_use": "per_mode_grpo_initial_noise_anchor",
     }
 
 
@@ -1470,6 +1474,8 @@ def _checkpoint_payload(
             "reward_input_domain": "tau_d",
             "candidate_selection_domain": "tau_d",
             "execution_input_domain": "tau_cmd",
+            "anchor_contract": dict(GRPO_ANCHOR_CONTRACT),
+            "anchor_contract_sha256": GRPO_ANCHOR_CONTRACT_SHA256,
             "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
             "tracking_expansion_enabled": False,
             "calibration_required": False,
@@ -1537,6 +1543,8 @@ def _validate_online_checkpoint_metadata(
         "reward_input_domain": "tau_d",
         "candidate_selection_domain": "tau_d",
         "execution_input_domain": "tau_cmd",
+        "anchor_contract": dict(GRPO_ANCHOR_CONTRACT),
+        "anchor_contract_sha256": GRPO_ANCHOR_CONTRACT_SHA256,
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
@@ -1855,6 +1863,8 @@ def _resume_best_checkpoint_anchor(
         "reward_input_domain",
         "candidate_selection_domain",
         "execution_input_domain",
+        "anchor_contract",
+        "anchor_contract_sha256",
         "best_checkpoint_metric",
         "tracking_expansion_enabled",
         "calibration_required",
@@ -2091,7 +2101,7 @@ def run_joint_grpo_training(
         else None
     )
     frozen = {
-        "format": "bev_joint_grpo_online_config_v6",
+        "format": "bev_joint_grpo_online_config_v7",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -2116,6 +2126,8 @@ def run_joint_grpo_training(
         "reward_input_domain": "tau_d",
         "candidate_selection_domain": "tau_d",
         "execution_input_domain": "tau_cmd",
+        "anchor_contract": dict(GRPO_ANCHOR_CONTRACT),
+        "anchor_contract_sha256": GRPO_ANCHOR_CONTRACT_SHA256,
         "frozen_pretrain_reward_logging": frozen_pretrain_reward_logging,
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,
@@ -2353,9 +2365,8 @@ def run_joint_grpo_training(
                                 ),
                             )
                             raise
-                        frozen_pretrain = trainer.infer_frozen_pretrain(rollout)
                         frozen_raw_candidate = (
-                            frozen_pretrain["selected_trajectory"]
+                            rollout.frozen_pretrain_selected_trajectory
                             .detach()
                             .cpu()
                             .numpy()
@@ -2850,7 +2861,7 @@ def run_joint_grpo_training(
         )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v6",
+        "format": "bev_joint_grpo_online_report_v7",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -2905,6 +2916,8 @@ def run_joint_grpo_training(
         "reward_input_domain": "tau_d",
         "candidate_selection_domain": "tau_d",
         "execution_input_domain": "tau_cmd",
+        "anchor_contract": dict(GRPO_ANCHOR_CONTRACT),
+        "anchor_contract_sha256": GRPO_ANCHOR_CONTRACT_SHA256,
         "frozen_pretrain_reward_logging": frozen_pretrain_reward_logging,
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,

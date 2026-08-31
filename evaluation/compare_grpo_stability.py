@@ -33,9 +33,10 @@ absolute or relative to the manifest):
 
 ``runs`` must contain exactly one baseline and one clipped entry for each of
 the three paired seeds (six entries total). The command validates each run's
-v6 config/report, exact randomized-start persistent-episode collection contract, the
-complete frozen ``JointGRPOConfig``, and the ``validation/reward_gain``
-TensorBoard series, then writes ``report.json`` and
+v7 config/report, exact frozen Stage-1 anchor and randomized-start
+persistent-episode collection contracts, the complete frozen
+``JointGRPOConfig``, and the ``validation/reward_gain`` TensorBoard series,
+then writes ``report.json`` and
 ``validation_reward_gain_ab.png``. Results remain diagnostic-only and do not
 authorize formal conclusions.
 """
@@ -60,11 +61,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tensorboard.backend.event_processing import event_accumulator
 
+from models.bev_planner.joint_grpo import (
+    GRPO_ANCHOR_CONTRACT,
+    GRPO_ANCHOR_CONTRACT_SHA256,
+)
+
 
 MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v2"
 REPORT_FORMAT = "stage2_grpo_stability_ab_report_v2"
-ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v6"
-ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v6"
+ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v7"
+ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v7"
 VALIDATION_REWARD_GAIN_TAG = "validation/reward_gain"
 PAIRED_SEEDS = (17, 23, 42)
 ARM_UPDATE_EPOCHS = {"baseline": 1, "clipped": 4}
@@ -203,6 +209,19 @@ def _validate_grpo_config(value: object, *, label: str) -> dict[str, object]:
                 f"{label} {name} mismatch: expected {expected!r}"
             )
     return {str(name): item for name, item in value.items()}
+
+
+def _validate_anchor_contract(
+    artifact: Mapping[str, object], *, label: str
+) -> None:
+    if artifact.get("anchor_contract") != GRPO_ANCHOR_CONTRACT:
+        raise GRPOStabilityComparisonError(
+            f"{label} anchor_contract mismatch"
+        )
+    if artifact.get("anchor_contract_sha256") != GRPO_ANCHOR_CONTRACT_SHA256:
+        raise GRPOStabilityComparisonError(
+            f"{label} anchor_contract_sha256 mismatch"
+        )
 
 
 def _expected_rollout_collection_contract(
@@ -451,6 +470,8 @@ def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
             "trajectory_optimizer_sha256"
         ),
         "scenario_contract_sha256": config.get("scenario_contract_sha256"),
+        "anchor_contract": config.get("anchor_contract"),
+        "anchor_contract_sha256": config.get("anchor_contract_sha256"),
         "policy_update_contract_common": {
             str(name): value
             for name, value in policy_update.items()
@@ -657,6 +678,8 @@ def _load_run(
         raise GRPOStabilityComparisonError(f"{arm}/{seed} config format mismatch")
     if report.get("format") != ONLINE_REPORT_FORMAT:
         raise GRPOStabilityComparisonError(f"{arm}/{seed} report format mismatch")
+    _validate_anchor_contract(config, label=f"{arm}/{seed} config")
+    _validate_anchor_contract(report, label=f"{arm}/{seed} report")
     config_grpo = _validate_grpo_config(
         config.get("grpo_config"), label=f"{arm}/{seed} config grpo_config"
     )
@@ -960,6 +983,8 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
         "eligible_for_formal_conclusions": False,
         "manifest": str(manifest_path),
         "source_stage1_sha256": source_sha,
+        "anchor_contract": dict(GRPO_ANCHOR_CONTRACT),
+        "anchor_contract_sha256": GRPO_ANCHOR_CONTRACT_SHA256,
         "paired_seeds": list(PAIRED_SEEDS),
         "group_size": GROUP_SIZE,
         "total_rollout_groups_per_run": TOTAL_ROLLOUT_GROUPS,

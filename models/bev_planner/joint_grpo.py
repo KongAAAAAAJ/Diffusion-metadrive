@@ -25,6 +25,41 @@ from models.bev_planner.bev_only_diffusion_planner import (
 from models.bev_planner.mode_contract import NUM_MODES, TRAJECTORY_STEPS
 
 
+def joint_grpo_anchor_contract() -> dict[str, object]:
+    """Return the frozen Stage-1 anchor contract for this GRPO ablation."""
+
+    return {
+        "version": "stage2_grpo_frozen_stage1_anchor_v1",
+        "cadence": "once_per_fresh_rollout_group",
+        "source_policy": "frozen_stage1_diffusion",
+        "candidate_scope": "all_per_mode_raw_tau_d_[B,3,10,8,3]",
+        "initial_noise_anchor": "normalized_xy_of_frozen_stage1_candidates",
+        "replaced_component": "initial_noise_xy_anchor_only",
+        "coarse_trajectory_conditioning": (
+            "retained_for_mode_heading_decoder_condition_stop_and_trajectory_optimizer"
+        ),
+        "resume_policy": (
+            "legacy_coarse_anchor_checkpoints_are_read_only_and_must_not_resume_training"
+        ),
+    }
+
+
+def joint_grpo_anchor_contract_sha256() -> str:
+    """Return the canonical digest of the frozen Stage-1 anchor contract."""
+
+    encoded = json.dumps(
+        joint_grpo_anchor_contract(),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+GRPO_ANCHOR_CONTRACT = joint_grpo_anchor_contract()
+GRPO_ANCHOR_CONTRACT_SHA256 = joint_grpo_anchor_contract_sha256()
+
+
 class JointGRPOError(RuntimeError):
     """Raised when the strict joint GRPO contract is violated."""
 
@@ -312,6 +347,9 @@ class JointGRPORollout:
     context: BEVPlannerContext
     coarse_trajectories: Tensor
     mode_valid_mask: Tensor
+    frozen_pretrain_trajectory_candidates: Tensor
+    frozen_pretrain_selected_trajectory: Tensor
+    frozen_pretrain_selected_mode: Tensor
     chains_normalized: Tensor
     sampled_modes: Tensor
     selected_trajectories: Tensor
@@ -746,18 +784,15 @@ class _JointGRPOTrainerBase:
             coarse,
         )
 
-    @torch.inference_mode()
-    def infer_frozen_pretrain(
+    @torch.no_grad()
+    def _infer_frozen_pretrain_from_state(
         self,
-        rollout: JointGRPORollout,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
     ) -> dict[str, Tensor]:
-        """Run one deterministic Stage-1 policy inference on a rollout state."""
+        """Run the frozen Stage-1 diffusion policy once for one live state."""
 
-        if not isinstance(rollout, JointGRPORollout):
-            raise JointGRPOError("frozen pretrain inference requires a joint rollout")
-        context = rollout.context
-        coarse = rollout.coarse_trajectories
-        valid_mask = rollout.mode_valid_mask
         self.planner._validate_trajectory_inputs(
             coarse,
             valid_mask,
@@ -826,8 +861,32 @@ class _JointGRPOTrainerBase:
             )
         selected = self.planner._select(candidates, raw_logits, valid_mask)
         return {
-            "selected_trajectory": selected["selected_trajectory"],
-            "selected_mode": selected["selected_mode"],
+            "trajectory_candidates": candidates.clone().detach(),
+            "selected_trajectory": (
+                selected["selected_trajectory"].clone().detach()
+            ),
+            "selected_mode": selected["selected_mode"].clone().detach(),
+        }
+
+    @torch.no_grad()
+    def infer_frozen_pretrain(
+        self,
+        rollout: JointGRPORollout,
+    ) -> dict[str, Tensor]:
+        """Return the frozen Stage-1 result cached during rollout sampling."""
+
+        if not isinstance(rollout, JointGRPORollout):
+            raise JointGRPOError("frozen pretrain inference requires a joint rollout")
+        return {
+            "trajectory_candidates": (
+                rollout.frozen_pretrain_trajectory_candidates.clone().detach()
+            ),
+            "selected_trajectory": (
+                rollout.frozen_pretrain_selected_trajectory.clone().detach()
+            ),
+            "selected_mode": (
+                rollout.frozen_pretrain_selected_mode.clone().detach()
+            ),
         }
 
     def _make_rollout(
@@ -836,6 +895,7 @@ class _JointGRPOTrainerBase:
         context: BEVPlannerContext,
         coarse: Tensor,
         valid_mask: Tensor,
+        frozen_pretrain: Mapping[str, Tensor],
         chains: Tensor,
         modes: Tensor,
         selected: Tensor,
@@ -852,6 +912,15 @@ class _JointGRPOTrainerBase:
             ),
             coarse_trajectories=coarse.detach(),
             mode_valid_mask=valid_mask.detach(),
+            frozen_pretrain_trajectory_candidates=(
+                frozen_pretrain["trajectory_candidates"].clone().detach()
+            ),
+            frozen_pretrain_selected_trajectory=(
+                frozen_pretrain["selected_trajectory"].clone().detach()
+            ),
+            frozen_pretrain_selected_mode=(
+                frozen_pretrain["selected_mode"].clone().detach()
+            ),
             chains_normalized=chains.detach(),
             sampled_modes=modes.detach(),
             selected_trajectories=selected.detach(),
@@ -877,11 +946,22 @@ class _JointGRPOTrainerBase:
             batch_size=context.batch_size,
             device=context.role_tokens.device,
         )
+        frozen_pretrain = self._infer_frozen_pretrain_from_state(
+            context,
+            coarse,
+            valid_mask,
+        )
         groups = self.config.group_size
         repeated_context = _repeat_context(context, groups)
         repeated_coarse = _repeat_groups(coarse, groups)
         repeated_mask = _repeat_groups(valid_mask, groups)
-        anchor = self.planner._normalize_xy(repeated_coarse[..., :2])
+        repeated_frozen_candidates = _repeat_groups(
+            frozen_pretrain["trajectory_candidates"],
+            groups,
+        )
+        anchor = self.planner._normalize_xy(
+            repeated_frozen_candidates[..., :2]
+        )
         noise = torch.randn(
             anchor.shape,
             device=anchor.device,
@@ -973,6 +1053,7 @@ class _JointGRPOTrainerBase:
             context=context,
             coarse=coarse,
             valid_mask=valid_mask,
+            frozen_pretrain=frozen_pretrain,
             chains=chain_tensor,
             modes=modes.reshape(batch_size, groups, NUM_PLATOON_ROLES),
             selected=selected.reshape(
@@ -1541,6 +1622,7 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
         context: BEVPlannerContext,
         coarse: Tensor,
         valid_mask: Tensor,
+        frozen_pretrain: Mapping[str, Tensor],
         chains: Tensor,
         modes: Tensor,
         selected: Tensor,
@@ -1572,6 +1654,15 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
             ),
             coarse_trajectories=coarse.detach(),
             mode_valid_mask=valid_mask.detach(),
+            frozen_pretrain_trajectory_candidates=(
+                frozen_pretrain["trajectory_candidates"].clone().detach()
+            ),
+            frozen_pretrain_selected_trajectory=(
+                frozen_pretrain["selected_trajectory"].clone().detach()
+            ),
+            frozen_pretrain_selected_mode=(
+                frozen_pretrain["selected_mode"].clone().detach()
+            ),
             chains_normalized=chains.detach(),
             sampled_modes=modes.detach(),
             selected_trajectories=selected.detach(),

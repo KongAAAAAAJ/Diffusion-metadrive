@@ -11,6 +11,8 @@ import pytest
 import torch
 
 from models.bev_planner.joint_grpo import (
+    GRPO_ANCHOR_CONTRACT,
+    GRPO_ANCHOR_CONTRACT_SHA256,
     JointGRPOConfig,
     JointGRPOPolicyUpdateConfig,
     joint_grpo_optimizer_contract,
@@ -125,6 +127,8 @@ def _binding() -> dict[str, object]:
         "reward_input_domain": "tau_d",
         "candidate_selection_domain": "tau_d",
         "execution_input_domain": "tau_cmd",
+        "anchor_contract": dict(GRPO_ANCHOR_CONTRACT),
+        "anchor_contract_sha256": GRPO_ANCHOR_CONTRACT_SHA256,
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
@@ -1104,6 +1108,17 @@ def test_resume_inherits_verified_historical_raw_best(tmp_path: Path) -> None:
         _resume_best_checkpoint_anchor(
             tmp_path / "last.pt", mismatched_collection
         )
+    mismatched_anchor = {
+        **last_payload,
+        "anchor_contract": {
+            **dict(last_payload["anchor_contract"]),
+            "version": "stage2_grpo_coarse_anchor_v1",
+        },
+    }
+    with pytest.raises(OnlineGRPOError, match="contract binding mismatch"):
+        _resume_best_checkpoint_anchor(
+            tmp_path / "last.pt", mismatched_anchor
+        )
     last_payload["best_checkpoint_sha256"] = "0" * 64
     with pytest.raises(OnlineGRPOError, match="SHA256 mismatch"):
         _resume_best_checkpoint_anchor(tmp_path / "last.pt", last_payload)
@@ -1193,6 +1208,64 @@ def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
     with pytest.raises(OnlineGRPOError, match="policy_update_contract"):
         _validate_online_checkpoint_metadata(
             legacy_policy,
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            collection_contract=collection,
+            bucket_count=10,
+            bucket_target_counts=bucket_targets,
+            rollout_groups_per_bucket_visit=10,
+            optimizer_step=4,
+        )
+    missing_anchor = _binding()
+    missing_anchor.pop("anchor_contract")
+    missing_anchor.pop("anchor_contract_sha256")
+    with pytest.raises(OnlineGRPOError, match="anchor_contract mismatch"):
+        _validate_online_checkpoint_metadata(
+            missing_anchor,
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            collection_contract=collection,
+            bucket_count=10,
+            bucket_target_counts=bucket_targets,
+            rollout_groups_per_bucket_visit=10,
+            optimizer_step=4,
+        )
+    coarse_anchor = {
+        **_binding(),
+        "anchor_contract": {
+            "version": "stage2_grpo_coarse_anchor_v1",
+            "source": "dynamic_coarse_trajectory",
+        },
+    }
+    with pytest.raises(OnlineGRPOError, match="anchor_contract mismatch"):
+        _validate_online_checkpoint_metadata(
+            coarse_anchor,
+            run_mode="smoke",
+            reward_config=JointRewardConfig(),
+            scenario_contract_sha=primary_scenario_contract()["sha256"],
+            scenario_seeds=(17, 23),
+            policy_update=JointGRPOPolicyUpdateConfig(),
+            collection_contract=collection,
+            bucket_count=10,
+            bucket_target_counts=bucket_targets,
+            rollout_groups_per_bucket_visit=10,
+            optimizer_step=4,
+        )
+    mismatched_anchor_sha = {
+        **_binding(),
+        "anchor_contract_sha256": "0" * 64,
+    }
+    with pytest.raises(
+        OnlineGRPOError, match="anchor_contract_sha256 mismatch"
+    ):
+        _validate_online_checkpoint_metadata(
+            mismatched_anchor_sha,
             run_mode="smoke",
             reward_config=JointRewardConfig(),
             scenario_contract_sha=primary_scenario_contract()["sha256"],
@@ -1817,10 +1890,12 @@ def _run_fake_persistent_collection(
         def sample_groups(self, batch, *, generator):
             torch.randn((1,), generator=generator)
             self.sample_calls += 1
+            self.frozen_infer_calls += 1
             active_env = envs[-1]
             self.sample_environment_steps.append(
                 (active_env.episode_index, active_env.step_calls)
             )
+            frozen_value = float(active_env.step_calls + 1)
             return SimpleNamespace(
                 selected_trajectories=torch.zeros(
                     (1, group_size, 3, 8, 3), dtype=torch.float32
@@ -1830,20 +1905,16 @@ def _run_fake_persistent_collection(
                     int(ModeIndex.KEEP_HIGH),
                     dtype=torch.int64,
                 ),
+                frozen_pretrain_selected_trajectory=torch.full(
+                    (1, 3, 8, 3), frozen_value, dtype=torch.float32
+                ),
             )
 
         def infer_frozen_pretrain(self, rollout):
-            self.frozen_infer_calls += 1
-            active_env = envs[-1]
-            value = float(active_env.step_calls + 1)
-            return {
-                "selected_trajectory": torch.full(
-                    (1, 3, 8, 3), value, dtype=torch.float32
-                ),
-                "selected_mode": torch.full(
-                    (1, 3), int(ModeIndex.KEEP_HIGH), dtype=torch.int64
-                ),
-            }
+            raise AssertionError(
+                "online logging must reuse the frozen trajectory cached in "
+                "sample_groups"
+            )
 
         def update(self, rollout, rewards, *, policy_update):
             self.update_calls += 1
@@ -1984,6 +2055,8 @@ def _run_fake_persistent_collection(
             "environment_steps": kwargs["environment_steps"],
             "best_validation_reward": kwargs["best_validation_reward"],
             "best_checkpoint_sha256": kwargs["best_checkpoint_sha256"],
+            "anchor_contract": dict(GRPO_ANCHOR_CONTRACT),
+            "anchor_contract_sha256": GRPO_ANCHOR_CONTRACT_SHA256,
             "rollout_collection_contract": dict(
                 kwargs["collection_contract"]
             ),
@@ -2182,7 +2255,7 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
         )
     )
 
-    assert report["format"] == "bev_joint_grpo_online_report_v6"
+    assert report["format"] == "bev_joint_grpo_online_report_v7"
     assert report["sampled_rollouts"] == 21
     assert report["uninformative_rollouts"] == 1
     assert report["optimizer_steps"] == 40
@@ -2215,7 +2288,7 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     )
     run_dir = Path(report["last_checkpoint"]).parent.parent
     frozen_config = json.loads((run_dir / "config.json").read_text())
-    assert frozen_config["format"] == "bev_joint_grpo_online_config_v6"
+    assert frozen_config["format"] == "bev_joint_grpo_online_config_v7"
     assert frozen_config["rollout_collection_contract"] == report[
         "rollout_collection_contract"
     ]
@@ -2233,12 +2306,20 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
         "inference_denoise_steps": 2,
         "fixed_inference_noise": True,
         "diagnostic_only": True,
-        "affects_training_or_environment_action": False,
+        "reward_affects_training_or_environment_action": False,
+        "frozen_trajectory_affects_training_or_environment_action": True,
+        "frozen_trajectory_use": "per_mode_grpo_initial_noise_anchor",
     }
     assert frozen_config["frozen_pretrain_reward_logging"] == (
         expected_logging_metadata
     )
     assert report["frozen_pretrain_reward_logging"] == expected_logging_metadata
+    assert frozen_config["anchor_contract"] == GRPO_ANCHOR_CONTRACT
+    assert frozen_config["anchor_contract_sha256"] == (
+        GRPO_ANCHOR_CONTRACT_SHA256
+    )
+    assert report["anchor_contract"] == GRPO_ANCHOR_CONTRACT
+    assert report["anchor_contract_sha256"] == GRPO_ANCHOR_CONTRACT_SHA256
     assert report["training_plots"]["reward_tags"] == [
         "raw_proxy_reward_mean",
         "raw_proxy_reward_max",
@@ -2253,6 +2334,10 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     assert checkpoint["rollout_collection_contract"] == report[
         "rollout_collection_contract"
     ]
+    assert checkpoint["anchor_contract"] == GRPO_ANCHOR_CONTRACT
+    assert checkpoint["anchor_contract_sha256"] == (
+        GRPO_ANCHOR_CONTRACT_SHA256
+    )
     assert checkpoint["metrics"][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG] == (
         report["metrics"][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG]
     )

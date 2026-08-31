@@ -20,12 +20,16 @@ from models.bev_planner import (
 )
 from models.bev_planner.bev_only_diffusion_planner import MAX_BACKGROUND_ACTORS
 from models.bev_planner.joint_grpo import (
+    GRPO_ANCHOR_CONTRACT,
+    GRPO_ANCHOR_CONTRACT_SHA256,
     JointGRPOPolicyUpdateConfig,
     _clipped_grpo_surrogate,
     _gather_modes,
     _repeat_context,
     _repeat_groups,
     _trajectory_bc,
+    joint_grpo_anchor_contract,
+    joint_grpo_anchor_contract_sha256,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
 )
@@ -230,6 +234,29 @@ def test_policy_update_config_contract_and_sha() -> None:
             JointGRPOPolicyUpdateConfig(clip_epsilon=invalid_epsilon)
 
 
+def test_frozen_stage1_anchor_contract_and_sha() -> None:
+    assert GRPO_ANCHOR_CONTRACT == joint_grpo_anchor_contract()
+    assert GRPO_ANCHOR_CONTRACT == {
+        "version": "stage2_grpo_frozen_stage1_anchor_v1",
+        "cadence": "once_per_fresh_rollout_group",
+        "source_policy": "frozen_stage1_diffusion",
+        "candidate_scope": "all_per_mode_raw_tau_d_[B,3,10,8,3]",
+        "initial_noise_anchor": "normalized_xy_of_frozen_stage1_candidates",
+        "replaced_component": "initial_noise_xy_anchor_only",
+        "coarse_trajectory_conditioning": (
+            "retained_for_mode_heading_decoder_condition_stop_and_trajectory_optimizer"
+        ),
+        "resume_policy": (
+            "legacy_coarse_anchor_checkpoints_are_read_only_and_must_not_resume_training"
+        ),
+    }
+    assert len(GRPO_ANCHOR_CONTRACT_SHA256) == 64
+    assert (
+        GRPO_ANCHOR_CONTRACT_SHA256
+        == joint_grpo_anchor_contract_sha256()
+    )
+
+
 def test_clipped_grpo_surrogate_positive_negative_advantages() -> None:
     ratios = torch.tensor(
         [[0.5, 0.5, 1.0, 1.5, 1.5]],
@@ -357,15 +384,32 @@ def test_frozen_pretrain_inference_matches_stage1_and_is_deterministic() -> None
     inputs = _model_inputs()
     trainer = JointGRPOTrainerA(_planner())
     training_generator = torch.Generator().manual_seed(19)
-    rollout = trainer.sample_groups(inputs, generator=training_generator)
+    with mock.patch.object(
+        trainer,
+        "_infer_frozen_pretrain_from_state",
+        wraps=trainer._infer_frozen_pretrain_from_state,
+    ) as frozen_inference:
+        rollout = trainer.sample_groups(inputs, generator=training_generator)
+        assert frozen_inference.call_count == 1
+        first = trainer.infer_frozen_pretrain(rollout)
+        second = trainer.infer_frozen_pretrain(rollout)
+        assert frozen_inference.call_count == 1
     generator_state = training_generator.get_state().clone()
 
-    first = trainer.infer_frozen_pretrain(rollout)
-    second = trainer.infer_frozen_pretrain(rollout)
     with torch.inference_mode():
         stage1 = trainer.planner(**inputs)
 
-    assert set(first) == {"selected_trajectory", "selected_mode"}
+    assert set(first) == {
+        "trajectory_candidates",
+        "selected_trajectory",
+        "selected_mode",
+    }
+    assert first["trajectory_candidates"].shape == (1, 3, 10, 8, 3)
+    assert first["trajectory_candidates"].dtype == torch.float32
+    assert torch.isfinite(first["trajectory_candidates"]).all()
+    assert first["trajectory_candidates"].requires_grad is False
+    assert first["trajectory_candidates"].grad_fn is None
+    assert first["trajectory_candidates"].is_inference() is False
     assert first["selected_trajectory"].shape == (1, 3, 8, 3)
     assert first["selected_trajectory"].dtype == torch.float32
     assert first["selected_mode"].shape == (1, 3)
@@ -375,6 +419,14 @@ def test_frozen_pretrain_inference_matches_stage1_and_is_deterministic() -> None
     assert first["selected_trajectory"].grad_fn is None
     assert first["selected_mode"].requires_grad is False
     assert torch.equal(training_generator.get_state(), generator_state)
+    torch.testing.assert_close(
+        first["trajectory_candidates"],
+        second["trajectory_candidates"],
+    )
+    torch.testing.assert_close(
+        first["trajectory_candidates"],
+        stage1["trajectory_candidates"],
+    )
     torch.testing.assert_close(
         first["selected_trajectory"],
         second["selected_trajectory"],
@@ -387,8 +439,71 @@ def test_frozen_pretrain_inference_matches_stage1_and_is_deterministic() -> None
     assert torch.equal(first["selected_mode"], stage1["selected_mode"])
 
 
+def test_frozen_per_mode_candidates_anchor_noise_and_keep_coarse_condition() -> None:
+    inputs = _model_inputs()
+    trainer = JointGRPOTrainerA(_planner())
+    seed = 27
+    with mock.patch.object(
+        trainer.planner,
+        "predict_denoised_candidates",
+        wraps=trainer.planner.predict_denoised_candidates,
+    ) as rollout_prediction:
+        rollout = trainer.sample_groups(
+            inputs,
+            generator=torch.Generator().manual_seed(seed),
+        )
+
+    groups = rollout.group_size
+    repeated_coarse = _repeat_groups(inputs["coarse_trajectories"], groups)
+    assert rollout_prediction.call_count == trainer.config.denoise_steps
+    for call in rollout_prediction.call_args_list:
+        torch.testing.assert_close(call.args[3], repeated_coarse)
+
+    repeated_frozen = _repeat_groups(
+        rollout.frozen_pretrain_trajectory_candidates,
+        groups,
+    )
+    anchor = trainer.planner._normalize_xy(repeated_frozen[..., :2])
+    noise = torch.randn(
+        anchor.shape,
+        dtype=torch.float32,
+        generator=torch.Generator().manual_seed(seed),
+    )
+    flat_shape = (groups * 3, 10, 8, 2)
+    noise_timestep = torch.full(
+        (groups * 3,),
+        trainer.config.initial_noise_timestep,
+        dtype=torch.int64,
+    )
+    expected = trainer.transition.add_noise(
+        anchor.reshape(flat_shape),
+        noise.reshape(flat_shape),
+        noise_timestep,
+    ).reshape_as(anchor).clamp(-1.0, 1.0)
+    sampled_initial = rollout.chains_normalized[:, :, 0].reshape_as(expected)
+    torch.testing.assert_close(sampled_initial, expected)
+
+    old_anchor = trainer.planner._normalize_xy(repeated_coarse[..., :2])
+    old_expected = trainer.transition.add_noise(
+        old_anchor.reshape(flat_shape),
+        noise.reshape(flat_shape),
+        noise_timestep,
+    ).reshape_as(old_anchor).clamp(-1.0, 1.0)
+    assert not torch.allclose(sampled_initial, old_expected)
+
+
 def test_joint_rollout_shapes_seed_and_hard_mask(rollout_pair) -> None:
     _, first, second = rollout_pair
+    assert first.frozen_pretrain_trajectory_candidates.shape == (
+        1,
+        3,
+        10,
+        8,
+        3,
+    )
+    assert first.frozen_pretrain_selected_trajectory.shape == (1, 3, 8, 3)
+    assert first.frozen_pretrain_selected_mode.shape == (1, 3)
+    assert first.frozen_pretrain_trajectory_candidates.is_inference() is False
     assert first.chains_normalized.shape == (1, 4, 5, 3, 10, 8, 2)
     assert first.sampled_modes.shape == (1, 4, 3)
     assert first.sampled_modes.dtype == torch.int64
@@ -396,6 +511,9 @@ def test_joint_rollout_shapes_seed_and_hard_mask(rollout_pair) -> None:
     assert first.old_mode_log_prob.shape == (1, 4)
     assert first.old_trajectory_log_prob.shape == (1, 4, 3)
     for name in (
+        "frozen_pretrain_trajectory_candidates",
+        "frozen_pretrain_selected_trajectory",
+        "frozen_pretrain_selected_mode",
         "chains_normalized",
         "sampled_modes",
         "selected_trajectories",
@@ -680,6 +798,18 @@ def test_exactly_one_update_changes_only_trainable_policy() -> None:
     fresh_rollout = trainer.sample_groups(
         inputs,
         generator=torch.Generator().manual_seed(31),
+    )
+    torch.testing.assert_close(
+        fresh_rollout.frozen_pretrain_trajectory_candidates,
+        frozen_before["trajectory_candidates"],
+    )
+    torch.testing.assert_close(
+        fresh_rollout.frozen_pretrain_selected_trajectory,
+        frozen_before["selected_trajectory"],
+    )
+    assert torch.equal(
+        fresh_rollout.frozen_pretrain_selected_mode,
+        frozen_before["selected_mode"],
     )
     second = trainer.update(
         fresh_rollout,

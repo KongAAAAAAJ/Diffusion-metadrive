@@ -154,8 +154,6 @@ def test_b_frozen_pretrain_matches_stage1_and_generates_own_history() -> None:
     trainer = JointGRPOTrainerB(planner)
     inputs = _inputs()
     training_generator = torch.Generator().manual_seed(18)
-    rollout = trainer.sample_groups(inputs, generator=training_generator)
-    generator_state = training_generator.get_state().clone()
     fixed_histories: list[torch.Tensor | None] = []
     original = trainer._decode_roles
 
@@ -164,15 +162,32 @@ def test_b_frozen_pretrain_matches_stage1_and_generates_own_history() -> None:
             fixed_histories.append(kwargs["fixed_history"])
         return original(*args, **kwargs)
 
-    with mock.patch.object(trainer, "_decode_roles", side_effect=traced):
+    with mock.patch.object(
+        trainer,
+        "_decode_roles",
+        side_effect=traced,
+    ), mock.patch.object(
+        trainer,
+        "_infer_frozen_pretrain_from_state",
+        wraps=trainer._infer_frozen_pretrain_from_state,
+    ) as frozen_inference:
+        rollout = trainer.sample_groups(inputs, generator=training_generator)
+        generator_state = training_generator.get_state().clone()
         first = trainer.infer_frozen_pretrain(rollout)
         second = trainer.infer_frozen_pretrain(rollout)
+        assert frozen_inference.call_count == 1
     with torch.inference_mode():
         stage1 = trainer.planner(**inputs)
 
     assert fixed_histories
     assert all(history is None for history in fixed_histories)
-    assert len(fixed_histories) == 2 * planner.config.inference_denoise_steps
+    assert len(fixed_histories) == planner.config.inference_denoise_steps
+    assert first["trajectory_candidates"].shape == (1, 3, 10, 8, 3)
+    assert first["trajectory_candidates"].dtype == torch.float32
+    assert torch.isfinite(first["trajectory_candidates"]).all()
+    assert first["trajectory_candidates"].requires_grad is False
+    assert first["trajectory_candidates"].grad_fn is None
+    assert first["trajectory_candidates"].is_inference() is False
     assert first["selected_trajectory"].shape == (1, 3, 8, 3)
     assert first["selected_trajectory"].dtype == torch.float32
     assert first["selected_mode"].shape == (1, 3)
@@ -181,6 +196,14 @@ def test_b_frozen_pretrain_matches_stage1_and_generates_own_history() -> None:
     assert first["selected_trajectory"].requires_grad is False
     assert first["selected_trajectory"].grad_fn is None
     assert torch.equal(training_generator.get_state(), generator_state)
+    torch.testing.assert_close(
+        first["trajectory_candidates"],
+        second["trajectory_candidates"],
+    )
+    torch.testing.assert_close(
+        first["trajectory_candidates"],
+        stage1["trajectory_candidates"],
+    )
     torch.testing.assert_close(
         first["selected_trajectory"],
         second["selected_trajectory"],
@@ -196,6 +219,16 @@ def test_b_frozen_pretrain_matches_stage1_and_generates_own_history() -> None:
 def test_b_contract_rollout_order_history_and_seed(rollout_pair) -> None:
     trainer, first, second = rollout_pair
     assert isinstance(first, JointGRPORolloutB)
+    assert first.frozen_pretrain_trajectory_candidates.shape == (
+        1,
+        3,
+        10,
+        8,
+        3,
+    )
+    assert first.frozen_pretrain_selected_trajectory.shape == (1, 3, 8, 3)
+    assert first.frozen_pretrain_selected_mode.shape == (1, 3)
+    assert first.frozen_pretrain_trajectory_candidates.is_inference() is False
     assert first.chains_normalized.shape == (1, 4, 5, 3, 10, 8, 2)
     assert first.sampled_modes.shape == (1, 4, 3)
     assert first.selected_trajectories.shape == (1, 4, 3, 8, 3)
@@ -208,6 +241,9 @@ def test_b_contract_rollout_order_history_and_seed(rollout_pair) -> None:
     assert torch.isfinite(history).all()
     assert bool((history[..., :2].abs() <= 1.0).all())
     for name in (
+        "frozen_pretrain_trajectory_candidates",
+        "frozen_pretrain_selected_trajectory",
+        "frozen_pretrain_selected_mode",
         "chains_normalized",
         "sampled_modes",
         "selected_trajectories",
