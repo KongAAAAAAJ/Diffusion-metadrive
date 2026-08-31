@@ -21,9 +21,16 @@ from tensorboard.util import tensor_util
 
 
 ADVANTAGE_VECTOR_TAG = "advantage/vector"
-REWARD_CURVE_TAGS = (
+LEGACY_REWARD_CURVE_TAGS = (
     "raw_proxy_reward_mean",
     "raw_proxy_reward_max",
+)
+FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG = (
+    "frozen_pretrain_raw_proxy_reward"
+)
+REWARD_CURVE_TAGS = (
+    *LEGACY_REWARD_CURVE_TAGS,
+    FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
 )
 VALIDATION_REWARD_CURVE_TAGS = (
     "validation/raw_proxy_reward_mean",
@@ -66,7 +73,6 @@ POLICY_STABILITY_CURVE_TAGS = (
 )
 
 _SCALAR_STEP_ALIGNMENT_GROUPS = (
-    REWARD_CURVE_TAGS,
     VALIDATION_REWARD_CURVE_TAGS,
     GRPO_LOSS_CURVE_TAGS,
     KL_LOSS_CURVE_TAGS,
@@ -402,8 +408,10 @@ def _render_policy_stability_curve(
 
 def _validate_aligned_scalar_steps(
     series: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    *,
+    reward_tags: tuple[str, ...],
 ) -> None:
-    for tags in _SCALAR_STEP_ALIGNMENT_GROUPS:
+    for tags in (reward_tags, *_SCALAR_STEP_ALIGNMENT_GROUPS):
         expected_steps = series[tags[0]][0]
         for tag in tags[1:]:
             if not np.array_equal(series[tag][0], expected_steps):
@@ -416,21 +424,53 @@ def _validate_aligned_scalar_steps(
 def generate_grpo_plots(
     tb_dir: Path,
     output_dir: Path,
+    *,
+    require_frozen_pretrain_reward: bool = False,
 ) -> Mapping[str, Path]:
-    """Generate the fixed GRPO advantage, reward, validation, loss, and KL plots."""
+    """Generate GRPO plots, accepting legacy reward logs unless strict."""
 
     accumulator = _load_event_accumulator(tb_dir)
     steps, advantages = _load_advantage_vectors_from_accumulator(
         accumulator, ADVANTAGE_VECTOR_TAG
     )
+    available_scalar_tags = set(
+        accumulator.Tags().get("scalars", ())
+    )
+    has_frozen_pretrain_reward = (
+        FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG in available_scalar_tags
+    )
+    if require_frozen_pretrain_reward and not has_frozen_pretrain_reward:
+        raise AdvantageHeatmapError(
+            "TensorBoard is missing required scalar tag: "
+            f"{FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG}"
+        )
+    reward_tags = (
+        REWARD_CURVE_TAGS
+        if has_frozen_pretrain_reward
+        else LEGACY_REWARD_CURVE_TAGS
+    )
+    curve_specs = dict(_CURVE_SPECS)
+    reward_filename, _, reward_title, reward_ylabel, reward_xlabel = (
+        curve_specs["reward_curve"]
+    )
+    curve_specs["reward_curve"] = (
+        reward_filename,
+        reward_tags,
+        reward_title,
+        reward_ylabel,
+        reward_xlabel,
+    )
     all_scalar_tags = tuple(
         tag
-        for _, tags, _, _, _ in _CURVE_SPECS.values()
+        for _, tags, _, _, _ in curve_specs.values()
         for tag in tags
     )
     all_scalar_tags += POLICY_STABILITY_CURVE_TAGS
     scalar_series = _load_scalar_series(accumulator, all_scalar_tags)
-    _validate_aligned_scalar_steps(scalar_series)
+    _validate_aligned_scalar_steps(
+        scalar_series,
+        reward_tags=reward_tags,
+    )
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -441,7 +481,7 @@ def generate_grpo_plots(
             output_dir / "advantage_vector_heatmap.png",
         )
     }
-    for key, (filename, tags, title, ylabel, xlabel) in _CURVE_SPECS.items():
+    for key, (filename, tags, title, ylabel, xlabel) in curve_specs.items():
         outputs[key] = _render_scalar_curve(
             scalar_series,
             tags,

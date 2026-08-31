@@ -20,6 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from evaluation.plot_grpo import (
     ADVANTAGE_VECTOR_TAG,
+    FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
     REWARD_CURVE_TAGS,
     VALIDATION_REWARD_CURVE_TAGS,
     generate_grpo_plots,
@@ -91,6 +92,34 @@ ROLLOUT_COLLECTION_CONTRACT_VERSION = (
 
 class OnlineGRPOError(RuntimeError):
     """Raised when online raw-domain GRPO violates its contract."""
+
+
+def _frozen_pretrain_reward_logging_metadata(
+    planner: torch.nn.Module,
+) -> dict[str, object]:
+    """Describe the per-live-state frozen Stage1 reward diagnostic."""
+
+    planner_config = planner.config
+    return {
+        "tensorboard_tag": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+        "metrics_jsonl_field": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+        "step_axis": "absolute_fresh_rollout_group",
+        "same_live_state_as_current_exploration": True,
+        "trajectory_count": 1,
+        "trajectory_selection": "valid_mode_masked_argmax",
+        "trajectory_domain": "raw_tau_d",
+        "inference": "frozen_stage1_standard_deterministic_ddim",
+        "inference_seed": int(planner_config.inference_seed),
+        "inference_noise_timestep": int(
+            planner_config.inference_noise_timestep
+        ),
+        "inference_denoise_steps": int(
+            planner_config.inference_denoise_steps
+        ),
+        "fixed_inference_noise": True,
+        "diagnostic_only": True,
+        "affects_training_or_environment_action": False,
+    }
 
 
 @dataclass(frozen=True)
@@ -1143,21 +1172,6 @@ def _write_rollout_start_event(
         stream.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def _next_run_directory(output_root: Path) -> Path:
-    output_root.mkdir(parents=True, exist_ok=True)
-    indices = []
-    for child in output_root.iterdir():
-        if child.is_dir() and child.name.startswith("run_"):
-            try:
-                indices.append(int(child.name[4:]))
-            except ValueError:
-                continue
-    path = output_root / f"run_{max(indices, default=0) + 1}"
-    path.mkdir()
-    (path / "checkpoints").mkdir()
-    return path
-
-
 def _application_contract_version() -> str:
     version = GRPO_OPEN_REWARD_APPLICATION_CONTRACT.get("version")
     if not isinstance(version, str) or not version:
@@ -1899,13 +1913,35 @@ def _score_select_and_optimize_raw_candidates(
 def run_joint_grpo_training(
     training_config: JointGRPOTrainingConfig,
     *,
-    output_root: Path,
+    run_dir: Path,
 ) -> dict[str, object]:
-    started_at = time.monotonic()
     if not isinstance(training_config, JointGRPOTrainingConfig):
         raise OnlineGRPOError(
             "training_config must be a JointGRPOTrainingConfig"
         )
+    run_dir = Path(run_dir)
+    if not run_dir.exists():
+        raise OnlineGRPOError(
+            f"run_dir must already exist: {run_dir}"
+        )
+    if not run_dir.is_dir():
+        raise OnlineGRPOError(f"run_dir must be a directory: {run_dir}")
+    unexpected_entries = sorted(
+        child.name for child in run_dir.iterdir() if child.name != "training.log"
+    )
+    if unexpected_entries:
+        raise OnlineGRPOError(
+            "run_dir must be reserved and may contain only training.log; "
+            f"found: {', '.join(unexpected_entries)}"
+        )
+    training_log = run_dir / "training.log"
+    if training_log.exists() and not training_log.is_file():
+        raise OnlineGRPOError(
+            f"run_dir training.log must be a file: {training_log}"
+        )
+    (run_dir / "checkpoints").mkdir()
+
+    started_at = time.monotonic()
     config = training_config.online
     variant = training_config.variant
     run_mode = training_config.run_mode
@@ -1929,6 +1965,9 @@ def run_joint_grpo_training(
         torch_device,
         grpo_config=grpo_config,
         allow_diagnostic_source=run_mode == "smoke",
+    )
+    frozen_pretrain_reward_logging = (
+        _frozen_pretrain_reward_logging_metadata(trainer.planner)
     )
     if run_mode == "formal" and source_payload.get(
         "eligible_for_formal_training"
@@ -2045,7 +2084,6 @@ def run_joint_grpo_training(
 
     run_start_optimizer_step = trainer.optimizer_step
     run_start_rollout_group = sampled_rollouts
-    run_dir = _next_run_directory(Path(output_root))
     online_config = dataclasses.asdict(config)
     online_config["resume_checkpoint"] = (
         str(config.resume_checkpoint)
@@ -2078,6 +2116,7 @@ def run_joint_grpo_training(
         "reward_input_domain": "tau_d",
         "candidate_selection_domain": "tau_d",
         "execution_input_domain": "tau_cmd",
+        "frozen_pretrain_reward_logging": frozen_pretrain_reward_logging,
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
@@ -2314,6 +2353,28 @@ def run_joint_grpo_training(
                                 ),
                             )
                             raise
+                        frozen_pretrain = trainer.infer_frozen_pretrain(rollout)
+                        frozen_raw_candidate = (
+                            frozen_pretrain["selected_trajectory"]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
+                        frozen_proxy = proxy_backend.score(
+                            env, values, frozen_raw_candidate
+                        )
+                        frozen_rewards = np.asarray(frozen_proxy.rewards)
+                        if frozen_rewards.shape != (1,):
+                            raise OnlineGRPOError(
+                                "frozen Stage1 inference must produce exactly "
+                                "one joint raw trajectory reward"
+                            )
+                        frozen_pretrain_reward = float(frozen_rewards[0])
+                        if not math.isfinite(frozen_pretrain_reward):
+                            raise OnlineGRPOError(
+                                "frozen Stage1 raw proxy reward must be finite"
+                            )
                         (
                             optimization,
                             rule_event,
@@ -2432,6 +2493,9 @@ def run_joint_grpo_training(
                                 proxy.rewards.mean()
                             ),
                             "raw_proxy_reward_max": float(proxy.rewards.max()),
+                            FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG: (
+                                frozen_pretrain_reward
+                            ),
                             "raw_proxy_unsafe_rate": float(proxy.unsafe.mean()),
                             "selected_raw_candidate_index": float(
                                 selected_index
@@ -2775,6 +2839,7 @@ def run_joint_grpo_training(
     plot_paths = generate_grpo_plots(
         run_dir / "tb",
         run_dir / "plots",
+        require_frozen_pretrain_reward=True,
     )
     if (
         rollout_start_accepted_count + rollout_start_rejected_count
@@ -2840,6 +2905,7 @@ def run_joint_grpo_training(
         "reward_input_domain": "tau_d",
         "candidate_selection_domain": "tau_d",
         "execution_input_domain": "tau_cmd",
+        "frozen_pretrain_reward_logging": frozen_pretrain_reward_logging,
         "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
@@ -3023,12 +3089,12 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--run-dir", type=Path, required=True)
     arguments = parser.parse_args()
     training_config = _config_from_yaml(arguments.config)
     report = run_joint_grpo_training(
         training_config,
-        output_root=arguments.output_root,
+        run_dir=arguments.run_dir,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

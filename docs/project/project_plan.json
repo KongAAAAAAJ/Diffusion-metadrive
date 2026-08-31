@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-30T19:24:19+08:00",
-  "status": "stage2_yaml_single_source_launcher_verified_short_ab_pending",
+  "updated_at": "2026-08-31T21:37:14+08:00",
+  "status": "stage2_run_scoped_logging_verified_short_ab_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -20,7 +20,7 @@
     "policy": "Store each GRPO-Open output beneath its exact source Stage1 run root instead of a standalone top-level GRPO output root.",
     "default_output_root": "<stage1_run_root>/grpo_open",
     "run_layout": "<stage1_run_root>/grpo_open/run_N",
-    "log_layout": "<stage1_run_root>/grpo_open/logs",
+    "log_layout": "<stage1_run_root>/grpo_open/run_N/training.log",
     "comparison_evaluation_layout": "<stage1_run_root>/evaluation/reward_compare",
     "comparison_evaluation_contents": "One unified step_rewards.csv containing Stage1-before-GRPO and GRPO-after-finetuning raw-tau_d joint reward rows, evaluator/plot logs, and nine two-checkpoint PNG reward boxplots",
     "comparison_evaluation_default_max_steps": 800,
@@ -33,6 +33,36 @@
     "compatibility_policy": "Do not create a symlink or duplicate compatibility copy at the former run_4 path.",
     "semantic_boundary": "Checkpoint payloads, reward/application contracts, diagnostic/formal eligibility, and the active Stage1 qualification gate are unchanged.",
     "evidence": "evaluation/STAGE2_GRPO_RUN_SCOPED_STORAGE_MIGRATION_REPORT.json"
+  },
+  "stage2_grpo_run_scoped_logging": {
+    "authorized_on": "2026-08-31",
+    "status": "verified_complete",
+    "problem_evidence": "Concurrent run_11 through run_15 launchers wrote to one truncating logs/grpo-open-training.log; the retained file contains interleaved output and cannot be attributed completely to each run.",
+    "implementation_scope": "Replace the shared truncating launcher log with one unique launch log that records the actual allocated run directory; preserve YAML-only training semantics, existing GRPO algorithm contracts, run artifacts, and the strict Stage1 qualification gate.",
+    "historical_log_policy": "Preserve the existing shared log unchanged as incomplete operational evidence; do not backfill, split, relabel, or use it to infer missing run outcomes.",
+    "contract_impact": {
+      "optimizer_contract_changed": false,
+      "rollout_collection_contract_changed": false,
+      "reward_or_application_contract_changed": false,
+      "checkpoint_or_online_artifact_format_changed": false,
+      "yaml_training_parameter_source_changed": false
+    },
+    "implementation_complete": true,
+    "verification_complete": true,
+    "implementation_report": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
+    "implementation_report_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
+    "verification": {
+      "launcher_tests_passed": 17,
+      "online_tests_passed": 126,
+      "total_tests_passed": 143,
+      "warnings": 15,
+      "bash_syntax_passed": true,
+      "python_compile_passed": true,
+      "scoped_diff_check_passed": true,
+      "real_cpu_missing_source_exit_status": 1,
+      "cuda_training_started": false,
+      "long_training_started": false
+    }
   },
   "stage1_grpo_reward_only_evaluation": {
     "authorized_on": "2026-08-29",
@@ -529,7 +559,7 @@
   },
   "stage2_at_risk_grpo_open": {
     "name": "At-risk diagnostic GRPO-Open",
-    "status": "yaml_single_source_launcher_verified_short_ab_pending",
+    "status": "run_scoped_logging_verified_short_ab_pending",
     "authorization_recorded_on": "2026-08-30",
     "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
     "source_checkpoint_classification": "unqualified Stage1 v2 diagnostic source; bounded optimizer implementation smokes and the paired short A/B remain diagnostic-only and cannot bypass strict Stage1 qualification",
@@ -549,8 +579,7 @@
         "PYTHON_BIN",
         "CONFIG",
         "ARTIFACT_ROOT",
-        "OUTPUT_ROOT",
-        "LOG_ROOT"
+        "OUTPUT_ROOT"
       ]
     },
     "bounded_total_rollout_groups_required": true,
@@ -568,15 +597,40 @@
     "default_rollout_groups_per_bucket_visit": 10,
     "default_rollout_start_offset_max_steps": 200,
     "default_rollout_start_min_remaining_steps": 10,
-    "current_yaml_group_size": 72,
-    "current_yaml_total_rollout_groups": 500,
-    "current_yaml_update_epochs": 10,
+    "yaml_projection_reconciliation": {
+      "last_verified_report_projection": {
+        "variant": "A",
+        "run_mode": "smoke",
+        "group_size": 72,
+        "total_rollout_groups": 500,
+        "update_epochs": 10
+      },
+      "head_ed761433_projection": {
+        "variant": "A",
+        "run_mode": "formal",
+        "group_size": 24,
+        "total_rollout_groups": 5000,
+        "update_epochs": 10
+      },
+      "working_tree_observation_at_reconciliation": {
+        "variant": "A",
+        "run_mode": "formal",
+        "group_size": 72,
+        "total_rollout_groups": 5000,
+        "update_epochs": 10
+      },
+      "working_tree_owned_by_user": true,
+      "canonical_projection_selected_by_this_round": false,
+      "policy": "Preserve the dirty YAML exactly; this administrative reconciliation does not normalize training values or waive the unqualified-source formal hard gate."
+    },
     "implementation_evidence": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
     "implementation_evidence_sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
     "persistent_episode_implementation_evidence": "evaluation/STAGE2_GRPO_PERSISTENT_EPISODE_IMPLEMENTATION_REPORT.json",
     "persistent_episode_implementation_evidence_sha256": "4568c05a58eb7aeafc86cdd3bca4b1cc87cbb4260e9176d1c6f2d38abeb4efd5",
     "random_start_implementation_evidence": "evaluation/STAGE2_GRPO_RANDOM_START_IMPLEMENTATION_REPORT.json",
     "random_start_implementation_evidence_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
+    "run_scoped_logging_implementation_evidence": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
+    "run_scoped_logging_implementation_evidence_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
     "implementation_verification": {
       "focused_tests_passed": 175,
       "legacy_runs_4_through_7_evaluator_load_passed": true,
@@ -610,8 +664,68 @@
       "checkpoint_round_trip_passed": true,
       "long_training_started": false
     },
+    "observed_run_reconciliation": {
+      "recorded_on": "2026-08-31",
+      "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
+      "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+      "source_checkpoint_project_eligible": false,
+      "completed_nonformal_diagnostic_group_size_sweep": {
+        "run_11": {
+          "group_size": 24,
+          "update_epochs": 10,
+          "target_and_sampled_rollout_groups": 5000,
+          "optimizer_steps": 50000,
+          "persisted_run_mode": "formal",
+          "persisted_eligible_for_formal_training": true,
+          "project_classification": "nonformal_diagnostic_only_due_to_unqualified_source",
+          "short_ab_arm": false
+        },
+        "run_12": {
+          "group_size": 48,
+          "update_epochs": 10,
+          "target_and_sampled_rollout_groups": 5000,
+          "optimizer_steps": 50000,
+          "persisted_run_mode": "formal",
+          "persisted_eligible_for_formal_training": true,
+          "project_classification": "nonformal_diagnostic_only_due_to_unqualified_source",
+          "short_ab_arm": false
+        },
+        "run_13": {
+          "group_size": 72,
+          "update_epochs": 10,
+          "target_and_sampled_rollout_groups": 5000,
+          "optimizer_steps": 50000,
+          "persisted_run_mode": "formal",
+          "persisted_eligible_for_formal_training": true,
+          "project_classification": "nonformal_diagnostic_only_due_to_unqualified_source",
+          "short_ab_arm": false
+        }
+      },
+      "incomplete_historical_runs": {
+        "run_14": {
+          "group_size": 72,
+          "update_epochs": 20,
+          "target_rollout_groups": 5000,
+          "sampled_rollout_groups": 10,
+          "optimizer_steps": 200,
+          "checkpoint_present": false,
+          "report_present": false
+        },
+        "run_15": {
+          "group_size": 72,
+          "update_epochs": 5,
+          "target_rollout_groups": 5000,
+          "sampled_rollout_groups": 1,
+          "optimizer_steps": 5,
+          "checkpoint_present": false,
+          "report_present": false
+        }
+      },
+      "preservation_policy": "Preserve run_11 through run_15 and their current metadata unchanged; do not promote, backfill, resume, overwrite, or relabel them.",
+      "next_unoccupied_run_observed_at_reconciliation": "run_16"
+    },
     "short_stability_ab": {
-      "status": "pending_separate_frozen_code_training_thread",
+      "status": "pending_future_actual_path_manifest_not_started",
       "manifest_format": "stage2_grpo_stability_ab_manifest_v2",
       "paired_training_seeds": [
         17,
@@ -629,14 +743,7 @@
       "rollout_start_offset_max_steps": 200,
       "rollout_start_min_remaining_steps": 10,
       "epoch_config_policy": "The main YAML remains update_epochs=10; the six-run A/B must use explicit one-epoch and four-epoch configs and must not treat the main YAML as the clipped arm.",
-      "run_allocation": {
-        "run_8": "baseline seed 17",
-        "run_9": "clipped seed 17",
-        "run_10": "baseline seed 23",
-        "run_11": "clipped seed 23",
-        "run_12": "baseline seed 42",
-        "run_13": "clipped seed 42"
-      },
+      "run_allocation_policy": "Do not preassign numbered directories. After run-scoped logging is verified, bind each of the six fresh runs to its actual immutable run path in the v2 A/B manifest; occupied run_8 through run_15 are not A/B arms.",
       "comparison_entry": "evaluation.compare_grpo_stability",
       "diagnostic_only": true
     },
@@ -953,5 +1060,7 @@
   "stage2_random_start_implementation_evidence_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
   "stage2_yaml_single_source_launcher_evidence": "evaluation/STAGE2_GRPO_YAML_SINGLE_SOURCE_LAUNCHER_REPORT.json",
   "stage2_yaml_single_source_launcher_evidence_sha256": "e7b2ef99d2f1b658d938c73655bd29b425f54527cac1baafc59c54d4ffb4a568",
-  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 with stage2_joint_grpo_persistent_episode_v2 and explicit G24/E1 and G24/E4 configs, then run evaluation.compare_grpo_stability; the main G72/E10/500-rollout YAML is not an A/B arm, and even a passing A/B cannot authorize formal or paper conclusions."
+  "stage2_run_scoped_logging_implementation_evidence": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
+  "stage2_run_scoped_logging_implementation_evidence_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
+  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, create the v2 A/B manifest by binding six future freshly allocated actual run paths to explicit G24/E1 and G24/E4 configs, then execute only those diagnostic paired runs; occupied run_8 through run_15 are not A/B arms, no future A/B run has started in this round, and even a passing A/B cannot authorize formal or paper conclusions."
 }

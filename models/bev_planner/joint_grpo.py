@@ -729,6 +729,105 @@ class _JointGRPOTrainerBase:
         )
         return candidates, logits, None
 
+    def _frozen_reference_prediction(
+        self,
+        sample: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        del valid_mask
+        return self.reference.predict(
+            self.planner,
+            sample,
+            timesteps,
+            context,
+            coarse,
+        )
+
+    @torch.inference_mode()
+    def infer_frozen_pretrain(
+        self,
+        rollout: JointGRPORollout,
+    ) -> dict[str, Tensor]:
+        """Run one deterministic Stage-1 policy inference on a rollout state."""
+
+        if not isinstance(rollout, JointGRPORollout):
+            raise JointGRPOError("frozen pretrain inference requires a joint rollout")
+        context = rollout.context
+        coarse = rollout.coarse_trajectories
+        valid_mask = rollout.mode_valid_mask
+        self.planner._validate_trajectory_inputs(
+            coarse,
+            valid_mask,
+            batch_size=context.batch_size,
+            device=context.role_tokens.device,
+        )
+
+        batch_size = context.batch_size
+        device = coarse.device
+        anchor_normalized = self.planner._normalize_xy(coarse[..., :2])
+        noise = self.planner._inference_noise(
+            anchor_normalized.shape,
+            device=device,
+        )
+        noise_timesteps = torch.full(
+            (batch_size * NUM_PLATOON_ROLES,),
+            self.planner.config.inference_noise_timestep,
+            device=device,
+            dtype=torch.int64,
+        )
+        flat_shape = (
+            batch_size * NUM_PLATOON_ROLES,
+            NUM_MODES,
+            TRAJECTORY_STEPS,
+            2,
+        )
+        sample = self.planner.diffusion_scheduler.add_noise(
+            anchor_normalized.reshape(flat_shape),
+            noise.reshape(flat_shape),
+            noise_timesteps,
+        ).reshape_as(anchor_normalized)
+        self.planner.diffusion_scheduler.set_timesteps(
+            self.planner.config.num_train_timesteps,
+            device=device,
+        )
+
+        candidates: Tensor | None = None
+        raw_logits: Tensor | None = None
+        for timestep in self.planner.inference_roll_timesteps(
+            self.planner.config.inference_denoise_steps
+        ):
+            batch_timesteps = torch.full(
+                (batch_size, NUM_PLATOON_ROLES),
+                timestep,
+                device=device,
+                dtype=torch.int64,
+            )
+            candidates, raw_logits = self._frozen_reference_prediction(
+                sample.clamp(-1.0, 1.0),
+                batch_timesteps,
+                context,
+                coarse,
+                valid_mask,
+            )
+            predicted_normalized = self.planner._normalize_xy(
+                candidates[..., :2]
+            )
+            sample = self.planner.diffusion_scheduler.step(
+                model_output=predicted_normalized.reshape(flat_shape),
+                timestep=timestep,
+                sample=sample.reshape(flat_shape),
+            ).prev_sample.reshape_as(sample)
+        if candidates is None or raw_logits is None:
+            raise JointGRPOError("frozen pretrain inference produced no denoising steps")
+        selected = self.planner._select(candidates, raw_logits, valid_mask)
+        return {
+            "selected_trajectory": selected["selected_trajectory"],
+            "selected_mode": selected["selected_mode"],
+        }
+
     def _make_rollout(
         self,
         *,
@@ -1413,6 +1512,26 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
             valid_mask=valid_mask,
             fixed_history=None,
         )
+
+    def _frozen_reference_prediction(
+        self,
+        sample: Tensor,
+        timesteps: Tensor,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        candidates, logits, _ = self._decode_roles(
+            decoder=self.reference.diffusion_decoder,
+            mode_head=self.reference.mode_head,
+            sample=sample,
+            timesteps=timesteps,
+            context=context,
+            coarse=coarse,
+            valid_mask=valid_mask,
+            fixed_history=None,
+        )
+        return candidates, logits
 
     def _make_rollout(
         self,

@@ -39,6 +39,7 @@ from scenarios.bev_round13_contract import primary_scenario_contract
 from scenarios.definitions import SCENARIO_BY_ID
 from train.train_bev_joint_grpo_online import (
     AGENT_IDS,
+    FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
     PRIMARY_S5_S9_SCENARIOS,
     ROLLOUT_COLLECTION_CONTRACT_VERSION,
     JointGRPOOnlineConfig,
@@ -57,7 +58,6 @@ from train.train_bev_joint_grpo_online import (
     _joint_rewards_are_informative,
     _load_trainer,
     _new_online_rule_maker,
-    _next_run_directory,
     _next_unfinished_bucket_index,
     _resume_best_checkpoint_anchor,
     _reject_exhausted_uninformative_budget,
@@ -95,16 +95,6 @@ RUN_YAML_HEADER = (
     "  run_mode: smoke\n"
     "  source_checkpoint: /tmp/stage1.pt\n"
 )
-
-
-def test_next_run_directory_continues_after_migrated_run4(tmp_path: Path) -> None:
-    output_root = tmp_path / "run_3" / "grpo_open"
-    (output_root / "run_4").mkdir(parents=True)
-
-    next_run = _next_run_directory(output_root)
-
-    assert next_run == output_root / "run_5"
-    assert (next_run / "checkpoints").is_dir()
 
 
 def _binding() -> dict[str, object]:
@@ -197,10 +187,12 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
         online=online,
     )
     assert training.online is online
+    run_dir = tmp_path / "run_1"
+    run_dir.mkdir()
     with pytest.raises(OnlineGRPOError, match="training_config"):
         run_joint_grpo_training(
             online,  # type: ignore[arg-type]
-            output_root=tmp_path / "output",
+            run_dir=run_dir,
         )
 
 
@@ -234,6 +226,88 @@ def test_training_config_wrapper_is_strict(tmp_path: Path) -> None:
             source_checkpoint=tmp_path / "stage1.pt",
             online=object(),  # type: ignore[arg-type]
         )
+
+
+def test_training_requires_pre_reserved_run_directory(tmp_path: Path) -> None:
+    training_config = JointGRPOTrainingConfig(
+        variant="A",
+        run_mode="smoke",
+        source_checkpoint=tmp_path / "stage1.pt",
+        online=JointGRPOOnlineConfig(device="cpu"),
+    )
+    missing_run_dir = tmp_path / "missing-run"
+    with pytest.raises(OnlineGRPOError, match="must already exist"):
+        run_joint_grpo_training(training_config, run_dir=missing_run_dir)
+
+    run_file = tmp_path / "run-file"
+    run_file.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(OnlineGRPOError, match="must be a directory"):
+        run_joint_grpo_training(training_config, run_dir=run_file)
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "is_directory"),
+    [
+        ("config.json", False),
+        ("metrics.jsonl", False),
+        ("checkpoints", True),
+        ("tb", True),
+        ("report.json", False),
+    ],
+)
+def test_training_refuses_to_overwrite_existing_managed_artifacts(
+    artifact_name: str,
+    is_directory: bool,
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run_1"
+    run_dir.mkdir()
+    artifact = run_dir / artifact_name
+    if is_directory:
+        artifact.mkdir()
+        sentinel = artifact / "sentinel.txt"
+    else:
+        sentinel = artifact
+    sentinel.write_text("preserve", encoding="utf-8")
+    training_config = JointGRPOTrainingConfig(
+        variant="A",
+        run_mode="smoke",
+        source_checkpoint=tmp_path / "stage1.pt",
+        online=JointGRPOOnlineConfig(device="cpu"),
+    )
+
+    with pytest.raises(OnlineGRPOError, match="may contain only training.log"):
+        run_joint_grpo_training(training_config, run_dir=run_dir)
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_training_allows_existing_training_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run_1"
+    run_dir.mkdir()
+    training_log = run_dir / "training.log"
+    training_log.write_text("launcher output\n", encoding="utf-8")
+    training_config = JointGRPOTrainingConfig(
+        variant="A",
+        run_mode="smoke",
+        source_checkpoint=tmp_path / "stage1.pt",
+        online=JointGRPOOnlineConfig(device="cpu"),
+    )
+
+    def load_trainer(*args, **kwargs):
+        raise OnlineGRPOError("trainer load reached")
+
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online._load_trainer", load_trainer
+    )
+    with pytest.raises(OnlineGRPOError, match="trainer load reached"):
+        run_joint_grpo_training(training_config, run_dir=run_dir)
+
+    assert training_log.read_text(encoding="utf-8") == "launcher output\n"
+    assert (run_dir / "checkpoints").is_dir()
 
 
 def test_cuda_peak_memory_is_reset_and_reported_only_for_cuda(
@@ -347,8 +421,8 @@ def test_cli_rejects_legacy_max_rollout_groups(
             "train_bev_joint_grpo_online",
             "--config",
             str(tmp_path / "config.yaml"),
-            "--output-root",
-            str(tmp_path / "output"),
+            "--run-dir",
+            str(tmp_path / "run_1"),
             "--max-rollout-groups",
             "1",
         ],
@@ -359,6 +433,36 @@ def test_cli_rejects_legacy_max_rollout_groups(
 
     assert exc_info.value.code == 2
     assert "unrecognized arguments: --max-rollout-groups 1" in capsys.readouterr().err
+
+
+def test_cli_rejects_legacy_output_root(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_bev_joint_grpo_online",
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--run-dir",
+            str(tmp_path / "run_1"),
+            "--output-root",
+            str(output_root),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        online_main()
+
+    assert exc_info.value.code == 2
+    assert (
+        f"unrecognized arguments: --output-root {output_root}"
+        in capsys.readouterr().err
+    )
 
 
 @pytest.mark.parametrize(
@@ -1344,10 +1448,12 @@ def test_pretrain_raw_baseline_runs_once_before_resume(
             resume_checkpoint=tmp_path / "resume.pt",
         ),
     )
+    run_dir = tmp_path / "run_1"
+    run_dir.mkdir()
     with pytest.raises(OnlineGRPOError, match="resume loader reached"):
         run_joint_grpo_training(
             training_config,
-            output_root=tmp_path / "output",
+            run_dir=run_dir,
         )
     assert validation_planners == [source_planner]
 
@@ -1558,13 +1664,15 @@ def _run_fake_persistent_collection(
     update_epochs = 2
     envs: list[object] = [] if external_envs is None else external_envs
     validation_rollouts: list[int] = []
+    writer_scalars: list[tuple[str, float, int]] = []
+    plot_call_kwargs: list[dict[str, object]] = []
 
     class Writer:
         def __init__(self, *args, **kwargs) -> None:
             pass
 
-        def add_scalar(self, *args, **kwargs) -> None:
-            pass
+        def add_scalar(self, tag, value, step) -> None:
+            writer_scalars.append((str(tag), float(value), int(step)))
 
         def add_tensor(self, *args, **kwargs) -> None:
             pass
@@ -1583,6 +1691,7 @@ def _run_fake_persistent_collection(
             self.step_calls = 0
             self.summary_calls = 0
             self.closed = False
+            self.actions: list[object] = []
             self._last_planner_batch = {}
             self._scenario_orchestrator = SimpleNamespace(
                 get_episode_summary=self.get_episode_summary
@@ -1616,6 +1725,7 @@ def _run_fake_persistent_collection(
             }
 
         def step(self, action):
+            self.actions.append(action)
             self.step_calls += 1
             ended = (
                 terminal_after_environment_steps is not None
@@ -1684,9 +1794,17 @@ def _run_fake_persistent_collection(
     class Trainer:
         def __init__(self) -> None:
             self.config = JointGRPOConfig(group_size=group_size)
-            self.planner = object()
+            self.planner = SimpleNamespace(
+                config=SimpleNamespace(
+                    inference_seed=0,
+                    inference_noise_timestep=8,
+                    inference_denoise_steps=2,
+                )
+            )
             self.optimizer_step = 0
             self.sample_calls = 0
+            self.frozen_infer_calls = 0
+            self.frozen_score_calls: list[tuple[int, int, float]] = []
             self.update_calls = 0
             self.policy_updates: list[JointGRPOPolicyUpdateConfig] = []
             self.sample_environment_steps: list[tuple[int, int]] = []
@@ -1712,6 +1830,19 @@ def _run_fake_persistent_collection(
                     dtype=torch.int64,
                 ),
             )
+
+        def infer_frozen_pretrain(self, rollout):
+            self.frozen_infer_calls += 1
+            active_env = envs[-1]
+            value = float(active_env.step_calls + 1)
+            return {
+                "selected_trajectory": torch.full(
+                    (1, 3, 8, 3), value, dtype=torch.float32
+                ),
+                "selected_mode": torch.full(
+                    (1, 3), int(ModeIndex.KEEP_HIGH), dtype=torch.int64
+                ),
+            }
 
         def update(self, rollout, rewards, *, policy_update):
             self.update_calls += 1
@@ -1739,6 +1870,23 @@ def _run_fake_persistent_collection(
             )
 
     trainer = Trainer()
+    trainer.writer_scalars = writer_scalars
+    trainer.plot_call_kwargs = plot_call_kwargs
+
+    class ProxyBackend:
+        def __init__(self, reward_config) -> None:
+            pass
+
+        def score(self, env, values, raw_candidates):
+            raw = np.asarray(raw_candidates)
+            assert raw.shape == (1, 3, 8, 3)
+            reward = float(raw[0, 0, 0, 0])
+            trainer.frozen_score_calls.append(
+                (env.episode_index, env.step_calls, reward)
+            )
+            return SimpleNamespace(
+                rewards=np.asarray([reward], dtype=np.float32)
+            )
 
     def new_env(scenario, seed):
         env = Env(scenario, seed, len(envs))
@@ -1871,6 +2019,10 @@ def _run_fake_persistent_collection(
         "train.train_bev_joint_grpo_online.SummaryWriter", Writer
     )
     monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.JointTrajectoryProxyReward",
+        ProxyBackend,
+    )
+    monkeypatch.setattr(
         "train.train_bev_joint_grpo_online._load_trainer",
         lambda *args, **kwargs: (trainer, {}, "a" * 64),
     )
@@ -1930,9 +2082,10 @@ def _run_fake_persistent_collection(
     )
     monkeypatch.setattr(
         "train.train_bev_joint_grpo_online.generate_grpo_plots",
-        lambda tb, plots: {
-            name: tmp_path / f"{name}.png" for name in plot_names
-        },
+        lambda tb, plots, **kwargs: (
+            plot_call_kwargs.append(dict(kwargs))
+            or {name: tmp_path / f"{name}.png" for name in plot_names}
+        ),
     )
     if single_training_bucket:
         monkeypatch.setattr(
@@ -1956,9 +2109,11 @@ def _run_fake_persistent_collection(
             advantage_vector_log_interval_rollouts=max_rollout_groups,
         ),
     )
+    run_dir = tmp_path / "run_1"
+    run_dir.mkdir(parents=True)
     report = run_joint_grpo_training(
         training_config,
-        output_root=tmp_path / "output",
+        run_dir=run_dir,
     )
     return report, envs, validation_rollouts, trainer
 
@@ -1989,6 +2144,17 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     assert report["environment_steps"] == 31
     assert report["warmup_environment_steps"] == 10
     assert validation_rollouts == [0, 21]
+    assert trainer.frozen_infer_calls == 21
+    assert len(trainer.frozen_score_calls) == 21
+    assert [call[:2] for call in trainer.frozen_score_calls] == (
+        trainer.sample_environment_steps
+    )
+    assert all(
+        np.count_nonzero(trajectory) == 0
+        for env in envs
+        for action in env.actions
+        for trajectory in action.values()
+    )
     counters = report["training_bucket_counters"]
     assert [item["target_rollouts"] for item in counters] == [3] + [2] * 9
     assert [item["sampled_rollouts"] for item in counters] == [3] + [2] * 9
@@ -2001,12 +2167,43 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     assert frozen_config["rollout_collection_contract"] == report[
         "rollout_collection_contract"
     ]
+    expected_logging_metadata = {
+        "tensorboard_tag": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+        "metrics_jsonl_field": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+        "step_axis": "absolute_fresh_rollout_group",
+        "same_live_state_as_current_exploration": True,
+        "trajectory_count": 1,
+        "trajectory_selection": "valid_mode_masked_argmax",
+        "trajectory_domain": "raw_tau_d",
+        "inference": "frozen_stage1_standard_deterministic_ddim",
+        "inference_seed": 0,
+        "inference_noise_timestep": 8,
+        "inference_denoise_steps": 2,
+        "fixed_inference_noise": True,
+        "diagnostic_only": True,
+        "affects_training_or_environment_action": False,
+    }
+    assert frozen_config["frozen_pretrain_reward_logging"] == (
+        expected_logging_metadata
+    )
+    assert report["frozen_pretrain_reward_logging"] == expected_logging_metadata
+    assert report["training_plots"]["reward_tags"] == [
+        "raw_proxy_reward_mean",
+        "raw_proxy_reward_max",
+        FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+    ]
+    assert trainer.plot_call_kwargs == [
+        {"require_frozen_pretrain_reward": True}
+    ]
     checkpoint = torch.load(
         report["last_checkpoint"], map_location="cpu", weights_only=False
     )
     assert checkpoint["rollout_collection_contract"] == report[
         "rollout_collection_contract"
     ]
+    assert checkpoint["metrics"][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG] == (
+        report["metrics"][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG]
+    )
     sampler = checkpoint["sampler_state"]
     assert sampler["bucket_target_counts"] == [3] + [2] * 9
     assert sampler["bucket_sample_counts"] == [3] + [2] * 9
@@ -2044,6 +2241,35 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
         }.issubset(event)
         for event in start_events
     )
+    records = [
+        json.loads(line)
+        for line in (run_dir / "metrics.jsonl").read_text().splitlines()
+    ]
+    rollout_events = [
+        record for record in records if record["event"] == "rollout"
+    ]
+    optimizer_events = [
+        record for record in records if record["event"] == "optimizer_epoch"
+    ]
+    assert len(rollout_events) == 21
+    assert [event["sampled_rollouts"] for event in rollout_events] == list(
+        range(1, 22)
+    )
+    assert all(
+        np.isfinite(event[FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG])
+        for event in rollout_events
+    )
+    assert all(
+        FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG not in event
+        for event in optimizer_events
+    )
+    frozen_tb = [
+        (value, step)
+        for tag, value, step in trainer.writer_scalars
+        if tag == FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG
+    ]
+    assert [step for _, step in frozen_tb] == list(range(1, 22))
+    assert all(np.isfinite(value) for value, _ in frozen_tb)
 
 
 def test_random_start_hits_exact_target_then_collects_ten_consecutive_groups(

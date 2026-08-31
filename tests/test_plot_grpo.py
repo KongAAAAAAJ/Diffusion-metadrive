@@ -12,8 +12,10 @@ import evaluation.plot_grpo as plot_grpo
 from evaluation.plot_grpo import (
     ADVANTAGE_VECTOR_TAG,
     CLIP_FRACTION_TAGS,
+    FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
     GRPO_LOSS_CURVE_TAGS,
     KL_LOSS_CURVE_TAGS,
+    LEGACY_REWARD_CURVE_TAGS,
     MODE_RATIO_TAGS,
     OLD_POLICY_APPROX_KL_TAGS,
     POLICY_STABILITY_CURVE_TAGS,
@@ -215,13 +217,22 @@ def test_load_advantage_vectors_rejects_non_finite_values(
         load_advantage_vectors(tb_dir)
 
 
-def _write_complete_grpo_events(tb_dir: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+def _write_complete_grpo_events(
+    tb_dir: Path,
+    *,
+    include_frozen_pretrain_reward: bool = True,
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     training_steps = np.arange(1, 16, dtype=np.int64)
     validation_steps = np.asarray([5, 10, 15], dtype=np.int64)
     scalar_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    reward_tags = (
+        REWARD_CURVE_TAGS
+        if include_frozen_pretrain_reward
+        else LEGACY_REWARD_CURVE_TAGS
+    )
     for tag_index, tag in enumerate(
         (
-            *REWARD_CURVE_TAGS,
+            *reward_tags,
             *VALIDATION_REWARD_CURVE_TAGS,
             *GRPO_LOSS_CURVE_TAGS,
             *KL_LOSS_CURVE_TAGS,
@@ -300,7 +311,11 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
 
     monkeypatch.setattr(Axes, "plot", record_plot)
 
-    outputs = generate_grpo_plots(tb_dir, output_dir)
+    outputs = generate_grpo_plots(
+        tb_dir,
+        output_dir,
+        require_frozen_pretrain_reward=True,
+    )
 
     assert set(outputs) == {
         "advantage_heatmap",
@@ -329,7 +344,7 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
             plot_grpo.event_accumulator.SCALARS: 0,
         }
     ]
-    assert len(plot_calls) == 21
+    assert len(plot_calls) == 22
     calls_by_tag = {tag: (axis, steps, values) for axis, tag, steps, values in plot_calls}
     assert set(calls_by_tag) == set(expected_series)
     for tag, (expected_steps, expected_values) in expected_series.items():
@@ -388,6 +403,105 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
     assert clip_axis.get_ylabel() == "Fraction"
     assert tuple(round(value, 8) for value in clip_axis.get_ylim()) == (0.0, 1.0)
     assert next(iter(old_policy_kl_axes)).get_ylabel() == "Approximate KL"
+
+
+def test_generate_grpo_plots_keeps_legacy_two_reward_curves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tb_dir = tmp_path / "tb"
+    _write_complete_grpo_events(
+        tb_dir,
+        include_frozen_pretrain_reward=False,
+    )
+
+    plotted_labels: list[str] = []
+    original_plot = Axes.plot
+
+    def record_plot(
+        self: Axes,
+        x: object,
+        y: object,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        plotted_labels.append(str(kwargs["label"]))
+        return original_plot(self, x, y, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "plot", record_plot)
+
+    outputs = generate_grpo_plots(tb_dir, tmp_path / "legacy_plots")
+
+    assert outputs["reward_curve"].is_file()
+    assert all(tag in plotted_labels for tag in LEGACY_REWARD_CURVE_TAGS)
+    assert FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG not in plotted_labels
+
+
+def test_generate_grpo_plots_strict_rejects_missing_frozen_reward(
+    tmp_path: Path,
+) -> None:
+    tb_dir = tmp_path / "tb"
+    _write_complete_grpo_events(
+        tb_dir,
+        include_frozen_pretrain_reward=False,
+    )
+
+    with pytest.raises(
+        AdvantageHeatmapError,
+        match=FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+    ):
+        generate_grpo_plots(
+            tb_dir,
+            tmp_path / "plots",
+            require_frozen_pretrain_reward=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("invalid_kind", "expected_message"),
+    [
+        ("duplicate", "duplicate step 1"),
+        ("non_finite", "must be finite"),
+        ("misaligned", "aligned steps"),
+    ],
+)
+def test_generate_grpo_plots_rejects_invalid_frozen_reward_series(
+    tmp_path: Path,
+    invalid_kind: str,
+    expected_message: str,
+) -> None:
+    tb_dir = tmp_path / "tb"
+    with SummaryWriter(log_dir=str(tb_dir)) as writer:
+        writer.add_tensor(
+            ADVANTAGE_VECTOR_TAG,
+            torch.zeros((1, 4), dtype=torch.float32),
+            global_step=1,
+        )
+        _write_all_scalar_tags(
+            writer,
+            duplicate_tag=(
+                FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG
+                if invalid_kind == "duplicate"
+                else None
+            ),
+            non_finite_tag=(
+                FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG
+                if invalid_kind == "non_finite"
+                else None
+            ),
+        )
+        if invalid_kind == "misaligned":
+            writer.add_scalar(
+                FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+                0.5,
+                global_step=2,
+            )
+
+    with pytest.raises(AdvantageHeatmapError, match=expected_message):
+        generate_grpo_plots(
+            tb_dir,
+            tmp_path / "plots",
+            require_frozen_pretrain_reward=True,
+        )
 
 
 def _write_all_scalar_tags(

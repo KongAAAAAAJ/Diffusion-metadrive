@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-30T19:24:19+08:00",
+  "updated_at": "2026-08-31T21:37:14+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "ee9ffc6f59674201b7c0166132195ba23c084fb0",
+    "git_commit": "ed76143334bdcfff723602bd2e8636179a0f8a43",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -80,19 +80,21 @@
     "uncommitted_stage2_grpo_persistent_episode_report_present": false,
     "uncommitted_stage2_grpo_random_start_present": false,
     "uncommitted_stage2_grpo_random_start_report_present": false,
-    "uncommitted_stage2_grpo_yaml_single_source_launcher_present": true,
-    "uncommitted_stage2_grpo_yaml_single_source_launcher_report_present": true
+    "uncommitted_stage2_grpo_yaml_single_source_launcher_present": false,
+    "uncommitted_stage2_grpo_yaml_single_source_launcher_report_present": false,
+    "uncommitted_stage2_grpo_run_scoped_logging_implementation_present": true,
+    "uncommitted_stage2_grpo_run_scoped_logging_report_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "stage2-grpo-yaml-single-source-launcher-20260830",
-    "status": "yaml_single_source_launcher_verified_short_ab_pending_nonformal",
+    "round": "stage2-grpo-run-scoped-logging-20260831",
+    "status": "run_scoped_logging_verified_short_ab_pending",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "yaml_single_source_launcher_verified_short_ab_pending_nonformal",
+      "status": "run_scoped_logging_verified_short_ab_pending",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -142,7 +144,7 @@
         "formal_experiment_status_changed": false
       },
       "stage2_clipped_multi_epoch_grpo": {
-        "status": "optimizer_v2_random_start_collection_v2_yaml_single_source_verified_short_ab_pending",
+        "status": "optimizer_v2_random_start_collection_v2_yaml_single_source_run_scoped_logging_verified_short_ab_pending",
         "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
         "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
         "default_group_size": 24,
@@ -188,18 +190,57 @@
         "random_start_implementation_report_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
         "training_parameter_source": "configs/train/bev_joint_grpo.yaml",
         "launcher_training_semantic_overrides": false,
-        "main_yaml_variant": "A",
-        "main_yaml_run_mode": "smoke",
-        "main_yaml_group_size": 72,
-        "main_yaml_total_rollout_groups": 500,
-        "main_yaml_update_epochs": 10,
+        "yaml_projection_reconciliation": {
+          "last_verified_report_projection": "A/smoke/G72/E10/500",
+          "head_ed761433_projection": "A/formal/G24/E10/5000",
+          "working_tree_observation": "A/formal/G72/E10/5000",
+          "working_tree_owned_by_user": true,
+          "canonical_projection_selected_by_this_round": false,
+          "policy": "Preserve the dirty YAML exactly and do not use it to waive the unqualified-source formal hard gate."
+        },
         "yaml_single_source_focused_tests_passed": 131,
         "yaml_single_source_broader_tests_passed": 251,
         "yaml_single_source_implementation_report": "evaluation/STAGE2_GRPO_YAML_SINGLE_SOURCE_LAUNCHER_REPORT.json",
         "yaml_single_source_implementation_report_sha256": "e7b2ef99d2f1b658d938c73655bd29b425f54527cac1baafc59c54d4ffb4a568",
         "short_ab_manifest_format": "stage2_grpo_stability_ab_manifest_v2",
         "short_ab_report_format": "stage2_grpo_stability_ab_report_v2",
-        "short_ab_status": "pending_separate_frozen_code_training_thread",
+        "short_ab_status": "pending_future_actual_path_manifest_not_started",
+        "run_scoped_logging": {
+          "status": "verified_complete",
+          "historical_shared_log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/logs/grpo-open-training.log",
+          "historical_shared_log_size_bytes": 5600466,
+          "historical_shared_log_nul_bytes": 19740,
+          "historical_shared_log_run_reference_counts": {
+            "run_11": 5,
+            "run_12": 0,
+            "run_13": 10,
+            "run_14": 0,
+            "run_15": 0
+          },
+          "historical_shared_log_reliable_per_run": false,
+          "historical_shared_log_mutation_allowed": false,
+          "future_log_binding": "<stage1_run_root>/grpo_open/run_N/training.log",
+          "algorithm_contract_changed": false,
+          "online_artifact_format_changed": false,
+          "implementation_files": [
+            "scripts/run_bev_joint_grpo.sh",
+            "train/train_bev_joint_grpo_online.py",
+            "tests/test_run_bev_joint_grpo_launcher.py",
+            "tests/test_bev_joint_grpo_online.py"
+          ],
+          "launcher_tests_passed": 17,
+          "online_tests_passed": 126,
+          "total_tests_passed": 143,
+          "warnings": 15,
+          "bash_syntax_passed": true,
+          "python_compile_passed": true,
+          "scoped_diff_check_passed": true,
+          "real_cpu_missing_source_exit_status": 1,
+          "cuda_training_started": false,
+          "long_training_started": false,
+          "implementation_report": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
+          "implementation_report_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55"
+        },
         "formal_experiment_status_changed": false
       },
       "short_closed_loop": {
@@ -880,13 +921,18 @@
     "stage2_grpo_yaml_single_source_launcher_authorized_on": "2026-08-30",
     "stage2_grpo_yaml_single_source_launcher_scope": "Move variant, run mode, source Stage1 checkpoint, and every online GRPO training parameter into configs/train/bev_joint_grpo.yaml; remove shell and CLI semantic overrides, keep only operational interpreter/config/output/log paths in the launcher, preserve the main G72/E10/500-rollout values, retain diagnostic smoke classification for the unqualified run_3 source, and do not start training in this implementation thread.",
     "stage2_grpo_yaml_single_source_launcher_long_training_authorized_in_this_thread": false,
-    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. Stage1 v2 run_3 remains unqualified and is the diagnostic source for legacy GRPO run_4 through run_7 and the pending clipped-GRPO A/B. Stage2_joint_grpo_persistent_episode_v2 randomized scenario-valid starts passed 237 focused tests and a bounded G=3/E=2 six-rollout CUDA smoke on 2026-08-30; formal eligibility is unchanged, and run_8 through run_13 remain pending in a separate frozen-code training thread."
+    "stage2_grpo_run_scoped_logging_authorized": true,
+    "stage2_grpo_run_scoped_logging_authorized_on": "2026-08-31",
+    "stage2_grpo_run_scoped_logging_scope": "Replace the shared truncating GRPO launcher log with one unique launch log bound to the actual allocated run directory; preserve existing logs and run artifacts, YAML-only training semantics, all GRPO algorithm contracts, checkpoint and online artifact formats, and the strict Stage1 qualification gate.",
+    "stage2_grpo_run_scoped_logging_implementation_complete": true,
+    "stage2_grpo_run_scoped_logging_long_training_authorized_in_this_thread": false,
+    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. Stage1 v2 run_3 remains unqualified. Run_11 through run_13 are occupied nonformal diagnostic G24/G48/G72 E10 sweeps, while run_14 and run_15 are incomplete historical artifacts; none is a clipped E1/E4 A/B arm or formal evidence. Run-scoped logging is verified complete, and the next diagnostic A/B may proceed only in a separate frozen-code thread after its v2 manifest binds six future freshly allocated actual run paths."
   },
   "source_of_truth": {
     "stage2_grpo_clipped_multi_epoch_implementation_report": {
       "path": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
       "sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
-      "role": "Records the exact stage2_joint_grpo_optimizer_v2 contract and SHA, clipped mode and per-DDIM-transition objectives, rollout-group budget and sampler-state resume semantics, 175 passing focused tests, full evaluator loading for legacy run_4 through run_7, passing G=3/E=2 and G=24/E=4 CUDA smokes, the 0.435 GiB full-group peak, six diagnostic plots, and the still-pending diagnostic run_8 through run_13 A/B."
+      "role": "Records the exact stage2_joint_grpo_optimizer_v2 contract and SHA, clipped mode and per-DDIM-transition objectives, rollout-group budget and sampler-state resume semantics, 175 passing focused tests, full evaluator loading for legacy run_4 through run_7, passing G=3/E=2 and G=24/E=4 CUDA smokes, the 0.435 GiB full-group peak, six diagnostic plots, and the still-pending six-run diagnostic A/B whose future paths must be bound by its manifest."
     },
     "stage2_grpo_persistent_episode_implementation_report": {
       "path": "evaluation/STAGE2_GRPO_PERSISTENT_EPISODE_IMPLEMENTATION_REPORT.json",
@@ -902,6 +948,11 @@
       "path": "evaluation/STAGE2_GRPO_YAML_SINGLE_SOURCE_LAUNCHER_REPORT.json",
       "sha256": "e7b2ef99d2f1b658d938c73655bd29b425f54527cac1baafc59c54d4ffb4a568",
       "role": "Records the YAML-only GRPO training-semantic source, removal and rejection of launcher/CLI variant, run-mode, source-checkpoint and rollout-budget overrides, the resolved A/smoke/G72/E10/500 main config, 251 passing related tests, and unchanged diagnostic/formal eligibility."
+    },
+    "stage2_grpo_run_scoped_logging_implementation_report": {
+      "path": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
+      "sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
+      "role": "Records launcher-owned atomic run_N allocation, one run_N/training.log per launch, strict --run-dir overwrite protection, Python-first tee exit-status propagation, the preserved historical shared log, 143 passing tests with 15 warnings, the real CPU missing-source failure boundary, and unchanged GRPO contracts and formal eligibility."
     },
     "v2_only_training_evaluation_cleanup_report": {
       "path": "evaluation/V2_ONLY_TRAINING_EVALUATION_CLEANUP_REPORT.json",
@@ -1163,8 +1214,8 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "6f6d1daa295a7c0c826e60c2429ab17ccae72ec3ddd2939b5b714bf19fe268df",
-      "role": "Freezes the verified stage2_joint_grpo_persistent_episode_v2 randomized-start contract, v6 online artifacts and v2 A/B binding; authorizes only the separate diagnostic E1/E4 run_8 through run_13 thread while retaining strict Stage1 v2 run_3 qualification as the active formal hard gate."
+      "sha256": "dfceaf5a00965403e9a7620a272266cd49b501a8b224fc2b541b2bb4b609301b",
+      "role": "Records verified run-scoped logging, the exact run_N/training.log layout, preserved run_11 through run_15 facts, and the still-unstarted future diagnostic E1/E4 A/B whose v2 manifest must bind actual newly allocated paths while retaining strict Stage1 v2 run_3 qualification as the active formal hard gate."
     },
     "stage2_at_risk_grpo_open_bare_launcher_fix_report": {
       "path": "evaluation/STAGE2_AT_RISK_GRPO_OPEN_BARE_LAUNCHER_FIX_REPORT.json",
@@ -1936,12 +1987,13 @@
       "eligible": false,
       "diagnostic_only": true,
       "implementation_verified": true,
-      "training_started": false,
+      "training_started": true,
+      "training_scope": "Nonformal diagnostic E10 group-size sweep completed for run_11 through run_13; no frozen E1/E4 A/B arm has been accepted.",
       "source": "stage1_a_v2_run3_unqualified",
       "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
       "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
       "storage_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
-      "next_default_run": "run_8",
+      "next_unoccupied_run_observed_at_reconciliation": "run_16",
       "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
       "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
       "application_contract": "stage2_grpo_open_application_v1",
@@ -1950,15 +2002,16 @@
       "default_update_epochs": 4,
       "default_clip_epsilon": 0.2,
       "budget_unit": "fresh_rollout_group",
-      "launcher_budget": "MAX_ROLLOUT_GROUPS",
+      "launcher_budget": "online.total_rollout_groups from YAML; launcher budget overrides are forbidden",
       "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v2",
       "rollout_groups_per_bucket_visit": 10,
       "rollout_start_offset_max_steps": 200,
       "rollout_start_min_remaining_steps": 10,
       "online_config_format": "bev_joint_grpo_online_config_v6",
       "online_report_format": "bev_joint_grpo_online_report_v6",
-      "current_yaml_update_epochs": 10,
-      "current_yaml_environment_steps_per_episode": 200,
+      "observed_head_and_worktree_update_epochs": 10,
+      "observed_head_and_worktree_environment_steps_per_episode": 200,
+      "dirty_yaml_preserved_without_canonicalization": true,
       "legacy_runs_4_through_7_read_only_evaluator_load_passed": true,
       "legacy_runs_4_through_7_resume_allowed": false,
       "cuda_smoke_g3_e2": "/tmp/stage2_grpo_smoke_g3/run_1",
@@ -1985,15 +2038,25 @@
       "random_start_cuda_peak_memory_bytes": 129990144,
       "random_start_implementation_report": "evaluation/STAGE2_GRPO_RANDOM_START_IMPLEMENTATION_REPORT.json",
       "random_start_implementation_report_sha256": "4a7b72098a5cf8df234a0ce3c965bd435a760170e1587f9adddbb3c206dcea8c",
-      "short_ab_runs": [
-        "run_8 baseline seed17",
-        "run_9 clipped seed17",
-        "run_10 baseline seed23",
-        "run_11 clipped seed23",
-        "run_12 baseline seed42",
-        "run_13 clipped seed42"
-      ],
-      "short_ab_status": "pending_separate_frozen_code_training_thread",
+      "reconciled_completed_nonformal_sweep": {
+        "run_11": "seed17 G24 E10, 5000 rollout groups and 50000 optimizer steps",
+        "run_12": "seed17 G48 E10, 5000 rollout groups and 50000 optimizer steps",
+        "run_13": "seed17 G72 E10, 5000 rollout groups and 50000 optimizer steps"
+      },
+      "reconciled_incomplete_historical_runs": {
+        "run_14": "G72 E20, stopped at 10 rollout groups and 200 optimizer steps without checkpoint or report",
+        "run_15": "G72 E5, stopped at 1 rollout group and 5 optimizer steps without checkpoint or report"
+      },
+      "reconciled_run_project_classification": "run_11 through run_15 remain nonformal and formally ineligible because their source Stage1 run_3 checkpoint is unqualified; persisted formal flags are not project qualification evidence",
+      "reconciled_run_preservation_policy": "preserve without metadata edits, backfill, resume, overwrite, or relabeling",
+      "short_ab_run_allocation_policy": "bind six future fresh actual run paths in the v2 A/B manifest after run-scoped logging is verified; occupied run_8 through run_15 are not A/B arms",
+      "short_ab_status": "pending_future_actual_path_manifest_not_started",
+      "run_scoped_logging_status": "verified_complete",
+      "run_scoped_log_layout": "<stage1_run_root>/grpo_open/run_N/training.log",
+      "run_scoped_logging_implementation_report": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
+      "run_scoped_logging_implementation_report_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
+      "run_scoped_logging_total_tests_passed": 143,
+      "run_scoped_logging_warnings": 15,
       "formal_evaluation_allowed": false,
       "paper_evidence_allowed": false
     },
@@ -2042,7 +2105,7 @@
       "run_report_sha256": "67b403be49c16d1e2019089f44f2f66c594ee60e8e830fe8ec60fc54e739f1be",
       "training_log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/logs/grpo-open-training.log",
       "storage_layout": "<source_stage1_run_root>/grpo_open/run_N",
-      "next_default_run": "run_8",
+      "next_default_run_at_report_time": "run_8",
       "optimizer_steps": 5000,
       "best_checkpoint_optimizer_step": 100,
       "environment_steps": 77500,
@@ -2235,7 +2298,7 @@
       "diagnostic_only": true,
       "source": "stage1_a_v2_run3_unqualified",
       "storage_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
-      "next_default_run": "run_8",
+      "next_default_run_at_report_time": "run_8",
       "runs": {
         "run_5": {
           "group_size": 8,
@@ -2414,7 +2477,7 @@
     "Treat the observed S5 background actor counts as descriptive evidence rather than an acceptance hard gate; no explicit background-quota waiver continuation switch exists in the current collector.",
     "Use tools/visualize_dataset_episode.py for read-only scenario/episode listing and world-topdown MP4 rendering; keep outputs outside dataset roots.",
     "Preserve run_3 as the user-terminated incomplete diagnostic artifact at metrics step 4532 and checkpoint step 4500; do not backfill or otherwise modify its TensorBoard event or checkpoints.",
-    "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, execute diagnostic run_8 through run_13 with stage2_joint_grpo_persistent_episode_v2, explicit E1/E4 configs, G=24, 100 fresh rollout groups and validation every 20 groups; then run evaluation.compare_grpo_stability. The main update_epochs=10 YAML is not an A/B arm, and a passing A/B cannot grant formal or paper eligibility.",
+    "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. Run-scoped logging is verified complete. In a separate frozen-code training thread, first bind six future freshly allocated actual paths in the v2 A/B manifest for explicit E1/E4 configs, G=24, 100 rollout groups and validation every 20 groups, then execute only those diagnostic paired runs; occupied run_8 through run_15 are not A/B arms, no future A/B run has started in this round, and a passing A/B cannot grant formal or paper eligibility.",
     "Do not use the at-risk Stage1 or GRPO-Open checkpoints as formal GRPO sources, formal evaluation artifacts, GRPO-Exec sources, or paper results. Formal mainline resumption still requires complete dataset verification and quality acceptance.",
     "Preserve the 9999-sample remediation dataset and its explicit quota revision as historical evidence; do not relabel it as 10000/2000 or mix it into the formal50K root.",
     "Do not resume or relabel the preserved RV2 four-family 70k root for formal Diffusion training.",

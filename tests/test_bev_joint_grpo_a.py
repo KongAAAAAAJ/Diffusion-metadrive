@@ -353,6 +353,40 @@ def rollout_pair():
     return trainer, first, second
 
 
+def test_frozen_pretrain_inference_matches_stage1_and_is_deterministic() -> None:
+    inputs = _model_inputs()
+    trainer = JointGRPOTrainerA(_planner())
+    training_generator = torch.Generator().manual_seed(19)
+    rollout = trainer.sample_groups(inputs, generator=training_generator)
+    generator_state = training_generator.get_state().clone()
+
+    first = trainer.infer_frozen_pretrain(rollout)
+    second = trainer.infer_frozen_pretrain(rollout)
+    with torch.inference_mode():
+        stage1 = trainer.planner(**inputs)
+
+    assert set(first) == {"selected_trajectory", "selected_mode"}
+    assert first["selected_trajectory"].shape == (1, 3, 8, 3)
+    assert first["selected_trajectory"].dtype == torch.float32
+    assert first["selected_mode"].shape == (1, 3)
+    assert first["selected_mode"].dtype == torch.int64
+    assert torch.isfinite(first["selected_trajectory"]).all()
+    assert first["selected_trajectory"].requires_grad is False
+    assert first["selected_trajectory"].grad_fn is None
+    assert first["selected_mode"].requires_grad is False
+    assert torch.equal(training_generator.get_state(), generator_state)
+    torch.testing.assert_close(
+        first["selected_trajectory"],
+        second["selected_trajectory"],
+    )
+    torch.testing.assert_close(
+        first["selected_trajectory"],
+        stage1["selected_trajectory"],
+    )
+    assert torch.equal(first["selected_mode"], second["selected_mode"])
+    assert torch.equal(first["selected_mode"], stage1["selected_mode"])
+
+
 def test_joint_rollout_shapes_seed_and_hard_mask(rollout_pair) -> None:
     _, first, second = rollout_pair
     assert first.chains_normalized.shape == (1, 4, 5, 3, 10, 8, 2)
@@ -600,6 +634,7 @@ def test_exactly_one_update_changes_only_trainable_policy() -> None:
         inputs,
         generator=torch.Generator().manual_seed(29),
     )
+    frozen_before = trainer.infer_frozen_pretrain(rollout)
     decoder_before = _state(trainer.planner.diffusion_decoder)
     mode_before = _state(trainer.planner.mode_head)
     backbone_before = _state(trainer.planner.backbone)
@@ -619,6 +654,15 @@ def test_exactly_one_update_changes_only_trainable_policy() -> None:
     assert _state_equal(fusion_before, _state(trainer.planner.bev_fusion))
     assert _state_equal(context_before, _state(trainer.planner.context_encoder))
     assert _state_equal(reference_before, _state(trainer.reference))
+    frozen_after = trainer.infer_frozen_pretrain(rollout)
+    torch.testing.assert_close(
+        frozen_after["selected_trajectory"],
+        frozen_before["selected_trajectory"],
+    )
+    assert torch.equal(
+        frozen_after["selected_mode"],
+        frozen_before["selected_mode"],
+    )
     assert all(
         torch.isfinite(parameter).all() for parameter in trainer.planner.parameters()
     )
@@ -789,6 +833,11 @@ def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:
         )
 
     trainer = JointGRPOTrainerA(_planner())
+    rollout = trainer.sample_groups(
+        _model_inputs(),
+        generator=torch.Generator().manual_seed(71),
+    )
+    frozen_before = trainer.infer_frozen_pretrain(rollout)
     payload = grpo_checkpoint_payload(
         trainer=trainer,
         source_stage1_sha256="a" * 64,
@@ -810,6 +859,15 @@ def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:
     assert loaded["optimizer_step"] == 0
     assert _state_equal(_state(restored.planner), _state(trainer.planner))
     assert _state_equal(_state(restored.reference), _state(trainer.reference))
+    frozen_after = restored.infer_frozen_pretrain(rollout)
+    torch.testing.assert_close(
+        frozen_after["selected_trajectory"],
+        frozen_before["selected_trajectory"],
+    )
+    assert torch.equal(
+        frozen_after["selected_mode"],
+        frozen_before["selected_mode"],
+    )
 
     bad_checkpoint = copy.deepcopy(payload)
     bad_checkpoint["variant"] = "B"

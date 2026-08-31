@@ -147,6 +147,52 @@ def rollout_pair():
     return trainer, first, second
 
 
+def test_b_frozen_pretrain_matches_stage1_and_generates_own_history() -> None:
+    planner = _planner()
+    with torch.no_grad():
+        planner.diffusion_decoder.predecessor_residual_gate.fill_(0.25)
+    trainer = JointGRPOTrainerB(planner)
+    inputs = _inputs()
+    training_generator = torch.Generator().manual_seed(18)
+    rollout = trainer.sample_groups(inputs, generator=training_generator)
+    generator_state = training_generator.get_state().clone()
+    fixed_histories: list[torch.Tensor | None] = []
+    original = trainer._decode_roles
+
+    def traced(*args, **kwargs):
+        if kwargs["decoder"] is trainer.reference.diffusion_decoder:
+            fixed_histories.append(kwargs["fixed_history"])
+        return original(*args, **kwargs)
+
+    with mock.patch.object(trainer, "_decode_roles", side_effect=traced):
+        first = trainer.infer_frozen_pretrain(rollout)
+        second = trainer.infer_frozen_pretrain(rollout)
+    with torch.inference_mode():
+        stage1 = trainer.planner(**inputs)
+
+    assert fixed_histories
+    assert all(history is None for history in fixed_histories)
+    assert len(fixed_histories) == 2 * planner.config.inference_denoise_steps
+    assert first["selected_trajectory"].shape == (1, 3, 8, 3)
+    assert first["selected_trajectory"].dtype == torch.float32
+    assert first["selected_mode"].shape == (1, 3)
+    assert first["selected_mode"].dtype == torch.int64
+    assert torch.isfinite(first["selected_trajectory"]).all()
+    assert first["selected_trajectory"].requires_grad is False
+    assert first["selected_trajectory"].grad_fn is None
+    assert torch.equal(training_generator.get_state(), generator_state)
+    torch.testing.assert_close(
+        first["selected_trajectory"],
+        second["selected_trajectory"],
+    )
+    torch.testing.assert_close(
+        first["selected_trajectory"],
+        stage1["selected_trajectory"],
+    )
+    assert torch.equal(first["selected_mode"], second["selected_mode"])
+    assert torch.equal(first["selected_mode"], stage1["selected_mode"])
+
+
 def test_b_contract_rollout_order_history_and_seed(rollout_pair) -> None:
     trainer, first, second = rollout_pair
     assert isinstance(first, JointGRPORolloutB)
@@ -408,6 +454,7 @@ def test_zero_gate_and_nonzero_gate_gradient_phases() -> None:
         _inputs(),
         generator=torch.Generator().manual_seed(37),
     )
+    frozen_before = trainer.infer_frozen_pretrain(rollout)
     decoder_before = _state(planner.diffusion_decoder)
     mode_before = _state(planner.mode_head)
     encoder = planner.diffusion_decoder.predecessor_action_encoder
@@ -440,6 +487,15 @@ def test_zero_gate_and_nonzero_gate_gradient_phases() -> None:
     assert _state_equal(fusion_before, _state(planner.bev_fusion))
     assert _state_equal(context_before, _state(planner.context_encoder))
     assert _state_equal(reference_before, _state(trainer.reference))
+    frozen_after = trainer.infer_frozen_pretrain(rollout)
+    torch.testing.assert_close(
+        frozen_after["selected_trajectory"],
+        frozen_before["selected_trajectory"],
+    )
+    assert torch.equal(
+        frozen_after["selected_mode"],
+        frozen_before["selected_mode"],
+    )
 
 
 def test_b_source_checkpoint_and_cross_variant_rejection(tmp_path: Path) -> None:
@@ -471,6 +527,11 @@ def test_b_source_checkpoint_and_cross_variant_rejection(tmp_path: Path) -> None
         )
 
     trainer = JointGRPOTrainerB(_planner())
+    rollout = trainer.sample_groups(
+        _inputs(),
+        generator=torch.Generator().manual_seed(73),
+    )
+    frozen_before = trainer.infer_frozen_pretrain(rollout)
     payload = grpo_b_checkpoint_payload(
         trainer=trainer,
         source_stage1_sha256="d" * 64,
@@ -490,6 +551,15 @@ def test_b_source_checkpoint_and_cross_variant_rejection(tmp_path: Path) -> None
     )
     assert _state_equal(_state(restored.planner), _state(trainer.planner))
     assert _state_equal(_state(restored.reference), _state(trainer.reference))
+    frozen_after = restored.infer_frozen_pretrain(rollout)
+    torch.testing.assert_close(
+        frozen_after["selected_trajectory"],
+        frozen_before["selected_trajectory"],
+    )
+    assert torch.equal(
+        frozen_after["selected_mode"],
+        frozen_before["selected_mode"],
+    )
 
     with pytest.raises(JointGRPOError, match="trainer variant"):
         load_grpo_b_checkpoint(

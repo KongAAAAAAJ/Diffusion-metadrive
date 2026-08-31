@@ -1,0 +1,121 @@
+{
+  "format": "stage2_grpo_run_scoped_logging_implementation_report_v1",
+  "created_at": "2026-08-31T21:37:14+08:00",
+  "repository_commit_at_implementation": "ed76143334bdcfff723602bd2e8636179a0f8a43",
+  "implementation_gate": {
+    "name": "stage2_grpo_run_scoped_logging",
+    "passed": true,
+    "scope": "Allocate each GRPO run directory atomically in the launcher, bind one non-shared training log to that exact run, hand the reserved directory to the online trainer, and refuse managed-artifact overwrite without changing training semantics.",
+    "implementation_files": [
+      "scripts/run_bev_joint_grpo.sh",
+      "train/train_bev_joint_grpo_online.py",
+      "tests/test_run_bev_joint_grpo_launcher.py",
+      "tests/test_bev_joint_grpo_online.py"
+    ],
+    "long_training_started": false,
+    "cuda_training_started": false,
+    "paired_ab_started": false
+  },
+  "problem_evidence": {
+    "historical_shared_log": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/logs/grpo-open-training.log",
+    "historical_shared_log_size_bytes": 5600466,
+    "historical_shared_log_nul_bytes": 19740,
+    "historical_shared_log_reliable_per_run": false,
+    "historical_shared_log_modified": false,
+    "historical_runs_modified": false,
+    "observed_run_reference_counts": {
+      "run_11": 5,
+      "run_12": 0,
+      "run_13": 10,
+      "run_14": 0,
+      "run_15": 0
+    }
+  },
+  "run_allocation_and_logging": {
+    "allocation_owner": "scripts/run_bev_joint_grpo.sh",
+    "allocation_algorithm": "scan the highest numeric run_N, then reserve max_plus_one with atomic mkdir and retry the next index when another launcher wins the same directory",
+    "output_layout": "<output_root>/run_N",
+    "log_layout": "<output_root>/run_N/training.log",
+    "shared_log_written": false,
+    "concurrent_launches_share_log": false,
+    "python_cli": [
+      "--config",
+      "--run-dir"
+    ],
+    "legacy_output_root_cli_accepted": false,
+    "legacy_log_root_environment_accepted": false,
+    "yaml_training_parameter_source_changed": false
+  },
+  "failure_and_exit_contract": {
+    "pre_allocation_launcher_failures": "unexpected launcher arguments, forbidden environment variables, a missing CONFIG file, or inability to create the output root fail before consuming a run number and report on stderr",
+    "post_allocation_failures": "after a CONFIG file is accepted and run_N is reserved, YAML parsing, YAML field validation, Python startup, and Stage 1 source-checkpoint failures are captured in that run's training.log",
+    "pipeline_status_capture": "capture both entries from PIPESTATUS immediately after the Python-to-tee pipeline",
+    "exit_status_priority": [
+      "python",
+      "primary_training_log_tee",
+      "exit_status_line_tee"
+    ],
+    "exit_status_record": "append python_exit_status and tee_exit_status to training.log"
+  },
+  "run_directory_overwrite_protection": {
+    "run_dir_must_exist": true,
+    "launcher_reserves_new_directory": true,
+    "online_trainer_allowed_initial_entries": [
+      "training.log"
+    ],
+    "managed_artifacts_rejected_before_model_load": [
+      "config.json",
+      "metrics.jsonl",
+      "checkpoints",
+      "tb",
+      "report.json"
+    ],
+    "existing_managed_artifacts_overwritten": false
+  },
+  "verification": {
+    "integration_command": "HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp PYTHONPATH=$PWD:$PYTHONPATH /home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_bev_joint_grpo_online.py tests/test_run_bev_joint_grpo_launcher.py",
+    "online_tests_passed": 126,
+    "launcher_tests_passed": 17,
+    "total_tests_passed": 143,
+    "failed": 0,
+    "warnings": 15,
+    "bash_syntax_command": "bash -n scripts/run_bev_joint_grpo.sh",
+    "bash_syntax_passed": true,
+    "python_compile_command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m py_compile train/train_bev_joint_grpo_online.py tests/test_bev_joint_grpo_online.py tests/test_run_bev_joint_grpo_launcher.py",
+    "python_compile_passed": true,
+    "scoped_diff_check_command": "git diff --check -- scripts/run_bev_joint_grpo.sh train/train_bev_joint_grpo_online.py tests/test_run_bev_joint_grpo_launcher.py tests/test_bev_joint_grpo_online.py",
+    "scoped_diff_check_passed": true,
+    "concurrent_atomic_allocation_and_log_isolation_passed": true,
+    "cpu_missing_source_preflight": {
+      "real_python": "/home/kong/anaconda3/envs/meta_drive/bin/python",
+      "device": "cpu",
+      "python_exit_status": 1,
+      "training_started": false,
+      "retained_entries": [
+        "training.log",
+        "checkpoints"
+      ],
+      "checkpoints_empty": true,
+      "failure_recorded_in_reserved_run_log": true
+    }
+  },
+  "compatibility": {
+    "training_parameter_source": "configs/train/bev_joint_grpo.yaml",
+    "optimizer_contract_changed": false,
+    "rollout_collection_contract_changed": false,
+    "reward_or_application_contract_changed": false,
+    "checkpoint_container_changed": false,
+    "online_config_format_changed": false,
+    "online_report_format_changed": false,
+    "historical_run_11_through_run_15_classification_changed": false,
+    "user_dirty_yaml_modified_by_this_round": false
+  },
+  "formal_boundary": {
+    "classification": "diagnostic_only",
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "source_checkpoint_formally_eligible": false,
+    "formal_evaluation_allowed": false,
+    "paper_evidence_allowed": false
+  },
+  "next_action": "In a separate frozen-code training thread, create the v2 A/B manifest by binding six future freshly allocated actual run paths to the explicit G24/E1 and G24/E4 paired configurations. No A/B run has been started or preassigned by this implementation round."
+}
