@@ -59,7 +59,7 @@ RUN_LOG="$RUN_DIR/training.log"
 
 set +e
 {
-  echo "[GRPO] application=stage2_grpo_open_application_v1 reward_domain=tau_d"
+  echo "[GRPO] application=stage2_grpo_open_application_v2 reward_domain=tau_d"
   echo "[GRPO] config=$CONFIG"
   echo "[GRPO] output_root=$OUTPUT_ROOT"
   echo "[GRPO] run_dir=$RUN_DIR"

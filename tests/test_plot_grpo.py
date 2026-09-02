@@ -11,13 +11,16 @@ from torch.utils.tensorboard import SummaryWriter
 import evaluation.plot_grpo as plot_grpo
 from evaluation.plot_grpo import (
     ADVANTAGE_VECTOR_TAG,
+    ACCEPTED_ROLLOUT_AXIS_LABEL,
     CLIP_FRACTION_TAGS,
     FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+    FRESH_ROLLOUT_AXIS_LABEL,
     GRPO_LOSS_CURVE_TAGS,
     KL_LOSS_CURVE_TAGS,
     LEGACY_REWARD_CURVE_TAGS,
     MODE_RATIO_TAGS,
     OLD_POLICY_APPROX_KL_TAGS,
+    OPTIMIZER_STEP_AXIS_LABEL,
     POLICY_STABILITY_CURVE_TAGS,
     REWARD_CURVE_TAGS,
     TRAJECTORY_RATIO_TAGS,
@@ -134,7 +137,8 @@ def test_generate_advantage_heatmap_uses_group_by_step_orientation_and_png(
         "g2",
         "g3",
     ]
-    assert axis.get_xlabel() == "Fresh rollout group"
+    assert axis.get_xlabel() == FRESH_ROLLOUT_AXIS_LABEL
+    assert axis.get_title() == "GRPO advantage by rollout group and sample slot"
     assert any(
         "no identity across steps" in text.get_text()
         for text in axis.figure.texts
@@ -151,6 +155,38 @@ def test_load_advantage_vectors_rejects_missing_tag(tmp_path: Path) -> None:
 
     with pytest.raises(AdvantageHeatmapError, match="was not found"):
         load_advantage_vectors(tb_dir)
+
+
+def test_generate_advantage_heatmap_uses_explicit_accepted_axis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tb_dir = tmp_path / "tb"
+    _write_tensor_events(
+        tb_dir,
+        [(1, np.zeros((1, 4), dtype=np.float32))],
+    )
+    labels: list[str] = []
+    original_set_xlabel = Axes.set_xlabel
+
+    def record_xlabel(
+        self: Axes,
+        label: str,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        labels.append(label)
+        return original_set_xlabel(self, label, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "set_xlabel", record_xlabel)
+
+    generate_advantage_heatmap(
+        tb_dir,
+        tmp_path / "accepted.png",
+        rollout_axis_label=ACCEPTED_ROLLOUT_AXIS_LABEL,
+    )
+
+    assert ACCEPTED_ROLLOUT_AXIS_LABEL in labels
 
 
 @pytest.mark.parametrize(
@@ -315,6 +351,7 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
         tb_dir,
         output_dir,
         require_frozen_pretrain_reward=True,
+        rollout_axis_label=ACCEPTED_ROLLOUT_AXIS_LABEL,
     )
 
     assert set(outputs) == {
@@ -351,12 +388,7 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
         axis, actual_steps, actual_values = calls_by_tag[tag]
         np.testing.assert_array_equal(actual_steps, expected_steps)
         np.testing.assert_allclose(actual_values, expected_values, rtol=0, atol=1e-6)
-        expected_xlabel = (
-            "Fresh rollout group"
-            if tag in (*REWARD_CURVE_TAGS, *VALIDATION_REWARD_CURVE_TAGS)
-            else "Optimizer step"
-        )
-        assert axis.get_xlabel() == expected_xlabel
+        assert axis.get_xlabel() == ACCEPTED_ROLLOUT_AXIS_LABEL
 
     reward_axes = {calls_by_tag[tag][0] for tag in REWARD_CURVE_TAGS}
     validation_reward_axes = {
@@ -403,6 +435,17 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
     assert clip_axis.get_ylabel() == "Fraction"
     assert tuple(round(value, 8) for value in clip_axis.get_ylim()) == (0.0, 1.0)
     assert next(iter(old_policy_kl_axes)).get_ylabel() == "Approximate KL"
+    assert all(
+        next(iter(axes)).get_xlabel() == ACCEPTED_ROLLOUT_AXIS_LABEL
+        for axes in (
+            grpo_axes,
+            kl_axes,
+            mode_ratio_axes,
+            trajectory_ratio_axes,
+            clip_axes,
+            old_policy_kl_axes,
+        )
+    )
 
 
 def test_generate_grpo_plots_keeps_legacy_two_reward_curves(
@@ -414,7 +457,7 @@ def test_generate_grpo_plots_keeps_legacy_two_reward_curves(
         include_frozen_pretrain_reward=False,
     )
 
-    plotted_labels: list[str] = []
+    plotted_axes: list[tuple[Axes, str]] = []
     original_plot = Axes.plot
 
     def record_plot(
@@ -424,7 +467,7 @@ def test_generate_grpo_plots_keeps_legacy_two_reward_curves(
         *args: object,
         **kwargs: object,
     ) -> object:
-        plotted_labels.append(str(kwargs["label"]))
+        plotted_axes.append((self, str(kwargs["label"])))
         return original_plot(self, x, y, *args, **kwargs)
 
     monkeypatch.setattr(Axes, "plot", record_plot)
@@ -432,8 +475,17 @@ def test_generate_grpo_plots_keeps_legacy_two_reward_curves(
     outputs = generate_grpo_plots(tb_dir, tmp_path / "legacy_plots")
 
     assert outputs["reward_curve"].is_file()
-    assert all(tag in plotted_labels for tag in LEGACY_REWARD_CURVE_TAGS)
-    assert FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG not in plotted_labels
+    axes_by_label = {label: axis for axis, label in plotted_axes}
+    assert all(tag in axes_by_label for tag in LEGACY_REWARD_CURVE_TAGS)
+    assert FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG not in axes_by_label
+    for tag in (*LEGACY_REWARD_CURVE_TAGS, *VALIDATION_REWARD_CURVE_TAGS):
+        assert axes_by_label[tag].get_xlabel() == FRESH_ROLLOUT_AXIS_LABEL
+    for tag in (
+        *GRPO_LOSS_CURVE_TAGS,
+        *KL_LOSS_CURVE_TAGS,
+        *POLICY_STABILITY_CURVE_TAGS,
+    ):
+        assert axes_by_label[tag].get_xlabel() == OPTIMIZER_STEP_AXIS_LABEL
 
 
 def test_generate_grpo_plots_strict_rejects_missing_frozen_reward(
@@ -672,3 +724,16 @@ def test_grpo_plot_cli_uses_tensorboard_and_output_directories() -> None:
 
     assert args.tensorboard_dir == Path("/tmp/source_tb")
     assert args.output_dir == Path("/tmp/output_plots")
+    assert args.rollout_axis_label == FRESH_ROLLOUT_AXIS_LABEL
+
+    accepted_args = plot_grpo._build_parser().parse_args(
+        [
+            "--tensorboard-dir",
+            "/tmp/source_tb",
+            "--output-dir",
+            "/tmp/output_plots",
+            "--rollout-axis-label",
+            ACCEPTED_ROLLOUT_AXIS_LABEL,
+        ]
+    )
+    assert accepted_args.rollout_axis_label == ACCEPTED_ROLLOUT_AXIS_LABEL

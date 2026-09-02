@@ -25,7 +25,6 @@ from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizerConfig,
 )
 from scenarios.bev_round13_contract import primary_scenario_contract
-from train.bev_joint_grpo import GRPO_CHECKPOINT_SCHEMA_VERSION
 from train.train_bev_diffusion_stage1 import CHECKPOINT_SCHEMA_VERSION
 
 
@@ -177,7 +176,7 @@ def build_round13_closeout(repo_root: Path | str) -> dict[str, object]:
         ),
         "checkpoint_contract": {
             "stage1_schema_version": CHECKPOINT_SCHEMA_VERSION,
-            "grpo_schema_version": GRPO_CHECKPOINT_SCHEMA_VERSION,
+            "grpo_schema_version": 1,
         },
         "latency_evidence_ms": {
             "three_role_model_inference_p95_max": 20.84,

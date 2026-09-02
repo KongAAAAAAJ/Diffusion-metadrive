@@ -73,10 +73,28 @@ JOINT_REWARD_CONTRACT_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
-    "version": "stage2_grpo_open_application_v1",
+    "version": "stage2_grpo_open_application_v2",
     "policy_sample_domain": "tau_d",
     "policy_probability_domain": "tau_d",
     "reward_input_domain": "tau_d",
+    "advantage_baseline": (
+        "same-live-state deterministic frozen Stage 1 raw tau_d proxy reward"
+    ),
+    "advantage_normalization": (
+        "delta divided by per-group delta RMS plus epsilon; no mean centering"
+    ),
+    "accepted_group_condition": (
+        "raw reward span greater than 1e-6 and "
+        "max(reward-frozen_pretrain_reward) greater than "
+        "pretrain_improvement_margin"
+    ),
+    "rejected_group_side_effects": (
+        "no trajectory optimization, RuleMaker finalize, policy update, "
+        "accepted-budget progress, validation progress, or environment step"
+    ),
+    "exhausted_state_fallback": (
+        "optimize and execute the frozen-pretrain tau_d trajectory once"
+    ),
     "candidate_selection_domain": "tau_d",
     "execution_input_domain": "tau_cmd",
     "execution_transform": "KinematicTrajectoryOptimizer(selected_tau_d)",

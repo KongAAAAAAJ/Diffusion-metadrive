@@ -21,6 +21,13 @@ from tensorboard.util import tensor_util
 
 
 ADVANTAGE_VECTOR_TAG = "advantage/vector"
+FRESH_ROLLOUT_AXIS_LABEL = "Fresh rollout group"
+ACCEPTED_ROLLOUT_AXIS_LABEL = "Accepted rollout group"
+OPTIMIZER_STEP_AXIS_LABEL = "Optimizer step"
+ROLLOUT_AXIS_LABELS = (
+    FRESH_ROLLOUT_AXIS_LABEL,
+    ACCEPTED_ROLLOUT_AXIS_LABEL,
+)
 LEGACY_REWARD_CURVE_TAGS = (
     "raw_proxy_reward_mean",
     "raw_proxy_reward_max",
@@ -85,28 +92,28 @@ _CURVE_SPECS = {
         REWARD_CURVE_TAGS,
         "GRPO raw reward curves",
         "Raw tau_d reward",
-        "Fresh rollout group",
+        FRESH_ROLLOUT_AXIS_LABEL,
     ),
     "validation_reward_curve": (
         "validation_reward_curve.png",
         VALIDATION_REWARD_CURVE_TAGS,
         "GRPO validation reward and gain curves",
         "Raw tau_d reward / gain",
-        "Fresh rollout group",
+        FRESH_ROLLOUT_AXIS_LABEL,
     ),
     "grpo_loss_curve": (
         "grpo_loss_curve.png",
         GRPO_LOSS_CURVE_TAGS,
         "GRPO loss curves",
         "Loss",
-        "Optimizer step",
+        OPTIMIZER_STEP_AXIS_LABEL,
     ),
     "kl_loss_curve": (
         "kl_loss_curve.png",
         KL_LOSS_CURVE_TAGS,
         "GRPO reference KL curves",
         "Unweighted KL divergence",
-        "Optimizer step",
+        OPTIMIZER_STEP_AXIS_LABEL,
     ),
 }
 
@@ -191,7 +198,7 @@ def load_advantage_vectors(
     tb_dir: Path,
     tag: str = ADVANTAGE_VECTOR_TAG,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Load all ``[1, G]`` advantage tensors ordered by fresh rollout group."""
+    """Load all ``[1, G]`` advantage tensors ordered by accepted rollout group."""
 
     return _load_advantage_vectors_from_accumulator(
         _load_event_accumulator(tb_dir), tag
@@ -202,6 +209,8 @@ def _render_advantage_heatmap(
     steps: np.ndarray,
     values: np.ndarray,
     output_path: Path,
+    *,
+    rollout_axis_label: str,
 ) -> Path:
     heatmap = values.T
     absolute_limit = float(np.max(np.abs(values)))
@@ -231,7 +240,7 @@ def _render_advantage_heatmap(
         np.arange(values.shape[1]),
         [f"g{index}" for index in range(values.shape[1])],
     )
-    ax.set_xlabel("Fresh rollout group")
+    ax.set_xlabel(rollout_axis_label)
     ax.set_ylabel("GRPO sample slot")
     ax.set_title("GRPO advantage by rollout group and sample slot")
     colorbar = fig.colorbar(image, ax=ax, pad=0.02)
@@ -253,11 +262,30 @@ def _render_advantage_heatmap(
     return output_path
 
 
-def generate_advantage_heatmap(tb_dir: Path, output_path: Path) -> Path:
-    """Generate a raw group-slot-by-fresh-rollout advantage heatmap."""
+def _validate_rollout_axis_label(value: str) -> str:
+    if value not in ROLLOUT_AXIS_LABELS:
+        raise AdvantageHeatmapError(
+            "rollout_axis_label must be Fresh rollout group or "
+            "Accepted rollout group"
+        )
+    return value
+
+
+def generate_advantage_heatmap(
+    tb_dir: Path,
+    output_path: Path,
+    *,
+    rollout_axis_label: str = FRESH_ROLLOUT_AXIS_LABEL,
+) -> Path:
+    """Generate a raw group-slot-by-rollout advantage heatmap."""
 
     steps, values = load_advantage_vectors(tb_dir)
-    return _render_advantage_heatmap(steps, values, output_path)
+    return _render_advantage_heatmap(
+        steps,
+        values,
+        output_path,
+        rollout_axis_label=_validate_rollout_axis_label(rollout_axis_label),
+    )
 
 
 def _load_scalar_series(
@@ -344,6 +372,8 @@ def _render_scalar_curve(
 def _render_policy_stability_curve(
     series: Mapping[str, tuple[np.ndarray, np.ndarray]],
     output_path: Path,
+    *,
+    update_axis_label: str,
 ) -> Path:
     fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.0))
     panels = (
@@ -384,7 +414,7 @@ def _render_policy_stability_curve(
                 linewidth=1.4,
                 label=tag,
             )
-        ax.set_xlabel("Optimizer step")
+        ax.set_xlabel(update_axis_label)
         ax.set_ylabel(ylabel)
         ax.set_title(title)
         ax.ticklabel_format(style="plain", axis="x", useOffset=False)
@@ -426,9 +456,11 @@ def generate_grpo_plots(
     output_dir: Path,
     *,
     require_frozen_pretrain_reward: bool = False,
+    rollout_axis_label: str = FRESH_ROLLOUT_AXIS_LABEL,
 ) -> Mapping[str, Path]:
     """Generate GRPO plots, accepting legacy reward logs unless strict."""
 
+    rollout_axis_label = _validate_rollout_axis_label(rollout_axis_label)
     accumulator = _load_event_accumulator(tb_dir)
     steps, advantages = _load_advantage_vectors_from_accumulator(
         accumulator, ADVANTAGE_VECTOR_TAG
@@ -450,6 +482,18 @@ def generate_grpo_plots(
         else LEGACY_REWARD_CURVE_TAGS
     )
     curve_specs = dict(_CURVE_SPECS)
+    rollout_axis_curve_keys = ["reward_curve", "validation_reward_curve"]
+    if rollout_axis_label == ACCEPTED_ROLLOUT_AXIS_LABEL:
+        rollout_axis_curve_keys.extend(("grpo_loss_curve", "kl_loss_curve"))
+    for key in rollout_axis_curve_keys:
+        filename, tags, title, ylabel, _ = curve_specs[key]
+        curve_specs[key] = (
+            filename,
+            tags,
+            title,
+            ylabel,
+            rollout_axis_label,
+        )
     reward_filename, _, reward_title, reward_ylabel, reward_xlabel = (
         curve_specs["reward_curve"]
     )
@@ -479,6 +523,7 @@ def generate_grpo_plots(
             steps,
             advantages,
             output_dir / "advantage_vector_heatmap.png",
+            rollout_axis_label=rollout_axis_label,
         )
     }
     for key, (filename, tags, title, ylabel, xlabel) in curve_specs.items():
@@ -493,6 +538,11 @@ def generate_grpo_plots(
     outputs["policy_stability_curve"] = _render_policy_stability_curve(
         scalar_series,
         output_dir / "policy_stability_curve.png",
+        update_axis_label=(
+            rollout_axis_label
+            if rollout_axis_label == ACCEPTED_ROLLOUT_AXIS_LABEL
+            else OPTIMIZER_STEP_AXIS_LABEL
+        ),
     )
     return outputs
 
@@ -503,13 +553,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tensorboard-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--rollout-axis-label",
+        choices=ROLLOUT_AXIS_LABELS,
+        default=FRESH_ROLLOUT_AXIS_LABEL,
+    )
     return parser
 
 
 def main() -> None:
     args = _build_parser().parse_args()
     for name, output_path in generate_grpo_plots(
-        args.tensorboard_dir, args.output_dir
+        args.tensorboard_dir,
+        args.output_dir,
+        rollout_axis_label=args.rollout_axis_label,
     ).items():
         print(f"{name}={output_path}")
 

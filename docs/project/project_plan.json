@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-08-31T21:37:14+08:00",
-  "status": "stage2_run_scoped_logging_verified_short_ab_pending",
+  "updated_at": "2026-09-02T18:27:47+08:00",
+  "status": "stage2_pretrain_relative_dynamic_sampling_verified_short_ab_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -559,7 +559,7 @@
   },
   "stage2_at_risk_grpo_open": {
     "name": "At-risk diagnostic GRPO-Open",
-    "status": "run_scoped_logging_verified_short_ab_pending",
+    "status": "pretrain_relative_dynamic_sampling_verified_short_ab_pending",
     "authorization_recorded_on": "2026-08-30",
     "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
     "source_checkpoint_classification": "unqualified Stage1 v2 diagnostic source; bounded optimizer implementation smokes and the paired short A/B remain diagnostic-only and cannot bypass strict Stage1 qualification",
@@ -586,14 +586,18 @@
     "calibration_required": false,
     "tracking_expansion_enabled": false,
     "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
-    "application_contract_version": "stage2_grpo_open_application_v1",
-    "application_contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
-    "optimizer_contract_version": "stage2_joint_grpo_optimizer_v2",
-    "optimizer_contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175",
-    "default_update_epochs": 4,
+    "application_contract_version": "stage2_grpo_open_application_v2",
+    "application_contract_sha256": "412d069690fa52745bcd8e1d0f019d1c50a6284305e6a5e719486c312d6b01a5",
+    "optimizer_contract_version": "stage2_joint_grpo_optimizer_v3",
+    "main_yaml_update_epochs": 10,
+    "main_yaml_optimizer_contract_sha256": "df7f848d1c0475489921522da63a07b84d9c108e8aaffc1b12b5bce5e2920995",
+    "short_ab_clipped_update_epochs": 4,
+    "short_ab_clipped_optimizer_contract_sha256": "a60d4dc77160ac721e1b42de187b7d5b596cd0e49641978b5f5bfc430d5d7508",
     "default_clip_epsilon": 0.2,
-    "budget_unit": "fresh_rollout_group",
-    "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v2",
+    "budget_unit": "accepted_pretrain_improving_rollout_group",
+    "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v3",
+    "online_config_format": "bev_joint_grpo_online_config_v8",
+    "online_report_format": "bev_joint_grpo_online_report_v8",
     "default_rollout_groups_per_bucket_visit": 10,
     "default_rollout_start_offset_max_steps": 200,
     "default_rollout_start_min_remaining_steps": 10,
@@ -665,7 +669,7 @@
       "long_training_started": false
     },
     "observed_run_reconciliation": {
-      "recorded_on": "2026-08-31",
+      "recorded_on": "2026-09-02",
       "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
       "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
       "source_checkpoint_project_eligible": false,
@@ -721,12 +725,51 @@
           "report_present": false
         }
       },
-      "preservation_policy": "Preserve run_11 through run_15 and their current metadata unchanged; do not promote, backfill, resume, overwrite, or relabel them.",
-      "next_unoccupied_run_observed_at_reconciliation": "run_16"
+      "completed_nonformal_diagnostic_experimental_runs": {
+        "run_16": {
+          "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_16",
+          "branch": "test_anchor",
+          "git_commit": "18f456cd70f07b0709a73773ed9b9cd0f270020e",
+          "group_size": 48,
+          "update_epochs": 10,
+          "target_and_sampled_rollout_groups": 5000,
+          "optimizer_steps": 50000,
+          "environment_steps": 58467,
+          "environment_episodes": 919,
+          "online_artifact_format": "v7",
+          "experimental_contract_version": "stage2_grpo_frozen_stage1_anchor_v1",
+          "experimental_contract_sha256": "78f08bfb9a237ff0202978b3c05f376b1130ab86c0da095d2b268dba0f64231f",
+          "checkpoint_round_trip": true,
+          "launcher_exit_status": 0,
+          "project_classification": "nonformal_diagnostic_only_due_to_unqualified_source",
+          "short_ab_arm": false
+        },
+        "run_17": {
+          "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_17",
+          "branch": "test_noise",
+          "git_commit": "2ce1188ef9190eb294968e3ba10092917ca95b66",
+          "group_size": 48,
+          "update_epochs": 10,
+          "target_and_sampled_rollout_groups": 5000,
+          "optimizer_steps": 50000,
+          "environment_steps": 56287,
+          "environment_episodes": 905,
+          "online_artifact_format": "v7",
+          "experimental_contract_version": "stage2_joint_grpo_transition_noise_v1",
+          "experimental_contract_sha256": "aa6e97d9cefe894791d14d5d70981763b6c8589ace922ce5575efebce539d137",
+          "checkpoint_round_trip": true,
+          "launcher_exit_status": 0,
+          "project_classification": "nonformal_diagnostic_only_due_to_unqualified_source",
+          "short_ab_arm": false
+        }
+      },
+      "preservation_policy": "Preserve run_11 through run_17 and their current metadata unchanged; do not promote, backfill, resume, overwrite, or relabel them.",
+      "next_unoccupied_run_observed_at_reconciliation": "run_18"
     },
     "short_stability_ab": {
       "status": "pending_future_actual_path_manifest_not_started",
-      "manifest_format": "stage2_grpo_stability_ab_manifest_v2",
+      "manifest_format": "stage2_grpo_stability_ab_manifest_v3",
+      "report_format": "stage2_grpo_stability_ab_report_v3",
       "paired_training_seeds": [
         17,
         23,
@@ -736,14 +779,30 @@
       "clipped_update_epochs": 4,
       "clip_epsilon": 0.2,
       "group_size": 24,
-      "rollout_groups_per_run": 100,
-      "validation_interval_rollouts": 20,
-      "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v2",
+      "target_accepted_rollout_groups_per_run": 100,
+      "validation_interval_accepted_rollout_groups": 20,
+      "application_contract_version": "stage2_grpo_open_application_v2",
+      "optimizer_contract_version": "stage2_joint_grpo_optimizer_v3",
+      "baseline_e1_optimizer_contract_sha256": "585c4c2d54078fa55a9be42886cfff9995d60998e204070c05581afce6f9191e",
+      "clipped_e4_optimizer_contract_sha256": "a60d4dc77160ac721e1b42de187b7d5b596cd0e49641978b5f5bfc430d5d7508",
+      "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v3",
+      "online_config_format": "bev_joint_grpo_online_config_v8",
+      "online_report_format": "bev_joint_grpo_online_report_v8",
+      "pretrain_improvement_margin": 1e-06,
+      "max_candidate_groups_per_state": 3,
+      "max_attempted_groups_multiplier": 3,
+      "required_counters": [
+        "accepted_rollout_groups",
+        "attempted_rollout_groups",
+        "rejected_no_pretrain_improvement",
+        "rejected_zero_reward_span",
+        "pretrain_fallback_steps"
+      ],
       "rollout_groups_per_bucket_visit": 10,
       "rollout_start_offset_max_steps": 200,
       "rollout_start_min_remaining_steps": 10,
       "epoch_config_policy": "The main YAML remains update_epochs=10; the six-run A/B must use explicit one-epoch and four-epoch configs and must not treat the main YAML as the clipped arm.",
-      "run_allocation_policy": "Do not preassign numbered directories. After run-scoped logging is verified, bind each of the six fresh runs to its actual immutable run path in the v2 A/B manifest; occupied run_8 through run_15 are not A/B arms.",
+      "run_allocation_policy": "Do not preassign numbered directories. After the pretrain-relative dynamic-sampling contract is verified, bind each future run to its actual immutable run path; occupied run_8 through run_17 are not A/B arms.",
       "comparison_entry": "evaluation.compare_grpo_stability",
       "diagnostic_only": true
     },
@@ -760,9 +819,9 @@
       "resume_allowed": false
     },
     "required_sequence": [
-      "freeze and verify stage2_grpo_open_application_v1 without changing the stage2_joint_reward_v2 formula or config SHA",
-      "the existing calibration reports and run_3 remain immutable historical artifacts and are never read by tau_d application-v1 training",
-      "after implementation verification, start only a bounded diagnostic run from the original Stage1 source in that source run's grpo_open root; run_3 resume is forbidden"
+      "retain the verified stage2_grpo_open_application_v2 without changing the stage2_joint_reward_v2 formula or config SHA",
+      "the existing calibration reports and run_3 remain immutable historical artifacts and are never read by tau_d application-v2 training",
+      "after strict Stage1 qualification, bind any future bounded diagnostic run to a fresh run_N under the source run's grpo_open root; historical resume is forbidden"
     ],
     "output_contract": {
       "diagnostic_only": true,
@@ -794,16 +853,21 @@
       "physical_event_semantics": "raster-filled physical footprint plus nominal background branch; collision/out penalties are additive and never replace the remaining candidate score",
       "tracking_risk_semantics": "tracking-aware footprint plus reachable background alternatives contributes only continuous gap, TTC and road-margin risk",
       "unsafe_semantics": "diagnostic only; never controls reward, action selection, optimizer update, or best-checkpoint ordering",
-      "legacy_compatibility": "legacy GRPO checkpoints are rejected; no silent migration or run_3 resume"
+      "legacy_compatibility": "legacy GRPO checkpoints remain readable only through the explicit read-only evaluation path; no silent migration, optimizer restoration, online resume, or run_3 resume"
     },
     "grpo_open_application_contract": {
-      "version": "stage2_grpo_open_application_v1",
+      "version": "stage2_grpo_open_application_v2",
       "machine_source": "models.bev_planner.joint_reward.GRPO_OPEN_REWARD_APPLICATION_CONTRACT",
-      "contract_sha256": "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6",
+      "contract_sha256": "412d069690fa52745bcd8e1d0f019d1c50a6284305e6a5e719486c312d6b01a5",
       "reward_input_domain": "tau_d",
       "candidate_selection_domain": "tau_d",
       "execution_input_domain": "tau_cmd",
       "execution_transform": "KinematicTrajectoryOptimizer(selected_tau_d)",
+      "advantage_baseline": "same-live-state deterministic frozen Stage1 raw tau_d proxy reward",
+      "advantage_normalization": "delta divided by per-group delta RMS plus epsilon; no group-mean centering or positive clamp",
+      "accepted_group_condition": "raw reward span greater than 1e-6 and max(reward-frozen_pretrain_reward) greater than pretrain_improvement_margin",
+      "rejected_group_side_effects": "no trajectory optimization, RuleMaker finalize, policy update, accepted-budget or validation progress, or environment step",
+      "exhausted_state_fallback": "optimize and finalize the frozen-pretrain tau_d trajectory, then execute it once without a policy update",
       "tracking_expansion_enabled": false,
       "calibration_required": false,
       "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
@@ -820,7 +884,7 @@
       "reference policy"
     ],
     "optimizer_contract": {
-      "version": "stage2_joint_grpo_optimizer_v2",
+      "version": "stage2_joint_grpo_optimizer_v3",
       "machine_source": "models.bev_planner.joint_grpo.joint_grpo_optimizer_contract",
       "behavior_policy_snapshot": "detached sampled mode and stochastic DDIM-transition log probabilities captured before any policy update",
       "update_epochs": 4,
@@ -828,23 +892,30 @@
       "mode_ratio_factorization": "one ratio per joint sampled mode group entry [B,G]",
       "trajectory_ratio_factorization": "one ratio per stochastic DDIM transition [B,G,S]",
       "clipped_surrogate": "negative mean of min(ratio*advantage, clip(ratio,1-epsilon,1+epsilon)*advantage)",
-      "advantage_reuse": "group-normalize once, detach, and freeze across all epochs of the rollout",
-      "rollout_consumption": "one external update call consumes one live rollout and performs exactly update_epochs serial optimizer steps when informative",
+      "advantage_baseline": "same-live-state deterministic frozen Stage1 raw tau_d proxy reward with shape [B,1]",
+      "advantage_normalization": "(reward-frozen_pretrain_reward) divided by per-group delta RMS plus epsilon; no group-mean centering",
+      "advantage_reuse": "pretrain-relative RMS-normalize once, detach, and freeze across all epochs of the accepted rollout",
+      "rollout_consumption": "one external update call consumes one accepted live rollout and performs exactly update_epochs serial optimizer steps",
       "minibatch_semantics": "none; reuse the complete joint group each epoch",
       "reference_regularization": "recompute behavior-cloning and frozen-Stage1 reference KL every epoch",
       "kl_early_stop": false,
-      "budget_unit": "fresh_rollout_group",
+      "budget_unit": "accepted_rollout_group",
       "checkpoint_boundary": "after a complete rollout and all of its optimizer epochs",
       "trainable_modules": [
         "diffusion_decoder",
         "mode_head"
       ],
-      "contract_sha256": "0a0244e33724ec282207c9a4caacf41d1c3d3d1adaab18dab3c86a2ad33c0175"
+      "contract_sha256": "a60d4dc77160ac721e1b42de187b7d5b596cd0e49641978b5f5bfc430d5d7508"
     },
     "rollout_collection_contract": {
-      "version": "stage2_joint_grpo_persistent_episode_v2",
+      "version": "stage2_joint_grpo_persistent_episode_v3",
       "machine_source": "train.train_bev_joint_grpo_online.rollout_collection_contract",
-      "budget_allocation": "deterministically balance the total fresh-rollout-group budget across the ordered scenario-by-seed buckets; lower bucket indices receive any remainder",
+      "budget_allocation": "deterministically balance the accepted pretrain-improving rollout-group target across ordered scenario-by-seed buckets; lower bucket indices receive any remainder",
+      "attempt_budget": "attempted candidate groups are globally capped at max_attempted_groups_multiplier times the accepted-group target",
+      "same_state_retry": "infer frozen pretrain once per live state and sample at most max_candidate_groups_per_state current-policy groups while advancing only the training generator",
+      "acceptance_gate": "max(reward-frozen_pretrain_reward) > pretrain_improvement_margin and raw reward span > 1e-6",
+      "rejected_candidate_side_effects": "none except training-generator advance and one sampling-attempt event",
+      "fallback_after_state_rejection": "after local exhaustion, optimize and RuleMaker-finalize the cached frozen-pretrain trajectory and perform one env.step without update",
       "rollout_groups_per_bucket_visit": 10,
       "rollout_start": "At the first history-ready and primary-scenario-ready state t_ready, draw one inclusive uniform integer offset from the shared training torch.Generator before policy sampling; the upper bound is min(200, environment_steps_per_episode - t_ready - 10).",
       "rollout_start_offset_max_steps": 200,
@@ -860,22 +931,22 @@
       "late_target_retry": "If the sampled target is not reached before scenario-window closure or natural episode end, close and retry the same bucket visit with a temporary upper bound tightened to the observed last-open offset; clear it after the first accepted rollout.",
       "partial_visit_policy": "Retain every completed rollout and optimizer update; if the scenario window or episode ends mid-visit, resume the remaining visit in a new episode with a fresh offset.",
       "validation_start": "fixed validation remains earliest-ready and never consumes a random start offset",
-      "episode_reuse": "after the randomized start, collect consecutive fresh rollout groups from successive scenario-valid states in the same live MetaDrive episode",
-      "per_group_order": "sample one G-entry behavior-policy group, compute raw tau_d rewards and frozen advantages, finish all optimizer epochs, then execute the selected tau_cmd with exactly one env.step",
+      "episode_reuse": "after the randomized start, collect consecutive accepted rollout groups or frozen-pretrain fallback steps from successive scenario-valid states in the same live MetaDrive episode",
+      "per_group_order": "cache one frozen-pretrain baseline for the live state, attempt up to three G-entry behavior-policy groups, and only for the first accepted group finish all optimizer epochs then execute its selected tau_cmd with exactly one env.step",
       "segment_boundaries": "close the live environment only at natural termination or truncation, environment_steps_per_episode, the bucket-visit quota, the bucket final target, the next validation rollout boundary, or the total rollout budget",
       "rule_maker_commitment": "within a live episode, advance active committed execution and condition on committed actions before allowing a new proposal; preserve exact feedback compatibility and safe-STOP behavior",
       "resume_boundary": "validation and checkpoints occur only after the live environment is closed; do not serialize in-flight environment, sample-builder history, or RuleMaker commitment state",
       "legacy_resume": "checkpoints without this exact collection contract and its sampler state are not resumable"
     },
-    "optimizer_semantics": "sample one fresh joint group with the behavior policy, freeze its old log-probabilities and advantages, then perform four serial PPO-clipped optimizer steps; no sequential-role optimizer",
-    "environment_semantics": "Never step the G candidates as G MetaDrive branches. Under stage2_joint_grpo_persistent_episode_v2, choose one reproducible randomized scenario-valid start per live training episode and then reuse that episode for consecutive valid decision states; each fresh group still sends only its final selected tau_cmd to exactly one MetaDrive env.step().",
+    "optimizer_semantics": "For the first accepted joint group, freeze its old log-probabilities and pretrain-relative RMS advantages, then perform four serial PPO-clipped optimizer steps; rejected groups perform none.",
+    "environment_semantics": "Never step the G candidates as G MetaDrive branches. Under stage2_joint_grpo_persistent_episode_v3, retries stay on the same live state; an accepted group or a three-rejection frozen-pretrain fallback sends exactly one finalized tau_cmd to one MetaDrive env.step().",
     "fairness_constants": [
       "formal dataset and Stage1-A checkpoint",
       "scenario set and seeds",
       "G and diffusion timesteps",
       "optimizer, learning rate, KL and BC weights",
-      "fresh rollout-group budget and clipped multi-epoch optimizer contract",
-      "randomized-start persistent-episode rollout collection contract, bucket targets, visit quota, offset distribution, and minimum remaining-step reserve",
+      "accepted pretrain-improving rollout-group budget and clipped multi-epoch optimizer contract",
+      "v3 same-state dynamic-sampling contract, attempt cap, fallback, bucket targets, visit quota, randomized-start distribution, and minimum remaining-step reserve",
       "trainable and frozen planner modules",
       "trajectory optimizer",
       "stage2_joint_reward_v2 contract SHA and exact reward-config SHA",
@@ -1031,6 +1102,58 @@
       "action": "Run the final multi-seed S5-S9 three-model evaluation and produce the main comparison, optional surrogate ablation, latency, and failure-analysis reports."
     }
   ],
+  "stage2_pretrain_relative_dynamic_sampling": {
+    "status": "verified_complete",
+    "authorized_on": "2026-09-02",
+    "implementation_base": {
+      "branch": "BEV",
+      "git_commit": "41d601a1008c3895b6dc749e1cbfc3c207e00872",
+      "experimental_run16_anchor_contract_included": false,
+      "experimental_run17_transition_noise_contract_included": false
+    },
+    "advantage": "delta_i = reward_i - frozen_pretrain_reward; advantage_i = delta_i / (sqrt(mean(delta^2)) + 1e-6); no group centering and no positive clamp",
+    "acceptance_gate": "max(delta) > 1e-6 and raw reward span > 1e-6",
+    "same_state_sampling": "at most three current-policy groups; rejected groups do not optimize, finalize RuleMaker, update, advance counters, or step the environment",
+    "exhaustion_action": "after three rejected groups, optimize and finalize the cached frozen-pretrain trajectory, execute one environment step, and perform no policy update",
+    "budget": "total_rollout_groups counts accepted groups; attempted groups are capped at three times the accepted target",
+    "contract_versions": {
+      "optimizer": "stage2_joint_grpo_optimizer_v3",
+      "collection": "stage2_joint_grpo_persistent_episode_v3",
+      "application": "stage2_grpo_open_application_v2",
+      "online_config": "bev_joint_grpo_online_config_v8",
+      "online_report": "bev_joint_grpo_online_report_v8",
+      "stability_manifest": "stage2_grpo_stability_ab_manifest_v3",
+      "stability_report": "stage2_grpo_stability_ab_report_v3"
+    },
+    "contract_sha256": {
+      "application": "412d069690fa52745bcd8e1d0f019d1c50a6284305e6a5e719486c312d6b01a5",
+      "optimizer_e1": "585c4c2d54078fa55a9be42886cfff9995d60998e204070c05581afce6f9191e",
+      "optimizer_e4": "a60d4dc77160ac721e1b42de187b7d5b596cd0e49641978b5f5bfc430d5d7508",
+      "optimizer_e10": "df7f848d1c0475489921522da63a07b84d9c108e8aaffc1b12b5bce5e2920995"
+    },
+    "minimum_reward_span": 1e-06,
+    "counter_invariants": [
+      "attempted = accepted + rejected_no_pretrain_improvement + rejected_zero_reward_span",
+      "optimizer_step = accepted * update_epochs",
+      "environment_steps = warmup_environment_steps + accepted + pretrain_fallback_steps"
+    ],
+    "training_plot_axis": "absolute_accepted_rollout_group",
+    "optimizer_curve_aggregation": "one epoch-mean value per accepted group and tag",
+    "verification": {
+      "tests_passed": 390,
+      "cuda_g3_rejection_fallback_passed": true,
+      "cuda_g48_single_group_passed": true,
+      "cuda_g72_single_group_passed": true,
+      "cuda_peak_below_16_gib": true,
+      "legacy_read_only_evaluation_passed": true,
+      "long_training_started": false
+    },
+    "implementation_report": "evaluation/STAGE2_GRPO_PRETRAIN_RELATIVE_DYNAMIC_SAMPLING_IMPLEMENTATION_REPORT.json",
+    "implementation_report_sha256": "037bdecb3aadf95f929280d02d63ecf3c04083c74c2ff2d8b3c1b64fbed1d650",
+    "legacy_resume": false,
+    "legacy_read_only_evaluation": true,
+    "formal_experiment_status_changed": false
+  },
   "stop_conditions": [
     "Do not start the user-authorized candidate-v3 10k collection before the S7 and S9 fixed-five-seed gates, collection-time scenario hash binding, and exact-path smoke pass.",
     "Do not treat the 10k diagnostic dataset as formal or training-eligible, and do not merge into BEV or start the new 50k collection, unless the remaining S5, S6, S8 and combined-contract gates plus both complete verifiers and the pre-frozen quality gate pass.",
@@ -1045,9 +1168,10 @@
     "Do not convert diagnostic artifacts into formal artifacts by editing metadata.",
     "Do not perform Round 14 cleanup while either Stage 2 branch is still changing semantically.",
     "Do not restore the obsolete Stage1 A/B or selector/MAPPO main experiment matrix without an explicit research-plan revision.",
-    "The 2026-08-17 failed-calibration waiver and all V2/V3 calibration reports are historical evidence only; tau_d application-v1 training must not read them or resume run_3.",
+    "The 2026-08-17 failed-calibration waiver and all V2/V3 calibration reports are historical evidence only; tau_d application-v2 training must not read them or resume run_3.",
     "Every at-risk GRPO-Open output remains diagnostic_only=true and eligible_for_formal_training=false; never use it for formal evaluation, GRPO-Exec, paper evidence, or metadata promotion.",
-    "Do not restore v1 planner, Stage 1, GRPO checkpoint, or S5-S9 evaluation execution paths; historical v1 data remains readable only through the generic dataset-schema contract."
+    "Do not restore v1 planner, Stage 1, or GRPO training/resume execution paths. Exact historical schema1/v1 GRPO checkpoints may be loaded only through the explicit planner-only read-only evaluation path.",
+    "Do not resume run_16 or run_17 into the pretrain-relative v3/v8 contracts, and do not merge their experimental anchor or transition-noise semantics into the BEV implementation without a separate user-authorized revision."
   ],
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
@@ -1062,5 +1186,7 @@
   "stage2_yaml_single_source_launcher_evidence_sha256": "e7b2ef99d2f1b658d938c73655bd29b425f54527cac1baafc59c54d4ffb4a568",
   "stage2_run_scoped_logging_implementation_evidence": "evaluation/STAGE2_GRPO_RUN_SCOPED_LOGGING_IMPLEMENTATION_REPORT.json",
   "stage2_run_scoped_logging_implementation_evidence_sha256": "e655a2cfabdd874ba704bf39d0462b96ed0779813e1fc7fb15acb9a2601d4b55",
-  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. In a separate frozen-code training thread, create the v2 A/B manifest by binding six future freshly allocated actual run paths to explicit G24/E1 and G24/E4 configs, then execute only those diagnostic paired runs; occupied run_8 through run_15 are not A/B arms, no future A/B run has started in this round, and even a passing A/B cannot authorize formal or paper conclusions."
+  "stage2_pretrain_relative_dynamic_sampling_implementation_evidence": "evaluation/STAGE2_GRPO_PRETRAIN_RELATIVE_DYNAMIC_SAMPLING_IMPLEMENTATION_REPORT.json",
+  "stage2_pretrain_relative_dynamic_sampling_implementation_evidence_sha256": "037bdecb3aadf95f929280d02d63ecf3c04083c74c2ff2d8b3c1b64fbed1d650",
+  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. The pretrain-relative dynamic sampler is verified for future fresh diagnostic runs, but no long run or A/B was started here; any later A/B must bind fresh actual paths in a v3 manifest/report, while run_11 through run_17 remain immutable and run_18 remains the next unoccupied run."
 }

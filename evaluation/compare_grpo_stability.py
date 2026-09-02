@@ -6,7 +6,7 @@ absolute or relative to the manifest):
 .. code-block:: json
 
    {
-     "format": "stage2_grpo_stability_ab_manifest_v2",
+     "format": "stage2_grpo_stability_ab_manifest_v3",
      "source_stage1_sha256": "<64 lowercase hex characters>",
      "paired_seeds": [17, 23, 42],
      "baseline_update_epochs": 1,
@@ -14,10 +14,15 @@ absolute or relative to the manifest):
      "group_size": 24,
      "total_rollout_groups": 100,
      "validation_interval_rollouts": 20,
-     "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v2",
+     "optimizer_contract_version": "stage2_joint_grpo_optimizer_v3",
+     "application_contract_version": "stage2_grpo_open_application_v2",
+     "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v3",
      "rollout_groups_per_bucket_visit": 10,
      "rollout_start_offset_max_steps": 200,
      "rollout_start_min_remaining_steps": 10,
+     "pretrain_improvement_margin": 1e-6,
+     "max_candidate_groups_per_state": 3,
+     "max_attempted_groups_multiplier": 3,
      "clip_epsilon": 0.2,
      "scenario_seeds": [17, 23],
      "validation_seeds": [31, 47],
@@ -33,7 +38,7 @@ absolute or relative to the manifest):
 
 ``runs`` must contain exactly one baseline and one clipped entry for each of
 the three paired seeds (six entries total). The command validates each run's
-v6 config/report, exact randomized-start persistent-episode collection contract, the
+v8 config/report, exact pretrain-relative dynamic-sampling collection contract, the
 complete frozen ``JointGRPOConfig``, and the ``validation/reward_gain``
 TensorBoard series, then writes ``report.json`` and
 ``validation_reward_gain_ab.png``. Results remain diagnostic-only and do not
@@ -60,11 +65,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tensorboard.backend.event_processing import event_accumulator
 
+from models.bev_planner.joint_grpo import (
+    JointGRPOPolicyUpdateConfig,
+    joint_grpo_optimizer_contract,
+    joint_grpo_optimizer_contract_sha256,
+)
+from models.bev_planner.joint_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+)
 
-MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v2"
-REPORT_FORMAT = "stage2_grpo_stability_ab_report_v2"
-ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v6"
-ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v6"
+
+MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v3"
+REPORT_FORMAT = "stage2_grpo_stability_ab_report_v3"
+ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v8"
+ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v8"
+APPLICATION_CONTRACT_VERSION = str(
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT["version"]
+)
+OPTIMIZER_CONTRACT_VERSION = "stage2_joint_grpo_optimizer_v3"
 VALIDATION_REWARD_GAIN_TAG = "validation/reward_gain"
 PAIRED_SEEDS = (17, 23, 42)
 ARM_UPDATE_EPOCHS = {"baseline": 1, "clipped": 4}
@@ -74,6 +93,11 @@ VALIDATION_INTERVAL_ROLLOUTS = 20
 ROLLOUT_GROUPS_PER_BUCKET_VISIT = 10
 ROLLOUT_START_OFFSET_MAX_STEPS = 200
 ROLLOUT_START_MIN_REMAINING_STEPS = 10
+PRETRAIN_IMPROVEMENT_MARGIN = 1e-6
+MAX_CANDIDATE_GROUPS_PER_STATE = 3
+MAX_ATTEMPTED_GROUPS_MULTIPLIER = 3
+ACCEPTED_ROLLOUT_AXIS = "absolute_accepted_rollout_group"
+MINIMUM_REWARD_SPAN = 1e-6
 CLIP_EPSILON = 0.2
 SCENARIO_SEEDS = (17, 23)
 VALIDATION_SEEDS = (31, 47)
@@ -84,7 +108,9 @@ SCENARIOS = (
     ("S8_ego_exit_to_ramp", "R6_exit_to_ramp"),
     ("S9_narrow_channel_negotiation", "R8_narrow_channel"),
 )
-ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v2"
+ROLLOUT_COLLECTION_CONTRACT_VERSION = (
+    "stage2_joint_grpo_persistent_episode_v3"
+)
 EXPECTED_GRPO_CONFIG = {
     "group_size": GROUP_SIZE,
     "initial_noise_timestep": 8,
@@ -116,6 +142,12 @@ class _RunSeries:
     rollout_steps: np.ndarray
     reward_gain: np.ndarray
     optimizer_steps: int
+    accepted_rollout_groups: int
+    attempted_rollout_groups: int
+    rejected_candidate_groups: int
+    rejected_no_pretrain_improvement: int
+    rejected_zero_reward_span: int
+    pretrain_fallback_steps: int
     wall_time_seconds: float
 
     @property
@@ -210,7 +242,24 @@ def _expected_rollout_collection_contract(
 ) -> dict[str, object]:
     return {
         "version": ROLLOUT_COLLECTION_CONTRACT_VERSION,
-        "budget_unit": "fresh_rollout_group",
+        "budget_unit": "accepted_pretrain_improving_rollout_group",
+        "attempt_budget_unit": "candidate_group_attempt",
+        "pretrain_baseline_domain": "raw_tau_d",
+        "pretrain_inference_per_live_state": 1,
+        "advantage_normalization": (
+            "pretrain_delta_rms_without_group_centering"
+        ),
+        "pretrain_improvement_margin": PRETRAIN_IMPROVEMENT_MARGIN,
+        "minimum_reward_span": MINIMUM_REWARD_SPAN,
+        "max_candidate_groups_per_state": MAX_CANDIDATE_GROUPS_PER_STATE,
+        "max_attempted_groups_multiplier": MAX_ATTEMPTED_GROUPS_MULTIPLIER,
+        "retry_scope": "same_live_state",
+        "rejected_candidate_side_effects": (
+            "none_except_training_generator_advance_and_attempt_logging"
+        ),
+        "fallback_after_state_rejection": (
+            "frozen_pretrain_action_once_no_update"
+        ),
         "bucket_order": "ordered_scenario_then_seed",
         "bucket_target_assignment": (
             "balanced_floor_with_remainder_to_lower_bucket_indices"
@@ -218,8 +267,8 @@ def _expected_rollout_collection_contract(
         "rollout_groups_per_bucket_visit": ROLLOUT_GROUPS_PER_BUCKET_VISIT,
         "environment_steps_per_episode": environment_steps_per_episode,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
-        "selected_environment_steps_per_rollout": 1,
-        "uninformative_rollout_execution": "selected_action_once_no_update",
+        "selected_environment_steps_per_accepted_rollout": 1,
+        "fallback_environment_steps_per_exhausted_state": 1,
         "episode_reuse": "persistent_within_bucket_visit",
         "interrupted_visit_resume": "same_bucket_same_visit_progress",
         "checkpoint_boundary": "closed_environment_only",
@@ -329,7 +378,7 @@ def _load_reward_gain(tb_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     )
     if not np.array_equal(steps, expected):
         raise GRPOStabilityComparisonError(
-            "validation/reward_gain must use fresh-rollout steps "
+            "validation/reward_gain must use accepted-rollout steps "
             f"{expected.tolist()}, got {steps.tolist()}"
         )
     return steps, values
@@ -348,10 +397,15 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
             "group_size",
             "total_rollout_groups",
             "validation_interval_rollouts",
+            "optimizer_contract_version",
+            "application_contract_version",
             "rollout_collection_contract_version",
             "rollout_groups_per_bucket_visit",
             "rollout_start_offset_max_steps",
             "rollout_start_min_remaining_steps",
+            "pretrain_improvement_margin",
+            "max_candidate_groups_per_state",
+            "max_attempted_groups_multiplier",
             "clip_epsilon",
             "scenario_seeds",
             "validation_seeds",
@@ -367,6 +421,8 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
         "group_size": GROUP_SIZE,
         "total_rollout_groups": TOTAL_ROLLOUT_GROUPS,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
+        "optimizer_contract_version": OPTIMIZER_CONTRACT_VERSION,
+        "application_contract_version": APPLICATION_CONTRACT_VERSION,
         "rollout_collection_contract_version": (
             ROLLOUT_COLLECTION_CONTRACT_VERSION
         ),
@@ -375,6 +431,9 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
         "rollout_start_min_remaining_steps": (
             ROLLOUT_START_MIN_REMAINING_STEPS
         ),
+        "pretrain_improvement_margin": PRETRAIN_IMPROVEMENT_MARGIN,
+        "max_candidate_groups_per_state": MAX_CANDIDATE_GROUPS_PER_STATE,
+        "max_attempted_groups_multiplier": MAX_ATTEMPTED_GROUPS_MULTIPLIER,
         "clip_epsilon": CLIP_EPSILON,
         "scenario_seeds": list(SCENARIO_SEEDS),
         "validation_seeds": list(VALIDATION_SEEDS),
@@ -447,6 +506,9 @@ def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
         "reward_application_contract_sha256": config.get(
             "reward_application_contract_sha256"
         ),
+        "reward_application_contract": config.get(
+            "reward_application_contract"
+        ),
         "trajectory_optimizer_sha256": config.get(
             "trajectory_optimizer_sha256"
         ),
@@ -480,6 +542,15 @@ def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
         "rollout_start_min_remaining_steps": online.get(
             "rollout_start_min_remaining_steps"
         ),
+        "pretrain_improvement_margin": online.get(
+            "pretrain_improvement_margin"
+        ),
+        "max_candidate_groups_per_state": online.get(
+            "max_candidate_groups_per_state"
+        ),
+        "max_attempted_groups_multiplier": online.get(
+            "max_attempted_groups_multiplier"
+        ),
     }
 
 
@@ -491,6 +562,11 @@ def _validate_training_bucket_counters(
     update_epochs: int,
     optimizer_steps: int,
     environment_episode_count: int,
+    attempted_rollout_groups: int,
+    rejected_candidate_groups: int,
+    rejected_no_pretrain_improvement: int,
+    rejected_zero_reward_span: int,
+    pretrain_fallback_steps: int,
 ) -> None:
     label = f"{arm}/{seed} training_bucket_counters"
     expected_buckets = tuple(
@@ -505,7 +581,12 @@ def _validate_training_bucket_counters(
     base_target, remainder = divmod(
         TOTAL_ROLLOUT_GROUPS, len(expected_buckets)
     )
-    sampled_total = 0
+    accepted_total = 0
+    attempted_total = 0
+    rejected_total = 0
+    no_improvement_total = 0
+    zero_span_total = 0
+    fallback_total = 0
     target_total = 0
     episode_total = 0
     optimizer_total = 0
@@ -513,8 +594,13 @@ def _validate_training_bucket_counters(
         "scenario",
         "route",
         "seed",
-        "target_rollouts",
-        "sampled_rollouts",
+        "target_accepted_rollouts",
+        "accepted_rollouts",
+        "attempted_rollouts",
+        "rejected_candidate_groups",
+        "rejected_no_pretrain_improvement",
+        "rejected_zero_reward_span",
+        "pretrain_fallback_steps",
         "environment_episodes",
         "optimizer_steps",
     }
@@ -536,12 +622,32 @@ def _validate_training_bucket_counters(
                 f"{counter_label} bucket identity mismatch"
             )
         target = _positive_int(
-            counter.get("target_rollouts"),
-            label=f"{counter_label}.target_rollouts",
+            counter.get("target_accepted_rollouts"),
+            label=f"{counter_label}.target_accepted_rollouts",
         )
-        sampled = _positive_int(
-            counter.get("sampled_rollouts"),
-            label=f"{counter_label}.sampled_rollouts",
+        accepted = _positive_int(
+            counter.get("accepted_rollouts"),
+            label=f"{counter_label}.accepted_rollouts",
+        )
+        attempted = _positive_int(
+            counter.get("attempted_rollouts"),
+            label=f"{counter_label}.attempted_rollouts",
+        )
+        rejected = _non_negative_int(
+            counter.get("rejected_candidate_groups"),
+            label=f"{counter_label}.rejected_candidate_groups",
+        )
+        no_improvement = _non_negative_int(
+            counter.get("rejected_no_pretrain_improvement"),
+            label=f"{counter_label}.rejected_no_pretrain_improvement",
+        )
+        zero_span = _non_negative_int(
+            counter.get("rejected_zero_reward_span"),
+            label=f"{counter_label}.rejected_zero_reward_span",
+        )
+        fallback_steps = _non_negative_int(
+            counter.get("pretrain_fallback_steps"),
+            label=f"{counter_label}.pretrain_fallback_steps",
         )
         episodes = _positive_int(
             counter.get("environment_episodes"),
@@ -553,25 +659,54 @@ def _validate_training_bucket_counters(
         )
         if target != expected_target:
             raise GRPOStabilityComparisonError(
-                f"{counter_label} target_rollouts mismatch"
+                f"{counter_label} target_accepted_rollouts mismatch"
             )
-        if sampled != target:
+        if accepted != target:
             raise GRPOStabilityComparisonError(
-                f"{counter_label} sampled_rollouts must equal target_rollouts"
+                f"{counter_label} accepted_rollouts must equal "
+                "target_accepted_rollouts"
             )
-        if bucket_optimizer_steps > sampled * update_epochs:
+        if attempted != accepted + rejected:
             raise GRPOStabilityComparisonError(
-                f"{counter_label} optimizer_steps exceeds its rollout budget"
+                f"{counter_label} attempted_rollouts must equal accepted "
+                "plus rejected candidate groups"
+            )
+        if rejected != no_improvement + zero_span:
+            raise GRPOStabilityComparisonError(
+                f"{counter_label} rejection-reason totals mismatch"
+            )
+        if rejected < fallback_steps * MAX_CANDIDATE_GROUPS_PER_STATE:
+            raise GRPOStabilityComparisonError(
+                f"{counter_label} fallback steps exceed exhausted-state evidence"
+            )
+        if bucket_optimizer_steps != accepted * update_epochs:
+            raise GRPOStabilityComparisonError(
+                f"{counter_label} optimizer_steps mismatch"
             )
         target_total += target
-        sampled_total += sampled
+        accepted_total += accepted
+        attempted_total += attempted
+        rejected_total += rejected
+        no_improvement_total += no_improvement
+        zero_span_total += zero_span
+        fallback_total += fallback_steps
         episode_total += episodes
         optimizer_total += bucket_optimizer_steps
     if (
         target_total != TOTAL_ROLLOUT_GROUPS
-        or sampled_total != TOTAL_ROLLOUT_GROUPS
+        or accepted_total != TOTAL_ROLLOUT_GROUPS
     ):
         raise GRPOStabilityComparisonError(f"{label} rollout totals mismatch")
+    if (
+        attempted_total != attempted_rollout_groups
+        or rejected_total != rejected_candidate_groups
+        or no_improvement_total != rejected_no_pretrain_improvement
+        or zero_span_total != rejected_zero_reward_span
+        or fallback_total != pretrain_fallback_steps
+    ):
+        raise GRPOStabilityComparisonError(
+            f"{label} dynamic-sampling totals mismatch"
+        )
     if episode_total != environment_episode_count:
         raise GRPOStabilityComparisonError(
             f"{label} environment episode total mismatch"
@@ -681,6 +816,9 @@ def _load_run(
         "rollout_groups_per_bucket_visit": ROLLOUT_GROUPS_PER_BUCKET_VISIT,
         "rollout_start_offset_max_steps": ROLLOUT_START_OFFSET_MAX_STEPS,
         "rollout_start_min_remaining_steps": ROLLOUT_START_MIN_REMAINING_STEPS,
+        "pretrain_improvement_margin": PRETRAIN_IMPROVEMENT_MARGIN,
+        "max_candidate_groups_per_state": MAX_CANDIDATE_GROUPS_PER_STATE,
+        "max_attempted_groups_multiplier": MAX_ATTEMPTED_GROUPS_MULTIPLIER,
         "scenarios": [list(value) for value in SCENARIOS],
         "scenario_seeds": list(SCENARIO_SEEDS),
         "resume_checkpoint": None,
@@ -712,16 +850,39 @@ def _load_run(
         raise GRPOStabilityComparisonError(
             f"{arm}/{seed} source Stage1 checkpoint mismatch"
         )
-    contract = config.get("policy_update_contract")
-    if (
-        not isinstance(contract, Mapping)
-        or contract.get("version") != "stage2_joint_grpo_optimizer_v2"
-        or contract.get("update_epochs") != ARM_UPDATE_EPOCHS[arm]
-        or contract.get("clip_epsilon") != CLIP_EPSILON
-    ):
-        raise GRPOStabilityComparisonError(
-            f"{arm}/{seed} policy update contract mismatch"
-        )
+    for artifact_name, artifact in (("config", config), ("report", report)):
+        application_contract = artifact.get("reward_application_contract")
+        if (
+            not isinstance(application_contract, Mapping)
+            or dict(application_contract)
+            != GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+            or artifact.get("reward_application_contract_sha256")
+            != GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        ):
+            raise GRPOStabilityComparisonError(
+                f"{arm}/{seed} {artifact_name} application contract mismatch"
+            )
+    expected_policy_update = JointGRPOPolicyUpdateConfig(
+        update_epochs=ARM_UPDATE_EPOCHS[arm],
+        clip_epsilon=CLIP_EPSILON,
+    )
+    expected_optimizer_contract = joint_grpo_optimizer_contract(
+        expected_policy_update
+    )
+    expected_optimizer_sha256 = joint_grpo_optimizer_contract_sha256(
+        expected_policy_update
+    )
+    for artifact_name, artifact in (("config", config), ("report", report)):
+        contract = artifact.get("policy_update_contract")
+        if (
+            not isinstance(contract, Mapping)
+            or dict(contract) != expected_optimizer_contract
+            or artifact.get("policy_update_contract_sha256")
+            != expected_optimizer_sha256
+        ):
+            raise GRPOStabilityComparisonError(
+                f"{arm}/{seed} {artifact_name} policy update contract mismatch"
+            )
     binding = _run_binding(config)
     if expected_binding is not None and binding != dict(expected_binding):
         raise GRPOStabilityComparisonError(
@@ -734,42 +895,89 @@ def _load_run(
         raise GRPOStabilityComparisonError(
             f"{arm}/{seed} must remain diagnostic-only"
         )
+    if report.get("training_status") != "complete":
+        raise GRPOStabilityComparisonError(
+            f"{arm}/{seed} training did not complete"
+        )
     if report.get("checkpoint_round_trip") is not True:
         raise GRPOStabilityComparisonError(
             f"{arm}/{seed} checkpoint round-trip did not pass"
         )
-    sampled = _positive_int(
-        report.get("sampled_rollouts"), label=f"{arm}/{seed} sampled_rollouts"
+    training_plots = report.get("training_plots")
+    if not isinstance(training_plots, Mapping) or any(
+        training_plots.get(field) != ACCEPTED_ROLLOUT_AXIS
+        for field in (
+            "reward_x_axis",
+            "validation_reward_x_axis",
+            "optimizer_x_axis",
+        )
+    ):
+        raise GRPOStabilityComparisonError(
+            f"{arm}/{seed} training plot axes must use accepted rollout groups"
+        )
+    accepted = _positive_int(
+        report.get("accepted_rollout_groups"),
+        label=f"{arm}/{seed} accepted_rollout_groups",
     )
-    uninformative = _non_negative_int(
-        report.get("uninformative_rollouts"),
-        label=f"{arm}/{seed} uninformative_rollouts",
+    accepted_this_run = _positive_int(
+        report.get("accepted_rollout_groups_this_run"),
+        label=f"{arm}/{seed} accepted_rollout_groups_this_run",
     )
     optimizer_steps = _positive_int(
         report.get("optimizer_steps"), label=f"{arm}/{seed} optimizer_steps"
     )
-    target_rollouts = _positive_int(
-        report.get("target_rollout_groups"),
-        label=f"{arm}/{seed} target_rollout_groups",
+    target_accepted = _positive_int(
+        report.get("target_accepted_rollout_groups"),
+        label=f"{arm}/{seed} target_accepted_rollout_groups",
     )
-    sampled_this_run = _positive_int(
-        report.get("sampled_rollouts_this_run"),
-        label=f"{arm}/{seed} sampled_rollouts_this_run",
+    attempted = _positive_int(
+        report.get("attempted_rollout_groups"),
+        label=f"{arm}/{seed} attempted_rollout_groups",
+    )
+    attempted_this_run = _positive_int(
+        report.get("attempted_rollout_groups_this_run"),
+        label=f"{arm}/{seed} attempted_rollout_groups_this_run",
+    )
+    max_attempted = _positive_int(
+        report.get("max_attempted_rollout_groups"),
+        label=f"{arm}/{seed} max_attempted_rollout_groups",
+    )
+    rejected = _non_negative_int(
+        report.get("rejected_candidate_groups"),
+        label=f"{arm}/{seed} rejected_candidate_groups",
+    )
+    rejected_no_improvement = _non_negative_int(
+        report.get("rejected_no_pretrain_improvement"),
+        label=f"{arm}/{seed} rejected_no_pretrain_improvement",
+    )
+    rejected_zero_span = _non_negative_int(
+        report.get("rejected_zero_reward_span"),
+        label=f"{arm}/{seed} rejected_zero_reward_span",
+    )
+    fallback_steps = _non_negative_int(
+        report.get("pretrain_fallback_steps"),
+        label=f"{arm}/{seed} pretrain_fallback_steps",
     )
     optimizer_steps_this_run = _positive_int(
         report.get("optimizer_steps_this_run"),
         label=f"{arm}/{seed} optimizer_steps_this_run",
     )
     if (
-        sampled != TOTAL_ROLLOUT_GROUPS
-        or target_rollouts != TOTAL_ROLLOUT_GROUPS
-        or sampled_this_run != TOTAL_ROLLOUT_GROUPS
-        or uninformative > sampled
+        accepted != TOTAL_ROLLOUT_GROUPS
+        or target_accepted != TOTAL_ROLLOUT_GROUPS
+        or accepted_this_run != TOTAL_ROLLOUT_GROUPS
+        or attempted_this_run != attempted
+        or max_attempted
+        != TOTAL_ROLLOUT_GROUPS * MAX_ATTEMPTED_GROUPS_MULTIPLIER
+        or attempted > max_attempted
+        or attempted != accepted + rejected
+        or rejected != rejected_no_improvement + rejected_zero_span
+        or rejected < fallback_steps * MAX_CANDIDATE_GROUPS_PER_STATE
     ):
-        raise GRPOStabilityComparisonError(f"{arm}/{seed} rollout counters mismatch")
-    expected_optimizer_steps = (
-        sampled - uninformative
-    ) * ARM_UPDATE_EPOCHS[arm]
+        raise GRPOStabilityComparisonError(
+            f"{arm}/{seed} dynamic-sampling counters mismatch"
+        )
+    expected_optimizer_steps = accepted * ARM_UPDATE_EPOCHS[arm]
     if (
         optimizer_steps != expected_optimizer_steps
         or optimizer_steps_this_run != expected_optimizer_steps
@@ -797,7 +1005,7 @@ def _load_run(
         report.get("warmup_environment_steps"),
         label=f"{arm}/{seed} warmup_environment_steps",
     )
-    if warmup_environment_steps != environment_steps - sampled:
+    if warmup_environment_steps != environment_steps - accepted - fallback_steps:
         raise GRPOStabilityComparisonError(
             f"{arm}/{seed} warmup environment-step count mismatch"
         )
@@ -813,6 +1021,11 @@ def _load_run(
         update_epochs=ARM_UPDATE_EPOCHS[arm],
         optimizer_steps=optimizer_steps,
         environment_episode_count=environment_episode_count,
+        attempted_rollout_groups=attempted,
+        rejected_candidate_groups=rejected,
+        rejected_no_pretrain_improvement=rejected_no_improvement,
+        rejected_zero_reward_span=rejected_zero_span,
+        pretrain_fallback_steps=fallback_steps,
     )
     wall_time_seconds = _finite_float(
         report.get("wall_time_seconds"),
@@ -828,6 +1041,12 @@ def _load_run(
             rollout_steps=steps,
             reward_gain=values,
             optimizer_steps=optimizer_steps,
+            accepted_rollout_groups=accepted,
+            attempted_rollout_groups=attempted,
+            rejected_candidate_groups=rejected,
+            rejected_no_pretrain_improvement=rejected_no_improvement,
+            rejected_zero_reward_span=rejected_zero_span,
+            pretrain_fallback_steps=fallback_steps,
             wall_time_seconds=wall_time_seconds,
         ),
         binding,
@@ -860,7 +1079,7 @@ def _render_comparison_plot(
             label=f"{arm} mean",
         )
     gain_ax.axhline(0.0, color="#777777", linewidth=0.8)
-    gain_ax.set_xlabel("Fresh rollout group")
+    gain_ax.set_xlabel("Accepted rollout group")
     gain_ax.set_ylabel("Validation reward gain")
     gain_ax.set_title("Paired GRPO validation reward gain")
     gain_ax.grid(color="#D9D9D9", linewidth=0.8, alpha=0.75)
@@ -928,7 +1147,9 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
         pairs.append(
             {
                 "seed": seed,
-                "validation_rollout_groups": baseline.rollout_steps.tolist(),
+                "validation_accepted_rollout_groups": (
+                    baseline.rollout_steps.tolist()
+                ),
                 "baseline_reward_gain": baseline.reward_gain.tolist(),
                 "clipped_reward_gain": clipped.reward_gain.tolist(),
                 "baseline_adjacent_delta_std": baseline.adjacent_delta_std,
@@ -941,6 +1162,42 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
                 ),
                 "baseline_optimizer_steps": baseline.optimizer_steps,
                 "clipped_optimizer_steps": clipped.optimizer_steps,
+                "baseline_accepted_rollout_groups": (
+                    baseline.accepted_rollout_groups
+                ),
+                "clipped_accepted_rollout_groups": (
+                    clipped.accepted_rollout_groups
+                ),
+                "baseline_attempted_rollout_groups": (
+                    baseline.attempted_rollout_groups
+                ),
+                "clipped_attempted_rollout_groups": (
+                    clipped.attempted_rollout_groups
+                ),
+                "baseline_rejected_candidate_groups": (
+                    baseline.rejected_candidate_groups
+                ),
+                "clipped_rejected_candidate_groups": (
+                    clipped.rejected_candidate_groups
+                ),
+                "baseline_rejected_no_pretrain_improvement": (
+                    baseline.rejected_no_pretrain_improvement
+                ),
+                "clipped_rejected_no_pretrain_improvement": (
+                    clipped.rejected_no_pretrain_improvement
+                ),
+                "baseline_rejected_zero_reward_span": (
+                    baseline.rejected_zero_reward_span
+                ),
+                "clipped_rejected_zero_reward_span": (
+                    clipped.rejected_zero_reward_span
+                ),
+                "baseline_pretrain_fallback_steps": (
+                    baseline.pretrain_fallback_steps
+                ),
+                "clipped_pretrain_fallback_steps": (
+                    clipped.pretrain_fallback_steps
+                ),
                 "baseline_wall_time_seconds": baseline.wall_time_seconds,
                 "clipped_wall_time_seconds": clipped.wall_time_seconds,
             }
@@ -962,8 +1219,10 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
         "source_stage1_sha256": source_sha,
         "paired_seeds": list(PAIRED_SEEDS),
         "group_size": GROUP_SIZE,
-        "total_rollout_groups_per_run": TOTAL_ROLLOUT_GROUPS,
+        "target_accepted_rollout_groups_per_run": TOTAL_ROLLOUT_GROUPS,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
+        "optimizer_contract_version": OPTIMIZER_CONTRACT_VERSION,
+        "application_contract_version": APPLICATION_CONTRACT_VERSION,
         "rollout_collection_contract_version": (
             ROLLOUT_COLLECTION_CONTRACT_VERSION
         ),
@@ -972,6 +1231,9 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
         "rollout_start_min_remaining_steps": (
             ROLLOUT_START_MIN_REMAINING_STEPS
         ),
+        "pretrain_improvement_margin": PRETRAIN_IMPROVEMENT_MARGIN,
+        "max_candidate_groups_per_state": MAX_CANDIDATE_GROUPS_PER_STATE,
+        "max_attempted_groups_multiplier": MAX_ATTEMPTED_GROUPS_MULTIPLIER,
         "baseline_update_epochs": ARM_UPDATE_EPOCHS["baseline"],
         "clipped_update_epochs": ARM_UPDATE_EPOCHS["clipped"],
         "clip_epsilon": CLIP_EPSILON,
@@ -1010,7 +1272,7 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         type=Path,
         help=(
-            "stage2_grpo_stability_ab_manifest_v2 JSON; relative run_dir "
+            f"{MANIFEST_FORMAT} JSON; relative run_dir "
             "values resolve from this file"
         ),
     )

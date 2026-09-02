@@ -125,7 +125,7 @@ def joint_grpo_optimizer_contract(
 
     policy_update = config if config is not None else JointGRPOPolicyUpdateConfig()
     return {
-        "version": "stage2_joint_grpo_optimizer_v2",
+        "version": "stage2_joint_grpo_optimizer_v3",
         "behavior_policy_snapshot": (
             "detached sampled mode and stochastic DDIM-transition log "
             "probabilities captured before any policy update"
@@ -142,20 +142,28 @@ def joint_grpo_optimizer_contract(
             "negative mean of min(ratio*advantage, "
             "clip(ratio,1-epsilon,1+epsilon)*advantage)"
         ),
+        "advantage_baseline": (
+            "same-live-state deterministic frozen Stage 1 raw tau_d proxy "
+            "reward with shape [B,1]"
+        ),
+        "advantage_normalization": (
+            "(reward-frozen_pretrain_reward) divided by the per-group RMS "
+            "of that delta plus epsilon; no group-mean centering"
+        ),
         "advantage_reuse": (
-            "group-normalize once, detach, and freeze across all epochs of "
-            "the rollout"
+            "pretrain-relative RMS-normalize once, detach, and freeze across "
+            "all epochs of the accepted rollout"
         ),
         "rollout_consumption": (
-            "one external update call consumes one live rollout and performs "
-            "exactly update_epochs serial optimizer steps when informative"
+            "one external update call consumes one accepted live rollout and "
+            "performs exactly update_epochs serial optimizer steps"
         ),
         "minibatch_semantics": "none; reuse the complete joint group each epoch",
         "reference_regularization": (
             "recompute behavior-cloning and frozen-Stage1 reference KL every epoch"
         ),
         "kl_early_stop": False,
-        "budget_unit": "fresh_rollout_group",
+        "budget_unit": "accepted_rollout_group",
         "checkpoint_boundary": (
             "after a complete rollout and all of its optimizer epochs"
         ),
@@ -489,9 +497,15 @@ class FrozenGRPOReference(nn.Module):
 FrozenVariantAReference = FrozenGRPOReference
 
 
-def normalize_signed_advantages(
-    rewards: Tensor, *, group_size: int = 4, eps: float = 1e-6
+def normalize_pretrain_relative_advantages(
+    rewards: Tensor,
+    pretrain_rewards: Tensor,
+    *,
+    group_size: int = 4,
+    eps: float = 1e-6,
 ) -> Tensor:
+    """Normalize reward deltas without erasing the frozen-pretrain baseline."""
+
     if (
         isinstance(group_size, bool)
         or not isinstance(group_size, int)
@@ -502,15 +516,30 @@ def normalize_signed_advantages(
         )
     if not isinstance(rewards, Tensor):
         raise JointGRPOError("rewards must be a torch.Tensor")
+    if not isinstance(pretrain_rewards, Tensor):
+        raise JointGRPOError("pretrain_rewards must be a torch.Tensor")
     if rewards.dtype != torch.float32:
         raise JointGRPOError("rewards must use dtype torch.float32")
+    if pretrain_rewards.dtype != torch.float32:
+        raise JointGRPOError("pretrain_rewards must use dtype torch.float32")
     if rewards.ndim != 2 or int(rewards.shape[1]) != int(group_size):
         raise JointGRPOError(f"rewards must have shape [B,{group_size}]")
     if int(rewards.shape[0]) <= 0 or not bool(torch.isfinite(rewards).all()):
         raise JointGRPOError("rewards must contain a non-empty finite batch")
-    centered = rewards - rewards.mean(dim=1, keepdim=True)
-    scale = rewards.std(dim=1, unbiased=False, keepdim=True)
-    return centered / (scale + float(eps))
+    if tuple(pretrain_rewards.shape) != (int(rewards.shape[0]), 1):
+        raise JointGRPOError("pretrain_rewards must have shape [B,1]")
+    if not bool(torch.isfinite(pretrain_rewards).all()):
+        raise JointGRPOError("pretrain_rewards must contain finite values")
+    if pretrain_rewards.device != rewards.device:
+        raise JointGRPOError(
+            "rewards and pretrain_rewards must use the same device"
+        )
+    epsilon = float(eps)
+    if not math.isfinite(epsilon) or epsilon <= 0.0:
+        raise JointGRPOError("advantage eps must be positive and finite")
+    delta = rewards - pretrain_rewards
+    root_mean_square = torch.sqrt(delta.square().mean(dim=1, keepdim=True))
+    return delta / (root_mean_square + epsilon)
 
 
 def _clipped_grpo_surrogate(
@@ -1039,6 +1068,7 @@ class _JointGRPOTrainerBase:
         self,
         rollout: JointGRPORollout,
         rewards: Tensor,
+        pretrain_rewards: Tensor,
         *,
         clip_epsilon: float = 0.2,
     ) -> JointGRPOLossResult:
@@ -1046,8 +1076,9 @@ class _JointGRPOTrainerBase:
             update_epochs=1,
             clip_epsilon=clip_epsilon,
         )
-        advantages = normalize_signed_advantages(
+        advantages = normalize_pretrain_relative_advantages(
             rewards,
+            pretrain_rewards,
             group_size=self.config.group_size,
             eps=self.config.advantage_eps,
         ).to(device=rollout.old_mode_log_prob.device).detach()
@@ -1311,6 +1342,7 @@ class _JointGRPOTrainerBase:
         self,
         rollout: JointGRPORollout,
         rewards: Tensor,
+        pretrain_rewards: Tensor,
         *,
         policy_update: JointGRPOPolicyUpdateConfig | None = None,
     ) -> JointGRPOUpdateResult:
@@ -1328,8 +1360,9 @@ class _JointGRPOTrainerBase:
             raise JointGRPOError(
                 "each live joint rollout may enter update exactly once"
             )
-        advantages = normalize_signed_advantages(
+        advantages = normalize_pretrain_relative_advantages(
             rewards,
+            pretrain_rewards,
             group_size=self.config.group_size,
             eps=self.config.advantage_eps,
         ).to(device=rollout.old_mode_log_prob.device).detach()
@@ -1681,5 +1714,5 @@ __all__ = [
     "StandardGaussianDDIM",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
-    "normalize_signed_advantages",
+    "normalize_pretrain_relative_advantages",
 ]

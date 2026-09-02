@@ -179,11 +179,16 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         dtype=torch.float32,
         device=device,
     )
+    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32, device=device)
     update_start = time.perf_counter()
-    update = trainer.update(rollout, rewards)
+    update = trainer.update(rollout, rewards, pretrain_rewards)
     _synchronize(device)
     update_ms = 1000.0 * (time.perf_counter() - update_start)
-    post_update_loss = trainer.compute_loss(rollout, rewards)
+    post_update_loss = trainer.compute_loss(
+        rollout,
+        rewards,
+        pretrain_rewards,
+    )
     _synchronize(device)
 
     after = {
@@ -340,6 +345,7 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         "stochastic_timesteps": list(trainer.config.stochastic_timesteps),
         "rollout_shapes": rollout_shapes,
         "rewards": rewards.detach().cpu().tolist(),
+        "pretrain_rewards": pretrain_rewards.detach().cpu().tolist(),
         "advantages": update.loss.advantages.detach().cpu().tolist(),
         "metrics": metrics,
         "parameter_max_abs_delta": deltas,

@@ -16,7 +16,7 @@ from models.bev_planner import (
     JointGRPOError,
     JointGRPOTrainerA,
     StandardGaussianDDIM,
-    normalize_signed_advantages,
+    normalize_pretrain_relative_advantages,
 )
 from models.bev_planner.bev_only_diffusion_planner import MAX_BACKGROUND_ACTORS
 from models.bev_planner.joint_grpo import (
@@ -32,7 +32,12 @@ from models.bev_planner.joint_grpo import (
 from train.bev_joint_grpo import (
     GRPO_CHECKPOINT_FORMAT,
     GRPO_CHECKPOINT_SCHEMA_VERSION,
+    LEGACY_GRPO_CHECKPOINT_FORMAT,
+    LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
     grpo_checkpoint_payload,
+    load_grpo_a_checkpoint_for_evaluation,
+    load_grpo_a_config_for_evaluation,
+    load_grpo_config_from_checkpoint,
     load_grpo_checkpoint,
     save_grpo_checkpoint,
     validate_stage1_a_source_metadata,
@@ -167,7 +172,7 @@ def _source_metadata(*, diagnostic: bool = True) -> dict[str, object]:
     }
 
 
-def test_config_and_signed_advantage_contract() -> None:
+def test_config_and_pretrain_relative_advantage_contract() -> None:
     config = JointGRPOConfig()
     assert config.group_size == 4
     assert JointGRPOConfig(group_size=3).group_size == 3
@@ -189,19 +194,73 @@ def test_config_and_signed_advantage_contract() -> None:
         [[-1.5, -0.5, 0.5, 1.5], [2.0, 2.0, 2.0, 2.0]],
         dtype=torch.float32,
     )
-    advantages = normalize_signed_advantages(rewards)
+    pretrain_rewards = torch.tensor([[0.5], [1.5]], dtype=torch.float32)
+    advantages = normalize_pretrain_relative_advantages(
+        rewards,
+        pretrain_rewards,
+    )
+    deltas = rewards - pretrain_rewards
+    expected = deltas / (
+        torch.sqrt(deltas.square().mean(dim=1, keepdim=True)) + 1e-6
+    )
+    torch.testing.assert_close(advantages, expected)
+    assert torch.equal(torch.sign(advantages), torch.sign(deltas))
     assert torch.any(advantages[0] < 0)
     assert torch.any(advantages[0] > 0)
-    torch.testing.assert_close(advantages.mean(dim=1), torch.zeros(2))
-    torch.testing.assert_close(advantages[1], torch.zeros(4))
+    assert torch.all(advantages[1] > 0)
+    assert advantages[1].mean() > 0.99
     with pytest.raises(JointGRPOError, match="dtype"):
-        normalize_signed_advantages(rewards.double())
+        normalize_pretrain_relative_advantages(
+            rewards.double(),
+            pretrain_rewards,
+        )
+    with pytest.raises(JointGRPOError, match="dtype"):
+        normalize_pretrain_relative_advantages(
+            rewards,
+            pretrain_rewards.double(),
+        )
     with pytest.raises(JointGRPOError, match="shape"):
-        normalize_signed_advantages(rewards[:, :3])
+        normalize_pretrain_relative_advantages(
+            rewards[:, :3],
+            pretrain_rewards,
+        )
+    with pytest.raises(JointGRPOError, match=r"\[B,1\]"):
+        normalize_pretrain_relative_advantages(
+            rewards,
+            pretrain_rewards.expand(-1, 2),
+        )
     bad = rewards.clone()
     bad[0, 0] = torch.nan
     with pytest.raises(JointGRPOError, match="finite"):
-        normalize_signed_advantages(bad)
+        normalize_pretrain_relative_advantages(bad, pretrain_rewards)
+    bad_pretrain = pretrain_rewards.clone()
+    bad_pretrain[0, 0] = torch.inf
+    with pytest.raises(JointGRPOError, match="finite"):
+        normalize_pretrain_relative_advantages(rewards, bad_pretrain)
+
+
+@pytest.mark.parametrize("group_size", [48, 72])
+def test_pretrain_relative_advantages_scale_for_formal_group_sizes(
+    group_size: int,
+) -> None:
+    pretrain_rewards = torch.tensor([[-0.25]], dtype=torch.float32)
+    deltas = torch.linspace(-1.0, 2.0, group_size).unsqueeze(0)
+    rewards = pretrain_rewards + deltas
+
+    advantages = normalize_pretrain_relative_advantages(
+        rewards,
+        pretrain_rewards,
+        group_size=group_size,
+    )
+
+    assert advantages.shape == (1, group_size)
+    assert torch.equal(torch.sign(advantages), torch.sign(deltas))
+    torch.testing.assert_close(
+        torch.sqrt(advantages.square().mean(dim=1)),
+        torch.ones(1),
+        rtol=2e-6,
+        atol=2e-6,
+    )
 
 
 def test_policy_update_config_contract_and_sha() -> None:
@@ -209,11 +268,13 @@ def test_policy_update_config_contract_and_sha() -> None:
     assert policy_update.update_epochs == 4
     assert policy_update.clip_epsilon == 0.2
     contract = joint_grpo_optimizer_contract(policy_update)
-    assert contract["version"] == "stage2_joint_grpo_optimizer_v2"
+    assert contract["version"] == "stage2_joint_grpo_optimizer_v3"
     assert contract["update_epochs"] == 4
     assert contract["clip_epsilon"] == 0.2
     assert contract["mode_ratio_factorization"].endswith("[B,G]")
     assert contract["trajectory_ratio_factorization"].endswith("[B,G,S]")
+    assert "no group-mean centering" in contract["advantage_normalization"]
+    assert contract["budget_unit"] == "accepted_rollout_group"
     digest = joint_grpo_optimizer_contract_sha256(policy_update)
     assert len(digest) == 64
     assert digest == joint_grpo_optimizer_contract_sha256(policy_update)
@@ -450,7 +511,8 @@ def test_joint_rollout_and_update_shapes_follow_group_size(
         steps=group_size,
         dtype=torch.float32,
     ).unsqueeze(0)
-    update = trainer.update(rollout, rewards)
+    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
+    update = trainer.update(rollout, rewards, pretrain_rewards)
 
     assert update.optimizer_step == 1
     assert update.loss.advantages.shape == (1, group_size)
@@ -463,7 +525,12 @@ def test_joint_probability_replay_zero_kl_and_weighted_loss(
 ) -> None:
     trainer, rollout, _ = rollout_pair
     rewards = torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32)
-    result = trainer.compute_loss(rollout, rewards)
+    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
+    with pytest.raises(TypeError, match="pretrain_rewards"):
+        trainer.compute_loss(rollout, rewards)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="pretrain_rewards"):
+        trainer.update(rollout, rewards)  # type: ignore[call-arg]
+    result = trainer.compute_loss(rollout, rewards, pretrain_rewards)
     torch.testing.assert_close(
         result.new_mode_log_prob,
         rollout.old_mode_log_prob,
@@ -596,6 +663,7 @@ def test_reference_kl_becomes_positive_after_policy_perturbation(
     result = trainer.compute_loss(
         rollout,
         torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
+        torch.zeros((1, 1), dtype=torch.float32),
     )
     assert result.reference_kl.item() >= 0.0
     assert result.mode_reference_kl.item() > 0.0
@@ -644,6 +712,7 @@ def test_exactly_one_update_changes_only_trainable_policy() -> None:
     result = trainer.update(
         rollout,
         torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
+        torch.zeros((1, 1), dtype=torch.float32),
     )
     assert result.optimizer_step == trainer.optimizer_step == 1
     assert result.gradient_norms["diffusion_decoder"] > 0.0
@@ -670,6 +739,7 @@ def test_exactly_one_update_changes_only_trainable_policy() -> None:
         trainer.update(
             rollout,
             torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
+            torch.zeros((1, 1), dtype=torch.float32),
         )
     rollout_reference = weakref.ref(rollout)
     del rollout
@@ -684,6 +754,7 @@ def test_exactly_one_update_changes_only_trainable_policy() -> None:
     second = trainer.update(
         fresh_rollout,
         torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
+        torch.zeros((1, 1), dtype=torch.float32),
     )
     assert second.optimizer_step == trainer.optimizer_step == 2
 
@@ -698,6 +769,7 @@ def test_multi_epoch_update_reuses_frozen_rollout_and_advantage() -> None:
         generator=torch.Generator().manual_seed(211),
     )
     rewards = torch.tensor([[-1.0, 0.0, 1.0]], dtype=torch.float32)
+    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
     old_mode_log_prob = rollout.old_mode_log_prob.clone()
     old_trajectory_log_prob = rollout.old_trajectory_log_prob.clone()
     old_chains = rollout.chains_normalized.clone()
@@ -707,12 +779,13 @@ def test_multi_epoch_update_reuses_frozen_rollout_and_advantage() -> None:
     reference_before = _state(trainer.reference)
 
     with mock.patch(
-        "models.bev_planner.joint_grpo.normalize_signed_advantages",
-        wraps=normalize_signed_advantages,
+        "models.bev_planner.joint_grpo.normalize_pretrain_relative_advantages",
+        wraps=normalize_pretrain_relative_advantages,
     ) as normalize:
         result = trainer.update(
             rollout,
             rewards,
+            pretrain_rewards,
             policy_update=JointGRPOPolicyUpdateConfig(
                 update_epochs=2,
                 clip_epsilon=0.2,
@@ -765,6 +838,7 @@ def test_multi_epoch_update_reuses_frozen_rollout_and_advantage() -> None:
         trainer.update(
             rollout,
             rewards,
+            pretrain_rewards,
             policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
         )
 
@@ -779,6 +853,7 @@ def test_partial_multi_epoch_failure_still_consumes_live_rollout() -> None:
         generator=torch.Generator().manual_seed(223),
     )
     rewards = torch.tensor([[-1.0, 1.0]], dtype=torch.float32)
+    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
     original_step = trainer.optimizer.step
     step_calls = 0
 
@@ -798,11 +873,12 @@ def test_partial_multi_epoch_failure_still_consumes_live_rollout() -> None:
             trainer.update(
                 rollout,
                 rewards,
+                pretrain_rewards,
                 policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
             )
     assert trainer.optimizer_step == 1
     with pytest.raises(JointGRPOError, match="enter update exactly once"):
-        trainer.update(rollout, rewards)
+        trainer.update(rollout, rewards, pretrain_rewards)
 
 
 def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:
@@ -845,8 +921,11 @@ def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:
         metrics={"loss/total": 0.0},
         diagnostic_only=True,
     )
-    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 1
+    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 2
     assert payload["format"] == GRPO_CHECKPOINT_FORMAT
+    assert payload["optimizer_contract_version"] == (
+        "stage2_joint_grpo_optimizer_v3"
+    )
     assert payload["diagnostic_only"] is True
     assert payload["eligible_for_formal_training"] is False
     path = save_grpo_checkpoint(tmp_path / "diagnostic.pt", payload)
@@ -868,6 +947,40 @@ def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:
         frozen_after["selected_mode"],
         frozen_before["selected_mode"],
     )
+
+    legacy_checkpoint = copy.deepcopy(payload)
+    legacy_checkpoint["schema_version"] = LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION
+    legacy_checkpoint["format"] = LEGACY_GRPO_CHECKPOINT_FORMAT
+    legacy_checkpoint["reward_source"] = "external"
+    legacy_checkpoint.pop("optimizer_contract_version")
+    legacy_checkpoint["optimizer_step"] = 7
+    legacy_path = save_grpo_checkpoint(
+        tmp_path / "legacy_v1.pt",
+        legacy_checkpoint,
+    )
+    assert load_grpo_a_config_for_evaluation(legacy_path) == trainer.config
+    evaluation_trainer = JointGRPOTrainerA(_planner())
+    evaluation_reference_before = _state(evaluation_trainer.reference)
+    loaded_for_evaluation = load_grpo_a_checkpoint_for_evaluation(
+        legacy_path,
+        evaluation_trainer,
+        expected_source_stage1_sha256="a" * 64,
+    )
+    assert loaded_for_evaluation["optimizer_step"] == 7
+    assert _state_equal(_state(evaluation_trainer.planner), _state(trainer.planner))
+    assert _state_equal(
+        _state(evaluation_trainer.reference), evaluation_reference_before
+    )
+    assert evaluation_trainer.optimizer.state == {}
+    assert evaluation_trainer.optimizer_step == 0
+    with pytest.raises(JointGRPOError, match="schema_version mismatch"):
+        load_grpo_config_from_checkpoint(legacy_path)
+    with pytest.raises(JointGRPOError, match="schema_version mismatch"):
+        load_grpo_checkpoint(
+            legacy_path,
+            JointGRPOTrainerA(_planner()),
+            expected_source_stage1_sha256="a" * 64,
+        )
 
     bad_checkpoint = copy.deepcopy(payload)
     bad_checkpoint["variant"] = "B"

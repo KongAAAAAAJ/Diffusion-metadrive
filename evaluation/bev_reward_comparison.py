@@ -60,8 +60,12 @@ from scenarios.bev_round13_contract import (
     primary_scenario_contract,
 )
 from train.bev_joint_grpo import (
-    load_grpo_checkpoint,
-    load_grpo_config_from_checkpoint,
+    GRPO_CHECKPOINT_FORMAT,
+    GRPO_CHECKPOINT_SCHEMA_VERSION,
+    LEGACY_GRPO_CHECKPOINT_FORMAT,
+    LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
+    load_grpo_a_checkpoint_for_evaluation,
+    load_grpo_a_config_for_evaluation,
     load_stage1_a_for_grpo,
 )
 from train.train_bev_diffusion_stage1 import planner_forward_from_batch
@@ -78,6 +82,29 @@ from train.train_bev_joint_grpo_online import (
 
 
 MODEL_IDS = ("stage1_a", "grpo_open")
+_LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
+    "version": "stage2_grpo_open_application_v1",
+    "policy_sample_domain": "tau_d",
+    "policy_probability_domain": "tau_d",
+    "reward_input_domain": "tau_d",
+    "candidate_selection_domain": "tau_d",
+    "execution_input_domain": "tau_cmd",
+    "execution_transform": "KinematicTrajectoryOptimizer(selected_tau_d)",
+    "optimize_only_selected_candidate": True,
+    "optimizer_must_succeed_before_policy_update": True,
+    "tracking_expansion_enabled": False,
+    "calibration_required": False,
+    "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+    "simulator_validation_role": "diagnostic_only",
+}
+_LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 = hashlib.sha256(
+    json.dumps(
+        _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+).hexdigest()
 REWARD_COLUMNS = (
     "total_reward",
     "progress_reward",
@@ -219,6 +246,8 @@ def _validate_grpo_checkpoint_contract(
     payload: Mapping[str, object],
 ) -> tuple[str, str, str]:
     required_fields = {
+        "schema_version",
+        "format",
         "run_mode",
         "reward_contract_version",
         "reward_contract_sha256",
@@ -271,10 +300,30 @@ def _validate_grpo_checkpoint_contract(
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
+    checkpoint_identity = (
+        payload.get("schema_version"),
+        payload.get("format"),
+    )
+    if checkpoint_identity == (
+        GRPO_CHECKPOINT_SCHEMA_VERSION,
+        GRPO_CHECKPOINT_FORMAT,
+    ):
+        expected_application = GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+        expected_application_sha = GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+    elif checkpoint_identity == (
+        LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
+        LEGACY_GRPO_CHECKPOINT_FORMAT,
+    ):
+        expected_application = _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+        expected_application_sha = (
+            _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        )
+    else:
+        raise RewardComparisonError("grpo_open checkpoint identity is unsupported")
     if (
-        dict(raw_application) != GRPO_OPEN_REWARD_APPLICATION_CONTRACT
-        or application_sha != canonical_application_sha
-        or application_sha != GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        application_sha != canonical_application_sha
+        or dict(raw_application) != expected_application
+        or application_sha != expected_application_sha
     ):
         raise RewardComparisonError(
             "grpo_open must use the frozen raw-tau_d application contract"
@@ -361,7 +410,7 @@ def _load_policy(
             or spec.source_checkpoint_sha256 is None
         ):
             raise RewardComparisonError("grpo_open model spec is invalid")
-        grpo_config = load_grpo_config_from_checkpoint(spec.checkpoint)
+        grpo_config = load_grpo_a_config_for_evaluation(spec.checkpoint)
         trainer, _, source_sha = load_stage1_a_for_grpo(
             spec.source_checkpoint,
             device=device,
@@ -370,7 +419,7 @@ def _load_policy(
         )
         if source_sha != spec.source_checkpoint_sha256:
             raise RewardComparisonError("grpo_open source Stage1 SHA mismatch")
-        payload = load_grpo_checkpoint(
+        payload = load_grpo_a_checkpoint_for_evaluation(
             spec.checkpoint,
             trainer,
             expected_source_stage1_sha256=source_sha,

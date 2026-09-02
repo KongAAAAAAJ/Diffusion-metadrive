@@ -71,7 +71,7 @@ from .joint_grpo import (
     StandardGaussianDDIM,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
-    normalize_signed_advantages,
+    normalize_pretrain_relative_advantages,
 )
 from .joint_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
@@ -162,7 +162,7 @@ __all__ = [
     "sha256_file",
     "trajectory_speed_acceleration",
     "wrapped_heading_error",
-    "normalize_signed_advantages",
+    "normalize_pretrain_relative_advantages",
     "aggregate_temporal_risk",
     "closing_ttc_from_gap_series",
     "compose_joint_reward",

@@ -281,6 +281,7 @@ def test_fixed_history_replay_and_reference_share_exact_condition(
 ) -> None:
     trainer, rollout, _ = rollout_pair
     rewards = torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32)
+    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
     seen: list[torch.Tensor] = []
     original = trainer._decode_roles
 
@@ -291,7 +292,7 @@ def test_fixed_history_replay_and_reference_share_exact_condition(
         return original(*args, **kwargs)
 
     with mock.patch.object(trainer, "_decode_roles", side_effect=traced):
-        result = trainer.compute_loss(rollout, rewards)
+        result = trainer.compute_loss(rollout, rewards, pretrain_rewards)
     assert len(seen) == 8
     for index in range(0, len(seen), 2):
         assert seen[index].data_ptr() == seen[index + 1].data_ptr()
@@ -343,6 +344,7 @@ def test_b_reference_kl_is_positive_after_policy_perturbation(
     result = trainer.compute_loss(
         rollout,
         torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
+        torch.zeros((1, 1), dtype=torch.float32),
     )
     assert result.mode_reference_kl.item() > 0.0
     assert result.trajectory_reference_kl.item() > 0.0
@@ -434,8 +436,13 @@ def test_zero_gate_and_nonzero_gate_gradient_phases() -> None:
         generator=torch.Generator().manual_seed(31),
     )
     rewards = torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32)
+    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
     zero_trainer.optimizer.zero_grad(set_to_none=True)
-    zero_trainer.compute_loss(zero_rollout, rewards).total.backward()
+    zero_trainer.compute_loss(
+        zero_rollout,
+        rewards,
+        pretrain_rewards,
+    ).total.backward()
     encoder = zero_planner.diffusion_decoder.predecessor_action_encoder
     gate = zero_planner.diffusion_decoder.predecessor_residual_gate
     assert encoder is not None and gate is not None
@@ -467,6 +474,7 @@ def test_zero_gate_and_nonzero_gate_gradient_phases() -> None:
     update = trainer.update(
         rollout,
         rewards,
+        pretrain_rewards,
         policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
     )
     assert update.optimizer_step == 2

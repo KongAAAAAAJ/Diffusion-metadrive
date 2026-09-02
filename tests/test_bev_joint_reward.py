@@ -302,10 +302,28 @@ def test_reward_rejects_labels_and_invalid_contracts() -> None:
 
 def test_grpo_open_application_contract_freezes_tau_d_without_changing_reward() -> None:
     assert GRPO_OPEN_REWARD_APPLICATION_CONTRACT == {
-        "version": "stage2_grpo_open_application_v1",
+        "version": "stage2_grpo_open_application_v2",
         "policy_sample_domain": "tau_d",
         "policy_probability_domain": "tau_d",
         "reward_input_domain": "tau_d",
+        "advantage_baseline": (
+            "same-live-state deterministic frozen Stage 1 raw tau_d proxy reward"
+        ),
+        "advantage_normalization": (
+            "delta divided by per-group delta RMS plus epsilon; no mean centering"
+        ),
+        "accepted_group_condition": (
+            "raw reward span greater than 1e-6 and "
+            "max(reward-frozen_pretrain_reward) greater than "
+            "pretrain_improvement_margin"
+        ),
+        "rejected_group_side_effects": (
+            "no trajectory optimization, RuleMaker finalize, policy update, "
+            "accepted-budget progress, validation progress, or environment step"
+        ),
+        "exhausted_state_fallback": (
+            "optimize and execute the frozen-pretrain tau_d trajectory once"
+        ),
         "candidate_selection_domain": "tau_d",
         "execution_input_domain": "tau_cmd",
         "execution_transform": "KinematicTrajectoryOptimizer(selected_tau_d)",
@@ -317,7 +335,7 @@ def test_grpo_open_application_contract_freezes_tau_d_without_changing_reward() 
         "simulator_validation_role": "diagnostic_only",
     }
     assert GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 == (
-        "7498a5cb80388f7db3c6edfeb8108d3d38ea0415cb009e8c42929912c0a693b6"
+        "412d069690fa52745bcd8e1d0f019d1c50a6284305e6a5e719486c312d6b01a5"
     )
 
 

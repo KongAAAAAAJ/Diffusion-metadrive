@@ -15,7 +15,7 @@ from models.bev_planner.joint_grpo import (
     JointGRPOPolicyUpdateConfig,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
-    normalize_signed_advantages,
+    normalize_pretrain_relative_advantages,
 )
 from models.bev_planner.joint_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
@@ -29,7 +29,6 @@ from models.bev_planner.mode_contract import ModeIndex
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizer,
     KinematicTrajectoryOptimizerConfig,
-    TrajectoryOptimizationError,
 )
 from models.decisioner.rule_decisioner import (
     JointActionProposal,
@@ -48,6 +47,7 @@ from train.train_bev_joint_grpo_online import (
     _OnlineRuleCondition,
     _balanced_bucket_targets,
     _bucket_visit_is_complete,
+    _candidate_group_rejection_reason,
     _checkpoint_file_sha256,
     _config_from_yaml,
     _condition_online_model_inputs,
@@ -60,7 +60,7 @@ from train.train_bev_joint_grpo_online import (
     _new_online_rule_maker,
     _next_unfinished_bucket_index,
     _resume_best_checkpoint_anchor,
-    _reject_exhausted_uninformative_budget,
+    _attempt_budget_is_exhausted,
     _reset_cuda_peak_memory,
     _rollout_start_offset_upper_bound,
     _round_robin_training_buckets,
@@ -68,7 +68,7 @@ from train.train_bev_joint_grpo_online import (
     _sampler_state,
     _scenario_ready_for_primary_sampling,
     _scenario_sampling_window_closed_from_summary,
-    _score_select_and_optimize_raw_candidates,
+    _score_raw_candidates,
     _should_record_advantage_vector,
     _split_loss_metrics_by_step_axis,
     _validate_online_checkpoint_metadata,
@@ -141,10 +141,22 @@ def _binding() -> dict[str, object]:
         "trajectory_optimizer_sha256": optimizer_config.sha256(),
         "environment_steps": 1,
         "sampler_state": {
-            "sampled_rollouts": 1,
-            "uninformative_rollouts": 0,
+            "accepted_rollout_groups": 1,
+            "attempted_rollout_groups": 1,
+            "rejected_no_pretrain_improvement": 0,
+            "rejected_zero_reward_span": 0,
+            "pretrain_fallback_steps": 0,
+            "warmup_environment_steps": 0,
             "bucket_target_counts": [10] * 10,
-            "bucket_sample_counts": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "bucket_accepted_rollout_counts": [
+                1, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ],
+            "bucket_attempted_rollout_counts": [
+                1, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ],
+            "bucket_rejected_no_pretrain_improvement_counts": [0] * 10,
+            "bucket_rejected_zero_reward_span_counts": [0] * 10,
+            "bucket_pretrain_fallback_step_counts": [0] * 10,
             "bucket_optimizer_step_counts": [4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             "bucket_episode_counts": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             "next_bucket_index": 0,
@@ -175,6 +187,15 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
     )
     assert JointGRPOOnlineConfig().validation_interval_rollouts == 20
     assert JointGRPOOnlineConfig().advantage_vector_log_interval_rollouts == 20
+    assert JointGRPOOnlineConfig().pretrain_improvement_margin == pytest.approx(
+        1e-6
+    )
+    assert JointGRPOOnlineConfig().max_candidate_groups_per_state == 3
+    assert JointGRPOOnlineConfig().max_attempted_groups_multiplier == 3
+    with pytest.raises(OnlineGRPOError, match="pretrain_improvement_margin"):
+        JointGRPOOnlineConfig(pretrain_improvement_margin=-1.0)
+    with pytest.raises(OnlineGRPOError, match="positive integer"):
+        JointGRPOOnlineConfig(max_candidate_groups_per_state=0)
     with pytest.raises(OnlineGRPOError, match="complete ordered S5--S9"):
         JointGRPOOnlineConfig(
             scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),)
@@ -380,7 +401,10 @@ def test_online_config_loads_clipped_rollout_contract_from_yaml(
         "  rollout_start_offset_max_steps: 29\n"
         "  rollout_start_min_remaining_steps: 8\n"
         "  validation_interval_rollouts: 11\n"
-        "  advantage_vector_log_interval_rollouts: 37\n",
+        "  advantage_vector_log_interval_rollouts: 37\n"
+        "  pretrain_improvement_margin: 0.0002\n"
+        "  max_candidate_groups_per_state: 4\n"
+        "  max_attempted_groups_multiplier: 5\n",
         encoding="utf-8",
     )
 
@@ -399,6 +423,9 @@ def test_online_config_loads_clipped_rollout_contract_from_yaml(
     assert config.rollout_start_min_remaining_steps == 8
     assert config.validation_interval_rollouts == 11
     assert config.advantage_vector_log_interval_rollouts == 37
+    assert config.pretrain_improvement_margin == pytest.approx(2e-4)
+    assert config.max_candidate_groups_per_state == 4
+    assert config.max_attempted_groups_multiplier == 5
 
 
 def test_yaml_requires_run_mapping(tmp_path: Path) -> None:
@@ -782,7 +809,11 @@ def test_scheduled_uninformative_rollout_writes_diagnostic_advantage() -> None:
 
     writer = RecordingWriter()
     rewards = torch.full((1, 24), -1.0, dtype=torch.float32)
-    advantages = normalize_signed_advantages(rewards, group_size=24)
+    advantages = normalize_pretrain_relative_advantages(
+        rewards,
+        torch.full((1, 1), -1.0, dtype=torch.float32),
+        group_size=24,
+    )
 
     assert _write_advantage_vector_summary(
         writer,  # type: ignore[arg-type]
@@ -835,11 +866,19 @@ def test_sampler_state_round_trip_preserves_counters_and_generator_sequence() ->
     generator = torch.Generator().manual_seed(17)
     torch.randn((5,), generator=generator)
     state = _sampler_state(
-        sampled_rollouts=3,
-        uninformative_rollouts=1,
+        accepted_rollout_groups=3,
+        attempted_rollout_groups=5,
+        rejected_no_pretrain_improvement=1,
+        rejected_zero_reward_span=1,
+        pretrain_fallback_steps=0,
+        warmup_environment_steps=2,
         bucket_target_counts=[4, 4],
-        bucket_sample_counts=[2, 1],
-        bucket_optimizer_step_counts=[4, 4],
+        bucket_accepted_rollout_counts=[2, 1],
+        bucket_attempted_rollout_counts=[3, 2],
+        bucket_rejected_no_pretrain_improvement_counts=[1, 0],
+        bucket_rejected_zero_reward_span_counts=[0, 1],
+        bucket_pretrain_fallback_step_counts=[0, 0],
+        bucket_optimizer_step_counts=[8, 4],
         bucket_episode_counts=[1, 1],
         next_bucket_index=1,
         current_visit_progress=1,
@@ -847,7 +886,9 @@ def test_sampler_state_round_trip_preserves_counters_and_generator_sequence() ->
         last_validated_rollout=2,
         rollout_groups_per_bucket_visit=2,
         update_epochs=4,
-        optimizer_step=8,
+        optimizer_step=12,
+        environment_steps=5,
+        max_attempted_rollout_groups=24,
     )
 
     restored = _validate_sampler_state(
@@ -856,18 +897,23 @@ def test_sampler_state_round_trip_preserves_counters_and_generator_sequence() ->
         expected_bucket_target_counts=[4, 4],
         rollout_groups_per_bucket_visit=2,
         update_epochs=4,
-        optimizer_step=8,
+        optimizer_step=12,
+        environment_steps=5,
+        max_attempted_rollout_groups=24,
     )
     resumed_generator = torch.Generator()
     resumed_generator.set_state(restored["generator_state"])
 
-    assert restored["sampled_rollouts"] == 3
-    assert restored["uninformative_rollouts"] == 1
+    assert restored["accepted_rollout_groups"] == 3
+    assert restored["attempted_rollout_groups"] == 5
+    assert restored["rejected_no_pretrain_improvement"] == 1
+    assert restored["rejected_zero_reward_span"] == 1
     assert restored["next_bucket_index"] == 1
     assert restored["current_visit_progress"] == 1
     assert restored["last_validated_rollout"] == 2
-    assert restored["bucket_sample_counts"] == [2, 1]
-    assert restored["bucket_optimizer_step_counts"] == [4, 4]
+    assert restored["bucket_accepted_rollout_counts"] == [2, 1]
+    assert restored["bucket_attempted_rollout_counts"] == [3, 2]
+    assert restored["bucket_optimizer_step_counts"] == [8, 4]
     assert restored["bucket_target_counts"] == [4, 4]
     assert restored["bucket_episode_counts"] == [1, 1]
     torch.testing.assert_close(
@@ -876,26 +922,25 @@ def test_sampler_state_round_trip_preserves_counters_and_generator_sequence() ->
     )
 
 
-def test_exhausted_all_uninformative_budget_is_not_a_successful_run() -> None:
-    _reject_exhausted_uninformative_budget(
-        sampled_rollouts=3,
-        target_rollout_groups=4,
-        optimizer_step=0,
-        run_start_optimizer_step=0,
+def test_attempt_budget_only_exhausts_before_accepted_target() -> None:
+    assert not _attempt_budget_is_exhausted(
+        accepted_rollout_groups=3,
+        target_accepted_rollout_groups=4,
+        attempted_rollout_groups=11,
+        max_attempted_rollout_groups=12,
     )
-    _reject_exhausted_uninformative_budget(
-        sampled_rollouts=4,
-        target_rollout_groups=4,
-        optimizer_step=4,
-        run_start_optimizer_step=0,
+    assert _attempt_budget_is_exhausted(
+        accepted_rollout_groups=3,
+        target_accepted_rollout_groups=4,
+        attempted_rollout_groups=12,
+        max_attempted_rollout_groups=12,
     )
-    with pytest.raises(OnlineGRPOError, match="every fresh group was uninformative"):
-        _reject_exhausted_uninformative_budget(
-            sampled_rollouts=4,
-            target_rollout_groups=4,
-            optimizer_step=8,
-            run_start_optimizer_step=8,
-        )
+    assert not _attempt_budget_is_exhausted(
+        accepted_rollout_groups=4,
+        target_accepted_rollout_groups=4,
+        attempted_rollout_groups=12,
+        max_attempted_rollout_groups=12,
+    )
 
 
 @pytest.mark.parametrize(
@@ -904,10 +949,21 @@ def test_exhausted_all_uninformative_budget_is_not_a_successful_run() -> None:
         ("next_bucket_index", 0, "current visit progress"),
         ("current_visit_progress", 0, "current visit progress"),
         ("bucket_target_counts", [5, 3], "bucket targets"),
-        ("bucket_sample_counts", [1, 1], "bucket samples"),
+        ("bucket_accepted_rollout_counts", [1, 1], "bucket accepts"),
+        ("bucket_attempted_rollout_counts", [2, 2], "bucket attempts"),
+        (
+            "bucket_attempted_rollout_counts",
+            [2, 3],
+            "bucket attempt counters",
+        ),
         ("bucket_optimizer_step_counts", [4, 0], "bucket updates"),
+        (
+            "bucket_optimizer_step_counts",
+            [4, 8],
+            "bucket optimizer counters",
+        ),
         ("bucket_episode_counts", [1, 0], "bucket episodes"),
-        ("uninformative_rollouts", 2, "rollout and optimizer counters"),
+        ("attempted_rollout_groups", 6, "sampler counters"),
         ("generator_state", torch.zeros(2), "generator_state"),
     ],
 )
@@ -918,11 +974,19 @@ def test_sampler_state_rejects_counter_and_generator_drift(
 ) -> None:
     generator = torch.Generator().manual_seed(17)
     state: dict[str, object] = {
-        "sampled_rollouts": 3,
-        "uninformative_rollouts": 1,
+        "accepted_rollout_groups": 3,
+        "attempted_rollout_groups": 5,
+        "rejected_no_pretrain_improvement": 1,
+        "rejected_zero_reward_span": 1,
+        "pretrain_fallback_steps": 0,
+        "warmup_environment_steps": 2,
         "bucket_target_counts": [4, 4],
-        "bucket_sample_counts": [2, 1],
-        "bucket_optimizer_step_counts": [4, 4],
+        "bucket_accepted_rollout_counts": [2, 1],
+        "bucket_attempted_rollout_counts": [3, 2],
+        "bucket_rejected_no_pretrain_improvement_counts": [1, 0],
+        "bucket_rejected_zero_reward_span_counts": [0, 1],
+        "bucket_pretrain_fallback_step_counts": [0, 0],
+        "bucket_optimizer_step_counts": [8, 4],
         "bucket_episode_counts": [1, 1],
         "next_bucket_index": 1,
         "current_visit_progress": 1,
@@ -938,7 +1002,9 @@ def test_sampler_state_rejects_counter_and_generator_drift(
             expected_bucket_target_counts=[4, 4],
             rollout_groups_per_bucket_visit=2,
             update_epochs=4,
-            optimizer_step=8,
+            optimizer_step=12,
+            environment_steps=5,
+            max_attempted_rollout_groups=24,
         )
 
 
@@ -952,9 +1018,8 @@ def test_tracking_expansion_is_rejected_and_base_config_is_frozen() -> None:
         _validate_raw_reward_config(JointRewardConfig(gap_weight=1.0))
 
 
-def test_raw_proxy_receives_exact_tau_d_and_only_argmax_is_optimized() -> None:
+def test_raw_proxy_scoring_is_side_effect_free_and_returns_argmax() -> None:
     raw = np.arange(4 * 3 * 8 * 3, dtype=np.float32).reshape(4, 3, 8, 3)
-    modes = np.arange(12, dtype=np.int64).reshape(4, 3) % 10
     seen: dict[str, np.ndarray] = {}
 
     class Proxy:
@@ -965,41 +1030,20 @@ def test_raw_proxy_receives_exact_tau_d_and_only_argmax_is_optimized() -> None:
                 unsafe=np.zeros(4, dtype=np.bool_),
             )
 
-    class Optimizer:
-        def optimize(self, trajectories, coarse, speeds, selected_modes):
-            seen["optimizer"] = np.array(trajectories, copy=True)
-            seen["modes"] = np.array(selected_modes, copy=True)
-            return SimpleNamespace(
-                optimized_trajectories=np.asarray(trajectories) + 1000.0
-            )
-
-    values = SimpleNamespace(
-        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
-        ego_state=np.zeros((3, 8), dtype=np.float32),
-    )
-    proxy, selected, optimization = _score_select_and_optimize_raw_candidates(
+    proxy, selected = _score_raw_candidates(
         object(),
-        values,
+        object(),
         raw,
-        modes,
         proxy_backend=Proxy(),
-        trajectory_optimizer=Optimizer(),
     )
 
     assert np.array_equal(seen["proxy"], raw)
     assert selected == 1
-    assert np.array_equal(seen["optimizer"], raw[1:2])
-    assert np.array_equal(seen["modes"], modes[1:2])
-    assert np.array_equal(
-        optimization.optimized_trajectories[0], raw[1] + 1000.0
-    )
     assert proxy.rewards[selected] == 8.0
 
 
-def test_optimizer_failure_has_no_fallback_candidate() -> None:
+def test_rejected_candidate_scoring_never_invokes_optimizer() -> None:
     raw = np.zeros((4, 3, 8, 3), dtype=np.float32)
-    modes = np.zeros((4, 3), dtype=np.int64)
-    calls = []
 
     class Proxy:
         def score(self, env, model_inputs, trajectories):
@@ -1007,26 +1051,10 @@ def test_optimizer_failure_has_no_fallback_candidate() -> None:
                 rewards=np.asarray([0.0, 1.0, 9.0, 2.0], dtype=np.float32)
             )
 
-    class FailingOptimizer:
-        def optimize(self, trajectories, coarse, speeds, selected_modes):
-            calls.append(np.array(trajectories, copy=True))
-            raise TrajectoryOptimizationError("selected candidate failed")
-
-    values = SimpleNamespace(
-        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
-        ego_state=np.zeros((3, 8), dtype=np.float32),
+    _, selected = _score_raw_candidates(
+        object(), object(), raw, proxy_backend=Proxy()
     )
-    with pytest.raises(TrajectoryOptimizationError, match="selected candidate"):
-        _score_select_and_optimize_raw_candidates(
-            object(),
-            values,
-            raw,
-            modes,
-            proxy_backend=Proxy(),
-            trajectory_optimizer=FailingOptimizer(),
-        )
-    assert len(calls) == 1
-    assert np.array_equal(calls[0], raw[2:3])
+    assert selected == 2
 
 
 def test_best_checkpoint_objective_uses_only_raw_proxy_reward() -> None:
@@ -1149,18 +1177,18 @@ def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
             rollout_groups_per_bucket_visit=10,
             optimizer_step=4,
         )
-    legacy_v1 = {
+    legacy_v2 = {
         **_binding(),
         "rollout_collection_contract": {
             **collection,
-            "version": "stage2_joint_grpo_persistent_episode_v1",
+            "version": "stage2_joint_grpo_persistent_episode_v2",
         },
     }
     with pytest.raises(
         OnlineGRPOError, match="rollout_collection_contract mismatch"
     ):
         _validate_online_checkpoint_metadata(
-            legacy_v1,
+            legacy_v2,
             run_mode="smoke",
             reward_config=JointRewardConfig(),
             scenario_contract_sha=primary_scenario_contract()["sha256"],
@@ -1461,14 +1489,51 @@ def test_pretrain_raw_baseline_runs_once_before_resume(
 def test_constant_rewards_and_training_buckets_are_strict() -> None:
     assert not _joint_rewards_are_informative(
         np.asarray([-1.0, -1.0, -1.0, -1.0], dtype=np.float32),
+        pretrain_reward=-2.0,
         group_size=4,
+        improvement_margin=1e-6,
     )
     assert _joint_rewards_are_informative(
         np.asarray([-1.0, 0.0, -1.0, -1.0], dtype=np.float32),
+        pretrain_reward=-2.0,
         group_size=4,
+        improvement_margin=1e-6,
     )
+    assert _candidate_group_rejection_reason(
+        np.full(4, -1.0, dtype=np.float32),
+        pretrain_reward=0.0,
+        group_size=4,
+        improvement_margin=1e-6,
+    ) == "no_pretrain_improvement"
+    assert _candidate_group_rejection_reason(
+        np.full(4, 1.0, dtype=np.float32),
+        pretrain_reward=0.0,
+        group_size=4,
+        improvement_margin=1e-6,
+    ) == "zero_reward_span"
     buckets = _round_robin_training_buckets(PRIMARY_S5_S9_SCENARIOS, (17, 23))
     assert len(buckets) == len(set(buckets)) == 10
+
+
+@pytest.mark.parametrize(
+    ("rewards", "expected_reason"),
+    [
+        ((-2.0, -1.0, -3.0, -4.0), "no_pretrain_improvement"),
+        ((-1.0, 0.0, 1e-6, -2.0), "no_pretrain_improvement"),
+        ((-1.0, 0.0, 2e-6, -2.0), None),
+        ((1.0, 1.0, 1.0, 1.0), "zero_reward_span"),
+    ],
+)
+def test_pretrain_relative_candidate_gate_boundaries(
+    rewards: tuple[float, ...], expected_reason: str | None
+) -> None:
+    reason = _candidate_group_rejection_reason(
+        np.asarray(rewards, dtype=np.float32),
+        pretrain_reward=0.0,
+        group_size=4,
+        improvement_margin=1e-6,
+    )
+    assert reason == expected_reason
 
 
 def test_persistent_collection_contract_and_balanced_bucket_targets() -> None:
@@ -1481,9 +1546,19 @@ def test_persistent_collection_contract_and_balanced_bucket_targets() -> None:
     contract = rollout_collection_contract(config)
 
     assert ROLLOUT_COLLECTION_CONTRACT_VERSION == (
-        "stage2_joint_grpo_persistent_episode_v2"
+        "stage2_joint_grpo_persistent_episode_v3"
     )
     assert contract["version"] == ROLLOUT_COLLECTION_CONTRACT_VERSION
+    assert contract["budget_unit"] == (
+        "accepted_pretrain_improving_rollout_group"
+    )
+    assert contract["attempt_budget_unit"] == "candidate_group_attempt"
+    assert contract["pretrain_inference_per_live_state"] == 1
+    assert contract["advantage_normalization"] == (
+        "pretrain_delta_rms_without_group_centering"
+    )
+    assert contract["max_candidate_groups_per_state"] == 3
+    assert contract["max_attempted_groups_multiplier"] == 3
     assert contract["rollout_groups_per_bucket_visit"] == 7
     assert contract["environment_steps_per_episode"] == 200
     assert contract["rollout_start_offset_max_steps"] == 200
@@ -1655,11 +1730,15 @@ def _run_fake_persistent_collection(
     force_start_offset_to_upper: bool = False,
     window_close_steps_by_episode: tuple[int | None, ...] = (),
     single_training_bucket: bool = False,
-    first_rollout_informative: bool = False,
+    first_rollout_informative: bool = True,
     environment_steps_per_episode: int = 50,
     history_ready_step: int = 1,
     external_envs: list[object] | None = None,
-    resume_sampled_rollouts: int = 0,
+    resume_accepted_rollouts: int = 0,
+    attempt_reward_sequence: tuple[tuple[float, ...], ...] = (),
+    max_candidate_groups_per_state: int = 3,
+    max_attempted_groups_multiplier: int = 3,
+    expect_attempt_budget_error: bool = False,
 ) -> tuple[dict[str, object], list[object], list[int], object]:
     group_size = 3
     update_epochs = 2
@@ -1757,6 +1836,7 @@ def _run_fake_persistent_collection(
             return self.captures >= history_ready_step + 1
 
         def build_model_inputs(self, env):
+            trainer.build_calls += 1
             fields = {
                 "mode_valid_mask": np.ones((3, 10), dtype=np.bool_),
                 "coarse_trajectories": np.zeros(
@@ -1783,12 +1863,19 @@ def _run_fake_persistent_collection(
         def propose_joint_actions(
             self, env, agent_ids, planner_batch, *, hard_valid_modes_by_action
         ):
+            trainer.proposal_calls += 1
             return RuleMakerProposalBatch(batch_id=1, proposals=(proposal,))
 
     class ScalarLoss:
+        def __init__(self, epoch_in_rollout: int) -> None:
+            self.epoch_in_rollout = epoch_in_rollout
+
         def scalar_metrics(self):
+            epoch = float(self.epoch_in_rollout)
             return {
-                "loss/total": 1.0,
+                "loss/total": epoch,
+                "loss/reference_kl": epoch / 10.0,
+                "policy/mode_ratio_mean": 1.0 + epoch / 10.0,
                 "advantage/mean": 0.0,
             }
 
@@ -1807,12 +1894,17 @@ def _run_fake_persistent_collection(
             self.frozen_infer_calls = 0
             self.frozen_score_calls: list[tuple[int, int, float]] = []
             self.update_calls = 0
+            self.update_pretrain_rewards: list[torch.Tensor] = []
             self.policy_updates: list[JointGRPOPolicyUpdateConfig] = []
             self.sample_environment_steps: list[tuple[int, int]] = []
             self.start_offset_calls: list[
                 tuple[int, int | None, int, int]
             ] = []
             self.warmup_calls_by_episode: list[int] = []
+            self.optimization_calls: list[np.ndarray] = []
+            self.finalize_calls = 0
+            self.build_calls = 0
+            self.proposal_calls = 0
 
         def sample_groups(self, batch, *, generator):
             torch.randn((1,), generator=generator)
@@ -1835,7 +1927,7 @@ def _run_fake_persistent_collection(
         def infer_frozen_pretrain(self, rollout):
             self.frozen_infer_calls += 1
             active_env = envs[-1]
-            value = float(active_env.step_calls + 1)
+            value = -2.0
             return {
                 "selected_trajectory": torch.full(
                     (1, 3, 8, 3), value, dtype=torch.float32
@@ -1845,11 +1937,15 @@ def _run_fake_persistent_collection(
                 ),
             }
 
-        def update(self, rollout, rewards, *, policy_update):
+        def update(
+            self, rollout, rewards, pretrain_rewards, *, policy_update
+        ):
             self.update_calls += 1
+            self.update_pretrain_rewards.append(pretrain_rewards.clone())
             self.policy_updates.append(policy_update)
-            advantages = normalize_signed_advantages(
+            advantages = normalize_pretrain_relative_advantages(
                 rewards,
+                pretrain_rewards,
                 group_size=group_size,
                 eps=self.config.advantage_eps,
             ).detach()
@@ -1862,7 +1958,7 @@ def _run_fake_persistent_collection(
                         epoch_in_rollout=epoch_index + 1,
                         total_gradient_norm=1.0,
                         gradient_norms={},
-                        loss=ScalarLoss(),
+                        loss=ScalarLoss(epoch_index + 1),
                     )
                 )
             return SimpleNamespace(
@@ -1921,11 +2017,11 @@ def _run_fake_persistent_collection(
         }
 
     def fixed_validation(planner, **kwargs):
-        validation_rollouts.append(trainer.sample_calls)
+        validation_rollouts.append(trainer.update_calls)
         return (
             {
                 "validation/raw_proxy_reward_mean": float(
-                    trainer.sample_calls
+                    trainer.update_calls
                 )
             },
             (),
@@ -1935,19 +2031,26 @@ def _run_fake_persistent_collection(
         env,
         values,
         raw_candidates,
-        sampled_modes,
         **kwargs,
     ):
-        rewards = (
-            np.zeros(group_size, dtype=np.float32)
-            if trainer.sample_calls == 1 and not first_rollout_informative
-            else np.asarray([-1.0, 0.0, 1.0], dtype=np.float32)
-        )
+        if trainer.sample_calls <= len(attempt_reward_sequence):
+            rewards = np.asarray(
+                attempt_reward_sequence[trainer.sample_calls - 1],
+                dtype=np.float32,
+            )
+        elif trainer.sample_calls == 1 and not first_rollout_informative:
+            rewards = np.zeros(group_size, dtype=np.float32)
+        else:
+            rewards = np.asarray([-1.0, 0.0, 1.0], dtype=np.float32)
         proxy = SimpleNamespace(
             rewards=rewards,
             unsafe=np.zeros(group_size, dtype=np.bool_),
         )
-        optimization = SimpleNamespace(
+        return proxy, int(np.argmax(rewards))
+
+    def optimize(values, raw_candidates, sampled_modes, *, optimizer):
+        trainer.optimization_calls.append(np.array(raw_candidates, copy=True))
+        return SimpleNamespace(
             optimized_trajectories=np.zeros(
                 (1, 3, 8, 3), dtype=np.float32
             ),
@@ -1958,9 +2061,9 @@ def _run_fake_persistent_collection(
             retained_raw_fraction=np.ones((1, 3), dtype=np.float32),
             optimized_valid=np.ones((1, 3), dtype=np.bool_),
         )
-        return proxy, 0, optimization
 
     def finalize(rule_maker, condition, **kwargs):
+        trainer.finalize_calls += 1
         return (
             kwargs["optimization"],
             {
@@ -2008,6 +2111,10 @@ def _run_fake_persistent_collection(
             ],
             update_epochs=kwargs["policy_update"].update_epochs,
             optimizer_step=kwargs["optimizer_step"],
+            environment_steps=payload["environment_steps"],
+            max_attempted_rollout_groups=kwargs[
+                "max_attempted_rollout_groups"
+            ],
         )
 
     plot_names = (
@@ -2064,8 +2171,12 @@ def _run_fake_persistent_collection(
         lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._score_select_and_optimize_raw_candidates",
+        "train.train_bev_joint_grpo_online._score_raw_candidates",
         score_candidates,
+    )
+    monkeypatch.setattr(
+        "train.train_bev_joint_grpo_online.optimize_selected_model_trajectories",
+        optimize,
     )
     monkeypatch.setattr(
         "train.train_bev_joint_grpo_online._finalize_online_rule_action",
@@ -2098,7 +2209,7 @@ def _run_fake_persistent_collection(
 
     resume_checkpoint = (
         tmp_path / "resume" / "last.pt"
-        if resume_sampled_rollouts
+        if resume_accepted_rollouts
         else None
     )
     online_config = JointGRPOOnlineConfig(
@@ -2112,6 +2223,8 @@ def _run_fake_persistent_collection(
         rollout_start_offset_max_steps=rollout_start_offset_max_steps,
         validation_interval_rollouts=validation_interval_rollouts,
         advantage_vector_log_interval_rollouts=max_rollout_groups,
+        max_candidate_groups_per_state=max_candidate_groups_per_state,
+        max_attempted_groups_multiplier=max_attempted_groups_multiplier,
     )
     training_config = JointGRPOTrainingConfig(
         variant="A",
@@ -2121,37 +2234,49 @@ def _run_fake_persistent_collection(
     )
     if resume_checkpoint is not None:
         assert single_training_bucket
-        assert 0 < resume_sampled_rollouts < max_rollout_groups
+        assert 0 < resume_accepted_rollouts < max_rollout_groups
         resume_checkpoint.parent.mkdir(parents=True)
-        optimizer_step = resume_sampled_rollouts * update_epochs
+        optimizer_step = resume_accepted_rollouts * update_epochs
         resume_payload = {
             "metrics": {"validation/raw_proxy_reward_mean": 1.0},
             "optimizer_step": optimizer_step,
-            "environment_steps": resume_sampled_rollouts + 1,
+            "environment_steps": resume_accepted_rollouts + 1,
             "best_validation_reward": 1.0,
             "best_checkpoint_sha256": None,
             "rollout_collection_contract": rollout_collection_contract(
                 online_config
             ),
             "sampler_state": _sampler_state(
-                sampled_rollouts=resume_sampled_rollouts,
-                uninformative_rollouts=0,
+                accepted_rollout_groups=resume_accepted_rollouts,
+                attempted_rollout_groups=resume_accepted_rollouts,
+                rejected_no_pretrain_improvement=0,
+                rejected_zero_reward_span=0,
+                pretrain_fallback_steps=0,
+                warmup_environment_steps=1,
                 bucket_target_counts=[max_rollout_groups],
-                bucket_sample_counts=[resume_sampled_rollouts],
+                bucket_accepted_rollout_counts=[resume_accepted_rollouts],
+                bucket_attempted_rollout_counts=[resume_accepted_rollouts],
+                bucket_rejected_no_pretrain_improvement_counts=[0],
+                bucket_rejected_zero_reward_span_counts=[0],
+                bucket_pretrain_fallback_step_counts=[0],
                 bucket_optimizer_step_counts=[optimizer_step],
                 bucket_episode_counts=[1],
                 next_bucket_index=0,
                 current_visit_progress=(
-                    resume_sampled_rollouts
+                    resume_accepted_rollouts
                     % rollout_groups_per_bucket_visit
                 ),
                 generator_state=torch.Generator().manual_seed(17).get_state(),
-                last_validated_rollout=resume_sampled_rollouts,
+                last_validated_rollout=resume_accepted_rollouts,
                 rollout_groups_per_bucket_visit=(
                     rollout_groups_per_bucket_visit
                 ),
                 update_epochs=update_epochs,
                 optimizer_step=optimizer_step,
+                environment_steps=resume_accepted_rollouts + 1,
+                max_attempted_rollout_groups=(
+                    max_attempted_groups_multiplier * max_rollout_groups
+                ),
             ),
         }
         torch.save(resume_payload, resume_checkpoint)
@@ -2163,14 +2288,22 @@ def _run_fake_persistent_collection(
         )
     run_dir = tmp_path / "run_1"
     run_dir.mkdir(parents=True)
-    report = run_joint_grpo_training(
-        training_config,
-        run_dir=run_dir,
-    )
+    if expect_attempt_budget_error:
+        with pytest.raises(
+            OnlineGRPOError,
+            match="exhausted max_attempted_rollout_groups",
+        ):
+            run_joint_grpo_training(training_config, run_dir=run_dir)
+        report = json.loads((run_dir / "report.json").read_text())
+    else:
+        report = run_joint_grpo_training(
+            training_config,
+            run_dir=run_dir,
+        )
     return report, envs, validation_rollouts, trainer
 
 
-def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
+def test_main_loop_retries_same_state_without_rejected_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     report, envs, validation_rollouts, trainer = (
@@ -2179,14 +2312,31 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
             monkeypatch,
             validation_interval_rollouts=21,
             terminal_after_environment_steps=None,
+            first_rollout_informative=False,
         )
     )
 
-    assert report["format"] == "bev_joint_grpo_online_report_v6"
-    assert report["sampled_rollouts"] == 21
-    assert report["uninformative_rollouts"] == 1
-    assert report["optimizer_steps"] == 40
-    assert trainer.update_calls == 20
+    assert report["format"] == "bev_joint_grpo_online_report_v8"
+    assert report["training_status"] == "complete"
+    assert report["accepted_rollout_groups"] == 21
+    assert report["attempted_rollout_groups"] == 22
+    assert report["rejected_candidate_groups"] == 1
+    assert report["rejected_zero_reward_span"] == 1
+    assert report["pretrain_fallback_steps"] == 0
+    assert report["optimizer_steps"] == 42
+    assert report["attempted_rollout_groups"] == (
+        report["accepted_rollout_groups"]
+        + report["rejected_candidate_groups"]
+    )
+    assert report["optimizer_steps"] == (
+        report["accepted_rollout_groups"] * 2
+    )
+    assert report["environment_steps"] == (
+        report["warmup_environment_steps"]
+        + report["accepted_rollout_groups"]
+        + report["pretrain_fallback_steps"]
+    )
+    assert trainer.update_calls == 21
     assert all(update.update_epochs == 2 for update in trainer.policy_updates)
     assert len(envs) == report["environment_episode_count"] == 10
     assert envs[0].step_calls == 4  # one warm-up plus three fresh groups
@@ -2198,8 +2348,13 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     assert validation_rollouts == [0, 21]
     assert trainer.frozen_infer_calls == 21
     assert len(trainer.frozen_score_calls) == 21
-    assert [call[:2] for call in trainer.frozen_score_calls] == (
-        trainer.sample_environment_steps
+    assert trainer.sample_environment_steps[:2] == [(0, 1), (0, 1)]
+    assert trainer.frozen_score_calls[0][:2] == (0, 1)
+    assert len(trainer.optimization_calls) == 21
+    assert trainer.finalize_calls == 21
+    assert all(
+        value.item() == pytest.approx(-2.0)
+        for value in trainer.update_pretrain_rewards
     )
     assert all(
         np.count_nonzero(trajectory) == 0
@@ -2208,21 +2363,24 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
         for trajectory in action.values()
     )
     counters = report["training_bucket_counters"]
-    assert [item["target_rollouts"] for item in counters] == [3] + [2] * 9
-    assert [item["sampled_rollouts"] for item in counters] == [3] + [2] * 9
+    assert [item["target_accepted_rollouts"] for item in counters] == (
+        [3] + [2] * 9
+    )
+    assert [item["accepted_rollouts"] for item in counters] == [3] + [2] * 9
+    assert [item["attempted_rollouts"] for item in counters] == [4] + [2] * 9
     assert report["rollout_collection_contract"]["version"] == (
         ROLLOUT_COLLECTION_CONTRACT_VERSION
     )
     run_dir = Path(report["last_checkpoint"]).parent.parent
     frozen_config = json.loads((run_dir / "config.json").read_text())
-    assert frozen_config["format"] == "bev_joint_grpo_online_config_v6"
+    assert frozen_config["format"] == "bev_joint_grpo_online_config_v8"
     assert frozen_config["rollout_collection_contract"] == report[
         "rollout_collection_contract"
     ]
     expected_logging_metadata = {
         "tensorboard_tag": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
         "metrics_jsonl_field": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
-        "step_axis": "absolute_fresh_rollout_group",
+        "step_axis": "absolute_accepted_rollout_group",
         "same_live_state_as_current_exploration": True,
         "trajectory_count": 1,
         "trajectory_selection": "valid_mode_masked_argmax",
@@ -2232,8 +2390,8 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
         "inference_noise_timestep": 8,
         "inference_denoise_steps": 2,
         "fixed_inference_noise": True,
-        "diagnostic_only": True,
-        "affects_training_or_environment_action": False,
+        "diagnostic_only": False,
+        "affects_training_or_environment_action": True,
     }
     assert frozen_config["frozen_pretrain_reward_logging"] == (
         expected_logging_metadata
@@ -2244,8 +2402,14 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
         "raw_proxy_reward_max",
         FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
     ]
+    assert report["training_plots"]["optimizer_x_axis"] == (
+        "absolute_accepted_rollout_group"
+    )
     assert trainer.plot_call_kwargs == [
-        {"require_frozen_pretrain_reward": True}
+        {
+            "require_frozen_pretrain_reward": True,
+            "rollout_axis_label": "Accepted rollout group",
+        }
     ]
     checkpoint = torch.load(
         report["last_checkpoint"], map_location="cpu", weights_only=False
@@ -2258,7 +2422,8 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     )
     sampler = checkpoint["sampler_state"]
     assert sampler["bucket_target_counts"] == [3] + [2] * 9
-    assert sampler["bucket_sample_counts"] == [3] + [2] * 9
+    assert sampler["bucket_accepted_rollout_counts"] == [3] + [2] * 9
+    assert sampler["bucket_attempted_rollout_counts"] == [4] + [2] * 9
     assert sampler["bucket_episode_counts"] == [1] * 10
     assert sampler["current_visit_progress"] == 0
     assert sampler["next_bucket_index"] == 0
@@ -2303,10 +2468,26 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     optimizer_events = [
         record for record in records if record["event"] == "optimizer_epoch"
     ]
+    attempt_events = [
+        record
+        for record in records
+        if record["event"] == "dynamic_sampling_attempt"
+    ]
     assert len(rollout_events) == 21
-    assert [event["sampled_rollouts"] for event in rollout_events] == list(
+    assert len(optimizer_events) == 42
+    assert [event["optimizer_step"] for event in optimizer_events] == list(
+        range(1, 43)
+    )
+    assert [
+        event["accepted_rollout_groups"] for event in rollout_events
+    ] == list(
         range(1, 22)
     )
+    assert len(attempt_events) == 22
+    assert attempt_events[0]["accepted"] is False
+    assert attempt_events[0]["rejection_reason"] == "zero_reward_span"
+    assert attempt_events[1]["accepted"] is True
+    assert [event["retry_index"] for event in attempt_events[:2]] == [1, 2]
     assert all(
         np.isfinite(event[FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG])
         for event in rollout_events
@@ -2322,6 +2503,221 @@ def test_main_loop_reuses_live_env_for_three_groups_and_steps_uninformative(
     ]
     assert [step for _, step in frozen_tb] == list(range(1, 22))
     assert all(np.isfinite(value) for value, _ in frozen_tb)
+    for tag, expected_mean in (
+        ("loss/total", 1.5),
+        ("loss/reference_kl", 0.15),
+        ("policy/mode_ratio_mean", 1.15),
+    ):
+        accepted_group_scalars = [
+            (value, step)
+            for scalar_tag, value, step in trainer.writer_scalars
+            if scalar_tag == tag
+        ]
+        assert [step for _, step in accepted_group_scalars] == list(
+            range(1, 22)
+        )
+        assert [value for value, _ in accepted_group_scalars] == pytest.approx(
+            [expected_mean] * 21
+        )
+
+
+def test_dynamic_sampling_rejects_two_groups_then_accepts_third(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report, envs, _, trainer = _run_fake_persistent_collection(
+        tmp_path,
+        monkeypatch,
+        validation_interval_rollouts=1,
+        terminal_after_environment_steps=None,
+        max_rollout_groups=1,
+        rollout_groups_per_bucket_visit=1,
+        single_training_bucket=True,
+        attempt_reward_sequence=(
+            (-3.0, -3.0, -3.0),
+            (0.0, 0.0, 0.0),
+            (-3.0, -2.0, 0.0),
+        ),
+    )
+
+    assert trainer.sample_calls == 3
+    assert trainer.frozen_infer_calls == 1
+    assert trainer.build_calls == 1
+    assert trainer.proposal_calls == 1
+    assert trainer.update_calls == 1
+    assert trainer.finalize_calls == 1
+    assert len(trainer.optimization_calls) == 1
+    assert len(envs) == 1
+    assert envs[0].step_calls == 2  # one warm-up plus one accepted action
+    assert report["accepted_rollout_groups"] == 1
+    assert report["attempted_rollout_groups"] == 3
+    assert report["rejected_no_pretrain_improvement"] == 1
+    assert report["rejected_zero_reward_span"] == 1
+    assert report["pretrain_fallback_steps"] == 0
+    records = [
+        json.loads(line)
+        for line in (
+            Path(report["last_checkpoint"]).parent.parent / "metrics.jsonl"
+        ).read_text().splitlines()
+    ]
+    attempts = [
+        record
+        for record in records
+        if record["event"] == "dynamic_sampling_attempt"
+    ]
+    assert [record["rejection_reason"] for record in attempts] == [
+        "no_pretrain_improvement",
+        "zero_reward_span",
+        None,
+    ]
+    assert [record["retry_index"] for record in attempts] == [1, 2, 3]
+
+
+def test_three_rejected_groups_execute_one_pretrain_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report, envs, _, trainer = _run_fake_persistent_collection(
+        tmp_path,
+        monkeypatch,
+        validation_interval_rollouts=1,
+        terminal_after_environment_steps=None,
+        max_rollout_groups=1,
+        rollout_groups_per_bucket_visit=1,
+        single_training_bucket=True,
+        max_attempted_groups_multiplier=6,
+        attempt_reward_sequence=(
+            (-3.0, -3.0, -3.0),
+            (-4.0, -3.0, -2.0),
+            (-5.0, -4.0, -3.0),
+            (-3.0, -2.0, 0.0),
+        ),
+    )
+
+    assert trainer.sample_calls == 4
+    assert trainer.frozen_infer_calls == 2
+    assert trainer.build_calls == 2
+    assert trainer.proposal_calls == 2
+    assert trainer.update_calls == 1
+    assert trainer.finalize_calls == 2
+    assert len(trainer.optimization_calls) == 2
+    assert len(envs) == 1
+    assert envs[0].step_calls == 3  # warm-up, fallback, accepted action
+    assert report["accepted_rollout_groups"] == 1
+    assert report["attempted_rollout_groups"] == 4
+    assert report["rejected_no_pretrain_improvement"] == 3
+    assert report["pretrain_fallback_steps"] == 1
+    records = [
+        json.loads(line)
+        for line in (
+            Path(report["last_checkpoint"]).parent.parent / "metrics.jsonl"
+        ).read_text().splitlines()
+    ]
+    assert sum(
+        record["event"] == "pretrain_fallback" for record in records
+    ) == 1
+
+
+def test_global_attempt_cap_saves_incomplete_checkpoint_and_bucket_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rejected = (-3.0, -3.0, -3.0)
+    report, envs, _, trainer = _run_fake_persistent_collection(
+        tmp_path,
+        monkeypatch,
+        validation_interval_rollouts=1,
+        terminal_after_environment_steps=None,
+        max_rollout_groups=2,
+        rollout_groups_per_bucket_visit=1,
+        single_training_bucket=True,
+        attempt_reward_sequence=(rejected,) * 6,
+        expect_attempt_budget_error=True,
+    )
+
+    assert report["training_status"] == "incomplete_attempt_budget_exhausted"
+    assert report["accepted_rollout_groups"] == 0
+    assert report["attempted_rollout_groups"] == 6
+    assert report["max_attempted_rollout_groups"] == 6
+    assert report["rejected_candidate_groups"] == 6
+    assert report["pretrain_fallback_steps"] == 2
+    assert report["environment_steps"] == 3
+    assert report["warmup_environment_steps"] == 1
+    assert report["cuda_peak_memory_bytes"] is None
+    assert report["attempted_rollout_groups"] == (
+        report["accepted_rollout_groups"]
+        + report["rejected_candidate_groups"]
+    )
+    assert report["environment_steps"] == (
+        report["warmup_environment_steps"]
+        + report["accepted_rollout_groups"]
+        + report["pretrain_fallback_steps"]
+    )
+    assert trainer.update_calls == 0
+    assert trainer.finalize_calls == 2
+    assert len(trainer.optimization_calls) == 2
+    assert len(envs) == 1 and envs[0].closed
+    assert envs[0].step_calls == 3
+    bucket = report["training_bucket_counters"][0]
+    assert bucket["accepted_rollouts"] == 0
+    assert bucket["attempted_rollouts"] == 6
+    assert bucket["rejected_candidate_groups"] == 6
+    assert bucket["pretrain_fallback_steps"] == 2
+    checkpoint = torch.load(
+        report["last_checkpoint"], map_location="cpu", weights_only=False
+    )
+    assert checkpoint["training_status"] == (
+        "incomplete_attempt_budget_exhausted"
+    )
+    assert checkpoint["sampler_state"]["attempted_rollout_groups"] == 6
+
+
+def test_attempt_cap_on_accepted_visit_boundary_saves_canonical_sampler_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rejected = (-3.0, -3.0, -3.0)
+    report, envs, validation_rollouts, trainer = (
+        _run_fake_persistent_collection(
+            tmp_path,
+            monkeypatch,
+            validation_interval_rollouts=1,
+            terminal_after_environment_steps=None,
+            max_rollout_groups=2,
+            rollout_groups_per_bucket_visit=1,
+            single_training_bucket=True,
+            attempt_reward_sequence=(
+                rejected,
+                rejected,
+                rejected,
+                rejected,
+                rejected,
+                (-3.0, -2.0, 0.0),
+            ),
+            expect_attempt_budget_error=True,
+        )
+    )
+
+    assert report["training_status"] == "incomplete_attempt_budget_exhausted"
+    assert report["accepted_rollout_groups"] == 1
+    assert report["attempted_rollout_groups"] == 6
+    assert report["rejected_candidate_groups"] == 5
+    assert report["pretrain_fallback_steps"] == 1
+    assert report["optimizer_steps"] == 2
+    assert report["environment_steps"] == 3
+    assert validation_rollouts == [0]
+    assert trainer.sample_calls == 6
+    assert trainer.update_calls == 1
+    assert trainer.finalize_calls == 2
+    assert len(trainer.optimization_calls) == 2
+    assert len(envs) == 1 and envs[0].step_calls == 3 and envs[0].closed
+    checkpoint = torch.load(
+        report["last_checkpoint"], map_location="cpu", weights_only=False
+    )
+    sampler = checkpoint["sampler_state"]
+    assert sampler["accepted_rollout_groups"] == 1
+    assert sampler["attempted_rollout_groups"] == 6
+    assert sampler["bucket_accepted_rollout_counts"] == [1]
+    assert sampler["bucket_attempted_rollout_counts"] == [6]
+    assert sampler["bucket_optimizer_step_counts"] == [2]
+    assert sampler["current_visit_progress"] == 0
+    assert sampler["next_bucket_index"] == 0
 
 
 def test_frozen_pretrain_reward_resume_uses_absolute_rollout_step(
@@ -2336,11 +2732,11 @@ def test_frozen_pretrain_reward_resume_uses_absolute_rollout_step(
         rollout_groups_per_bucket_visit=3,
         single_training_bucket=True,
         first_rollout_informative=True,
-        resume_sampled_rollouts=2,
+        resume_accepted_rollouts=2,
     )
 
-    assert report["sampled_rollouts"] == 3
-    assert report["sampled_rollouts_this_run"] == 1
+    assert report["accepted_rollout_groups"] == 3
+    assert report["accepted_rollout_groups_this_run"] == 1
     assert report["optimizer_steps"] == 6
     assert report["optimizer_steps_this_run"] == 2
     run_dir = Path(report["last_checkpoint"]).parent.parent
@@ -2350,7 +2746,7 @@ def test_frozen_pretrain_reward_resume_uses_absolute_rollout_step(
         if json.loads(line)["event"] == "rollout"
     ]
     assert len(rollout_events) == 1
-    assert rollout_events[0]["sampled_rollouts"] == 3.0
+    assert rollout_events[0]["accepted_rollout_groups"] == 3.0
     assert np.isfinite(
         rollout_events[0][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG]
     )
@@ -2390,8 +2786,8 @@ def test_random_start_hits_exact_target_then_collects_ten_consecutive_groups(
     assert envs[0].summary_calls == 13
     assert trainer.warmup_calls_by_episode == [4]
     assert trainer.sample_calls == 10
-    assert trainer.update_calls == 9  # first group is intentionally uninformative
-    assert report["sampled_rollouts"] == 10
+    assert trainer.update_calls == 10
+    assert report["accepted_rollout_groups"] == 10
     assert report["environment_steps"] == 14
     assert report["warmup_environment_steps"] == 4
 
@@ -2501,7 +2897,7 @@ def test_late_random_targets_tighten_and_three_rejections_are_not_empty_errors(
     ]
     assert len(envs) == 4
     assert trainer.sample_environment_steps == [(3, 1)]
-    assert report["sampled_rollouts"] == 1
+    assert report["accepted_rollout_groups"] == 1
     assert report["rollout_start_diagnostics_this_run"] == {
         "attempt_count": 4,
         "accepted_count": 1,
@@ -2541,7 +2937,7 @@ def test_window_close_mid_segment_keeps_partial_visit_and_never_warms_again(
     assert trainer.sample_environment_steps == [(0, 1), (1, 1), (1, 2)]
     assert trainer.warmup_calls_by_episode == [1, 1]
     assert [env.step_calls for env in envs] == [2, 3]
-    assert report["sampled_rollouts"] == 3
+    assert report["accepted_rollout_groups"] == 3
     assert report["training_bucket_counters"][0]["environment_episodes"] == 2
     assert trainer.start_offset_calls == [
         (1, None, 0, 0),
@@ -2585,8 +2981,18 @@ def test_online_informative_reward_detection_follows_group_size(
     informative = constant.copy()
     informative[-1] = 0.0
 
-    assert not _joint_rewards_are_informative(constant, group_size=group_size)
-    assert _joint_rewards_are_informative(informative, group_size=group_size)
+    assert not _joint_rewards_are_informative(
+        constant,
+        pretrain_reward=-2.0,
+        group_size=group_size,
+        improvement_margin=1e-6,
+    )
+    assert _joint_rewards_are_informative(
+        informative,
+        pretrain_reward=-2.0,
+        group_size=group_size,
+        improvement_margin=1e-6,
+    )
 
 
 def test_scenario_routes_and_primary_sampling_contract() -> None:
