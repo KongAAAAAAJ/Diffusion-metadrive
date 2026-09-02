@@ -6,7 +6,7 @@ absolute or relative to the manifest):
 .. code-block:: json
 
    {
-     "format": "stage2_grpo_stability_ab_manifest_v3",
+     "format": "stage2_grpo_stability_ab_manifest_v4",
      "source_stage1_sha256": "<64 lowercase hex characters>",
      "paired_seeds": [17, 23, 42],
      "baseline_update_epochs": 1,
@@ -14,7 +14,7 @@ absolute or relative to the manifest):
      "group_size": 24,
      "total_rollout_groups": 100,
      "validation_interval_rollouts": 20,
-     "optimizer_contract_version": "stage2_joint_grpo_optimizer_v3",
+     "optimizer_contract_version": "stage2_joint_grpo_optimizer_v4",
      "application_contract_version": "stage2_grpo_open_application_v2",
      "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v3",
      "rollout_groups_per_bucket_visit": 10,
@@ -23,7 +23,8 @@ absolute or relative to the manifest):
      "pretrain_improvement_margin": 1e-6,
      "max_candidate_groups_per_state": 3,
      "max_attempted_groups_multiplier": 3,
-     "clip_epsilon": 0.2,
+     "clip_epsilon_low": 0.1,
+     "clip_epsilon_high": 0.3,
      "scenario_seeds": [17, 23],
      "validation_seeds": [31, 47],
      "runs": [
@@ -38,7 +39,7 @@ absolute or relative to the manifest):
 
 ``runs`` must contain exactly one baseline and one clipped entry for each of
 the three paired seeds (six entries total). The command validates each run's
-v8 config/report, exact pretrain-relative dynamic-sampling collection contract, the
+v9 config/report, exact pretrain-relative dynamic-sampling collection contract, the
 complete frozen ``JointGRPOConfig``, and the ``validation/reward_gain``
 TensorBoard series, then writes ``report.json`` and
 ``validation_reward_gain_ab.png``. Results remain diagnostic-only and do not
@@ -76,14 +77,14 @@ from models.bev_planner.joint_reward import (
 )
 
 
-MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v3"
-REPORT_FORMAT = "stage2_grpo_stability_ab_report_v3"
-ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v8"
-ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v8"
+MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v4"
+REPORT_FORMAT = "stage2_grpo_stability_ab_report_v4"
+ONLINE_CONFIG_FORMAT = "bev_joint_grpo_online_config_v9"
+ONLINE_REPORT_FORMAT = "bev_joint_grpo_online_report_v9"
 APPLICATION_CONTRACT_VERSION = str(
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT["version"]
 )
-OPTIMIZER_CONTRACT_VERSION = "stage2_joint_grpo_optimizer_v3"
+OPTIMIZER_CONTRACT_VERSION = "stage2_joint_grpo_optimizer_v4"
 VALIDATION_REWARD_GAIN_TAG = "validation/reward_gain"
 PAIRED_SEEDS = (17, 23, 42)
 ARM_UPDATE_EPOCHS = {"baseline": 1, "clipped": 4}
@@ -98,7 +99,8 @@ MAX_CANDIDATE_GROUPS_PER_STATE = 3
 MAX_ATTEMPTED_GROUPS_MULTIPLIER = 3
 ACCEPTED_ROLLOUT_AXIS = "absolute_accepted_rollout_group"
 MINIMUM_REWARD_SPAN = 1e-6
-CLIP_EPSILON = 0.2
+CLIP_EPSILON_LOW = 0.1
+CLIP_EPSILON_HIGH = 0.3
 SCENARIO_SEEDS = (17, 23)
 VALIDATION_SEEDS = (31, 47)
 SCENARIOS = (
@@ -406,7 +408,8 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
             "pretrain_improvement_margin",
             "max_candidate_groups_per_state",
             "max_attempted_groups_multiplier",
-            "clip_epsilon",
+            "clip_epsilon_low",
+            "clip_epsilon_high",
             "scenario_seeds",
             "validation_seeds",
             "runs",
@@ -434,7 +437,8 @@ def _validate_manifest(path: Path) -> tuple[str, tuple[Mapping[str, object], ...
         "pretrain_improvement_margin": PRETRAIN_IMPROVEMENT_MARGIN,
         "max_candidate_groups_per_state": MAX_CANDIDATE_GROUPS_PER_STATE,
         "max_attempted_groups_multiplier": MAX_ATTEMPTED_GROUPS_MULTIPLIER,
-        "clip_epsilon": CLIP_EPSILON,
+        "clip_epsilon_low": CLIP_EPSILON_LOW,
+        "clip_epsilon_high": CLIP_EPSILON_HIGH,
         "scenario_seeds": list(SCENARIO_SEEDS),
         "validation_seeds": list(VALIDATION_SEEDS),
     }
@@ -529,7 +533,8 @@ def _run_binding(config: Mapping[str, object]) -> dict[str, object]:
         ),
         "group_size": online.get("group_size"),
         "total_rollout_groups": online.get("total_rollout_groups"),
-        "clip_epsilon": online.get("clip_epsilon"),
+        "clip_epsilon_low": online.get("clip_epsilon_low"),
+        "clip_epsilon_high": online.get("clip_epsilon_high"),
         "validation_interval_rollouts": online.get(
             "validation_interval_rollouts"
         ),
@@ -811,7 +816,8 @@ def _load_run(
         "group_size": GROUP_SIZE,
         "total_rollout_groups": TOTAL_ROLLOUT_GROUPS,
         "update_epochs": ARM_UPDATE_EPOCHS[arm],
-        "clip_epsilon": CLIP_EPSILON,
+        "clip_epsilon_low": CLIP_EPSILON_LOW,
+        "clip_epsilon_high": CLIP_EPSILON_HIGH,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
         "rollout_groups_per_bucket_visit": ROLLOUT_GROUPS_PER_BUCKET_VISIT,
         "rollout_start_offset_max_steps": ROLLOUT_START_OFFSET_MAX_STEPS,
@@ -864,7 +870,8 @@ def _load_run(
             )
     expected_policy_update = JointGRPOPolicyUpdateConfig(
         update_epochs=ARM_UPDATE_EPOCHS[arm],
-        clip_epsilon=CLIP_EPSILON,
+        clip_epsilon_low=CLIP_EPSILON_LOW,
+        clip_epsilon_high=CLIP_EPSILON_HIGH,
     )
     expected_optimizer_contract = joint_grpo_optimizer_contract(
         expected_policy_update
@@ -1236,7 +1243,8 @@ def compare_grpo_stability(manifest_path: Path, output_dir: Path) -> dict[str, o
         "max_attempted_groups_multiplier": MAX_ATTEMPTED_GROUPS_MULTIPLIER,
         "baseline_update_epochs": ARM_UPDATE_EPOCHS["baseline"],
         "clipped_update_epochs": ARM_UPDATE_EPOCHS["clipped"],
-        "clip_epsilon": CLIP_EPSILON,
+        "clip_epsilon_low": CLIP_EPSILON_LOW,
+        "clip_epsilon_high": CLIP_EPSILON_HIGH,
         "pairs": pairs,
         "summary": {
             "volatility_reduced_pair_count": volatility_reduced_count,

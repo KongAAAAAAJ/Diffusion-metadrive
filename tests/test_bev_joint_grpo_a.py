@@ -266,11 +266,13 @@ def test_pretrain_relative_advantages_scale_for_formal_group_sizes(
 def test_policy_update_config_contract_and_sha() -> None:
     policy_update = JointGRPOPolicyUpdateConfig()
     assert policy_update.update_epochs == 4
-    assert policy_update.clip_epsilon == 0.2
+    assert policy_update.clip_epsilon_low == 0.1
+    assert policy_update.clip_epsilon_high == 0.3
     contract = joint_grpo_optimizer_contract(policy_update)
-    assert contract["version"] == "stage2_joint_grpo_optimizer_v3"
+    assert contract["version"] == "stage2_joint_grpo_optimizer_v4"
     assert contract["update_epochs"] == 4
-    assert contract["clip_epsilon"] == 0.2
+    assert contract["clip_epsilon_low"] == 0.1
+    assert contract["clip_epsilon_high"] == 0.3
     assert contract["mode_ratio_factorization"].endswith("[B,G]")
     assert contract["trajectory_ratio_factorization"].endswith("[B,G,S]")
     assert "no group-mean centering" in contract["advantage_normalization"]
@@ -287,8 +289,10 @@ def test_policy_update_config_contract_and_sha() -> None:
                 update_epochs=invalid_epochs,  # type: ignore[arg-type]
             )
     for invalid_epsilon in (0.0, 1.0, -0.1, float("inf"), float("nan")):
-        with pytest.raises(JointGRPOError, match="clip_epsilon"):
-            JointGRPOPolicyUpdateConfig(clip_epsilon=invalid_epsilon)
+        with pytest.raises(JointGRPOError, match="clip_epsilon_low"):
+            JointGRPOPolicyUpdateConfig(clip_epsilon_low=invalid_epsilon)
+        with pytest.raises(JointGRPOError, match="clip_epsilon_high"):
+            JointGRPOPolicyUpdateConfig(clip_epsilon_high=invalid_epsilon)
 
 
 def test_clipped_grpo_surrogate_positive_negative_advantages() -> None:
@@ -304,10 +308,11 @@ def test_clipped_grpo_surrogate_positive_negative_advantages() -> None:
     loss = _clipped_grpo_surrogate(
         ratios,
         advantages,
-        clip_epsilon=0.2,
+        clip_epsilon_low=0.1,
+        clip_epsilon_high=0.3,
     )
     expected_terms = torch.tensor(
-        [[0.5, -0.8, 1.0, 1.2, -1.5]],
+        [[0.5, -0.9, 1.0, 1.3, -1.5]],
         dtype=torch.float32,
     )
     torch.testing.assert_close(loss, -expected_terms.mean())
@@ -331,11 +336,12 @@ def test_clipped_grpo_surrogate_positive_negative_advantages() -> None:
     trajectory_loss = _clipped_grpo_surrogate(
         trajectory_ratios,
         trajectory_advantages,
-        clip_epsilon=0.2,
+        clip_epsilon_low=0.1,
+        clip_epsilon_high=0.3,
     )
     manual = -torch.minimum(
         trajectory_ratios * trajectory_advantages,
-        trajectory_ratios.clamp(0.8, 1.2) * trajectory_advantages,
+        trajectory_ratios.clamp(0.9, 1.3) * trajectory_advantages,
     ).mean()
     torch.testing.assert_close(trajectory_loss, manual)
 
@@ -788,7 +794,8 @@ def test_multi_epoch_update_reuses_frozen_rollout_and_advantage() -> None:
             pretrain_rewards,
             policy_update=JointGRPOPolicyUpdateConfig(
                 update_epochs=2,
-                clip_epsilon=0.2,
+                clip_epsilon_low=0.1,
+                clip_epsilon_high=0.3,
             ),
         )
 
@@ -924,7 +931,7 @@ def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:
     assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 2
     assert payload["format"] == GRPO_CHECKPOINT_FORMAT
     assert payload["optimizer_contract_version"] == (
-        "stage2_joint_grpo_optimizer_v3"
+        "stage2_joint_grpo_optimizer_v4"
     )
     assert payload["diagnostic_only"] is True
     assert payload["eligible_for_formal_training"] is False
@@ -947,6 +954,21 @@ def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:
         frozen_after["selected_mode"],
         frozen_before["selected_mode"],
     )
+
+    symmetric_clip_checkpoint = copy.deepcopy(payload)
+    symmetric_clip_checkpoint["optimizer_contract_version"] = (
+        "stage2_joint_grpo_optimizer_v3"
+    )
+    symmetric_clip_path = save_grpo_checkpoint(
+        tmp_path / "symmetric_clip_v3.pt",
+        symmetric_clip_checkpoint,
+    )
+    with pytest.raises(JointGRPOError, match="optimizer_contract_version"):
+        load_grpo_checkpoint(
+            symmetric_clip_path,
+            JointGRPOTrainerA(_planner()),
+            expected_source_stage1_sha256="a" * 64,
+        )
 
     legacy_checkpoint = copy.deepcopy(payload)
     legacy_checkpoint["schema_version"] = LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION

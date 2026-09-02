@@ -40,7 +40,8 @@ def _run_config(arm: str, seed: int) -> dict[str, object]:
     update_epochs = comparison.ARM_UPDATE_EPOCHS[arm]
     policy_update = JointGRPOPolicyUpdateConfig(
         update_epochs=update_epochs,
-        clip_epsilon=comparison.CLIP_EPSILON,
+        clip_epsilon_low=comparison.CLIP_EPSILON_LOW,
+        clip_epsilon_high=comparison.CLIP_EPSILON_HIGH,
     )
     return {
         "format": comparison.ONLINE_CONFIG_FORMAT,
@@ -69,7 +70,8 @@ def _run_config(arm: str, seed: int) -> dict[str, object]:
             "group_size": comparison.GROUP_SIZE,
             "total_rollout_groups": comparison.TOTAL_ROLLOUT_GROUPS,
             "update_epochs": update_epochs,
-            "clip_epsilon": comparison.CLIP_EPSILON,
+            "clip_epsilon_low": comparison.CLIP_EPSILON_LOW,
+            "clip_epsilon_high": comparison.CLIP_EPSILON_HIGH,
             "resume_checkpoint": None,
             "scenarios": [
                 ["S5_hard_brake_lead", "R1_entry_straight"],
@@ -114,7 +116,8 @@ def _run_report(
     update_epochs = comparison.ARM_UPDATE_EPOCHS[arm]
     policy_update = JointGRPOPolicyUpdateConfig(
         update_epochs=update_epochs,
-        clip_epsilon=comparison.CLIP_EPSILON,
+        clip_epsilon_low=comparison.CLIP_EPSILON_LOW,
+        clip_epsilon_high=comparison.CLIP_EPSILON_HIGH,
     )
     optimizer_steps = comparison.TOTAL_ROLLOUT_GROUPS * update_epochs
     bucket_counters = []
@@ -308,7 +311,8 @@ def _write_manifest(
         "max_attempted_groups_multiplier": (
             comparison.MAX_ATTEMPTED_GROUPS_MULTIPLIER
         ),
-        "clip_epsilon": comparison.CLIP_EPSILON,
+        "clip_epsilon_low": comparison.CLIP_EPSILON_LOW,
+        "clip_epsilon_high": comparison.CLIP_EPSILON_HIGH,
         "scenario_seeds": list(comparison.SCENARIO_SEEDS),
         "validation_seeds": list(comparison.VALIDATION_SEEDS),
         "runs": runs,

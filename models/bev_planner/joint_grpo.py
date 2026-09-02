@@ -100,7 +100,8 @@ class JointGRPOPolicyUpdateConfig:
     """PPO-style update semantics applied to one frozen joint rollout."""
 
     update_epochs: int = 4
-    clip_epsilon: float = 0.2
+    clip_epsilon_low: float = 0.1
+    clip_epsilon_high: float = 0.3
 
     def __post_init__(self) -> None:
         if (
@@ -109,13 +110,14 @@ class JointGRPOPolicyUpdateConfig:
             or self.update_epochs < 1
         ):
             raise JointGRPOError("update_epochs must be a positive integer")
-        clip_epsilon = float(self.clip_epsilon)
-        if (
-            not math.isfinite(clip_epsilon)
-            or clip_epsilon <= 0.0
-            or clip_epsilon >= 1.0
-        ):
-            raise JointGRPOError("clip_epsilon must be finite and in (0,1)")
+        for name in ("clip_epsilon_low", "clip_epsilon_high"):
+            clip_epsilon = float(getattr(self, name))
+            if (
+                not math.isfinite(clip_epsilon)
+                or clip_epsilon <= 0.0
+                or clip_epsilon >= 1.0
+            ):
+                raise JointGRPOError(f"{name} must be finite and in (0,1)")
 
 
 def joint_grpo_optimizer_contract(
@@ -125,13 +127,14 @@ def joint_grpo_optimizer_contract(
 
     policy_update = config if config is not None else JointGRPOPolicyUpdateConfig()
     return {
-        "version": "stage2_joint_grpo_optimizer_v3",
+        "version": "stage2_joint_grpo_optimizer_v4",
         "behavior_policy_snapshot": (
             "detached sampled mode and stochastic DDIM-transition log "
             "probabilities captured before any policy update"
         ),
         "update_epochs": int(policy_update.update_epochs),
-        "clip_epsilon": float(policy_update.clip_epsilon),
+        "clip_epsilon_low": float(policy_update.clip_epsilon_low),
+        "clip_epsilon_high": float(policy_update.clip_epsilon_high),
         "mode_ratio_factorization": (
             "one ratio per joint sampled mode group entry [B,G]"
         ),
@@ -140,7 +143,7 @@ def joint_grpo_optimizer_contract(
         ),
         "clipped_surrogate": (
             "negative mean of min(ratio*advantage, "
-            "clip(ratio,1-epsilon,1+epsilon)*advantage)"
+            "clip(ratio,1-epsilon_low,1+epsilon_high)*advantage)"
         ),
         "advantage_baseline": (
             "same-live-state deterministic frozen Stage 1 raw tau_d proxy "
@@ -546,14 +549,15 @@ def _clipped_grpo_surrogate(
     importance_ratio: Tensor,
     advantages: Tensor,
     *,
-    clip_epsilon: float,
+    clip_epsilon_low: float,
+    clip_epsilon_high: float,
 ) -> Tensor:
     """Return the negative PPO clipped surrogate for aligned components."""
 
     unclipped = importance_ratio * advantages
     clipped = importance_ratio.clamp(
-        1.0 - float(clip_epsilon),
-        1.0 + float(clip_epsilon),
+        1.0 - float(clip_epsilon_low),
+        1.0 + float(clip_epsilon_high),
     ) * advantages
     return -torch.minimum(unclipped, clipped).mean()
 
@@ -562,12 +566,13 @@ def _importance_ratio_diagnostics(
     log_ratio: Tensor,
     importance_ratio: Tensor,
     *,
-    clip_epsilon: float,
+    clip_epsilon_low: float,
+    clip_epsilon_high: float,
 ) -> tuple[Tensor, Tensor, Tensor]:
     detached_log_ratio = log_ratio.detach()
     detached_ratio = importance_ratio.detach()
-    low = (detached_ratio < 1.0 - float(clip_epsilon)).float().mean()
-    high = (detached_ratio > 1.0 + float(clip_epsilon)).float().mean()
+    low = (detached_ratio < 1.0 - float(clip_epsilon_low)).float().mean()
+    high = (detached_ratio > 1.0 + float(clip_epsilon_high)).float().mean()
     approximate_kl = (
         detached_ratio - 1.0 - detached_log_ratio
     ).mean().clamp_min(0.0)
@@ -1070,11 +1075,13 @@ class _JointGRPOTrainerBase:
         rewards: Tensor,
         pretrain_rewards: Tensor,
         *,
-        clip_epsilon: float = 0.2,
+        clip_epsilon_low: float = 0.1,
+        clip_epsilon_high: float = 0.3,
     ) -> JointGRPOLossResult:
         policy_update = JointGRPOPolicyUpdateConfig(
             update_epochs=1,
-            clip_epsilon=clip_epsilon,
+            clip_epsilon_low=clip_epsilon_low,
+            clip_epsilon_high=clip_epsilon_high,
         )
         advantages = normalize_pretrain_relative_advantages(
             rewards,
@@ -1085,7 +1092,8 @@ class _JointGRPOTrainerBase:
         return self._compute_loss_from_advantages(
             rollout,
             advantages,
-            clip_epsilon=policy_update.clip_epsilon,
+            clip_epsilon_low=policy_update.clip_epsilon_low,
+            clip_epsilon_high=policy_update.clip_epsilon_high,
         )
 
     def _compute_loss_from_advantages(
@@ -1093,7 +1101,8 @@ class _JointGRPOTrainerBase:
         rollout: JointGRPORollout,
         advantages: Tensor,
         *,
-        clip_epsilon: float,
+        clip_epsilon_low: float,
+        clip_epsilon_high: float,
     ) -> JointGRPOLossResult:
         if tuple(advantages.shape) != (
             rollout.batch_size,
@@ -1224,12 +1233,14 @@ class _JointGRPOTrainerBase:
         mode_pg = _clipped_grpo_surrogate(
             mode_ratio,
             advantages,
-            clip_epsilon=clip_epsilon,
+            clip_epsilon_low=clip_epsilon_low,
+            clip_epsilon_high=clip_epsilon_high,
         )
         trajectory_pg = _clipped_grpo_surrogate(
             trajectory_ratio,
             advantages.unsqueeze(-1).expand_as(trajectory_ratio),
-            clip_epsilon=clip_epsilon,
+            clip_epsilon_low=clip_epsilon_low,
+            clip_epsilon_high=clip_epsilon_high,
         )
         (
             mode_clip_fraction_low,
@@ -1238,7 +1249,8 @@ class _JointGRPOTrainerBase:
         ) = _importance_ratio_diagnostics(
             mode_log_ratio,
             mode_ratio,
-            clip_epsilon=clip_epsilon,
+            clip_epsilon_low=clip_epsilon_low,
+            clip_epsilon_high=clip_epsilon_high,
         )
         (
             trajectory_clip_fraction_low,
@@ -1247,7 +1259,8 @@ class _JointGRPOTrainerBase:
         ) = _importance_ratio_diagnostics(
             trajectory_log_ratio,
             trajectory_ratio,
-            clip_epsilon=clip_epsilon,
+            clip_epsilon_low=clip_epsilon_low,
+            clip_epsilon_high=clip_epsilon_high,
         )
 
         current_selected = _gather_modes(final_current_candidates, modes)
@@ -1370,7 +1383,8 @@ class _JointGRPOTrainerBase:
         first_loss = self._compute_loss_from_advantages(
             rollout,
             advantages,
-            clip_epsilon=update_config.clip_epsilon,
+            clip_epsilon_low=update_config.clip_epsilon_low,
+            clip_epsilon_high=update_config.clip_epsilon_high,
         )
         # Register consumption before the first optimizer mutation.  A failed
         # later epoch must never make a partially-updated rollout reusable.
@@ -1389,7 +1403,8 @@ class _JointGRPOTrainerBase:
                 loss = self._compute_loss_from_advantages(
                     rollout,
                     advantages,
-                    clip_epsilon=update_config.clip_epsilon,
+                    clip_epsilon_low=update_config.clip_epsilon_low,
+                    clip_epsilon_high=update_config.clip_epsilon_high,
                 )
             loss.total.backward()
             gradient_norms = {

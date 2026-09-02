@@ -129,7 +129,8 @@ class JointGRPOOnlineConfig:
     group_size: int = 24
     total_rollout_groups: int = 100
     update_epochs: int = 4
-    clip_epsilon: float = 0.2
+    clip_epsilon_low: float = 0.1
+    clip_epsilon_high: float = 0.3
     resume_checkpoint: Path | None = None
     scenarios: tuple[tuple[str, str], ...] = PRIMARY_S5_S9_SCENARIOS
     scenario_seeds: tuple[int, ...] = DEVELOPMENT_SEEDS
@@ -206,15 +207,17 @@ class JointGRPOOnlineConfig:
                 "environment_steps_per_episode must be greater than or equal "
                 "to rollout_start_min_remaining_steps"
             )
-        if (
-            isinstance(self.clip_epsilon, bool)
-            or not isinstance(self.clip_epsilon, (int, float))
-            or not math.isfinite(float(self.clip_epsilon))
-            or not 0.0 < float(self.clip_epsilon) < 1.0
-        ):
-            raise OnlineGRPOError(
-                "clip_epsilon must be a finite scalar strictly between 0 and 1"
-            )
+        for name in ("clip_epsilon_low", "clip_epsilon_high"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 < float(value) < 1.0
+            ):
+                raise OnlineGRPOError(
+                    f"{name} must be a finite scalar strictly between 0 and 1"
+                )
         if (
             isinstance(self.pretrain_improvement_margin, bool)
             or not isinstance(
@@ -1389,7 +1392,8 @@ def _policy_update_config(
 ) -> JointGRPOPolicyUpdateConfig:
     return JointGRPOPolicyUpdateConfig(
         update_epochs=config.update_epochs,
-        clip_epsilon=float(config.clip_epsilon),
+        clip_epsilon_low=float(config.clip_epsilon_low),
+        clip_epsilon_high=float(config.clip_epsilon_high),
     )
 
 
@@ -2431,7 +2435,7 @@ def run_joint_grpo_training(
         else None
     )
     frozen = {
-        "format": "bev_joint_grpo_online_config_v8",
+        "format": "bev_joint_grpo_online_config_v9",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -3445,7 +3449,7 @@ def run_joint_grpo_training(
         )
         last_path = save_grpo_checkpoint(last_path, incomplete_checkpoint)
         incomplete_report = {
-            "format": "bev_joint_grpo_online_report_v8",
+            "format": "bev_joint_grpo_online_report_v9",
             "training_status": "incomplete_attempt_budget_exhausted",
             "variant": variant,
             "run_mode": run_mode,
@@ -3618,7 +3622,7 @@ def run_joint_grpo_training(
         )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v8",
+        "format": "bev_joint_grpo_online_report_v9",
         "training_status": "complete",
         "variant": variant,
         "run_mode": run_mode,
@@ -3830,11 +3834,12 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         "total_optimizer_steps",
         "validation_interval_steps",
         "advantage_vector_log_interval_steps",
+        "clip_epsilon",
     }
     present_legacy = sorted(legacy_fields.intersection(online))
     if present_legacy:
         raise OnlineGRPOError(
-            "online GRPO YAML contains legacy optimizer-step fields: "
+            "online GRPO YAML contains legacy fields: "
             + ", ".join(present_legacy)
         )
     scenarios = tuple(
@@ -3848,7 +3853,8 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         group_size=online.get("group_size", 24),
         total_rollout_groups=online.get("total_rollout_groups", 100),
         update_epochs=online.get("update_epochs", 4),
-        clip_epsilon=online.get("clip_epsilon", 0.2),
+        clip_epsilon_low=online.get("clip_epsilon_low", 0.1),
+        clip_epsilon_high=online.get("clip_epsilon_high", 0.3),
         resume_checkpoint=(
             Path(str(online["resume_checkpoint"]))
             if online.get("resume_checkpoint")

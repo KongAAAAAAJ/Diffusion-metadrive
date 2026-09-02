@@ -176,7 +176,8 @@ def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
     assert JointGRPOOnlineConfig(group_size=3).group_size == 3
     assert JointGRPOOnlineConfig(group_size=5).group_size == 5
     assert JointGRPOOnlineConfig().update_epochs == 4
-    assert JointGRPOOnlineConfig().clip_epsilon == pytest.approx(0.2)
+    assert JointGRPOOnlineConfig().clip_epsilon_low == pytest.approx(0.1)
+    assert JointGRPOOnlineConfig().clip_epsilon_high == pytest.approx(0.3)
     assert JointGRPOOnlineConfig().rollout_groups_per_bucket_visit == 10
     assert JointGRPOOnlineConfig().rollout_start_offset_max_steps == 200
     assert JointGRPOOnlineConfig().rollout_start_min_remaining_steps == 10
@@ -396,7 +397,8 @@ def test_online_config_loads_clipped_rollout_contract_from_yaml(
         "  group_size: 5\n"
         "  total_rollout_groups: 41\n"
         "  update_epochs: 3\n"
-        "  clip_epsilon: 0.15\n"
+        "  clip_epsilon_low: 0.15\n"
+        "  clip_epsilon_high: 0.25\n"
         "  rollout_groups_per_bucket_visit: 7\n"
         "  rollout_start_offset_max_steps: 29\n"
         "  rollout_start_min_remaining_steps: 8\n"
@@ -417,7 +419,8 @@ def test_online_config_loads_clipped_rollout_contract_from_yaml(
     assert config.group_size == 5
     assert config.total_rollout_groups == 41
     assert config.update_epochs == 3
-    assert config.clip_epsilon == pytest.approx(0.15)
+    assert config.clip_epsilon_low == pytest.approx(0.15)
+    assert config.clip_epsilon_high == pytest.approx(0.25)
     assert config.rollout_groups_per_bucket_visit == 7
     assert config.rollout_start_offset_max_steps == 29
     assert config.rollout_start_min_remaining_steps == 8
@@ -601,16 +604,16 @@ def test_online_config_rejects_start_reserve_smaller_than_visit_or_episode(
         )
 
 
+@pytest.mark.parametrize("field", ["clip_epsilon_low", "clip_epsilon_high"])
 @pytest.mark.parametrize(
     "invalid_clip_epsilon", [True, False, 0.0, 1.0, -0.1, float("nan")]
 )
 def test_online_config_rejects_invalid_clip_epsilon(
+    field: str,
     invalid_clip_epsilon: object,
 ) -> None:
-    with pytest.raises(OnlineGRPOError, match="clip_epsilon"):
-        JointGRPOOnlineConfig(
-            clip_epsilon=invalid_clip_epsilon  # type: ignore[arg-type]
-        )
+    with pytest.raises(OnlineGRPOError, match=field):
+        JointGRPOOnlineConfig(**{field: invalid_clip_epsilon})
 
 
 @pytest.mark.parametrize(
@@ -619,9 +622,10 @@ def test_online_config_rejects_invalid_clip_epsilon(
         "total_optimizer_steps",
         "validation_interval_steps",
         "advantage_vector_log_interval_steps",
+        "clip_epsilon",
     ],
 )
-def test_online_config_rejects_legacy_optimizer_step_fields(
+def test_online_config_rejects_legacy_fields(
     tmp_path: Path,
     legacy_field: str,
 ) -> None:
@@ -631,7 +635,7 @@ def test_online_config_rejects_legacy_optimizer_step_fields(
         encoding="utf-8",
     )
 
-    with pytest.raises(OnlineGRPOError, match="legacy optimizer-step fields"):
+    with pytest.raises(OnlineGRPOError, match="legacy fields"):
         _config_from_yaml(config_path)
 
 
@@ -1253,7 +1257,7 @@ def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
             reward_config=JointRewardConfig(),
             scenario_contract_sha=primary_scenario_contract()["sha256"],
             scenario_seeds=(17, 23),
-            policy_update=JointGRPOPolicyUpdateConfig(clip_epsilon=0.1),
+            policy_update=JointGRPOPolicyUpdateConfig(clip_epsilon_low=0.2),
             collection_contract=collection,
             bucket_count=10,
             bucket_target_counts=bucket_targets,
@@ -2316,7 +2320,7 @@ def test_main_loop_retries_same_state_without_rejected_side_effects(
         )
     )
 
-    assert report["format"] == "bev_joint_grpo_online_report_v8"
+    assert report["format"] == "bev_joint_grpo_online_report_v9"
     assert report["training_status"] == "complete"
     assert report["accepted_rollout_groups"] == 21
     assert report["attempted_rollout_groups"] == 22
@@ -2373,7 +2377,7 @@ def test_main_loop_retries_same_state_without_rejected_side_effects(
     )
     run_dir = Path(report["last_checkpoint"]).parent.parent
     frozen_config = json.loads((run_dir / "config.json").read_text())
-    assert frozen_config["format"] == "bev_joint_grpo_online_config_v8"
+    assert frozen_config["format"] == "bev_joint_grpo_online_config_v9"
     assert frozen_config["rollout_collection_contract"] == report[
         "rollout_collection_contract"
     ]

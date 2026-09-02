@@ -1,0 +1,62 @@
+{
+  "format": "stage2_grpo_asymmetric_clip_implementation_report_v1",
+  "recorded_at": "2026-09-02T20:26:00+08:00",
+  "status": "verified_complete",
+  "requested_change": "Replace symmetric GRPO ratio clipping with a lower epsilon of 0.1 and an upper epsilon of 0.3.",
+  "optimizer_semantics": {
+    "ratio_lower_bound": 0.9,
+    "ratio_upper_bound": 1.3,
+    "clip_epsilon_low": 0.1,
+    "clip_epsilon_high": 0.3,
+    "surrogate": "negative mean of min(ratio*advantage, clip(ratio,0.9,1.3)*advantage)",
+    "positive_advantage_boundary": "upper clipping at ratio 1.3",
+    "negative_advantage_boundary": "lower clipping at ratio 0.9"
+  },
+  "contract_versions": {
+    "optimizer": "stage2_joint_grpo_optimizer_v4",
+    "online_config": "bev_joint_grpo_online_config_v9",
+    "online_report": "bev_joint_grpo_online_report_v9",
+    "stability_manifest": "stage2_grpo_stability_ab_manifest_v4",
+    "stability_report": "stage2_grpo_stability_ab_report_v4",
+    "application_unchanged": "stage2_grpo_open_application_v2",
+    "collection_unchanged": "stage2_joint_grpo_persistent_episode_v3"
+  },
+  "optimizer_contract_sha256": {
+    "update_epochs_1": "e708c51f89b7a41e0ec00437586c42551fb0eaa4f7c801d12b331886e8bca706",
+    "update_epochs_4": "a419bdb6cadaa1b452c8e8ae677efe347517c2fb3e706c5dbff69b06dd161775",
+    "update_epochs_10": "2a9ea49af009162dd8fb8274e98144767c6d43a532de4bc67cb9afef1fdfa08f"
+  },
+  "configuration": {
+    "path": "configs/train/bev_joint_grpo.yaml",
+    "removed_field": "clip_epsilon",
+    "new_fields": {
+      "clip_epsilon_low": 0.1,
+      "clip_epsilon_high": 0.3
+    },
+    "legacy_single_clip_field_is_rejected": true
+  },
+  "checkpoint_policy": {
+    "old_optimizer_contract_resume_allowed": false,
+    "silent_migration_allowed": false,
+    "reason": "strict online checkpoint validation binds the complete optimizer contract and SHA"
+  },
+  "verification": {
+    "python_compile_passed": true,
+    "focused_tests_passed": 251,
+    "adjacent_tests_passed": 90,
+    "complete_grpo_regression_tests_passed": 397,
+    "warnings": 15,
+    "git_diff_check_passed_before_machine_state_update": true,
+    "cuda_smoke_repeated": false,
+    "cuda_smoke_reason": "The change affects only scalar ratio bounds; existing trainer update tests execute the loss and gradient path, while rollout shapes and memory behavior are unchanged.",
+    "long_training_started": false
+  },
+  "unchanged_boundaries": [
+    "pretrain-relative advantage normalization",
+    "same-state dynamic sampling and fallback behavior",
+    "raw tau_d reward and candidate selection",
+    "RuleMaker finalization and environment stepping",
+    "strict_stage1_v2_run3_qualification hard gate"
+  ],
+  "formal_experiment_status_changed": false
+}
