@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,16 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_checkout_has_no_partial_distribution_metadata() -> None:
+    broken_local_distributions = [
+        str(getattr(distribution, "_path", ""))
+        for distribution in importlib.metadata.distributions(path=[str(REPO_ROOT)])
+        if distribution.metadata is None
+    ]
+
+    assert broken_local_distributions == []
 
 
 def test_sensorless_collection_import_does_not_load_training_frameworks() -> None:

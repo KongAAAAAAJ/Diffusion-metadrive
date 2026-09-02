@@ -1,0 +1,58 @@
+{
+  "format": "stage2_grpo_cupy_import_metadata_fix_report_v1",
+  "recorded_at": "2026-09-02T09:42:41+08:00",
+  "repository_commit_at_implementation": "63d57d093ad0e8846dcef723b6461ba66ee262f0",
+  "failure": {
+    "entrypoint": "python -m train.train_bev_joint_grpo_online",
+    "exception": "AttributeError: 'NoneType' object has no attribute 'get'",
+    "exception_site": "cupy._environment._detect_duplicate_installation",
+    "training_started": false,
+    "root_cause_commit": "72be10d2d0d0475ea662317fc7a01c461077686d",
+    "root_cause": "The repository contained a partial generated metadrive_simulator.egg-info directory. PKG-INFO had been deleted while SOURCES.txt, dependency_links.txt, requires.txt, and top_level.txt remained, so importlib.metadata returned a distribution whose metadata was None. CuPy 13.6.0 assumes every enumerated distribution exposes mapping-like metadata."
+  },
+  "fix": {
+    "strategy": "Remove the partial generated egg-info directory and ignore that setup.py output as a whole.",
+    "removed_tracked_generated_files": [
+      "metadrive_simulator.egg-info/SOURCES.txt",
+      "metadrive_simulator.egg-info/dependency_links.txt",
+      "metadrive_simulator.egg-info/requires.txt",
+      "metadrive_simulator.egg-info/top_level.txt"
+    ],
+    "gitignore_entry": "metadrive_simulator.egg-info/",
+    "cupy_or_environment_package_modified": false,
+    "process_wide_metadata_monkeypatch_added": false,
+    "grpo_algorithm_modified": false,
+    "grpo_contracts_modified": false,
+    "user_yaml_modified_by_this_fix": false
+  },
+  "verification": {
+    "repository_local_distributions_with_missing_metadata": 0,
+    "cupy_import": {
+      "passed": true,
+      "version": "13.6.0"
+    },
+    "online_cli_help_import_chain": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m train.train_bev_joint_grpo_online --help",
+      "exit_status": 0,
+      "training_started": false
+    },
+    "import_and_launcher_tests": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_collection_import_boundary.py tests/test_run_bev_joint_grpo_launcher.py -q",
+      "passed": 20,
+      "failed": 0,
+      "warnings": 15
+    },
+    "online_grpo_tests": {
+      "command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest tests/test_bev_joint_grpo_online.py -q",
+      "passed": 128,
+      "failed": 0,
+      "warnings": 15
+    }
+  },
+  "execution_boundary": {
+    "long_training_started": false,
+    "formal_ab_started": false,
+    "active_hard_gate_unchanged": "strict_stage1_v2_run3_qualification",
+    "formal_or_paper_eligibility_changed": false
+  }
+}

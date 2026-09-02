@@ -20,5 +20,8 @@
 # Keep gitignore itself
 !.gitignore
 
+# setup.py output must never be kept partially; importlib treats it as a package.
+metadrive_simulator.egg-info/
+
 # Keep generated run artifacts out of Git at any directory depth
 outputs/
