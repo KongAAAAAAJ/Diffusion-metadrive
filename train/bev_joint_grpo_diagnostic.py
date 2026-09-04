@@ -50,6 +50,14 @@ def _snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
+def _decoder_shared_snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        name: value.detach().cpu().clone()
+        for name, value in module.state_dict().items()
+        if not name.startswith("trajectory_head.")
+    }
+
+
 def _max_delta(
     before: Mapping[str, torch.Tensor],
     after: Mapping[str, torch.Tensor],
@@ -81,6 +89,11 @@ def _model_inputs(
         "agent_role",
         "coarse_trajectories",
         "mode_valid_mask",
+        "background_actor_state",
+        "background_actor_valid_mask",
+        "scenario_code",
+        "rule_formation_state",
+        "rule_action_condition",
     )
     return {
         name: sample[name].unsqueeze(0).to(
@@ -147,6 +160,12 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
 
     before = {
         "diffusion_decoder": _snapshot(trainer.planner.diffusion_decoder),
+        "decoder_shared": _decoder_shared_snapshot(
+            trainer.planner.diffusion_decoder
+        ),
+        "trajectory_head": _snapshot(
+            trainer.planner.diffusion_decoder.trajectory_head
+        ),
         "mode_head": _snapshot(trainer.planner.mode_head),
         "backbone": _snapshot(trainer.planner.backbone),
         "bev_fusion": _snapshot(trainer.planner.bev_fusion),
@@ -174,25 +193,55 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
     )
     _synchronize(device)
     sample_ms = 1000.0 * (time.perf_counter() - sample_start)
-    rewards = torch.tensor(
-        [[-1.5, -0.5, 0.5, 1.5]],
+    trajectories = trainer.config.trajectories_per_mode
+    rewards = torch.linspace(
+        -1.5,
+        1.5,
+        trajectories,
         dtype=torch.float32,
         device=device,
+    ).reshape(1, 1, 1, trajectories).expand(1, 3, 10, -1).clone()
+    active_mode_mask = rollout.mode_valid_mask.clone()
+    if not bool(active_mode_mask.any()):
+        raise JointGRPOError("diagnostic sample contains no valid mode")
+    with torch.no_grad():
+        pre_update_loss = trainer.compute_loss(
+            rollout,
+            rewards,
+            active_mode_mask,
+        )
+    trajectory_replay_error = float(
+        (
+            pre_update_loss.new_trajectory_log_prob
+            - rollout.old_trajectory_log_prob
+        )
+        .abs()
+        .max()
+        .detach()
+        .cpu()
     )
-    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32, device=device)
+    if trajectory_replay_error > 2e-5:
+        raise JointGRPOError("fixed-chain trajectory log-prob replay exceeded tolerance")
     update_start = time.perf_counter()
-    update = trainer.update(rollout, rewards, pretrain_rewards)
+    update = trainer.update(rollout, rewards, active_mode_mask)
     _synchronize(device)
     update_ms = 1000.0 * (time.perf_counter() - update_start)
-    post_update_loss = trainer.compute_loss(
-        rollout,
-        rewards,
-        pretrain_rewards,
-    )
+    with torch.no_grad():
+        post_update_loss = trainer.compute_loss(
+            rollout,
+            rewards,
+            active_mode_mask,
+        )
     _synchronize(device)
 
     after = {
         "diffusion_decoder": _snapshot(trainer.planner.diffusion_decoder),
+        "decoder_shared": _decoder_shared_snapshot(
+            trainer.planner.diffusion_decoder
+        ),
+        "trajectory_head": _snapshot(
+            trainer.planner.diffusion_decoder.trajectory_head
+        ),
         "mode_head": _snapshot(trainer.planner.mode_head),
         "backbone": _snapshot(trainer.planner.backbone),
         "bev_fusion": _snapshot(trainer.planner.bev_fusion),
@@ -215,42 +264,26 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         for name in before
     }
     deltas["predecessor_residual_gate"] = gate_delta
-    if deltas["diffusion_decoder"] <= 0.0 or deltas["mode_head"] <= 0.0:
-        raise JointGRPOError("diagnostic trainable policy did not update")
-    for name in ("backbone", "bev_fusion", "context_encoder", "reference"):
+    if deltas["diffusion_decoder"] <= 0.0 or deltas["trajectory_head"] <= 0.0:
+        raise JointGRPOError("diagnostic trajectory head did not update")
+    for name in (
+        "decoder_shared",
+        "mode_head",
+        "backbone",
+        "bev_fusion",
+        "context_encoder",
+        "reference",
+    ):
         if deltas[name] != 0.0:
             raise JointGRPOError(f"frozen diagnostic module changed: {name}")
     if variant == "B" and (
-        deltas["predecessor_action_encoder"] <= 0.0
-        or deltas["predecessor_residual_gate"] <= 0.0
+        deltas["predecessor_action_encoder"] != 0.0
+        or deltas["predecessor_residual_gate"] != 0.0
     ):
-        raise JointGRPOError("Variant B condition modules did not update")
-
-    mode_replay_error = float(
-        (
-            update.loss.new_mode_log_prob - rollout.old_mode_log_prob
-        )
-        .abs()
-        .max()
-        .detach()
-        .cpu()
-    )
-    trajectory_replay_error = float(
-        (
-            update.loss.new_trajectory_log_prob
-            - rollout.old_trajectory_log_prob
-        )
-        .abs()
-        .max()
-        .detach()
-        .cpu()
-    )
-    if mode_replay_error > 2e-5 or trajectory_replay_error > 2e-5:
-        raise JointGRPOError("fixed-chain log-prob replay exceeded tolerance")
+        raise JointGRPOError("Variant B shared condition modules changed")
     metrics = update.loss.scalar_metrics()
     metrics.update(
         {
-            "replay/mode_log_prob_max_abs": mode_replay_error,
             "replay/trajectory_log_prob_max_abs": trajectory_replay_error,
             "post_update/reference_kl": float(
                 post_update_loss.reference_kl.detach().cpu()
@@ -258,6 +291,7 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
             "gradient/total_before_clip": update.total_gradient_norm,
             "timing/sample_groups_ms": sample_ms,
             "timing/update_ms": update_ms,
+            "zero_signal_epochs": float(update.zero_signal_epochs),
         }
     )
     metrics.update(
@@ -312,11 +346,7 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
 
     rollout_shapes = {
         "chains_normalized": list(rollout.chains_normalized.shape),
-        "sampled_modes": list(rollout.sampled_modes.shape),
-        "selected_trajectories": list(
-            rollout.selected_trajectories.shape
-        ),
-        "old_mode_log_prob": list(rollout.old_mode_log_prob.shape),
+        "candidate_trajectories": list(rollout.candidate_trajectories.shape),
         "old_trajectory_log_prob": list(
             rollout.old_trajectory_log_prob.shape
         ),
@@ -326,14 +356,14 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
             rollout.predecessor_action_history_normalized.shape
         )
     report: dict[str, object] = {
-        "format": f"bev_joint_grpo_{variant.lower()}_smoke_v1",
+        "format": f"bev_joint_grpo_{variant.lower()}_same_mode_smoke_v2",
         "variant": variant,
         "predecessor_condition": (
             "none" if variant == "A" else "predicted_detached"
         ),
         "diagnostic_only": True,
         "eligible_for_formal_training": False,
-        "reward_source": "external_ordered_signed_test_values",
+        "reward_source": "synthetic_per_vehicle_same_mode_ordered_values",
         "source_stage1_checkpoint": str(args.stage1_checkpoint.resolve()),
         "source_stage1_sha256": source_sha256,
         "source_dataset_fingerprint": source_payload["dataset_fingerprint"],
@@ -345,7 +375,7 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         "stochastic_timesteps": list(trainer.config.stochastic_timesteps),
         "rollout_shapes": rollout_shapes,
         "rewards": rewards.detach().cpu().tolist(),
-        "pretrain_rewards": pretrain_rewards.detach().cpu().tolist(),
+        "active_mode_mask": active_mode_mask.detach().cpu().tolist(),
         "advantages": update.loss.advantages.detach().cpu().tolist(),
         "metrics": metrics,
         "parameter_max_abs_delta": deltas,

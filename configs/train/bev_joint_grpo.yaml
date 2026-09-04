@@ -6,14 +6,13 @@ run:
 online:
   device: cuda
   seed: 17
-  group_size: 48  # 24 48 72
+  trajectories_per_mode: 48
   total_rollout_groups: 5000
-  update_epochs: 10  
-  clip_epsilon_low: 0.1  # 0.1  0.05  0.05
-  clip_epsilon_high: 0.2  # 0.2  0.1  0.2
-  pretrain_improvement_margin: 1.0e-6
-  max_candidate_groups_per_state: 3
-  max_attempted_groups_multiplier: 3
+  update_epochs: 10
+  clip_epsilon_low: 0.1
+  clip_epsilon_high: 0.2
+  max_sampling_attempts_per_state: 3
+  max_sampling_attempts_multiplier: 3
   resume_checkpoint: null
   environment_steps_per_episode: 200
   rollout_groups_per_bucket_visit: 10

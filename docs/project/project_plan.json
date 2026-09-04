@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-09-02T20:26:00+08:00",
-  "status": "stage2_asymmetric_clip_verified_short_ab_pending",
+  "updated_at": "2026-09-04T13:51:45+08:00",
+  "status": "stage2_per_vehicle_same_mode_grpo_implemented_stage1_gate_failed",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -559,7 +559,7 @@
   },
   "stage2_at_risk_grpo_open": {
     "name": "At-risk diagnostic GRPO-Open",
-    "status": "asymmetric_clip_verified_short_ab_pending",
+    "status": "per_vehicle_same_mode_grpo_implementation_in_progress",
     "authorization_recorded_on": "2026-08-30",
     "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
     "source_checkpoint_classification": "unqualified Stage1 v2 diagnostic source; bounded optimizer implementation smokes and the paired short A/B remain diagnostic-only and cannot bypass strict Stage1 qualification",
@@ -585,20 +585,20 @@
     "bounded_total_rollout_groups_required": true,
     "calibration_required": false,
     "tracking_expansion_enabled": false,
-    "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
-    "application_contract_version": "stage2_grpo_open_application_v2",
-    "application_contract_sha256": "412d069690fa52745bcd8e1d0f019d1c50a6284305e6a5e719486c312d6b01a5",
-    "optimizer_contract_version": "stage2_joint_grpo_optimizer_v4",
+    "best_checkpoint_metric": "validation/vehicle_reward_mean",
+    "application_contract_version": "stage2_grpo_open_application_v3",
+    "application_contract_sha256": "pending_implementation",
+    "optimizer_contract_version": "stage2_joint_grpo_optimizer_v5",
     "main_yaml_update_epochs": 10,
     "main_yaml_optimizer_contract_sha256": "2a9ea49af009162dd8fb8274e98144767c6d43a532de4bc67cb9afef1fdfa08f",
     "short_ab_clipped_update_epochs": 4,
     "short_ab_clipped_optimizer_contract_sha256": "a419bdb6cadaa1b452c8e8ae677efe347517c2fb3e706c5dbff69b06dd161775",
     "default_clip_epsilon_low": 0.1,
-    "default_clip_epsilon_high": 0.3,
-    "budget_unit": "accepted_pretrain_improving_rollout_group",
-    "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v3",
-    "online_config_format": "bev_joint_grpo_online_config_v9",
-    "online_report_format": "bev_joint_grpo_online_report_v9",
+    "default_clip_epsilon_high": 0.2,
+    "budget_unit": "accepted_update_state",
+    "rollout_collection_contract_version": "stage2_joint_grpo_persistent_episode_v4",
+    "online_config_format": "bev_joint_grpo_online_config_v10",
+    "online_report_format": "bev_joint_grpo_online_report_v10",
     "default_rollout_groups_per_bucket_visit": 10,
     "default_rollout_start_offset_max_steps": 200,
     "default_rollout_start_min_remaining_steps": 10,
@@ -764,11 +764,19 @@
           "short_ab_arm": false
         }
       },
-      "preservation_policy": "Preserve run_11 through run_17 and their current metadata unchanged; do not promote, backfill, resume, overwrite, or relabel them.",
-      "next_unoccupied_run_observed_at_reconciliation": "run_18"
+      "completed_or_failed_runs_18_through_23": {
+        "run_18": {"status": "complete", "target_accepted_rollout_groups": 500, "accepted_rollout_groups": 500, "optimizer_steps": 5000, "clip_bounds": [0.9, 1.2], "artifact_format": "v8"},
+        "run_19": {"status": "complete", "target_accepted_rollout_groups": 500, "accepted_rollout_groups": 500, "optimizer_steps": 5000, "clip_bounds": [0.9, 1.3], "artifact_format": "v9"},
+        "run_20": {"status": "complete", "target_accepted_rollout_groups": 500, "accepted_rollout_groups": 500, "optimizer_steps": 5000, "clip_bounds": [0.9, 1.2], "artifact_format": "v9"},
+        "run_21": {"status": "failed_historical", "target_accepted_rollout_groups": 5000, "accepted_rollout_groups": 3676, "optimizer_steps": 36760, "clip_bounds": [0.9, 1.2], "failure": "TrajectoryOptimizationError: calibrated execution contract rejected STOP", "report_present": false},
+        "run_22": {"status": "complete", "target_accepted_rollout_groups": 5000, "accepted_rollout_groups": 5000, "optimizer_steps": 50000, "clip_bounds": [0.95, 1.1], "artifact_format": "v9"},
+        "run_23": {"status": "complete", "target_accepted_rollout_groups": 5000, "accepted_rollout_groups": 5000, "optimizer_steps": 50000, "clip_bounds": [0.95, 1.2], "artifact_format": "v9"}
+      },
+      "preservation_policy": "Preserve run_11 through run_23 and their current metadata unchanged; do not promote, backfill, resume, overwrite, or relabel them.",
+      "next_unoccupied_run_observed_at_reconciliation": "run_24"
     },
     "short_stability_ab": {
-      "status": "pending_future_actual_path_manifest_not_started",
+      "status": "superseded_by_per_vehicle_same_mode_grpo",
       "manifest_format": "stage2_grpo_stability_ab_manifest_v4",
       "report_format": "stage2_grpo_stability_ab_report_v4",
       "paired_training_seeds": [
@@ -1208,6 +1216,111 @@
     "Do not restore v1 planner, Stage 1, or GRPO training/resume execution paths. Exact historical schema1/v1 GRPO checkpoints may be loaded only through the explicit planner-only read-only evaluation path.",
     "Do not resume run_16 or run_17 into the pretrain-relative v3/v8 contracts, and do not merge their experimental anchor or transition-noise semantics into the BEV implementation without a separate user-authorized revision."
   ],
+  "stage2_per_vehicle_same_mode_grpo": {
+    "status": "implementation_verified_formal_gate_failed",
+    "authorized_on": "2026-09-04",
+    "supersedes_for_future_runs": [
+      "stage2_joint_reward_v2_training_semantics",
+      "stage2_grpo_open_application_v2",
+      "stage2_joint_grpo_optimizer_v4",
+      "stage2_joint_grpo_persistent_episode_v3",
+      "bev_joint_grpo_online_config_v9",
+      "bev_joint_grpo_online_report_v9"
+    ],
+    "comparison_unit": "vehicle_mode",
+    "trajectories_per_mode": 48,
+    "rollout_shapes": {
+      "chain": "[B,48,L+1,3,10,8,2]",
+      "candidates": "[B,3,10,48,8,3]",
+      "trajectory_log_probability": "[B,3,10,48,S]",
+      "rewards_and_advantages": "[B,3,10,48]",
+      "active_mode_mask": "[B,3,10]"
+    },
+    "reward_contract": {
+      "training_scope": "single target vehicle counterfactual reward",
+      "teammate_context": "two frozen Stage1 argmax raw tau_d trajectories",
+      "same_mode_baseline": "replace only the target vehicle with its frozen Stage1 trajectory for that mode under the identical teammate context",
+      "formula": "0.47*progress - 1.185*gap - 0.5*ttc - 0.5*road - 0.0225*comfort - 5.0*collision - 4.0*out_of_drivable",
+      "formation_removed": true,
+      "other_vehicle_independent_events_aggregated": false,
+      "joint_reward_role": "historical_and_final_team_evaluation_diagnostic_only"
+    },
+    "advantage_and_gate": {
+      "normalization": "Within each (batch,vehicle,mode), (R_j-mean_j(R))/sqrt(mean_j((R_j-mean_j(R))^2)+eps)",
+      "active": "hard_valid AND optimizer_calibrated_executable AND max_j(R_j) >= R_pretrain",
+      "improvement_margin": null,
+      "reward_span_gate": null,
+      "inactive_exclusion": ["trajectory_pg", "behavior_cloning", "trajectory_reference_kl"],
+      "loss_reduction": "mean over trajectories*DDIM steps, then active modes per vehicle, then vehicles, then batch"
+    },
+    "optimizer": {
+      "version": "stage2_joint_grpo_optimizer_v5",
+      "update_epochs": 10,
+      "trajectory_ratio_clip_bounds": [0.9, 1.2],
+      "mode_pg_removed": true,
+      "mode_kl_removed": true,
+      "trainable_module": "diffusion_decoder.trajectory_head",
+      "frozen_modules": ["mode_head", "diffusion_decoder shared layers", "all remaining planner modules"],
+      "zero_total_gradient": "skip optimizer step and record zero_signal_epoch"
+    },
+    "sampling_and_execution": {
+      "frozen_inference_per_live_state": 1,
+      "retry_only_when_all_vehicle_modes_inactive": true,
+      "max_sampling_attempts_per_state": 3,
+      "partial_active_policy": "merge every active vehicle-mode into one immediate update; do not replenish inactive modes",
+      "environment_action": "always cached frozen Stage1 argmax raw baseline through trajectory optimizer and RuleMaker finalize/safe-stop",
+      "sampled_candidate_execution_forbidden": true,
+      "required_counters": ["accepted_update_states", "rejected_sampling_attempts", "exhausted_states", "baseline_execution_steps", "zero_signal_epochs"]
+    },
+    "artifacts": {
+      "checkpoint_schema_version": 3,
+      "checkpoint_formats": ["bev_joint_grpo_a_v3", "bev_joint_grpo_b_v3"],
+      "application_contract": "stage2_grpo_open_application_v3",
+      "application_contract_sha256": "4ea5af5edfdab318b0d6de6cabeecc5f75c4d2f4b976c47913ba594eb8c3eb5a",
+      "vehicle_reward_contract": "stage2_vehicle_mode_reward_v1",
+      "vehicle_reward_contract_sha256": "2bb512f345a6e7d0e07a2278e1baae28c15eafca3e1dc356c674b96d5249ddba",
+      "vehicle_reward_config_sha256": "bc1b0d2a85bb41743d57800e818fa5ea730486857b238ad1b2421bf1dd071e2d",
+      "optimizer_contract_sha256": "868f1421b7004019255f5974ac46518f64bcfbdda3ba05ab2f41f6fed49604f7",
+      "collection_contract": "stage2_joint_grpo_persistent_episode_v4",
+      "online_config_format": "bev_joint_grpo_online_config_v10",
+      "online_report_format": "bev_joint_grpo_online_report_v10",
+      "stability_manifest_format": "stage2_grpo_stability_ab_manifest_v5",
+      "stability_report_format": "stage2_grpo_stability_ab_report_v5",
+      "legacy_checkpoint_policy": "Schema below 3 may supply planner weights for explicit historical read-only evaluation only; never restore optimizer, RNG, or counters."
+    },
+    "selection_and_validation": {
+      "best_checkpoint_metric": "validation/vehicle_reward_mean",
+      "also_record": ["validation/same_mode_pretrain_reward_mean", "validation/vehicle_reward_gain", "per_vehicle_safety_metrics"],
+      "baseline_gate": "S5-S9 x seeds 17/23 x 200 steps, frozen Stage1 baseline execution only",
+      "stop_failure_policy": "If STOP reproduces, record role, speed, STOP audits, and projection cause before fixing the observed cause; otherwise do not change thresholds or add fallback logic.",
+      "cuda_smoke": "one n=48 update with finite loss/gradients, peak memory below 16 GiB, and schema-v3 checkpoint round-trip",
+      "cuda_smoke_status": "passed: 10 optimizer epochs, finite trajectory-head gradient, 587.497 MiB peak, schema-v3 round-trip",
+      "frozen_baseline_gate_status": "failed on S5/R1 seed 17 at baseline step 22 due agent0 collision; selected and STOP projections both accepted for every role",
+      "formal_long_training_allowed_before_stage1_run3_qualification": false
+    },
+    "run_reconciliation": {
+      "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
+      "run_18": "complete v8, 500 accepted, E10, clip [0.9,1.2]",
+      "run_19": "complete v9, 500 accepted, E10, clip [0.9,1.3]",
+      "run_20": "complete v9, 500 accepted, E10, clip [0.9,1.2]",
+      "run_21": "failed historical at 3676 accepted / 36760 optimizer steps due calibrated execution contract rejected STOP; no report",
+      "run_22": "complete v9, 5000 accepted, E10, clip [0.95,1.1]",
+      "run_23": "complete v9, 5000 accepted, E10, clip [0.95,1.2]",
+      "next_run": "run_24",
+      "project_classification": "all remain nonformal diagnostics because the Stage1 run_3 source is unqualified"
+    },
+    "implementation_evidence": {
+      "report": "evaluation/STAGE2_PER_VEHICLE_SAME_MODE_GRPO_IMPLEMENTATION_REPORT.json",
+      "report_sha256": "41ba19f0e4b5d9a49a5d6b11b1b98e6140b14b3e37514b2ce21f240298ff3472",
+      "focused_and_adjacent_tests_passed": 216,
+      "cuda_single_update_passed": true,
+      "frozen_baseline_gate_report": "evaluation/STAGE2_SAME_MODE_GRPO_FROZEN_BASELINE_GATE.json",
+      "frozen_baseline_gate_report_sha256": "1608379e583abde35def1fbd49c34ccab3412f2ab08f731b5bde8aa866da8a03",
+      "frozen_baseline_gate_passed": false,
+      "formal_long_training_started": false
+    },
+    "active_hard_gate": "strict_stage1_v2_run3_qualification"
+  },
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
   "implementation_evidence_sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
@@ -1225,5 +1338,7 @@
   "stage2_pretrain_relative_dynamic_sampling_implementation_evidence_sha256": "037bdecb3aadf95f929280d02d63ecf3c04083c74c2ff2d8b3c1b64fbed1d650",
   "stage2_asymmetric_clip_implementation_evidence": "evaluation/STAGE2_GRPO_ASYMMETRIC_CLIP_IMPLEMENTATION_REPORT.json",
   "stage2_asymmetric_clip_implementation_evidence_sha256": "bddc7107f5472844acb79e6b75739b827775918db0f6f7acf637b12a96623f81",
-  "current_next_action": "Keep strict Stage1 v2 run_3 qualification as the active formal hard gate. Future fresh GRPO runs use optimizer v4 with ratio bounds [0.9,1.3], v9 online artifacts, and v4 stability manifests/reports; no long run or A/B was started here, run_11 through run_17 remain immutable, and run_18 remains the next unoccupied run."
+  "stage2_per_vehicle_same_mode_implementation_evidence": "evaluation/STAGE2_PER_VEHICLE_SAME_MODE_GRPO_IMPLEMENTATION_REPORT.json",
+  "stage2_per_vehicle_same_mode_implementation_evidence_sha256": "41ba19f0e4b5d9a49a5d6b11b1b98e6140b14b3e37514b2ce21f240298ff3472",
+  "current_next_action": "Keep formal GRPO training blocked. Diagnose or improve the frozen Stage1 run_3 S5 hard-brake behavior under the strict qualification workflow, then rerun the full S5-S9 x seeds 17/23 x 200-step frozen-baseline gate. If and only if Stage1 qualification passes, allocate fresh run_24 under the verified per-vehicle same-mode v5 contract."
 }

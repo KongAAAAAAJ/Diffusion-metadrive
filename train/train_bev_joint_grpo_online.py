@@ -19,6 +19,7 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 
 from evaluation.plot_grpo import (
+    ACCEPTED_ROLLOUT_AXIS_LABEL,
     ADVANTAGE_VECTOR_TAG,
     FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
     REWARD_CURVE_TAGS,
@@ -38,8 +39,6 @@ from expert_dataset.collect_joint_bev import (
 from models.bev_planner import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
-    JOINT_REWARD_CONTRACT,
-    JOINT_REWARD_CONTRACT_SHA256,
     JointGRPOConfig,
     JointGRPOPolicyUpdateConfig,
     JointRewardConfig,
@@ -49,9 +48,15 @@ from models.bev_planner import (
     KinematicTrajectoryOptimizerConfig,
     TrajectoryOptimizationError,
     TrajectoryOptimizationResult,
-    joint_reward_config_sha256,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
+)
+from models.bev_planner.joint_reward import (
+    VEHICLE_MODE_REWARD_CONTRACT,
+    VEHICLE_MODE_REWARD_CONTRACT_SHA256,
+    VehicleModeCounterfactualReward,
+    VehicleModeRewardConfig,
+    vehicle_mode_reward_config_sha256,
 )
 from models.bev_planner.mode_contract import ModeIndex
 from models.decisioner.rule_decisioner import (
@@ -84,10 +89,7 @@ from scenarios.bev_round13_contract import (
 
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
-ROLLOUT_COLLECTION_CONTRACT_VERSION = (
-    "stage2_joint_grpo_persistent_episode_v3"
-)
-MINIMUM_REWARD_SPAN = 1e-6
+ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v4"
 
 
 class OnlineGRPOError(RuntimeError):
@@ -103,22 +105,21 @@ def _frozen_pretrain_reward_logging_metadata(
     return {
         "tensorboard_tag": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
         "metrics_jsonl_field": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
-        "step_axis": "absolute_accepted_rollout_group",
+        "step_axis": "absolute_accepted_update_state",
         "same_live_state_as_current_exploration": True,
-        "trajectory_count": 1,
-        "trajectory_selection": "valid_mode_masked_argmax",
+        "reward_baseline_trajectory_count": 30,
+        "reward_baseline_selection": "all_valid_vehicle_modes",
+        "execution_trajectory_count": 3,
+        "execution_selection": "valid_mode_masked_argmax_per_vehicle",
         "trajectory_domain": "raw_tau_d",
         "inference": "frozen_stage1_standard_deterministic_ddim",
         "inference_seed": int(planner_config.inference_seed),
-        "inference_noise_timestep": int(
-            planner_config.inference_noise_timestep
-        ),
-        "inference_denoise_steps": int(
-            planner_config.inference_denoise_steps
-        ),
+        "inference_noise_timestep": int(planner_config.inference_noise_timestep),
+        "inference_denoise_steps": int(planner_config.inference_denoise_steps),
         "fixed_inference_noise": True,
-        "diagnostic_only": False,
-        "affects_training_or_environment_action": True,
+        "advantage_formula_role": "none",
+        "active_mode_gate_role": "same_mode_threshold",
+        "environment_action_role": "sole_executed_policy",
     }
 
 
@@ -126,11 +127,11 @@ def _frozen_pretrain_reward_logging_metadata(
 class JointGRPOOnlineConfig:
     device: str = "cuda"
     seed: int = 17
-    group_size: int = 24
+    trajectories_per_mode: int = 48
     total_rollout_groups: int = 100
-    update_epochs: int = 4
+    update_epochs: int = 10
     clip_epsilon_low: float = 0.1
-    clip_epsilon_high: float = 0.3
+    clip_epsilon_high: float = 0.2
     resume_checkpoint: Path | None = None
     scenarios: tuple[tuple[str, str], ...] = PRIMARY_S5_S9_SCENARIOS
     scenario_seeds: tuple[int, ...] = DEVELOPMENT_SEEDS
@@ -140,9 +141,8 @@ class JointGRPOOnlineConfig:
     rollout_start_min_remaining_steps: int = 10
     validation_interval_rollouts: int = 20
     advantage_vector_log_interval_rollouts: int = 20
-    pretrain_improvement_margin: float = 1e-6
-    max_candidate_groups_per_state: int = 3
-    max_attempted_groups_multiplier: int = 3
+    max_sampling_attempts_per_state: int = 3
+    max_sampling_attempts_multiplier: int = 3
 
     def __post_init__(self) -> None:
         if self.device not in ("cpu", "cuda"):
@@ -150,12 +150,12 @@ class JointGRPOOnlineConfig:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise OnlineGRPOError("online GRPO seed must be an integer")
         if (
-            isinstance(self.group_size, bool)
-            or not isinstance(self.group_size, int)
-            or self.group_size < 2
+            isinstance(self.trajectories_per_mode, bool)
+            or not isinstance(self.trajectories_per_mode, int)
+            or self.trajectories_per_mode < 2
         ):
             raise OnlineGRPOError(
-                "group_size must be an integer greater than or equal to 2"
+                "trajectories_per_mode must be an integer greater than or " "equal to 2"
             )
         for name in (
             "total_rollout_groups",
@@ -164,8 +164,8 @@ class JointGRPOOnlineConfig:
             "rollout_groups_per_bucket_visit",
             "validation_interval_rollouts",
             "advantage_vector_log_interval_rollouts",
-            "max_candidate_groups_per_state",
-            "max_attempted_groups_multiplier",
+            "max_sampling_attempts_per_state",
+            "max_sampling_attempts_multiplier",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -184,13 +184,10 @@ class JointGRPOOnlineConfig:
             or self.rollout_start_min_remaining_steps < 0
         ):
             raise OnlineGRPOError(
-                "rollout_start_min_remaining_steps must be a non-negative "
-                "integer"
+                "rollout_start_min_remaining_steps must be a non-negative " "integer"
             )
         if self.environment_steps_per_episode < 10:
-            raise OnlineGRPOError(
-                "environment_steps_per_episode must be at least 10"
-            )
+            raise OnlineGRPOError("environment_steps_per_episode must be at least 10")
         if (
             self.rollout_start_min_remaining_steps
             < self.rollout_groups_per_bucket_visit
@@ -199,10 +196,7 @@ class JointGRPOOnlineConfig:
                 "rollout_start_min_remaining_steps must be greater than or "
                 "equal to rollout_groups_per_bucket_visit"
             )
-        if (
-            self.environment_steps_per_episode
-            < self.rollout_start_min_remaining_steps
-        ):
+        if self.environment_steps_per_episode < self.rollout_start_min_remaining_steps:
             raise OnlineGRPOError(
                 "environment_steps_per_episode must be greater than or equal "
                 "to rollout_start_min_remaining_steps"
@@ -218,20 +212,8 @@ class JointGRPOOnlineConfig:
                 raise OnlineGRPOError(
                     f"{name} must be a finite scalar strictly between 0 and 1"
                 )
-        if (
-            isinstance(self.pretrain_improvement_margin, bool)
-            or not isinstance(
-                self.pretrain_improvement_margin, (int, float)
-            )
-            or not math.isfinite(float(self.pretrain_improvement_margin))
-            or float(self.pretrain_improvement_margin) < 0.0
-        ):
-            raise OnlineGRPOError(
-                "pretrain_improvement_margin must be finite and non-negative"
-            )
         if not self.scenarios or any(
-            len(value) != 2 or not value[0] or not value[1]
-            for value in self.scenarios
+            len(value) != 2 or not value[0] or not value[1] for value in self.scenarios
         ):
             raise OnlineGRPOError("at least one scenario/route pair is required")
         try:
@@ -244,9 +226,7 @@ class JointGRPOOnlineConfig:
         ):
             raise OnlineGRPOError("scenario_seeds must contain integers")
         if self.resume_checkpoint is not None:
-            object.__setattr__(
-                self, "resume_checkpoint", Path(self.resume_checkpoint)
-            )
+            object.__setattr__(self, "resume_checkpoint", Path(self.resume_checkpoint))
 
 
 @dataclass(frozen=True)
@@ -274,58 +254,43 @@ def rollout_collection_contract(
 
     return {
         "version": ROLLOUT_COLLECTION_CONTRACT_VERSION,
-        "budget_unit": "accepted_pretrain_improving_rollout_group",
-        "attempt_budget_unit": "candidate_group_attempt",
+        "budget_unit": "accepted_update_state",
+        "attempt_budget_unit": "same_live_state_noise_resample",
         "pretrain_baseline_domain": "raw_tau_d",
         "pretrain_inference_per_live_state": 1,
-        "advantage_normalization": (
-            "pretrain_delta_rms_without_group_centering"
+        "comparison_unit": "vehicle_mode",
+        "trajectories_per_mode": int(config.trajectories_per_mode),
+        "advantage_normalization": "within_vehicle_mode_centered_rms",
+        "active_mode_gate": (
+            "hard_valid_and_optimizer_executable_and_max_reward_gte_"
+            "same_mode_frozen_pretrain_reward"
         ),
-        "pretrain_improvement_margin": float(
-            config.pretrain_improvement_margin
-        ),
-        "minimum_reward_span": MINIMUM_REWARD_SPAN,
-        "max_candidate_groups_per_state": int(
-            config.max_candidate_groups_per_state
-        ),
-        "max_attempted_groups_multiplier": int(
-            config.max_attempted_groups_multiplier
+        "max_sampling_attempts_per_state": int(config.max_sampling_attempts_per_state),
+        "max_sampling_attempts_multiplier": int(
+            config.max_sampling_attempts_multiplier
         ),
         "retry_scope": "same_live_state",
-        "rejected_candidate_side_effects": (
-            "none_except_training_generator_advance_and_attempt_logging"
-        ),
-        "fallback_after_state_rejection": (
-            "frozen_pretrain_action_once_no_update"
-        ),
+        "partial_active_policy": "merge_all_active_modes_without_backfill",
+        "retry_condition": "all_vehicle_modes_inactive",
+        "sampled_candidate_execution": False,
+        "environment_action": "cached_frozen_stage1_argmax_only",
         "bucket_order": "ordered_scenario_then_seed",
         "bucket_target_assignment": (
             "balanced_floor_with_remainder_to_lower_bucket_indices"
         ),
-        "rollout_groups_per_bucket_visit": int(
-            config.rollout_groups_per_bucket_visit
-        ),
-        "environment_steps_per_episode": int(
-            config.environment_steps_per_episode
-        ),
-        "validation_interval_rollouts": int(
-            config.validation_interval_rollouts
-        ),
-        "selected_environment_steps_per_accepted_rollout": 1,
-        "fallback_environment_steps_per_exhausted_state": 1,
+        "rollout_groups_per_bucket_visit": int(config.rollout_groups_per_bucket_visit),
+        "environment_steps_per_episode": int(config.environment_steps_per_episode),
+        "validation_interval_rollouts": int(config.validation_interval_rollouts),
+        "baseline_environment_steps_per_live_state": 1,
         "episode_reuse": "persistent_within_bucket_visit",
         "interrupted_visit_resume": "same_bucket_same_visit_progress",
         "checkpoint_boundary": "closed_environment_only",
         "active_environment_serialized": False,
         "rule_maker_commitment_scope": "live_environment_episode",
-        "rollout_start_ready_gate": (
-            "history_ready_and_primary_scenario_ready"
-        ),
+        "rollout_start_ready_gate": ("history_ready_and_primary_scenario_ready"),
         "rollout_start_offset_distribution": "inclusive_uniform_integer",
         "rollout_start_generator": "shared_training_torch_generator",
-        "rollout_start_offset_max_steps": int(
-            config.rollout_start_offset_max_steps
-        ),
+        "rollout_start_offset_max_steps": int(config.rollout_start_offset_max_steps),
         "rollout_start_min_remaining_steps": int(
             config.rollout_start_min_remaining_steps
         ),
@@ -357,12 +322,10 @@ def rollout_collection_contract(
             ),
         },
         "late_target_retry": (
-            "same_bucket_same_visit_with_temporary_observed_last_open_upper_"
-            "bound"
+            "same_bucket_same_visit_with_temporary_observed_last_open_upper_" "bound"
         ),
         "partial_visit_policy": (
-            "retain_completed_rollouts_and_updates_then_new_episode_fresh_"
-            "offset"
+            "retain_completed_rollouts_and_updates_then_new_episode_fresh_" "offset"
         ),
         "validation_start": "earliest_ready_without_random_offset",
     }
@@ -403,11 +366,9 @@ def model_inputs_to_batch(
         if name == "mode_valid_mask" and (
             array.shape != (3, 10) or array.dtype != np.bool_
         ):
-            raise OnlineGRPOError(
-                "execution mode_valid_mask must be bool [3,10]"
-            )
-        result[name] = torch.from_numpy(np.array(array, copy=True)).unsqueeze(0).to(
-            device
+            raise OnlineGRPOError("execution mode_valid_mask must be bool [3,10]")
+        result[name] = (
+            torch.from_numpy(np.array(array, copy=True)).unsqueeze(0).to(device)
         )
     return result
 
@@ -528,9 +489,7 @@ def episode_has_ended(
     truncated: Mapping[str, object],
     info: Mapping[str, object],
 ) -> bool:
-    if bool(terminated.get("__all__", False)) or bool(
-        truncated.get("__all__", False)
-    ):
+    if bool(terminated.get("__all__", False)) or bool(truncated.get("__all__", False)):
         return True
     for agent_id in AGENT_IDS:
         value = info.get(agent_id)
@@ -557,9 +516,7 @@ def _new_env(scenario: tuple[str, str], seed: int) -> object:
         {
             "num_agents": 3,
             "traffic_density": 0.0,
-            "initial_speed_km_h": deterministic_initial_speed_km_h(
-                scenario[0], seed
-            ),
+            "initial_speed_km_h": deterministic_initial_speed_km_h(scenario[0], seed),
             "start_seed": int(seed),
             "num_scenarios": 1,
         }
@@ -607,10 +564,7 @@ def _condition_online_model_inputs(
     committed_actions = (
         None
         if committed_plan_actions is None
-        else {
-            agent_id: int(committed_plan_actions[agent_id])
-            for agent_id in AGENT_IDS
-        }
+        else {agent_id: int(committed_plan_actions[agent_id]) for agent_id in AGENT_IDS}
     )
     try:
         hard_modes = hard_valid_modes_by_rule_action(
@@ -671,23 +625,17 @@ def _condition_online_model_inputs(
     )
 
 
-def _validate_online_trajectory_controls(
-    env: object, trajectories: np.ndarray
-) -> None:
+def _validate_online_trajectory_controls(env: object, trajectories: np.ndarray) -> None:
     action = joint_trajectory_action(trajectories)
     for agent_id in AGENT_IDS:
         try:
-            control = np.asarray(
-                env.trajectory_to_control(agent_id, action[agent_id])
-            )
+            control = np.asarray(env.trajectory_to_control(agent_id, action[agent_id]))
         except Exception as exc:
             raise OnlineGRPOError(
                 f"trajectory control failed for {agent_id}: {exc}"
             ) from exc
         if not np.isfinite(control).all():
-            raise OnlineGRPOError(
-                f"trajectory control is non-finite for {agent_id}"
-            )
+            raise OnlineGRPOError(f"trajectory control is non-finite for {agent_id}")
 
 
 def _finalize_online_rule_action(
@@ -728,8 +676,7 @@ def _finalize_online_rule_action(
         if condition.is_commitment:
             diagnostics["commitment_conditioned_rollouts"] = 1
             compatible = all(
-                feedback_actions[agent_id]
-                == int(condition.rule_actions[agent_id])
+                feedback_actions[agent_id] == int(condition.rule_actions[agent_id])
                 for agent_id in AGENT_IDS
             )
             matched = None
@@ -757,9 +704,7 @@ def _finalize_online_rule_action(
             condition.is_commitment and not compatible
         )
         coarse = np.asarray(values.coarse_trajectories)
-        raw_stop = np.asarray(
-            coarse[:, int(ModeIndex.STOP)], dtype=np.float32
-        )[None]
+        raw_stop = np.asarray(coarse[:, int(ModeIndex.STOP)], dtype=np.float32)[None]
         resolved = optimize_selected_model_trajectories(
             values,
             raw_stop,
@@ -770,9 +715,7 @@ def _finalize_online_rule_action(
         diagnostics["proposal_matches"] = int(not condition.is_commitment)
         resolved = optimization
 
-    _validate_online_trajectory_controls(
-        env, resolved.optimized_trajectories[0]
-    )
+    _validate_online_trajectory_controls(env, resolved.optimized_trajectories[0])
     committed_execution_id = condition.committed_execution_id
     committed_plan_actions = condition.committed_plan_actions
     if matched is not None:
@@ -797,6 +740,69 @@ def _finalize_online_rule_action(
     )
 
 
+def execute_cached_frozen_baseline(
+    *,
+    env: object,
+    rule_maker: object,
+    condition: _OnlineRuleCondition,
+    scenario: tuple[str, str],
+    model_inputs: object,
+    frozen_raw_trajectories: np.ndarray,
+    frozen_selected_modes: np.ndarray,
+    optimizer: KinematicTrajectoryOptimizer,
+) -> tuple[
+    tuple[object, object, object, object, object],
+    TrajectoryOptimizationResult,
+    dict[str, int],
+    int | None,
+    dict[str, int] | None,
+]:
+    """Execute one cached frozen Stage-1 action and advance the env once.
+
+    The sampled GRPO candidates are deliberately absent from this interface,
+    making the online execution boundary auditable and hard to misuse.
+    """
+
+    raw = np.asarray(frozen_raw_trajectories)
+    modes = np.asarray(frozen_selected_modes)
+    if raw.shape != (1, 3, 8, 3) or modes.shape != (1, 3):
+        raise OnlineGRPOError(
+            "cached frozen baseline must be [1,3,8,3] with modes [1,3]"
+        )
+    optimization = optimize_selected_model_trajectories(
+        model_inputs,
+        raw,
+        modes,
+        optimizer=optimizer,
+    )
+    (
+        optimization,
+        diagnostics,
+        committed_execution_id,
+        committed_plan_actions,
+    ) = _finalize_online_rule_action(
+        rule_maker,
+        condition,
+        env=env,
+        scenario=scenario,
+        values=model_inputs,
+        selected_modes=modes[0],
+        optimization=optimization,
+        optimizer=optimizer,
+    )
+    action = joint_trajectory_action(optimization.optimized_trajectories[0])
+    step_result = env.step(action)
+    if not isinstance(step_result, tuple) or len(step_result) != 5:
+        raise OnlineGRPOError("online env.step must return a five-item tuple")
+    return (
+        step_result,
+        optimization,
+        diagnostics,
+        committed_execution_id,
+        committed_plan_actions,
+    )
+
+
 def _load_trainer(
     variant: str,
     source_checkpoint: Path,
@@ -805,9 +811,7 @@ def _load_trainer(
     grpo_config: JointGRPOConfig,
     allow_diagnostic_source: bool,
 ):
-    loader = (
-        load_stage1_a_for_grpo if variant == "A" else load_stage1_b_for_grpo
-    )
+    loader = load_stage1_a_for_grpo if variant == "A" else load_stage1_b_for_grpo
     return loader(
         source_checkpoint,
         device=device,
@@ -828,9 +832,9 @@ def _checkpoint_file_sha256(path: Path) -> str:
 
 
 def _reward_contract_version() -> str:
-    version = JOINT_REWARD_CONTRACT.get("version")
+    version = VEHICLE_MODE_REWARD_CONTRACT.get("version")
     if not isinstance(version, str) or not version:
-        raise OnlineGRPOError("joint reward contract version is invalid")
+        raise OnlineGRPOError("vehicle-mode reward contract version is invalid")
     return version
 
 
@@ -838,26 +842,26 @@ def _candidate_group_rejection_reason(
     rewards: np.ndarray,
     *,
     pretrain_reward: float,
-    group_size: int,
-    improvement_margin: float,
-    minimum_span: float = MINIMUM_REWARD_SPAN,
+    trajectories_per_mode: int,
 ) -> str | None:
-    """Return the exclusive rejection reason for one candidate group."""
+    """Apply the exact same-mode gate for one vehicle-mode block."""
 
     if (
-        isinstance(group_size, bool)
-        or not isinstance(group_size, int)
-        or group_size < 2
+        isinstance(trajectories_per_mode, bool)
+        or not isinstance(trajectories_per_mode, int)
+        or trajectories_per_mode < 2
     ):
         raise OnlineGRPOError(
-            "group_size must be an integer greater than or equal to 2"
+            "trajectories_per_mode must be an integer greater than or equal " "to 2"
         )
     values = np.asarray(rewards)
-    if (
-        values.shape != (group_size,)
-        or values.dtype not in (np.float32, np.float64)
+    if values.shape != (trajectories_per_mode,) or values.dtype not in (
+        np.float32,
+        np.float64,
     ):
-        raise OnlineGRPOError(f"joint proxy rewards must be float [{group_size}]")
+        raise OnlineGRPOError(
+            "vehicle-mode rewards must be float " f"[{trajectories_per_mode}]"
+        )
     if not np.isfinite(values).all():
         raise OnlineGRPOError("joint proxy rewards must be finite")
     if (
@@ -866,50 +870,56 @@ def _candidate_group_rejection_reason(
         or not math.isfinite(float(pretrain_reward))
     ):
         raise OnlineGRPOError("frozen pretrain reward must be a finite scalar")
-    if (
-        isinstance(improvement_margin, bool)
-        or not isinstance(improvement_margin, (int, float))
-        or not math.isfinite(float(improvement_margin))
-        or float(improvement_margin) < 0.0
-    ):
-        raise OnlineGRPOError(
-            "pretrain improvement margin must be finite and non-negative"
-        )
-    if not math.isfinite(minimum_span) or minimum_span < 0.0:
-        raise OnlineGRPOError(
-            "minimum reward span must be finite and non-negative"
-        )
     values64 = values.astype(np.float64, copy=False)
-    if (
-        float(values64.max()) - float(pretrain_reward)
-        <= float(improvement_margin)
-    ):
-        return "no_pretrain_improvement"
-    if float(np.ptp(values64)) <= minimum_span:
-        return "zero_reward_span"
-    return None
+    return (
+        None
+        if float(values64.max()) >= float(pretrain_reward)
+        else "all_below_same_mode_pretrain"
+    )
 
 
-def _joint_rewards_are_informative(
+def _vehicle_mode_rewards_are_active(
     rewards: np.ndarray,
     *,
     pretrain_reward: float,
-    group_size: int,
-    improvement_margin: float,
-    minimum_span: float = MINIMUM_REWARD_SPAN,
+    trajectories_per_mode: int,
 ) -> bool:
-    """Whether one group is varied and beats frozen pretrain at this state."""
+    """Whether one same-mode group passes the strict frozen-pretrain gate."""
 
     return (
         _candidate_group_rejection_reason(
             rewards,
             pretrain_reward=pretrain_reward,
-            group_size=group_size,
-            improvement_margin=improvement_margin,
-            minimum_span=minimum_span,
+            trajectories_per_mode=trajectories_per_mode,
         )
         is None
     )
+
+
+def _active_vehicle_mode_mask(
+    rewards: np.ndarray,
+    pretrain_rewards: np.ndarray,
+    valid_mode_mask: np.ndarray,
+) -> np.ndarray:
+    """Return active `(vehicle, mode)` blocks; equality is intentionally active."""
+
+    values = np.asarray(rewards)
+    baseline = np.asarray(pretrain_rewards)
+    valid = np.asarray(valid_mode_mask)
+    if values.ndim != 3 or values.shape[:2] != (3, 10):
+        raise OnlineGRPOError("vehicle-mode rewards must have shape [3,10,N]")
+    if values.shape[2] < 2 or values.dtype not in (np.float32, np.float64):
+        raise OnlineGRPOError("vehicle-mode rewards must be float [3,10,N>=2]")
+    if baseline.shape != (3, 10) or baseline.dtype not in (
+        np.float32,
+        np.float64,
+    ):
+        raise OnlineGRPOError("same-mode pretrain rewards must be float [3,10]")
+    if valid.shape != (3, 10) or valid.dtype != np.bool_:
+        raise OnlineGRPOError("valid mode mask must be bool [3,10]")
+    if not np.isfinite(values).all() or not np.isfinite(baseline).all():
+        raise OnlineGRPOError("vehicle-mode rewards and baselines must be finite")
+    return valid & (values.max(axis=-1) >= baseline)
 
 
 def _should_record_advantage_vector(
@@ -925,12 +935,9 @@ def _should_record_advantage_vector(
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise OnlineGRPOError(f"{name} must be a positive integer")
     if rollout_group > target_rollout_groups:
-        raise OnlineGRPOError(
-            "rollout_group cannot exceed target_rollout_groups"
-        )
+        raise OnlineGRPOError("rollout_group cannot exceed target_rollout_groups")
     return (
-        rollout_group % interval_rollouts == 0
-        or rollout_group == target_rollout_groups
+        rollout_group % interval_rollouts == 0 or rollout_group == target_rollout_groups
     )
 
 
@@ -941,27 +948,30 @@ def _write_advantage_vector_summary(
     target_rollout_groups: int,
     interval_rollouts: int,
     *,
-    group_size: int,
+    trajectories_per_mode: int,
 ) -> bool:
     if (
-        isinstance(group_size, bool)
-        or not isinstance(group_size, int)
-        or group_size < 2
+        isinstance(trajectories_per_mode, bool)
+        or not isinstance(trajectories_per_mode, int)
+        or trajectories_per_mode < 2
     ):
         raise OnlineGRPOError(
-            "group_size must be an integer greater than or equal to 2"
+            "trajectories_per_mode must be an integer greater than or equal " "to 2"
         )
     if not _should_record_advantage_vector(
         rollout_group, target_rollout_groups, interval_rollouts
     ):
         return False
     vector = advantages.detach().cpu()
-    if (
-        vector.dtype != torch.float32
-        or tuple(vector.shape) != (1, group_size)
+    if vector.dtype != torch.float32 or tuple(vector.shape) != (
+        1,
+        3,
+        10,
+        trajectories_per_mode,
     ):
         raise OnlineGRPOError(
-            f"advantage vector must be float32 with shape [1,{group_size}]"
+            "advantage tensor must be float32 with shape "
+            f"[1,3,10,{trajectories_per_mode}]"
         )
     if not bool(torch.isfinite(vector).all()):
         raise OnlineGRPOError("advantage vector must be finite")
@@ -988,9 +998,7 @@ def _split_loss_metrics_by_step_axis(
 def _advantage_scalar_metrics(advantages: torch.Tensor) -> dict[str, float]:
     return {
         "advantage/mean": float(advantages.mean().detach().cpu()),
-        "advantage/std": float(
-            advantages.std(unbiased=False).detach().cpu()
-        ),
+        "advantage/std": float(advantages.std(unbiased=False).detach().cpu()),
         "advantage/min": float(advantages.min().detach().cpu()),
         "advantage/max": float(advantages.max().detach().cpu()),
     }
@@ -998,38 +1006,34 @@ def _advantage_scalar_metrics(advantages: torch.Tensor) -> dict[str, float]:
 
 def _attempt_budget_is_exhausted(
     *,
-    accepted_rollout_groups: int,
-    target_accepted_rollout_groups: int,
-    attempted_rollout_groups: int,
-    max_attempted_rollout_groups: int,
+    accepted_update_states: int,
+    target_accepted_update_states: int,
+    sampling_attempts: int,
+    max_sampling_attempts: int,
 ) -> bool:
     """Whether collection hit its hard attempt cap before its accepted target."""
 
     for name, value in (
-        ("accepted_rollout_groups", accepted_rollout_groups),
-        ("target_accepted_rollout_groups", target_accepted_rollout_groups),
-        ("attempted_rollout_groups", attempted_rollout_groups),
-        ("max_attempted_rollout_groups", max_attempted_rollout_groups),
+        ("accepted_update_states", accepted_update_states),
+        ("target_accepted_update_states", target_accepted_update_states),
+        ("sampling_attempts", sampling_attempts),
+        ("max_sampling_attempts", max_sampling_attempts),
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise OnlineGRPOError(f"{name} must be a non-negative integer")
-    if target_accepted_rollout_groups <= 0:
+    if target_accepted_update_states <= 0:
         raise OnlineGRPOError(
-            "target_accepted_rollout_groups must be a positive integer"
+            "target_accepted_update_states must be a positive integer"
         )
-    if max_attempted_rollout_groups <= 0:
-        raise OnlineGRPOError(
-            "max_attempted_rollout_groups must be a positive integer"
-        )
-    if accepted_rollout_groups > target_accepted_rollout_groups:
+    if max_sampling_attempts <= 0:
+        raise OnlineGRPOError("max_sampling_attempts must be a positive integer")
+    if accepted_update_states > target_accepted_update_states:
         raise OnlineGRPOError("accepted rollout target was exceeded")
-    if attempted_rollout_groups < accepted_rollout_groups:
+    if sampling_attempts < accepted_update_states:
         raise OnlineGRPOError("attempted rollout count is below accepted count")
-    if attempted_rollout_groups > max_attempted_rollout_groups:
-        raise OnlineGRPOError("attempted rollout budget was exceeded")
     return (
-        accepted_rollout_groups < target_accepted_rollout_groups
-        and attempted_rollout_groups == max_attempted_rollout_groups
+        accepted_update_states < target_accepted_update_states
+        and sampling_attempts >= max_sampling_attempts
     )
 
 
@@ -1046,9 +1050,7 @@ def _round_robin_training_buckets(
     return buckets
 
 
-def _balanced_bucket_targets(
-    total_rollout_groups: int, bucket_count: int
-) -> list[int]:
+def _balanced_bucket_targets(total_rollout_groups: int, bucket_count: int) -> list[int]:
     for name, value in (
         ("total_rollout_groups", total_rollout_groups),
         ("bucket_count", bucket_count),
@@ -1057,8 +1059,7 @@ def _balanced_bucket_targets(
             raise OnlineGRPOError(f"{name} must be a positive integer")
     base, remainder = divmod(total_rollout_groups, bucket_count)
     return [
-        base + int(bucket_index < remainder)
-        for bucket_index in range(bucket_count)
+        base + int(bucket_index < remainder) for bucket_index in range(bucket_count)
     ]
 
 
@@ -1096,8 +1097,7 @@ def _bucket_visit_is_complete(
 ) -> bool:
     return (
         current_visit_progress >= rollout_groups_per_bucket_visit
-        or bucket_sample_counts[bucket_index]
-        >= bucket_target_counts[bucket_index]
+        or bucket_sample_counts[bucket_index] >= bucket_target_counts[bucket_index]
     )
 
 
@@ -1125,8 +1125,7 @@ def _scenario_ready_from_summary(summary: Mapping[str, object]) -> bool:
         # concrete brake profile installed by the hard-brake handler.
         notes = summary.get("scenario_notes", ())
         return bool(summary.get("scenario_triggered", False)) and (
-            isinstance(notes, (list, tuple))
-            and "lead_brake_profile" in notes
+            isinstance(notes, (list, tuple)) and "lead_brake_profile" in notes
         )
     # S6/S8 background traffic is itself the evaluated hazard.  Sampling an
     # intermediate recipe state would let a new actor appear inside a 4-second
@@ -1164,13 +1163,13 @@ def _scenario_sampling_window_closed_from_summary(
             conflict.get("formation_recovered_after_merge", False)
         )
     if scenario_id == "S8_ego_exit_to_ramp":
-        return bool(
-            route.get("all_agents_continued_on_exit_ramp", False)
-        ) and bool(conflict.get("formation_recovered_on_ramp", False))
+        return bool(route.get("all_agents_continued_on_exit_ramp", False)) and bool(
+            conflict.get("formation_recovered_on_ramp", False)
+        )
     if scenario_id == "S9_narrow_channel_negotiation":
-        return bool(
-            route.get("all_agents_returned_to_original_lane", False)
-        ) and bool(conflict.get("formation_recovered_after_return", False))
+        return bool(route.get("all_agents_returned_to_original_lane", False)) and bool(
+            conflict.get("formation_recovered_after_return", False)
+        )
     raise OnlineGRPOError(
         f"unsupported primary scenario sampling window: {scenario_id}"
     )
@@ -1285,41 +1284,52 @@ def _write_dynamic_sampling_attempt_event(
     path: Path,
     *,
     optimizer_step: int,
-    accepted_rollout_group: int,
-    attempted_rollout_group: int,
+    accepted_update_state: int,
+    sampling_attempt: int,
     retry_index: int,
     bucket_index: int,
     scenario: tuple[str, str],
     seed: int,
     rewards: np.ndarray,
-    pretrain_reward: float,
-    improvement_margin: float,
-    rejection_reason: str | None,
+    pretrain_rewards: np.ndarray,
+    valid_mode_mask: np.ndarray,
+    active_mode_mask: np.ndarray,
 ) -> dict[str, float]:
     values = np.asarray(rewards, dtype=np.float64)
-    deltas = values - float(pretrain_reward)
+    baseline = np.asarray(pretrain_rewards, dtype=np.float64)
+    valid = np.asarray(valid_mode_mask, dtype=np.bool_)
+    active = np.asarray(active_mode_mask, dtype=np.bool_)
+    if values.ndim != 3 or values.shape[:2] != (3, 10):
+        raise OnlineGRPOError("sampling rewards must have shape [3,10,N]")
+    if baseline.shape != (3, 10) or valid.shape != (3, 10) or active.shape != (3, 10):
+        raise OnlineGRPOError(
+            "sampling pretrain rewards and active mask must be [3,10]"
+        )
+    if not valid.any() or np.any(active & ~valid):
+        raise OnlineGRPOError("sampling masks contain no valid modes or conflict")
+    valid_values = values[valid]
+    valid_baseline = baseline[valid]
+    deltas = valid_values - valid_baseline[:, None]
     metrics = {
-        "raw_proxy_reward_mean": float(values.mean()),
-        "raw_proxy_reward_max": float(values.max()),
-        "pretrain_reward": float(pretrain_reward),
-        "pretrain_reward_delta_mean": float(deltas.mean()),
-        "pretrain_reward_delta_max": float(deltas.max()),
-        "positive_delta_fraction": float(np.mean(deltas > 0.0)),
-        "reward_span": float(np.ptp(values)),
+        "vehicle_reward_mean": float(valid_values.mean()),
+        "same_mode_pretrain_reward_mean": float(valid_baseline.mean()),
+        "same_mode_reward_gain_mean": float(deltas.mean()),
+        "same_mode_reward_gain_max": float(deltas.max()),
+        "active_mode_count": float(active.sum()),
+        "active_vehicle_count": float(np.any(active, axis=1).sum()),
     }
     record = {
         "event": "dynamic_sampling_attempt",
         "optimizer_step": int(optimizer_step),
-        "accepted_rollout_group": int(accepted_rollout_group),
-        "attempted_rollout_group": int(attempted_rollout_group),
+        "accepted_update_state": int(accepted_update_state),
+        "sampling_attempt": int(sampling_attempt),
         "retry_index": int(retry_index),
         "training_bucket_index": int(bucket_index),
         "scenario": str(scenario[0]),
         "route": str(scenario[1]),
         "seed": int(seed),
-        "improvement_margin": float(improvement_margin),
-        "accepted": rejection_reason is None,
-        "rejection_reason": rejection_reason,
+        "accepted": bool(active.any()),
+        "rejection_reason": (None if active.any() else "all_vehicle_modes_inactive"),
         **metrics,
     }
     with path.open("a", encoding="utf-8") as stream:
@@ -1327,31 +1337,33 @@ def _write_dynamic_sampling_attempt_event(
     return metrics
 
 
-def _write_pretrain_fallback_event(
+def _write_baseline_execution_event(
     path: Path,
     *,
     optimizer_step: int,
-    accepted_rollout_groups: int,
-    attempted_rollout_groups: int,
-    pretrain_fallback_steps: int,
+    accepted_update_states: int,
+    rejected_sampling_attempts: int,
+    exhausted_states: int,
+    baseline_execution_steps: int,
     environment_steps: int,
     bucket_index: int,
     scenario: tuple[str, str],
     seed: int,
-    pretrain_reward: float,
+    pretrain_reward_mean: float,
 ) -> None:
     record = {
-        "event": "pretrain_fallback",
+        "event": "frozen_baseline_execution",
         "optimizer_step": int(optimizer_step),
-        "accepted_rollout_groups": int(accepted_rollout_groups),
-        "attempted_rollout_groups": int(attempted_rollout_groups),
-        "pretrain_fallback_steps": int(pretrain_fallback_steps),
+        "accepted_update_states": int(accepted_update_states),
+        "rejected_sampling_attempts": int(rejected_sampling_attempts),
+        "exhausted_states": int(exhausted_states),
+        "baseline_execution_steps": int(baseline_execution_steps),
         "environment_steps": int(environment_steps),
         "training_bucket_index": int(bucket_index),
         "scenario": str(scenario[0]),
         "route": str(scenario[1]),
         "seed": int(seed),
-        "pretrain_reward": float(pretrain_reward),
+        "same_mode_pretrain_reward_mean": float(pretrain_reward_mean),
     }
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(record, sort_keys=True) + "\n")
@@ -1377,13 +1389,24 @@ def _validate_raw_reward_config(config: JointRewardConfig) -> None:
             "tracking_heading_margin_rad",
         )
     ):
-        raise OnlineGRPOError(
-            "GRPO-Open tau_d reward requires zero tracking margins"
-        )
+        raise OnlineGRPOError("GRPO-Open tau_d reward requires zero tracking margins")
     default = JointRewardConfig()
     if dataclasses.asdict(config) != dataclasses.asdict(default):
         raise OnlineGRPOError(
             "GRPO-Open tau_d reward config must match the frozen base config"
+        )
+
+
+def _validate_vehicle_mode_reward_config(
+    config: VehicleModeRewardConfig,
+    *,
+    trajectories_per_mode: int,
+) -> None:
+    if not isinstance(config, VehicleModeRewardConfig):
+        raise OnlineGRPOError("training reward config must be VehicleModeRewardConfig")
+    if config.trajectories_per_mode != trajectories_per_mode:
+        raise OnlineGRPOError(
+            "vehicle-mode reward trajectory count does not match GRPO config"
         )
 
 
@@ -1405,71 +1428,65 @@ def _grpo_config_artifact_payload(
 
 def _sampler_state(
     *,
-    accepted_rollout_groups: int,
-    attempted_rollout_groups: int,
-    rejected_no_pretrain_improvement: int,
-    rejected_zero_reward_span: int,
-    pretrain_fallback_steps: int,
+    accepted_update_states: int,
+    sampling_attempts: int,
+    rejected_sampling_attempts: int,
+    exhausted_states: int,
+    baseline_execution_steps: int,
+    zero_signal_epochs: int,
     warmup_environment_steps: int,
     bucket_target_counts: Sequence[int],
-    bucket_accepted_rollout_counts: Sequence[int],
-    bucket_attempted_rollout_counts: Sequence[int],
-    bucket_rejected_no_pretrain_improvement_counts: Sequence[int],
-    bucket_rejected_zero_reward_span_counts: Sequence[int],
-    bucket_pretrain_fallback_step_counts: Sequence[int],
+    bucket_accepted_update_counts: Sequence[int],
+    bucket_sampling_attempt_counts: Sequence[int],
+    bucket_rejected_sampling_attempt_counts: Sequence[int],
+    bucket_exhausted_state_counts: Sequence[int],
+    bucket_baseline_execution_step_counts: Sequence[int],
+    bucket_zero_signal_epoch_counts: Sequence[int],
     bucket_optimizer_step_counts: Sequence[int],
     bucket_episode_counts: Sequence[int],
     next_bucket_index: int,
     current_visit_progress: int,
     generator_state: torch.Tensor,
-    last_validated_rollout: int,
+    last_validated_update_state: int,
     rollout_groups_per_bucket_visit: int,
-    update_epochs: int,
     optimizer_step: int,
     environment_steps: int,
-    max_attempted_rollout_groups: int,
+    max_sampling_attempts: int,
 ) -> dict[str, object]:
     raw = {
-        "accepted_rollout_groups": accepted_rollout_groups,
-        "attempted_rollout_groups": attempted_rollout_groups,
-        "rejected_no_pretrain_improvement": (
-            rejected_no_pretrain_improvement
-        ),
-        "rejected_zero_reward_span": rejected_zero_reward_span,
-        "pretrain_fallback_steps": pretrain_fallback_steps,
+        "accepted_update_states": accepted_update_states,
+        "sampling_attempts": sampling_attempts,
+        "rejected_sampling_attempts": rejected_sampling_attempts,
+        "exhausted_states": exhausted_states,
+        "baseline_execution_steps": baseline_execution_steps,
+        "zero_signal_epochs": zero_signal_epochs,
         "warmup_environment_steps": warmup_environment_steps,
         "bucket_target_counts": list(bucket_target_counts),
-        "bucket_accepted_rollout_counts": list(
-            bucket_accepted_rollout_counts
+        "bucket_accepted_update_counts": list(bucket_accepted_update_counts),
+        "bucket_sampling_attempt_counts": list(bucket_sampling_attempt_counts),
+        "bucket_rejected_sampling_attempt_counts": list(
+            bucket_rejected_sampling_attempt_counts
         ),
-        "bucket_attempted_rollout_counts": list(
-            bucket_attempted_rollout_counts
+        "bucket_exhausted_state_counts": list(bucket_exhausted_state_counts),
+        "bucket_baseline_execution_step_counts": list(
+            bucket_baseline_execution_step_counts
         ),
-        "bucket_rejected_no_pretrain_improvement_counts": list(
-            bucket_rejected_no_pretrain_improvement_counts
-        ),
-        "bucket_rejected_zero_reward_span_counts": list(
-            bucket_rejected_zero_reward_span_counts
-        ),
-        "bucket_pretrain_fallback_step_counts": list(
-            bucket_pretrain_fallback_step_counts
-        ),
+        "bucket_zero_signal_epoch_counts": list(bucket_zero_signal_epoch_counts),
         "bucket_optimizer_step_counts": list(bucket_optimizer_step_counts),
         "bucket_episode_counts": list(bucket_episode_counts),
         "next_bucket_index": next_bucket_index,
         "current_visit_progress": current_visit_progress,
         "generator_state": generator_state.detach().cpu().clone(),
-        "last_validated_rollout": last_validated_rollout,
+        "last_validated_update_state": last_validated_update_state,
     }
     return _validate_sampler_state(
         raw,
-        bucket_count=len(bucket_accepted_rollout_counts),
+        bucket_count=len(bucket_accepted_update_counts),
         expected_bucket_target_counts=bucket_target_counts,
         rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
-        update_epochs=update_epochs,
         optimizer_step=optimizer_step,
         environment_steps=environment_steps,
-        max_attempted_rollout_groups=max_attempted_rollout_groups,
+        max_sampling_attempts=max_sampling_attempts,
     )
 
 
@@ -1479,10 +1496,9 @@ def _validate_sampler_state(
     bucket_count: int,
     expected_bucket_target_counts: Sequence[int],
     rollout_groups_per_bucket_visit: int,
-    update_epochs: int,
     optimizer_step: int,
     environment_steps: int,
-    max_attempted_rollout_groups: int,
+    max_sampling_attempts: int,
 ) -> dict[str, object]:
     if not isinstance(raw, Mapping):
         raise OnlineGRPOError("online GRPO checkpoint sampler_state is invalid")
@@ -1499,55 +1515,52 @@ def _validate_sampler_state(
     ):
         raise OnlineGRPOError("rollout bucket visit quota is invalid")
     for name, minimum in (
-        ("accepted_rollout_groups", 0),
-        ("attempted_rollout_groups", 0),
-        ("rejected_no_pretrain_improvement", 0),
-        ("rejected_zero_reward_span", 0),
-        ("pretrain_fallback_steps", 0),
+        ("accepted_update_states", 0),
+        ("sampling_attempts", 0),
+        ("rejected_sampling_attempts", 0),
+        ("exhausted_states", 0),
+        ("baseline_execution_steps", 0),
+        ("zero_signal_epochs", 0),
         ("warmup_environment_steps", 0),
         ("next_bucket_index", 0),
         ("current_visit_progress", 0),
-        ("last_validated_rollout", -1),
+        ("last_validated_update_state", -1),
     ):
         value = raw.get(name)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value < minimum
-        ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise OnlineGRPOError(
                 f"online GRPO checkpoint sampler_state {name} is invalid"
             )
-    accepted = int(raw["accepted_rollout_groups"])
-    attempted = int(raw["attempted_rollout_groups"])
-    rejected_no_improvement = int(
-        raw["rejected_no_pretrain_improvement"]
-    )
-    rejected_zero_span = int(raw["rejected_zero_reward_span"])
-    fallback_steps = int(raw["pretrain_fallback_steps"])
+    accepted = int(raw["accepted_update_states"])
+    attempts = int(raw["sampling_attempts"])
+    rejected = int(raw["rejected_sampling_attempts"])
+    exhausted = int(raw["exhausted_states"])
+    baseline_steps = int(raw["baseline_execution_steps"])
+    zero_signal = int(raw["zero_signal_epochs"])
     warmup_steps = int(raw["warmup_environment_steps"])
     next_bucket = int(raw["next_bucket_index"])
     current_visit_progress = int(raw["current_visit_progress"])
-    last_validated = int(raw["last_validated_rollout"])
-    rejected = rejected_no_improvement + rejected_zero_span
-    if attempted != accepted + rejected or last_validated > accepted:
+    last_validated = int(raw["last_validated_update_state"])
+    if attempts != accepted + rejected or last_validated > accepted:
         raise OnlineGRPOError("online GRPO checkpoint sampler counters conflict")
+    if baseline_steps != accepted + exhausted:
+        raise OnlineGRPOError("online GRPO baseline execution counters conflict")
     if (
         isinstance(environment_steps, bool)
         or not isinstance(environment_steps, int)
         or environment_steps < 0
-        or environment_steps != warmup_steps + accepted + fallback_steps
+        or environment_steps != warmup_steps + baseline_steps
     ):
         raise OnlineGRPOError(
             "online GRPO checkpoint environment step counters conflict"
         )
     _attempt_budget_is_exhausted(
-        accepted_rollout_groups=accepted,
-        target_accepted_rollout_groups=sum(
+        accepted_update_states=accepted,
+        target_accepted_update_states=sum(
             int(value) for value in expected_bucket_target_counts
         ),
-        attempted_rollout_groups=attempted,
-        max_attempted_rollout_groups=max_attempted_rollout_groups,
+        sampling_attempts=attempts,
+        max_sampling_attempts=max_sampling_attempts,
     )
     if next_bucket >= bucket_count:
         raise OnlineGRPOError("online GRPO checkpoint bucket cursor is invalid")
@@ -1555,11 +1568,12 @@ def _validate_sampler_state(
     counts: dict[str, list[int]] = {}
     for name in (
         "bucket_target_counts",
-        "bucket_accepted_rollout_counts",
-        "bucket_attempted_rollout_counts",
-        "bucket_rejected_no_pretrain_improvement_counts",
-        "bucket_rejected_zero_reward_span_counts",
-        "bucket_pretrain_fallback_step_counts",
+        "bucket_accepted_update_counts",
+        "bucket_sampling_attempt_counts",
+        "bucket_rejected_sampling_attempt_counts",
+        "bucket_exhausted_state_counts",
+        "bucket_baseline_execution_step_counts",
+        "bucket_zero_signal_epoch_counts",
         "bucket_optimizer_step_counts",
         "bucket_episode_counts",
     ):
@@ -1568,9 +1582,7 @@ def _validate_sampler_state(
             not isinstance(values, (list, tuple))
             or len(values) != bucket_count
             or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 0
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
                 for value in values
             )
         ):
@@ -1584,68 +1596,58 @@ def _validate_sampler_state(
         or counts["bucket_target_counts"] != expected_targets
     ):
         raise OnlineGRPOError("online GRPO checkpoint bucket targets mismatch")
-    if sum(counts["bucket_accepted_rollout_counts"]) != accepted:
+    if sum(counts["bucket_accepted_update_counts"]) != accepted:
         raise OnlineGRPOError("online GRPO checkpoint bucket accepts conflict")
-    if sum(counts["bucket_attempted_rollout_counts"]) != attempted:
+    if sum(counts["bucket_sampling_attempt_counts"]) != attempts:
         raise OnlineGRPOError("online GRPO checkpoint bucket attempts conflict")
-    if (
-        sum(counts["bucket_rejected_no_pretrain_improvement_counts"])
-        != rejected_no_improvement
-        or sum(counts["bucket_rejected_zero_reward_span_counts"])
-        != rejected_zero_span
-    ):
+    if sum(counts["bucket_rejected_sampling_attempt_counts"]) != rejected:
         raise OnlineGRPOError("online GRPO checkpoint bucket rejections conflict")
-    if sum(counts["bucket_pretrain_fallback_step_counts"]) != fallback_steps:
-        raise OnlineGRPOError("online GRPO checkpoint bucket fallbacks conflict")
+    if sum(counts["bucket_exhausted_state_counts"]) != exhausted:
+        raise OnlineGRPOError("online GRPO checkpoint bucket exhaustions conflict")
+    if sum(counts["bucket_baseline_execution_step_counts"]) != baseline_steps:
+        raise OnlineGRPOError("online GRPO checkpoint baseline steps conflict")
+    if sum(counts["bucket_zero_signal_epoch_counts"]) != zero_signal:
+        raise OnlineGRPOError("online GRPO checkpoint zero-signal epochs conflict")
     if sum(counts["bucket_optimizer_step_counts"]) != optimizer_step:
         raise OnlineGRPOError("online GRPO checkpoint bucket updates conflict")
-    if optimizer_step != accepted * update_epochs:
-        raise OnlineGRPOError(
-            "online GRPO checkpoint rollout and optimizer counters conflict"
-        )
     if any(
-        attempt_count
-        != accepted_count + no_improvement_count + zero_span_count
-        for attempt_count, accepted_count, no_improvement_count, zero_span_count in zip(
-            counts["bucket_attempted_rollout_counts"],
-            counts["bucket_accepted_rollout_counts"],
-            counts["bucket_rejected_no_pretrain_improvement_counts"],
-            counts["bucket_rejected_zero_reward_span_counts"],
+        attempt_count != accepted_count + rejected_count
+        for attempt_count, accepted_count, rejected_count in zip(
+            counts["bucket_sampling_attempt_counts"],
+            counts["bucket_accepted_update_counts"],
+            counts["bucket_rejected_sampling_attempt_counts"],
         )
     ):
-        raise OnlineGRPOError(
-            "online GRPO checkpoint bucket attempt counters conflict"
-        )
+        raise OnlineGRPOError("online GRPO checkpoint bucket attempt counters conflict")
     if any(
-        step_count != accepted_count * update_epochs
-        for step_count, accepted_count in zip(
-            counts["bucket_optimizer_step_counts"],
-            counts["bucket_accepted_rollout_counts"],
+        baseline_count != accepted_count + exhausted_count
+        for baseline_count, accepted_count, exhausted_count in zip(
+            counts["bucket_baseline_execution_step_counts"],
+            counts["bucket_accepted_update_counts"],
+            counts["bucket_exhausted_state_counts"],
         )
     ):
-        raise OnlineGRPOError(
-            "online GRPO checkpoint bucket optimizer counters conflict"
-        )
+        raise OnlineGRPOError("online GRPO bucket baseline counters conflict")
     if any(
         sampled_count > target_count
         for sampled_count, target_count in zip(
-            counts["bucket_accepted_rollout_counts"],
+            counts["bucket_accepted_update_counts"],
             counts["bucket_target_counts"],
         )
     ):
         raise OnlineGRPOError("online GRPO checkpoint bucket target exceeded")
     if any(
-        (attempt_count > 0 or fallback_count > 0) and episode_count == 0
-        for attempt_count, fallback_count, episode_count in zip(
-            counts["bucket_attempted_rollout_counts"],
-            counts["bucket_pretrain_fallback_step_counts"],
+        (attempt_count > 0 or baseline_count > 0) and episode_count == 0
+        for attempt_count, baseline_count, episode_count in zip(
+            counts["bucket_sampling_attempt_counts"],
+            counts["bucket_baseline_execution_step_counts"],
             counts["bucket_episode_counts"],
         )
     ):
         raise OnlineGRPOError("online GRPO checkpoint bucket episodes conflict")
 
     unfinished = _next_unfinished_bucket_index(
-        counts["bucket_accepted_rollout_counts"],
+        counts["bucket_accepted_update_counts"],
         counts["bucket_target_counts"],
         start_index=next_bucket,
     )
@@ -1658,7 +1660,7 @@ def _validate_sampler_state(
         if unfinished != next_bucket:
             raise OnlineGRPOError("online GRPO checkpoint bucket cursor is invalid")
         expected_progress = (
-            counts["bucket_accepted_rollout_counts"][next_bucket]
+            counts["bucket_accepted_update_counts"][next_bucket]
             % rollout_groups_per_bucket_visit
         )
         if current_visit_progress != expected_progress:
@@ -1667,7 +1669,7 @@ def _validate_sampler_state(
             )
     for index, (sample_count, target_count) in enumerate(
         zip(
-            counts["bucket_accepted_rollout_counts"],
+            counts["bucket_accepted_update_counts"],
             counts["bucket_target_counts"],
         )
     ):
@@ -1687,21 +1689,20 @@ def _validate_sampler_state(
         or generator_state.ndim != 1
         or generator_state.numel() == 0
     ):
-        raise OnlineGRPOError(
-            "online GRPO checkpoint generator_state is invalid"
-        )
+        raise OnlineGRPOError("online GRPO checkpoint generator_state is invalid")
     return {
-        "accepted_rollout_groups": accepted,
-        "attempted_rollout_groups": attempted,
-        "rejected_no_pretrain_improvement": rejected_no_improvement,
-        "rejected_zero_reward_span": rejected_zero_span,
-        "pretrain_fallback_steps": fallback_steps,
+        "accepted_update_states": accepted,
+        "sampling_attempts": attempts,
+        "rejected_sampling_attempts": rejected,
+        "exhausted_states": exhausted,
+        "baseline_execution_steps": baseline_steps,
+        "zero_signal_epochs": zero_signal,
         "warmup_environment_steps": warmup_steps,
         **counts,
         "next_bucket_index": next_bucket,
         "current_visit_progress": current_visit_progress,
         "generator_state": generator_state.detach().cpu().clone(),
-        "last_validated_rollout": last_validated,
+        "last_validated_update_state": last_validated,
     }
 
 
@@ -1714,7 +1715,7 @@ def _checkpoint_payload(
     metrics: Mapping[str, float],
     diagnostic_only: bool,
     run_mode: str,
-    reward_config: JointRewardConfig,
+    reward_config: VehicleModeRewardConfig,
     scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
     environment_steps: int,
@@ -1724,7 +1725,10 @@ def _checkpoint_payload(
     collection_contract: Mapping[str, object],
     sampler_state: Mapping[str, object],
 ) -> dict[str, object]:
-    _validate_raw_reward_config(reward_config)
+    _validate_vehicle_mode_reward_config(
+        reward_config,
+        trajectories_per_mode=trainer.config.trajectories_per_mode,
+    )
     if not math.isfinite(float(best_validation_reward)):
         raise OnlineGRPOError("best validation reward must be finite")
     if best_checkpoint_sha256 is not None:
@@ -1737,9 +1741,7 @@ def _checkpoint_payload(
             int(best_checkpoint_sha256, 16)
         except ValueError as exc:
             raise OnlineGRPOError("best checkpoint SHA256 is invalid") from exc
-    builder = (
-        grpo_checkpoint_payload if variant == "A" else grpo_b_checkpoint_payload
-    )
+    builder = grpo_checkpoint_payload if variant == "A" else grpo_b_checkpoint_payload
     payload = builder(
         trainer=trainer,
         source_stage1_sha256=source_sha,
@@ -1751,17 +1753,19 @@ def _checkpoint_payload(
         {
             "run_mode": run_mode,
             "reward_contract_version": _reward_contract_version(),
-            "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+            "reward_contract_sha256": VEHICLE_MODE_REWARD_CONTRACT_SHA256,
             "reward_config": dataclasses.asdict(reward_config),
-            "reward_config_sha256": joint_reward_config_sha256(reward_config),
+            "reward_config_sha256": vehicle_mode_reward_config_sha256(reward_config),
             "reward_application_contract": GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
             "reward_application_contract_sha256": (
                 GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
             ),
             "reward_input_domain": "tau_d",
-            "candidate_selection_domain": "tau_d",
+            "training_candidate_domain": "tau_d_all_vehicle_modes",
+            "environment_action_source": "cached_frozen_stage1_argmax",
             "execution_input_domain": "tau_cmd",
-            "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+            "best_checkpoint_metric": "validation/vehicle_reward_mean",
+            "joint_reward_role": "historical_and_final_evaluation_only",
             "tracking_expansion_enabled": False,
             "calibration_required": False,
             "scenario_contract_sha256": scenario_contract_sha,
@@ -1769,9 +1773,7 @@ def _checkpoint_payload(
             "environment_steps": int(environment_steps),
             "best_validation_reward": float(best_validation_reward),
             "best_checkpoint_sha256": best_checkpoint_sha256,
-            "policy_update_contract": joint_grpo_optimizer_contract(
-                policy_update
-            ),
+            "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
             "policy_update_contract_sha256": (
                 joint_grpo_optimizer_contract_sha256(policy_update)
             ),
@@ -1792,7 +1794,7 @@ def _validate_online_checkpoint_metadata(
     payload: Mapping[str, object],
     *,
     run_mode: str,
-    reward_config: JointRewardConfig,
+    reward_config: VehicleModeRewardConfig,
     scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
     policy_update: JointGRPOPolicyUpdateConfig,
@@ -1801,9 +1803,12 @@ def _validate_online_checkpoint_metadata(
     bucket_target_counts: Sequence[int],
     rollout_groups_per_bucket_visit: int,
     optimizer_step: int,
-    max_attempted_rollout_groups: int | None = None,
+    max_sampling_attempts: int | None = None,
 ) -> dict[str, object]:
-    _validate_raw_reward_config(reward_config)
+    _validate_vehicle_mode_reward_config(
+        reward_config,
+        trajectories_per_mode=int(collection_contract.get("trajectories_per_mode", -1)),
+    )
     legacy_fields = (
         "calibration_report_sha256",
         "calibration_gate_bypassed",
@@ -1819,17 +1824,19 @@ def _validate_online_checkpoint_metadata(
         "diagnostic_only": run_mode != "formal",
         "eligible_for_formal_training": run_mode == "formal",
         "reward_contract_version": _reward_contract_version(),
-        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+        "reward_contract_sha256": VEHICLE_MODE_REWARD_CONTRACT_SHA256,
         "reward_config": dataclasses.asdict(reward_config),
-        "reward_config_sha256": joint_reward_config_sha256(reward_config),
+        "reward_config_sha256": vehicle_mode_reward_config_sha256(reward_config),
         "reward_application_contract": GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
         "reward_application_contract_sha256": (
             GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
         ),
         "reward_input_domain": "tau_d",
-        "candidate_selection_domain": "tau_d",
+        "training_candidate_domain": "tau_d_all_vehicle_modes",
+        "environment_action_source": "cached_frozen_stage1_argmax",
         "execution_input_domain": "tau_cmd",
-        "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+        "best_checkpoint_metric": "validation/vehicle_reward_mean",
+        "joint_reward_role": "historical_and_final_evaluation_only",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
         "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
@@ -1842,9 +1849,7 @@ def _validate_online_checkpoint_metadata(
         "trajectory_optimizer_config": dataclasses.asdict(
             KinematicTrajectoryOptimizerConfig()
         ),
-        "trajectory_optimizer_sha256": (
-            KinematicTrajectoryOptimizerConfig().sha256()
-        ),
+        "trajectory_optimizer_sha256": (KinematicTrajectoryOptimizerConfig().sha256()),
     }
     for name, value in expected.items():
         if payload.get(name) != value:
@@ -1855,9 +1860,7 @@ def _validate_online_checkpoint_metadata(
         or not isinstance(environment_steps, int)
         or environment_steps < 0
     ):
-        raise OnlineGRPOError(
-            "online GRPO checkpoint environment_steps is invalid"
-        )
+        raise OnlineGRPOError("online GRPO checkpoint environment_steps is invalid")
     best_reward = payload.get("best_validation_reward")
     if (
         isinstance(best_reward, bool)
@@ -1883,13 +1886,13 @@ def _validate_online_checkpoint_metadata(
             raise OnlineGRPOError(
                 "online GRPO checkpoint best_checkpoint_sha256 is invalid"
             ) from exc
-    if max_attempted_rollout_groups is None:
-        multiplier = collection_contract.get("max_attempted_groups_multiplier")
+    if max_sampling_attempts is None:
+        multiplier = collection_contract.get("max_sampling_attempts_multiplier")
         if isinstance(multiplier, bool) or not isinstance(multiplier, int):
             raise OnlineGRPOError(
                 "online GRPO collection attempt multiplier is invalid"
             )
-        max_attempted_rollout_groups = multiplier * sum(
+        max_sampling_attempts = multiplier * sum(
             int(value) for value in bucket_target_counts
         )
     return _validate_sampler_state(
@@ -1897,32 +1900,46 @@ def _validate_online_checkpoint_metadata(
         bucket_count=bucket_count,
         expected_bucket_target_counts=bucket_target_counts,
         rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
-        update_epochs=policy_update.update_epochs,
         optimizer_step=optimizer_step,
         environment_steps=environment_steps,
-        max_attempted_rollout_groups=max_attempted_rollout_groups,
+        max_sampling_attempts=max_sampling_attempts,
     )
 
 
 @torch.no_grad()
 def _fixed_raw_proxy_and_simulator_validation(
-    planner: torch.nn.Module,
+    trainer: object,
     *,
     device: torch.device,
     reward_config: JointRewardConfig,
     scenarios: Sequence[tuple[str, str]],
     seeds: Sequence[int],
 ) -> tuple[dict[str, float], tuple[dict[str, object], ...]]:
-    """Evaluate raw proxy reward and best-effort closed-loop diagnostics."""
+    """Evaluate per-vehicle reward; retain joint/simulator diagnostics only."""
 
     _validate_raw_reward_config(reward_config)
+    planner = trainer.planner
     proxy_backend = JointTrajectoryProxyReward(reward_config)
+    vehicle_backend = VehicleModeCounterfactualReward(
+        VehicleModeRewardConfig(
+            trajectories_per_mode=trainer.config.trajectories_per_mode
+        )
+    )
     evaluator = JointSimulatorBranchEvaluator(reward_config)
     trajectory_optimizer = KinematicTrajectoryOptimizer()
     raw_rewards: list[float] = []
     raw_unsafe_count = 0
     raw_collision_count = 0
     raw_out_count = 0
+    vehicle_rewards: list[float] = []
+    pretrain_vehicle_rewards: list[float] = []
+    vehicle_unsafe_count = 0
+    vehicle_collision_count = 0
+    vehicle_out_count = 0
+    role_rewards: list[list[float]] = [[], [], []]
+    role_unsafe_counts = [0, 0, 0]
+    role_collision_counts = [0, 0, 0]
+    role_out_counts = [0, 0, 0]
     simulator_rewards: list[float] = []
     simulator_unsafe_count = 0
     simulator_collision_count = 0
@@ -1939,9 +1956,8 @@ def _fixed_raw_proxy_and_simulator_validation(
             try:
                 for step_index in range(100):
                     builder.capture_state(env, step_index * dt_s)
-                    if (
-                        builder.history_ready()
-                        and _scenario_ready_for_primary_sampling(env)
+                    if builder.history_ready() and _scenario_ready_for_primary_sampling(
+                        env
                     ):
                         break
                     action = route_following_warmup_actions(env, builder)
@@ -1978,17 +1994,8 @@ def _fixed_raw_proxy_and_simulator_validation(
                     device,
                     mode_valid_mask=execution_mask,
                 )
-                generator = torch.Generator(device=device)
-                generator.manual_seed(int(seed))
-                noise = torch.randn(
-                    (1, 3, 10, 8, 2),
-                    dtype=torch.float32,
-                    device=device,
-                    generator=generator,
-                )
-                output = planner_forward_from_batch(
-                    planner, batch, diffusion_noise=noise
-                )
+                output = planner_forward_from_batch(planner, batch)
+                frozen = trainer.infer_frozen_pretrain_from_inputs(batch)
                 raw_candidate = (
                     output["selected_trajectory"][0]
                     .detach()
@@ -2003,6 +2010,71 @@ def _fixed_raw_proxy_and_simulator_validation(
                     .numpy()[None]
                     .astype(np.int64, copy=False)
                 )
+                current_all_modes = (
+                    output["trajectory_candidates"][0]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
+                frozen_all_modes = (
+                    frozen["all_mode_trajectories"][0]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
+                frozen_argmax = (
+                    frozen["selected_trajectory"][0]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
+                pretrain_local = vehicle_backend.score_pretrain(
+                    env,
+                    values,
+                    frozen_all_modes,
+                    frozen_argmax,
+                    execution_mask,
+                )
+                validation_candidates = np.repeat(
+                    current_all_modes[:, :, None],
+                    trainer.config.trajectories_per_mode,
+                    axis=2,
+                )
+                current_local = vehicle_backend.score_candidates(
+                    env,
+                    values,
+                    validation_candidates,
+                    frozen_argmax,
+                    execution_mask,
+                    pretrain_local,
+                )
+                valid = np.asarray(current_local.valid_mode_mask, dtype=np.bool_)
+                per_mode_reward = np.asarray(current_local.rewards).mean(axis=-1)
+                per_mode_unsafe = np.asarray(current_local.unsafe)[..., 0]
+                per_mode_collision = np.asarray(current_local.collision)[..., 0]
+                per_mode_out = np.asarray(current_local.out_of_drivable)[..., 0]
+                vehicle_rewards.extend(per_mode_reward[valid].tolist())
+                pretrain_vehicle_rewards.extend(
+                    np.asarray(current_local.pretrain_rewards)[valid].tolist()
+                )
+                vehicle_unsafe_count += int(per_mode_unsafe[valid].sum())
+                vehicle_collision_count += int(per_mode_collision[valid].sum())
+                vehicle_out_count += int(per_mode_out[valid].sum())
+                for role in range(3):
+                    role_valid = valid[role]
+                    role_rewards[role].extend(
+                        per_mode_reward[role][role_valid].tolist()
+                    )
+                    role_unsafe_counts[role] += int(
+                        per_mode_unsafe[role][role_valid].sum()
+                    )
+                    role_collision_counts[role] += int(
+                        per_mode_collision[role][role_valid].sum()
+                    )
+                    role_out_counts[role] += int(per_mode_out[role][role_valid].sum())
                 raw_proxy = proxy_backend.score(env, values, raw_candidate)
                 raw_rewards.append(float(raw_proxy.rewards[0]))
                 raw_unsafe_count += int(raw_proxy.unsafe[0])
@@ -2039,9 +2111,19 @@ def _fixed_raw_proxy_and_simulator_validation(
             simulator_unsafe_count += int(branch.reward.unsafe[0])
             simulator_collision_count += int(branch.reward.collision[0])
             simulator_out_count += int(branch.reward.out_of_drivable[0])
-    if not raw_rewards:
+    if not raw_rewards or not vehicle_rewards:
         raise OnlineGRPOError("fixed validation produced no raw proxy rewards")
     metrics = {
+        "validation/vehicle_reward_mean": float(np.mean(vehicle_rewards)),
+        "validation/same_mode_pretrain_reward_mean": float(
+            np.mean(pretrain_vehicle_rewards)
+        ),
+        "validation/vehicle_reward_gain": float(
+            np.mean(vehicle_rewards) - np.mean(pretrain_vehicle_rewards)
+        ),
+        "validation/vehicle_unsafe_count": float(vehicle_unsafe_count),
+        "validation/vehicle_collision_count": float(vehicle_collision_count),
+        "validation/vehicle_out_of_drivable_count": float(vehicle_out_count),
         "validation/raw_proxy_reward_mean": float(np.mean(raw_rewards)),
         "validation/raw_proxy_unsafe_count": float(raw_unsafe_count),
         "validation/raw_proxy_collision_count": float(raw_collision_count),
@@ -2050,12 +2132,31 @@ def _fixed_raw_proxy_and_simulator_validation(
         "validation/simulator_success_count": float(len(simulator_rewards)),
         "validation/simulator_failure_count": float(len(simulator_errors)),
     }
+    for role in range(3):
+        if not role_rewards[role]:
+            raise OnlineGRPOError(
+                f"fixed validation produced no valid modes for vehicle {role}"
+            )
+        metrics.update(
+            {
+                f"validation/vehicle_{role}_reward_mean": float(
+                    np.mean(role_rewards[role])
+                ),
+                f"validation/vehicle_{role}_unsafe_count": float(
+                    role_unsafe_counts[role]
+                ),
+                f"validation/vehicle_{role}_collision_count": float(
+                    role_collision_counts[role]
+                ),
+                f"validation/vehicle_{role}_out_of_drivable_count": float(
+                    role_out_counts[role]
+                ),
+            }
+        )
     if simulator_rewards:
         metrics.update(
             {
-                "validation/simulator_reward_mean": float(
-                    np.mean(simulator_rewards)
-                ),
+                "validation/simulator_reward_mean": float(np.mean(simulator_rewards)),
                 "validation/unsafe_count": float(simulator_unsafe_count),
                 "validation/collision_count": float(simulator_collision_count),
                 "validation/out_of_road_count": float(simulator_out_count),
@@ -2070,7 +2171,7 @@ def _validation_reward_comparison_metrics(
     current_validation: Mapping[str, object],
     pretrain_reward: object,
 ) -> dict[str, float]:
-    reward_tag = "validation/raw_proxy_reward_mean"
+    reward_tag = "validation/vehicle_reward_mean"
     if reward_tag not in current_validation:
         raise OnlineGRPOError(
             f"fixed validation is missing required metric {reward_tag}"
@@ -2087,15 +2188,17 @@ def _validation_reward_comparison_metrics(
             "validation current and pretrain rewards must be finite scalars"
         )
     return {
-        "validation/pretrain_reward": baseline_reward,
-        "validation/reward_gain": current_reward - baseline_reward,
+        "validation/fixed_pretrain_vehicle_reward": baseline_reward,
+        "validation/fixed_pretrain_vehicle_reward_gain": (
+            current_reward - baseline_reward
+        ),
     }
 
 
-def _validation_raw_proxy_reward(validation: Mapping[str, object]) -> float:
+def _validation_vehicle_reward(validation: Mapping[str, object]) -> float:
     """Return the sole best-checkpoint objective as a finite scalar."""
 
-    reward_tag = "validation/raw_proxy_reward_mean"
+    reward_tag = "validation/vehicle_reward_mean"
     if reward_tag not in validation:
         raise OnlineGRPOError(
             f"fixed validation is missing required metric {reward_tag}"
@@ -2104,12 +2207,10 @@ def _validation_raw_proxy_reward(validation: Mapping[str, object]) -> float:
         reward = float(validation[reward_tag])
     except (TypeError, ValueError) as exc:
         raise OnlineGRPOError(
-            "validation raw proxy reward must be a finite scalar"
+            "validation vehicle reward must be a finite scalar"
         ) from exc
     if not math.isfinite(reward):
-        raise OnlineGRPOError(
-            "validation raw proxy reward must be a finite scalar"
-        )
+        raise OnlineGRPOError("validation vehicle reward must be a finite scalar")
     return reward
 
 
@@ -2122,9 +2223,7 @@ def _resume_best_checkpoint_anchor(
     best_reward = float(resume_payload["best_validation_reward"])
     best_sha = resume_payload.get("best_checkpoint_sha256")
     if best_sha is None:
-        if _validation_raw_proxy_reward(
-            resume_payload.get("metrics", {})
-        ) != best_reward:
+        if _validation_vehicle_reward(resume_payload.get("metrics", {})) != best_reward:
             raise OnlineGRPOError(
                 "self-contained best checkpoint reward binding mismatch"
             )
@@ -2134,9 +2233,7 @@ def _resume_best_checkpoint_anchor(
     if _checkpoint_file_sha256(best_path) != best_sha:
         raise OnlineGRPOError("resume best checkpoint SHA256 mismatch")
     try:
-        best_payload = torch.load(
-            best_path, map_location="cpu", weights_only=False
-        )
+        best_payload = torch.load(best_path, map_location="cpu", weights_only=False)
     except (OSError, RuntimeError, ValueError) as exc:
         raise OnlineGRPOError(
             f"unable to load resume best checkpoint: {best_path}"
@@ -2156,9 +2253,11 @@ def _resume_best_checkpoint_anchor(
         "reward_config_sha256",
         "reward_application_contract_sha256",
         "reward_input_domain",
-        "candidate_selection_domain",
+        "training_candidate_domain",
+        "environment_action_source",
         "execution_input_domain",
         "best_checkpoint_metric",
+        "joint_reward_role",
         "tracking_expansion_enabled",
         "calibration_required",
         "policy_update_contract",
@@ -2168,8 +2267,7 @@ def _resume_best_checkpoint_anchor(
         "trajectory_optimizer_sha256",
     )
     if any(
-        best_payload.get(field) != resume_payload.get(field)
-        for field in binding_fields
+        best_payload.get(field) != resume_payload.get(field) for field in binding_fields
     ):
         raise OnlineGRPOError("resume best checkpoint contract binding mismatch")
     raw_best_reward = best_payload.get("best_validation_reward")
@@ -2182,26 +2280,10 @@ def _resume_best_checkpoint_anchor(
     if (
         best_payload.get("best_checkpoint_sha256") is not None
         or float(raw_best_reward) != best_reward
-        or _validation_raw_proxy_reward(best_payload.get("metrics", {}))
-        != best_reward
+        or _validation_vehicle_reward(best_payload.get("metrics", {})) != best_reward
     ):
         raise OnlineGRPOError("resume best checkpoint reward binding mismatch")
     return best_path, best_reward
-
-
-def _score_raw_candidates(
-    env: object,
-    model_inputs: object,
-    raw_candidates: np.ndarray,
-    *,
-    proxy_backend: JointTrajectoryProxyReward,
-) -> tuple[object, int]:
-    """Score every raw tau_d and return its reward argmax without side effects."""
-
-    raw = np.asarray(raw_candidates)
-    proxy = proxy_backend.score(env, model_inputs, raw)
-    selected_index = int(np.argmax(proxy.rewards))
-    return proxy, selected_index
 
 
 def run_joint_grpo_training(
@@ -2210,14 +2292,10 @@ def run_joint_grpo_training(
     run_dir: Path,
 ) -> dict[str, object]:
     if not isinstance(training_config, JointGRPOTrainingConfig):
-        raise OnlineGRPOError(
-            "training_config must be a JointGRPOTrainingConfig"
-        )
+        raise OnlineGRPOError("training_config must be a JointGRPOTrainingConfig")
     run_dir = Path(run_dir)
     if not run_dir.exists():
-        raise OnlineGRPOError(
-            f"run_dir must already exist: {run_dir}"
-        )
+        raise OnlineGRPOError(f"run_dir must already exist: {run_dir}")
     if not run_dir.is_dir():
         raise OnlineGRPOError(f"run_dir must be a directory: {run_dir}")
     unexpected_entries = sorted(
@@ -2230,9 +2308,7 @@ def run_joint_grpo_training(
         )
     training_log = run_dir / "training.log"
     if training_log.exists() and not training_log.is_file():
-        raise OnlineGRPOError(
-            f"run_dir training.log must be a file: {training_log}"
-        )
+        raise OnlineGRPOError(f"run_dir training.log must be a file: {training_log}")
     (run_dir / "checkpoints").mkdir()
 
     started_at = time.monotonic()
@@ -2240,14 +2316,16 @@ def run_joint_grpo_training(
     variant = training_config.variant
     run_mode = training_config.run_mode
     source_checkpoint = training_config.source_checkpoint
-    target_accepted_rollout_groups = config.total_rollout_groups
-    max_attempted_rollout_groups = (
-        config.max_attempted_groups_multiplier
-        * target_accepted_rollout_groups
+    target_accepted_update_states = config.total_rollout_groups
+    max_sampling_attempts = (
+        config.max_sampling_attempts_multiplier * target_accepted_update_states
     )
 
-    reward_config = JointRewardConfig()
-    _validate_raw_reward_config(reward_config)
+    reward_config = VehicleModeRewardConfig(
+        trajectories_per_mode=config.trajectories_per_mode
+    )
+    joint_diagnostic_reward_config = JointRewardConfig()
+    _validate_raw_reward_config(joint_diagnostic_reward_config)
     try:
         scenario_contract_sha = validate_primary_scenario_contract(
             primary_scenario_contract(config.scenarios)
@@ -2255,7 +2333,7 @@ def run_joint_grpo_training(
     except BEVScenarioContractError as exc:
         raise OnlineGRPOError(str(exc)) from exc
     torch_device = _device(config.device)
-    grpo_config = JointGRPOConfig(group_size=config.group_size)
+    grpo_config = JointGRPOConfig(trajectories_per_mode=config.trajectories_per_mode)
     policy_update = _policy_update_config(config)
     trainer, source_payload, source_sha = _load_trainer(
         variant,
@@ -2264,21 +2342,22 @@ def run_joint_grpo_training(
         grpo_config=grpo_config,
         allow_diagnostic_source=run_mode == "smoke",
     )
-    if run_mode == "formal" and source_payload.get(
-        "eligible_for_formal_training"
-    ) is not True:
+    if (
+        run_mode == "formal"
+        and source_payload.get("eligible_for_formal_training") is not True
+    ):
         raise OnlineGRPOError("formal GRPO requires an eligible Stage 1 source")
 
     pretrain_validation, pretrain_simulator_errors = (
         _fixed_raw_proxy_and_simulator_validation(
-            trainer.planner,
+            trainer,
             device=torch_device,
-            reward_config=reward_config,
+            reward_config=joint_diagnostic_reward_config,
             scenarios=config.scenarios,
             seeds=HOLDOUT_SEEDS,
         )
     )
-    pretrain_reward = _validation_raw_proxy_reward(pretrain_validation)
+    pretrain_reward = _validation_vehicle_reward(pretrain_validation)
     pretrain_simulator_reward = pretrain_validation.get(
         "validation/simulator_reward_mean"
     )
@@ -2290,32 +2369,30 @@ def run_joint_grpo_training(
         config.scenarios, config.scenario_seeds
     )
     bucket_target_counts = _balanced_bucket_targets(
-        target_accepted_rollout_groups, len(training_buckets)
+        target_accepted_update_states, len(training_buckets)
     )
     collection_contract = rollout_collection_contract(config)
     generator = torch.Generator(device=torch_device)
     generator.manual_seed(config.seed)
     environment_steps = 0
     warmup_environment_steps = 0
-    accepted_rollout_groups = 0
-    attempted_rollout_groups = 0
-    rejected_no_pretrain_improvement = 0
-    rejected_zero_reward_span = 0
-    pretrain_fallback_steps = 0
-    bucket_accepted_rollout_counts = [0 for _ in training_buckets]
-    bucket_attempted_rollout_counts = [0 for _ in training_buckets]
-    bucket_rejected_no_pretrain_improvement_counts = [
-        0 for _ in training_buckets
-    ]
-    bucket_rejected_zero_reward_span_counts = [
-        0 for _ in training_buckets
-    ]
-    bucket_pretrain_fallback_step_counts = [0 for _ in training_buckets]
+    accepted_update_states = 0
+    sampling_attempts = 0
+    rejected_sampling_attempts = 0
+    exhausted_states = 0
+    baseline_execution_steps = 0
+    zero_signal_epochs = 0
+    bucket_accepted_update_counts = [0 for _ in training_buckets]
+    bucket_sampling_attempt_counts = [0 for _ in training_buckets]
+    bucket_rejected_sampling_attempt_counts = [0 for _ in training_buckets]
+    bucket_exhausted_state_counts = [0 for _ in training_buckets]
+    bucket_baseline_execution_step_counts = [0 for _ in training_buckets]
+    bucket_zero_signal_epoch_counts = [0 for _ in training_buckets]
     bucket_optimizer_step_counts = [0 for _ in training_buckets]
     bucket_episode_counts = [0 for _ in training_buckets]
     next_bucket_index = 0
     current_visit_progress = 0
-    last_validated_rollout = -1
+    last_validated_update_state = -1
     advantage_vector_record_count = 0
     rollout_start_offsets_this_run: list[int] = []
     rollout_start_accepted_count = 0
@@ -2332,8 +2409,7 @@ def run_joint_grpo_training(
         "commitment_feedback_incompatible": 0,
     }
     last_metrics: dict[str, float] = {
-        str(name): float(value)
-        for name, value in pretrain_validation.items()
+        str(name): float(value) for name, value in pretrain_validation.items()
     }
     resume_best_path: Path | None = None
     best_reward: float | None = None
@@ -2353,89 +2429,75 @@ def run_joint_grpo_training(
             collection_contract=collection_contract,
             bucket_count=len(training_buckets),
             bucket_target_counts=bucket_target_counts,
-            rollout_groups_per_bucket_visit=(
-                config.rollout_groups_per_bucket_visit
-            ),
+            rollout_groups_per_bucket_visit=(config.rollout_groups_per_bucket_visit),
             optimizer_step=trainer.optimizer_step,
-            max_attempted_rollout_groups=max_attempted_rollout_groups,
+            max_sampling_attempts=max_sampling_attempts,
         )
         environment_steps = int(resume_payload["environment_steps"])
         warmup_environment_steps = int(
             restored_sampler_state["warmup_environment_steps"]
         )
-        accepted_rollout_groups = int(
-            restored_sampler_state["accepted_rollout_groups"]
+        accepted_update_states = int(restored_sampler_state["accepted_update_states"])
+        sampling_attempts = int(restored_sampler_state["sampling_attempts"])
+        rejected_sampling_attempts = int(
+            restored_sampler_state["rejected_sampling_attempts"]
         )
-        attempted_rollout_groups = int(
-            restored_sampler_state["attempted_rollout_groups"]
+        exhausted_states = int(restored_sampler_state["exhausted_states"])
+        baseline_execution_steps = int(
+            restored_sampler_state["baseline_execution_steps"]
         )
-        rejected_no_pretrain_improvement = int(
-            restored_sampler_state["rejected_no_pretrain_improvement"]
+        zero_signal_epochs = int(restored_sampler_state["zero_signal_epochs"])
+        bucket_accepted_update_counts = list(
+            restored_sampler_state["bucket_accepted_update_counts"]
         )
-        rejected_zero_reward_span = int(
-            restored_sampler_state["rejected_zero_reward_span"]
+        bucket_sampling_attempt_counts = list(
+            restored_sampler_state["bucket_sampling_attempt_counts"]
         )
-        pretrain_fallback_steps = int(
-            restored_sampler_state["pretrain_fallback_steps"]
+        bucket_rejected_sampling_attempt_counts = list(
+            restored_sampler_state["bucket_rejected_sampling_attempt_counts"]
         )
-        bucket_accepted_rollout_counts = list(
-            restored_sampler_state["bucket_accepted_rollout_counts"]
+        bucket_exhausted_state_counts = list(
+            restored_sampler_state["bucket_exhausted_state_counts"]
         )
-        bucket_attempted_rollout_counts = list(
-            restored_sampler_state["bucket_attempted_rollout_counts"]
+        bucket_baseline_execution_step_counts = list(
+            restored_sampler_state["bucket_baseline_execution_step_counts"]
         )
-        bucket_rejected_no_pretrain_improvement_counts = list(
-            restored_sampler_state[
-                "bucket_rejected_no_pretrain_improvement_counts"
-            ]
-        )
-        bucket_rejected_zero_reward_span_counts = list(
-            restored_sampler_state["bucket_rejected_zero_reward_span_counts"]
-        )
-        bucket_pretrain_fallback_step_counts = list(
-            restored_sampler_state["bucket_pretrain_fallback_step_counts"]
+        bucket_zero_signal_epoch_counts = list(
+            restored_sampler_state["bucket_zero_signal_epoch_counts"]
         )
         bucket_optimizer_step_counts = list(
             restored_sampler_state["bucket_optimizer_step_counts"]
         )
-        bucket_episode_counts = list(
-            restored_sampler_state["bucket_episode_counts"]
-        )
+        bucket_episode_counts = list(restored_sampler_state["bucket_episode_counts"])
         next_bucket_index = int(restored_sampler_state["next_bucket_index"])
-        current_visit_progress = int(
-            restored_sampler_state["current_visit_progress"]
-        )
-        last_validated_rollout = int(
-            restored_sampler_state["last_validated_rollout"]
+        current_visit_progress = int(restored_sampler_state["current_visit_progress"])
+        last_validated_update_state = int(
+            restored_sampler_state["last_validated_update_state"]
         )
         generator.set_state(restored_sampler_state["generator_state"])
         last_metrics = {
-            str(name): float(value)
-            for name, value in resume_payload["metrics"].items()
+            str(name): float(value) for name, value in resume_payload["metrics"].items()
         }
         resume_best_path, best_reward = _resume_best_checkpoint_anchor(
             Path(config.resume_checkpoint), resume_payload
         )
-        if accepted_rollout_groups >= target_accepted_rollout_groups:
+        if accepted_update_states >= target_accepted_update_states:
             raise OnlineGRPOError(
-                "resume checkpoint already reached requested accepted rollout "
-                "groups"
+                "resume checkpoint already reached requested accepted rollout " "groups"
             )
 
-    frozen_pretrain_reward_logging = (
-        _frozen_pretrain_reward_logging_metadata(trainer.planner)
+    frozen_pretrain_reward_logging = _frozen_pretrain_reward_logging_metadata(
+        trainer.planner
     )
     run_start_optimizer_step = trainer.optimizer_step
-    run_start_accepted_rollout_group = accepted_rollout_groups
-    run_start_attempted_rollout_group = attempted_rollout_groups
+    run_start_accepted_update_state = accepted_update_states
+    run_start_sampling_attempt = sampling_attempts
     online_config = dataclasses.asdict(config)
     online_config["resume_checkpoint"] = (
-        str(config.resume_checkpoint)
-        if config.resume_checkpoint is not None
-        else None
+        str(config.resume_checkpoint) if config.resume_checkpoint is not None else None
     )
     frozen = {
-        "format": "bev_joint_grpo_online_config_v9",
+        "format": "bev_joint_grpo_online_config_v10",
         "variant": variant,
         "run_mode": run_mode,
         "diagnostic_only": run_mode != "formal",
@@ -2449,27 +2511,27 @@ def run_joint_grpo_training(
         ),
         "rollout_collection_contract": collection_contract,
         "reward_contract_version": _reward_contract_version(),
-        "reward_contract": JOINT_REWARD_CONTRACT,
-        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+        "reward_contract": VEHICLE_MODE_REWARD_CONTRACT,
+        "reward_contract_sha256": VEHICLE_MODE_REWARD_CONTRACT_SHA256,
         "reward_config": dataclasses.asdict(reward_config),
-        "reward_config_sha256": joint_reward_config_sha256(reward_config),
+        "reward_config_sha256": vehicle_mode_reward_config_sha256(reward_config),
         "reward_application_contract": GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
         "reward_application_contract_sha256": (
             GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
         ),
         "reward_input_domain": "tau_d",
-        "candidate_selection_domain": "tau_d",
+        "training_candidate_domain": "tau_d_all_vehicle_modes",
+        "environment_action_source": "cached_frozen_stage1_argmax",
         "execution_input_domain": "tau_cmd",
         "frozen_pretrain_reward_logging": frozen_pretrain_reward_logging,
-        "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+        "best_checkpoint_metric": "validation/vehicle_reward_mean",
+        "joint_reward_role": "historical_and_final_evaluation_only",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
         "trajectory_optimizer_config": dataclasses.asdict(
             KinematicTrajectoryOptimizerConfig()
         ),
-        "trajectory_optimizer_sha256": (
-            KinematicTrajectoryOptimizerConfig().sha256()
-        ),
+        "trajectory_optimizer_sha256": (KinematicTrajectoryOptimizerConfig().sha256()),
         "scenario_contract": primary_scenario_contract(config.scenarios),
         "scenario_contract_sha256": scenario_contract_sha,
     }
@@ -2478,7 +2540,7 @@ def run_joint_grpo_training(
     )
     metrics_path = run_dir / "metrics.jsonl"
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
-    proxy_backend = JointTrajectoryProxyReward(reward_config)
+    vehicle_reward_backend = VehicleModeCounterfactualReward(reward_config)
     trajectory_optimizer = KinematicTrajectoryOptimizer()
     consecutive_empty_episodes = 0
     best_path = run_dir / "checkpoints" / "best.pt"
@@ -2495,18 +2557,18 @@ def run_joint_grpo_training(
     _reset_cuda_peak_memory(torch_device)
     attempt_budget_exhausted = False
     try:
-        while accepted_rollout_groups < target_accepted_rollout_groups:
+        while accepted_update_states < target_accepted_update_states:
             bucket_index = next_bucket_index
             if (
-                bucket_accepted_rollout_counts[bucket_index]
+                bucket_accepted_update_counts[bucket_index]
                 >= bucket_target_counts[bucket_index]
             ):
                 raise OnlineGRPOError(
                     "training bucket cursor points to a completed target"
                 )
             scenario, seed = training_buckets[bucket_index]
-            accepted_at_episode_start = accepted_rollout_groups
-            fallbacks_at_episode_start = pretrain_fallback_steps
+            accepted_at_episode_start = accepted_update_states
+            baseline_steps_at_episode_start = baseline_execution_steps
             env = _new_env(scenario, seed)
             bucket_episode_counts[bucket_index] += 1
             builder = JointBEVSampleBuilder(AGENT_IDS)
@@ -2525,20 +2587,17 @@ def run_joint_grpo_training(
             scenario_window_closed = False
             try:
                 while (
-                    accepted_rollout_groups < target_accepted_rollout_groups
-                    and bucket_accepted_rollout_counts[bucket_index]
+                    accepted_update_states < target_accepted_update_states
+                    and bucket_accepted_update_counts[bucket_index]
                     < bucket_target_counts[bucket_index]
-                    and current_visit_progress
-                    < config.rollout_groups_per_bucket_visit
+                    and current_visit_progress < config.rollout_groups_per_bucket_visit
                     and episode_step < config.environment_steps_per_episode
                 ):
                     builder.capture_state(env, episode_step * dt_s)
                     history_ready = builder.history_ready()
                     if history_ready:
                         scenario_summary = _scenario_summary(env)
-                        ready_now = _scenario_ready_from_summary(
-                            scenario_summary
-                        )
+                        ready_now = _scenario_ready_from_summary(scenario_summary)
                         window_closed_now = (
                             _scenario_sampling_window_closed_from_summary(
                                 scenario_summary
@@ -2548,67 +2607,58 @@ def run_joint_grpo_training(
                         ready_now = False
                         window_closed_now = False
                     scenario_window_closed = bool(
-                        scenario_window_closed
-                        or window_closed_now
+                        scenario_window_closed or window_closed_now
                     )
                     if scenario_window_closed:
                         if start_target_step is not None and not start_accepted:
                             assert start_ready_step is not None
                             assert start_offset is not None
                             assert start_upper_bound is not None
-                            last_open_offset = (
-                                episode_step - start_ready_step - 1
-                            )
+                            last_open_offset = episode_step - start_ready_step - 1
                             if last_open_offset >= 0:
                                 temporary_start_offset_upper_bound = min(
                                     last_open_offset,
-                                    temporary_start_offset_upper_bound
-                                    if temporary_start_offset_upper_bound
-                                    is not None
-                                    else last_open_offset,
+                                    (
+                                        temporary_start_offset_upper_bound
+                                        if temporary_start_offset_upper_bound
+                                        is not None
+                                        else last_open_offset
+                                    ),
                                 )
                                 retryable_start_rejection = True
                             rollout_start_rejected_count += 1
                             _write_rollout_start_event(
                                 metrics_path,
                                 optimizer_step=trainer.optimizer_step,
-                                rollout_group=accepted_rollout_groups,
+                                rollout_group=accepted_update_states,
                                 bucket_index=bucket_index,
                                 scenario=scenario,
                                 seed=seed,
-                                bucket_episode=(
-                                    bucket_episode_counts[bucket_index]
-                                ),
+                                bucket_episode=(bucket_episode_counts[bucket_index]),
                                 ready_step=start_ready_step,
                                 upper_bound=start_upper_bound,
                                 sampled_offset=start_offset,
                                 target_step=start_target_step,
-                                status=(
-                                    "rejected_window_closed_before_target"
-                                ),
+                                status=("rejected_window_closed_before_target"),
                             )
                         break
                     if start_ready_step is None and ready_now:
                         start_ready_step = episode_step
-                        start_offset, start_upper_bound = (
-                            _sample_rollout_start_offset(
-                                config,
-                                start_ready_step,
-                                generator=generator,
-                                temporary_max_offset_steps=(
-                                    temporary_start_offset_upper_bound
-                                ),
-                            )
+                        start_offset, start_upper_bound = _sample_rollout_start_offset(
+                            config,
+                            start_ready_step,
+                            generator=generator,
+                            temporary_max_offset_steps=(
+                                temporary_start_offset_upper_bound
+                            ),
                         )
                         start_target_step = start_ready_step + start_offset
                         rollout_start_offsets_this_run.append(start_offset)
                     accepted_this_step = False
-                    fallback_this_step = False
-                    fallback_pretrain_reward: float | None = None
-                    if (
-                        start_target_step is None
-                        or episode_step < start_target_step
-                    ):
+                    baseline_this_step = False
+                    exhausted_this_step = False
+                    baseline_step_result: tuple[object, ...] | None = None
+                    if start_target_step is None or episode_step < start_target_step:
                         action = route_following_warmup_actions(env, builder)
                     else:
                         if not start_accepted:
@@ -2621,13 +2671,11 @@ def run_joint_grpo_training(
                             _write_rollout_start_event(
                                 metrics_path,
                                 optimizer_step=trainer.optimizer_step,
-                                rollout_group=accepted_rollout_groups + 1,
+                                rollout_group=accepted_update_states + 1,
                                 bucket_index=bucket_index,
                                 scenario=scenario,
                                 seed=seed,
-                                bucket_episode=(
-                                    bucket_episode_counts[bucket_index]
-                                ),
+                                bucket_episode=(bucket_episode_counts[bucket_index]),
                                 ready_step=start_ready_step,
                                 upper_bound=start_upper_bound,
                                 sampled_offset=start_offset,
@@ -2652,41 +2700,31 @@ def run_joint_grpo_training(
                             torch_device,
                             mode_valid_mask=execution_mask,
                         )
-                        accepted_candidate: tuple[
-                            object, np.ndarray, np.ndarray, object, int
-                        ] | None = None
+                        accepted_attempt: (
+                            tuple[object, object, np.ndarray, dict[str, float]] | None
+                        ) = None
                         frozen_raw_candidate: np.ndarray | None = None
+                        frozen_all_mode_candidates: np.ndarray | None = None
                         frozen_modes: np.ndarray | None = None
-                        frozen_pretrain_reward: float | None = None
-                        accepted_attempt_metrics: dict[str, float] | None = None
+                        pretrain_score: object | None = None
                         attempts_for_state = 0
                         for retry_index in range(
-                            1, config.max_candidate_groups_per_state + 1
+                            1, config.max_sampling_attempts_per_state + 1
                         ):
-                            if _attempt_budget_is_exhausted(
-                                accepted_rollout_groups=(
-                                    accepted_rollout_groups
+                            if retry_index == 1 and _attempt_budget_is_exhausted(
+                                accepted_update_states=accepted_update_states,
+                                target_accepted_update_states=(
+                                    target_accepted_update_states
                                 ),
-                                target_accepted_rollout_groups=(
-                                    target_accepted_rollout_groups
-                                ),
-                                attempted_rollout_groups=(
-                                    attempted_rollout_groups
-                                ),
-                                max_attempted_rollout_groups=(
-                                    max_attempted_rollout_groups
-                                ),
+                                sampling_attempts=sampling_attempts,
+                                max_sampling_attempts=(max_sampling_attempts),
                             ):
                                 attempt_budget_exhausted = True
                                 break
-                            rollout = trainer.sample_groups(
-                                batch, generator=generator
-                            )
+                            rollout = trainer.sample_groups(batch, generator=generator)
                             attempts_for_state += 1
                             if frozen_raw_candidate is None:
-                                frozen_pretrain = (
-                                    trainer.infer_frozen_pretrain(rollout)
-                                )
+                                frozen_pretrain = trainer.infer_frozen_pretrain(rollout)
                                 frozen_raw_candidate = (
                                     frozen_pretrain["selected_trajectory"]
                                     .detach()
@@ -2701,267 +2739,161 @@ def run_joint_grpo_training(
                                     .numpy()
                                     .astype(np.int64, copy=False)
                                 )
-                                frozen_proxy = proxy_backend.score(
-                                    env, values, frozen_raw_candidate
+                                frozen_all_mode_candidates = (
+                                    frozen_pretrain["all_mode_trajectories"]
+                                    .detach()
+                                    .cpu()
+                                    .numpy()
+                                    .astype(np.float32, copy=False)
                                 )
-                                frozen_rewards = np.asarray(
-                                    frozen_proxy.rewards
+                                pretrain_score = vehicle_reward_backend.score_pretrain(
+                                    env,
+                                    values,
+                                    frozen_all_mode_candidates[0],
+                                    frozen_raw_candidate[0],
+                                    execution_mask,
                                 )
-                                if frozen_rewards.shape != (1,):
-                                    raise OnlineGRPOError(
-                                        "frozen Stage1 inference must produce "
-                                        "exactly one joint raw trajectory reward"
-                                    )
-                                frozen_pretrain_reward = float(
-                                    frozen_rewards[0]
-                                )
-                                if not math.isfinite(frozen_pretrain_reward):
-                                    raise OnlineGRPOError(
-                                        "frozen Stage1 raw proxy reward must be "
-                                        "finite"
-                                    )
+                            assert frozen_raw_candidate is not None
+                            assert frozen_all_mode_candidates is not None
+                            assert pretrain_score is not None
                             raw_candidates = (
-                                rollout.selected_trajectories[0]
+                                rollout.candidate_trajectories[0]
                                 .detach()
                                 .cpu()
                                 .numpy()
                                 .astype(np.float32, copy=False)
                             )
-                            sampled_modes = (
-                                rollout.sampled_modes[0]
-                                .detach()
-                                .cpu()
-                                .numpy()
-                                .astype(np.int64, copy=False)
-                            )
-                            proxy, selected_index = _score_raw_candidates(
+                            proxy = vehicle_reward_backend.score_candidates(
                                 env,
                                 values,
                                 raw_candidates,
-                                proxy_backend=proxy_backend,
+                                frozen_raw_candidate[0],
+                                execution_mask,
+                                pretrain_score,
                             )
-                            assert frozen_pretrain_reward is not None
-                            rejection_reason = (
-                                _candidate_group_rejection_reason(
-                                    proxy.rewards,
-                                    pretrain_reward=frozen_pretrain_reward,
-                                    group_size=trainer.config.group_size,
-                                    improvement_margin=(
-                                        config.pretrain_improvement_margin
-                                    ),
-                                )
+                            active_mode_mask = _active_vehicle_mode_mask(
+                                proxy.rewards,
+                                proxy.pretrain_rewards,
+                                proxy.valid_mode_mask,
                             )
-                            attempted_rollout_groups += 1
-                            bucket_attempted_rollout_counts[bucket_index] += 1
-                            attempt_metrics = (
-                                _write_dynamic_sampling_attempt_event(
-                                    metrics_path,
-                                    optimizer_step=trainer.optimizer_step,
-                                    accepted_rollout_group=(
-                                        accepted_rollout_groups + 1
-                                    ),
-                                    attempted_rollout_group=(
-                                        attempted_rollout_groups
-                                    ),
-                                    retry_index=retry_index,
-                                    bucket_index=bucket_index,
-                                    scenario=scenario,
-                                    seed=seed,
-                                    rewards=proxy.rewards,
-                                    pretrain_reward=frozen_pretrain_reward,
-                                    improvement_margin=(
-                                        config.pretrain_improvement_margin
-                                    ),
-                                    rejection_reason=rejection_reason,
-                                )
+                            sampling_attempts += 1
+                            bucket_sampling_attempt_counts[bucket_index] += 1
+                            attempt_metrics = _write_dynamic_sampling_attempt_event(
+                                metrics_path,
+                                optimizer_step=trainer.optimizer_step,
+                                accepted_update_state=(accepted_update_states + 1),
+                                sampling_attempt=sampling_attempts,
+                                retry_index=retry_index,
+                                bucket_index=bucket_index,
+                                scenario=scenario,
+                                seed=seed,
+                                rewards=proxy.rewards,
+                                pretrain_rewards=proxy.pretrain_rewards,
+                                valid_mode_mask=proxy.valid_mode_mask,
+                                active_mode_mask=active_mode_mask,
                             )
                             writer.add_scalar(
                                 "dynamic_sampling/accepted",
-                                float(rejection_reason is None),
-                                attempted_rollout_groups,
+                                float(active_mode_mask.any()),
+                                sampling_attempts,
                             )
                             writer.add_scalar(
-                                "dynamic_sampling/pretrain_reward_delta_max",
-                                attempt_metrics[
-                                    "pretrain_reward_delta_max"
-                                ],
-                                attempted_rollout_groups,
+                                "dynamic_sampling/active_mode_count",
+                                attempt_metrics["active_mode_count"],
+                                sampling_attempts,
                             )
-                            if rejection_reason is None:
-                                accepted_candidate = (
+                            if active_mode_mask.any():
+                                accepted_attempt = (
                                     rollout,
-                                    raw_candidates,
-                                    sampled_modes,
                                     proxy,
-                                    selected_index,
+                                    active_mode_mask,
+                                    attempt_metrics,
                                 )
-                                accepted_attempt_metrics = attempt_metrics
                                 break
-                            if rejection_reason == "no_pretrain_improvement":
-                                rejected_no_pretrain_improvement += 1
-                                bucket_rejected_no_pretrain_improvement_counts[
-                                    bucket_index
-                                ] += 1
-                            else:
-                                assert rejection_reason == "zero_reward_span"
-                                rejected_zero_reward_span += 1
-                                bucket_rejected_zero_reward_span_counts[
-                                    bucket_index
-                                ] += 1
-                            if (
-                                retry_index
-                                < config.max_candidate_groups_per_state
-                                and _attempt_budget_is_exhausted(
-                                    accepted_rollout_groups=(
-                                        accepted_rollout_groups
-                                    ),
-                                    target_accepted_rollout_groups=(
-                                        target_accepted_rollout_groups
-                                    ),
-                                    attempted_rollout_groups=(
-                                        attempted_rollout_groups
-                                    ),
-                                    max_attempted_rollout_groups=(
-                                        max_attempted_rollout_groups
-                                    ),
-                                )
-                            ):
-                                attempt_budget_exhausted = True
-                                break
+                            rejected_sampling_attempts += 1
+                            bucket_rejected_sampling_attempt_counts[bucket_index] += 1
 
                         if attempt_budget_exhausted:
                             break
                         assert frozen_raw_candidate is not None
                         assert frozen_modes is not None
-                        assert frozen_pretrain_reward is not None
-                        fallback_this_step = accepted_candidate is None
-                        accepted_this_step = accepted_candidate is not None
-                        if fallback_this_step:
-                            fallback_pretrain_reward = frozen_pretrain_reward
-                        if accepted_candidate is None:
-                            selected_raw = frozen_raw_candidate
-                            selected_modes = frozen_modes
-                        else:
+                        assert pretrain_score is not None
+                        accepted_this_step = accepted_attempt is not None
+                        exhausted_this_step = accepted_attempt is None
+                        baseline_this_step = True
+                        if exhausted_this_step:
+                            exhausted_states += 1
+                            bucket_exhausted_state_counts[bucket_index] += 1
+
+                        if accepted_attempt is not None:
                             (
                                 rollout,
-                                raw_candidates,
-                                sampled_modes,
                                 proxy,
-                                selected_index,
-                            ) = accepted_candidate
-                            selected_raw = raw_candidates[
-                                selected_index : selected_index + 1
-                            ]
-                            selected_modes = sampled_modes[
-                                selected_index : selected_index + 1
-                            ]
-                        try:
-                            optimization = optimize_selected_model_trajectories(
-                                values,
-                                selected_raw,
-                                selected_modes,
-                                optimizer=trajectory_optimizer,
+                                active_mode_mask,
+                                accepted_attempt_metrics,
+                            ) = accepted_attempt
+                            rewards = (
+                                torch.from_numpy(
+                                    np.asarray(proxy.rewards, dtype=np.float32)
+                                )
+                                .unsqueeze(0)
+                                .to(torch_device)
                             )
-                        except TrajectoryOptimizationError:
-                            np.savez_compressed(
-                                run_dir / "trajectory_optimizer_failure.npz",
-                                raw_trajectories=selected_raw,
-                                sampled_modes=selected_modes,
-                                coarse_trajectories=values.coarse_trajectories,
-                                current_speeds_mps=values.ego_state[:, 0],
-                                mode_valid_mask=values.mode_valid_mask,
-                                candidate_source=np.asarray(
-                                    [
-                                        "frozen_pretrain"
-                                        if fallback_this_step
-                                        else "accepted_current_policy"
-                                    ]
-                                ),
-                                environment_steps=np.asarray(
-                                    [environment_steps], dtype=np.int64
-                                ),
-                                episode_steps=np.asarray(
-                                    [episode_step], dtype=np.int64
-                                ),
+                            active_modes = (
+                                torch.from_numpy(
+                                    np.asarray(active_mode_mask, dtype=np.bool_)
+                                )
+                                .unsqueeze(0)
+                                .to(torch_device)
                             )
-                            raise
-                        (
-                            optimization,
-                            rule_event,
-                            committed_execution_id,
-                            committed_plan_actions,
-                        ) = _finalize_online_rule_action(
-                            rule_maker,
-                            condition,
-                            env=env,
-                            scenario=scenario,
-                            values=values,
-                            selected_modes=selected_modes[0],
-                            optimization=optimization,
-                            optimizer=trajectory_optimizer,
-                        )
-                        for name, value in rule_event.items():
-                            rule_diagnostics[name] += int(value)
-
-                        if accepted_candidate is not None:
-                            rewards = torch.from_numpy(
-                                proxy.rewards.reshape(1, -1)
-                            ).to(torch_device)
-                            pretrain_rewards = torch.full(
-                                (1, 1),
-                                frozen_pretrain_reward,
-                                dtype=torch.float32,
-                                device=torch_device,
-                            )
+                            optimizer_step_before = trainer.optimizer_step
                             update = trainer.update(
                                 rollout,
                                 rewards,
-                                pretrain_rewards,
+                                active_modes,
                                 policy_update=policy_update,
                             )
                             if len(update.epoch_results) != config.update_epochs:
                                 raise OnlineGRPOError(
-                                    "joint GRPO update did not complete every "
-                                    "configured epoch"
+                                    "vehicle-mode GRPO update did not complete "
+                                    "every configured epoch"
                                 )
-                            bucket_optimizer_step_counts[bucket_index] += len(
-                                update.epoch_results
+                            optimizer_steps_for_state = (
+                                trainer.optimizer_step - optimizer_step_before
                             )
-                            next_accepted_group = accepted_rollout_groups + 1
+                            bucket_optimizer_step_counts[
+                                bucket_index
+                            ] += optimizer_steps_for_state
+                            zero_signal_epochs += int(update.zero_signal_epochs)
+                            bucket_zero_signal_epoch_counts[bucket_index] += int(
+                                update.zero_signal_epochs
+                            )
+                            next_update_state = accepted_update_states + 1
                             rollout_advantages = update.loss.advantages
-                            accepted_group_metric_values: dict[
-                                str, list[float]
-                            ] = {}
+                            update_metric_values: dict[str, list[float]] = {}
                             for epoch in update.epoch_results:
-                                _, epoch_metrics = (
-                                    _split_loss_metrics_by_step_axis(
-                                        epoch.loss.scalar_metrics()
-                                    )
+                                _, epoch_metrics = _split_loss_metrics_by_step_axis(
+                                    epoch.loss.scalar_metrics()
                                 )
                                 epoch_metrics["gradient_total"] = float(
                                     epoch.total_gradient_norm
                                 )
+                                epoch_metrics["zero_signal_epoch"] = float(
+                                    epoch.zero_signal_epoch
+                                )
                                 for name, value in epoch.gradient_norms.items():
-                                    epoch_metrics[f"gradient/{name}"] = float(
-                                        value
-                                    )
+                                    epoch_metrics[f"gradient/{name}"] = float(value)
                                 for metric_name, metric_value in epoch_metrics.items():
-                                    accepted_group_metric_values.setdefault(
+                                    update_metric_values.setdefault(
                                         metric_name, []
                                     ).append(float(metric_value))
                                 optimizer_metrics = {
                                     **epoch_metrics,
                                     "optimizer_step": float(epoch.optimizer_step),
-                                    "accepted_rollout_group": float(
-                                        next_accepted_group
-                                    ),
-                                    "epoch_in_rollout": float(
-                                        epoch.epoch_in_rollout
-                                    ),
+                                    "accepted_update_state": float(next_update_state),
+                                    "epoch_in_rollout": float(epoch.epoch_in_rollout),
                                 }
-                                with metrics_path.open(
-                                    "a", encoding="utf-8"
-                                ) as stream:
+                                with metrics_path.open("a", encoding="utf-8") as stream:
                                     stream.write(
                                         json.dumps(
                                             {
@@ -2973,122 +2905,92 @@ def run_joint_grpo_training(
                                         + "\n"
                                     )
                                 last_metrics.update(optimizer_metrics)
-                            for metric_name, metric_values in (
-                                accepted_group_metric_values.items()
-                            ):
+                            for (
+                                metric_name,
+                                metric_values,
+                            ) in update_metric_values.items():
                                 mean_value = float(np.mean(metric_values))
                                 writer.add_scalar(
                                     metric_name,
                                     mean_value,
-                                    next_accepted_group,
+                                    next_update_state,
                                 )
                                 last_metrics[metric_name] = mean_value
                             if _write_advantage_vector_summary(
                                 writer,
                                 rollout_advantages,
-                                next_accepted_group,
-                                target_accepted_rollout_groups,
+                                next_update_state,
+                                target_accepted_update_states,
                                 config.advantage_vector_log_interval_rollouts,
-                                group_size=trainer.config.group_size,
+                                trajectories_per_mode=(
+                                    trainer.config.trajectories_per_mode
+                                ),
                             ):
                                 advantage_vector_record_count += 1
-                            assert accepted_attempt_metrics is not None
+                            valid = np.asarray(proxy.valid_mode_mask, dtype=np.bool_)
+                            valid_rewards = np.asarray(proxy.rewards)[valid]
+                            valid_pretrain = np.asarray(proxy.pretrain_rewards)[valid]
                             rollout_metrics = {
-                                "environment_steps": float(
-                                    environment_steps + 1
+                                "environment_steps": float(environment_steps + 1),
+                                "accepted_update_states": float(next_update_state),
+                                "sampling_attempts": float(sampling_attempts),
+                                "rejected_sampling_attempts": float(
+                                    rejected_sampling_attempts
                                 ),
-                                "accepted_rollout_groups": float(
-                                    next_accepted_group
+                                "exhausted_states": float(exhausted_states),
+                                "baseline_execution_steps": float(
+                                    baseline_execution_steps + 1
                                 ),
-                                "attempted_rollout_groups": float(
-                                    attempted_rollout_groups
-                                ),
-                                "rejected_no_pretrain_improvement": float(
-                                    rejected_no_pretrain_improvement
-                                ),
-                                "rejected_zero_reward_span": float(
-                                    rejected_zero_reward_span
-                                ),
-                                "pretrain_fallback_steps": float(
-                                    pretrain_fallback_steps
-                                ),
+                                "zero_signal_epochs": float(zero_signal_epochs),
                                 "dynamic_sampling_attempts_for_state": float(
                                     attempts_for_state
                                 ),
                                 "training_bucket_index": float(bucket_index),
-                                "raw_proxy_reward_mean": float(
-                                    proxy.rewards.mean()
+                                "vehicle_reward_mean": float(valid_rewards.mean()),
+                                "same_mode_pretrain_reward_mean": float(
+                                    valid_pretrain.mean()
                                 ),
-                                "raw_proxy_reward_max": float(
-                                    proxy.rewards.max()
+                                FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG: float(
+                                    valid_pretrain.mean()
                                 ),
-                                FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG: (
-                                    frozen_pretrain_reward
+                                "same_mode_reward_gain_mean": float(
+                                    (valid_rewards - valid_pretrain[:, None]).mean()
                                 ),
-                                "pretrain_reward_delta_mean": (
-                                    accepted_attempt_metrics[
-                                        "pretrain_reward_delta_mean"
-                                    ]
+                                "active_mode_count": float(active_mode_mask.sum()),
+                                "active_vehicle_count": float(
+                                    np.any(active_mode_mask, axis=1).sum()
                                 ),
-                                "pretrain_reward_delta_max": (
-                                    accepted_attempt_metrics[
-                                        "pretrain_reward_delta_max"
-                                    ]
+                                "vehicle_unsafe_rate": float(
+                                    np.asarray(proxy.unsafe)[valid].mean()
                                 ),
-                                "positive_delta_fraction": (
-                                    accepted_attempt_metrics[
-                                        "positive_delta_fraction"
-                                    ]
+                                "vehicle_collision_rate": float(
+                                    np.asarray(proxy.collision)[valid].mean()
                                 ),
-                                "raw_proxy_unsafe_rate": float(
-                                    proxy.unsafe.mean()
-                                ),
-                                "selected_raw_candidate_index": float(
-                                    selected_index
-                                ),
-                                "selected_trajectory_optimizer_ms": float(
-                                    optimization.elapsed_ms
-                                ),
-                                "selected_trajectory_intervention_ade_m": float(
-                                    optimization.intervention_ade_m.mean()
-                                ),
-                                "selected_trajectory_intervention_fde_m": float(
-                                    optimization.intervention_fde_m.mean()
-                                ),
-                                "selected_raw_trajectory_valid_rate": float(
-                                    optimization.raw_valid.mean()
-                                ),
-                                "selected_trajectory_retained_raw_fraction": (
-                                    float(
-                                        optimization.retained_raw_fraction.mean()
-                                    )
-                                ),
-                                "selected_optimized_trajectory_valid_rate": (
-                                    float(optimization.optimized_valid.mean())
+                                "vehicle_out_of_drivable_rate": float(
+                                    np.asarray(proxy.out_of_drivable)[valid].mean()
                                 ),
                                 **{
-                                    f"diagnostic/v2_rule_{name}": float(value)
-                                    for name, value in rule_diagnostics.items()
+                                    f"vehicle_{role}/reward_mean": float(
+                                        np.asarray(proxy.rewards)[role][
+                                            valid[role]
+                                        ].mean()
+                                    )
+                                    for role in range(3)
                                 },
-                                **_advantage_scalar_metrics(
-                                    rollout_advantages
-                                ),
+                                **_advantage_scalar_metrics(rollout_advantages),
                             }
-                            for metric_name, metric_value in (
-                                rollout_metrics.items()
-                            ):
+                            rollout_metrics.update(accepted_attempt_metrics)
+                            for metric_name, metric_value in rollout_metrics.items():
                                 writer.add_scalar(
                                     metric_name,
                                     metric_value,
-                                    next_accepted_group,
+                                    next_update_state,
                                 )
-                            with metrics_path.open(
-                                "a", encoding="utf-8"
-                            ) as stream:
+                            with metrics_path.open("a", encoding="utf-8") as stream:
                                 stream.write(
                                     json.dumps(
                                         {
-                                            "event": "rollout",
+                                            "event": "update_state",
                                             **rollout_metrics,
                                         },
                                         sort_keys=True,
@@ -3096,45 +2998,82 @@ def run_joint_grpo_training(
                                     + "\n"
                                 )
                             last_metrics.update(rollout_metrics)
-                        action = joint_trajectory_action(
-                            optimization.optimized_trajectories[0]
-                        )
 
-                    stepped_from = episode_step
-                    _, _, terminated, truncated, info = env.step(action)
-                    environment_steps += 1
-                    episode_step += 1
-                    if accepted_this_step:
-                        accepted_rollout_groups += 1
-                        bucket_accepted_rollout_counts[bucket_index] += 1
-                        current_visit_progress += 1
-                    elif fallback_this_step:
-                        pretrain_fallback_steps += 1
-                        bucket_pretrain_fallback_step_counts[bucket_index] += 1
-                        assert fallback_pretrain_reward is not None
-                        _write_pretrain_fallback_event(
+                        try:
+                            (
+                                baseline_step_result,
+                                optimization,
+                                rule_event,
+                                committed_execution_id,
+                                committed_plan_actions,
+                            ) = execute_cached_frozen_baseline(
+                                env=env,
+                                rule_maker=rule_maker,
+                                condition=condition,
+                                scenario=scenario,
+                                model_inputs=values,
+                                frozen_raw_trajectories=(frozen_raw_candidate),
+                                frozen_selected_modes=frozen_modes,
+                                optimizer=trajectory_optimizer,
+                            )
+                        except TrajectoryOptimizationError:
+                            np.savez_compressed(
+                                run_dir / "trajectory_optimizer_failure.npz",
+                                raw_trajectories=frozen_raw_candidate,
+                                frozen_selected_modes=frozen_modes,
+                                coarse_trajectories=values.coarse_trajectories,
+                                current_speeds_mps=values.ego_state[:, 0],
+                                mode_valid_mask=values.mode_valid_mask,
+                                candidate_source=np.asarray(["frozen_stage1_argmax"]),
+                                environment_steps=np.asarray(
+                                    [environment_steps], dtype=np.int64
+                                ),
+                                episode_steps=np.asarray(
+                                    [episode_step], dtype=np.int64
+                                ),
+                            )
+                            raise
+                        for name, value in rule_event.items():
+                            rule_diagnostics[name] += int(value)
+                        baseline_execution_steps += 1
+                        bucket_baseline_execution_step_counts[bucket_index] += 1
+                        pretrain_values = np.asarray(pretrain_score.rewards)[
+                            execution_mask
+                        ]
+                        _write_baseline_execution_event(
                             metrics_path,
                             optimizer_step=trainer.optimizer_step,
-                            accepted_rollout_groups=accepted_rollout_groups,
-                            attempted_rollout_groups=attempted_rollout_groups,
-                            pretrain_fallback_steps=pretrain_fallback_steps,
-                            environment_steps=environment_steps,
+                            accepted_update_states=(
+                                accepted_update_states + int(accepted_this_step)
+                            ),
+                            rejected_sampling_attempts=(rejected_sampling_attempts),
+                            exhausted_states=exhausted_states,
+                            baseline_execution_steps=(baseline_execution_steps),
+                            environment_steps=environment_steps + 1,
                             bucket_index=bucket_index,
                             scenario=scenario,
                             seed=seed,
-                            pretrain_reward=fallback_pretrain_reward,
+                            pretrain_reward_mean=float(pretrain_values.mean()),
                         )
+
+                    stepped_from = episode_step
+                    if baseline_step_result is None:
+                        _, _, terminated, truncated, info = env.step(action)
                     else:
+                        _, _, terminated, truncated, info = baseline_step_result
+                    environment_steps += 1
+                    episode_step += 1
+                    if accepted_this_step:
+                        accepted_update_states += 1
+                        bucket_accepted_update_counts[bucket_index] += 1
+                        current_visit_progress += 1
+                    if not baseline_this_step:
                         warmup_environment_steps += 1
                     if _attempt_budget_is_exhausted(
-                        accepted_rollout_groups=accepted_rollout_groups,
-                        target_accepted_rollout_groups=(
-                            target_accepted_rollout_groups
-                        ),
-                        attempted_rollout_groups=attempted_rollout_groups,
-                        max_attempted_rollout_groups=(
-                            max_attempted_rollout_groups
-                        ),
+                        accepted_update_states=accepted_update_states,
+                        target_accepted_update_states=(target_accepted_update_states),
+                        sampling_attempts=sampling_attempts,
+                        max_sampling_attempts=(max_sampling_attempts),
                     ):
                         attempt_budget_exhausted = True
                         break
@@ -3147,56 +3086,50 @@ def run_joint_grpo_training(
                             if last_open_offset >= 0:
                                 temporary_start_offset_upper_bound = min(
                                     last_open_offset,
-                                    temporary_start_offset_upper_bound
-                                    if temporary_start_offset_upper_bound
-                                    is not None
-                                    else last_open_offset,
+                                    (
+                                        temporary_start_offset_upper_bound
+                                        if temporary_start_offset_upper_bound
+                                        is not None
+                                        else last_open_offset
+                                    ),
                                 )
                                 retryable_start_rejection = True
                             rollout_start_rejected_count += 1
                             _write_rollout_start_event(
                                 metrics_path,
                                 optimizer_step=trainer.optimizer_step,
-                                rollout_group=accepted_rollout_groups,
+                                rollout_group=accepted_update_states,
                                 bucket_index=bucket_index,
                                 scenario=scenario,
                                 seed=seed,
-                                bucket_episode=(
-                                    bucket_episode_counts[bucket_index]
-                                ),
+                                bucket_episode=(bucket_episode_counts[bucket_index]),
                                 ready_step=start_ready_step,
                                 upper_bound=start_upper_bound,
                                 sampled_offset=start_offset,
                                 target_step=start_target_step,
-                                status=(
-                                    "rejected_episode_ended_before_target"
-                                ),
+                                status=("rejected_episode_ended_before_target"),
                             )
                         break
-                    if accepted_rollout_groups > accepted_at_episode_start and (
+                    if accepted_update_states > accepted_at_episode_start and (
                         _bucket_visit_is_complete(
                             bucket_index=bucket_index,
-                            bucket_sample_counts=(
-                                bucket_accepted_rollout_counts
-                            ),
+                            bucket_sample_counts=(bucket_accepted_update_counts),
                             bucket_target_counts=bucket_target_counts,
                             current_visit_progress=current_visit_progress,
                             rollout_groups_per_bucket_visit=(
                                 config.rollout_groups_per_bucket_visit
                             ),
                         )
-                        or accepted_rollout_groups
-                        == target_accepted_rollout_groups
-                        or accepted_rollout_groups
-                        % config.validation_interval_rollouts
+                        or accepted_update_states == target_accepted_update_states
+                        or accepted_update_states % config.validation_interval_rollouts
                         == 0
                     ):
                         break
             finally:
                 env.close()
             if (
-                accepted_rollout_groups == accepted_at_episode_start
-                and pretrain_fallback_steps == fallbacks_at_episode_start
+                accepted_update_states == accepted_at_episode_start
+                and baseline_execution_steps == baseline_steps_at_episode_start
             ):
                 if retryable_start_rejection:
                     consecutive_empty_episodes = 0
@@ -3213,7 +3146,7 @@ def run_joint_grpo_training(
                 consecutive_empty_episodes = 0
             if _bucket_visit_is_complete(
                 bucket_index=bucket_index,
-                bucket_sample_counts=bucket_accepted_rollout_counts,
+                bucket_sample_counts=bucket_accepted_update_counts,
                 bucket_target_counts=bucket_target_counts,
                 current_visit_progress=current_visit_progress,
                 rollout_groups_per_bucket_visit=(
@@ -3222,7 +3155,7 @@ def run_joint_grpo_training(
             ):
                 current_visit_progress = 0
                 unfinished_bucket = _next_unfinished_bucket_index(
-                    bucket_accepted_rollout_counts,
+                    bucket_accepted_update_counts,
                     bucket_target_counts,
                     start_index=(bucket_index + 1) % len(training_buckets),
                 )
@@ -3234,28 +3167,25 @@ def run_joint_grpo_training(
                 next_bucket_index = bucket_index
             if attempt_budget_exhausted:
                 break
-            if accepted_rollout_groups != last_validated_rollout and (
-                accepted_rollout_groups == target_accepted_rollout_groups
+            if accepted_update_states != last_validated_update_state and (
+                accepted_update_states == target_accepted_update_states
                 or (
-                    accepted_rollout_groups > 0
-                    and accepted_rollout_groups
-                    % config.validation_interval_rollouts
+                    accepted_update_states > 0
+                    and accepted_update_states % config.validation_interval_rollouts
                     == 0
                 )
             ):
                 validation, simulator_errors = (
                     _fixed_raw_proxy_and_simulator_validation(
-                        trainer.planner,
+                        trainer,
                         device=torch_device,
-                        reward_config=reward_config,
+                        reward_config=joint_diagnostic_reward_config,
                         scenarios=config.scenarios,
                         seeds=HOLDOUT_SEEDS,
                     )
                 )
                 validation.update(
-                    _validation_reward_comparison_metrics(
-                        validation, pretrain_reward
-                    )
+                    _validation_reward_comparison_metrics(validation, pretrain_reward)
                 )
                 if (
                     pretrain_simulator_reward is not None
@@ -3277,9 +3207,7 @@ def run_joint_grpo_training(
                 for value in simulator_errors:
                     error_record = {
                         "optimizer_step": int(trainer.optimizer_step),
-                        "accepted_rollout_group": int(
-                            accepted_rollout_groups
-                        ),
+                        "accepted_update_state": int(accepted_update_states),
                         "stage1_baseline": False,
                         **dict(value),
                     }
@@ -3287,60 +3215,45 @@ def run_joint_grpo_training(
                     writer.add_text(
                         "validation/simulator_error",
                         json.dumps(error_record, sort_keys=True),
-                        accepted_rollout_groups,
+                        accepted_update_states,
                     )
                 last_metrics.update(validation)
                 for metric_name, metric_value in validation.items():
-                    writer.add_scalar(
-                        metric_name, metric_value, accepted_rollout_groups
-                    )
-                last_validated_rollout = accepted_rollout_groups
-                if trainer.optimizer_step == run_start_optimizer_step:
-                    continue
+                    writer.add_scalar(metric_name, metric_value, accepted_update_states)
+                last_validated_update_state = accepted_update_states
                 current_sampler_state = _sampler_state(
-                    accepted_rollout_groups=accepted_rollout_groups,
-                    attempted_rollout_groups=attempted_rollout_groups,
-                    rejected_no_pretrain_improvement=(
-                        rejected_no_pretrain_improvement
-                    ),
-                    rejected_zero_reward_span=rejected_zero_reward_span,
-                    pretrain_fallback_steps=pretrain_fallback_steps,
+                    accepted_update_states=accepted_update_states,
+                    sampling_attempts=sampling_attempts,
+                    rejected_sampling_attempts=rejected_sampling_attempts,
+                    exhausted_states=exhausted_states,
+                    baseline_execution_steps=baseline_execution_steps,
+                    zero_signal_epochs=zero_signal_epochs,
                     warmup_environment_steps=warmup_environment_steps,
                     bucket_target_counts=bucket_target_counts,
-                    bucket_accepted_rollout_counts=(
-                        bucket_accepted_rollout_counts
+                    bucket_accepted_update_counts=(bucket_accepted_update_counts),
+                    bucket_sampling_attempt_counts=(bucket_sampling_attempt_counts),
+                    bucket_rejected_sampling_attempt_counts=(
+                        bucket_rejected_sampling_attempt_counts
                     ),
-                    bucket_attempted_rollout_counts=(
-                        bucket_attempted_rollout_counts
+                    bucket_exhausted_state_counts=(bucket_exhausted_state_counts),
+                    bucket_baseline_execution_step_counts=(
+                        bucket_baseline_execution_step_counts
                     ),
-                    bucket_rejected_no_pretrain_improvement_counts=(
-                        bucket_rejected_no_pretrain_improvement_counts
-                    ),
-                    bucket_rejected_zero_reward_span_counts=(
-                        bucket_rejected_zero_reward_span_counts
-                    ),
-                    bucket_pretrain_fallback_step_counts=(
-                        bucket_pretrain_fallback_step_counts
-                    ),
-                    bucket_optimizer_step_counts=(
-                        bucket_optimizer_step_counts
-                    ),
+                    bucket_zero_signal_epoch_counts=(bucket_zero_signal_epoch_counts),
+                    bucket_optimizer_step_counts=(bucket_optimizer_step_counts),
                     bucket_episode_counts=bucket_episode_counts,
                     next_bucket_index=next_bucket_index,
                     current_visit_progress=current_visit_progress,
                     generator_state=generator.get_state(),
-                    last_validated_rollout=last_validated_rollout,
+                    last_validated_update_state=last_validated_update_state,
                     rollout_groups_per_bucket_visit=(
                         config.rollout_groups_per_bucket_visit
                     ),
-                    update_epochs=config.update_epochs,
                     optimizer_step=trainer.optimizer_step,
                     environment_steps=environment_steps,
-                    max_attempted_rollout_groups=(
-                        max_attempted_rollout_groups
-                    ),
+                    max_sampling_attempts=max_sampling_attempts,
                 )
-                validation_reward = _validation_raw_proxy_reward(validation)
+                validation_reward = _validation_vehicle_reward(validation)
                 if best_reward is None or validation_reward > best_reward:
                     best_reward = validation_reward
                     best_checkpoint = _checkpoint_payload(
@@ -3389,43 +3302,36 @@ def run_joint_grpo_training(
 
     if attempt_budget_exhausted:
         incomplete_sampler_state = _sampler_state(
-            accepted_rollout_groups=accepted_rollout_groups,
-            attempted_rollout_groups=attempted_rollout_groups,
-            rejected_no_pretrain_improvement=(
-                rejected_no_pretrain_improvement
-            ),
-            rejected_zero_reward_span=rejected_zero_reward_span,
-            pretrain_fallback_steps=pretrain_fallback_steps,
+            accepted_update_states=accepted_update_states,
+            sampling_attempts=sampling_attempts,
+            rejected_sampling_attempts=rejected_sampling_attempts,
+            exhausted_states=exhausted_states,
+            baseline_execution_steps=baseline_execution_steps,
+            zero_signal_epochs=zero_signal_epochs,
             warmup_environment_steps=warmup_environment_steps,
             bucket_target_counts=bucket_target_counts,
-            bucket_accepted_rollout_counts=bucket_accepted_rollout_counts,
-            bucket_attempted_rollout_counts=bucket_attempted_rollout_counts,
-            bucket_rejected_no_pretrain_improvement_counts=(
-                bucket_rejected_no_pretrain_improvement_counts
+            bucket_accepted_update_counts=bucket_accepted_update_counts,
+            bucket_sampling_attempt_counts=bucket_sampling_attempt_counts,
+            bucket_rejected_sampling_attempt_counts=(
+                bucket_rejected_sampling_attempt_counts
             ),
-            bucket_rejected_zero_reward_span_counts=(
-                bucket_rejected_zero_reward_span_counts
+            bucket_exhausted_state_counts=bucket_exhausted_state_counts,
+            bucket_baseline_execution_step_counts=(
+                bucket_baseline_execution_step_counts
             ),
-            bucket_pretrain_fallback_step_counts=(
-                bucket_pretrain_fallback_step_counts
-            ),
+            bucket_zero_signal_epoch_counts=(bucket_zero_signal_epoch_counts),
             bucket_optimizer_step_counts=bucket_optimizer_step_counts,
             bucket_episode_counts=bucket_episode_counts,
             next_bucket_index=next_bucket_index,
             current_visit_progress=current_visit_progress,
             generator_state=generator.get_state(),
-            last_validated_rollout=last_validated_rollout,
-            rollout_groups_per_bucket_visit=(
-                config.rollout_groups_per_bucket_visit
-            ),
-            update_epochs=config.update_epochs,
+            last_validated_update_state=last_validated_update_state,
+            rollout_groups_per_bucket_visit=(config.rollout_groups_per_bucket_visit),
             optimizer_step=trainer.optimizer_step,
             environment_steps=environment_steps,
-            max_attempted_rollout_groups=max_attempted_rollout_groups,
+            max_sampling_attempts=max_sampling_attempts,
         )
-        incomplete_best_reward = (
-            pretrain_reward if best_reward is None else best_reward
-        )
+        incomplete_best_reward = pretrain_reward if best_reward is None else best_reward
         incomplete_checkpoint = _checkpoint_payload(
             variant=variant,
             trainer=trainer,
@@ -3444,35 +3350,27 @@ def run_joint_grpo_training(
             collection_contract=collection_contract,
             sampler_state=incomplete_sampler_state,
         )
-        incomplete_checkpoint["training_status"] = (
-            "incomplete_attempt_budget_exhausted"
-        )
+        incomplete_checkpoint["training_status"] = "incomplete_attempt_budget_exhausted"
         last_path = save_grpo_checkpoint(last_path, incomplete_checkpoint)
         incomplete_report = {
-            "format": "bev_joint_grpo_online_report_v9",
+            "format": "bev_joint_grpo_online_report_v10",
             "training_status": "incomplete_attempt_budget_exhausted",
             "variant": variant,
             "run_mode": run_mode,
-            "accepted_rollout_groups": accepted_rollout_groups,
-            "accepted_rollout_groups_this_run": (
-                accepted_rollout_groups - run_start_accepted_rollout_group
+            "accepted_update_states": accepted_update_states,
+            "accepted_update_states_this_run": (
+                accepted_update_states - run_start_accepted_update_state
             ),
-            "target_accepted_rollout_groups": (
-                target_accepted_rollout_groups
+            "target_accepted_update_states": (target_accepted_update_states),
+            "sampling_attempts": sampling_attempts,
+            "sampling_attempts_this_run": (
+                sampling_attempts - run_start_sampling_attempt
             ),
-            "attempted_rollout_groups": attempted_rollout_groups,
-            "attempted_rollout_groups_this_run": (
-                attempted_rollout_groups - run_start_attempted_rollout_group
-            ),
-            "max_attempted_rollout_groups": max_attempted_rollout_groups,
-            "rejected_candidate_groups": (
-                rejected_no_pretrain_improvement + rejected_zero_reward_span
-            ),
-            "rejected_no_pretrain_improvement": (
-                rejected_no_pretrain_improvement
-            ),
-            "rejected_zero_reward_span": rejected_zero_reward_span,
-            "pretrain_fallback_steps": pretrain_fallback_steps,
+            "max_sampling_attempts": max_sampling_attempts,
+            "rejected_sampling_attempts": rejected_sampling_attempts,
+            "exhausted_states": exhausted_states,
+            "baseline_execution_steps": baseline_execution_steps,
+            "zero_signal_epochs": zero_signal_epochs,
             "warmup_environment_steps": warmup_environment_steps,
             "environment_steps": environment_steps,
             "optimizer_steps": trainer.optimizer_step,
@@ -3484,26 +3382,17 @@ def run_joint_grpo_training(
                     "scenario": scenario[0],
                     "route": scenario[1],
                     "seed": seed,
-                    "target_accepted_rollouts": bucket_target_counts[index],
-                    "accepted_rollouts": (
-                        bucket_accepted_rollout_counts[index]
+                    "target_accepted_updates": bucket_target_counts[index],
+                    "accepted_update_states": (bucket_accepted_update_counts[index]),
+                    "sampling_attempts": (bucket_sampling_attempt_counts[index]),
+                    "rejected_sampling_attempts": (
+                        bucket_rejected_sampling_attempt_counts[index]
                     ),
-                    "attempted_rollouts": (
-                        bucket_attempted_rollout_counts[index]
+                    "exhausted_states": (bucket_exhausted_state_counts[index]),
+                    "baseline_execution_steps": (
+                        bucket_baseline_execution_step_counts[index]
                     ),
-                    "rejected_candidate_groups": (
-                        bucket_rejected_no_pretrain_improvement_counts[index]
-                        + bucket_rejected_zero_reward_span_counts[index]
-                    ),
-                    "rejected_no_pretrain_improvement": (
-                        bucket_rejected_no_pretrain_improvement_counts[index]
-                    ),
-                    "rejected_zero_reward_span": (
-                        bucket_rejected_zero_reward_span_counts[index]
-                    ),
-                    "pretrain_fallback_steps": (
-                        bucket_pretrain_fallback_step_counts[index]
-                    ),
+                    "zero_signal_epochs": bucket_zero_signal_epoch_counts[index],
                     "environment_episodes": bucket_episode_counts[index],
                     "optimizer_steps": bucket_optimizer_step_counts[index],
                 }
@@ -3517,45 +3406,40 @@ def run_joint_grpo_training(
             encoding="utf-8",
         )
         raise OnlineGRPOError(
-            "dynamic sampling exhausted max_attempted_rollout_groups before "
-            "reaching target_accepted_rollout_groups; incomplete checkpoint "
+            "dynamic sampling exhausted max_sampling_attempts before reaching "
+            "target_accepted_update_states; incomplete checkpoint "
             f"and report saved at {last_path} and {incomplete_report_path}"
         )
 
     if best_reward is None or best_checkpoint_sha256 is None:
         raise OnlineGRPOError("online GRPO never completed fixed validation")
     final_sampler_state = _sampler_state(
-        accepted_rollout_groups=accepted_rollout_groups,
-        attempted_rollout_groups=attempted_rollout_groups,
-        rejected_no_pretrain_improvement=rejected_no_pretrain_improvement,
-        rejected_zero_reward_span=rejected_zero_reward_span,
-        pretrain_fallback_steps=pretrain_fallback_steps,
+        accepted_update_states=accepted_update_states,
+        sampling_attempts=sampling_attempts,
+        rejected_sampling_attempts=rejected_sampling_attempts,
+        exhausted_states=exhausted_states,
+        baseline_execution_steps=baseline_execution_steps,
+        zero_signal_epochs=zero_signal_epochs,
         warmup_environment_steps=warmup_environment_steps,
         bucket_target_counts=bucket_target_counts,
-        bucket_accepted_rollout_counts=bucket_accepted_rollout_counts,
-        bucket_attempted_rollout_counts=bucket_attempted_rollout_counts,
-        bucket_rejected_no_pretrain_improvement_counts=(
-            bucket_rejected_no_pretrain_improvement_counts
+        bucket_accepted_update_counts=bucket_accepted_update_counts,
+        bucket_sampling_attempt_counts=bucket_sampling_attempt_counts,
+        bucket_rejected_sampling_attempt_counts=(
+            bucket_rejected_sampling_attempt_counts
         ),
-        bucket_rejected_zero_reward_span_counts=(
-            bucket_rejected_zero_reward_span_counts
-        ),
-        bucket_pretrain_fallback_step_counts=(
-            bucket_pretrain_fallback_step_counts
-        ),
+        bucket_exhausted_state_counts=bucket_exhausted_state_counts,
+        bucket_baseline_execution_step_counts=(bucket_baseline_execution_step_counts),
+        bucket_zero_signal_epoch_counts=(bucket_zero_signal_epoch_counts),
         bucket_optimizer_step_counts=bucket_optimizer_step_counts,
         bucket_episode_counts=bucket_episode_counts,
         next_bucket_index=next_bucket_index,
         current_visit_progress=current_visit_progress,
         generator_state=generator.get_state(),
-        last_validated_rollout=last_validated_rollout,
-        rollout_groups_per_bucket_visit=(
-            config.rollout_groups_per_bucket_visit
-        ),
-        update_epochs=config.update_epochs,
+        last_validated_update_state=last_validated_update_state,
+        rollout_groups_per_bucket_visit=(config.rollout_groups_per_bucket_visit),
         optimizer_step=trainer.optimizer_step,
         environment_steps=environment_steps,
-        max_attempted_rollout_groups=max_attempted_rollout_groups,
+        max_sampling_attempts=max_sampling_attempts,
     )
     payload = _checkpoint_payload(
         variant=variant,
@@ -3600,29 +3484,26 @@ def run_joint_grpo_training(
         collection_contract=collection_contract,
         bucket_count=len(training_buckets),
         bucket_target_counts=bucket_target_counts,
-        rollout_groups_per_bucket_visit=(
-            config.rollout_groups_per_bucket_visit
-        ),
+        rollout_groups_per_bucket_visit=(config.rollout_groups_per_bucket_visit),
         optimizer_step=restored.optimizer_step,
-        max_attempted_rollout_groups=max_attempted_rollout_groups,
+        max_sampling_attempts=max_sampling_attempts,
     )
 
     plot_paths = generate_grpo_plots(
         run_dir / "tb",
         run_dir / "plots",
         require_frozen_pretrain_reward=True,
-        rollout_axis_label="Accepted rollout group",
+        rollout_axis_label=ACCEPTED_ROLLOUT_AXIS_LABEL,
     )
-    if (
-        rollout_start_accepted_count + rollout_start_rejected_count
-        != len(rollout_start_offsets_this_run)
+    if rollout_start_accepted_count + rollout_start_rejected_count != len(
+        rollout_start_offsets_this_run
     ):
         raise OnlineGRPOError(
             "rollout start diagnostics contain an unresolved sampling attempt"
         )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v9",
+        "format": "bev_joint_grpo_online_report_v10",
         "training_status": "complete",
         "variant": variant,
         "run_mode": run_mode,
@@ -3630,30 +3511,22 @@ def run_joint_grpo_training(
         "eligible_for_formal_training": run_mode == "formal",
         "grpo_config": _grpo_config_artifact_payload(grpo_config),
         "optimizer_steps": trainer.optimizer_step,
-        "optimizer_steps_this_run": (
-            trainer.optimizer_step - run_start_optimizer_step
-        ),
+        "optimizer_steps_this_run": (trainer.optimizer_step - run_start_optimizer_step),
         "environment_steps": environment_steps,
         "environment_episode_count": sum(bucket_episode_counts),
         "warmup_environment_steps": warmup_environment_steps,
-        "accepted_rollout_groups": accepted_rollout_groups,
-        "accepted_rollout_groups_this_run": (
-            accepted_rollout_groups - run_start_accepted_rollout_group
+        "accepted_update_states": accepted_update_states,
+        "accepted_update_states_this_run": (
+            accepted_update_states - run_start_accepted_update_state
         ),
-        "target_accepted_rollout_groups": target_accepted_rollout_groups,
-        "attempted_rollout_groups": attempted_rollout_groups,
-        "attempted_rollout_groups_this_run": (
-            attempted_rollout_groups - run_start_attempted_rollout_group
-        ),
-        "max_attempted_rollout_groups": max_attempted_rollout_groups,
-        "rejected_candidate_groups": (
-            rejected_no_pretrain_improvement + rejected_zero_reward_span
-        ),
-        "rejected_no_pretrain_improvement": (
-            rejected_no_pretrain_improvement
-        ),
-        "rejected_zero_reward_span": rejected_zero_reward_span,
-        "pretrain_fallback_steps": pretrain_fallback_steps,
+        "target_accepted_update_states": target_accepted_update_states,
+        "sampling_attempts": sampling_attempts,
+        "sampling_attempts_this_run": (sampling_attempts - run_start_sampling_attempt),
+        "max_sampling_attempts": max_sampling_attempts,
+        "rejected_sampling_attempts": rejected_sampling_attempts,
+        "exhausted_states": exhausted_states,
+        "baseline_execution_steps": baseline_execution_steps,
+        "zero_signal_epochs": zero_signal_epochs,
         "rollout_start_diagnostics_this_run": {
             "attempt_count": len(rollout_start_offsets_this_run),
             "accepted_count": rollout_start_accepted_count,
@@ -3681,17 +3554,19 @@ def run_joint_grpo_training(
             **rule_diagnostics,
         },
         "reward_contract_version": _reward_contract_version(),
-        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
-        "reward_config_sha256": joint_reward_config_sha256(reward_config),
+        "reward_contract_sha256": VEHICLE_MODE_REWARD_CONTRACT_SHA256,
+        "reward_config_sha256": vehicle_mode_reward_config_sha256(reward_config),
         "reward_application_contract": GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
         "reward_application_contract_sha256": (
             GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
         ),
         "reward_input_domain": "tau_d",
-        "candidate_selection_domain": "tau_d",
+        "training_candidate_domain": "tau_d_all_vehicle_modes",
+        "environment_action_source": "cached_frozen_stage1_argmax",
         "execution_input_domain": "tau_cmd",
         "frozen_pretrain_reward_logging": frozen_pretrain_reward_logging,
-        "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+        "best_checkpoint_metric": "validation/vehicle_reward_mean",
+        "joint_reward_role": "historical_and_final_evaluation_only",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
         "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
@@ -3709,22 +3584,17 @@ def run_joint_grpo_training(
                 "scenario": scenario[0],
                 "route": scenario[1],
                 "seed": seed,
-                "target_accepted_rollouts": bucket_target_counts[index],
-                "accepted_rollouts": bucket_accepted_rollout_counts[index],
-                "attempted_rollouts": bucket_attempted_rollout_counts[index],
-                "rejected_candidate_groups": (
-                    bucket_rejected_no_pretrain_improvement_counts[index]
-                    + bucket_rejected_zero_reward_span_counts[index]
+                "target_accepted_updates": bucket_target_counts[index],
+                "accepted_update_states": bucket_accepted_update_counts[index],
+                "sampling_attempts": bucket_sampling_attempt_counts[index],
+                "rejected_sampling_attempts": (
+                    bucket_rejected_sampling_attempt_counts[index]
                 ),
-                "rejected_no_pretrain_improvement": (
-                    bucket_rejected_no_pretrain_improvement_counts[index]
+                "exhausted_states": (bucket_exhausted_state_counts[index]),
+                "baseline_execution_steps": (
+                    bucket_baseline_execution_step_counts[index]
                 ),
-                "rejected_zero_reward_span": (
-                    bucket_rejected_zero_reward_span_counts[index]
-                ),
-                "pretrain_fallback_steps": (
-                    bucket_pretrain_fallback_step_counts[index]
-                ),
+                "zero_signal_epochs": bucket_zero_signal_epoch_counts[index],
                 "environment_episodes": bucket_episode_counts[index],
                 "optimizer_steps": bucket_optimizer_step_counts[index],
             }
@@ -3740,21 +3610,20 @@ def run_joint_grpo_training(
             "storage": "tensorboard_tensor",
             "tensorboard_tag": ADVANTAGE_VECTOR_TAG,
             "tensorboard_dir": str((run_dir / "tb").resolve()),
-            "shape": [1, int(trainer.config.group_size)],
-            "interval_rollout_groups": (
-                config.advantage_vector_log_interval_rollouts
-            ),
+            "shape": [
+                1,
+                3,
+                10,
+                int(trainer.config.trajectories_per_mode),
+            ],
+            "interval_rollout_groups": (config.advantage_vector_log_interval_rollouts),
             "record_count": advantage_vector_record_count,
             "scope": "current_run_only",
             "run_start_optimizer_step": run_start_optimizer_step,
-            "run_start_accepted_rollout_group": (
-                run_start_accepted_rollout_group
-            ),
-            "group_axis_semantics": (
-                "independent_random_sample_slot_without_cross_step_identity"
-            ),
+            "run_start_accepted_update_state": (run_start_accepted_update_state),
+            "group_axis_semantics": "vehicle_mode_trajectory_sample",
             "heatmap": str(plot_paths["advantage_heatmap"].resolve()),
-            "x_axis": "absolute_accepted_rollout_group",
+            "x_axis": "absolute_accepted_update_state",
         },
         "training_plots": {
             "reward_curve": str(plot_paths["reward_curve"].resolve()),
@@ -3762,33 +3631,25 @@ def run_joint_grpo_training(
             "validation_reward_curve": str(
                 plot_paths["validation_reward_curve"].resolve()
             ),
-            "validation_reward_tags": list(
-                VALIDATION_REWARD_CURVE_TAGS
-            ),
+            "validation_reward_tags": list(VALIDATION_REWARD_CURVE_TAGS),
             "reward_domain": "raw_tau_d",
-            "grpo_loss_curve": str(
-                plot_paths["grpo_loss_curve"].resolve()
-            ),
+            "grpo_loss_curve": str(plot_paths["grpo_loss_curve"].resolve()),
             "grpo_loss_tags": [
                 "loss/total",
-                "loss/mode_pg",
                 "loss/trajectory_pg",
             ],
             "kl_loss_curve": str(plot_paths["kl_loss_curve"].resolve()),
             "kl_loss_tags": [
                 "loss/reference_kl",
-                "loss/mode_reference_kl",
                 "loss/trajectory_reference_kl",
             ],
             "reference_kl_weighted": False,
             "policy_stability_curve": str(
                 plot_paths["policy_stability_curve"].resolve()
             ),
-            "reward_x_axis": "absolute_accepted_rollout_group",
-            "validation_reward_x_axis": (
-                "absolute_accepted_rollout_group"
-            ),
-            "optimizer_x_axis": "absolute_accepted_rollout_group",
+            "reward_x_axis": "absolute_accepted_update_state",
+            "validation_reward_x_axis": ("absolute_accepted_update_state"),
+            "optimizer_x_axis": "absolute_accepted_update_state",
         },
     }
     (run_dir / "report.json").write_text(
@@ -3824,9 +3685,7 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         raise OnlineGRPOError("run_mode must be formal or smoke")
     source_checkpoint = run["source_checkpoint"]
     if not isinstance(source_checkpoint, str) or not source_checkpoint.strip():
-        raise OnlineGRPOError(
-            "source_checkpoint must be a non-empty path string"
-        )
+        raise OnlineGRPOError("source_checkpoint must be a non-empty path string")
     online = payload.get("online")
     if not isinstance(online, Mapping):
         raise OnlineGRPOError("online GRPO YAML requires an online mapping")
@@ -3835,12 +3694,15 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         "validation_interval_steps",
         "advantage_vector_log_interval_steps",
         "clip_epsilon",
+        "group_size",
+        "pretrain_improvement_margin",
+        "max_candidate_groups_per_state",
+        "max_attempted_groups_multiplier",
     }
     present_legacy = sorted(legacy_fields.intersection(online))
     if present_legacy:
         raise OnlineGRPOError(
-            "online GRPO YAML contains legacy fields: "
-            + ", ".join(present_legacy)
+            "online GRPO YAML contains legacy fields: " + ", ".join(present_legacy)
         )
     scenarios = tuple(
         (str(value["scenario"]), str(value["route"]))
@@ -3850,11 +3712,11 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
     online_config = JointGRPOOnlineConfig(
         device=str(online.get("device", "cuda")),
         seed=online.get("seed", 17),
-        group_size=online.get("group_size", 24),
+        trajectories_per_mode=online.get("trajectories_per_mode", 48),
         total_rollout_groups=online.get("total_rollout_groups", 100),
-        update_epochs=online.get("update_epochs", 4),
+        update_epochs=online.get("update_epochs", 10),
         clip_epsilon_low=online.get("clip_epsilon_low", 0.1),
-        clip_epsilon_high=online.get("clip_epsilon_high", 0.3),
+        clip_epsilon_high=online.get("clip_epsilon_high", 0.2),
         resume_checkpoint=(
             Path(str(online["resume_checkpoint"]))
             if online.get("resume_checkpoint")
@@ -3876,20 +3738,15 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         rollout_start_min_remaining_steps=online.get(
             "rollout_start_min_remaining_steps", 10
         ),
-        validation_interval_rollouts=online.get(
-            "validation_interval_rollouts", 20
-        ),
+        validation_interval_rollouts=online.get("validation_interval_rollouts", 20),
         advantage_vector_log_interval_rollouts=online.get(
             "advantage_vector_log_interval_rollouts", 20
         ),
-        pretrain_improvement_margin=online.get(
-            "pretrain_improvement_margin", 1e-6
+        max_sampling_attempts_per_state=online.get(
+            "max_sampling_attempts_per_state", 3
         ),
-        max_candidate_groups_per_state=online.get(
-            "max_candidate_groups_per_state", 3
-        ),
-        max_attempted_groups_multiplier=online.get(
-            "max_attempted_groups_multiplier", 3
+        max_sampling_attempts_multiplier=online.get(
+            "max_sampling_attempts_multiplier", 3
         ),
     )
     return JointGRPOTrainingConfig(
@@ -3923,6 +3780,7 @@ __all__ = [
     "OnlineGRPOError",
     "constant_velocity_actions",
     "episode_has_ended",
+    "execute_cached_frozen_baseline",
     "joint_trajectory_action",
     "model_inputs_to_batch",
     "optimize_selected_model_trajectories",

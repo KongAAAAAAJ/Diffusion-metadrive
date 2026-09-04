@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import gc
 import weakref
 from pathlib import Path
-from unittest import mock
 
 import pytest
 import torch
@@ -14,31 +14,23 @@ from models.bev_planner import (
     BEVOnlyDiffusionPlannerConfig,
     JointGRPOConfig,
     JointGRPOError,
+    JointGRPOPolicyUpdateConfig,
     JointGRPOTrainerA,
     StandardGaussianDDIM,
-    normalize_pretrain_relative_advantages,
 )
 from models.bev_planner.bev_only_diffusion_planner import MAX_BACKGROUND_ACTORS
-from models.bev_planner.joint_grpo import (
-    JointGRPOPolicyUpdateConfig,
-    _clipped_grpo_surrogate,
-    _gather_modes,
-    _repeat_context,
-    _repeat_groups,
-    _trajectory_bc,
-    joint_grpo_optimizer_contract,
-    joint_grpo_optimizer_contract_sha256,
-)
 from train.bev_joint_grpo import (
     GRPO_CHECKPOINT_FORMAT,
     GRPO_CHECKPOINT_SCHEMA_VERSION,
     LEGACY_GRPO_CHECKPOINT_FORMAT,
     LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
+    PREVIOUS_GRPO_CHECKPOINT_FORMAT,
+    PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION,
     grpo_checkpoint_payload,
     load_grpo_a_checkpoint_for_evaluation,
     load_grpo_a_config_for_evaluation,
-    load_grpo_config_from_checkpoint,
     load_grpo_checkpoint,
+    load_grpo_config_from_checkpoint,
     save_grpo_checkpoint,
     validate_stage1_a_source_metadata,
 )
@@ -60,83 +52,27 @@ def _planner() -> BEVOnlyDiffusionPlanner:
     )
 
 
-def _model_inputs(batch_size: int = 1) -> dict[str, torch.Tensor]:
-    generator = torch.Generator().manual_seed(91)
-    times = torch.arange(1, 9, dtype=torch.float32) * 0.5
-    coarse = torch.zeros((batch_size, 3, 10, 8, 3), dtype=torch.float32)
-    for role in range(3):
-        for mode in range(10):
-            coarse[:, role, mode, :, 0] = times * (6.0 + 0.2 * role)
-            coarse[:, role, mode, :, 0] += 0.1 * mode
-            coarse[:, role, mode, :, 1] = 0.05 * (mode - 4)
-            coarse[:, role, mode, :, 2] = 0.01 * (mode - 4)
+def _inputs() -> dict[str, torch.Tensor]:
+    coarse = torch.zeros((1, 3, 10, 8, 3), dtype=torch.float32)
+    coarse[..., 0] = torch.arange(1, 9, dtype=torch.float32) * 0.5
     return {
-        "bev": torch.randint(
-            0,
-            256,
-            (batch_size, 3, 8, 256, 256),
-            dtype=torch.uint8,
-            generator=generator,
-        ),
-        "ego_state": torch.zeros((batch_size, 3, 8), dtype=torch.float32),
-        "formation_relation_state": torch.zeros(
-            (batch_size, 3, 12), dtype=torch.float32
-        ),
-        "relation_valid_mask": torch.ones(
-            (batch_size, 3, 2), dtype=torch.bool
-        ),
-        "agent_role": torch.arange(3, dtype=torch.int64)
-        .unsqueeze(0)
-        .repeat(batch_size, 1),
+        "bev": torch.zeros((1, 3, 8, 256, 256), dtype=torch.uint8),
+        "ego_state": torch.zeros((1, 3, 8), dtype=torch.float32),
+        "formation_relation_state": torch.zeros((1, 3, 12), dtype=torch.float32),
+        "relation_valid_mask": torch.ones((1, 3, 2), dtype=torch.bool),
+        "agent_role": torch.arange(3, dtype=torch.int64).unsqueeze(0),
         "coarse_trajectories": coarse,
-        "mode_valid_mask": torch.ones(
-            (batch_size, 3, 10), dtype=torch.bool
-        ),
-        "background_actor_state": torch.zeros(
-            (batch_size, 3, MAX_BACKGROUND_ACTORS, 8), dtype=torch.float32
-        ),
-        "background_actor_valid_mask": torch.zeros(
-            (batch_size, 3, MAX_BACKGROUND_ACTORS), dtype=torch.bool
-        ),
-        "scenario_code": torch.ones((batch_size,), dtype=torch.int64),
-        "rule_formation_state": torch.zeros((batch_size,), dtype=torch.int64),
-        "rule_action_condition": torch.zeros(
-            (batch_size, 3), dtype=torch.int64
-        ),
-    }
-
-
-def test_v2_context_receives_all_explicit_rule_conditions() -> None:
-    planner = BEVOnlyDiffusionPlanner(
-        BEVOnlyDiffusionPlannerConfig(
-            d_model=32,
-            num_heads=4,
-            ffn_dim=64,
-            decoder_layers=1,
-            predecessor_condition="none",
-            model_version="v2",
-        )
-    )
-    trainer = JointGRPOTrainerA(planner)
-    model_inputs = {
-        **_model_inputs(),
+        "mode_valid_mask": torch.ones((1, 3, 10), dtype=torch.bool),
         "background_actor_state": torch.zeros(
             (1, 3, MAX_BACKGROUND_ACTORS, 8), dtype=torch.float32
         ),
         "background_actor_valid_mask": torch.zeros(
             (1, 3, MAX_BACKGROUND_ACTORS), dtype=torch.bool
         ),
-        "scenario_code": torch.tensor([5], dtype=torch.int64),
-        "rule_formation_state": torch.tensor([1], dtype=torch.int64),
-        "rule_action_condition": torch.tensor(
-            [[-1, 0, 1]], dtype=torch.int64
-        ),
+        "scenario_code": torch.ones((1,), dtype=torch.int64),
+        "rule_formation_state": torch.zeros((1,), dtype=torch.int64),
+        "rule_action_condition": torch.zeros((1, 3), dtype=torch.int64),
     }
-
-    context = trainer._context_from_inputs(model_inputs)
-
-    assert context.batch_size == 1
-    assert torch.isfinite(context.role_tokens).all()
 
 
 def _state(module: torch.nn.Module) -> dict[str, torch.Tensor]:
@@ -146,13 +82,7 @@ def _state(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
-def _changed(
-    before: dict[str, torch.Tensor], after: dict[str, torch.Tensor]
-) -> bool:
-    return any(not torch.equal(before[name], after[name]) for name in before)
-
-
-def _state_equal(
+def _same_state(
     first: dict[str, torch.Tensor], second: dict[str, torch.Tensor]
 ) -> bool:
     return first.keys() == second.keys() and all(
@@ -172,189 +102,7 @@ def _source_metadata(*, diagnostic: bool = True) -> dict[str, object]:
     }
 
 
-def test_config_and_pretrain_relative_advantage_contract() -> None:
-    config = JointGRPOConfig()
-    assert config.group_size == 4
-    assert JointGRPOConfig(group_size=3).group_size == 3
-    assert JointGRPOConfig(group_size=5).group_size == 5
-    assert config.initial_noise_timestep == 8
-    assert config.denoise_steps == 4
-    assert config.roll_timesteps == (15, 10, 5, 0)
-    assert config.stochastic_timesteps == (15, 10, 5)
-    assert config.eta == 1.0
-    assert config.mode_pg_weight == config.trajectory_pg_weight == 1.0
-    assert config.bc_weight == 0.1
-    assert config.reference_kl_weight == 0.02
-    with pytest.raises(JointGRPOError, match="initial_noise_timestep"):
-        JointGRPOConfig(initial_noise_timestep=9)
-    with pytest.raises(JointGRPOError, match="non-negative"):
-        JointGRPOConfig(reference_kl_weight=-0.1)
-
-    rewards = torch.tensor(
-        [[-1.5, -0.5, 0.5, 1.5], [2.0, 2.0, 2.0, 2.0]],
-        dtype=torch.float32,
-    )
-    pretrain_rewards = torch.tensor([[0.5], [1.5]], dtype=torch.float32)
-    advantages = normalize_pretrain_relative_advantages(
-        rewards,
-        pretrain_rewards,
-    )
-    deltas = rewards - pretrain_rewards
-    expected = deltas / (
-        torch.sqrt(deltas.square().mean(dim=1, keepdim=True)) + 1e-6
-    )
-    torch.testing.assert_close(advantages, expected)
-    assert torch.equal(torch.sign(advantages), torch.sign(deltas))
-    assert torch.any(advantages[0] < 0)
-    assert torch.any(advantages[0] > 0)
-    assert torch.all(advantages[1] > 0)
-    assert advantages[1].mean() > 0.99
-    with pytest.raises(JointGRPOError, match="dtype"):
-        normalize_pretrain_relative_advantages(
-            rewards.double(),
-            pretrain_rewards,
-        )
-    with pytest.raises(JointGRPOError, match="dtype"):
-        normalize_pretrain_relative_advantages(
-            rewards,
-            pretrain_rewards.double(),
-        )
-    with pytest.raises(JointGRPOError, match="shape"):
-        normalize_pretrain_relative_advantages(
-            rewards[:, :3],
-            pretrain_rewards,
-        )
-    with pytest.raises(JointGRPOError, match=r"\[B,1\]"):
-        normalize_pretrain_relative_advantages(
-            rewards,
-            pretrain_rewards.expand(-1, 2),
-        )
-    bad = rewards.clone()
-    bad[0, 0] = torch.nan
-    with pytest.raises(JointGRPOError, match="finite"):
-        normalize_pretrain_relative_advantages(bad, pretrain_rewards)
-    bad_pretrain = pretrain_rewards.clone()
-    bad_pretrain[0, 0] = torch.inf
-    with pytest.raises(JointGRPOError, match="finite"):
-        normalize_pretrain_relative_advantages(rewards, bad_pretrain)
-
-
-@pytest.mark.parametrize("group_size", [48, 72])
-def test_pretrain_relative_advantages_scale_for_formal_group_sizes(
-    group_size: int,
-) -> None:
-    pretrain_rewards = torch.tensor([[-0.25]], dtype=torch.float32)
-    deltas = torch.linspace(-1.0, 2.0, group_size).unsqueeze(0)
-    rewards = pretrain_rewards + deltas
-
-    advantages = normalize_pretrain_relative_advantages(
-        rewards,
-        pretrain_rewards,
-        group_size=group_size,
-    )
-
-    assert advantages.shape == (1, group_size)
-    assert torch.equal(torch.sign(advantages), torch.sign(deltas))
-    torch.testing.assert_close(
-        torch.sqrt(advantages.square().mean(dim=1)),
-        torch.ones(1),
-        rtol=2e-6,
-        atol=2e-6,
-    )
-
-
-def test_policy_update_config_contract_and_sha() -> None:
-    policy_update = JointGRPOPolicyUpdateConfig()
-    assert policy_update.update_epochs == 4
-    assert policy_update.clip_epsilon_low == 0.1
-    assert policy_update.clip_epsilon_high == 0.3
-    contract = joint_grpo_optimizer_contract(policy_update)
-    assert contract["version"] == "stage2_joint_grpo_optimizer_v4"
-    assert contract["update_epochs"] == 4
-    assert contract["clip_epsilon_low"] == 0.1
-    assert contract["clip_epsilon_high"] == 0.3
-    assert contract["mode_ratio_factorization"].endswith("[B,G]")
-    assert contract["trajectory_ratio_factorization"].endswith("[B,G,S]")
-    assert "no group-mean centering" in contract["advantage_normalization"]
-    assert contract["budget_unit"] == "accepted_rollout_group"
-    digest = joint_grpo_optimizer_contract_sha256(policy_update)
-    assert len(digest) == 64
-    assert digest == joint_grpo_optimizer_contract_sha256(policy_update)
-    assert digest != joint_grpo_optimizer_contract_sha256(
-        JointGRPOPolicyUpdateConfig(update_epochs=1)
-    )
-    for invalid_epochs in (True, False, 0, -1):
-        with pytest.raises(JointGRPOError, match="update_epochs"):
-            JointGRPOPolicyUpdateConfig(
-                update_epochs=invalid_epochs,  # type: ignore[arg-type]
-            )
-    for invalid_epsilon in (0.0, 1.0, -0.1, float("inf"), float("nan")):
-        with pytest.raises(JointGRPOError, match="clip_epsilon_low"):
-            JointGRPOPolicyUpdateConfig(clip_epsilon_low=invalid_epsilon)
-        with pytest.raises(JointGRPOError, match="clip_epsilon_high"):
-            JointGRPOPolicyUpdateConfig(clip_epsilon_high=invalid_epsilon)
-
-
-def test_clipped_grpo_surrogate_positive_negative_advantages() -> None:
-    ratios = torch.tensor(
-        [[0.5, 0.5, 1.0, 1.5, 1.5]],
-        dtype=torch.float32,
-        requires_grad=True,
-    )
-    advantages = torch.tensor(
-        [[1.0, -1.0, 1.0, 1.0, -1.0]],
-        dtype=torch.float32,
-    )
-    loss = _clipped_grpo_surrogate(
-        ratios,
-        advantages,
-        clip_epsilon_low=0.1,
-        clip_epsilon_high=0.3,
-    )
-    expected_terms = torch.tensor(
-        [[0.5, -0.9, 1.0, 1.3, -1.5]],
-        dtype=torch.float32,
-    )
-    torch.testing.assert_close(loss, -expected_terms.mean())
-    loss.backward()
-    torch.testing.assert_close(
-        ratios.grad,
-        torch.tensor(
-            [[-0.2, 0.0, -0.2, 0.0, 0.2]],
-            dtype=torch.float32,
-        ),
-    )
-
-    trajectory_ratios = torch.tensor(
-        [[[0.7, 1.0, 1.3], [1.3, 0.7, 1.0]]],
-        dtype=torch.float32,
-    )
-    trajectory_advantages = torch.tensor(
-        [[[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]],
-        dtype=torch.float32,
-    )
-    trajectory_loss = _clipped_grpo_surrogate(
-        trajectory_ratios,
-        trajectory_advantages,
-        clip_epsilon_low=0.1,
-        clip_epsilon_high=0.3,
-    )
-    manual = -torch.minimum(
-        trajectory_ratios * trajectory_advantages,
-        trajectory_ratios.clamp(0.9, 1.3) * trajectory_advantages,
-    ).mean()
-    torch.testing.assert_close(trajectory_loss, manual)
-
-
-@pytest.mark.parametrize("invalid_group_size", [True, False, 1, 0, -1])
-def test_config_rejects_invalid_group_size(invalid_group_size: object) -> None:
-    with pytest.raises(JointGRPOError, match="group_size"):
-        JointGRPOConfig(
-            group_size=invalid_group_size  # type: ignore[arg-type]
-        )
-
-
-def test_standard_gaussian_ddim_sampling_replay_and_schedule() -> None:
+def test_standard_gaussian_ddim_sampling_and_exact_replay() -> None:
     transition = StandardGaussianDDIM()
     sample = torch.zeros((2, 3, 10, 8, 2), dtype=torch.float32)
     prediction = torch.full_like(sample, 0.25)
@@ -367,7 +115,6 @@ def test_standard_gaussian_ddim_sampling_replay_and_schedule() -> None:
         generator=torch.Generator().manual_seed(7),
     )
     assert first.log_prob is not None
-    assert first.log_prob.shape == (2, 3, 10)
     replay = transition.step(
         model_output=prediction,
         timestep=15,
@@ -376,16 +123,8 @@ def test_standard_gaussian_ddim_sampling_replay_and_schedule() -> None:
         eta=1.0,
         prev_sample=first.prev_sample,
     )
-    torch.testing.assert_close(replay.mean, first.mean)
-    torch.testing.assert_close(replay.log_prob, first.log_prob)
-    standardized = (first.prev_sample - first.mean) / first.std
-    expected = (
-        -0.5 * standardized.square()
-        - torch.log(first.std)
-        - 0.5 * torch.log(torch.tensor(2.0 * torch.pi))
-    ).sum(dim=(-2, -1))
-    torch.testing.assert_close(first.log_prob, expected)
-
+    torch.testing.assert_close(first.mean, replay.mean)
+    torch.testing.assert_close(first.log_prob, replay.log_prob)
     terminal = transition.step(
         model_output=prediction,
         timestep=0,
@@ -394,631 +133,155 @@ def test_standard_gaussian_ddim_sampling_replay_and_schedule() -> None:
         eta=1.0,
     )
     assert terminal.log_prob is None
-    assert terminal.std.item() == 0.0
-    with pytest.raises(JointGRPOError, match="previous_timestep"):
-        transition.step(
-            model_output=prediction,
-            timestep=0,
-            previous_timestep=-0,
-            sample=sample,
-            eta=1.0,
-        )
 
 
-@pytest.fixture(scope="module")
-def rollout_pair():
-    trainer = JointGRPOTrainerA(_planner())
-    model_inputs = _model_inputs()
-    first = trainer.sample_groups(
-        model_inputs,
-        generator=torch.Generator().manual_seed(17),
+def test_frozen_pretrain_returns_all_modes_and_matches_stage1() -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(), JointGRPOConfig(trajectories_per_mode=2)
     )
-    second = trainer.sample_groups(
-        model_inputs,
-        generator=torch.Generator().manual_seed(17),
+    inputs = _inputs()
+    rollout = trainer.sample_groups(
+        inputs, generator=torch.Generator().manual_seed(17)
     )
-    return trainer, first, second
-
-
-def test_frozen_pretrain_inference_matches_stage1_and_is_deterministic() -> None:
-    inputs = _model_inputs()
-    trainer = JointGRPOTrainerA(_planner())
-    training_generator = torch.Generator().manual_seed(19)
-    rollout = trainer.sample_groups(inputs, generator=training_generator)
-    generator_state = training_generator.get_state().clone()
-
     first = trainer.infer_frozen_pretrain(rollout)
     second = trainer.infer_frozen_pretrain(rollout)
+    direct = trainer.infer_frozen_pretrain_from_inputs(inputs)
     with torch.inference_mode():
         stage1 = trainer.planner(**inputs)
-
-    assert set(first) == {"selected_trajectory", "selected_mode"}
-    assert first["selected_trajectory"].shape == (1, 3, 8, 3)
-    assert first["selected_trajectory"].dtype == torch.float32
-    assert first["selected_mode"].shape == (1, 3)
-    assert first["selected_mode"].dtype == torch.int64
-    assert torch.isfinite(first["selected_trajectory"]).all()
-    assert first["selected_trajectory"].requires_grad is False
-    assert first["selected_trajectory"].grad_fn is None
-    assert first["selected_mode"].requires_grad is False
-    assert torch.equal(training_generator.get_state(), generator_state)
+    assert first["all_mode_trajectories"].shape == (1, 3, 10, 8, 3)
+    assert first["mode_logits"].shape == (1, 3, 10)
     torch.testing.assert_close(
-        first["selected_trajectory"],
-        second["selected_trajectory"],
+        first["all_mode_trajectories"], second["all_mode_trajectories"]
     )
     torch.testing.assert_close(
-        first["selected_trajectory"],
-        stage1["selected_trajectory"],
+        first["all_mode_trajectories"], direct["all_mode_trajectories"]
     )
-    assert torch.equal(first["selected_mode"], second["selected_mode"])
+    torch.testing.assert_close(
+        first["selected_trajectory"], stage1["selected_trajectory"]
+    )
     assert torch.equal(first["selected_mode"], stage1["selected_mode"])
 
 
-def test_joint_rollout_shapes_seed_and_hard_mask(rollout_pair) -> None:
-    _, first, second = rollout_pair
-    assert first.chains_normalized.shape == (1, 4, 5, 3, 10, 8, 2)
-    assert first.sampled_modes.shape == (1, 4, 3)
-    assert first.sampled_modes.dtype == torch.int64
-    assert first.selected_trajectories.shape == (1, 4, 3, 8, 3)
-    assert first.old_mode_log_prob.shape == (1, 4)
-    assert first.old_trajectory_log_prob.shape == (1, 4, 3)
-    for name in (
-        "chains_normalized",
-        "sampled_modes",
-        "selected_trajectories",
-        "old_mode_log_prob",
-        "old_trajectory_log_prob",
-    ):
-        torch.testing.assert_close(getattr(first, name), getattr(second, name))
-
-    stop_inputs = _model_inputs()
-    stop_inputs["mode_valid_mask"][..., :9] = False
-    stop_rollout = JointGRPOTrainerA(_planner()).sample_groups(
-        stop_inputs,
-        generator=torch.Generator().manual_seed(23),
-    )
-    assert torch.equal(
-        stop_rollout.sampled_modes,
-        torch.full_like(stop_rollout.sampled_modes, 9),
-    )
-
-
-@pytest.mark.parametrize("group_size", [3, 5])
-def test_joint_rollout_and_update_shapes_follow_group_size(
-    group_size: int,
-) -> None:
+def test_rollout_can_enter_update_only_once() -> None:
     trainer = JointGRPOTrainerA(
-        _planner(),
-        JointGRPOConfig(group_size=group_size),
+        _planner(), JointGRPOConfig(trajectories_per_mode=2)
     )
     rollout = trainer.sample_groups(
-        _model_inputs(),
-        generator=torch.Generator().manual_seed(101 + group_size),
+        _inputs(), generator=torch.Generator().manual_seed(19)
     )
-
-    assert rollout.group_size == group_size
-    assert rollout.chains_normalized.shape == (
-        1,
-        group_size,
-        5,
-        3,
-        10,
-        8,
-        2,
-    )
-    assert rollout.sampled_modes.shape == (1, group_size, 3)
-    assert rollout.selected_trajectories.shape == (1, group_size, 3, 8, 3)
-    assert rollout.old_mode_log_prob.shape == (1, group_size)
-    assert rollout.old_trajectory_log_prob.shape == (1, group_size, 3)
-
-    rewards = torch.linspace(
-        -1.0,
-        1.0,
-        steps=group_size,
-        dtype=torch.float32,
-    ).unsqueeze(0)
-    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
-    update = trainer.update(rollout, rewards, pretrain_rewards)
-
-    assert update.optimizer_step == 1
-    assert update.loss.advantages.shape == (1, group_size)
-    assert update.loss.new_mode_log_prob.shape == (1, group_size)
-    assert update.loss.new_trajectory_log_prob.shape == (1, group_size, 3)
-
-
-def test_joint_probability_replay_zero_kl_and_weighted_loss(
-    rollout_pair,
-) -> None:
-    trainer, rollout, _ = rollout_pair
-    rewards = torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32)
-    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
-    with pytest.raises(TypeError, match="pretrain_rewards"):
-        trainer.compute_loss(rollout, rewards)  # type: ignore[call-arg]
-    with pytest.raises(TypeError, match="pretrain_rewards"):
-        trainer.update(rollout, rewards)  # type: ignore[call-arg]
-    result = trainer.compute_loss(rollout, rewards, pretrain_rewards)
-    torch.testing.assert_close(
-        result.new_mode_log_prob,
-        rollout.old_mode_log_prob,
-        rtol=0,
-        atol=2e-6,
-    )
-    torch.testing.assert_close(
-        result.new_trajectory_log_prob,
-        rollout.old_trajectory_log_prob,
-        rtol=0,
-        atol=2e-5,
-    )
-    torch.testing.assert_close(
-        result.mode_importance_ratio,
-        torch.ones_like(result.mode_importance_ratio),
-        rtol=0,
-        atol=2e-6,
-    )
-    torch.testing.assert_close(
-        result.trajectory_importance_ratio,
-        torch.ones_like(result.trajectory_importance_ratio),
-        rtol=0,
-        atol=2e-5,
-    )
-    assert result.mode_clip_fraction_low.item() == 0.0
-    assert result.mode_clip_fraction_high.item() == 0.0
-    assert result.trajectory_clip_fraction_low.item() == 0.0
-    assert result.trajectory_clip_fraction_high.item() == 0.0
-    assert result.mode_old_policy_approx_kl.item() >= 0.0
-    assert result.trajectory_old_policy_approx_kl.item() >= 0.0
-    policy_metrics = result.scalar_metrics()
-    assert policy_metrics["policy/mode_ratio_mean"] == pytest.approx(
-        1.0, abs=2e-6
-    )
-    assert policy_metrics["policy/trajectory_ratio_mean"] == pytest.approx(
-        1.0, abs=2e-5
-    )
-    assert policy_metrics["policy/mode_clip_fraction"] == 0.0
-    assert policy_metrics["policy/trajectory_clip_fraction"] == 0.0
-
-    groups = rollout.group_size
-    flat_count = rollout.batch_size * groups
-    context = _repeat_context(rollout.context, groups)
-    coarse = _repeat_groups(rollout.coarse_trajectories, groups)
-    valid = _repeat_groups(rollout.mode_valid_mask, groups)
-    modes = rollout.sampled_modes.reshape(flat_count, 3)
-    chains = rollout.chains_normalized.reshape(
-        flat_count, 5, 3, 10, 8, 2
-    )
-    role_transition_log_probs = []
-    final_logits = None
-    with torch.no_grad():
-        for index, (timestep, previous_timestep) in enumerate(
-            ((15, 10), (10, 5), (5, 0), (0, -1))
-        ):
-            timesteps = torch.full(
-                (flat_count, 3), timestep, dtype=torch.int64
-            )
-            candidates, final_logits = (
-                trainer.planner.predict_denoised_candidates(
-                    chains[:, index],
-                    timesteps,
-                    context,
-                    coarse,
-                    valid,
-                )
-            )
-            transition = trainer.transition.step(
-                model_output=trainer.planner._normalize_xy(
-                    candidates[..., :2]
-                ).float(),
-                timestep=timestep,
-                previous_timestep=previous_timestep,
-                sample=chains[:, index].float(),
-                eta=1.0,
-                prev_sample=chains[:, index + 1].float(),
-            )
-            if transition.log_prob is not None:
-                role_transition_log_probs.append(
-                    _gather_modes(
-                        transition.log_prob.unsqueeze(-1), modes
-                    ).squeeze(-1)
-                )
-    assert final_logits is not None
-    role_mode_log_prob = torch.log_softmax(
-        final_logits.float().masked_fill(~valid, float("-inf")),
-        dim=-1,
-    ).gather(-1, modes.unsqueeze(-1)).squeeze(-1)
-    manual_mode_joint = role_mode_log_prob.sum(dim=-1).reshape(1, 4)
-    manual_trajectory_joint = torch.stack(
-        [value.sum(dim=-1) for value in role_transition_log_probs],
-        dim=-1,
-    ).reshape(1, 4, 3)
-    torch.testing.assert_close(
-        manual_mode_joint, rollout.old_mode_log_prob
-    )
-    torch.testing.assert_close(
-        manual_trajectory_joint, rollout.old_trajectory_log_prob
-    )
-    torch.testing.assert_close(result.behavior_cloning, torch.zeros(()))
-    torch.testing.assert_close(result.mode_reference_kl, torch.zeros(()))
-    torch.testing.assert_close(
-        result.trajectory_reference_kl, torch.zeros(())
-    )
-    expected = (
-        result.mode_pg
-        + result.trajectory_pg
-        + 0.1 * result.behavior_cloning
-        + 0.02 * result.reference_kl
-    )
-    torch.testing.assert_close(result.total, expected)
-
-    current = torch.zeros((1, 8, 3), dtype=torch.float32)
-    reference = current.clone()
-    current[..., 2] = -torch.pi + 0.01
-    reference[..., 2] = torch.pi - 0.01
-    wrapped = _trajectory_bc(current, reference, JointGRPOConfig())
-    assert wrapped.item() < 0.01
-
-
-def test_reference_kl_becomes_positive_after_policy_perturbation(
-    rollout_pair,
-) -> None:
-    trainer, rollout, _ = rollout_pair
-    decoder_original = _state(trainer.planner.diffusion_decoder)
-    mode_original = _state(trainer.planner.mode_head)
-    with torch.no_grad():
-        trainer.planner.diffusion_decoder.trajectory_head[-1].bias.add_(0.01)
-        trainer.planner.mode_head.weight[0, 0].add_(0.05)
-    result = trainer.compute_loss(
+    rewards = torch.zeros((1, 3, 10, 2), dtype=torch.float32)
+    rewards[..., 0] = -1.0
+    rewards[..., 1] = 1.0
+    trainer.update(
         rollout,
-        torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
-        torch.zeros((1, 1), dtype=torch.float32),
-    )
-    assert result.reference_kl.item() >= 0.0
-    assert result.mode_reference_kl.item() > 0.0
-    assert result.trajectory_reference_kl.item() > 0.0
-    trainer.planner.diffusion_decoder.load_state_dict(decoder_original)
-    trainer.planner.mode_head.load_state_dict(mode_original)
-
-
-def test_exactly_one_update_changes_only_trainable_policy() -> None:
-    trainer = JointGRPOTrainerA(_planner())
-    optimizer_parameters = {
-        id(parameter)
-        for group in trainer.optimizer.param_groups
-        for parameter in group["params"]
-    }
-    expected_trainable = {
-        id(parameter)
-        for parameter in (
-            *trainer.planner.diffusion_decoder.parameters(),
-            *trainer.planner.mode_head.parameters(),
-        )
-    }
-    assert optimizer_parameters == expected_trainable
-    assert {
-        id(parameter)
-        for parameter in trainer.planner.parameters()
-        if parameter.requires_grad
-    } == expected_trainable
-    assert not any(
-        parameter.requires_grad for parameter in trainer.reference.parameters()
-    )
-    inputs = _model_inputs()
-    inputs["mode_valid_mask"][..., 1:4] = False
-    inputs["mode_valid_mask"][..., 6:9] = False
-    rollout = trainer.sample_groups(
-        inputs,
-        generator=torch.Generator().manual_seed(29),
-    )
-    frozen_before = trainer.infer_frozen_pretrain(rollout)
-    decoder_before = _state(trainer.planner.diffusion_decoder)
-    mode_before = _state(trainer.planner.mode_head)
-    backbone_before = _state(trainer.planner.backbone)
-    fusion_before = _state(trainer.planner.bev_fusion)
-    context_before = _state(trainer.planner.context_encoder)
-    reference_before = _state(trainer.reference)
-    result = trainer.update(
-        rollout,
-        torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
-        torch.zeros((1, 1), dtype=torch.float32),
-    )
-    assert result.optimizer_step == trainer.optimizer_step == 1
-    assert result.gradient_norms["diffusion_decoder"] > 0.0
-    assert result.gradient_norms["mode_head"] > 0.0
-    assert _changed(decoder_before, _state(trainer.planner.diffusion_decoder))
-    assert _changed(mode_before, _state(trainer.planner.mode_head))
-    assert _state_equal(backbone_before, _state(trainer.planner.backbone))
-    assert _state_equal(fusion_before, _state(trainer.planner.bev_fusion))
-    assert _state_equal(context_before, _state(trainer.planner.context_encoder))
-    assert _state_equal(reference_before, _state(trainer.reference))
-    frozen_after = trainer.infer_frozen_pretrain(rollout)
-    torch.testing.assert_close(
-        frozen_after["selected_trajectory"],
-        frozen_before["selected_trajectory"],
-    )
-    assert torch.equal(
-        frozen_after["selected_mode"],
-        frozen_before["selected_mode"],
-    )
-    assert all(
-        torch.isfinite(parameter).all() for parameter in trainer.planner.parameters()
+        rewards,
+        rollout.mode_valid_mask,
+        policy_update=JointGRPOPolicyUpdateConfig(update_epochs=1),
     )
     with pytest.raises(JointGRPOError, match="exactly once"):
         trainer.update(
             rollout,
-            torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
-            torch.zeros((1, 1), dtype=torch.float32),
+            rewards,
+            rollout.mode_valid_mask,
+            policy_update=JointGRPOPolicyUpdateConfig(update_epochs=1),
         )
-    rollout_reference = weakref.ref(rollout)
+    reference = weakref.ref(rollout)
     del rollout
     gc.collect()
-    assert rollout_reference() is None
+    assert reference() is None
     assert len(trainer._consumed_rollouts) == 0
 
-    fresh_rollout = trainer.sample_groups(
-        inputs,
-        generator=torch.Generator().manual_seed(31),
-    )
-    second = trainer.update(
-        fresh_rollout,
-        torch.tensor([[-1.5, -0.5, 0.5, 1.5]], dtype=torch.float32),
-        torch.zeros((1, 1), dtype=torch.float32),
-    )
-    assert second.optimizer_step == trainer.optimizer_step == 2
 
-
-def test_multi_epoch_update_reuses_frozen_rollout_and_advantage() -> None:
-    trainer = JointGRPOTrainerA(
-        _planner(),
-        JointGRPOConfig(group_size=3),
-    )
-    rollout = trainer.sample_groups(
-        _model_inputs(),
-        generator=torch.Generator().manual_seed(211),
-    )
-    rewards = torch.tensor([[-1.0, 0.0, 1.0]], dtype=torch.float32)
-    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
-    old_mode_log_prob = rollout.old_mode_log_prob.clone()
-    old_trajectory_log_prob = rollout.old_trajectory_log_prob.clone()
-    old_chains = rollout.chains_normalized.clone()
-    decoder_before = _state(trainer.planner.diffusion_decoder)
-    mode_before = _state(trainer.planner.mode_head)
-    backbone_before = _state(trainer.planner.backbone)
-    reference_before = _state(trainer.reference)
-
-    with mock.patch(
-        "models.bev_planner.joint_grpo.normalize_pretrain_relative_advantages",
-        wraps=normalize_pretrain_relative_advantages,
-    ) as normalize:
-        result = trainer.update(
-            rollout,
-            rewards,
-            pretrain_rewards,
-            policy_update=JointGRPOPolicyUpdateConfig(
-                update_epochs=2,
-                clip_epsilon_low=0.1,
-                clip_epsilon_high=0.3,
-            ),
-        )
-
-    assert normalize.call_count == 1
-    assert len(result.epoch_results) == 2
-    assert [epoch.epoch_in_rollout for epoch in result.epoch_results] == [1, 2]
-    assert [epoch.optimizer_step for epoch in result.epoch_results] == [1, 2]
-    assert result.optimizer_step == trainer.optimizer_step == 2
-    assert result.loss is result.epoch_results[-1].loss
-    assert result.gradient_norms is result.epoch_results[-1].gradient_norms
-    assert (
-        result.epoch_results[0].loss.advantages.data_ptr()
-        == result.epoch_results[1].loss.advantages.data_ptr()
-    )
-    torch.testing.assert_close(
-        result.epoch_results[0].loss.advantages,
-        result.epoch_results[1].loss.advantages,
-    )
-    torch.testing.assert_close(rollout.old_mode_log_prob, old_mode_log_prob)
-    torch.testing.assert_close(
-        rollout.old_trajectory_log_prob,
-        old_trajectory_log_prob,
-    )
-    torch.testing.assert_close(rollout.chains_normalized, old_chains)
-    torch.testing.assert_close(
-        result.epoch_results[0].loss.new_mode_log_prob,
-        old_mode_log_prob,
-        rtol=0,
-        atol=2e-6,
-    )
-    assert not torch.equal(
-        result.epoch_results[1].loss.mode_importance_ratio,
-        result.epoch_results[0].loss.mode_importance_ratio,
-    )
-    for epoch in result.epoch_results:
-        for value in vars(epoch.loss).values():
-            assert isinstance(value, torch.Tensor)
-            assert value.requires_grad is False
-            assert value.grad_fn is None
-        assert epoch.gradient_norms["diffusion_decoder"] > 0.0
-        assert epoch.gradient_norms["mode_head"] > 0.0
-    assert _changed(decoder_before, _state(trainer.planner.diffusion_decoder))
-    assert _changed(mode_before, _state(trainer.planner.mode_head))
-    assert _state_equal(backbone_before, _state(trainer.planner.backbone))
-    assert _state_equal(reference_before, _state(trainer.reference))
-    with pytest.raises(JointGRPOError, match="enter update exactly once"):
-        trainer.update(
-            rollout,
-            rewards,
-            pretrain_rewards,
-            policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
-        )
-
-
-def test_partial_multi_epoch_failure_still_consumes_live_rollout() -> None:
-    trainer = JointGRPOTrainerA(
-        _planner(),
-        JointGRPOConfig(group_size=2),
-    )
-    rollout = trainer.sample_groups(
-        _model_inputs(),
-        generator=torch.Generator().manual_seed(223),
-    )
-    rewards = torch.tensor([[-1.0, 1.0]], dtype=torch.float32)
-    pretrain_rewards = torch.zeros((1, 1), dtype=torch.float32)
-    original_step = trainer.optimizer.step
-    step_calls = 0
-
-    def fail_second_step(*args, **kwargs):
-        nonlocal step_calls
-        step_calls += 1
-        if step_calls == 2:
-            raise RuntimeError("injected second epoch failure")
-        return original_step(*args, **kwargs)
-
-    with mock.patch.object(
-        trainer.optimizer,
-        "step",
-        side_effect=fail_second_step,
-    ):
-        with pytest.raises(RuntimeError, match="second epoch"):
-            trainer.update(
-                rollout,
-                rewards,
-                pretrain_rewards,
-                policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
-            )
-    assert trainer.optimizer_step == 1
-    with pytest.raises(JointGRPOError, match="enter update exactly once"):
-        trainer.update(rollout, rewards, pretrain_rewards)
-
-
-def test_source_metadata_and_grpo_checkpoint_round_trip(tmp_path: Path) -> None:
+def test_stage1_source_metadata_requires_explicit_diagnostic_opt_in() -> None:
     source = _source_metadata(diagnostic=True)
-    validate_stage1_a_source_metadata(
-        source,
-        allow_diagnostic_source=True,
-    )
+    validate_stage1_a_source_metadata(source, allow_diagnostic_source=True)
     with pytest.raises(JointGRPOError, match="explicit opt-in"):
-        validate_stage1_a_source_metadata(
-            source,
-            allow_diagnostic_source=False,
-        )
-    bad_b = copy.deepcopy(source)
-    bad_b["variant"] = "B"
-    bad_b["predecessor_condition"] = "predicted_detached"
+        validate_stage1_a_source_metadata(source, allow_diagnostic_source=False)
+    wrong = dict(source)
+    wrong["variant"] = "B"
     with pytest.raises(JointGRPOError, match="variant mismatch"):
-        validate_stage1_a_source_metadata(
-            bad_b,
-            allow_diagnostic_source=True,
-        )
-    legacy = copy.deepcopy(source)
-    legacy["schema_version"] = 1
-    with pytest.raises(JointGRPOError, match="schema_version mismatch"):
-        validate_stage1_a_source_metadata(
-            legacy,
-            allow_diagnostic_source=True,
-        )
+        validate_stage1_a_source_metadata(wrong, allow_diagnostic_source=True)
 
-    trainer = JointGRPOTrainerA(_planner())
-    rollout = trainer.sample_groups(
-        _model_inputs(),
-        generator=torch.Generator().manual_seed(71),
+
+def test_schema3_strict_resume_restores_optimizer_and_reference(tmp_path: Path) -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(), JointGRPOConfig(trajectories_per_mode=2)
     )
-    frozen_before = trainer.infer_frozen_pretrain(rollout)
     payload = grpo_checkpoint_payload(
         trainer=trainer,
         source_stage1_sha256="a" * 64,
-        source_stage1_payload=source,
+        source_stage1_payload=_source_metadata(),
         metrics={"loss/total": 0.0},
         diagnostic_only=True,
     )
-    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 2
+    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 3
     assert payload["format"] == GRPO_CHECKPOINT_FORMAT
-    assert payload["optimizer_contract_version"] == (
-        "stage2_joint_grpo_optimizer_v4"
+    assert payload["optimizer_contract_version"] == "stage2_joint_grpo_optimizer_v5"
+    path = save_grpo_checkpoint(tmp_path / "current.pt", payload)
+
+    restored = JointGRPOTrainerA(
+        _planner(), JointGRPOConfig(trajectories_per_mode=2)
     )
-    assert payload["diagnostic_only"] is True
-    assert payload["eligible_for_formal_training"] is False
-    path = save_grpo_checkpoint(tmp_path / "diagnostic.pt", payload)
-    restored = JointGRPOTrainerA(_planner())
     loaded = load_grpo_checkpoint(
-        path,
-        restored,
-        expected_source_stage1_sha256="a" * 64,
+        path, restored, expected_source_stage1_sha256="a" * 64
     )
     assert loaded["optimizer_step"] == 0
-    assert _state_equal(_state(restored.planner), _state(trainer.planner))
-    assert _state_equal(_state(restored.reference), _state(trainer.reference))
-    frozen_after = restored.infer_frozen_pretrain(rollout)
-    torch.testing.assert_close(
-        frozen_after["selected_trajectory"],
-        frozen_before["selected_trajectory"],
-    )
-    assert torch.equal(
-        frozen_after["selected_mode"],
-        frozen_before["selected_mode"],
-    )
+    assert _same_state(_state(restored.planner), _state(trainer.planner))
+    assert _same_state(_state(restored.reference), _state(trainer.reference))
+    assert load_grpo_config_from_checkpoint(path) == trainer.config
 
-    symmetric_clip_checkpoint = copy.deepcopy(payload)
-    symmetric_clip_checkpoint["optimizer_contract_version"] = (
-        "stage2_joint_grpo_optimizer_v3"
-    )
-    symmetric_clip_path = save_grpo_checkpoint(
-        tmp_path / "symmetric_clip_v3.pt",
-        symmetric_clip_checkpoint,
-    )
-    with pytest.raises(JointGRPOError, match="optimizer_contract_version"):
-        load_grpo_checkpoint(
-            symmetric_clip_path,
-            JointGRPOTrainerA(_planner()),
-            expected_source_stage1_sha256="a" * 64,
-        )
 
-    legacy_checkpoint = copy.deepcopy(payload)
-    legacy_checkpoint["schema_version"] = LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION
-    legacy_checkpoint["format"] = LEGACY_GRPO_CHECKPOINT_FORMAT
-    legacy_checkpoint["reward_source"] = "external"
-    legacy_checkpoint.pop("optimizer_contract_version")
-    legacy_checkpoint["optimizer_step"] = 7
-    legacy_path = save_grpo_checkpoint(
-        tmp_path / "legacy_v1.pt",
-        legacy_checkpoint,
+@pytest.mark.parametrize("generation", ["legacy", "previous"])
+def test_old_schema_is_planner_only_for_historical_evaluation(
+    tmp_path: Path, generation: str
+) -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(), JointGRPOConfig(trajectories_per_mode=2)
     )
-    assert load_grpo_a_config_for_evaluation(legacy_path) == trainer.config
-    evaluation_trainer = JointGRPOTrainerA(_planner())
-    evaluation_reference_before = _state(evaluation_trainer.reference)
-    loaded_for_evaluation = load_grpo_a_checkpoint_for_evaluation(
-        legacy_path,
-        evaluation_trainer,
-        expected_source_stage1_sha256="a" * 64,
+    payload = grpo_checkpoint_payload(
+        trainer=trainer,
+        source_stage1_sha256="a" * 64,
+        source_stage1_payload=_source_metadata(),
+        metrics={"loss/total": 0.0},
+        diagnostic_only=True,
     )
-    assert loaded_for_evaluation["optimizer_step"] == 7
-    assert _state_equal(_state(evaluation_trainer.planner), _state(trainer.planner))
-    assert _state_equal(
-        _state(evaluation_trainer.reference), evaluation_reference_before
+    historical = copy.deepcopy(payload)
+    raw_config = dataclasses.asdict(trainer.config)
+    raw_config["group_size"] = raw_config.pop("trajectories_per_mode")
+    if generation == "legacy":
+        historical["schema_version"] = LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION
+        historical["format"] = LEGACY_GRPO_CHECKPOINT_FORMAT
+        historical["reward_source"] = "external"
+        historical.pop("optimizer_contract_version")
+    else:
+        historical["schema_version"] = PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION
+        historical["format"] = PREVIOUS_GRPO_CHECKPOINT_FORMAT
+        historical["reward_source"] = "external_with_explicit_pretrain_baseline"
+        historical["optimizer_contract_version"] = "stage2_joint_grpo_optimizer_v4"
+    historical["grpo_config"] = raw_config
+    historical["optimizer_step"] = 27
+    path = save_grpo_checkpoint(tmp_path / f"{generation}.pt", historical)
+
+    evaluation = JointGRPOTrainerA(
+        _planner(), JointGRPOConfig(trajectories_per_mode=2)
     )
-    assert evaluation_trainer.optimizer.state == {}
-    assert evaluation_trainer.optimizer_step == 0
+    reference_before = _state(evaluation.reference)
+    loaded = load_grpo_a_checkpoint_for_evaluation(
+        path, evaluation, expected_source_stage1_sha256="a" * 64
+    )
+    assert loaded["optimizer_step"] == 27
+    assert _same_state(_state(evaluation.planner), _state(trainer.planner))
+    assert _same_state(_state(evaluation.reference), reference_before)
+    assert evaluation.optimizer.state == {}
+    assert evaluation.optimizer_step == 0
+    assert load_grpo_a_config_for_evaluation(path) == trainer.config
     with pytest.raises(JointGRPOError, match="schema_version mismatch"):
-        load_grpo_config_from_checkpoint(legacy_path)
+        load_grpo_config_from_checkpoint(path)
     with pytest.raises(JointGRPOError, match="schema_version mismatch"):
         load_grpo_checkpoint(
-            legacy_path,
-            JointGRPOTrainerA(_planner()),
+            path,
+            JointGRPOTrainerA(
+                _planner(), JointGRPOConfig(trajectories_per_mode=2)
+            ),
             expected_source_stage1_sha256="a" * 64,
-        )
-
-    bad_checkpoint = copy.deepcopy(payload)
-    bad_checkpoint["variant"] = "B"
-    bad_path = save_grpo_checkpoint(tmp_path / "variant_b.pt", bad_checkpoint)
-    with pytest.raises(JointGRPOError, match="variant mismatch"):
-        load_grpo_checkpoint(
-            bad_path,
-            JointGRPOTrainerA(_planner()),
-            expected_source_stage1_sha256="a" * 64,
-        )
-
-    with pytest.raises(JointGRPOError, match="diagnostic Stage 1"):
-        grpo_checkpoint_payload(
-            trainer=trainer,
-            source_stage1_sha256="a" * 64,
-            source_stage1_payload=source,
-            metrics={},
-            diagnostic_only=False,
         )

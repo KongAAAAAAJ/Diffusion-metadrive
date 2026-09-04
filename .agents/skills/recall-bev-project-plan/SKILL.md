@@ -21,8 +21,8 @@ For a general query such as “项目计划” or “下一步是什么”, retu
 1. The current paper question and the three trajectory domains `tau_d`, `tau_cmd`, and `tau_a`.
 2. The active hard gate and the immediately executable next action.
 3. The Stage 1 formal scope: train Variant A only.
-4. The Stage 2 comparison: `GRPO-Open` evaluates reward on `tau_cmd`; `GRPO-Exec` evaluates reward on surrogate-predicted `tau_a`.
-5. The final three-model matrix and remaining ordered gates.
+4. The active Stage 2 path: `GRPO-Open` computes per-vehicle, same-mode counterfactual reward on raw `tau_d`; sampled GRPO candidates never drive the environment, which advances only with the cached frozen Stage-1 argmax baseline.
+5. The future `GRPO-Exec`/three-model matrix and remaining ordered gates, clearly separated from the currently authorized implementation.
 6. Any real blocker, especially the real-TruckSim surrogate gate.
 
 Keep the response proportional to the request. Link the local memory and state files when useful.
@@ -31,11 +31,10 @@ Keep the response proportional to the request. Link the local memory and state f
 
 - Do not present Stage 1 Variant B as required formal training, a main baseline, or a final model.
 - Do not restore MAPPO selector, camera/LiDAR input, teacher forcing, or sequential-role optimizer paths.
-- Both Stage 2 branches must start from the same eligible Stage1-A checkpoint and use the same data, seeds, budgets, optimizer, KL/BC weights, reward components, and trajectory optimizer.
-- The primary Stage 2 variable is only the reward domain: `R(tau_cmd)` versus `R(tau_a)`.
+- Current GRPO-Open uses `(vehicle, mode)` blocks with 48 raw `tau_d` trajectories, same-mode frozen baselines, and no formation term. Any future GRPO-Exec comparison must first be reconciled to this active contract in the machine-readable plan.
 - GRPO probability and gradients remain tied to raw diffusion rollout `tau_d`.
 - The chassis surrogate consumes `tau_cmd`, stays frozen during GRPO, and is not part of reward backpropagation.
-- The G candidates are not separately executed in MetaDrive. Select one `tau_cmd`, then call `env.step()` exactly once.
+- Sampled GRPO candidates never enter the trajectory optimizer, RuleMaker, or MetaDrive. At each live state, optimize/finalize the cached frozen Stage-1 argmax baseline and call `env.step()` exactly once.
 - Synthetic surrogate data is engineering evidence only. Formal `GRPO-Exec` and paper conclusions require the real TruckSim fit, ID/OOD, and calibration gates.
 - Round 14 cleanup starts only after both Stage 2 branches are semantically stable.
 

@@ -123,7 +123,7 @@ def test_launcher_allocates_run_and_forwards_only_config_and_run_dir(
         / "logs"
         / "grpo-open-training.log"
     ).exists()
-    assert "application=stage2_grpo_open_application_v2" in result.stdout
+    assert "application=stage2_grpo_open_application_v3" in result.stdout
     assert "reward_domain=tau_d" in result.stdout
 
 
@@ -351,13 +351,14 @@ def test_launcher_uses_static_default_artifact_root() -> None:
     assert "training_v1" not in source
     assert "logs_v1" not in source
     assert "calibrate_bev_joint_reward.py" not in source
-    assert "stage2_grpo_open_application_v2" in source
+    assert "stage2_grpo_open_application_v3" in source
+    assert "stage2_grpo_open_application_v2" not in source
     assert "stage2_grpo_open_application_v1" not in source
 
 
-def test_default_yaml_freezes_pretrain_dynamic_sampling_parameters() -> None:
+def test_default_yaml_freezes_same_mode_sampling_parameters() -> None:
     payload = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8"))
 
-    assert payload["online"]["pretrain_improvement_margin"] == 1e-6
-    assert payload["online"]["max_candidate_groups_per_state"] == 3
-    assert payload["online"]["max_attempted_groups_multiplier"] == 3
+    assert payload["online"]["trajectories_per_mode"] == 48
+    assert payload["online"]["max_sampling_attempts_per_state"] == 3
+    assert payload["online"]["max_sampling_attempts_multiplier"] == 3

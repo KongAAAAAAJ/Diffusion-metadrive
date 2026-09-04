@@ -1,4 +1,4 @@
-"""Audit raw GRPO actions and the deterministic execution transform."""
+"""Audit frozen Stage-1 baseline actions and their execution transform."""
 
 from __future__ import annotations
 
@@ -55,8 +55,7 @@ def run_audit(
         JointBEVDatasetConfig(dataset_root=dataset_root, split="train")
     )
     optimizer = KinematicTrajectoryOptimizer()
-    generator = torch.Generator(device=torch_device)
-    generator.manual_seed(seed)
+    del seed  # Frozen Stage-1 inference owns its deterministic inference noise.
     raw_valid = []
     optimized_valid = []
     intervention_ade = []
@@ -84,34 +83,33 @@ def run_audit(
             name: getattr(values, name) for name in MODEL_FIELDS
         }
         batch = model_inputs_to_batch(values, torch_device)
-        with torch.no_grad():
-            rollout = trainer.sample_groups(batch, generator=generator)
-        raw = rollout.selected_trajectories[0].detach().cpu().numpy().copy()
-        raw_tensor_before = rollout.selected_trajectories.detach().clone()
-        modes = rollout.sampled_modes[0].detach().cpu().numpy()
+        frozen = trainer.infer_frozen_pretrain_from_inputs(batch)
+        selected = frozen["selected_trajectory"]
+        raw = selected.detach().cpu().numpy().copy()
+        raw_tensor_before = selected.detach().clone()
+        modes = frozen["selected_mode"].detach().cpu().numpy()
         result = optimize_selected_model_trajectories(
-            values, raw, modes, optimizer=optimizer
+            values, raw[None, ...], modes[None, ...], optimizer=optimizer
         )
-        if not torch.equal(raw_tensor_before, rollout.selected_trajectories):
-            raise RuntimeError("execution optimizer mutated the raw GRPO rollout")
+        if not torch.equal(raw_tensor_before, selected):
+            raise RuntimeError("execution optimizer mutated the frozen baseline")
         raw_valid.extend(result.raw_valid.reshape(-1).tolist())
         optimized_valid.extend(result.optimized_valid.reshape(-1).tolist())
         intervention_ade.extend(result.intervention_ade_m.reshape(-1).tolist())
         intervention_fde.extend(result.intervention_fde_m.reshape(-1).tolist())
-        selected_coarse = np.empty_like(raw)
-        for group in range(raw.shape[0]):
-            for role in range(3):
-                selected_coarse[group, role] = values.coarse_trajectories[
-                    role, int(modes[group, role])
-                ]
-                mode = int(modes[group, role])
-                if mode in (3, 4, 5, 6, 7, 8):
-                    lane_direction_matches.append(
-                        bool(
-                            np.sign(result.optimized_trajectories[group, role, -1, 1])
-                            == np.sign(selected_coarse[group, role, -1, 1])
-                        )
+        selected_coarse = np.empty_like(raw[None, ...])
+        for role in range(3):
+            selected_coarse[0, role] = values.coarse_trajectories[
+                role, int(modes[role])
+            ]
+            mode = int(modes[role])
+            if mode in (3, 4, 5, 6, 7, 8):
+                lane_direction_matches.append(
+                    bool(
+                        np.sign(result.optimized_trajectories[0, role, -1, 1])
+                        == np.sign(selected_coarse[0, role, -1, 1])
                     )
+                )
         coarse_delta = np.linalg.norm(
             result.optimized_trajectories[..., :2] - selected_coarse[..., :2],
             axis=-1,
@@ -144,7 +142,7 @@ def run_audit(
                 raw_violations[reason] = raw_violations.get(reason, 0) + 1
 
     report = {
-        "format": "bev_trajectory_optimizer_audit_v1",
+        "format": "bev_trajectory_optimizer_audit_v2",
         "variant": variant,
         "source_checkpoint": str(checkpoint.resolve()),
         "source_checkpoint_sha256": checkpoint_sha,
@@ -178,7 +176,7 @@ def run_audit(
             np.percentile(transition_duration, 95)
         ),
         "raw_violations": dict(sorted(raw_violations.items())),
-        "raw_grpo_rollout_unchanged": True,
+        "raw_frozen_baseline_unchanged": True,
         "optimizer_config_sha256": optimizer.config.sha256(),
     }
     output.parent.mkdir(parents=True, exist_ok=True)

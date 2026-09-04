@@ -33,11 +33,15 @@ from models.bev_planner.joint_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
+    VEHICLE_MODE_REWARD_CONTRACT,
+    VEHICLE_MODE_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
     JointRewardError,
     JointRewardResult,
     JointTrajectoryProxyReward,
+    VehicleModeRewardConfig,
     joint_reward_config_sha256,
+    vehicle_mode_reward_config_sha256,
 )
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizer,
@@ -64,6 +68,8 @@ from train.bev_joint_grpo import (
     GRPO_CHECKPOINT_SCHEMA_VERSION,
     LEGACY_GRPO_CHECKPOINT_FORMAT,
     LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
+    PREVIOUS_GRPO_CHECKPOINT_FORMAT,
+    PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION,
     load_grpo_a_checkpoint_for_evaluation,
     load_grpo_a_config_for_evaluation,
     load_stage1_a_for_grpo,
@@ -100,6 +106,47 @@ _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
 _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 = hashlib.sha256(
     json.dumps(
         _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+).hexdigest()
+_PREVIOUS_GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
+    "version": "stage2_grpo_open_application_v2",
+    "policy_sample_domain": "tau_d",
+    "policy_probability_domain": "tau_d",
+    "reward_input_domain": "tau_d",
+    "candidate_selection_domain": "tau_d",
+    "execution_input_domain": "tau_cmd",
+    "execution_transform": "KinematicTrajectoryOptimizer(selected_tau_d)",
+    "optimize_only_selected_candidate": True,
+    "optimizer_must_succeed_before_policy_update": True,
+    "advantage_baseline": (
+        "same-live-state deterministic frozen Stage 1 raw tau_d proxy reward"
+    ),
+    "advantage_normalization": (
+        "delta divided by per-group delta RMS plus epsilon; no mean centering"
+    ),
+    "accepted_group_condition": (
+        "raw reward span greater than 1e-6 and "
+        "max(reward-frozen_pretrain_reward) greater than "
+        "pretrain_improvement_margin"
+    ),
+    "rejected_group_side_effects": (
+        "no trajectory optimization, RuleMaker finalize, policy update, "
+        "accepted-budget progress, validation progress, or environment step"
+    ),
+    "exhausted_state_fallback": (
+        "optimize and execute the frozen-pretrain tau_d trajectory once"
+    ),
+    "tracking_expansion_enabled": False,
+    "calibration_required": False,
+    "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
+    "simulator_validation_role": "diagnostic_only",
+}
+_PREVIOUS_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 = hashlib.sha256(
+    json.dumps(
+        _PREVIOUS_GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
@@ -245,9 +292,36 @@ def _initial_scene_sha256(env: object) -> str:
 def _validate_grpo_checkpoint_contract(
     payload: Mapping[str, object],
 ) -> tuple[str, str, str]:
+    identity = (payload.get("schema_version"), payload.get("format"))
+    if identity == (GRPO_CHECKPOINT_SCHEMA_VERSION, GRPO_CHECKPOINT_FORMAT):
+        generation = "current"
+        expected_application = GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+        expected_application_sha = GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+    elif identity == (
+        PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION,
+        PREVIOUS_GRPO_CHECKPOINT_FORMAT,
+    ):
+        generation = "previous"
+        expected_application = _PREVIOUS_GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+        expected_application_sha = (
+            _PREVIOUS_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        )
+    elif identity == (
+        LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
+        LEGACY_GRPO_CHECKPOINT_FORMAT,
+    ):
+        generation = "legacy"
+        expected_application = _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+        expected_application_sha = (
+            _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        )
+    else:
+        raise RewardComparisonError("grpo_open checkpoint identity is unsupported")
+
     required_fields = {
         "schema_version",
         "format",
+        "grpo_config",
         "run_mode",
         "reward_contract_version",
         "reward_contract_sha256",
@@ -256,7 +330,6 @@ def _validate_grpo_checkpoint_contract(
         "reward_application_contract",
         "reward_application_contract_sha256",
         "reward_input_domain",
-        "candidate_selection_domain",
         "execution_input_domain",
         "best_checkpoint_metric",
         "tracking_expansion_enabled",
@@ -269,22 +342,31 @@ def _validate_grpo_checkpoint_contract(
         "trajectory_optimizer_config",
         "trajectory_optimizer_sha256",
     }
+    if generation == "current":
+        required_fields.update(
+            {
+                "training_candidate_domain",
+                "environment_action_source",
+                "joint_reward_role",
+            }
+        )
+    else:
+        required_fields.add("candidate_selection_domain")
     missing = sorted(required_fields.difference(payload))
     if missing:
         raise RewardComparisonError(
             f"grpo_open checkpoint is missing contract fields: {missing}"
         )
-    expected_diagnostic = {
-        "run_mode": "smoke",
-        "diagnostic_only": True,
-        "eligible_for_formal_training": False,
-        "calibration_required": False,
-    }
-    for field, expected in expected_diagnostic.items():
-        if payload.get(field) != expected:
-            raise RewardComparisonError(
-                f"grpo_open diagnostic checkpoint {field} mismatch"
-            )
+    run_mode = payload.get("run_mode")
+    diagnostic = payload.get("diagnostic_only")
+    eligible = payload.get("eligible_for_formal_training")
+    if run_mode not in {"smoke", "formal"}:
+        raise RewardComparisonError("grpo_open checkpoint run_mode mismatch")
+    if not isinstance(diagnostic, bool) or not isinstance(eligible, bool):
+        raise RewardComparisonError("grpo_open eligibility metadata is invalid")
+    expected_diagnostic = run_mode != "formal"
+    if diagnostic == eligible or diagnostic != expected_diagnostic:
+        raise RewardComparisonError("grpo_open eligibility metadata conflicts")
 
     raw_application = payload.get("reward_application_contract")
     application_sha = payload.get("reward_application_contract_sha256")
@@ -300,69 +382,123 @@ def _validate_grpo_checkpoint_contract(
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
-    checkpoint_identity = (
-        payload.get("schema_version"),
-        payload.get("format"),
-    )
-    if checkpoint_identity == (
-        GRPO_CHECKPOINT_SCHEMA_VERSION,
-        GRPO_CHECKPOINT_FORMAT,
-    ):
-        expected_application = GRPO_OPEN_REWARD_APPLICATION_CONTRACT
-        expected_application_sha = GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
-    elif checkpoint_identity == (
-        LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
-        LEGACY_GRPO_CHECKPOINT_FORMAT,
-    ):
-        expected_application = _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT
-        expected_application_sha = (
-            _LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
-        )
-    else:
-        raise RewardComparisonError("grpo_open checkpoint identity is unsupported")
     if (
         application_sha != canonical_application_sha
         or dict(raw_application) != expected_application
         or application_sha != expected_application_sha
     ):
         raise RewardComparisonError(
-            "grpo_open must use the frozen raw-tau_d application contract"
+            "grpo_open application contract does not match its checkpoint schema"
         )
-    for field in (
-        "reward_input_domain",
-        "candidate_selection_domain",
-        "execution_input_domain",
-        "best_checkpoint_metric",
-        "tracking_expansion_enabled",
-        "calibration_required",
-    ):
-        if payload.get(field) != raw_application.get(field):
+    if generation == "current":
+        expected_metadata = {
+            "reward_input_domain": "tau_d",
+            "training_candidate_domain": "tau_d_all_vehicle_modes",
+            "environment_action_source": "cached_frozen_stage1_argmax",
+            "execution_input_domain": "tau_cmd",
+            "best_checkpoint_metric": "validation/vehicle_reward_mean",
+            "joint_reward_role": "historical_and_final_evaluation_only",
+            "tracking_expansion_enabled": False,
+            "calibration_required": False,
+        }
+    else:
+        expected_metadata = {
+            field: raw_application[field]
+            for field in (
+                "reward_input_domain",
+                "candidate_selection_domain",
+                "execution_input_domain",
+                "best_checkpoint_metric",
+                "tracking_expansion_enabled",
+                "calibration_required",
+            )
+        }
+    for field, expected in expected_metadata.items():
+        if payload.get(field) != expected:
             raise RewardComparisonError(
                 f"grpo_open reward application metadata mismatch: {field}"
             )
 
     raw_reward_config = payload.get("reward_config")
-    try:
-        parsed_reward_config = (
-            JointRewardConfig(**dict(raw_reward_config))
-            if isinstance(raw_reward_config, Mapping)
+    if generation == "current":
+        raw_grpo_config = payload.get("grpo_config")
+        trajectories_per_mode = (
+            raw_grpo_config.get("trajectories_per_mode")
+            if isinstance(raw_grpo_config, Mapping)
             else None
         )
-    except (TypeError, ValueError, JointRewardError) as exc:
-        raise RewardComparisonError("grpo_open reward config is invalid") from exc
-    expected_reward_config = JointRewardConfig()
-    expected_reward_version = JOINT_REWARD_CONTRACT["version"]
-    if (
-        parsed_reward_config is None
-        or dict(raw_reward_config) != asdict(parsed_reward_config)
-        or parsed_reward_config != expected_reward_config
-        or payload.get("reward_contract_version") != expected_reward_version
-        or payload.get("reward_contract_sha256") != JOINT_REWARD_CONTRACT_SHA256
-        or payload.get("reward_config_sha256")
-        != joint_reward_config_sha256(parsed_reward_config)
-    ):
-        raise RewardComparisonError(
-            "grpo_open is not bound to the active frozen joint reward config"
+        if (
+            not isinstance(raw_grpo_config, Mapping)
+            or "group_size" in raw_grpo_config
+            or isinstance(trajectories_per_mode, bool)
+            or not isinstance(trajectories_per_mode, int)
+            or trajectories_per_mode < 2
+        ):
+            raise RewardComparisonError(
+                "current grpo_open config must use trajectories_per_mode"
+            )
+        try:
+            parsed_reward_config = (
+                VehicleModeRewardConfig(**dict(raw_reward_config))
+                if isinstance(raw_reward_config, Mapping)
+                else None
+            )
+        except (TypeError, ValueError, JointRewardError) as exc:
+            raise RewardComparisonError(
+                "grpo_open vehicle-mode reward config is invalid"
+            ) from exc
+        expected_reward_config = VehicleModeRewardConfig(
+            trajectories_per_mode=trajectories_per_mode
+        )
+        if (
+            parsed_reward_config is None
+            or dict(raw_reward_config) != asdict(parsed_reward_config)
+            or parsed_reward_config != expected_reward_config
+            or payload.get("reward_contract_version")
+            != VEHICLE_MODE_REWARD_CONTRACT["version"]
+            or payload.get("reward_contract_sha256")
+            != VEHICLE_MODE_REWARD_CONTRACT_SHA256
+            or payload.get("reward_config_sha256")
+            != vehicle_mode_reward_config_sha256(parsed_reward_config)
+        ):
+            raise RewardComparisonError(
+                "grpo_open is not bound to the active vehicle-mode reward config"
+            )
+        reward_binding = (
+            str(VEHICLE_MODE_REWARD_CONTRACT["version"]),
+            VEHICLE_MODE_REWARD_CONTRACT_SHA256,
+            vehicle_mode_reward_config_sha256(parsed_reward_config),
+        )
+    else:
+        try:
+            parsed_reward_config = (
+                JointRewardConfig(**dict(raw_reward_config))
+                if isinstance(raw_reward_config, Mapping)
+                else None
+            )
+        except (TypeError, ValueError, JointRewardError) as exc:
+            raise RewardComparisonError(
+                "historical grpo_open reward config is invalid"
+            ) from exc
+        expected_reward_config = JointRewardConfig()
+        if (
+            parsed_reward_config is None
+            or dict(raw_reward_config) != asdict(parsed_reward_config)
+            or parsed_reward_config != expected_reward_config
+            or payload.get("reward_contract_version")
+            != JOINT_REWARD_CONTRACT["version"]
+            or payload.get("reward_contract_sha256")
+            != JOINT_REWARD_CONTRACT_SHA256
+            or payload.get("reward_config_sha256")
+            != joint_reward_config_sha256(parsed_reward_config)
+        ):
+            raise RewardComparisonError(
+                "historical grpo_open joint reward config is invalid"
+            )
+        reward_binding = (
+            str(JOINT_REWARD_CONTRACT["version"]),
+            JOINT_REWARD_CONTRACT_SHA256,
+            joint_reward_config_sha256(parsed_reward_config),
         )
 
     optimizer_config = KinematicTrajectoryOptimizerConfig()
@@ -378,11 +514,7 @@ def _validate_grpo_checkpoint_contract(
         != primary_scenario_contract()["sha256"]
     ):
         raise RewardComparisonError("grpo_open S5-S9 scenario contract mismatch")
-    return (
-        str(expected_reward_version),
-        JOINT_REWARD_CONTRACT_SHA256,
-        joint_reward_config_sha256(parsed_reward_config),
-    )
+    return reward_binding
 
 
 def _load_policy(
@@ -513,10 +645,9 @@ def _load_models(
         for spec in _model_specs(stage1_checkpoint, grpo_checkpoint)
     }
     binding = _validate_common_reward_binding(reward_bindings)
-    expected_config_sha = joint_reward_config_sha256(JointRewardConfig())
-    if binding is None or binding["reward_config_sha256"] != expected_config_sha:
+    if binding is None:
         raise RewardComparisonError(
-            "the GRPO checkpoint is not bound to the active default joint reward config"
+            "the GRPO checkpoint has no validated evaluation binding"
         )
     return models
 

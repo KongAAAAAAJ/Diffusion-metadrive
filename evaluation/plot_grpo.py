@@ -21,8 +21,8 @@ from tensorboard.util import tensor_util
 
 
 ADVANTAGE_VECTOR_TAG = "advantage/vector"
-FRESH_ROLLOUT_AXIS_LABEL = "Fresh rollout group"
-ACCEPTED_ROLLOUT_AXIS_LABEL = "Accepted rollout group"
+FRESH_ROLLOUT_AXIS_LABEL = "Fresh sampling attempt"
+ACCEPTED_ROLLOUT_AXIS_LABEL = "Accepted update state"
 OPTIMIZER_STEP_AXIS_LABEL = "Optimizer step"
 ROLLOUT_AXIS_LABELS = (
     FRESH_ROLLOUT_AXIS_LABEL,
@@ -32,51 +32,48 @@ LEGACY_REWARD_CURVE_TAGS = (
     "raw_proxy_reward_mean",
     "raw_proxy_reward_max",
 )
-FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG = (
-    "frozen_pretrain_raw_proxy_reward"
-)
+SAME_MODE_PRETRAIN_REWARD_TAG = "same_mode_pretrain_reward_mean"
+# Kept as an import alias for callers written before the same-mode rename.
+FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG = SAME_MODE_PRETRAIN_REWARD_TAG
 REWARD_CURVE_TAGS = (
-    *LEGACY_REWARD_CURVE_TAGS,
-    FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
+    "vehicle_reward_mean",
+    SAME_MODE_PRETRAIN_REWARD_TAG,
+    "same_mode_reward_gain_mean",
 )
 VALIDATION_REWARD_CURVE_TAGS = (
-    "validation/raw_proxy_reward_mean",
-    "validation/pretrain_reward",
-    "validation/reward_gain",
+    "validation/vehicle_reward_mean",
+    "validation/same_mode_pretrain_reward_mean",
+    "validation/vehicle_reward_gain",
 )
 GRPO_LOSS_CURVE_TAGS = (
     "loss/total",
-    "loss/mode_pg",
     "loss/trajectory_pg",
+    "loss/behavior_cloning",
 )
 KL_LOSS_CURVE_TAGS = (
     "loss/reference_kl",
-    "loss/mode_reference_kl",
     "loss/trajectory_reference_kl",
-)
-MODE_RATIO_TAGS = (
-    "policy/mode_ratio_mean",
-    "policy/mode_ratio_min",
-    "policy/mode_ratio_max",
 )
 TRAJECTORY_RATIO_TAGS = (
     "policy/trajectory_ratio_mean",
-    "policy/trajectory_ratio_min",
-    "policy/trajectory_ratio_max",
 )
 CLIP_FRACTION_TAGS = (
-    "policy/mode_clip_fraction",
+    "policy/trajectory_clip_fraction_low",
+    "policy/trajectory_clip_fraction_high",
     "policy/trajectory_clip_fraction",
 )
 OLD_POLICY_APPROX_KL_TAGS = (
-    "policy/mode_old_policy_approx_kl",
     "policy/trajectory_old_policy_approx_kl",
 )
+ACTIVE_SIGNAL_TAGS = (
+    "active_mode/count",
+    "zero_signal_epoch",
+)
 POLICY_STABILITY_CURVE_TAGS = (
-    *MODE_RATIO_TAGS,
     *TRAJECTORY_RATIO_TAGS,
     *CLIP_FRACTION_TAGS,
     *OLD_POLICY_APPROX_KL_TAGS,
+    *ACTIVE_SIGNAL_TAGS,
 )
 
 _SCALAR_STEP_ALIGNMENT_GROUPS = (
@@ -90,15 +87,15 @@ _CURVE_SPECS = {
     "reward_curve": (
         "reward_curve.png",
         REWARD_CURVE_TAGS,
-        "GRPO raw reward curves",
-        "Raw tau_d reward",
+        "Per-vehicle same-mode reward curves",
+        "Counterfactual tau_d reward / gain",
         FRESH_ROLLOUT_AXIS_LABEL,
     ),
     "validation_reward_curve": (
         "validation_reward_curve.png",
         VALIDATION_REWARD_CURVE_TAGS,
-        "GRPO validation reward and gain curves",
-        "Raw tau_d reward / gain",
+        "Per-vehicle validation reward and gain curves",
+        "Counterfactual tau_d reward / gain",
         FRESH_ROLLOUT_AXIS_LABEL,
     ),
     "grpo_loss_curve": (
@@ -153,7 +150,7 @@ def _load_advantage_vectors_from_accumulator(
 
     records: list[tuple[int, np.ndarray]] = []
     observed_steps: set[int] = set()
-    group_size: int | None = None
+    vector_shape: tuple[int, ...] | None = None
     for event in events:
         step = int(event.step)
         if step in observed_steps:
@@ -163,18 +160,29 @@ def _load_advantage_vectors_from_accumulator(
         observed_steps.add(step)
 
         tensor = np.asarray(tensor_util.make_ndarray(event.tensor_proto))
-        if tensor.ndim != 2 or tensor.shape[0] != 1 or tensor.shape[1] <= 0:
+        valid_legacy = (
+            tensor.ndim == 2 and tensor.shape[0] == 1 and tensor.shape[1] > 0
+        )
+        valid_same_mode = (
+            tensor.ndim == 4
+            and tensor.shape[0] == 1
+            and tensor.shape[1] == 3
+            and tensor.shape[2] == 10
+            and tensor.shape[3] > 0
+        )
+        if not (valid_legacy or valid_same_mode):
             raise AdvantageHeatmapError(
-                f"step {step} advantage tensor must have shape [1,G], "
+                f"step {step} advantage tensor must have shape [1,G] or "
+                "[1,3,10,N], "
                 f"got {tensor.shape}"
             )
-        current_group_size = int(tensor.shape[1])
-        if group_size is None:
-            group_size = current_group_size
-        elif current_group_size != group_size:
+        current_shape = tuple(int(value) for value in tensor.shape[1:])
+        if vector_shape is None:
+            vector_shape = current_shape
+        elif current_shape != vector_shape:
             raise AdvantageHeatmapError(
-                "advantage tensors must use one consistent group size; "
-                f"expected {group_size}, got {current_group_size} at step {step}"
+                "advantage tensors must use one consistent rollout shape; "
+                f"expected {vector_shape}, got {current_shape} at step {step}"
             )
         try:
             finite = bool(np.isfinite(tensor).all())
@@ -186,7 +194,7 @@ def _load_advantage_vectors_from_accumulator(
             raise AdvantageHeatmapError(
                 f"step {step} advantage tensor must contain only finite values"
             )
-        records.append((step, tensor[0]))
+        records.append((step, tensor.reshape(-1)))
 
     records.sort(key=lambda record: record[0])
     steps = np.asarray([step for step, _ in records], dtype=np.int64)
@@ -198,7 +206,7 @@ def load_advantage_vectors(
     tb_dir: Path,
     tag: str = ADVANTAGE_VECTOR_TAG,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Load all ``[1, G]`` advantage tensors ordered by accepted rollout group."""
+    """Load and flatten legacy ``[1,G]`` or same-mode ``[1,3,10,N]`` tensors."""
 
     return _load_advantage_vectors_from_accumulator(
         _load_event_accumulator(tb_dir), tag
@@ -236,19 +244,20 @@ def _render_advantage_heatmap(
         tick_indices,
         [str(int(steps[index])) for index in tick_indices],
     )
-    ax.set_yticks(
-        np.arange(values.shape[1]),
-        [f"g{index}" for index in range(values.shape[1])],
+    y_tick_count = min(values.shape[1], 12)
+    y_tick_indices = np.unique(
+        np.linspace(0, values.shape[1] - 1, num=y_tick_count, dtype=np.int64)
     )
+    ax.set_yticks(y_tick_indices, [f"s{index}" for index in y_tick_indices])
     ax.set_xlabel(rollout_axis_label)
-    ax.set_ylabel("GRPO sample slot")
-    ax.set_title("GRPO advantage by rollout group and sample slot")
+    ax.set_ylabel("Flattened vehicle-mode trajectory slot")
+    ax.set_title("Same-mode GRPO advantage by update state and trajectory slot")
     colorbar = fig.colorbar(image, ax=ax, pad=0.02)
     colorbar.set_label("Normalized advantage")
     fig.text(
         0.5,
         0.015,
-        "Group slots are independent samples and have no identity across steps.",
+        "Slot order is vehicle-major, then mode, then sampled trajectory.",
         ha="center",
         fontsize=8.5,
         color="#555555",
@@ -265,8 +274,8 @@ def _render_advantage_heatmap(
 def _validate_rollout_axis_label(value: str) -> str:
     if value not in ROLLOUT_AXIS_LABELS:
         raise AdvantageHeatmapError(
-            "rollout_axis_label must be Fresh rollout group or "
-            "Accepted rollout group"
+            "rollout_axis_label must be Fresh sampling attempt or "
+            "Accepted update state"
         )
     return value
 
@@ -277,7 +286,7 @@ def generate_advantage_heatmap(
     *,
     rollout_axis_label: str = FRESH_ROLLOUT_AXIS_LABEL,
 ) -> Path:
-    """Generate a raw group-slot-by-rollout advantage heatmap."""
+    """Generate a vehicle-mode-trajectory-by-update advantage heatmap."""
 
     steps, values = load_advantage_vectors(tb_dir)
     return _render_advantage_heatmap(
@@ -379,27 +388,27 @@ def _render_policy_stability_curve(
     panels = (
         (
             axes[0, 0],
-            MODE_RATIO_TAGS,
-            "Mode importance ratio",
-            "Importance ratio",
-        ),
-        (
-            axes[0, 1],
             TRAJECTORY_RATIO_TAGS,
             "DDIM-transition importance ratio",
             "Importance ratio",
         ),
         (
-            axes[1, 0],
+            axes[0, 1],
             CLIP_FRACTION_TAGS,
-            "Clipped sample fraction",
+            "Trajectory clipped fraction",
             "Fraction",
         ),
         (
-            axes[1, 1],
+            axes[1, 0],
             OLD_POLICY_APPROX_KL_TAGS,
             "Approximate KL from rollout policy",
             "Approximate KL",
+        ),
+        (
+            axes[1, 1],
+            ACTIVE_SIGNAL_TAGS,
+            "Active modes and zero-signal epochs",
+            "Count / indicator",
         ),
     )
     for ax, tags, title, ylabel in panels:
@@ -423,9 +432,8 @@ def _render_policy_stability_curve(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.legend(frameon=False, fontsize=7.5)
-    for ax in (axes[0, 0], axes[0, 1]):
-        ax.axhspan(0.8, 1.2, color="#59A14F", alpha=0.08)
-    axes[1, 0].set_ylim(0.0, 1.0)
+    axes[0, 0].axhspan(0.8, 1.2, color="#59A14F", alpha=0.08)
+    axes[0, 1].set_ylim(0.0, 1.0)
     fig.suptitle("GRPO policy-update stability", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
 

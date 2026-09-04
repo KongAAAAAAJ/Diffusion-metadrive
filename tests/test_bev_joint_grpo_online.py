@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import dataclasses
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,1300 +8,332 @@ import numpy as np
 import pytest
 import torch
 
-from models.bev_planner.joint_grpo import (
-    JointGRPOConfig,
-    JointGRPOPolicyUpdateConfig,
-    joint_grpo_optimizer_contract,
-    joint_grpo_optimizer_contract_sha256,
-    normalize_pretrain_relative_advantages,
-)
-from models.bev_planner.joint_reward import (
-    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
-    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
-    JOINT_REWARD_CONTRACT,
-    JOINT_REWARD_CONTRACT_SHA256,
-    JointRewardConfig,
-    joint_reward_config_sha256,
-)
-from models.bev_planner.mode_contract import ModeIndex
-from models.bev_planner.trajectory_optimizer import (
-    KinematicTrajectoryOptimizer,
-    KinematicTrajectoryOptimizerConfig,
-)
-from models.decisioner.rule_decisioner import (
-    JointActionProposal,
-    RuleMakerProposalBatch,
-)
-from scenarios.bev_round13_contract import primary_scenario_contract
-from scenarios.definitions import SCENARIO_BY_ID
+import train.train_bev_joint_grpo_online as online
 from train.train_bev_joint_grpo_online import (
-    AGENT_IDS,
-    FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
-    PRIMARY_S5_S9_SCENARIOS,
-    ROLLOUT_COLLECTION_CONTRACT_VERSION,
     JointGRPOOnlineConfig,
-    JointGRPOTrainingConfig,
     OnlineGRPOError,
-    _OnlineRuleCondition,
-    _balanced_bucket_targets,
-    _bucket_visit_is_complete,
+    _active_vehicle_mode_mask,
     _candidate_group_rejection_reason,
-    _checkpoint_file_sha256,
     _config_from_yaml,
-    _condition_online_model_inputs,
-    _cuda_peak_memory_bytes,
-    _finalize_online_rule_action,
-    _fixed_raw_proxy_and_simulator_validation,
-    _grpo_config_artifact_payload,
-    _joint_rewards_are_informative,
-    _load_trainer,
-    _new_online_rule_maker,
-    _next_unfinished_bucket_index,
-    _resume_best_checkpoint_anchor,
-    _attempt_budget_is_exhausted,
-    _reset_cuda_peak_memory,
-    _rollout_start_offset_upper_bound,
-    _round_robin_training_buckets,
-    _sample_rollout_start_offset,
     _sampler_state,
-    _scenario_ready_for_primary_sampling,
-    _scenario_sampling_window_closed_from_summary,
-    _score_raw_candidates,
-    _should_record_advantage_vector,
-    _split_loss_metrics_by_step_axis,
-    _validate_online_checkpoint_metadata,
-    _validate_raw_reward_config,
     _validate_sampler_state,
-    _validation_raw_proxy_reward,
-    _validation_reward_comparison_metrics,
-    _write_advantage_vector_summary,
-    constant_velocity_actions,
-    episode_has_ended,
-    execution_mode_valid_mask,
-    joint_trajectory_action,
-    model_inputs_to_batch,
-    main as online_main,
-    optimize_selected_model_trajectories,
+    _vehicle_mode_rewards_are_active,
+    _write_dynamic_sampling_attempt_event,
+    execute_cached_frozen_baseline,
     rollout_collection_contract,
-    run_joint_grpo_training,
 )
 
 
-RUN_YAML_HEADER = (
-    "run:\n"
-    "  variant: A\n"
-    "  run_mode: smoke\n"
-    "  source_checkpoint: /tmp/stage1.pt\n"
-)
-
-
-def _binding() -> dict[str, object]:
-    reward_config = JointRewardConfig()
-    optimizer_config = KinematicTrajectoryOptimizerConfig()
-    policy_update = JointGRPOPolicyUpdateConfig()
-    online_config = JointGRPOOnlineConfig(device="cpu")
-    generator_state = torch.Generator().manual_seed(17).get_state()
-    return {
-        "schema_version": 1,
-        "format": "bev_joint_grpo_a_v1",
-        "variant": "A",
-        "predecessor_condition": "A",
-        "source_stage1_sha256": "a" * 64,
-        "grpo_config": dataclasses.asdict(JointGRPOConfig()),
-        "optimizer_step": 4,
-        "run_mode": "smoke",
-        "diagnostic_only": True,
-        "eligible_for_formal_training": False,
-        "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
-        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
-        "reward_config": dataclasses.asdict(reward_config),
-        "reward_config_sha256": joint_reward_config_sha256(reward_config),
-        "reward_application_contract": GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
-        "reward_application_contract_sha256": (
-            GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
-        ),
-        "reward_input_domain": "tau_d",
-        "candidate_selection_domain": "tau_d",
-        "execution_input_domain": "tau_cmd",
-        "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
-        "tracking_expansion_enabled": False,
-        "calibration_required": False,
-        "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
-        "policy_update_contract_sha256": (
-            joint_grpo_optimizer_contract_sha256(policy_update)
-        ),
-        "rollout_collection_contract": rollout_collection_contract(
-            online_config
-        ),
-        "scenario_contract_sha256": primary_scenario_contract()["sha256"],
-        "scenario_seeds": [17, 23],
-        "trajectory_optimizer_config": dataclasses.asdict(optimizer_config),
-        "trajectory_optimizer_sha256": optimizer_config.sha256(),
-        "environment_steps": 1,
-        "sampler_state": {
-            "accepted_rollout_groups": 1,
-            "attempted_rollout_groups": 1,
-            "rejected_no_pretrain_improvement": 0,
-            "rejected_zero_reward_span": 0,
-            "pretrain_fallback_steps": 0,
-            "warmup_environment_steps": 0,
-            "bucket_target_counts": [10] * 10,
-            "bucket_accepted_rollout_counts": [
-                1, 0, 0, 0, 0, 0, 0, 0, 0, 0
-            ],
-            "bucket_attempted_rollout_counts": [
-                1, 0, 0, 0, 0, 0, 0, 0, 0, 0
-            ],
-            "bucket_rejected_no_pretrain_improvement_counts": [0] * 10,
-            "bucket_rejected_zero_reward_span_counts": [0] * 10,
-            "bucket_pretrain_fallback_step_counts": [0] * 10,
-            "bucket_optimizer_step_counts": [4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            "bucket_episode_counts": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            "next_bucket_index": 0,
-            "current_visit_progress": 1,
-            "generator_state": generator_state,
-            "last_validated_rollout": 1,
-        },
-    }
-
-
-def test_online_config_and_run_mode_are_strict(tmp_path: Path) -> None:
-    with pytest.raises(OnlineGRPOError):
-        JointGRPOOnlineConfig(device="auto")
-    with pytest.raises(OnlineGRPOError):
-        JointGRPOOnlineConfig(total_rollout_groups=0)
-    assert JointGRPOOnlineConfig().group_size == 24
-    assert JointGRPOOnlineConfig(group_size=3).group_size == 3
-    assert JointGRPOOnlineConfig(group_size=5).group_size == 5
-    assert JointGRPOOnlineConfig().update_epochs == 4
-    assert JointGRPOOnlineConfig().clip_epsilon_low == pytest.approx(0.1)
-    assert JointGRPOOnlineConfig().clip_epsilon_high == pytest.approx(0.3)
-    assert JointGRPOOnlineConfig().rollout_groups_per_bucket_visit == 10
-    assert JointGRPOOnlineConfig().rollout_start_offset_max_steps == 200
-    assert JointGRPOOnlineConfig().rollout_start_min_remaining_steps == 10
-    assert (
-        JointGRPOOnlineConfig(rollout_start_offset_max_steps=0)
-        .rollout_start_offset_max_steps
-        == 0
-    )
-    assert JointGRPOOnlineConfig().validation_interval_rollouts == 20
-    assert JointGRPOOnlineConfig().advantage_vector_log_interval_rollouts == 20
-    assert JointGRPOOnlineConfig().pretrain_improvement_margin == pytest.approx(
-        1e-6
-    )
-    assert JointGRPOOnlineConfig().max_candidate_groups_per_state == 3
-    assert JointGRPOOnlineConfig().max_attempted_groups_multiplier == 3
-    with pytest.raises(OnlineGRPOError, match="pretrain_improvement_margin"):
-        JointGRPOOnlineConfig(pretrain_improvement_margin=-1.0)
-    with pytest.raises(OnlineGRPOError, match="positive integer"):
-        JointGRPOOnlineConfig(max_candidate_groups_per_state=0)
-    with pytest.raises(OnlineGRPOError, match="complete ordered S5--S9"):
-        JointGRPOOnlineConfig(
-            scenarios=(("S1_free_cruise_straight", "R3_mainline_straight"),)
-        )
-    online = JointGRPOOnlineConfig(device="cpu")
-    training = JointGRPOTrainingConfig(
-        variant="A",
-        run_mode="smoke",
-        source_checkpoint=tmp_path / "stage1.pt",
-        online=online,
-    )
-    assert training.online is online
-    run_dir = tmp_path / "run_1"
-    run_dir.mkdir()
-    with pytest.raises(OnlineGRPOError, match="training_config"):
-        run_joint_grpo_training(
-            online,  # type: ignore[arg-type]
-            run_dir=run_dir,
-        )
-
-
-def test_training_config_wrapper_is_strict(tmp_path: Path) -> None:
-    online = JointGRPOOnlineConfig(device="cpu")
-    with pytest.raises(OnlineGRPOError, match="variant"):
-        JointGRPOTrainingConfig(
-            variant="C",  # type: ignore[arg-type]
-            run_mode="smoke",
-            source_checkpoint=tmp_path / "stage1.pt",
-            online=online,
-        )
-    with pytest.raises(OnlineGRPOError, match="run_mode"):
-        JointGRPOTrainingConfig(
-            variant="A",
-            run_mode="preview",  # type: ignore[arg-type]
-            source_checkpoint=tmp_path / "stage1.pt",
-            online=online,
-        )
-    with pytest.raises(OnlineGRPOError, match="source_checkpoint"):
-        JointGRPOTrainingConfig(
-            variant="A",
-            run_mode="smoke",
-            source_checkpoint="stage1.pt",  # type: ignore[arg-type]
-            online=online,
-        )
-    with pytest.raises(OnlineGRPOError, match="online"):
-        JointGRPOTrainingConfig(
-            variant="A",
-            run_mode="smoke",
-            source_checkpoint=tmp_path / "stage1.pt",
-            online=object(),  # type: ignore[arg-type]
-        )
-
-
-def test_training_requires_pre_reserved_run_directory(tmp_path: Path) -> None:
-    training_config = JointGRPOTrainingConfig(
-        variant="A",
-        run_mode="smoke",
-        source_checkpoint=tmp_path / "stage1.pt",
-        online=JointGRPOOnlineConfig(device="cpu"),
-    )
-    missing_run_dir = tmp_path / "missing-run"
-    with pytest.raises(OnlineGRPOError, match="must already exist"):
-        run_joint_grpo_training(training_config, run_dir=missing_run_dir)
-
-    run_file = tmp_path / "run-file"
-    run_file.write_text("not a directory", encoding="utf-8")
-    with pytest.raises(OnlineGRPOError, match="must be a directory"):
-        run_joint_grpo_training(training_config, run_dir=run_file)
-
-
-@pytest.mark.parametrize(
-    ("artifact_name", "is_directory"),
-    [
-        ("config.json", False),
-        ("metrics.jsonl", False),
-        ("checkpoints", True),
-        ("tb", True),
-        ("report.json", False),
-    ],
-)
-def test_training_refuses_to_overwrite_existing_managed_artifacts(
-    artifact_name: str,
-    is_directory: bool,
-    tmp_path: Path,
-) -> None:
-    run_dir = tmp_path / "run_1"
-    run_dir.mkdir()
-    artifact = run_dir / artifact_name
-    if is_directory:
-        artifact.mkdir()
-        sentinel = artifact / "sentinel.txt"
-    else:
-        sentinel = artifact
-    sentinel.write_text("preserve", encoding="utf-8")
-    training_config = JointGRPOTrainingConfig(
-        variant="A",
-        run_mode="smoke",
-        source_checkpoint=tmp_path / "stage1.pt",
-        online=JointGRPOOnlineConfig(device="cpu"),
-    )
-
-    with pytest.raises(OnlineGRPOError, match="may contain only training.log"):
-        run_joint_grpo_training(training_config, run_dir=run_dir)
-
-    assert sentinel.read_text(encoding="utf-8") == "preserve"
-
-
-def test_training_allows_existing_training_log(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    run_dir = tmp_path / "run_1"
-    run_dir.mkdir()
-    training_log = run_dir / "training.log"
-    training_log.write_text("launcher output\n", encoding="utf-8")
-    training_config = JointGRPOTrainingConfig(
-        variant="A",
-        run_mode="smoke",
-        source_checkpoint=tmp_path / "stage1.pt",
-        online=JointGRPOOnlineConfig(device="cpu"),
-    )
-
-    def load_trainer(*args, **kwargs):
-        raise OnlineGRPOError("trainer load reached")
-
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._load_trainer", load_trainer
-    )
-    with pytest.raises(OnlineGRPOError, match="trainer load reached"):
-        run_joint_grpo_training(training_config, run_dir=run_dir)
-
-    assert training_log.read_text(encoding="utf-8") == "launcher output\n"
-    assert (run_dir / "checkpoints").is_dir()
-
-
-def test_cuda_peak_memory_is_reset_and_reported_only_for_cuda(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    reset_devices: list[torch.device] = []
-    queried_devices: list[torch.device] = []
-    monkeypatch.setattr(
-        torch.cuda,
-        "reset_peak_memory_stats",
-        lambda device: reset_devices.append(device),
-    )
-    monkeypatch.setattr(
-        torch.cuda,
-        "max_memory_allocated",
-        lambda device: queried_devices.append(device) or 123456,
-    )
-
-    cpu = torch.device("cpu")
-    _reset_cuda_peak_memory(cpu)
-    assert _cuda_peak_memory_bytes(cpu) is None
-    assert reset_devices == []
-    assert queried_devices == []
-
-    cuda = torch.device("cuda")
-    _reset_cuda_peak_memory(cuda)
-    assert _cuda_peak_memory_bytes(cuda) == 123456
-    assert reset_devices == [cuda]
-    assert queried_devices == [cuda]
-
-
-@pytest.mark.parametrize("invalid_group_size", [True, False, 1, 0, -1])
-def test_online_config_rejects_invalid_group_size(
-    invalid_group_size: object,
-) -> None:
-    with pytest.raises(OnlineGRPOError, match="group_size"):
-        JointGRPOOnlineConfig(
-            group_size=invalid_group_size  # type: ignore[arg-type]
-        )
-
-
-@pytest.mark.parametrize(
-    "invalid_interval",
-    [0, -1, True, False],
-)
-def test_online_config_rejects_invalid_advantage_vector_log_interval(
-    invalid_interval: object,
-) -> None:
-    with pytest.raises(
-        OnlineGRPOError, match="advantage_vector_log_interval_rollouts"
-    ):
-        JointGRPOOnlineConfig(
-            advantage_vector_log_interval_rollouts=invalid_interval  # type: ignore[arg-type]
-        )
-
-
-def test_online_config_loads_clipped_rollout_contract_from_yaml(
-    tmp_path: Path,
-) -> None:
-    config_path = tmp_path / "online.yaml"
-    config_path.write_text(
-        RUN_YAML_HEADER
-        + "online:\n"
-        "  device: cpu\n"
-        "  group_size: 5\n"
-        "  total_rollout_groups: 41\n"
-        "  update_epochs: 3\n"
-        "  clip_epsilon_low: 0.15\n"
-        "  clip_epsilon_high: 0.25\n"
-        "  rollout_groups_per_bucket_visit: 7\n"
-        "  rollout_start_offset_max_steps: 29\n"
-        "  rollout_start_min_remaining_steps: 8\n"
-        "  validation_interval_rollouts: 11\n"
-        "  advantage_vector_log_interval_rollouts: 37\n"
-        "  pretrain_improvement_margin: 0.0002\n"
-        "  max_candidate_groups_per_state: 4\n"
-        "  max_attempted_groups_multiplier: 5\n",
-        encoding="utf-8",
-    )
-
-    training = _config_from_yaml(config_path)
-    config = training.online
-
-    assert training.variant == "A"
-    assert training.run_mode == "smoke"
-    assert training.source_checkpoint == Path("/tmp/stage1.pt")
-    assert config.group_size == 5
-    assert config.total_rollout_groups == 41
-    assert config.update_epochs == 3
-    assert config.clip_epsilon_low == pytest.approx(0.15)
-    assert config.clip_epsilon_high == pytest.approx(0.25)
-    assert config.rollout_groups_per_bucket_visit == 7
-    assert config.rollout_start_offset_max_steps == 29
-    assert config.rollout_start_min_remaining_steps == 8
-    assert config.validation_interval_rollouts == 11
-    assert config.advantage_vector_log_interval_rollouts == 37
-    assert config.pretrain_improvement_margin == pytest.approx(2e-4)
-    assert config.max_candidate_groups_per_state == 4
-    assert config.max_attempted_groups_multiplier == 5
-
-
-def test_yaml_requires_run_mapping(tmp_path: Path) -> None:
-    config_path = tmp_path / "missing-run.yaml"
-    config_path.write_text("online:\n  device: cpu\n", encoding="utf-8")
-
-    with pytest.raises(OnlineGRPOError, match="requires a run mapping"):
-        _config_from_yaml(config_path)
-
-
-def test_cli_rejects_legacy_max_rollout_groups(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "train_bev_joint_grpo_online",
-            "--config",
-            str(tmp_path / "config.yaml"),
-            "--run-dir",
-            str(tmp_path / "run_1"),
-            "--max-rollout-groups",
-            "1",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc_info:
-        online_main()
-
-    assert exc_info.value.code == 2
-    assert "unrecognized arguments: --max-rollout-groups 1" in capsys.readouterr().err
-
-
-def test_cli_rejects_legacy_output_root(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    output_root = tmp_path / "output"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "train_bev_joint_grpo_online",
-            "--config",
-            str(tmp_path / "config.yaml"),
-            "--run-dir",
-            str(tmp_path / "run_1"),
-            "--output-root",
-            str(output_root),
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc_info:
-        online_main()
-
-    assert exc_info.value.code == 2
-    assert (
-        f"unrecognized arguments: --output-root {output_root}"
-        in capsys.readouterr().err
-    )
-
-
-@pytest.mark.parametrize(
-    "run_yaml",
-    [
-        "run: {}\n",
-        "run:\n  run_mode: smoke\n  source_checkpoint: /tmp/stage1.pt\n",
-        "run:\n  variant: A\n  source_checkpoint: /tmp/stage1.pt\n",
-        "run:\n  variant: A\n  run_mode: smoke\n",
-        (
-            "run:\n"
-            "  variant: A\n"
-            "  run_mode: smoke\n"
-            "  source_checkpoint: /tmp/stage1.pt\n"
-            "  total_rollout_groups: 1\n"
-        ),
-    ],
-)
-def test_yaml_run_mapping_requires_exact_three_fields(
-    tmp_path: Path,
-    run_yaml: str,
-) -> None:
-    config_path = tmp_path / "invalid-run.yaml"
-    config_path.write_text(
-        run_yaml + "online:\n  device: cpu\n", encoding="utf-8"
-    )
-
-    with pytest.raises(OnlineGRPOError, match="must contain exactly"):
-        _config_from_yaml(config_path)
-
-
-@pytest.mark.parametrize("yaml_value", ["true", "false", "1", "0", "-1"])
-def test_online_config_rejects_invalid_yaml_group_size(
-    tmp_path: Path,
-    yaml_value: str,
-) -> None:
-    config_path = tmp_path / f"invalid_group_{yaml_value}.yaml"
-    config_path.write_text(
-        RUN_YAML_HEADER
-        + f"online:\n  device: cpu\n  group_size: {yaml_value}\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(OnlineGRPOError, match="group_size"):
-        _config_from_yaml(config_path)
-
-
-@pytest.mark.parametrize("invalid_update_epochs", [True, False, 0, -1, 1.5])
-def test_online_config_rejects_invalid_update_epochs(
-    invalid_update_epochs: object,
-) -> None:
-    with pytest.raises(OnlineGRPOError, match="update_epochs"):
-        JointGRPOOnlineConfig(
-            update_epochs=invalid_update_epochs  # type: ignore[arg-type]
-        )
-
-
-@pytest.mark.parametrize("invalid_quota", [True, False, 0, -1, 1.5])
-def test_online_config_rejects_invalid_bucket_visit_quota(
-    invalid_quota: object,
-) -> None:
-    with pytest.raises(OnlineGRPOError, match="rollout_groups_per_bucket_visit"):
-        JointGRPOOnlineConfig(
-            rollout_groups_per_bucket_visit=invalid_quota  # type: ignore[arg-type]
-        )
-
-
-@pytest.mark.parametrize("invalid_max_offset", [True, False, -1, 1.5])
-def test_online_config_rejects_invalid_rollout_start_max_offset(
-    invalid_max_offset: object,
-) -> None:
-    with pytest.raises(OnlineGRPOError, match="rollout_start_offset_max_steps"):
-        JointGRPOOnlineConfig(
-            rollout_start_offset_max_steps=invalid_max_offset  # type: ignore[arg-type]
-        )
-
-
-@pytest.mark.parametrize("invalid_min_remaining", [True, False, -1, 1.5])
-def test_online_config_rejects_invalid_rollout_start_min_remaining(
-    invalid_min_remaining: object,
-) -> None:
-    with pytest.raises(
-        OnlineGRPOError, match="rollout_start_min_remaining_steps"
-    ):
-        JointGRPOOnlineConfig(
-            rollout_start_min_remaining_steps=invalid_min_remaining  # type: ignore[arg-type]
-        )
-
-
-def test_online_config_rejects_start_reserve_smaller_than_visit_or_episode(
-) -> None:
-    with pytest.raises(
-        OnlineGRPOError, match="rollout_start_min_remaining_steps"
-    ):
-        JointGRPOOnlineConfig(
-            rollout_groups_per_bucket_visit=1,
-            rollout_start_min_remaining_steps=0,
-        )
-    with pytest.raises(OnlineGRPOError, match="rollout_groups_per_bucket_visit"):
-        JointGRPOOnlineConfig(
-            rollout_groups_per_bucket_visit=11,
-            rollout_start_min_remaining_steps=10,
-        )
-    with pytest.raises(OnlineGRPOError, match="environment_steps_per_episode"):
-        JointGRPOOnlineConfig(
-            environment_steps_per_episode=9,
-            rollout_groups_per_bucket_visit=3,
-            rollout_start_min_remaining_steps=10,
-        )
-
-
-@pytest.mark.parametrize("field", ["clip_epsilon_low", "clip_epsilon_high"])
-@pytest.mark.parametrize(
-    "invalid_clip_epsilon", [True, False, 0.0, 1.0, -0.1, float("nan")]
-)
-def test_online_config_rejects_invalid_clip_epsilon(
-    field: str,
-    invalid_clip_epsilon: object,
-) -> None:
-    with pytest.raises(OnlineGRPOError, match=field):
-        JointGRPOOnlineConfig(**{field: invalid_clip_epsilon})
-
-
-@pytest.mark.parametrize(
-    "legacy_field",
-    [
-        "total_optimizer_steps",
-        "validation_interval_steps",
-        "advantage_vector_log_interval_steps",
-        "clip_epsilon",
-    ],
-)
-def test_online_config_rejects_legacy_fields(
-    tmp_path: Path,
-    legacy_field: str,
-) -> None:
-    config_path = tmp_path / f"legacy_{legacy_field}.yaml"
-    config_path.write_text(
-        RUN_YAML_HEADER + f"online:\n  device: cpu\n  {legacy_field}: 1\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(OnlineGRPOError, match="legacy fields"):
-        _config_from_yaml(config_path)
-
-
-def test_online_loader_forwards_exact_core_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    core_config = JointGRPOConfig(group_size=5)
-    expected = (object(), {"source": "stage1"}, "a" * 64)
-    observed: dict[str, object] = {}
-
-    def fake_loader(
-        path: Path,
-        *,
-        device: torch.device,
-        config: JointGRPOConfig,
-        allow_diagnostic_source: bool,
-    ) -> tuple[object, dict[str, str], str]:
-        observed.update(
-            {
-                "path": path,
-                "device": device,
-                "config": config,
-                "allow_diagnostic_source": allow_diagnostic_source,
-            }
-        )
-        return expected
-
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.load_stage1_a_for_grpo",
-        fake_loader,
-    )
-    source = tmp_path / "stage1.pt"
-
-    result = _load_trainer(
-        "A",
-        source,
-        torch.device("cpu"),
-        grpo_config=core_config,
-        allow_diagnostic_source=True,
-    )
-
-    assert result == expected
-    assert observed == {
-        "path": source,
-        "device": torch.device("cpu"),
-        "config": core_config,
-        "allow_diagnostic_source": True,
-    }
-    assert observed["config"] is core_config
-
-
-def test_grpo_artifact_payload_preserves_fairness_hyperparameters() -> None:
-    config = JointGRPOConfig(group_size=24)
-
-    payload = _grpo_config_artifact_payload(config)
-
-    assert payload == dataclasses.asdict(config)
-    assert payload["group_size"] == 24
-    for name in (
-        "learning_rate",
-        "mode_pg_weight",
-        "trajectory_pg_weight",
-        "bc_weight",
-        "reference_kl_weight",
-    ):
-        assert name in payload
-
-
-def test_advantage_vector_recording_schedule_uses_rollout_interval_or_final() -> None:
-    assert not _should_record_advantage_vector(
-        rollout_group=1,
-        target_rollout_groups=350,
-        interval_rollouts=100,
-    )
-    assert _should_record_advantage_vector(
-        rollout_group=100,
-        target_rollout_groups=350,
-        interval_rollouts=100,
-    )
-    assert _should_record_advantage_vector(
-        rollout_group=350,
-        target_rollout_groups=350,
-        interval_rollouts=100,
-    )
-
-
-def test_loss_metrics_use_rollout_and_optimizer_axes_without_duplication() -> None:
-    rollout_metrics, optimizer_metrics = _split_loss_metrics_by_step_axis(
-        {
-            "advantage/mean": 0.0,
-            "advantage/std": 1.0,
-            "loss/total": 2.0,
-            "policy/mode_ratio_mean": 1.1,
-        }
-    )
-
-    assert rollout_metrics == {"advantage/mean": 0.0, "advantage/std": 1.0}
-    assert optimizer_metrics == {
-        "loss/total": 2.0,
-        "policy/mode_ratio_mean": 1.1,
-    }
-
-
-@pytest.mark.parametrize("group_size", [3, 4, 5])
-def test_advantage_vector_summary_is_sparse_and_preserves_tensor_values(
-    group_size: int,
-) -> None:
-    class RecordingWriter:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, torch.Tensor, int]] = []
-
-        def add_tensor(
-            self, tag: str, tensor: torch.Tensor, step: int
-        ) -> None:
-            self.calls.append((tag, tensor, step))
-
-    writer = RecordingWriter()
-    advantages = torch.linspace(
-        -1.0,
-        1.0,
-        steps=group_size,
-        dtype=torch.float32,
-        requires_grad=True,
-    ).unsqueeze(0)
-
-    assert not _write_advantage_vector_summary(
-        writer,
-        advantages,
-        rollout_group=99,
-        target_rollout_groups=350,
-        interval_rollouts=100,
-        group_size=group_size,
-    )
-    assert writer.calls == []
-
-    assert _write_advantage_vector_summary(
-        writer,
-        advantages,
-        rollout_group=100,
-        target_rollout_groups=350,
-        interval_rollouts=100,
-        group_size=group_size,
-    )
-    assert len(writer.calls) == 1
-    tag, recorded, step = writer.calls[0]
-    assert tag == "advantage/vector"
-    assert step == 100
-    assert recorded.shape == (1, group_size)
-    assert recorded.dtype == torch.float32
-    assert recorded.device.type == "cpu"
-    assert not recorded.requires_grad
-    torch.testing.assert_close(recorded, advantages.detach().cpu())
-
-    assert _write_advantage_vector_summary(
-        writer,
-        advantages,
-        rollout_group=350,
-        target_rollout_groups=350,
-        interval_rollouts=100,
-        group_size=group_size,
-    )
-    assert [call[2] for call in writer.calls] == [100, 350]
-
-
-def test_scheduled_uninformative_rollout_writes_diagnostic_advantage() -> None:
-    class RecordingWriter:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, torch.Tensor, int]] = []
-
-        def add_tensor(
-            self, tag: str, tensor: torch.Tensor, step: int
-        ) -> None:
-            self.calls.append((tag, tensor.clone(), step))
-
-    writer = RecordingWriter()
-    rewards = torch.full((1, 24), -1.0, dtype=torch.float32)
-    advantages = normalize_pretrain_relative_advantages(
-        rewards,
-        torch.full((1, 1), -1.0, dtype=torch.float32),
-        group_size=24,
-    )
-
-    assert _write_advantage_vector_summary(
-        writer,  # type: ignore[arg-type]
-        advantages,
-        rollout_group=20,
-        target_rollout_groups=100,
-        interval_rollouts=20,
-        group_size=24,
-    )
-    assert len(writer.calls) == 1
-    tag, persisted, step = writer.calls[0]
-    assert tag == "advantage/vector"
-    assert step == 20
-    torch.testing.assert_close(persisted, torch.zeros_like(persisted))
-
-
-@pytest.mark.parametrize(
-    "invalid_advantages",
-    [
-        torch.zeros(4, dtype=torch.float32),
-        torch.zeros((2, 4), dtype=torch.float32),
-        torch.zeros((1, 3), dtype=torch.float32),
-        torch.zeros((1, 1), dtype=torch.float32),
-        torch.zeros((1, 0), dtype=torch.float32),
-        torch.zeros((1, 4), dtype=torch.float64),
-        torch.zeros((1, 4), dtype=torch.int64),
-        torch.tensor([[0.0, 1.0, float("nan"), -1.0]], dtype=torch.float32),
-        torch.tensor([[0.0, 1.0, float("inf"), -1.0]], dtype=torch.float32),
-    ],
-)
-def test_advantage_vector_summary_rejects_invalid_tensor_contract(
-    invalid_advantages: torch.Tensor,
-) -> None:
-    class FailingWriter:
-        def add_tensor(self, *args: object) -> None:
-            raise AssertionError("invalid advantages must not reach writer")
-
-    with pytest.raises(OnlineGRPOError):
-        _write_advantage_vector_summary(
-            FailingWriter(),
-            invalid_advantages,
-            rollout_group=100,
-            target_rollout_groups=350,
-            interval_rollouts=100,
-            group_size=4,
-        )
-
-
-def test_sampler_state_round_trip_preserves_counters_and_generator_sequence() -> None:
+def _valid_sampler_state() -> tuple[dict[str, object], dict[str, object]]:
     generator = torch.Generator().manual_seed(17)
-    torch.randn((5,), generator=generator)
-    state = _sampler_state(
-        accepted_rollout_groups=3,
-        attempted_rollout_groups=5,
-        rejected_no_pretrain_improvement=1,
-        rejected_zero_reward_span=1,
-        pretrain_fallback_steps=0,
-        warmup_environment_steps=2,
-        bucket_target_counts=[4, 4],
-        bucket_accepted_rollout_counts=[2, 1],
-        bucket_attempted_rollout_counts=[3, 2],
-        bucket_rejected_no_pretrain_improvement_counts=[1, 0],
-        bucket_rejected_zero_reward_span_counts=[0, 1],
-        bucket_pretrain_fallback_step_counts=[0, 0],
-        bucket_optimizer_step_counts=[8, 4],
-        bucket_episode_counts=[1, 1],
-        next_bucket_index=1,
-        current_visit_progress=1,
-        generator_state=generator.get_state(),
-        last_validated_rollout=2,
-        rollout_groups_per_bucket_visit=2,
-        update_epochs=4,
-        optimizer_step=12,
-        environment_steps=5,
-        max_attempted_rollout_groups=24,
+    kwargs = {
+        "accepted_update_states": 2,
+        "sampling_attempts": 5,
+        "rejected_sampling_attempts": 3,
+        "exhausted_states": 1,
+        "baseline_execution_steps": 3,
+        "zero_signal_epochs": 4,
+        "warmup_environment_steps": 7,
+        "bucket_target_counts": [4],
+        "bucket_accepted_update_counts": [2],
+        "bucket_sampling_attempt_counts": [5],
+        "bucket_rejected_sampling_attempt_counts": [3],
+        "bucket_exhausted_state_counts": [1],
+        "bucket_baseline_execution_step_counts": [3],
+        "bucket_zero_signal_epoch_counts": [4],
+        "bucket_optimizer_step_counts": [16],
+        "bucket_episode_counts": [1],
+        "next_bucket_index": 0,
+        "current_visit_progress": 0,
+        "generator_state": generator.get_state(),
+        "last_validated_update_state": 2,
+        "rollout_groups_per_bucket_visit": 2,
+        "optimizer_step": 16,
+        "environment_steps": 10,
+        "max_sampling_attempts": 12,
+    }
+    state = _sampler_state(**kwargs)
+    return state, kwargs
+
+
+def test_online_config_defaults_match_formal_same_mode_contract() -> None:
+    config = JointGRPOOnlineConfig()
+    assert config.trajectories_per_mode == 48
+    assert config.update_epochs == 10
+    assert config.clip_epsilon_low == pytest.approx(0.1)
+    assert config.clip_epsilon_high == pytest.approx(0.2)
+    assert config.max_sampling_attempts_per_state == 3
+
+
+def test_checked_in_yaml_uses_only_new_sampling_fields() -> None:
+    config = _config_from_yaml(Path("configs/train/bev_joint_grpo.yaml"))
+    assert config.online.trajectories_per_mode == 48
+    assert config.online.max_sampling_attempts_per_state == 3
+    assert config.online.update_epochs == 10
+    payload = Path("configs/train/bev_joint_grpo.yaml").read_text(encoding="utf-8")
+    for removed in (
+        "group_size:",
+        "pretrain_improvement_margin:",
+        "max_candidate_groups_per_state:",
+        "max_attempted_groups_multiplier:",
+    ):
+        assert removed not in payload
+
+
+def test_yaml_rejects_obsolete_group_size(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+run:
+  variant: A
+  run_mode: smoke
+  source_checkpoint: stage1.pt
+online:
+  group_size: 48
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(OnlineGRPOError, match="legacy fields: group_size"):
+        _config_from_yaml(path)
+
+
+def test_strict_gate_accepts_equal_reward_and_zero_variance() -> None:
+    rewards = np.full((48,), 1.5, dtype=np.float32)
+    assert (
+        _candidate_group_rejection_reason(
+            rewards,
+            pretrain_reward=1.5,
+            trajectories_per_mode=48,
+        )
+        is None
+    )
+    assert _vehicle_mode_rewards_are_active(
+        rewards,
+        pretrain_reward=1.5,
+        trajectories_per_mode=48,
     )
 
+
+def test_strict_gate_rejects_only_when_all_are_below() -> None:
+    rewards = np.nextafter(
+        np.full((48,), 1.5, dtype=np.float32),
+        np.float32(-np.inf),
+    )
+    assert (
+        _candidate_group_rejection_reason(
+            rewards,
+            pretrain_reward=1.5,
+            trajectories_per_mode=48,
+        )
+        == "all_below_same_mode_pretrain"
+    )
+
+
+def test_active_mask_is_independent_per_vehicle_mode_and_honors_validity() -> None:
+    rewards = np.zeros((3, 10, 48), dtype=np.float32)
+    pretrain = np.ones((3, 10), dtype=np.float32)
+    valid = np.ones((3, 10), dtype=np.bool_)
+    rewards[1, 7, 3] = 1.0
+    rewards[2, 4, 0] = 3.0
+    valid[2, 4] = False
+
+    active = _active_vehicle_mode_mask(rewards, pretrain, valid)
+
+    assert active.sum() == 1
+    assert active[1, 7]
+    assert not active[2, 4]
+
+
+def test_dynamic_attempt_metrics_exclude_invalid_modes(tmp_path: Path) -> None:
+    path = tmp_path / "metrics.jsonl"
+    rewards = np.full((3, 10, 48), 1000.0, dtype=np.float32)
+    pretrain = np.full((3, 10), 1000.0, dtype=np.float32)
+    valid = np.zeros((3, 10), dtype=np.bool_)
+    valid[0, 0] = True
+    rewards[0, 0] = np.arange(48, dtype=np.float32)
+    pretrain[0, 0] = 24.0
+    active = _active_vehicle_mode_mask(rewards, pretrain, valid)
+
+    metrics = _write_dynamic_sampling_attempt_event(
+        path,
+        optimizer_step=0,
+        accepted_update_state=1,
+        sampling_attempt=1,
+        retry_index=1,
+        bucket_index=0,
+        scenario=("S5_hard_brake_lead", "R1_entry_straight"),
+        seed=17,
+        rewards=rewards,
+        pretrain_rewards=pretrain,
+        valid_mode_mask=valid,
+        active_mode_mask=active,
+    )
+
+    assert metrics["vehicle_reward_mean"] == pytest.approx(23.5)
+    assert metrics["same_mode_pretrain_reward_mean"] == pytest.approx(24.0)
+    event = json.loads(path.read_text(encoding="utf-8"))
+    assert event["accepted"] is True
+    assert event["active_mode_count"] == 1.0
+
+
+def test_sampler_state_round_trip_allows_zero_signal_epochs() -> None:
+    state, kwargs = _valid_sampler_state()
     restored = _validate_sampler_state(
         state,
-        bucket_count=2,
-        expected_bucket_target_counts=[4, 4],
+        bucket_count=1,
+        expected_bucket_target_counts=[4],
         rollout_groups_per_bucket_visit=2,
-        update_epochs=4,
-        optimizer_step=12,
-        environment_steps=5,
-        max_attempted_rollout_groups=24,
+        optimizer_step=kwargs["optimizer_step"],
+        environment_steps=kwargs["environment_steps"],
+        max_sampling_attempts=kwargs["max_sampling_attempts"],
     )
-    resumed_generator = torch.Generator()
-    resumed_generator.set_state(restored["generator_state"])
-
-    assert restored["accepted_rollout_groups"] == 3
-    assert restored["attempted_rollout_groups"] == 5
-    assert restored["rejected_no_pretrain_improvement"] == 1
-    assert restored["rejected_zero_reward_span"] == 1
-    assert restored["next_bucket_index"] == 1
-    assert restored["current_visit_progress"] == 1
-    assert restored["last_validated_rollout"] == 2
-    assert restored["bucket_accepted_rollout_counts"] == [2, 1]
-    assert restored["bucket_attempted_rollout_counts"] == [3, 2]
-    assert restored["bucket_optimizer_step_counts"] == [8, 4]
-    assert restored["bucket_target_counts"] == [4, 4]
-    assert restored["bucket_episode_counts"] == [1, 1]
-    torch.testing.assert_close(
-        torch.randn((8,), generator=resumed_generator),
-        torch.randn((8,), generator=generator),
-    )
+    assert restored["accepted_update_states"] == 2
+    assert restored["rejected_sampling_attempts"] == 3
+    assert restored["zero_signal_epochs"] == 4
+    assert restored["baseline_execution_steps"] == 3
 
 
-def test_attempt_budget_only_exhausts_before_accepted_target() -> None:
-    assert not _attempt_budget_is_exhausted(
-        accepted_rollout_groups=3,
-        target_accepted_rollout_groups=4,
-        attempted_rollout_groups=11,
-        max_attempted_rollout_groups=12,
-    )
-    assert _attempt_budget_is_exhausted(
-        accepted_rollout_groups=3,
-        target_accepted_rollout_groups=4,
-        attempted_rollout_groups=12,
-        max_attempted_rollout_groups=12,
-    )
-    assert not _attempt_budget_is_exhausted(
-        accepted_rollout_groups=4,
-        target_accepted_rollout_groups=4,
-        attempted_rollout_groups=12,
-        max_attempted_rollout_groups=12,
-    )
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("next_bucket_index", 0, "current visit progress"),
-        ("current_visit_progress", 0, "current visit progress"),
-        ("bucket_target_counts", [5, 3], "bucket targets"),
-        ("bucket_accepted_rollout_counts", [1, 1], "bucket accepts"),
-        ("bucket_attempted_rollout_counts", [2, 2], "bucket attempts"),
-        (
-            "bucket_attempted_rollout_counts",
-            [2, 3],
-            "bucket attempt counters",
-        ),
-        ("bucket_optimizer_step_counts", [4, 0], "bucket updates"),
-        (
-            "bucket_optimizer_step_counts",
-            [4, 8],
-            "bucket optimizer counters",
-        ),
-        ("bucket_episode_counts", [1, 0], "bucket episodes"),
-        ("attempted_rollout_groups", 6, "sampler counters"),
-        ("generator_state", torch.zeros(2), "generator_state"),
-    ],
-)
-def test_sampler_state_rejects_counter_and_generator_drift(
-    field: str,
-    value: object,
-    message: str,
-) -> None:
-    generator = torch.Generator().manual_seed(17)
-    state: dict[str, object] = {
-        "accepted_rollout_groups": 3,
-        "attempted_rollout_groups": 5,
-        "rejected_no_pretrain_improvement": 1,
-        "rejected_zero_reward_span": 1,
-        "pretrain_fallback_steps": 0,
-        "warmup_environment_steps": 2,
-        "bucket_target_counts": [4, 4],
-        "bucket_accepted_rollout_counts": [2, 1],
-        "bucket_attempted_rollout_counts": [3, 2],
-        "bucket_rejected_no_pretrain_improvement_counts": [1, 0],
-        "bucket_rejected_zero_reward_span_counts": [0, 1],
-        "bucket_pretrain_fallback_step_counts": [0, 0],
-        "bucket_optimizer_step_counts": [8, 4],
-        "bucket_episode_counts": [1, 1],
-        "next_bucket_index": 1,
-        "current_visit_progress": 1,
-        "generator_state": generator.get_state(),
-        "last_validated_rollout": 2,
-    }
-    state[field] = value
-
-    with pytest.raises(OnlineGRPOError, match=message):
+def test_sampler_state_rejects_baseline_execution_drift() -> None:
+    state, kwargs = _valid_sampler_state()
+    state["baseline_execution_steps"] = 2
+    with pytest.raises(OnlineGRPOError, match="baseline execution counters"):
         _validate_sampler_state(
             state,
-            bucket_count=2,
-            expected_bucket_target_counts=[4, 4],
+            bucket_count=1,
+            expected_bucket_target_counts=[4],
             rollout_groups_per_bucket_visit=2,
-            update_epochs=4,
-            optimizer_step=12,
-            environment_steps=5,
-            max_attempted_rollout_groups=24,
+            optimizer_step=kwargs["optimizer_step"],
+            environment_steps=kwargs["environment_steps"],
+            max_sampling_attempts=kwargs["max_sampling_attempts"],
         )
 
 
-def test_tracking_expansion_is_rejected_and_base_config_is_frozen() -> None:
-    _validate_raw_reward_config(JointRewardConfig())
-    with pytest.raises(OnlineGRPOError, match="zero tracking margins"):
-        _validate_raw_reward_config(
-            JointRewardConfig(tracking_lateral_margin_m=0.01)
-        )
-    with pytest.raises(OnlineGRPOError, match="frozen base config"):
-        _validate_raw_reward_config(JointRewardConfig(gap_weight=1.0))
+def test_collection_contract_forbids_sampled_candidate_execution() -> None:
+    contract = rollout_collection_contract(JointGRPOOnlineConfig())
+    assert contract["version"] == "stage2_joint_grpo_persistent_episode_v4"
+    assert contract["comparison_unit"] == "vehicle_mode"
+    assert contract["trajectories_per_mode"] == 48
+    assert contract["retry_condition"] == "all_vehicle_modes_inactive"
+    assert contract["sampled_candidate_execution"] is False
+    assert contract["environment_action"] == "cached_frozen_stage1_argmax_only"
 
 
-def test_raw_proxy_scoring_is_side_effect_free_and_returns_argmax() -> None:
-    raw = np.arange(4 * 3 * 8 * 3, dtype=np.float32).reshape(4, 3, 8, 3)
-    seen: dict[str, np.ndarray] = {}
+class _OneStepEnv:
+    def __init__(self) -> None:
+        self.actions: list[dict[str, np.ndarray]] = []
 
-    class Proxy:
-        def score(self, env, model_inputs, trajectories):
-            seen["proxy"] = np.array(trajectories, copy=True)
-            return SimpleNamespace(
-                rewards=np.asarray([-3.0, 8.0, 2.0, 1.0], dtype=np.float32),
-                unsafe=np.zeros(4, dtype=np.bool_),
-            )
-
-    proxy, selected = _score_raw_candidates(
-        object(),
-        object(),
-        raw,
-        proxy_backend=Proxy(),
-    )
-
-    assert np.array_equal(seen["proxy"], raw)
-    assert selected == 1
-    assert proxy.rewards[selected] == 8.0
+    def step(self, action: dict[str, np.ndarray]):
+        self.actions.append(action)
+        return "obs", "reward", {"__all__": False}, {"__all__": False}, {}
 
 
-def test_rejected_candidate_scoring_never_invokes_optimizer() -> None:
-    raw = np.zeros((4, 3, 8, 3), dtype=np.float32)
-
-    class Proxy:
-        def score(self, env, model_inputs, trajectories):
-            return SimpleNamespace(
-                rewards=np.asarray([0.0, 1.0, 9.0, 2.0], dtype=np.float32)
-            )
-
-    _, selected = _score_raw_candidates(
-        object(), object(), raw, proxy_backend=Proxy()
-    )
-    assert selected == 2
-
-
-def test_best_checkpoint_objective_uses_only_raw_proxy_reward() -> None:
-    earlier = {
-        "validation/raw_proxy_reward_mean": -8.0,
-        "validation/simulator_reward_mean": 100.0,
-        "validation/unsafe_count": 0.0,
-    }
-    better_raw_worse_simulator = {
-        "validation/raw_proxy_reward_mean": -7.0,
-        "validation/simulator_reward_mean": -100.0,
-        "validation/unsafe_count": 10.0,
-    }
-    exact_tie = {
-        "validation/raw_proxy_reward_mean": -7.0,
-        "validation/simulator_reward_mean": 1000.0,
-    }
-    best = _validation_raw_proxy_reward(earlier)
-    candidate = _validation_raw_proxy_reward(better_raw_worse_simulator)
-    assert candidate > best
-    best = candidate
-    assert not _validation_raw_proxy_reward(exact_tie) > best
-
-
-def test_resume_inherits_verified_historical_raw_best(tmp_path: Path) -> None:
-    binding = _binding()
-    best_payload = {
-        **binding,
-        "metrics": {"validation/raw_proxy_reward_mean": -7.0},
-        "best_validation_reward": -7.0,
-        "best_checkpoint_sha256": None,
-    }
-    best_path = tmp_path / "best.pt"
-    torch.save(best_payload, best_path)
-    last_payload = {
-        **binding,
-        "metrics": {"validation/raw_proxy_reward_mean": -8.0},
-        "best_validation_reward": -7.0,
-        "best_checkpoint_sha256": _checkpoint_file_sha256(best_path),
-    }
-    resolved, reward = _resume_best_checkpoint_anchor(
-        tmp_path / "last.pt", last_payload
-    )
-    assert resolved == best_path
-    assert reward == -7.0
-    mismatched_group_size = {
-        **last_payload,
-        "grpo_config": dataclasses.asdict(JointGRPOConfig(group_size=5)),
-    }
-    with pytest.raises(OnlineGRPOError, match="contract binding mismatch"):
-        _resume_best_checkpoint_anchor(
-            tmp_path / "last.pt", mismatched_group_size
-        )
-    mismatched_policy = {
-        **last_payload,
-        "policy_update_contract": joint_grpo_optimizer_contract(
-            JointGRPOPolicyUpdateConfig(update_epochs=2)
-        ),
-        "policy_update_contract_sha256": (
-            joint_grpo_optimizer_contract_sha256(
-                JointGRPOPolicyUpdateConfig(update_epochs=2)
-            )
-        ),
-    }
-    with pytest.raises(OnlineGRPOError, match="contract binding mismatch"):
-        _resume_best_checkpoint_anchor(tmp_path / "last.pt", mismatched_policy)
-    mismatched_collection = {
-        **last_payload,
-        "rollout_collection_contract": {
-            **dict(last_payload["rollout_collection_contract"]),
-            "rollout_groups_per_bucket_visit": 5,
-        },
-    }
-    with pytest.raises(OnlineGRPOError, match="contract binding mismatch"):
-        _resume_best_checkpoint_anchor(
-            tmp_path / "last.pt", mismatched_collection
-        )
-    last_payload["best_checkpoint_sha256"] = "0" * 64
-    with pytest.raises(OnlineGRPOError, match="SHA256 mismatch"):
-        _resume_best_checkpoint_anchor(tmp_path / "last.pt", last_payload)
-
-
-def test_checkpoint_metadata_rejects_legacy_and_domain_drift() -> None:
-    online_config = JointGRPOOnlineConfig(device="cpu")
-    collection = rollout_collection_contract(online_config)
-    bucket_targets = [10] * 10
-    payload = {
-        **_binding(),
-        "best_validation_reward": -7.0,
-        "best_checkpoint_sha256": None,
-    }
-    _validate_online_checkpoint_metadata(
-        payload,
-        run_mode="smoke",
-        reward_config=JointRewardConfig(),
-        scenario_contract_sha=primary_scenario_contract()["sha256"],
-        scenario_seeds=(17, 23),
-        policy_update=JointGRPOPolicyUpdateConfig(),
-        collection_contract=collection,
-        bucket_count=10,
-        bucket_target_counts=bucket_targets,
-        rollout_groups_per_bucket_visit=10,
-        optimizer_step=4,
-    )
-    pre_persistent = _binding()
-    pre_persistent.pop("rollout_collection_contract")
-    with pytest.raises(
-        OnlineGRPOError, match="rollout_collection_contract mismatch"
-    ):
-        _validate_online_checkpoint_metadata(
-            pre_persistent,
-            run_mode="smoke",
-            reward_config=JointRewardConfig(),
-            scenario_contract_sha=primary_scenario_contract()["sha256"],
-            scenario_seeds=(17, 23),
-            policy_update=JointGRPOPolicyUpdateConfig(),
-            collection_contract=collection,
-            bucket_count=10,
-            bucket_target_counts=bucket_targets,
-            rollout_groups_per_bucket_visit=10,
-            optimizer_step=4,
-        )
-    legacy_v2 = {
-        **_binding(),
-        "rollout_collection_contract": {
-            **collection,
-            "version": "stage2_joint_grpo_persistent_episode_v2",
-        },
-    }
-    with pytest.raises(
-        OnlineGRPOError, match="rollout_collection_contract mismatch"
-    ):
-        _validate_online_checkpoint_metadata(
-            legacy_v2,
-            run_mode="smoke",
-            reward_config=JointRewardConfig(),
-            scenario_contract_sha=primary_scenario_contract()["sha256"],
-            scenario_seeds=(17, 23),
-            policy_update=JointGRPOPolicyUpdateConfig(),
-            collection_contract=collection,
-            bucket_count=10,
-            bucket_target_counts=bucket_targets,
-            rollout_groups_per_bucket_visit=10,
-            optimizer_step=4,
-        )
-    payload["reward_input_domain"] = "tau_cmd"
-    with pytest.raises(OnlineGRPOError, match="reward_input_domain mismatch"):
-        _validate_online_checkpoint_metadata(
-            payload,
-            run_mode="smoke",
-            reward_config=JointRewardConfig(),
-            scenario_contract_sha=primary_scenario_contract()["sha256"],
-            scenario_seeds=(17, 23),
-            policy_update=JointGRPOPolicyUpdateConfig(),
-            collection_contract=collection,
-            bucket_count=10,
-            bucket_target_counts=bucket_targets,
-            rollout_groups_per_bucket_visit=10,
-            optimizer_step=4,
-        )
-    legacy_policy = _binding()
-    legacy_policy.pop("policy_update_contract")
-    legacy_policy.pop("policy_update_contract_sha256")
-    with pytest.raises(OnlineGRPOError, match="policy_update_contract"):
-        _validate_online_checkpoint_metadata(
-            legacy_policy,
-            run_mode="smoke",
-            reward_config=JointRewardConfig(),
-            scenario_contract_sha=primary_scenario_contract()["sha256"],
-            scenario_seeds=(17, 23),
-            policy_update=JointGRPOPolicyUpdateConfig(),
-            collection_contract=collection,
-            bucket_count=10,
-            bucket_target_counts=bucket_targets,
-            rollout_groups_per_bucket_visit=10,
-            optimizer_step=4,
-        )
-    with pytest.raises(OnlineGRPOError, match="policy_update_contract"):
-        _validate_online_checkpoint_metadata(
-            _binding(),
-            run_mode="smoke",
-            reward_config=JointRewardConfig(),
-            scenario_contract_sha=primary_scenario_contract()["sha256"],
-            scenario_seeds=(17, 23),
-            policy_update=JointGRPOPolicyUpdateConfig(update_epochs=2),
-            collection_contract=collection,
-            bucket_count=10,
-            bucket_target_counts=bucket_targets,
-            rollout_groups_per_bucket_visit=10,
-            optimizer_step=4,
-        )
-    with pytest.raises(OnlineGRPOError, match="policy_update_contract"):
-        _validate_online_checkpoint_metadata(
-            _binding(),
-            run_mode="smoke",
-            reward_config=JointRewardConfig(),
-            scenario_contract_sha=primary_scenario_contract()["sha256"],
-            scenario_seeds=(17, 23),
-            policy_update=JointGRPOPolicyUpdateConfig(clip_epsilon_low=0.2),
-            collection_contract=collection,
-            bucket_count=10,
-            bucket_target_counts=bucket_targets,
-            rollout_groups_per_bucket_visit=10,
-            optimizer_step=4,
-        )
-    payload = {**_binding(), "calibration_report_sha256": "b" * 64}
-    with pytest.raises(OnlineGRPOError, match="legacy calibration semantics"):
-        _validate_online_checkpoint_metadata(
-            payload,
-            run_mode="smoke",
-            reward_config=JointRewardConfig(),
-            scenario_contract_sha=primary_scenario_contract()["sha256"],
-            scenario_seeds=(17, 23),
-            policy_update=JointGRPOPolicyUpdateConfig(),
-            collection_contract=collection,
-            bucket_count=10,
-            bucket_target_counts=bucket_targets,
-            rollout_groups_per_bucket_visit=10,
-            optimizer_step=4,
-        )
-
-
-def test_validation_reward_comparison_uses_raw_tag() -> None:
-    result = _validation_reward_comparison_metrics(
-        {"validation/raw_proxy_reward_mean": -8.0}, -10.5
-    )
-    assert result == {
-        "validation/pretrain_reward": -10.5,
-        "validation/reward_gain": 2.5,
-    }
-    with pytest.raises(OnlineGRPOError, match="raw_proxy_reward_mean"):
-        _validation_reward_comparison_metrics(
-            {"validation/simulator_reward_mean": -8.0}, -10.5
-        )
-
-
-def test_simulator_failure_is_non_gating_for_raw_validation(
+def test_cached_baseline_helper_optimizes_finalizes_and_steps_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    values = SimpleNamespace(
-        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
-        ego_state=np.zeros((3, 8), dtype=np.float32),
+    raw = np.arange(1 * 3 * 8 * 3, dtype=np.float32).reshape(1, 3, 8, 3)
+    modes = np.asarray([[1, 2, 3]], dtype=np.int64)
+    optimized = raw + 10.0
+    optimization = SimpleNamespace(optimized_trajectories=optimized)
+    calls: list[tuple[str, np.ndarray]] = []
+
+    def fake_optimize(model_inputs, trajectories, selected_modes, *, optimizer):
+        del model_inputs, optimizer
+        calls.append(("optimize", np.array(trajectories, copy=True)))
+        np.testing.assert_array_equal(selected_modes, modes)
+        return optimization
+
+    def fake_finalize(
+        rule_maker,
+        condition,
+        *,
+        env,
+        scenario,
+        values,
+        selected_modes,
+        optimization,
+        optimizer,
+    ):
+        del rule_maker, condition, env, scenario, values, optimizer
+        calls.append(("finalize", np.array(selected_modes, copy=True)))
+        return optimization, {"conditioned_rollouts": 1}, None, None
+
+    monkeypatch.setattr(online, "optimize_selected_model_trajectories", fake_optimize)
+    monkeypatch.setattr(online, "_finalize_online_rule_action", fake_finalize)
+    env = _OneStepEnv()
+
+    step_result, result, diagnostics, _, _ = execute_cached_frozen_baseline(
+        env=env,
+        rule_maker=object(),
+        condition=SimpleNamespace(),
+        scenario=("S5_hard_brake_lead", "R1_entry_straight"),
+        model_inputs=object(),
+        frozen_raw_trajectories=raw,
+        frozen_selected_modes=modes,
+        optimizer=object(),
     )
 
+    assert step_result[0] == "obs"
+    assert result is optimization
+    assert diagnostics == {"conditioned_rollouts": 1}
+    assert [name for name, _ in calls] == ["optimize", "finalize"]
+    assert len(env.actions) == 1
+    for role, agent_id in enumerate(online.AGENT_IDS):
+        np.testing.assert_array_equal(env.actions[0][agent_id], optimized[0, role])
+
+
+def test_cached_baseline_helper_has_no_candidate_input_and_rejects_bad_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def fake_optimize(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("must validate cache before optimizer")
+
+    monkeypatch.setattr(online, "optimize_selected_model_trajectories", fake_optimize)
+    with pytest.raises(OnlineGRPOError, match="cached frozen baseline"):
+        execute_cached_frozen_baseline(
+            env=_OneStepEnv(),
+            rule_maker=object(),
+            condition=SimpleNamespace(),
+            scenario=("S5_hard_brake_lead", "R1_entry_straight"),
+            model_inputs=object(),
+            frozen_raw_trajectories=np.zeros((3, 8, 3), dtype=np.float32),
+            frozen_selected_modes=np.zeros((1, 3), dtype=np.int64),
+            optimizer=object(),
+        )
+    assert not called
+
+
+@pytest.mark.parametrize("has_active_mode", [True, False])
+def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    has_active_mode: bool,
+) -> None:
+    executed: list[np.ndarray] = []
+
+    class Writer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_scalar(self, *args, **kwargs):
+            pass
+
+        def add_tensor(self, *args, **kwargs):
+            pass
+
+        def add_text(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
     class Env:
+        _last_planner_batch = {}
+
         def __init__(self):
             self.step_calls = 0
 
@@ -1312,582 +342,42 @@ def test_simulator_failure_is_non_gating_for_raw_validation(
             return {}, {}, {"__all__": False}, {"__all__": False}, {}
 
         def close(self):
-            return None
+            pass
 
-    env = Env()
+    fields = {
+        "mode_valid_mask": np.ones((3, 10), dtype=np.bool_),
+        "coarse_trajectories": np.zeros((3, 10, 8, 3), dtype=np.float32),
+        "ego_state": np.zeros((3, 8), dtype=np.float32),
+    }
+    values = SimpleNamespace(**fields, as_dict=lambda: fields)
 
     class Builder:
         def __init__(self, agent_ids):
-            self.captures = 0
+            del agent_ids
 
         def reset(self):
-            self.captures = 0
+            pass
 
         def capture_state(self, env, timestamp):
-            self.captures += 1
+            del env, timestamp
 
         def history_ready(self):
-            return self.captures >= 3
+            return True
 
         def build_model_inputs(self, env):
+            del env
             return values
 
-    class Proxy:
-        def __init__(self, config):
-            pass
-
-        def score(self, env, model_inputs, trajectories):
-            assert env.step_calls == 2
-            return SimpleNamespace(
-                rewards=np.asarray([3.5], dtype=np.float32),
-                unsafe=np.asarray([False]),
-                collision=np.asarray([False]),
-                out_of_drivable=np.asarray([False]),
-            )
-
-    class Optimizer:
-        def optimize(self, trajectories, coarse, speeds, modes):
-            return SimpleNamespace(optimized_trajectories=trajectories + 1.0)
-
-    class Evaluator:
-        def __init__(self, config):
-            pass
-
-        def evaluate(self, spec, prefix, candidates):
-            raise RuntimeError("diagnostic backend unavailable")
-
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._new_env", lambda *a: env
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.JointBEVSampleBuilder", Builder
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.simulator_decision_dt_s", lambda env: 0.1
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._scenario_ready_for_primary_sampling",
-        lambda env: True,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.route_following_warmup_actions",
-        lambda env, builder: {
-            agent_id: np.zeros((8, 3), dtype=np.float32)
-            for agent_id in AGENT_IDS
-        },
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._sample_rollout_start_offset",
-        lambda *args, **kwargs: pytest.fail(
-            "fixed validation must not sample a rollout start offset"
-        ),
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.execution_mode_valid_mask",
-        lambda values, optimizer: np.ones((3, 10), dtype=np.bool_),
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.model_inputs_to_batch",
-        lambda *args, **kwargs: {},
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.planner_forward_from_batch",
-        lambda *args, **kwargs: {
-            "selected_trajectory": torch.zeros((1, 3, 8, 3)),
-            "selected_mode": torch.zeros((1, 3), dtype=torch.int64),
-        },
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.JointTrajectoryProxyReward", Proxy
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.KinematicTrajectoryOptimizer",
-        Optimizer,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.JointSimulatorBranchEvaluator",
-        Evaluator,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.capture_joint_pose_global",
-        lambda env: np.zeros((3, 3), dtype=np.float32),
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._new_online_rule_maker",
-        lambda planner, env: object(),
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._condition_online_model_inputs",
-        lambda rule_maker, env, builder, values, **kwargs: _OnlineRuleCondition(
-            model_inputs=values,
-            proposal_batch=object(),
-            rule_actions={agent_id: 0 for agent_id in AGENT_IDS},
-            is_commitment=False,
-            committed_execution_id=None,
-            committed_plan_actions=None,
-        ),
-    )
-
-    metrics, errors = _fixed_raw_proxy_and_simulator_validation(
-        SimpleNamespace(config=SimpleNamespace(model_version="v2")),
-        device=torch.device("cpu"),
-        reward_config=JointRewardConfig(),
-        scenarios=(PRIMARY_S5_S9_SCENARIOS[0],),
-        seeds=(31,),
-    )
-    assert metrics["validation/raw_proxy_reward_mean"] == pytest.approx(3.5)
-    assert metrics["validation/simulator_available"] == 0.0
-    assert metrics["validation/simulator_failure_count"] == 1.0
-    assert "validation/simulator_reward_mean" not in metrics
-    assert errors[0]["error_type"] == "RuntimeError"
-    assert env.step_calls == 2
-
-
-def test_pretrain_raw_baseline_runs_once_before_resume(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_planner = object()
-    trainer = SimpleNamespace(planner=source_planner)
-    validation_planners = []
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._load_trainer",
-        lambda *args, **kwargs: (trainer, {}, "a" * 64),
-    )
-
-    def fixed_validation(planner, **kwargs):
-        validation_planners.append(planner)
-        return ({"validation/raw_proxy_reward_mean": -10.0}, ())
-
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._fixed_raw_proxy_and_simulator_validation",
-        fixed_validation,
-    )
-
-    def resume_loader(*args, **kwargs):
-        assert validation_planners == [source_planner]
-        raise OnlineGRPOError("resume loader reached")
-
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.load_grpo_checkpoint", resume_loader
-    )
-    training_config = JointGRPOTrainingConfig(
-        variant="A",
-        run_mode="smoke",
-        source_checkpoint=tmp_path / "stage1.pt",
-        online=JointGRPOOnlineConfig(
-            device="cpu",
-            total_rollout_groups=1,
-            resume_checkpoint=tmp_path / "resume.pt",
-        ),
-    )
-    run_dir = tmp_path / "run_1"
-    run_dir.mkdir()
-    with pytest.raises(OnlineGRPOError, match="resume loader reached"):
-        run_joint_grpo_training(
-            training_config,
-            run_dir=run_dir,
-        )
-    assert validation_planners == [source_planner]
-
-
-def test_constant_rewards_and_training_buckets_are_strict() -> None:
-    assert not _joint_rewards_are_informative(
-        np.asarray([-1.0, -1.0, -1.0, -1.0], dtype=np.float32),
-        pretrain_reward=-2.0,
-        group_size=4,
-        improvement_margin=1e-6,
-    )
-    assert _joint_rewards_are_informative(
-        np.asarray([-1.0, 0.0, -1.0, -1.0], dtype=np.float32),
-        pretrain_reward=-2.0,
-        group_size=4,
-        improvement_margin=1e-6,
-    )
-    assert _candidate_group_rejection_reason(
-        np.full(4, -1.0, dtype=np.float32),
-        pretrain_reward=0.0,
-        group_size=4,
-        improvement_margin=1e-6,
-    ) == "no_pretrain_improvement"
-    assert _candidate_group_rejection_reason(
-        np.full(4, 1.0, dtype=np.float32),
-        pretrain_reward=0.0,
-        group_size=4,
-        improvement_margin=1e-6,
-    ) == "zero_reward_span"
-    buckets = _round_robin_training_buckets(PRIMARY_S5_S9_SCENARIOS, (17, 23))
-    assert len(buckets) == len(set(buckets)) == 10
-
-
-@pytest.mark.parametrize(
-    ("rewards", "expected_reason"),
-    [
-        ((-2.0, -1.0, -3.0, -4.0), "no_pretrain_improvement"),
-        ((-1.0, 0.0, 1e-6, -2.0), "no_pretrain_improvement"),
-        ((-1.0, 0.0, 2e-6, -2.0), None),
-        ((1.0, 1.0, 1.0, 1.0), "zero_reward_span"),
-    ],
-)
-def test_pretrain_relative_candidate_gate_boundaries(
-    rewards: tuple[float, ...], expected_reason: str | None
-) -> None:
-    reason = _candidate_group_rejection_reason(
-        np.asarray(rewards, dtype=np.float32),
-        pretrain_reward=0.0,
-        group_size=4,
-        improvement_margin=1e-6,
-    )
-    assert reason == expected_reason
-
-
-def test_persistent_collection_contract_and_balanced_bucket_targets() -> None:
-    config = JointGRPOOnlineConfig(
-        device="cpu",
-        environment_steps_per_episode=200,
-        rollout_groups_per_bucket_visit=7,
-        validation_interval_rollouts=13,
-    )
-    contract = rollout_collection_contract(config)
-
-    assert ROLLOUT_COLLECTION_CONTRACT_VERSION == (
-        "stage2_joint_grpo_persistent_episode_v3"
-    )
-    assert contract["version"] == ROLLOUT_COLLECTION_CONTRACT_VERSION
-    assert contract["budget_unit"] == (
-        "accepted_pretrain_improving_rollout_group"
-    )
-    assert contract["attempt_budget_unit"] == "candidate_group_attempt"
-    assert contract["pretrain_inference_per_live_state"] == 1
-    assert contract["advantage_normalization"] == (
-        "pretrain_delta_rms_without_group_centering"
-    )
-    assert contract["max_candidate_groups_per_state"] == 3
-    assert contract["max_attempted_groups_multiplier"] == 3
-    assert contract["rollout_groups_per_bucket_visit"] == 7
-    assert contract["environment_steps_per_episode"] == 200
-    assert contract["rollout_start_offset_max_steps"] == 200
-    assert contract["rollout_start_min_remaining_steps"] == 10
-    assert contract["rollout_start_offset_distribution"] == (
-        "inclusive_uniform_integer"
-    )
-    assert contract["rollout_start_generator"] == "shared_training_torch_generator"
-    assert contract["validation_start"] == "earliest_ready_without_random_offset"
-    assert contract["validation_interval_rollouts"] == 13
-    assert contract["checkpoint_boundary"] == "closed_environment_only"
-    assert _balanced_bucket_targets(100, 10) == [10] * 10
-    assert _balanced_bucket_targets(103, 10) == [11, 11, 11] + [10] * 7
-    assert _balanced_bucket_targets(3, 5) == [1, 1, 1, 0, 0]
-
-
-def test_rollout_start_offset_upper_bound_is_inclusive_and_reserves_ten_steps(
-) -> None:
-    config = JointGRPOOnlineConfig(
-        device="cpu",
-        environment_steps_per_episode=200,
-        rollout_start_offset_max_steps=200,
-        rollout_start_min_remaining_steps=10,
-    )
-
-    assert _rollout_start_offset_upper_bound(config, 0) == 190
-    assert _rollout_start_offset_upper_bound(config, 170) == 20
-    assert _rollout_start_offset_upper_bound(config, 170, 7) == 7
-    assert _rollout_start_offset_upper_bound(config, 190) == 0
-    with pytest.raises(OnlineGRPOError, match="remaining"):
-        _rollout_start_offset_upper_bound(config, 191)
-
-
-def test_zero_upper_bound_still_consumes_exactly_one_generator_draw() -> None:
-    config = JointGRPOOnlineConfig(
-        device="cpu", environment_steps_per_episode=200
-    )
-    generator = torch.Generator().manual_seed(17)
-    before = generator.get_state().clone()
-
-    offset, upper = _sample_rollout_start_offset(config, 190, generator)
-
-    assert (offset, upper) == (0, 0)
-    assert not torch.equal(before, generator.get_state())
-    reference = torch.Generator().manual_seed(17)
-    torch.randint(0, 1, (1,), generator=reference)
-    torch.testing.assert_close(
-        torch.randn((8,), generator=generator),
-        torch.randn((8,), generator=reference),
-    )
-
-
-def test_rollout_start_offset_and_following_noise_resume_exactly() -> None:
-    config = JointGRPOOnlineConfig(
-        device="cpu",
-        environment_steps_per_episode=200,
-        rollout_start_offset_max_steps=17,
-    )
-    uninterrupted = torch.Generator().manual_seed(23)
-    first = _sample_rollout_start_offset(config, 20, uninterrupted)
-    state_at_checkpoint = uninterrupted.get_state()
-    expected_next = _sample_rollout_start_offset(config, 20, uninterrupted)
-    expected_noise = torch.randn((12,), generator=uninterrupted)
-
-    resumed = torch.Generator()
-    resumed.set_state(state_at_checkpoint)
-    assert _sample_rollout_start_offset(config, 20, resumed) == expected_next
-    torch.testing.assert_close(
-        torch.randn((12,), generator=resumed), expected_noise
-    )
-
-    same_seed = torch.Generator().manual_seed(23)
-    assert _sample_rollout_start_offset(config, 20, same_seed) == first
-
-
-@pytest.mark.parametrize(
-    ("scenario_id", "conflict_evidence", "route_completion"),
-    [
-        (
-            "S5_hard_brake_lead",
-            {"formation_recovered_after_hazard": True},
-            {},
-        ),
-        (
-            "S6_background_merge_in",
-            {"formation_recovered_after_merge": True},
-            {},
-        ),
-        (
-            "S7_ego_merge_from_ramp",
-            {"formation_recovered_after_merge": True},
-            {"all_agents_entered_mainline": True},
-        ),
-        (
-            "S8_ego_exit_to_ramp",
-            {"formation_recovered_on_ramp": True},
-            {"all_agents_continued_on_exit_ramp": True},
-        ),
-        (
-            "S9_narrow_channel_negotiation",
-            {"formation_recovered_after_return": True},
-            {"all_agents_returned_to_original_lane": True},
-        ),
-    ],
-)
-def test_scenario_sampling_window_closes_only_at_frozen_completion_predicate(
-    scenario_id: str,
-    conflict_evidence: dict[str, bool],
-    route_completion: dict[str, bool],
-) -> None:
-    closed = {
-        "scenario_id": scenario_id,
-        "conflict_evidence": conflict_evidence,
-        "route_completion": route_completion,
-    }
-    assert _scenario_sampling_window_closed_from_summary(closed)
-
-    for section_name in ("conflict_evidence", "route_completion"):
-        for field_name in closed[section_name]:
-            still_open = {
-                "scenario_id": scenario_id,
-                "conflict_evidence": dict(conflict_evidence),
-                "route_completion": dict(route_completion),
-            }
-            still_open[section_name][field_name] = False
-            assert not _scenario_sampling_window_closed_from_summary(still_open)
-
-
-def test_bucket_visit_progress_keeps_or_advances_the_fair_cursor() -> None:
-    targets = [5, 4, 4]
-    samples = [2, 0, 0]
-    assert not _bucket_visit_is_complete(
-        bucket_index=0,
-        bucket_sample_counts=samples,
-        bucket_target_counts=targets,
-        current_visit_progress=2,
-        rollout_groups_per_bucket_visit=3,
-    )
-    assert _next_unfinished_bucket_index(
-        samples, targets, start_index=0
-    ) == 0
-
-    samples[0] = 3
-    assert _bucket_visit_is_complete(
-        bucket_index=0,
-        bucket_sample_counts=samples,
-        bucket_target_counts=targets,
-        current_visit_progress=3,
-        rollout_groups_per_bucket_visit=3,
-    )
-    assert _next_unfinished_bucket_index(
-        samples, targets, start_index=1
-    ) == 1
-
-    assert _next_unfinished_bucket_index(
-        targets, targets, start_index=2
-    ) is None
-
-
-def _run_fake_persistent_collection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    validation_interval_rollouts: int,
-    terminal_after_environment_steps: int | None,
-    max_rollout_groups: int = 21,
-    rollout_groups_per_bucket_visit: int = 3,
-    rollout_start_offset_max_steps: int = 0,
-    force_start_offset_to_upper: bool = False,
-    window_close_steps_by_episode: tuple[int | None, ...] = (),
-    single_training_bucket: bool = False,
-    first_rollout_informative: bool = True,
-    environment_steps_per_episode: int = 50,
-    history_ready_step: int = 1,
-    external_envs: list[object] | None = None,
-    resume_accepted_rollouts: int = 0,
-    attempt_reward_sequence: tuple[tuple[float, ...], ...] = (),
-    max_candidate_groups_per_state: int = 3,
-    max_attempted_groups_multiplier: int = 3,
-    expect_attempt_budget_error: bool = False,
-) -> tuple[dict[str, object], list[object], list[int], object]:
-    group_size = 3
-    update_epochs = 2
-    envs: list[object] = [] if external_envs is None else external_envs
-    validation_rollouts: list[int] = []
-    writer_scalars: list[tuple[str, float, int]] = []
-    plot_call_kwargs: list[dict[str, object]] = []
-
-    class Writer:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-        def add_scalar(self, tag, value, step) -> None:
-            writer_scalars.append((str(tag), float(value), int(step)))
-
-        def add_tensor(self, *args, **kwargs) -> None:
-            pass
-
-        def add_text(self, *args, **kwargs) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-    class Env:
-        def __init__(self, scenario, seed, episode_index) -> None:
-            self.scenario = scenario
-            self.seed = seed
-            self.episode_index = episode_index
-            self.step_calls = 0
-            self.summary_calls = 0
-            self.closed = False
-            self.actions: list[object] = []
-            self._last_planner_batch = {}
-            self._scenario_orchestrator = SimpleNamespace(
-                get_episode_summary=self.get_episode_summary
-            )
-
-        def get_episode_summary(self):
-            self.summary_calls += 1
-            close_step = (
-                window_close_steps_by_episode[self.episode_index]
-                if self.episode_index < len(window_close_steps_by_episode)
-                else None
-            )
-            closed = close_step is not None and self.step_calls >= close_step
-            return {
-                "scenario_id": self.scenario[0],
-                "scenario_realized": True,
-                "scenario_triggered": True,
-                "scenario_recipes_complete": True,
-                "scenario_notes": ["lead_brake_profile"],
-                "conflict_evidence": {
-                    "formation_recovered_after_hazard": closed,
-                    "formation_recovered_after_merge": closed,
-                    "formation_recovered_on_ramp": closed,
-                    "formation_recovered_after_return": closed,
-                },
-                "route_completion": {
-                    "all_agents_entered_mainline": closed,
-                    "all_agents_continued_on_exit_ramp": closed,
-                    "all_agents_returned_to_original_lane": closed,
-                },
-            }
-
-        def step(self, action):
-            self.actions.append(action)
-            self.step_calls += 1
-            ended = (
-                terminal_after_environment_steps is not None
-                and self.step_calls >= terminal_after_environment_steps
-            )
-            return (
-                {},
-                {},
-                {"__all__": ended},
-                {"__all__": False},
-                {},
-            )
-
-        def close(self) -> None:
-            self.closed = True
-
-    class Builder:
-        def __init__(self, agent_ids) -> None:
-            self.captures = 0
-
-        def reset(self) -> None:
-            self.captures = 0
-
-        def capture_state(self, env, timestamp) -> None:
-            self.captures += 1
-
-        def history_ready(self) -> bool:
-            return self.captures >= history_ready_step + 1
-
-        def build_model_inputs(self, env):
-            trainer.build_calls += 1
-            fields = {
-                "mode_valid_mask": np.ones((3, 10), dtype=np.bool_),
-                "coarse_trajectories": np.zeros(
-                    (3, 10, 8, 3), dtype=np.float32
-                ),
-                "ego_state": np.zeros((3, 8), dtype=np.float32),
-            }
-            return SimpleNamespace(**fields, as_dict=lambda: fields)
-
-        def augment_v2_model_inputs(self, env, values, **kwargs):
-            return values
-
-    proposal = JointActionProposal(
-        proposal_id=1,
-        rank=0,
-        rule_score=1.0,
-        decisions={agent_id: {"action": 0} for agent_id in AGENT_IDS},
-    )
-
-    class RuleMaker:
-        is_formation_locked = False
-        has_active_lane_change_commitments = False
-
-        def propose_joint_actions(
-            self, env, agent_ids, planner_batch, *, hard_valid_modes_by_action
-        ):
-            trainer.proposal_calls += 1
-            return RuleMakerProposalBatch(batch_id=1, proposals=(proposal,))
-
-    class ScalarLoss:
-        def __init__(self, epoch_in_rollout: int) -> None:
-            self.epoch_in_rollout = epoch_in_rollout
-
+    class Loss:
         def scalar_metrics(self):
-            epoch = float(self.epoch_in_rollout)
-            return {
-                "loss/total": epoch,
-                "loss/reference_kl": epoch / 10.0,
-                "policy/mode_ratio_mean": 1.0 + epoch / 10.0,
-                "advantage/mean": 0.0,
-            }
+            return {"loss/total": 0.5, "advantage/mean": 0.0}
 
     class Trainer:
-        def __init__(self) -> None:
-            self.config = JointGRPOConfig(group_size=group_size)
+        def __init__(self):
+            self.config = SimpleNamespace(trajectories_per_mode=2)
             self.planner = SimpleNamespace(
                 config=SimpleNamespace(
+                    model_version="v2",
                     inference_seed=0,
                     inference_noise_timestep=8,
                     inference_denoise_steps=2,
@@ -1895,194 +385,98 @@ def _run_fake_persistent_collection(
             )
             self.optimizer_step = 0
             self.sample_calls = 0
-            self.frozen_infer_calls = 0
-            self.frozen_score_calls: list[tuple[int, int, float]] = []
-            self.update_calls = 0
-            self.update_pretrain_rewards: list[torch.Tensor] = []
-            self.policy_updates: list[JointGRPOPolicyUpdateConfig] = []
-            self.sample_environment_steps: list[tuple[int, int]] = []
-            self.start_offset_calls: list[
-                tuple[int, int | None, int, int]
-            ] = []
-            self.warmup_calls_by_episode: list[int] = []
-            self.optimization_calls: list[np.ndarray] = []
-            self.finalize_calls = 0
-            self.build_calls = 0
-            self.proposal_calls = 0
+            self.frozen_calls = 0
+            self.update_masks: list[np.ndarray] = []
 
         def sample_groups(self, batch, *, generator):
+            del batch
             torch.randn((1,), generator=generator)
             self.sample_calls += 1
-            active_env = envs[-1]
-            self.sample_environment_steps.append(
-                (active_env.episode_index, active_env.step_calls)
-            )
             return SimpleNamespace(
-                selected_trajectories=torch.zeros(
-                    (1, group_size, 3, 8, 3), dtype=torch.float32
-                ),
-                sampled_modes=torch.full(
-                    (1, group_size, 3),
-                    int(ModeIndex.KEEP_HIGH),
-                    dtype=torch.int64,
-                ),
+                candidate_trajectories=torch.full(
+                    (1, 3, 10, 2, 8, 3), 99.0, dtype=torch.float32
+                )
             )
 
         def infer_frozen_pretrain(self, rollout):
-            self.frozen_infer_calls += 1
-            active_env = envs[-1]
-            value = -2.0
+            del rollout
+            self.frozen_calls += 1
             return {
                 "selected_trajectory": torch.full(
-                    (1, 3, 8, 3), value, dtype=torch.float32
+                    (1, 3, 8, 3), -7.0, dtype=torch.float32
                 ),
-                "selected_mode": torch.full(
-                    (1, 3), int(ModeIndex.KEEP_HIGH), dtype=torch.int64
+                "selected_mode": torch.zeros((1, 3), dtype=torch.int64),
+                "all_mode_trajectories": torch.full(
+                    (1, 3, 10, 8, 3), -7.0, dtype=torch.float32
                 ),
             }
 
-        def update(
-            self, rollout, rewards, pretrain_rewards, *, policy_update
-        ):
-            self.update_calls += 1
-            self.update_pretrain_rewards.append(pretrain_rewards.clone())
-            self.policy_updates.append(policy_update)
-            advantages = normalize_pretrain_relative_advantages(
-                rewards,
-                pretrain_rewards,
-                group_size=group_size,
-                eps=self.config.advantage_eps,
-            ).detach()
-            epochs = []
-            for epoch_index in range(policy_update.update_epochs):
-                self.optimizer_step += 1
-                epochs.append(
-                    SimpleNamespace(
-                        optimizer_step=self.optimizer_step,
-                        epoch_in_rollout=epoch_index + 1,
-                        total_gradient_norm=1.0,
-                        gradient_norms={},
-                        loss=ScalarLoss(epoch_index + 1),
-                    )
-                )
+        def update(self, rollout, rewards, active_modes, *, policy_update):
+            del rollout, rewards, policy_update
+            self.update_masks.append(active_modes.cpu().numpy())
+            self.optimizer_step += 1
+            epoch = SimpleNamespace(
+                optimizer_step=self.optimizer_step,
+                epoch_in_rollout=1,
+                total_gradient_norm=1.0,
+                gradient_norms={"trajectory_head": 1.0},
+                zero_signal_epoch=False,
+                loss=Loss(),
+            )
             return SimpleNamespace(
-                epoch_results=tuple(epochs),
-                loss=SimpleNamespace(advantages=advantages),
+                epoch_results=(epoch,),
+                loss=SimpleNamespace(
+                    advantages=torch.zeros((1, 3, 10, 2), dtype=torch.float32)
+                ),
+                zero_signal_epochs=0,
             )
 
     trainer = Trainer()
-    trainer.writer_scalars = writer_scalars
-    trainer.plot_call_kwargs = plot_call_kwargs
 
-    class ProxyBackend:
-        def __init__(self, reward_config) -> None:
-            pass
+    class RewardBackend:
+        def __init__(self, config):
+            del config
 
-        def score(self, env, values, raw_candidates):
-            raw = np.asarray(raw_candidates)
-            assert raw.shape == (1, 3, 8, 3)
-            reward = float(raw[0, 0, 0, 0])
-            trainer.frozen_score_calls.append(
-                (env.episode_index, env.step_calls, reward)
-            )
+        def score_pretrain(self, *args):
             return SimpleNamespace(
-                rewards=np.asarray([reward], dtype=np.float32)
+                rewards=np.zeros((3, 10), dtype=np.float32),
+                valid_mode_mask=np.ones((3, 10), dtype=np.bool_),
             )
 
-    def new_env(scenario, seed):
-        env = Env(scenario, seed, len(envs))
-        envs.append(env)
-        trainer.warmup_calls_by_episode.append(0)
-        return env
+        def score_candidates(self, env, model_inputs, candidates, *args):
+            del env, model_inputs, args
+            np.testing.assert_array_equal(candidates, 99.0)
+            rewards = np.full((3, 10, 2), -1.0, dtype=np.float32)
+            if has_active_mode:
+                rewards[1, 4, 0] = 0.0
+            shape = rewards.shape
+            return SimpleNamespace(
+                rewards=rewards,
+                pretrain_rewards=np.zeros((3, 10), dtype=np.float32),
+                valid_mode_mask=np.ones((3, 10), dtype=np.bool_),
+                unsafe=np.zeros(shape, dtype=np.bool_),
+                collision=np.zeros(shape, dtype=np.bool_),
+                out_of_drivable=np.zeros(shape, dtype=np.bool_),
+            )
 
-    def sample_start_offset(
-        config,
-        ready_step,
-        generator,
-        temporary_max_offset_steps=None,
-    ):
-        sampled_offset, upper = _sample_rollout_start_offset(
-            config,
-            ready_step,
-            generator,
-            temporary_max_offset_steps,
-        )
-        offset = upper if force_start_offset_to_upper else sampled_offset
-        trainer.start_offset_calls.append(
-            (ready_step, temporary_max_offset_steps, offset, upper)
-        )
-        return offset, upper
+    env = Env()
 
-    def warmup_actions(env, builder):
-        trainer.warmup_calls_by_episode[env.episode_index] += 1
-        return {
-            agent_id: np.zeros((8, 3), dtype=np.float32)
-            for agent_id in AGENT_IDS
+    def execute_baseline(**kwargs):
+        raw = np.asarray(kwargs["frozen_raw_trajectories"])
+        executed.append(raw.copy())
+        result = kwargs["env"].step({})
+        optimization = SimpleNamespace(optimized_trajectories=raw)
+        diagnostics = {
+            "conditioned_rollouts": 1,
+            "proposal_match_attempts": 0,
+            "proposal_matches": 0,
+            "condition_failures": 0,
+            "forced_safe_stops": 0,
+            "s7_feedback_exception_hits": 0,
+            "commitment_conditioned_rollouts": 0,
+            "commitment_feedback_incompatible": 0,
         }
-
-    def fixed_validation(planner, **kwargs):
-        validation_rollouts.append(trainer.update_calls)
-        return (
-            {
-                "validation/raw_proxy_reward_mean": float(
-                    trainer.update_calls
-                )
-            },
-            (),
-        )
-
-    def score_candidates(
-        env,
-        values,
-        raw_candidates,
-        **kwargs,
-    ):
-        if trainer.sample_calls <= len(attempt_reward_sequence):
-            rewards = np.asarray(
-                attempt_reward_sequence[trainer.sample_calls - 1],
-                dtype=np.float32,
-            )
-        elif trainer.sample_calls == 1 and not first_rollout_informative:
-            rewards = np.zeros(group_size, dtype=np.float32)
-        else:
-            rewards = np.asarray([-1.0, 0.0, 1.0], dtype=np.float32)
-        proxy = SimpleNamespace(
-            rewards=rewards,
-            unsafe=np.zeros(group_size, dtype=np.bool_),
-        )
-        return proxy, int(np.argmax(rewards))
-
-    def optimize(values, raw_candidates, sampled_modes, *, optimizer):
-        trainer.optimization_calls.append(np.array(raw_candidates, copy=True))
-        return SimpleNamespace(
-            optimized_trajectories=np.zeros(
-                (1, 3, 8, 3), dtype=np.float32
-            ),
-            elapsed_ms=0.1,
-            intervention_ade_m=np.zeros((1, 3), dtype=np.float32),
-            intervention_fde_m=np.zeros((1, 3), dtype=np.float32),
-            raw_valid=np.ones((1, 3), dtype=np.bool_),
-            retained_raw_fraction=np.ones((1, 3), dtype=np.float32),
-            optimized_valid=np.ones((1, 3), dtype=np.bool_),
-        )
-
-    def finalize(rule_maker, condition, **kwargs):
-        trainer.finalize_calls += 1
-        return (
-            kwargs["optimization"],
-            {
-                "conditioned_rollouts": 1,
-                "proposal_match_attempts": 1,
-                "proposal_matches": 1,
-                "condition_failures": 0,
-                "forced_safe_stops": 0,
-                "s7_feedback_exception_hits": 0,
-                "commitment_conditioned_rollouts": 0,
-                "commitment_feedback_incompatible": 0,
-            },
-            condition.committed_execution_id,
-            condition.committed_plan_actions,
-        )
+        return result, optimization, diagnostics, None, None
 
     def checkpoint_payload(**kwargs):
         return {
@@ -2091,36 +485,70 @@ def _run_fake_persistent_collection(
             "environment_steps": kwargs["environment_steps"],
             "best_validation_reward": kwargs["best_validation_reward"],
             "best_checkpoint_sha256": kwargs["best_checkpoint_sha256"],
-            "rollout_collection_contract": dict(
-                kwargs["collection_contract"]
-            ),
             "sampler_state": dict(kwargs["sampler_state"]),
         }
 
-    def checkpoint_loader(path, restored, **kwargs):
-        payload = torch.load(path, map_location="cpu", weights_only=False)
-        restored.optimizer_step = int(payload["optimizer_step"])
-        return payload
+    def save_checkpoint(path, payload):
+        torch.save(payload, path)
+        return path
 
-    def validate_checkpoint(payload, **kwargs):
-        assert payload["rollout_collection_contract"] == dict(
-            kwargs["collection_contract"]
-        )
-        return _validate_sampler_state(
-            payload["sampler_state"],
-            bucket_count=kwargs["bucket_count"],
-            expected_bucket_target_counts=kwargs["bucket_target_counts"],
-            rollout_groups_per_bucket_visit=kwargs[
-                "rollout_groups_per_bucket_visit"
-            ],
-            update_epochs=kwargs["policy_update"].update_epochs,
-            optimizer_step=kwargs["optimizer_step"],
-            environment_steps=payload["environment_steps"],
-            max_attempted_rollout_groups=kwargs[
-                "max_attempted_rollout_groups"
-            ],
-        )
-
+    monkeypatch.setattr(online, "SummaryWriter", Writer)
+    monkeypatch.setattr(online, "VehicleModeCounterfactualReward", RewardBackend)
+    monkeypatch.setattr(
+        online, "_load_trainer", lambda *args, **kwargs: (trainer, {}, "a" * 64)
+    )
+    monkeypatch.setattr(
+        online,
+        "_fixed_raw_proxy_and_simulator_validation",
+        lambda *args, **kwargs: ({"validation/vehicle_reward_mean": 1.0}, ()),
+    )
+    monkeypatch.setattr(online, "_new_env", lambda *args, **kwargs: env)
+    monkeypatch.setattr(online, "JointBEVSampleBuilder", Builder)
+    monkeypatch.setattr(online, "_new_online_rule_maker", lambda *args: object())
+    monkeypatch.setattr(
+        online,
+        "_condition_online_model_inputs",
+        lambda *args, **kwargs: SimpleNamespace(
+            model_inputs=values,
+            committed_execution_id=None,
+            committed_plan_actions=None,
+        ),
+    )
+    monkeypatch.setattr(
+        online,
+        "_scenario_summary",
+        lambda env: {
+            "scenario_id": "S5_hard_brake_lead",
+            "scenario_realized": True,
+            "scenario_triggered": True,
+            "scenario_recipes_complete": True,
+            "scenario_notes": ["lead_brake_profile"],
+            "conflict_evidence": {},
+            "route_completion": {},
+        },
+    )
+    monkeypatch.setattr(online, "_sample_rollout_start_offset", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(
+        online,
+        "execution_mode_valid_mask",
+        lambda *args, **kwargs: np.ones((3, 10), dtype=np.bool_),
+    )
+    monkeypatch.setattr(online, "model_inputs_to_batch", lambda *a, **k: {})
+    monkeypatch.setattr(online, "execute_cached_frozen_baseline", execute_baseline)
+    monkeypatch.setattr(online, "_checkpoint_payload", checkpoint_payload)
+    monkeypatch.setattr(online, "save_grpo_checkpoint", save_checkpoint)
+    monkeypatch.setattr(
+        online,
+        "load_grpo_checkpoint",
+        lambda path, restored, **kwargs: torch.load(
+            path, map_location="cpu", weights_only=False
+        ),
+    )
+    monkeypatch.setattr(
+        online,
+        "_validate_online_checkpoint_metadata",
+        lambda payload, **kwargs: payload["sampler_state"],
+    )
     plot_names = (
         "advantage_heatmap",
         "reward_curve",
@@ -2130,1290 +558,54 @@ def _run_fake_persistent_collection(
         "policy_stability_curve",
     )
     monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.SummaryWriter", Writer
+        online,
+        "generate_grpo_plots",
+        lambda *args, **kwargs: {name: tmp_path / f"{name}.png" for name in plot_names},
     )
     monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.JointTrajectoryProxyReward",
-        ProxyBackend,
+        online,
+        "_round_robin_training_buckets",
+        lambda *args: ((online.PRIMARY_S5_S9_SCENARIOS[0], 17),),
     )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._load_trainer",
-        lambda *args, **kwargs: (trainer, {}, "a" * 64),
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._fixed_raw_proxy_and_simulator_validation",
-        fixed_validation,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._new_env", new_env
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.JointBEVSampleBuilder", Builder
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._new_online_rule_maker",
-        lambda planner, env: RuleMaker(),
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.simulator_decision_dt_s",
-        lambda env: 0.1,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._sample_rollout_start_offset",
-        sample_start_offset,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.route_following_warmup_actions",
-        warmup_actions,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.execution_mode_valid_mask",
-        lambda values, optimizer: np.ones((3, 10), dtype=np.bool_),
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.model_inputs_to_batch",
-        lambda *args, **kwargs: {},
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._score_raw_candidates",
-        score_candidates,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.optimize_selected_model_trajectories",
-        optimize,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._finalize_online_rule_action",
-        finalize,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._checkpoint_payload",
-        checkpoint_payload,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.load_grpo_checkpoint",
-        checkpoint_loader,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online._validate_online_checkpoint_metadata",
-        validate_checkpoint,
-    )
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.generate_grpo_plots",
-        lambda tb, plots, **kwargs: (
-            plot_call_kwargs.append(dict(kwargs))
-            or {name: tmp_path / f"{name}.png" for name in plot_names}
-        ),
-    )
-    if single_training_bucket:
-        monkeypatch.setattr(
-            "train.train_bev_joint_grpo_online._round_robin_training_buckets",
-            lambda scenarios, seeds: ((scenarios[0], seeds[0]),),
-        )
-
-    resume_checkpoint = (
-        tmp_path / "resume" / "last.pt"
-        if resume_accepted_rollouts
-        else None
-    )
-    online_config = JointGRPOOnlineConfig(
-        device="cpu",
-        group_size=group_size,
-        total_rollout_groups=max_rollout_groups,
-        update_epochs=update_epochs,
-        resume_checkpoint=resume_checkpoint,
-        environment_steps_per_episode=environment_steps_per_episode,
-        rollout_groups_per_bucket_visit=rollout_groups_per_bucket_visit,
-        rollout_start_offset_max_steps=rollout_start_offset_max_steps,
-        validation_interval_rollouts=validation_interval_rollouts,
-        advantage_vector_log_interval_rollouts=max_rollout_groups,
-        max_candidate_groups_per_state=max_candidate_groups_per_state,
-        max_attempted_groups_multiplier=max_attempted_groups_multiplier,
-    )
-    training_config = JointGRPOTrainingConfig(
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    config = online.JointGRPOTrainingConfig(
         variant="A",
         run_mode="smoke",
         source_checkpoint=tmp_path / "stage1.pt",
-        online=online_config,
+        online=JointGRPOOnlineConfig(
+            device="cpu",
+            trajectories_per_mode=2,
+            total_rollout_groups=1,
+            update_epochs=1,
+            environment_steps_per_episode=10,
+            rollout_groups_per_bucket_visit=1,
+            rollout_start_offset_max_steps=0,
+            rollout_start_min_remaining_steps=1,
+            validation_interval_rollouts=1,
+            advantage_vector_log_interval_rollouts=1,
+            max_sampling_attempts_per_state=3,
+            max_sampling_attempts_multiplier=3,
+        ),
     )
-    if resume_checkpoint is not None:
-        assert single_training_bucket
-        assert 0 < resume_accepted_rollouts < max_rollout_groups
-        resume_checkpoint.parent.mkdir(parents=True)
-        optimizer_step = resume_accepted_rollouts * update_epochs
-        resume_payload = {
-            "metrics": {"validation/raw_proxy_reward_mean": 1.0},
-            "optimizer_step": optimizer_step,
-            "environment_steps": resume_accepted_rollouts + 1,
-            "best_validation_reward": 1.0,
-            "best_checkpoint_sha256": None,
-            "rollout_collection_contract": rollout_collection_contract(
-                online_config
-            ),
-            "sampler_state": _sampler_state(
-                accepted_rollout_groups=resume_accepted_rollouts,
-                attempted_rollout_groups=resume_accepted_rollouts,
-                rejected_no_pretrain_improvement=0,
-                rejected_zero_reward_span=0,
-                pretrain_fallback_steps=0,
-                warmup_environment_steps=1,
-                bucket_target_counts=[max_rollout_groups],
-                bucket_accepted_rollout_counts=[resume_accepted_rollouts],
-                bucket_attempted_rollout_counts=[resume_accepted_rollouts],
-                bucket_rejected_no_pretrain_improvement_counts=[0],
-                bucket_rejected_zero_reward_span_counts=[0],
-                bucket_pretrain_fallback_step_counts=[0],
-                bucket_optimizer_step_counts=[optimizer_step],
-                bucket_episode_counts=[1],
-                next_bucket_index=0,
-                current_visit_progress=(
-                    resume_accepted_rollouts
-                    % rollout_groups_per_bucket_visit
-                ),
-                generator_state=torch.Generator().manual_seed(17).get_state(),
-                last_validated_rollout=resume_accepted_rollouts,
-                rollout_groups_per_bucket_visit=(
-                    rollout_groups_per_bucket_visit
-                ),
-                update_epochs=update_epochs,
-                optimizer_step=optimizer_step,
-                environment_steps=resume_accepted_rollouts + 1,
-                max_attempted_rollout_groups=(
-                    max_attempted_groups_multiplier * max_rollout_groups
-                ),
-            ),
-        }
-        torch.save(resume_payload, resume_checkpoint)
-        best_path = resume_checkpoint.with_name("best.pt")
-        torch.save(resume_payload, best_path)
-        monkeypatch.setattr(
-            "train.train_bev_joint_grpo_online._resume_best_checkpoint_anchor",
-            lambda path, payload: (best_path, 1.0),
-        )
-    run_dir = tmp_path / "run_1"
-    run_dir.mkdir(parents=True)
-    if expect_attempt_budget_error:
-        with pytest.raises(
-            OnlineGRPOError,
-            match="exhausted max_attempted_rollout_groups",
-        ):
-            run_joint_grpo_training(training_config, run_dir=run_dir)
-        report = json.loads((run_dir / "report.json").read_text())
+
+    if has_active_mode:
+        report = online.run_joint_grpo_training(config, run_dir=run_dir)
     else:
-        report = run_joint_grpo_training(
-            training_config,
-            run_dir=run_dir,
-        )
-    return report, envs, validation_rollouts, trainer
-
-
-def test_main_loop_retries_same_state_without_rejected_side_effects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, envs, validation_rollouts, trainer = (
-        _run_fake_persistent_collection(
-            tmp_path,
-            monkeypatch,
-            validation_interval_rollouts=21,
-            terminal_after_environment_steps=None,
-            first_rollout_informative=False,
-        )
-    )
-
-    assert report["format"] == "bev_joint_grpo_online_report_v9"
-    assert report["training_status"] == "complete"
-    assert report["accepted_rollout_groups"] == 21
-    assert report["attempted_rollout_groups"] == 22
-    assert report["rejected_candidate_groups"] == 1
-    assert report["rejected_zero_reward_span"] == 1
-    assert report["pretrain_fallback_steps"] == 0
-    assert report["optimizer_steps"] == 42
-    assert report["attempted_rollout_groups"] == (
-        report["accepted_rollout_groups"]
-        + report["rejected_candidate_groups"]
-    )
-    assert report["optimizer_steps"] == (
-        report["accepted_rollout_groups"] * 2
-    )
-    assert report["environment_steps"] == (
-        report["warmup_environment_steps"]
-        + report["accepted_rollout_groups"]
-        + report["pretrain_fallback_steps"]
-    )
-    assert trainer.update_calls == 21
-    assert all(update.update_epochs == 2 for update in trainer.policy_updates)
-    assert len(envs) == report["environment_episode_count"] == 10
-    assert envs[0].step_calls == 4  # one warm-up plus three fresh groups
-    assert len(trainer.start_offset_calls) == len(envs)
-    assert all(call == (1, None, 0, 0) for call in trainer.start_offset_calls)
-    assert all(env.closed for env in envs)
-    assert report["environment_steps"] == 31
-    assert report["warmup_environment_steps"] == 10
-    assert validation_rollouts == [0, 21]
-    assert trainer.frozen_infer_calls == 21
-    assert len(trainer.frozen_score_calls) == 21
-    assert trainer.sample_environment_steps[:2] == [(0, 1), (0, 1)]
-    assert trainer.frozen_score_calls[0][:2] == (0, 1)
-    assert len(trainer.optimization_calls) == 21
-    assert trainer.finalize_calls == 21
-    assert all(
-        value.item() == pytest.approx(-2.0)
-        for value in trainer.update_pretrain_rewards
-    )
-    assert all(
-        np.count_nonzero(trajectory) == 0
-        for env in envs
-        for action in env.actions
-        for trajectory in action.values()
-    )
-    counters = report["training_bucket_counters"]
-    assert [item["target_accepted_rollouts"] for item in counters] == (
-        [3] + [2] * 9
-    )
-    assert [item["accepted_rollouts"] for item in counters] == [3] + [2] * 9
-    assert [item["attempted_rollouts"] for item in counters] == [4] + [2] * 9
-    assert report["rollout_collection_contract"]["version"] == (
-        ROLLOUT_COLLECTION_CONTRACT_VERSION
-    )
-    run_dir = Path(report["last_checkpoint"]).parent.parent
-    frozen_config = json.loads((run_dir / "config.json").read_text())
-    assert frozen_config["format"] == "bev_joint_grpo_online_config_v9"
-    assert frozen_config["rollout_collection_contract"] == report[
-        "rollout_collection_contract"
-    ]
-    expected_logging_metadata = {
-        "tensorboard_tag": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
-        "metrics_jsonl_field": FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
-        "step_axis": "absolute_accepted_rollout_group",
-        "same_live_state_as_current_exploration": True,
-        "trajectory_count": 1,
-        "trajectory_selection": "valid_mode_masked_argmax",
-        "trajectory_domain": "raw_tau_d",
-        "inference": "frozen_stage1_standard_deterministic_ddim",
-        "inference_seed": 0,
-        "inference_noise_timestep": 8,
-        "inference_denoise_steps": 2,
-        "fixed_inference_noise": True,
-        "diagnostic_only": False,
-        "affects_training_or_environment_action": True,
-    }
-    assert frozen_config["frozen_pretrain_reward_logging"] == (
-        expected_logging_metadata
-    )
-    assert report["frozen_pretrain_reward_logging"] == expected_logging_metadata
-    assert report["training_plots"]["reward_tags"] == [
-        "raw_proxy_reward_mean",
-        "raw_proxy_reward_max",
-        FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
-    ]
-    assert report["training_plots"]["optimizer_x_axis"] == (
-        "absolute_accepted_rollout_group"
-    )
-    assert trainer.plot_call_kwargs == [
-        {
-            "require_frozen_pretrain_reward": True,
-            "rollout_axis_label": "Accepted rollout group",
-        }
-    ]
-    checkpoint = torch.load(
-        report["last_checkpoint"], map_location="cpu", weights_only=False
-    )
-    assert checkpoint["rollout_collection_contract"] == report[
-        "rollout_collection_contract"
-    ]
-    assert checkpoint["metrics"][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG] == (
-        report["metrics"][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG]
-    )
-    sampler = checkpoint["sampler_state"]
-    assert sampler["bucket_target_counts"] == [3] + [2] * 9
-    assert sampler["bucket_accepted_rollout_counts"] == [3] + [2] * 9
-    assert sampler["bucket_attempted_rollout_counts"] == [4] + [2] * 9
-    assert sampler["bucket_episode_counts"] == [1] * 10
-    assert sampler["current_visit_progress"] == 0
-    assert sampler["next_bucket_index"] == 0
-    assert report["rollout_start_diagnostics_this_run"] == {
-        "attempt_count": 10,
-        "accepted_count": 10,
-        "rejected_count": 0,
-        "offset_min_steps": 0,
-        "offset_mean_steps": 0.0,
-        "offset_max_steps": 0,
-    }
-    start_events = [
-        json.loads(line)
-        for line in (run_dir / "metrics.jsonl").read_text().splitlines()
-        if json.loads(line)["event"] == "rollout_start"
-    ]
-    assert len(start_events) == 10
-    assert {event["status"] for event in start_events} == {"accepted"}
-    assert all(
-        {
-            "optimizer_step",
-            "rollout_group",
-            "training_bucket_index",
-            "scenario",
-            "route",
-            "seed",
-            "bucket_episode",
-            "t_ready",
-            "feasible_upper_bound",
-            "sampled_offset",
-            "target_step",
-        }.issubset(event)
-        for event in start_events
-    )
-    records = [
-        json.loads(line)
-        for line in (run_dir / "metrics.jsonl").read_text().splitlines()
-    ]
-    rollout_events = [
-        record for record in records if record["event"] == "rollout"
-    ]
-    optimizer_events = [
-        record for record in records if record["event"] == "optimizer_epoch"
-    ]
-    attempt_events = [
-        record
-        for record in records
-        if record["event"] == "dynamic_sampling_attempt"
-    ]
-    assert len(rollout_events) == 21
-    assert len(optimizer_events) == 42
-    assert [event["optimizer_step"] for event in optimizer_events] == list(
-        range(1, 43)
-    )
-    assert [
-        event["accepted_rollout_groups"] for event in rollout_events
-    ] == list(
-        range(1, 22)
-    )
-    assert len(attempt_events) == 22
-    assert attempt_events[0]["accepted"] is False
-    assert attempt_events[0]["rejection_reason"] == "zero_reward_span"
-    assert attempt_events[1]["accepted"] is True
-    assert [event["retry_index"] for event in attempt_events[:2]] == [1, 2]
-    assert all(
-        np.isfinite(event[FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG])
-        for event in rollout_events
-    )
-    assert all(
-        FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG not in event
-        for event in optimizer_events
-    )
-    frozen_tb = [
-        (value, step)
-        for tag, value, step in trainer.writer_scalars
-        if tag == FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG
-    ]
-    assert [step for _, step in frozen_tb] == list(range(1, 22))
-    assert all(np.isfinite(value) for value, _ in frozen_tb)
-    for tag, expected_mean in (
-        ("loss/total", 1.5),
-        ("loss/reference_kl", 0.15),
-        ("policy/mode_ratio_mean", 1.15),
-    ):
-        accepted_group_scalars = [
-            (value, step)
-            for scalar_tag, value, step in trainer.writer_scalars
-            if scalar_tag == tag
-        ]
-        assert [step for _, step in accepted_group_scalars] == list(
-            range(1, 22)
-        )
-        assert [value for value, _ in accepted_group_scalars] == pytest.approx(
-            [expected_mean] * 21
-        )
-
-
-def test_dynamic_sampling_rejects_two_groups_then_accepts_third(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, envs, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=1,
-        terminal_after_environment_steps=None,
-        max_rollout_groups=1,
-        rollout_groups_per_bucket_visit=1,
-        single_training_bucket=True,
-        attempt_reward_sequence=(
-            (-3.0, -3.0, -3.0),
-            (0.0, 0.0, 0.0),
-            (-3.0, -2.0, 0.0),
-        ),
-    )
-
-    assert trainer.sample_calls == 3
-    assert trainer.frozen_infer_calls == 1
-    assert trainer.build_calls == 1
-    assert trainer.proposal_calls == 1
-    assert trainer.update_calls == 1
-    assert trainer.finalize_calls == 1
-    assert len(trainer.optimization_calls) == 1
-    assert len(envs) == 1
-    assert envs[0].step_calls == 2  # one warm-up plus one accepted action
-    assert report["accepted_rollout_groups"] == 1
-    assert report["attempted_rollout_groups"] == 3
-    assert report["rejected_no_pretrain_improvement"] == 1
-    assert report["rejected_zero_reward_span"] == 1
-    assert report["pretrain_fallback_steps"] == 0
-    records = [
-        json.loads(line)
-        for line in (
-            Path(report["last_checkpoint"]).parent.parent / "metrics.jsonl"
-        ).read_text().splitlines()
-    ]
-    attempts = [
-        record
-        for record in records
-        if record["event"] == "dynamic_sampling_attempt"
-    ]
-    assert [record["rejection_reason"] for record in attempts] == [
-        "no_pretrain_improvement",
-        "zero_reward_span",
-        None,
-    ]
-    assert [record["retry_index"] for record in attempts] == [1, 2, 3]
-
-
-def test_three_rejected_groups_execute_one_pretrain_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, envs, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=1,
-        terminal_after_environment_steps=None,
-        max_rollout_groups=1,
-        rollout_groups_per_bucket_visit=1,
-        single_training_bucket=True,
-        max_attempted_groups_multiplier=6,
-        attempt_reward_sequence=(
-            (-3.0, -3.0, -3.0),
-            (-4.0, -3.0, -2.0),
-            (-5.0, -4.0, -3.0),
-            (-3.0, -2.0, 0.0),
-        ),
-    )
-
-    assert trainer.sample_calls == 4
-    assert trainer.frozen_infer_calls == 2
-    assert trainer.build_calls == 2
-    assert trainer.proposal_calls == 2
-    assert trainer.update_calls == 1
-    assert trainer.finalize_calls == 2
-    assert len(trainer.optimization_calls) == 2
-    assert len(envs) == 1
-    assert envs[0].step_calls == 3  # warm-up, fallback, accepted action
-    assert report["accepted_rollout_groups"] == 1
-    assert report["attempted_rollout_groups"] == 4
-    assert report["rejected_no_pretrain_improvement"] == 3
-    assert report["pretrain_fallback_steps"] == 1
-    records = [
-        json.loads(line)
-        for line in (
-            Path(report["last_checkpoint"]).parent.parent / "metrics.jsonl"
-        ).read_text().splitlines()
-    ]
-    assert sum(
-        record["event"] == "pretrain_fallback" for record in records
-    ) == 1
-
-
-def test_global_attempt_cap_saves_incomplete_checkpoint_and_bucket_counters(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    rejected = (-3.0, -3.0, -3.0)
-    report, envs, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=1,
-        terminal_after_environment_steps=None,
-        max_rollout_groups=2,
-        rollout_groups_per_bucket_visit=1,
-        single_training_bucket=True,
-        attempt_reward_sequence=(rejected,) * 6,
-        expect_attempt_budget_error=True,
-    )
-
-    assert report["training_status"] == "incomplete_attempt_budget_exhausted"
-    assert report["accepted_rollout_groups"] == 0
-    assert report["attempted_rollout_groups"] == 6
-    assert report["max_attempted_rollout_groups"] == 6
-    assert report["rejected_candidate_groups"] == 6
-    assert report["pretrain_fallback_steps"] == 2
-    assert report["environment_steps"] == 3
-    assert report["warmup_environment_steps"] == 1
-    assert report["cuda_peak_memory_bytes"] is None
-    assert report["attempted_rollout_groups"] == (
-        report["accepted_rollout_groups"]
-        + report["rejected_candidate_groups"]
-    )
-    assert report["environment_steps"] == (
-        report["warmup_environment_steps"]
-        + report["accepted_rollout_groups"]
-        + report["pretrain_fallback_steps"]
-    )
-    assert trainer.update_calls == 0
-    assert trainer.finalize_calls == 2
-    assert len(trainer.optimization_calls) == 2
-    assert len(envs) == 1 and envs[0].closed
-    assert envs[0].step_calls == 3
-    bucket = report["training_bucket_counters"][0]
-    assert bucket["accepted_rollouts"] == 0
-    assert bucket["attempted_rollouts"] == 6
-    assert bucket["rejected_candidate_groups"] == 6
-    assert bucket["pretrain_fallback_steps"] == 2
-    checkpoint = torch.load(
-        report["last_checkpoint"], map_location="cpu", weights_only=False
-    )
-    assert checkpoint["training_status"] == (
-        "incomplete_attempt_budget_exhausted"
-    )
-    assert checkpoint["sampler_state"]["attempted_rollout_groups"] == 6
-
-
-def test_attempt_cap_on_accepted_visit_boundary_saves_canonical_sampler_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    rejected = (-3.0, -3.0, -3.0)
-    report, envs, validation_rollouts, trainer = (
-        _run_fake_persistent_collection(
-            tmp_path,
-            monkeypatch,
-            validation_interval_rollouts=1,
-            terminal_after_environment_steps=None,
-            max_rollout_groups=2,
-            rollout_groups_per_bucket_visit=1,
-            single_training_bucket=True,
-            attempt_reward_sequence=(
-                rejected,
-                rejected,
-                rejected,
-                rejected,
-                rejected,
-                (-3.0, -2.0, 0.0),
-            ),
-            expect_attempt_budget_error=True,
-        )
-    )
-
-    assert report["training_status"] == "incomplete_attempt_budget_exhausted"
-    assert report["accepted_rollout_groups"] == 1
-    assert report["attempted_rollout_groups"] == 6
-    assert report["rejected_candidate_groups"] == 5
-    assert report["pretrain_fallback_steps"] == 1
-    assert report["optimizer_steps"] == 2
-    assert report["environment_steps"] == 3
-    assert validation_rollouts == [0]
-    assert trainer.sample_calls == 6
-    assert trainer.update_calls == 1
-    assert trainer.finalize_calls == 2
-    assert len(trainer.optimization_calls) == 2
-    assert len(envs) == 1 and envs[0].step_calls == 3 and envs[0].closed
-    checkpoint = torch.load(
-        report["last_checkpoint"], map_location="cpu", weights_only=False
-    )
-    sampler = checkpoint["sampler_state"]
-    assert sampler["accepted_rollout_groups"] == 1
-    assert sampler["attempted_rollout_groups"] == 6
-    assert sampler["bucket_accepted_rollout_counts"] == [1]
-    assert sampler["bucket_attempted_rollout_counts"] == [6]
-    assert sampler["bucket_optimizer_step_counts"] == [2]
-    assert sampler["current_visit_progress"] == 0
-    assert sampler["next_bucket_index"] == 0
-
-
-def test_frozen_pretrain_reward_resume_uses_absolute_rollout_step(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, _, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=3,
-        terminal_after_environment_steps=None,
-        max_rollout_groups=3,
-        rollout_groups_per_bucket_visit=3,
-        single_training_bucket=True,
-        first_rollout_informative=True,
-        resume_accepted_rollouts=2,
-    )
-
-    assert report["accepted_rollout_groups"] == 3
-    assert report["accepted_rollout_groups_this_run"] == 1
-    assert report["optimizer_steps"] == 6
-    assert report["optimizer_steps_this_run"] == 2
-    run_dir = Path(report["last_checkpoint"]).parent.parent
-    rollout_events = [
-        json.loads(line)
-        for line in (run_dir / "metrics.jsonl").read_text().splitlines()
-        if json.loads(line)["event"] == "rollout"
-    ]
-    assert len(rollout_events) == 1
-    assert rollout_events[0]["accepted_rollout_groups"] == 3.0
-    assert np.isfinite(
-        rollout_events[0][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG]
-    )
-    assert [
-        step
-        for tag, _, step in trainer.writer_scalars
-        if tag == FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG
-    ] == [3]
-    checkpoint = torch.load(
-        report["last_checkpoint"], map_location="cpu", weights_only=False
-    )
-    assert checkpoint["metrics"][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG] == (
-        rollout_events[0][FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG]
-    )
-
-
-def test_random_start_hits_exact_target_then_collects_ten_consecutive_groups(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, envs, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=10,
-        terminal_after_environment_steps=None,
-        max_rollout_groups=10,
-        rollout_groups_per_bucket_visit=10,
-        rollout_start_offset_max_steps=3,
-        single_training_bucket=True,
-    )
-
-    assert trainer.start_offset_calls == [(1, None, 3, 3)]
-    assert trainer.sample_environment_steps == [
-        (0, step) for step in range(4, 14)
-    ]
-    assert len(envs) == 1
-    assert envs[0].step_calls == 14
-    assert envs[0].summary_calls == 13
-    assert trainer.warmup_calls_by_episode == [4]
-    assert trainer.sample_calls == 10
-    assert trainer.update_calls == 10
-    assert report["accepted_rollout_groups"] == 10
-    assert report["environment_steps"] == 14
-    assert report["warmup_environment_steps"] == 4
-
-
-def test_training_queries_scenario_summary_only_once_per_history_ready_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _, envs, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=1,
-        terminal_after_environment_steps=None,
-        max_rollout_groups=1,
-        rollout_groups_per_bucket_visit=1,
-        single_training_bucket=True,
-        first_rollout_informative=True,
-        history_ready_step=3,
-    )
-
-    assert trainer.sample_environment_steps == [(0, 3)]
-    assert trainer.warmup_calls_by_episode == [3]
-    assert envs[0].step_calls == 4
-    assert envs[0].summary_calls == 1
-
-
-def test_main_loop_fails_immediately_when_ready_step_has_no_ten_step_reserve(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    observed_envs: list[object] = []
-    with pytest.raises(OnlineGRPOError, match="no feasible rollout start offset"):
-        _run_fake_persistent_collection(
-            tmp_path,
-            monkeypatch,
-            validation_interval_rollouts=1,
-            terminal_after_environment_steps=None,
-            max_rollout_groups=1,
-            rollout_groups_per_bucket_visit=1,
-            rollout_start_offset_max_steps=200,
-            single_training_bucket=True,
-            first_rollout_informative=True,
-            environment_steps_per_episode=200,
-            history_ready_step=191,
-            external_envs=observed_envs,
-        )
-
-    assert len(observed_envs) == 1
-    assert observed_envs[0].step_calls == 191
-    assert observed_envs[0].summary_calls == 1
-    assert observed_envs[0].closed
-
-
-def test_episode_end_before_random_target_tightens_then_retries_same_visit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, envs, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=1,
-        terminal_after_environment_steps=3,
-        max_rollout_groups=1,
-        rollout_groups_per_bucket_visit=1,
-        rollout_start_offset_max_steps=3,
-        single_training_bucket=True,
-        first_rollout_informative=True,
-    )
-
-    assert trainer.start_offset_calls == [
-        (1, None, 3, 3),
-        (1, 1, 1, 1),
-    ]
-    assert trainer.sample_environment_steps == [(1, 2)]
-    assert [env.step_calls for env in envs] == [3, 3]
-    run_dir = Path(report["last_checkpoint"]).parent.parent
-    statuses = [
-        json.loads(line)["status"]
-        for line in (run_dir / "metrics.jsonl").read_text().splitlines()
-        if json.loads(line)["event"] == "rollout_start"
-    ]
-    assert statuses == [
-        "rejected_episode_ended_before_target",
-        "accepted",
-    ]
-
-
-def test_late_random_targets_tighten_and_three_rejections_are_not_empty_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, envs, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=1,
-        terminal_after_environment_steps=None,
-        max_rollout_groups=1,
-        rollout_groups_per_bucket_visit=1,
-        rollout_start_offset_max_steps=4,
-        force_start_offset_to_upper=True,
-        window_close_steps_by_episode=(4, 3, 2, None),
-        single_training_bucket=True,
-        first_rollout_informative=True,
-    )
-
-    assert [call[1:] for call in trainer.start_offset_calls] == [
-        (None, 4, 4),
-        (2, 2, 2),
-        (1, 1, 1),
-        (0, 0, 0),
-    ]
-    assert len(envs) == 4
-    assert trainer.sample_environment_steps == [(3, 1)]
-    assert report["accepted_rollout_groups"] == 1
-    assert report["rollout_start_diagnostics_this_run"] == {
-        "attempt_count": 4,
-        "accepted_count": 1,
-        "rejected_count": 3,
-        "offset_min_steps": 0,
-        "offset_mean_steps": 1.75,
-        "offset_max_steps": 4,
-    }
-    run_dir = Path(report["last_checkpoint"]).parent.parent
-    statuses = [
-        json.loads(line)["status"]
-        for line in (run_dir / "metrics.jsonl").read_text().splitlines()
-        if json.loads(line)["event"] == "rollout_start"
-    ]
-    assert statuses == [
-        "rejected_window_closed_before_target",
-        "rejected_window_closed_before_target",
-        "rejected_window_closed_before_target",
-        "accepted",
-    ]
-
-
-def test_window_close_mid_segment_keeps_partial_visit_and_never_warms_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, envs, _, trainer = _run_fake_persistent_collection(
-        tmp_path,
-        monkeypatch,
-        validation_interval_rollouts=3,
-        terminal_after_environment_steps=None,
-        max_rollout_groups=3,
-        rollout_groups_per_bucket_visit=3,
-        window_close_steps_by_episode=(2, None),
-        single_training_bucket=True,
-    )
-
-    assert trainer.sample_environment_steps == [(0, 1), (1, 1), (1, 2)]
-    assert trainer.warmup_calls_by_episode == [1, 1]
-    assert [env.step_calls for env in envs] == [2, 3]
-    assert report["accepted_rollout_groups"] == 3
-    assert report["training_bucket_counters"][0]["environment_episodes"] == 2
-    assert trainer.start_offset_calls == [
-        (1, None, 0, 0),
-        (1, None, 0, 0),
-    ]
-
-
-def test_validation_and_natural_end_resume_same_bucket_visit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    report, envs, validation_rollouts, _ = _run_fake_persistent_collection(
-        tmp_path / "validation",
-        monkeypatch,
-        validation_interval_rollouts=2,
-        terminal_after_environment_steps=None,
-    )
-    assert validation_rollouts == [0] + list(range(2, 21, 2)) + [21]
-    assert report["training_bucket_counters"][0]["environment_episodes"] == 2
-    assert envs[0].step_calls == 3  # warm-up + rollouts 1 and 2
-    assert envs[1].step_calls == 2  # warm-up + rollout 3, same bucket
-    assert envs[0].scenario == envs[1].scenario
-    assert envs[0].seed == envs[1].seed
-
-    report, terminal_envs, _, _ = _run_fake_persistent_collection(
-        tmp_path / "terminal",
-        monkeypatch,
-        validation_interval_rollouts=21,
-        terminal_after_environment_steps=2,
-    )
-    assert report["training_bucket_counters"][0]["environment_episodes"] == 3
-    assert len(terminal_envs) == 21
-    assert all(env.step_calls == 2 for env in terminal_envs)
-    assert report["warmup_environment_steps"] == 21
-
-
-@pytest.mark.parametrize("group_size", [3, 5])
-def test_online_informative_reward_detection_follows_group_size(
-    group_size: int,
-) -> None:
-    constant = np.full(group_size, -1.0, dtype=np.float32)
-    informative = constant.copy()
-    informative[-1] = 0.0
-
-    assert not _joint_rewards_are_informative(
-        constant,
-        pretrain_reward=-2.0,
-        group_size=group_size,
-        improvement_margin=1e-6,
-    )
-    assert _joint_rewards_are_informative(
-        informative,
-        pretrain_reward=-2.0,
-        group_size=group_size,
-        improvement_margin=1e-6,
-    )
-
-
-def test_scenario_routes_and_primary_sampling_contract() -> None:
-    for scenario_id, route in PRIMARY_S5_S9_SCENARIOS:
-        assert route in SCENARIO_BY_ID[scenario_id].allowed_local_routes
-    assert JointGRPOOnlineConfig(device="cpu").scenarios == PRIMARY_S5_S9_SCENARIOS
-
-    class Orchestrator:
-        def get_episode_summary(self):
-            return {
-                "scenario_id": "S8_ego_exit_to_ramp",
-                "scenario_realized": True,
-                "scenario_recipes_complete": False,
-            }
-
-    env = SimpleNamespace(_scenario_orchestrator=Orchestrator())
-    assert not _scenario_ready_for_primary_sampling(env)
-
-
-def test_execution_helpers_preserve_raw_policy_action() -> None:
-    coarse = np.zeros((3, 10, 8, 3), dtype=np.float32)
-    coarse[..., 0] = 4.0 * np.arange(1, 9, dtype=np.float32)
-    raw = np.broadcast_to(coarse[:, 0], (1, 3, 8, 3)).copy()
-    raw[..., 0] *= -1.0
-    original = raw.copy()
-    values = SimpleNamespace(
-        coarse_trajectories=coarse,
-        ego_state=np.pad(
-            np.full((3, 1), 8.0, dtype=np.float32), ((0, 0), (0, 7))
-        ),
-    )
-    result = optimize_selected_model_trajectories(
-        values, raw, np.zeros((1, 3), dtype=np.int64)
-    )
-    assert np.array_equal(raw, original)
-    assert np.array_equal(result.raw_trajectories, original)
-    assert result.optimized_valid.all()
-
-
-def test_online_action_and_batch_helpers_are_strict() -> None:
-    env = SimpleNamespace(
-        agents={
-            f"agent{role}": SimpleNamespace(speed_km_h=18.0)
-            for role in range(3)
-        }
-    )
-    assert constant_velocity_actions(env)["agent0"][1, 0] == pytest.approx(5.0)
-    trajectories = np.zeros((3, 8, 3), dtype=np.float32)
-    action = joint_trajectory_action(trajectories)
-    trajectories[0, 0, 0] = 99.0
-    assert action["agent0"][0, 0] == 0.0
-    assert episode_has_ended(
-        {"__all__": False},
-        {"__all__": False},
-        {"agent1": {"out_of_road": True}},
-    )
-
-    coarse = np.zeros((3, 10, 8, 3), dtype=np.float32)
-    coarse[..., 0] = (
-        4.0 * np.arange(1, 9, dtype=np.float32)[None, None, :] * 0.5
-    )
-    coarse[:, 9, :, 0] = np.asarray(
-        [1.5, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float32
-    )
-    fields = {
-        "bev": np.zeros((3, 8, 256, 256), dtype=np.uint8),
-        "ego_state": np.zeros((3, 8), dtype=np.float32),
-        "formation_relation_state": np.zeros((3, 12), dtype=np.float32),
-        "relation_valid_mask": np.ones((3, 2), dtype=np.bool_),
-        "agent_role": np.arange(3, dtype=np.int64),
-        "coarse_trajectories": coarse,
-        "mode_valid_mask": np.ones((3, 10), dtype=np.bool_),
-    }
-    fields["ego_state"][:, 0] = 4.0
-    values = SimpleNamespace(**fields, as_dict=lambda: fields)
-    mask = execution_mode_valid_mask(values)
-    batch = model_inputs_to_batch(values, torch.device("cpu"), mode_valid_mask=mask)
-    assert torch.equal(batch["mode_valid_mask"][0], torch.from_numpy(mask.copy()))
-
-
-def test_v2_online_inputs_use_and_accept_exact_rule_proposal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    proposal = JointActionProposal(
-        proposal_id=4,
-        rank=0,
-        rule_score=1.0,
-        decisions={
-            agent_id: {"action": 0}
-            for agent_id in ("agent0", "agent1", "agent2")
-        },
-    )
-    proposal_batch = RuleMakerProposalBatch(batch_id=9, proposals=(proposal,))
-
-    class RuleMaker:
-        is_formation_locked = True
-        has_active_lane_change_commitments = False
-
-        def __init__(self):
-            self.reset_args = None
-            self.proposal_args = None
-            self.accepted = None
-
-        def reset(self, env, agent_ids):
-            self.reset_args = (env, tuple(agent_ids))
-
-        def propose_joint_actions(
-            self, env, agent_ids, planner_batch, *, hard_valid_modes_by_action
-        ):
-            self.proposal_args = (
-                env,
-                tuple(agent_ids),
-                planner_batch,
-                hard_valid_modes_by_action,
-            )
-            return proposal_batch
-
-        def accept_joint_action(self, batch_id, proposal_id):
-            self.accepted = (batch_id, proposal_id)
-
-    class Builder:
-        def __init__(self):
-            self.augmentation = None
-
-        def augment_v2_model_inputs(self, env, values, **kwargs):
-            self.augmentation = (env, values, kwargs)
-            return SimpleNamespace(
-                conditioned=True, mode_valid_mask=values.mode_valid_mask
-            )
-
-    rule_maker = RuleMaker()
-    monkeypatch.setattr(
-        "train.train_bev_joint_grpo_online.make_rule_maker",
-        lambda config: rule_maker,
-    )
-    env = SimpleNamespace(
-        config={"scenario_id": "S5_hard_brake_lead"},
-        _last_planner_batch={"tick": 3},
-        trajectory_to_control=lambda agent_id, trajectory: np.zeros(2),
-    )
-    planner = SimpleNamespace(config=SimpleNamespace(model_version="v2"))
-    values = SimpleNamespace(
-        mode_valid_mask=np.ones((3, 10), dtype=np.bool_)
-    )
-    builder = Builder()
-
-    resolved_rule_maker = _new_online_rule_maker(planner, env)
-    condition = _condition_online_model_inputs(
-        resolved_rule_maker,
-        env,
-        builder,
-        values,
-        committed_execution_id=None,
-        committed_plan_actions=None,
-    )
-
-    assert resolved_rule_maker is rule_maker
-    assert rule_maker.reset_args == (env, ("agent0", "agent1", "agent2"))
-    assert condition.model_inputs.conditioned
-    assert condition.proposal_batch is proposal_batch
-    assert not condition.is_commitment
-    assert builder.augmentation[2] == {
-        "rule_action_condition": {"agent0": 0, "agent1": 0, "agent2": 0},
-        "rule_formation_state": True,
-    }
-
-    optimization = SimpleNamespace(
-        optimized_trajectories=np.zeros((1, 3, 8, 3), dtype=np.float32)
-    )
-    resolved, diagnostics, committed_id, committed_actions = (
-        _finalize_online_rule_action(
-        rule_maker,
-        condition,
-        env=env,
-        scenario=("S5_hard_brake_lead", "R1_entry_straight"),
-        values=condition.model_inputs,
-        selected_modes=np.full(3, int(ModeIndex.KEEP_HIGH), dtype=np.int64),
-        optimization=optimization,
-        optimizer=object(),
-        )
-    )
-
-    assert resolved is optimization
-    assert committed_id is None
-    assert committed_actions is None
-    assert rule_maker.accepted == (9, 4)
-    assert diagnostics["conditioned_rollouts"] == 1
-    assert diagnostics["proposal_matches"] == 1
-    assert diagnostics["condition_failures"] == 0
-
-
-def test_online_rule_maker_commitment_persists_and_resumes_proposals() -> None:
-    proposal = JointActionProposal(
-        proposal_id=4,
-        rank=0,
-        rule_score=1.0,
-        decisions={agent_id: {"action": 0} for agent_id in AGENT_IDS},
-    )
-    proposal_batch = RuleMakerProposalBatch(batch_id=9, proposals=(proposal,))
-
-    class RuleMaker:
-        is_formation_locked = True
-
-        def __init__(self) -> None:
-            self.active = False
-            self.proposal_calls = 0
-            self.advance_calls: list[int] = []
-
-        @property
-        def has_active_lane_change_commitments(self) -> bool:
-            return self.active
-
-        def propose_joint_actions(
-            self, env, agent_ids, planner_batch, *, hard_valid_modes_by_action
-        ):
-            self.proposal_calls += 1
-            return proposal_batch
-
-        def accept_joint_action(self, batch_id, proposal_id) -> None:
-            assert (batch_id, proposal_id) == (9, 4)
-            self.active = True
-
-        def advance_committed_execution(
-            self, env, agent_ids, execution_id
-        ) -> None:
-            self.advance_calls.append(int(execution_id))
-            if len(self.advance_calls) == 3:
-                self.active = False
-
-        def committed_execution_rule_actions(self, env, plan_actions):
-            return dict(plan_actions)
-
-    class Builder:
-        def augment_v2_model_inputs(self, env, values, **kwargs):
-            return values
-
-    rule_maker = RuleMaker()
-    env = SimpleNamespace(
-        _last_planner_batch={},
-        trajectory_to_control=lambda agent_id, trajectory: np.zeros(2),
-    )
-    values = SimpleNamespace(
-        mode_valid_mask=np.ones((3, 10), dtype=np.bool_),
-        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
-        ego_state=np.zeros((3, 8), dtype=np.float32),
-    )
-    optimization = SimpleNamespace(
-        optimized_trajectories=np.zeros((1, 3, 8, 3), dtype=np.float32)
-    )
-
-    proposal_condition = _condition_online_model_inputs(
-        rule_maker,
-        env,
-        Builder(),
-        values,
-        committed_execution_id=None,
-        committed_plan_actions=None,
-    )
-    _, _, committed_id, committed_actions = _finalize_online_rule_action(
-        rule_maker,
-        proposal_condition,
-        env=env,
-        scenario=("S5_hard_brake_lead", "R1_entry_straight"),
-        values=values,
-        selected_modes=np.full(3, int(ModeIndex.KEEP_HIGH), dtype=np.int64),
-        optimization=optimization,
-        optimizer=KinematicTrajectoryOptimizer(),
-    )
-    assert committed_id == 9
-    assert committed_actions == {agent_id: 0 for agent_id in AGENT_IDS}
-
-    committed_condition = _condition_online_model_inputs(
-        rule_maker,
-        env,
-        Builder(),
-        values,
-        committed_execution_id=committed_id,
-        committed_plan_actions=committed_actions,
-    )
-    assert committed_condition.is_commitment
-    assert committed_condition.proposal_batch is None
-    assert rule_maker.proposal_calls == 1
-    resolved, diagnostics, resumed_id, resumed_actions = (
-        _finalize_online_rule_action(
-            rule_maker,
-            committed_condition,
-            env=env,
-            scenario=("S5_hard_brake_lead", "R1_entry_straight"),
-            values=values,
-            selected_modes=np.full(
-                3, int(ModeIndex.KEEP_HIGH), dtype=np.int64
-            ),
-            optimization=optimization,
-            optimizer=KinematicTrajectoryOptimizer(),
-        )
-    )
-    assert resolved is optimization
-    assert diagnostics["proposal_match_attempts"] == 0
-    assert diagnostics["proposal_matches"] == 0
-    assert diagnostics["commitment_conditioned_rollouts"] == 1
-    assert diagnostics["commitment_feedback_incompatible"] == 0
-    assert resumed_id == committed_id
-    assert resumed_actions == committed_actions
-
-    incompatible_condition = _condition_online_model_inputs(
-        rule_maker,
-        env,
-        Builder(),
-        values,
-        committed_execution_id=resumed_id,
-        committed_plan_actions=resumed_actions,
-    )
-    resolved, diagnostics, resumed_id, resumed_actions = (
-        _finalize_online_rule_action(
-            rule_maker,
-            incompatible_condition,
-            env=env,
-            scenario=("S5_hard_brake_lead", "R1_entry_straight"),
-            values=values,
-            selected_modes=np.full(
-                3, int(ModeIndex.LEFT_HIGH), dtype=np.int64
-            ),
-            optimization=optimization,
-            optimizer=KinematicTrajectoryOptimizer(),
-        )
-    )
-    assert resolved.optimized_trajectories.shape == (1, 3, 8, 3)
-    assert np.all(resolved.selected_modes == int(ModeIndex.STOP))
-    assert diagnostics["proposal_match_attempts"] == 0
-    assert diagnostics["proposal_matches"] == 0
-    assert diagnostics["commitment_conditioned_rollouts"] == 1
-    assert diagnostics["commitment_feedback_incompatible"] == 1
-    assert resumed_id == committed_id
-    assert resumed_actions == committed_actions
-
-    next_proposal = _condition_online_model_inputs(
-        rule_maker,
-        env,
-        Builder(),
-        values,
-        committed_execution_id=resumed_id,
-        committed_plan_actions=resumed_actions,
-    )
-    assert not next_proposal.is_commitment
-    assert next_proposal.proposal_batch is proposal_batch
-    assert next_proposal.committed_execution_id is None
-    assert next_proposal.committed_plan_actions is None
-    assert rule_maker.proposal_calls == 2
-    assert rule_maker.advance_calls == [9, 9, 9]
-
-
-@pytest.mark.parametrize("model_version", [None, "v1"])
-def test_online_grpo_rejects_non_v2_planner(model_version: object) -> None:
-    planner = SimpleNamespace(config=SimpleNamespace(model_version=model_version))
-    with pytest.raises(OnlineGRPOError, match="requires a v2 planner"):
-        _new_online_rule_maker(planner, SimpleNamespace())
-
-
-def test_v2_unmatched_rule_action_executes_batched_safe_stop() -> None:
-    proposal = JointActionProposal(
-        proposal_id=4,
-        rank=0,
-        rule_score=1.0,
-        decisions={
-            agent_id: {"action": 0}
-            for agent_id in ("agent0", "agent1", "agent2")
-        },
-    )
-    proposal_batch = RuleMakerProposalBatch(batch_id=9, proposals=(proposal,))
-
-    class RuleMaker:
-        accepted = None
-        has_active_lane_change_commitments = False
-
-        def accept_joint_action(self, batch_id, proposal_id):
-            self.accepted = (batch_id, proposal_id)
-
-    rule_maker = RuleMaker()
-    env = SimpleNamespace(
-        trajectory_to_control=lambda agent_id, trajectory: np.zeros(2)
-    )
-    optimization = SimpleNamespace(
-        optimized_trajectories=np.zeros((1, 3, 8, 3), dtype=np.float32)
-    )
-    values = SimpleNamespace(
-        coarse_trajectories=np.zeros((3, 10, 8, 3), dtype=np.float32),
-        ego_state=np.zeros((3, 8), dtype=np.float32),
-    )
-
-    condition = _OnlineRuleCondition(
-        model_inputs=values,
-        proposal_batch=proposal_batch,
-        rule_actions={agent_id: 0 for agent_id in ("agent0", "agent1", "agent2")},
-        is_commitment=False,
-        committed_execution_id=None,
-        committed_plan_actions=None,
-    )
-    resolved, diagnostics, committed_id, committed_actions = (
-        _finalize_online_rule_action(
-        rule_maker,
-        condition,
-        env=env,
-        scenario=("S5_hard_brake_lead", "R1_entry_straight"),
-        values=values,
-        selected_modes=np.full(3, int(ModeIndex.LEFT_HIGH), dtype=np.int64),
-        optimization=optimization,
-        optimizer=KinematicTrajectoryOptimizer(),
-        )
-    )
-
-    assert resolved.optimized_trajectories.shape == (1, 3, 8, 3)
-    assert resolved.selected_modes.shape == (1, 3)
-    assert np.all(resolved.selected_modes == int(ModeIndex.STOP))
-    assert np.isfinite(resolved.optimized_trajectories).all()
-    assert len(joint_trajectory_action(resolved.optimized_trajectories[0])) == 3
-    assert rule_maker.accepted is None
-    assert committed_id is None
-    assert committed_actions is None
-    assert diagnostics["condition_failures"] == 1
-    assert diagnostics["forced_safe_stops"] == 1
+        with pytest.raises(OnlineGRPOError, match="max_sampling_attempts"):
+            online.run_joint_grpo_training(config, run_dir=run_dir)
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+
+    assert report["accepted_update_states"] == int(has_active_mode)
+    assert report["sampling_attempts"] == (1 if has_active_mode else 3)
+    assert report["rejected_sampling_attempts"] == (0 if has_active_mode else 3)
+    assert report["exhausted_states"] == int(not has_active_mode)
+    assert report["baseline_execution_steps"] == 1
+    assert trainer.sample_calls == (1 if has_active_mode else 3)
+    assert trainer.frozen_calls == 1
+    if has_active_mode:
+        assert trainer.update_masks[0].sum() == 1
+    else:
+        assert not trainer.update_masks
+    assert len(executed) == env.step_calls == 1
+    np.testing.assert_array_equal(executed[0], -7.0)

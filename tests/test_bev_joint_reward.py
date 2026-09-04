@@ -300,42 +300,50 @@ def test_reward_rejects_labels_and_invalid_contracts() -> None:
         )
 
 
-def test_grpo_open_application_contract_freezes_tau_d_without_changing_reward() -> None:
+def test_grpo_open_application_contract_is_vehicle_mode_baseline_only() -> None:
     assert GRPO_OPEN_REWARD_APPLICATION_CONTRACT == {
-        "version": "stage2_grpo_open_application_v2",
-        "policy_sample_domain": "tau_d",
-        "policy_probability_domain": "tau_d",
+        "version": "stage2_grpo_open_application_v3",
+        "comparison_unit": "vehicle_mode",
+        "policy_sample_domain": "all-mode raw tau_d",
+        "policy_probability_domain": (
+            "per-vehicle per-mode DDIM trajectory transitions"
+        ),
+        "mode_policy_terms": False,
         "reward_input_domain": "tau_d",
-        "advantage_baseline": (
-            "same-live-state deterministic frozen Stage 1 raw tau_d proxy reward"
-        ),
+        "teammate_reward_context": "frozen Stage 1 argmax raw tau_d",
+        "same_mode_reference": "frozen Stage 1 raw tau_d for the target mode",
         "advantage_normalization": (
-            "delta divided by per-group delta RMS plus epsilon; no mean centering"
+            "per-(vehicle,mode) mean-centered population-RMS standardization"
         ),
-        "accepted_group_condition": (
-            "raw reward span greater than 1e-6 and "
-            "max(reward-frozen_pretrain_reward) greater than "
-            "pretrain_improvement_margin"
+        "active_mode_condition": (
+            "hard-valid and max(candidate_reward) >= same-mode pretrain reward"
         ),
-        "rejected_group_side_effects": (
-            "no trajectory optimization, RuleMaker finalize, policy update, "
-            "accepted-budget progress, validation progress, or environment step"
+        "activation_margin": None,
+        "activation_reward_span_threshold": None,
+        "inactive_mode_loss_terms": (
+            "excluded from trajectory PG, trajectory BC and trajectory KL"
         ),
-        "exhausted_state_fallback": (
-            "optimize and execute the frozen-pretrain tau_d trajectory once"
+        "sampled_candidate_execution": False,
+        "sampled_candidate_optimizer_or_rule_maker": False,
+        "live_state_retry": (
+            "resample diffusion noise only when every vehicle-mode is inactive"
         ),
-        "candidate_selection_domain": "tau_d",
+        "environment_execution_policy": (
+            "always cached deterministic frozen Stage 1 argmax baseline"
+        ),
         "execution_input_domain": "tau_cmd",
-        "execution_transform": "KinematicTrajectoryOptimizer(selected_tau_d)",
-        "optimize_only_selected_candidate": True,
-        "optimizer_must_succeed_before_policy_update": True,
+        "execution_transform": (
+            "raw frozen baseline -> KinematicTrajectoryOptimizer -> "
+            "RuleMaker finalize/safe-stop -> env.step"
+        ),
+        "baseline_execution_per_live_state": 1,
         "tracking_expansion_enabled": False,
         "calibration_required": False,
-        "best_checkpoint_metric": "validation/raw_proxy_reward_mean",
-        "simulator_validation_role": "diagnostic_only",
+        "best_checkpoint_metric": "validation/vehicle_reward_mean",
+        "joint_reward_role": "historical/final team evaluation diagnostic only",
     }
     assert GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 == (
-        "412d069690fa52745bcd8e1d0f019d1c50a6284305e6a5e719486c312d6b01a5"
+        "4ea5af5edfdab318b0d6de6cabeecc5f75c4d2f4b976c47913ba594eb8c3eb5a"
     )
 
 

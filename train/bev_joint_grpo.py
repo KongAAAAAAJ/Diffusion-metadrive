@@ -28,10 +28,14 @@ from train.train_bev_diffusion_stage1 import (
 )
 
 
-GRPO_CHECKPOINT_SCHEMA_VERSION = 2
-GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v2"
-GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v2"
-GRPO_REWARD_SOURCE = "external_with_explicit_pretrain_baseline"
+GRPO_CHECKPOINT_SCHEMA_VERSION = 3
+GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v3"
+GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v3"
+GRPO_REWARD_SOURCE = "external_per_vehicle_same_mode_counterfactual"
+PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION = 2
+PREVIOUS_GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v2"
+PREVIOUS_GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v2"
+PREVIOUS_GRPO_REWARD_SOURCE = "external_with_explicit_pretrain_baseline"
 LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION = 1
 LEGACY_GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v1"
 LEGACY_GRPO_REWARD_SOURCE = "external"
@@ -405,7 +409,7 @@ def load_grpo_config_from_checkpoint(
     return _grpo_config_from_payload(payload)
 
 
-def _validate_grpo_a_evaluation_identity(payload: Mapping[str, Any]) -> None:
+def _validate_grpo_a_evaluation_identity(payload: Mapping[str, Any]) -> str:
     current_identity = {
         "schema_version": GRPO_CHECKPOINT_SCHEMA_VERSION,
         "format": GRPO_CHECKPOINT_FORMAT,
@@ -421,12 +425,50 @@ def _validate_grpo_a_evaluation_identity(payload: Mapping[str, Any]) -> None:
         "predecessor_condition": "none",
         "reward_source": LEGACY_GRPO_REWARD_SOURCE,
     }
-    if any(
-        all(payload.get(name) == value for name, value in identity.items())
-        for identity in (current_identity, legacy_identity)
+    if all(payload.get(name) == value for name, value in current_identity.items()):
+        return "current"
+    if (
+        payload.get("schema_version") == PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION
+        and payload.get("format") == PREVIOUS_GRPO_CHECKPOINT_FORMAT
+        and payload.get("variant") == "A"
+        and payload.get("predecessor_condition") == "none"
+        and payload.get("reward_source") == PREVIOUS_GRPO_REWARD_SOURCE
+        and payload.get("optimizer_contract_version")
+        in {
+            "stage2_joint_grpo_optimizer_v3",
+            "stage2_joint_grpo_optimizer_v4",
+        }
     ):
-        return
+        return "previous"
+    if all(payload.get(name) == value for name, value in legacy_identity.items()):
+        return "legacy"
     raise JointGRPOError("GRPO evaluation checkpoint identity mismatch")
+
+
+def _historical_grpo_config_for_evaluation(
+    payload: Mapping[str, Any],
+) -> JointGRPOConfig:
+    """Translate only the sampling size needed to inspect historical planners."""
+
+    raw_config = payload.get("grpo_config")
+    if not isinstance(raw_config, Mapping):
+        raise JointGRPOError("GRPO checkpoint config must be a mapping")
+    values = dataclasses.asdict(JointGRPOConfig())
+    for name, default in tuple(values.items()):
+        if name in raw_config:
+            value = raw_config[name]
+            if type(value) is not type(default):
+                raise JointGRPOError("historical GRPO checkpoint config is invalid")
+            values[name] = value
+    if "trajectories_per_mode" not in raw_config:
+        old_size = raw_config.get("group_size")
+        if isinstance(old_size, bool) or not isinstance(old_size, int) or old_size < 2:
+            raise JointGRPOError("historical GRPO checkpoint config is invalid")
+        values["trajectories_per_mode"] = old_size
+    try:
+        return JointGRPOConfig(**values)
+    except (TypeError, ValueError, JointGRPOError) as exc:
+        raise JointGRPOError("historical GRPO checkpoint config is invalid") from exc
 
 
 def load_grpo_a_config_for_evaluation(
@@ -435,8 +477,10 @@ def load_grpo_a_config_for_evaluation(
     """Read an exact current or historical Variant-A config for evaluation."""
 
     payload = _load_grpo_payload(path)
-    _validate_grpo_a_evaluation_identity(payload)
-    return _grpo_config_from_payload(payload)
+    generation = _validate_grpo_a_evaluation_identity(payload)
+    if generation == "current":
+        return _grpo_config_from_payload(payload)
+    return _historical_grpo_config_for_evaluation(payload)
 
 
 def _load_grpo_checkpoint(
@@ -573,7 +617,7 @@ def load_grpo_a_checkpoint_for_evaluation(
         ) from exc
 
     payload = _load_grpo_payload(path)
-    _validate_grpo_a_evaluation_identity(payload)
+    generation = _validate_grpo_a_evaluation_identity(payload)
     if payload.get("source_stage1_sha256") != expected_source_stage1_sha256:
         raise JointGRPOError("GRPO evaluation checkpoint source_stage1_sha256 mismatch")
     for name in ("diagnostic_only", "eligible_for_formal_training"):
@@ -596,31 +640,28 @@ def load_grpo_a_checkpoint_for_evaluation(
         raise JointGRPOError(
             "GRPO evaluation checkpoint source_dataset_fingerprint is invalid"
         ) from exc
-    step = payload.get("optimizer_step")
-    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
-        raise JointGRPOError("GRPO evaluation checkpoint optimizer_step is invalid")
-    if payload.get("grpo_config") != dataclasses.asdict(trainer.config):
-        raise JointGRPOError("GRPO evaluation checkpoint config mismatch")
-    for name in (
-        "metrics",
-        "planner_state",
-        "reference_state",
-        "optimizer_state",
-        "scaler_state",
-    ):
-        if not isinstance(payload.get(name), Mapping):
-            raise JointGRPOError(f"GRPO evaluation checkpoint {name} is invalid")
-    metrics = payload["metrics"]
-    if any(
-        not isinstance(name, str)
-        or isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        for name, value in metrics.items()
-    ):
-        raise JointGRPOError(
-            "GRPO evaluation checkpoint metrics must be finite scalars"
-        )
+    if not isinstance(payload.get("planner_state"), Mapping):
+        raise JointGRPOError("GRPO evaluation checkpoint planner_state is invalid")
+    if generation == "current":
+        step = payload.get("optimizer_step")
+        if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+            raise JointGRPOError("GRPO evaluation checkpoint optimizer_step is invalid")
+        if payload.get("grpo_config") != dataclasses.asdict(trainer.config):
+            raise JointGRPOError("GRPO evaluation checkpoint config mismatch")
+        for name in ("metrics", "reference_state", "optimizer_state", "scaler_state"):
+            if not isinstance(payload.get(name), Mapping):
+                raise JointGRPOError(f"GRPO evaluation checkpoint {name} is invalid")
+        metrics = payload["metrics"]
+        if any(
+            not isinstance(name, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for name, value in metrics.items()
+        ):
+            raise JointGRPOError(
+                "GRPO evaluation checkpoint metrics must be finite scalars"
+            )
     try:
         trainer.planner.load_state_dict(
             dict(payload["planner_state"]), strict=True
@@ -667,6 +708,9 @@ __all__ = [
     "GRPO_CHECKPOINT_SCHEMA_VERSION",
     "LEGACY_GRPO_CHECKPOINT_FORMAT",
     "LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION",
+    "PREVIOUS_GRPO_B_CHECKPOINT_FORMAT",
+    "PREVIOUS_GRPO_CHECKPOINT_FORMAT",
+    "PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION",
     "grpo_b_checkpoint_payload",
     "grpo_checkpoint_payload",
     "load_grpo_a_checkpoint_for_evaluation",

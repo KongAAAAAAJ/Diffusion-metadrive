@@ -1,0 +1,162 @@
+{
+  "format": "stage2_per_vehicle_same_mode_grpo_implementation_report_v1",
+  "recorded_at": "2026-09-04T13:51:45+08:00",
+  "status": "implementation_verified_formal_gate_failed",
+  "repository": {
+    "branch": "BEV",
+    "base_git_commit": "61490a80e7faf8da479926f9c34bdd439bddc42e",
+    "implementation_uncommitted": true
+  },
+  "requested_change": "Replace cross-mode GRPO comparison with independent n=48 trajectory groups for every valid vehicle-mode, use target-vehicle counterfactual reward, and always execute the frozen Stage-1 argmax baseline.",
+  "implemented_semantics": {
+    "comparison_unit": "vehicle_mode",
+    "trajectories_per_mode": 48,
+    "rollout_shapes": {
+      "chains_normalized": [1, 48, 5, 3, 10, 8, 2],
+      "candidate_trajectories": [1, 3, 10, 48, 8, 3],
+      "trajectory_log_probability": [1, 3, 10, 48, 3],
+      "rewards_and_advantages": "[B,3,10,48]",
+      "active_mode_mask": "[B,3,10]"
+    },
+    "advantage": "For each (batch,vehicle,mode), subtract the 48-trajectory mean and divide by sqrt(population_variance+epsilon).",
+    "active_gate": "hard_valid AND optimizer_executable AND max_j(candidate_reward_j) >= same_mode_frozen_pretrain_reward",
+    "inactive_loss_terms": [
+      "trajectory_pg",
+      "behavior_cloning",
+      "trajectory_reference_kl"
+    ],
+    "mode_probability_terms_removed": true,
+    "trajectory_ratio_clip_bounds": [0.9, 1.2],
+    "update_epochs": 10,
+    "trainable_module": "diffusion_decoder.trajectory_head",
+    "zero_signal_epoch": "skip optimizer step and increment zero_signal_epochs",
+    "same_state_retry": "Only when every vehicle-mode is inactive; at most three diffusion-noise attempts.",
+    "partial_active_policy": "Immediately merge all active vehicle-modes into one update without replenishing inactive modes.",
+    "environment_execution": "cached frozen Stage-1 argmax raw tau_d -> trajectory optimizer -> RuleMaker finalize/safe-stop -> exactly one env.step",
+    "sampled_candidate_execution": false
+  },
+  "reward": {
+    "contract_version": "stage2_vehicle_mode_reward_v1",
+    "contract_sha256": "2bb512f345a6e7d0e07a2278e1baae28c15eafca3e1dc356c674b96d5249ddba",
+    "config_sha256": "bc1b0d2a85bb41743d57800e818fa5ea730486857b238ad1b2421bf1dd071e2d",
+    "formula": "0.47*progress - 1.185*gap - 0.5*ttc - 0.5*road - 0.0225*comfort - 5.0*collision - 4.0*out_of_drivable",
+    "target_vehicle_only": true,
+    "teammates": "Both teammate trajectories remain the cached frozen Stage-1 argmax raw tau_d.",
+    "formation_component": false,
+    "unrelated_teammate_self_events": false,
+    "joint_reward_training_role": "none"
+  },
+  "contracts": {
+    "optimizer": {
+      "version": "stage2_joint_grpo_optimizer_v5",
+      "sha256": "868f1421b7004019255f5974ac46518f64bcfbdda3ba05ab2f41f6fed49604f7"
+    },
+    "application": {
+      "version": "stage2_grpo_open_application_v3",
+      "sha256": "4ea5af5edfdab318b0d6de6cabeecc5f75c4d2f4b976c47913ba594eb8c3eb5a"
+    },
+    "collection": "stage2_joint_grpo_persistent_episode_v4",
+    "online_config": "bev_joint_grpo_online_config_v10",
+    "online_report": "bev_joint_grpo_online_report_v10",
+    "stability_manifest": "stage2_grpo_stability_ab_manifest_v5",
+    "stability_report": "stage2_grpo_stability_ab_report_v5",
+    "checkpoint_schema_version": 3,
+    "checkpoint_formats": [
+      "bev_joint_grpo_a_v3",
+      "bev_joint_grpo_b_v3"
+    ],
+    "legacy_checkpoint_policy": "Schema v1/v2 may provide Variant-A planner weights for explicit historical read-only evaluation only; optimizer, RNG, counters and reference state are never restored."
+  },
+  "counters": [
+    "accepted_update_states",
+    "rejected_sampling_attempts",
+    "exhausted_states",
+    "baseline_execution_steps",
+    "zero_signal_epochs"
+  ],
+  "selection_and_validation": {
+    "best_checkpoint_metric": "validation/vehicle_reward_mean",
+    "additional_metrics": [
+      "validation/same_mode_pretrain_reward_mean",
+      "validation/vehicle_reward_gain",
+      "per_vehicle_safety_metrics"
+    ],
+    "joint_reward_role": "historical and final team-evaluation diagnostic only"
+  },
+  "run_reconciliation": {
+    "report": "evaluation/STAGE2_GRPO_RUN18_RUN23_RECONCILIATION_REPORT.json",
+    "report_sha256": "0edadcb07e135e5a3a3a6d6589505189c8f4b3f9158dd07092ddaf1c7eadeace",
+    "run21": "failed historical diagnostic at 3676 accepted states and 36760 optimizer steps; no report",
+    "next_unoccupied_run": "run_24",
+    "actual_clip_for_new_runs": [0.9, 1.2]
+  },
+  "verification": {
+    "focused_and_adjacent_tests_passed": 216,
+    "warnings": 15,
+    "inactive_pg_bc_kl_zero_gradient_direct_test": true,
+    "python_compile_passed": true,
+    "launcher_bash_syntax_passed": true,
+    "git_diff_check_passed_before_project_metadata_finalization": true,
+    "independent_read_only_review": "No blocking or high-risk implementation-semantic defect found."
+  },
+  "cuda_single_update_smoke": {
+    "status": "passed",
+    "diagnostic_report": "/tmp/grpo_same_mode_cuda_smoke_20260904/report.json",
+    "diagnostic_report_sha256": "b8b2cfe0bfc2580f96b2dc6fb2295bb4f6eaf82809091d86802ac6a05e3afc64",
+    "source_stage1_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "device": "cuda",
+    "optimizer_steps": 10,
+    "zero_signal_epochs": 0,
+    "finite_total_loss": -0.011695514433085918,
+    "trajectory_head_gradient_norm": 1.9213522672653198,
+    "trajectory_head_max_abs_delta": 0.00010143406689167023,
+    "shared_decoder_max_abs_delta": 0.0,
+    "mode_head_max_abs_delta": 0.0,
+    "backbone_max_abs_delta": 0.0,
+    "reference_max_abs_delta": 0.0,
+    "trajectory_log_probability_replay_max_abs_error": 0.0,
+    "peak_cuda_memory_mib": 587.4970703125,
+    "memory_limit_mib": 16384,
+    "checkpoint_round_trip": true,
+    "checkpoint_schema_version": 3
+  },
+  "frozen_stage1_baseline_gate": {
+    "status": "failed",
+    "report": "evaluation/STAGE2_SAME_MODE_GRPO_FROZEN_BASELINE_GATE.json",
+    "report_sha256": "1608379e583abde35def1fbd49c34ccab3412f2ab08f731b5bde8aa866da8a03",
+    "required_buckets": 10,
+    "required_steps_per_bucket": 200,
+    "attempted_buckets": 1,
+    "completed_baseline_steps": 22,
+    "failure_bucket": {
+      "scenario": "S5_hard_brake_lead",
+      "route": "R1_entry_straight",
+      "seed": 17,
+      "baseline_step": 22,
+      "event": "agent0 collision and early episode termination",
+      "selected_modes": [1, 1, 1],
+      "model_input_speeds_mps": [
+        6.1951799392700195,
+        3.83903169631958,
+        1.7364414930343628
+      ],
+      "selected_projection_accepted_for_all_roles": true,
+      "stop_projection_accepted_for_all_roles": true,
+      "rule_actions": {
+        "agent0": 0,
+        "agent1": 0,
+        "agent2": 0
+      }
+    },
+    "stop_projection_failure_reproduced": false,
+    "optimizer_thresholds_changed": false,
+    "fallback_added": false
+  },
+  "formal_boundary": {
+    "stage1_run3_qualified": false,
+    "formal_long_training_started": false,
+    "formal_experiment_status_changed": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification",
+    "reason": "The frozen Stage-1 baseline gate failed on S5 seed 17 before completing the required S5-S9 x seeds 17/23 x 200-step matrix."
+  }
+}

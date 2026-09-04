@@ -1,0 +1,106 @@
+{
+  "format": "stage2_grpo_run18_run23_reconciliation_report_v1",
+  "recorded_at": "2026-09-04T13:08:49+08:00",
+  "repository": {
+    "branch": "BEV",
+    "head_before_reconciliation": "61490a80e7faf8da479926f9c34bdd439bddc42e",
+    "worktree_clean_before_reconciliation": true,
+    "active_training_process_observed": false
+  },
+  "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
+  "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+  "source_checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+  "source_checkpoint_project_eligible": false,
+  "observed_runs": {
+    "run_18": {
+      "config_format": "bev_joint_grpo_online_config_v8",
+      "report_format": "bev_joint_grpo_online_report_v8",
+      "training_status": "complete",
+      "target_accepted_rollout_groups": 500,
+      "accepted_rollout_groups": 500,
+      "attempted_rollout_groups": 947,
+      "optimizer_steps": 5000,
+      "update_epochs": 10,
+      "clip_bounds": [0.9, 1.2]
+    },
+    "run_19": {
+      "config_format": "bev_joint_grpo_online_config_v9",
+      "report_format": "bev_joint_grpo_online_report_v9",
+      "training_status": "complete",
+      "target_accepted_rollout_groups": 500,
+      "accepted_rollout_groups": 500,
+      "attempted_rollout_groups": 1152,
+      "optimizer_steps": 5000,
+      "update_epochs": 10,
+      "clip_bounds": [0.9, 1.3]
+    },
+    "run_20": {
+      "config_format": "bev_joint_grpo_online_config_v9",
+      "report_format": "bev_joint_grpo_online_report_v9",
+      "training_status": "complete",
+      "target_accepted_rollout_groups": 500,
+      "accepted_rollout_groups": 500,
+      "attempted_rollout_groups": 1109,
+      "optimizer_steps": 5000,
+      "update_epochs": 10,
+      "clip_bounds": [0.9, 1.2]
+    },
+    "run_21": {
+      "config_format": "bev_joint_grpo_online_config_v9",
+      "report_present": false,
+      "training_status": "failed_historical",
+      "target_accepted_rollout_groups": 5000,
+      "accepted_rollout_groups": 3676,
+      "attempted_rollout_groups": 8046,
+      "optimizer_steps": 36760,
+      "pretrain_fallback_steps": 1433,
+      "update_epochs": 10,
+      "clip_bounds": [0.9, 1.2],
+      "failure": "TrajectoryOptimizationError: calibrated execution contract rejected STOP",
+      "failure_bucket": {
+        "scenario": "S8_ego_exit_to_ramp",
+        "route": "R6_exit_to_ramp",
+        "seed": 23
+      },
+      "resume_allowed": false
+    },
+    "run_22": {
+      "config_format": "bev_joint_grpo_online_config_v9",
+      "report_format": "bev_joint_grpo_online_report_v9",
+      "training_status": "complete",
+      "target_accepted_rollout_groups": 5000,
+      "accepted_rollout_groups": 5000,
+      "attempted_rollout_groups": 9706,
+      "optimizer_steps": 50000,
+      "update_epochs": 10,
+      "clip_bounds": [0.95, 1.1]
+    },
+    "run_23": {
+      "config_format": "bev_joint_grpo_online_config_v9",
+      "report_format": "bev_joint_grpo_online_report_v9",
+      "training_status": "complete",
+      "target_accepted_rollout_groups": 5000,
+      "accepted_rollout_groups": 5000,
+      "attempted_rollout_groups": 11865,
+      "optimizer_steps": 50000,
+      "update_epochs": 10,
+      "clip_bounds": [0.95, 1.2]
+    }
+  },
+  "reconciled_decisions": {
+    "run_21_classification": "failed historical diagnostic",
+    "all_run18_through_run23_project_classification": "nonformal diagnostic only because the Stage1 run_3 source is unqualified",
+    "next_unoccupied_run": "run_24",
+    "current_yaml_update_epochs": 10,
+    "current_yaml_clip_bounds": [0.9, 1.2],
+    "historical_artifact_mutation_allowed": false,
+    "formal_long_training_allowed": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification"
+  },
+  "implementation_boundary": {
+    "per_vehicle_same_mode_grpo_implementation_started": false,
+    "trajectory_optimizer_threshold_changed": false,
+    "speculative_stop_fallback_added": false,
+    "long_training_started": false
+  }
+}

@@ -30,9 +30,13 @@ from models.bev_planner.joint_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
+    VEHICLE_MODE_REWARD_CONTRACT,
+    VEHICLE_MODE_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
+    VehicleModeRewardConfig,
     compose_joint_reward,
     joint_reward_config_sha256,
+    vehicle_mode_reward_config_sha256,
 )
 from models.bev_planner.joint_grpo import JointGRPOConfig, JointGRPOError
 from models.bev_planner.trajectory_optimizer import (
@@ -44,6 +48,9 @@ from train.bev_joint_grpo import (
     GRPO_CHECKPOINT_SCHEMA_VERSION,
     LEGACY_GRPO_CHECKPOINT_FORMAT,
     LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
+    PREVIOUS_GRPO_CHECKPOINT_FORMAT,
+    PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION,
+    load_grpo_a_config_for_evaluation,
     load_grpo_config_from_checkpoint,
 )
 
@@ -66,27 +73,31 @@ def _result():
 
 
 def _valid_grpo_contract_payload() -> dict[str, object]:
-    reward_config = JointRewardConfig()
+    grpo_config = JointGRPOConfig(trajectories_per_mode=3)
+    reward_config = VehicleModeRewardConfig(trajectories_per_mode=3)
     optimizer_config = KinematicTrajectoryOptimizerConfig()
     application = dict(GRPO_OPEN_REWARD_APPLICATION_CONTRACT)
     return {
         "schema_version": GRPO_CHECKPOINT_SCHEMA_VERSION,
         "format": GRPO_CHECKPOINT_FORMAT,
+        "grpo_config": asdict(grpo_config),
         "run_mode": "smoke",
-        "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
-        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+        "reward_contract_version": VEHICLE_MODE_REWARD_CONTRACT["version"],
+        "reward_contract_sha256": VEHICLE_MODE_REWARD_CONTRACT_SHA256,
         "reward_config": asdict(reward_config),
-        "reward_config_sha256": joint_reward_config_sha256(reward_config),
+        "reward_config_sha256": vehicle_mode_reward_config_sha256(reward_config),
         "reward_application_contract": application,
         "reward_application_contract_sha256": (
             GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
         ),
-        "reward_input_domain": application["reward_input_domain"],
-        "candidate_selection_domain": application["candidate_selection_domain"],
-        "execution_input_domain": application["execution_input_domain"],
-        "best_checkpoint_metric": application["best_checkpoint_metric"],
-        "tracking_expansion_enabled": application["tracking_expansion_enabled"],
-        "calibration_required": application["calibration_required"],
+        "reward_input_domain": "tau_d",
+        "training_candidate_domain": "tau_d_all_vehicle_modes",
+        "environment_action_source": "cached_frozen_stage1_argmax",
+        "execution_input_domain": "tau_cmd",
+        "best_checkpoint_metric": "validation/vehicle_reward_mean",
+        "joint_reward_role": "historical_and_final_evaluation_only",
+        "tracking_expansion_enabled": False,
+        "calibration_required": False,
         "diagnostic_only": True,
         "eligible_for_formal_training": False,
         "scenario_seeds": [31, 47],
@@ -97,21 +108,76 @@ def _valid_grpo_contract_payload() -> dict[str, object]:
     }
 
 
+def _historical_grpo_contract_payload(generation: str) -> dict[str, object]:
+    reward_config = JointRewardConfig()
+    optimizer_config = KinematicTrajectoryOptimizerConfig()
+    if generation == "legacy":
+        schema_version = LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION
+        checkpoint_format = LEGACY_GRPO_CHECKPOINT_FORMAT
+        application = dict(
+            reward_comparison._LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+        )
+        application_sha = (
+            reward_comparison._LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        )
+    elif generation == "previous":
+        schema_version = PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION
+        checkpoint_format = PREVIOUS_GRPO_CHECKPOINT_FORMAT
+        application = dict(
+            reward_comparison._PREVIOUS_GRPO_OPEN_REWARD_APPLICATION_CONTRACT
+        )
+        application_sha = (
+            reward_comparison._PREVIOUS_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
+        )
+    else:
+        raise AssertionError("unsupported test generation")
+    return {
+        "schema_version": schema_version,
+        "format": checkpoint_format,
+        "grpo_config": {"group_size": 3},
+        "run_mode": "formal",
+        "reward_contract_version": JOINT_REWARD_CONTRACT["version"],
+        "reward_contract_sha256": JOINT_REWARD_CONTRACT_SHA256,
+        "reward_config": asdict(reward_config),
+        "reward_config_sha256": joint_reward_config_sha256(reward_config),
+        "reward_application_contract": application,
+        "reward_application_contract_sha256": application_sha,
+        "reward_input_domain": application["reward_input_domain"],
+        "candidate_selection_domain": application["candidate_selection_domain"],
+        "execution_input_domain": application["execution_input_domain"],
+        "best_checkpoint_metric": application["best_checkpoint_metric"],
+        "tracking_expansion_enabled": application["tracking_expansion_enabled"],
+        "calibration_required": application["calibration_required"],
+        "diagnostic_only": False,
+        "eligible_for_formal_training": True,
+        "scenario_seeds": [17, 23],
+        "environment_steps": 500,
+        "scenario_contract_sha256": primary_scenario_contract()["sha256"],
+        "trajectory_optimizer_config": asdict(optimizer_config),
+        "trajectory_optimizer_sha256": optimizer_config.sha256(),
+    }
+
+
 def test_reward_comparator_has_no_legacy_evaluator_dependency() -> None:
     source = Path(reward_comparison.__file__).read_text(encoding="utf-8")
 
     assert "bev_four_model_evaluator" not in source
+    assert "load_grpo_checkpoint" not in source
+    assert "generator_state" not in source
+    assert "accepted_update_states" not in source
 
 
-def test_grpo_checkpoint_contract_accepts_only_frozen_diagnostic_tau_d() -> None:
+def test_grpo_checkpoint_contract_accepts_exact_current_vehicle_mode_v3() -> None:
     payload = _valid_grpo_contract_payload()
 
     binding = reward_comparison._validate_grpo_checkpoint_contract(payload)
 
     assert binding == (
-        JOINT_REWARD_CONTRACT["version"],
-        JOINT_REWARD_CONTRACT_SHA256,
-        joint_reward_config_sha256(JointRewardConfig()),
+        VEHICLE_MODE_REWARD_CONTRACT["version"],
+        VEHICLE_MODE_REWARD_CONTRACT_SHA256,
+        vehicle_mode_reward_config_sha256(
+            VehicleModeRewardConfig(trajectories_per_mode=3)
+        ),
     )
 
     wrong_application = copy.deepcopy(payload)
@@ -123,29 +189,30 @@ def test_grpo_checkpoint_contract_accepts_only_frozen_diagnostic_tau_d() -> None
     wrong_reward_config = dict(wrong_reward["reward_config"])
     wrong_reward_config["progress_weight"] = 0.5
     wrong_reward["reward_config"] = wrong_reward_config
-    wrong_reward["reward_config_sha256"] = joint_reward_config_sha256(
-        JointRewardConfig(**wrong_reward_config)
+    wrong_reward["reward_config_sha256"] = vehicle_mode_reward_config_sha256(
+        VehicleModeRewardConfig(**wrong_reward_config)
     )
-    with pytest.raises(RewardComparisonError, match="active frozen joint reward"):
+    with pytest.raises(RewardComparisonError, match="vehicle-mode reward"):
         reward_comparison._validate_grpo_checkpoint_contract(wrong_reward)
 
     formal = copy.deepcopy(payload)
     formal["run_mode"] = "formal"
-    with pytest.raises(RewardComparisonError, match="run_mode mismatch"):
+    with pytest.raises(RewardComparisonError, match="eligibility metadata"):
         reward_comparison._validate_grpo_checkpoint_contract(formal)
 
+    old_name = copy.deepcopy(payload)
+    old_name["grpo_config"]["group_size"] = old_name["grpo_config"].pop(
+        "trajectories_per_mode"
+    )
+    with pytest.raises(RewardComparisonError, match="trajectories_per_mode"):
+        reward_comparison._validate_grpo_checkpoint_contract(old_name)
 
-def test_grpo_checkpoint_contract_accepts_exact_historical_v1_application() -> None:
-    payload = _valid_grpo_contract_payload()
-    legacy_application = dict(
-        reward_comparison._LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT
-    )
-    payload["reward_application_contract"] = legacy_application
-    payload["reward_application_contract_sha256"] = (
-        reward_comparison._LEGACY_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256
-    )
-    payload["schema_version"] = LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION
-    payload["format"] = LEGACY_GRPO_CHECKPOINT_FORMAT
+
+@pytest.mark.parametrize("generation", ["legacy", "previous"])
+def test_grpo_checkpoint_contract_accepts_exact_historical_application(
+    generation: str,
+) -> None:
+    payload = _historical_grpo_contract_payload(generation)
 
     binding = reward_comparison._validate_grpo_checkpoint_contract(payload)
 
@@ -158,7 +225,14 @@ def test_grpo_checkpoint_contract_accepts_exact_historical_v1_application() -> N
     current_identity = copy.deepcopy(payload)
     current_identity["schema_version"] = GRPO_CHECKPOINT_SCHEMA_VERSION
     current_identity["format"] = GRPO_CHECKPOINT_FORMAT
-    with pytest.raises(RewardComparisonError, match="frozen raw-tau_d"):
+    current_identity["training_candidate_domain"] = "tau_d_all_vehicle_modes"
+    current_identity["environment_action_source"] = (
+        "cached_frozen_stage1_argmax"
+    )
+    current_identity["joint_reward_role"] = (
+        "historical_and_final_evaluation_only"
+    )
+    with pytest.raises(RewardComparisonError, match="checkpoint schema"):
         reward_comparison._validate_grpo_checkpoint_contract(current_identity)
 
     drifted = copy.deepcopy(payload)
@@ -173,7 +247,7 @@ def test_grpo_checkpoint_contract_accepts_exact_historical_v1_application() -> N
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
-    with pytest.raises(RewardComparisonError, match="frozen raw-tau_d"):
+    with pytest.raises(RewardComparisonError, match="checkpoint schema"):
         reward_comparison._validate_grpo_checkpoint_contract(drifted)
 
 
@@ -293,10 +367,10 @@ def test_model_specs_bind_grpo_to_exact_stage1_checkpoint(tmp_path) -> None:
     assert candidate.source_checkpoint_sha256 == baseline.checkpoint_sha256
 
 
-def test_grpo_checkpoint_config_round_trips_group_size_three(
+def test_grpo_checkpoint_config_round_trips_trajectories_per_mode_three(
     tmp_path: Path,
 ) -> None:
-    expected = JointGRPOConfig(group_size=3)
+    expected = JointGRPOConfig(trajectories_per_mode=3)
     checkpoint = tmp_path / "grpo.pt"
     torch.save(
         {
@@ -310,23 +384,23 @@ def test_grpo_checkpoint_config_round_trips_group_size_three(
     restored = load_grpo_config_from_checkpoint(checkpoint)
 
     assert restored == expected
-    assert restored.group_size == 3
+    assert restored.trajectories_per_mode == 3
 
 
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda value: value.pop("group_size"),
+        lambda value: value.pop("trajectories_per_mode"),
         lambda value: value.update({"unexpected": 1}),
-        lambda value: value.update({"group_size": 1}),
-        lambda value: value.update({"group_size": "3"}),
+        lambda value: value.update({"trajectories_per_mode": 1}),
+        lambda value: value.update({"trajectories_per_mode": "3"}),
     ],
 )
 def test_grpo_checkpoint_config_rejects_invalid_mapping(
     tmp_path: Path,
     mutate,
 ) -> None:
-    raw = asdict(JointGRPOConfig(group_size=3))
+    raw = asdict(JointGRPOConfig(trajectories_per_mode=3))
     mutate(raw)
     checkpoint = tmp_path / "invalid_grpo.pt"
     torch.save(
@@ -342,11 +416,40 @@ def test_grpo_checkpoint_config_rejects_invalid_mapping(
         load_grpo_config_from_checkpoint(checkpoint)
 
 
+@pytest.mark.parametrize("generation", ["legacy", "previous"])
+def test_historical_config_translates_group_size_only_for_evaluation(
+    tmp_path: Path,
+    generation: str,
+) -> None:
+    payload = _historical_grpo_contract_payload(generation)
+    payload.update(
+        {
+            "variant": "A",
+            "predecessor_condition": "none",
+            "reward_source": (
+                "external"
+                if generation == "legacy"
+                else "external_with_explicit_pretrain_baseline"
+            ),
+        }
+    )
+    if generation == "previous":
+        payload["optimizer_contract_version"] = "stage2_joint_grpo_optimizer_v4"
+    checkpoint = tmp_path / f"{generation}.pt"
+    torch.save(payload, checkpoint)
+
+    restored = load_grpo_a_config_for_evaluation(checkpoint)
+
+    assert restored.trajectories_per_mode == 3
+    with pytest.raises(JointGRPOError, match="schema_version mismatch"):
+        load_grpo_config_from_checkpoint(checkpoint)
+
+
 def test_load_policy_passes_exact_checkpoint_config_to_stage1_loader(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected_config = JointGRPOConfig(group_size=3)
+    expected_config = JointGRPOConfig(trajectories_per_mode=3)
     planner = torch.nn.Identity()
     trainer = SimpleNamespace(planner=planner)
     observed: dict[str, object] = {}
@@ -423,7 +526,7 @@ def test_load_policy_passes_exact_checkpoint_config_to_stage1_loader(
     assert result is planner
     assert observed["config_path"] == spec.checkpoint
     assert observed["config"] is expected_config
-    assert observed["config"] == JointGRPOConfig(group_size=3)
+    assert observed["config"] == JointGRPOConfig(trajectories_per_mode=3)
     assert observed["source_path"] == spec.source_checkpoint
     assert observed["checkpoint_path"] == spec.checkpoint
     assert observed["trainer"] is trainer

@@ -10,6 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import evaluation.plot_grpo as plot_grpo
 from evaluation.plot_grpo import (
+    ACTIVE_SIGNAL_TAGS,
     ADVANTAGE_VECTOR_TAG,
     ACCEPTED_ROLLOUT_AXIS_LABEL,
     CLIP_FRACTION_TAGS,
@@ -18,7 +19,6 @@ from evaluation.plot_grpo import (
     GRPO_LOSS_CURVE_TAGS,
     KL_LOSS_CURVE_TAGS,
     LEGACY_REWARD_CURVE_TAGS,
-    MODE_RATIO_TAGS,
     OLD_POLICY_APPROX_KL_TAGS,
     OPTIMIZER_STEP_AXIS_LABEL,
     POLICY_STABILITY_CURVE_TAGS,
@@ -132,17 +132,32 @@ def test_generate_advantage_heatmap_uses_group_by_step_orientation_and_png(
         "20",
     ]
     assert [label.get_text() for label in axis.get_yticklabels()] == [
-        "g0",
-        "g1",
-        "g2",
-        "g3",
+        "s0",
+        "s1",
+        "s2",
+        "s3",
     ]
     assert axis.get_xlabel() == FRESH_ROLLOUT_AXIS_LABEL
-    assert axis.get_title() == "GRPO advantage by rollout group and sample slot"
+    assert axis.get_title() == (
+        "Same-mode GRPO advantage by update state and trajectory slot"
+    )
     assert any(
-        "no identity across steps" in text.get_text()
+        "vehicle-major" in text.get_text()
         for text in axis.figure.texts
     )
+
+
+def test_load_advantage_vectors_flattens_vehicle_mode_trajectory_axes(
+    tmp_path: Path,
+) -> None:
+    tb_dir = tmp_path / "tb"
+    values = np.arange(1 * 3 * 10 * 4, dtype=np.float32).reshape(1, 3, 10, 4)
+    _write_tensor_events(tb_dir, [(7, values)])
+
+    steps, loaded = load_advantage_vectors(tb_dir)
+
+    np.testing.assert_array_equal(steps, np.asarray([7]))
+    np.testing.assert_array_equal(loaded, values.reshape(1, -1))
 
 
 def test_load_advantage_vectors_rejects_missing_tag(tmp_path: Path) -> None:
@@ -206,7 +221,7 @@ def test_load_advantage_vectors_rejects_bad_shape(
         [(3, np.zeros(bad_shape, dtype=np.float32))],
     )
 
-    with pytest.raises(AdvantageHeatmapError, match=r"shape \[1,G\]"):
+    with pytest.raises(AdvantageHeatmapError, match=r"shape \[1,G\] or"):
         load_advantage_vectors(tb_dir)
 
 
@@ -222,7 +237,7 @@ def test_load_advantage_vectors_rejects_inconsistent_group_size(
         ],
     )
 
-    with pytest.raises(AdvantageHeatmapError, match="consistent group size"):
+    with pytest.raises(AdvantageHeatmapError, match="consistent rollout shape"):
         load_advantage_vectors(tb_dir)
 
 
@@ -381,7 +396,7 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
             plot_grpo.event_accumulator.SCALARS: 0,
         }
     ]
-    assert len(plot_calls) == 22
+    assert len(plot_calls) == 18
     calls_by_tag = {tag: (axis, steps, values) for axis, tag, steps, values in plot_calls}
     assert set(calls_by_tag) == set(expected_series)
     for tag, (expected_steps, expected_values) in expected_series.items():
@@ -396,13 +411,15 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
     }
     grpo_axes = {calls_by_tag[tag][0] for tag in GRPO_LOSS_CURVE_TAGS}
     kl_axes = {calls_by_tag[tag][0] for tag in KL_LOSS_CURVE_TAGS}
-    mode_ratio_axes = {calls_by_tag[tag][0] for tag in MODE_RATIO_TAGS}
     trajectory_ratio_axes = {
         calls_by_tag[tag][0] for tag in TRAJECTORY_RATIO_TAGS
     }
     clip_axes = {calls_by_tag[tag][0] for tag in CLIP_FRACTION_TAGS}
     old_policy_kl_axes = {
         calls_by_tag[tag][0] for tag in OLD_POLICY_APPROX_KL_TAGS
+    }
+    active_signal_axes = {
+        calls_by_tag[tag][0] for tag in ACTIVE_SIGNAL_TAGS
     }
     assert (
         len(reward_axes)
@@ -412,38 +429,41 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
         == 1
     )
     assert reward_axes.isdisjoint(validation_reward_axes)
-    assert next(iter(reward_axes)).get_ylabel() == "Raw tau_d reward"
+    assert next(iter(reward_axes)).get_ylabel() == (
+        "Counterfactual tau_d reward / gain"
+    )
     validation_reward_axis = next(iter(validation_reward_axes))
-    assert validation_reward_axis.get_ylabel() == "Raw tau_d reward / gain"
+    assert validation_reward_axis.get_ylabel() == (
+        "Counterfactual tau_d reward / gain"
+    )
     assert (
         validation_reward_axis.get_title()
-        == "GRPO validation reward and gain curves"
+        == "Per-vehicle validation reward and gain curves"
     )
     assert next(iter(grpo_axes)).get_ylabel() == "Loss"
     assert next(iter(kl_axes)).get_ylabel() == "Unweighted KL divergence"
     assert (
-        len(mode_ratio_axes)
-        == len(trajectory_ratio_axes)
+        len(trajectory_ratio_axes)
         == len(clip_axes)
         == len(old_policy_kl_axes)
+        == len(active_signal_axes)
         == 1
     )
-    assert mode_ratio_axes.isdisjoint(trajectory_ratio_axes)
-    assert next(iter(mode_ratio_axes)).get_ylabel() == "Importance ratio"
     assert next(iter(trajectory_ratio_axes)).get_ylabel() == "Importance ratio"
     clip_axis = next(iter(clip_axes))
     assert clip_axis.get_ylabel() == "Fraction"
     assert tuple(round(value, 8) for value in clip_axis.get_ylim()) == (0.0, 1.0)
     assert next(iter(old_policy_kl_axes)).get_ylabel() == "Approximate KL"
+    assert next(iter(active_signal_axes)).get_ylabel() == "Count / indicator"
     assert all(
         next(iter(axes)).get_xlabel() == ACCEPTED_ROLLOUT_AXIS_LABEL
         for axes in (
             grpo_axes,
             kl_axes,
-            mode_ratio_axes,
             trajectory_ratio_axes,
             clip_axes,
             old_policy_kl_axes,
+            active_signal_axes,
         )
     )
 
@@ -591,7 +611,7 @@ def test_generate_grpo_plots_rejects_missing_validation_scalar_tag(
             *GRPO_LOSS_CURVE_TAGS,
             *KL_LOSS_CURVE_TAGS,
         ):
-            if tag != "validation/reward_gain":
+            if tag != "validation/vehicle_reward_gain":
                 writer.add_scalar(tag, 0.25, global_step=1)
 
     with pytest.raises(AdvantageHeatmapError, match="missing required scalar tags"):
@@ -610,7 +630,7 @@ def test_generate_grpo_plots_rejects_duplicate_validation_scalar_step(
         )
         _write_all_scalar_tags(
             writer,
-            duplicate_tag="validation/reward_gain",
+            duplicate_tag="validation/vehicle_reward_gain",
         )
 
     with pytest.raises(AdvantageHeatmapError, match="duplicate step 1"):
@@ -629,7 +649,7 @@ def test_generate_grpo_plots_rejects_non_finite_validation_scalar(
         )
         _write_all_scalar_tags(
             writer,
-            non_finite_tag="validation/pretrain_reward",
+            non_finite_tag="validation/same_mode_pretrain_reward_mean",
         )
 
     with pytest.raises(AdvantageHeatmapError, match="must be finite"):
@@ -647,7 +667,9 @@ def test_generate_grpo_plots_rejects_misaligned_validation_scalar_steps(
             global_step=1,
         )
         _write_all_scalar_tags(writer)
-        writer.add_scalar("validation/reward_gain", 0.5, global_step=2)
+        writer.add_scalar(
+            "validation/vehicle_reward_gain", 0.5, global_step=2
+        )
 
     with pytest.raises(AdvantageHeatmapError, match="aligned steps"):
         generate_grpo_plots(tb_dir, tmp_path / "plots")
@@ -691,7 +713,7 @@ def test_generate_grpo_plots_rejects_invalid_policy_stability_series(
     expected_message: str,
 ) -> None:
     tb_dir = tmp_path / "tb"
-    invalid_tag = "policy/mode_ratio_mean"
+    invalid_tag = "policy/trajectory_ratio_mean"
     with SummaryWriter(log_dir=str(tb_dir)) as writer:
         writer.add_tensor(
             ADVANTAGE_VECTOR_TAG,
