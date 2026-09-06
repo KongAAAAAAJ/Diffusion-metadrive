@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-09-04T13:53:21+08:00",
+  "updated_at": "2026-09-06T21:05:45+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "61490a80e7faf8da479926f9c34bdd439bddc42e",
+    "git_commit": "366354219ac589aafc76d4274e90fd3b43dded89",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
@@ -90,14 +90,16 @@
     "uncommitted_stage2_grpo_pretrain_relative_dynamic_sampling_report_present": false,
     "uncommitted_stage2_grpo_asymmetric_clip_present": false,
     "uncommitted_stage2_grpo_asymmetric_clip_report_present": false,
-    "uncommitted_stage2_grpo_run18_run23_reconciliation_present": true,
-    "uncommitted_stage2_grpo_per_vehicle_same_mode_present": true,
-    "uncommitted_stage2_grpo_per_vehicle_same_mode_report_present": true
+    "uncommitted_stage2_grpo_run18_run23_reconciliation_present": false,
+    "uncommitted_stage2_grpo_per_vehicle_same_mode_present": false,
+    "uncommitted_stage2_grpo_per_vehicle_same_mode_report_present": false,
+    "uncommitted_stage2_grpo_ddim_alignment_plan_present": true,
+    "uncommitted_stage2_grpo_run24_run26_reconciliation_report_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
-    "round": "stage2-grpo-per-vehicle-same-mode-20260904",
-    "status": "per_vehicle_same_mode_implementation_verified_frozen_baseline_gate_failed",
+    "round": "stage2-grpo-ddim-alignment-and-stability-20260906",
+    "status": "run24_run26_reconciled_ddim_alignment_implementation_pending",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
@@ -1163,9 +1165,18 @@
     "stage2_grpo_per_vehicle_same_mode_scope": "Use 48 trajectories for every valid vehicle-mode, compute target-vehicle counterfactual rewards and same-mode centered standardized advantages, gate only on max reward >= frozen same-mode baseline, remove all mode objectives, train only diffusion_decoder.trajectory_head, retry noise only when every vehicle-mode is inactive, always execute the cached frozen Stage1 argmax baseline, and upgrade future contracts/checkpoints/artifacts without resuming historical optimizer/RNG/counters.",
     "stage2_grpo_per_vehicle_same_mode_implementation_complete": true,
     "stage2_grpo_per_vehicle_same_mode_long_training_authorized_in_this_thread": false,
-    "note": "The candidate-v3 formal50k collection counter reached 50000 samples without complete acceptance. Stage1 v2 run_3 remains unqualified. Run_11 through run_20 and run_22 through run_23 are completed nonformal diagnostics; run_14 and run_15 are incomplete; run_21 is a failed historical diagnostic at 3676 accepted states and 36760 optimizer steps. Historical run_4 through run_23 remain untouched; the next unoccupied run is run_24."
+    "stage2_grpo_ddim_alignment_and_stability_authorized": true,
+    "stage2_grpo_ddim_alignment_and_stability_authorized_on": "2026-09-06",
+    "stage2_grpo_ddim_alignment_and_stability_scope": "Unify current, frozen and validation DDIM paths at timesteps [8,5,3,0], previous timesteps [5,3,0,-1], eta=1; add fixed validation and reward diagnostics; replace max gating with mean gating and anchor all valid executable modes with BC/KL; select checkpoints by safety-constrained simulator reward; run only three-seed 500-accepted-state diagnostic arms.",
+    "stage2_grpo_ddim_alignment_and_stability_long_training_authorized_in_this_thread": false,
+    "note": "Stage1 v2 run_3 remains unqualified. Run24 is interrupted historical evidence; run25 and run26 are complete but project-ineligible diagnostics despite their self-reported formal metadata. Preserve all historical artifacts unchanged; allocate run27 next."
   },
   "source_of_truth": {
+    "stage2_grpo_run24_run26_ddim_alignment_reconciliation_report": {
+      "path": "evaluation/STAGE2_GRPO_RUN24_RUN26_DDIM_ALIGNMENT_RECONCILIATION_REPORT.json",
+      "sha256": "cff26099e61a48c21f172223bbcfb38042aa1a2735114aa28cf510ade9b7b475",
+      "role": "Reconciles the current Git HEAD, interrupted run24, project-ineligible run25/run26 metadata, the verified planner/frozen versus GRPO DDIM semantic mismatch, fresh run27 allocation, and the bounded diagnostic-only implementation boundary."
+    },
     "stage2_grpo_clipped_multi_epoch_implementation_report": {
       "path": "evaluation/STAGE2_GRPO_CLIPPED_MULTI_EPOCH_IMPLEMENTATION_REPORT.json",
       "sha256": "aa28e8e43288270daf0cd5bd589cedcd468502229875eadd587c88f854740a92",
@@ -2760,8 +2771,9 @@
     "Future BEV-mainline GRPO-Open runs must use stage2_joint_grpo_optimizer_v5 with trajectory ratio bounds [0.9,1.2], stage2_joint_grpo_persistent_episode_v4, stage2_grpo_open_application_v3, schema-v3 checkpoints and v10 online artifacts. Historical run_4 through run_23 remain read-only diagnostics and cannot restore optimizer, RNG, or counters into v5."
   ],
   "next_actions": [
-    "Keep formal GRPO training blocked. Diagnose the observed frozen Stage1 run_3 S5/R1 seed-17 hard-brake collision without changing optimizer thresholds or adding speculative fallback behavior, then rerun the full S5-S9 x seeds 17/23 x 200-step gate.",
-    "Use the verified per-vehicle same-mode v5/application-v3/collection-v4/schema-v3 implementation for future runs only after Stage1 qualification passes; preserve run_4 through run_23 and allocate run_24 next.",
+    "Implement one shared four-step DDIM path for current policy, frozen Stage1 and validation, then pass focused CPU tests and the n=48 CUDA single-update smoke before any diagnostic training.",
+    "Run the aligned frozen Stage1 S5-S9 x seeds 17/23 x 200-step gate and complete three-vehicle planning-tick P95 measurement; keep formal GRPO blocked unless both pass.",
+    "After implementation evidence, run only bounded diagnostic arms with seeds 17/23/42 and at most 500 accepted states per seed from fresh run27+ paths; never relabel these artifacts as formal.",
     "The n=48 CUDA single-update smoke and 216-test regression are implementation evidence only. They do not qualify Stage1 run_3, authorize formal long training, or provide paper evidence.",
     "When a full diagnostic reward distribution is desired, run scripts/run_eval_grpo.sh at its default 800-step horizon to populate evaluation/reward_compare/step_rewards.csv, one total/progress/TTC/comfort 2-by-2 figure, and five individual reward figures. The deleted evaluation/compare output must not be treated as available evidence; the reward-only output remains non-formal.",
     "The bounded Stage 1 single-step smoke passed. Continue retaining the original 50070-sample backup; no permanent backup deletion is authorized.",

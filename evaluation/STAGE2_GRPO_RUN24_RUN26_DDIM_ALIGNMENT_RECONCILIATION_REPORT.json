@@ -1,0 +1,70 @@
+{
+  "format": "stage2_grpo_run24_run26_ddim_alignment_reconciliation_report_v1",
+  "recorded_at": "2026-09-06T21:05:45+08:00",
+  "status": "reconciled_implementation_pending",
+  "repository": {
+    "branch": "BEV",
+    "git_commit_before_reconciliation": "366354219ac589aafc76d4274e90fd3b43dded89",
+    "worktree_clean_before_reconciliation": true,
+    "active_training_or_evaluation_process_observed": false
+  },
+  "artifacts": {
+    "root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
+    "run24": {
+      "status": "interrupted_historical",
+      "files": ["training.log"],
+      "python_exit_status": 120,
+      "tee_exit_status": 130,
+      "resume_allowed": false
+    },
+    "run25": {
+      "status": "complete_project_ineligible_diagnostic",
+      "report_format": "bev_joint_grpo_online_report_v10",
+      "reported_run_mode": "formal",
+      "reported_eligible_for_formal_training": true,
+      "accepted_update_states": 1000,
+      "optimizer_steps": 10000,
+      "observed_best_validation_region": "approximately accepted state 360",
+      "post_best_degradation_observed": true
+    },
+    "run26": {
+      "status": "complete_project_ineligible_diagnostic",
+      "report_format": "bev_joint_grpo_online_report_v10",
+      "reported_run_mode": "formal",
+      "reported_eligible_for_formal_training": true,
+      "accepted_update_states": 5000,
+      "optimizer_steps": 50000,
+      "observed_best_validation_region": "approximately accepted state 500",
+      "post_best_degradation_observed": true
+    },
+    "historical_mutation_allowed": false,
+    "next_unoccupied_run": "run_27"
+  },
+  "verified_semantic_mismatch": {
+    "stage1_and_frozen_inference": "q(x_8) followed by the planner's legacy two decoder-call loop using diffusers DDIMScheduler.step with implicit previous timestep semantics",
+    "grpo_rollout_and_replay": "q(x_8) followed by four explicit Gaussian DDIM transitions and explicit previous timesteps",
+    "impact": "training policy, frozen baseline and validation do not share one timestep/previous-timestep/DDIM transition contract"
+  },
+  "authorized_replacement": {
+    "timesteps": [8, 5, 3, 0],
+    "previous_timesteps": [5, 3, 0, -1],
+    "eta": 1.0,
+    "stochastic_log_probability_transitions": 3,
+    "stabilized_gate": "valid AND optimizer_executable AND mean_j(R_j) >= R_pretrain",
+    "anchor_scope": "BC and trajectory KL over all valid optimizer-executable modes; trajectory PG over active modes only",
+    "diagnostic_seeds": [17, 23, 42],
+    "accepted_states_per_seed": 500
+  },
+  "unchanged_boundaries": {
+    "reward_formula_changed": false,
+    "formation_restored": false,
+    "sampled_grpo_candidates_execute_in_environment": false,
+    "trajectory_optimizer_threshold_changed": false,
+    "formal_long_training_allowed": false,
+    "active_hard_gate": "strict_stage1_v2_run3_qualification"
+  },
+  "project_plan": {
+    "path": "docs/project/project_plan.json",
+    "sha256_after_revision": "d14c14b98cf6674fd0e1c5415d83c56a2c8862de840724c9841a271f188d9c39"
+  }
+}

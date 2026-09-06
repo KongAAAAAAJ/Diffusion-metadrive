@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-09-04T13:51:45+08:00",
-  "status": "stage2_per_vehicle_same_mode_grpo_implemented_stage1_gate_failed",
+  "updated_at": "2026-09-06T21:05:45+08:00",
+  "status": "stage2_grpo_ddim_alignment_and_stability_diagnostics_authorized",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -1321,6 +1321,76 @@
     },
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
+  "stage2_ddim_alignment_and_stability_diagnostics": {
+    "status": "authorized_reconciliation_complete_implementation_pending",
+    "authorized_on": "2026-09-06",
+    "objective": "Unify current-policy, frozen Stage1 and validation DDIM transition semantics before any further long training, then diagnose the run25/run26 post-500-state degradation with bounded paired experiments.",
+    "ddim_path": {
+      "timesteps": [8, 5, 3, 0],
+      "previous_timesteps": [5, 3, 0, -1],
+      "eta": 1.0,
+      "decoder_calls": 4,
+      "stochastic_log_probability_transitions": 3,
+      "final_transition": "0_to_minus_1_is_deterministic_and_has_no_policy_log_probability",
+      "shared_by": ["current_policy_rollout", "frozen_stage1_baseline", "validation_current", "validation_frozen"]
+    },
+    "stabilized_optimizer": {
+      "active_gate": "hard_valid AND optimizer_executable AND mean_j(R_j) >= same_mode_frozen_pretrain_reward",
+      "trajectory_pg_scope": "active_vehicle_modes_only",
+      "behavior_cloning_scope": "all_hard_valid_optimizer_executable_vehicle_modes",
+      "trajectory_reference_kl_scope": "all_hard_valid_optimizer_executable_vehicle_modes",
+      "all_inactive_policy": "no_anchor_only_update; retry_noise_at_most_three_times_then_execute_cached_frozen_baseline_once",
+      "trainable_module": "diffusion_decoder.trajectory_head"
+    },
+    "diagnostics": {
+      "required_group_metrics": [
+        "fraction_reward_ge_same_mode_pretrain",
+        "active_group_mean_gain",
+        "active_group_median_gain",
+        "positive_advantage_below_pretrain_fraction",
+        "progress_gap_ttc_road_comfort_collision_out_components"
+      ],
+      "validation_interval_accepted_states": 20,
+      "advantage_log_interval_accepted_states": 10,
+      "validation_scenarios": ["S5", "S6", "S7", "S8", "S9"],
+      "validation_seeds": [31, 47],
+      "s7_focus": ["road_penalty", "minimum_road_margin", "out_of_drivable", "collision"]
+    },
+    "checkpoint_selection": {
+      "safety_constraints": [
+        "global_simulator_collision_count_not_above_frozen",
+        "global_simulator_out_count_not_above_frozen",
+        "S7_out_count_and_rate_not_above_frozen",
+        "all_current_and_frozen_validation_metrics_finite"
+      ],
+      "primary": "three_validation_trailing_mean_simulator_reward_gain_from_state_60",
+      "secondary": "three_validation_trailing_mean_selected_trajectory_reward_gain",
+      "tie_break": "earlier_checkpoint",
+      "no_safe_checkpoint": "do_not_create_best.pt"
+    },
+    "bounded_experiment_matrix": {
+      "seeds": [17, 23, 42],
+      "accepted_states_per_seed": 500,
+      "milestone_state": 200,
+      "arms": [
+        "legacy_ddim_max_gate_active_only_anchor",
+        "aligned_ddim_max_gate_active_only_anchor",
+        "aligned_ddim_mean_gate_full_valid_anchor"
+      ],
+      "run_mode": "smoke",
+      "diagnostic_only": true,
+      "eligible_for_formal_training": false,
+      "run_allocation": "fresh immutable run directories beginning after run26; bind actual paths in the experiment manifest"
+    },
+    "historical_reconciliation": {
+      "run24": "interrupted historical artifact with training.log only; never resume or overwrite",
+      "run25": "completed self-described formal run, project-classified diagnostic because the source Stage1 gate failed; best validation occurred near accepted state 360 and later degraded",
+      "run26": "completed self-described formal run, project-classified diagnostic because the source Stage1 gate failed; best validation occurred near accepted state 500 and later degraded",
+      "actual_clip_bounds": [0.9, 1.2],
+      "next_unoccupied_run": "run_27"
+    },
+    "formal_boundary": "No 5000-state formal training until the aligned frozen Stage1 S5-S9 x seeds 17/23 x 200-step qualification gate and the complete three-vehicle planning-tick P95 <= 200 ms gate both pass."
+  },
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
   "implementation_evidence_sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
@@ -1340,5 +1410,5 @@
   "stage2_asymmetric_clip_implementation_evidence_sha256": "bddc7107f5472844acb79e6b75739b827775918db0f6f7acf637b12a96623f81",
   "stage2_per_vehicle_same_mode_implementation_evidence": "evaluation/STAGE2_PER_VEHICLE_SAME_MODE_GRPO_IMPLEMENTATION_REPORT.json",
   "stage2_per_vehicle_same_mode_implementation_evidence_sha256": "41ba19f0e4b5d9a49a5d6b11b1b98e6140b14b3e37514b2ce21f240298ff3472",
-  "current_next_action": "Keep formal GRPO training blocked. Diagnose or improve the frozen Stage1 run_3 S5 hard-brake behavior under the strict qualification workflow, then rerun the full S5-S9 x seeds 17/23 x 200-step frozen-baseline gate. If and only if Stage1 qualification passes, allocate fresh run_24 under the verified per-vehicle same-mode v5 contract."
+  "current_next_action": "Implement and verify the shared four-step DDIM path, mean same-mode gate, full-valid BC/KL anchoring, fixed validation diagnostics and safety-constrained checkpoint selection. Run only bounded 500-state diagnostics from fresh run_27+ paths; keep formal GRPO blocked until the aligned frozen Stage1 qualification and P95 gates pass."
 }
