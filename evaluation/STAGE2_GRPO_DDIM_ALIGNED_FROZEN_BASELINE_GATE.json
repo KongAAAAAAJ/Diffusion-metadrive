@@ -1,0 +1,662 @@
+{
+  "buckets": [
+    {
+      "counts": {
+        "baseline_env_step_calls": 21,
+        "baseline_execution_steps": 21,
+        "execution_mode_mask_calls": 21,
+        "frozen_stage1_inference_calls": 21,
+        "rule_maker_finalize_calls": 21,
+        "trajectory_optimizer_calls": 21,
+        "warmup_environment_steps": 32
+      },
+      "end_state": {
+        "agents": {
+          "agent0": {
+            "present": false
+          },
+          "agent1": {
+            "heading_rad": 0.004395946853339439,
+            "position_xy": [
+              107.6229476928711,
+              3.5181126594543457
+            ],
+            "present": true,
+            "speed_km_h": 21.800670114626115
+          },
+          "agent2": {
+            "heading_rad": 0.0009683253723533625,
+            "position_xy": [
+              88.56127166748047,
+              3.4816174507141113
+            ],
+            "present": true,
+            "speed_km_h": 13.170909373793474
+          }
+        },
+        "episode_ended": true,
+        "last_step_flags": {
+          "agent0": {
+            "collision": true,
+            "out_of_drivable": false,
+            "unsafe": true
+          },
+          "agent1": {
+            "collision": false,
+            "out_of_drivable": false,
+            "unsafe": false
+          },
+          "agent2": {
+            "collision": false,
+            "out_of_drivable": false,
+            "unsafe": false
+          }
+        },
+        "scenario_summary": {
+          "actor_manifest": {
+            "hard_brake_lead": {
+              "active": true,
+              "current_lane_index": [
+                ">>>",
+                "1S0_0_",
+                1
+              ],
+              "current_position_xy": [
+                129.68435668945312,
+                3.5
+              ],
+              "current_speed_km_h": 17.56436983010086,
+              "object_name": "8f8ff065-754c-45c2-af8b-321e96a06fb1",
+              "role": "hard_brake_lead",
+              "spawn_lane_index": [
+                ">>>",
+                "1S0_0_",
+                1
+              ],
+              "spawn_position_xy": [
+                123.64656066894531,
+                3.5
+              ],
+              "spawn_step": 32
+            },
+            "incidental_background_0": {
+              "active": true,
+              "current_lane_index": [
+                "14C0_0_",
+                "14C0_1_",
+                2
+              ],
+              "current_position_xy": [
+                8.115955352783203,
+                -344.1210632324219
+              ],
+              "current_speed_km_h": 25.14405132680281,
+              "object_name": "ad0af10c-24bd-4f6a-ba9a-d6608b651e1e",
+              "role": "incidental_background_0",
+              "spawn_lane_index": [
+                "13Y0_1_",
+                "14C0_0_",
+                2
+              ],
+              "spawn_position_xy": [
+                34.933982849121094,
+                -367.9160461425781
+              ],
+              "spawn_step": 0
+            },
+            "incidental_background_1": {
+              "active": true,
+              "current_lane_index": [
+                "9g0_0_",
+                "9g0_1_",
+                0
+              ],
+              "current_position_xy": [
+                655.0286254882812,
+                -299.2137756347656
+              ],
+              "current_speed_km_h": 23.07648515945428,
+              "object_name": "a00e425f-c6eb-47f2-b875-f6cb8c254123",
+              "role": "incidental_background_1",
+              "spawn_lane_index": [
+                "9g0_0_",
+                "9g0_1_",
+                0
+              ],
+              "spawn_position_xy": [
+                684.3386840820312,
+                -282.29156494140625
+              ],
+              "spawn_step": 0
+            },
+            "incidental_background_2": {
+              "active": true,
+              "current_lane_index": [
+                "6X2_0_",
+                "6X2_1_",
+                2
+              ],
+              "current_position_xy": [
+                737.724365234375,
+                130.61610412597656
+              ],
+              "current_speed_km_h": 24.472570290284807,
+              "object_name": "4d79e19f-de6e-4fe1-8be2-76ea5a6afba3",
+              "role": "incidental_background_2",
+              "spawn_lane_index": [
+                "6X2_0_",
+                "6X2_1_",
+                2
+              ],
+              "spawn_position_xy": [
+                755.6729125976562,
+                99.52992248535156
+              ],
+              "spawn_step": 0
+            },
+            "incidental_background_3": {
+              "active": true,
+              "current_lane_index": [
+                "16c0_0_",
+                "16c0_1_",
+                0
+              ],
+              "current_position_xy": [
+                710.010498046875,
+                -45.21375274658203
+              ],
+              "current_speed_km_h": 24.01716987981444,
+              "object_name": "4b4f15a9-4965-42ff-8cce-19ca8c669c13",
+              "role": "incidental_background_3",
+              "spawn_lane_index": [
+                "16c0_0_",
+                "16c0_1_",
+                0
+              ],
+              "spawn_position_xy": [
+                676.913818359375,
+                -33.16729736328125
+              ],
+              "spawn_step": 0
+            },
+            "incidental_background_4": {
+              "active": true,
+              "current_lane_index": [
+                "9g1_2_",
+                "9g1_3_",
+                0
+              ],
+              "current_position_xy": [
+                714.8131713867188,
+                -247.08132934570312
+              ],
+              "current_speed_km_h": 23.124803225787513,
+              "object_name": "492192a5-61d3-4d18-83c3-abb26c6b9c98",
+              "role": "incidental_background_4",
+              "spawn_lane_index": [
+                "18c0_0_",
+                "18c0_1_",
+                0
+              ],
+              "spawn_position_xy": [
+                744.1820068359375,
+                -230.1166534423828
+              ],
+              "spawn_step": 0
+            },
+            "s5_adjacent_left": {
+              "active": true,
+              "current_lane_index": [
+                ">>>",
+                "1S0_0_",
+                0
+              ],
+              "current_position_xy": [
+                145.7616729736328,
+                7.0
+              ],
+              "current_speed_km_h": 25.281353759766098,
+              "object_name": "f61bff98-d51d-4429-9dca-d9b7ca8c94b1",
+              "role": "s5_adjacent_left",
+              "spawn_lane_index": [
+                ">>>",
+                "1S0_0_",
+                0
+              ],
+              "spawn_position_xy": [
+                108.68201446533203,
+                7.0
+              ],
+              "spawn_step": 0
+            },
+            "s5_adjacent_right": {
+              "active": true,
+              "current_lane_index": [
+                ">>>",
+                "1S0_0_",
+                2
+              ],
+              "current_position_xy": [
+                108.01114654541016,
+                -2.070193659164943e-06
+              ],
+              "current_speed_km_h": 22.30932712555001,
+              "object_name": "ef8b7950-9f44-40f3-bc24-3d3e0203c73b",
+              "role": "s5_adjacent_right",
+              "spawn_lane_index": [
+                ">>>",
+                "1S0_0_",
+                2
+              ],
+              "spawn_position_xy": [
+                75.29117584228516,
+                0.0
+              ],
+              "spawn_step": 0
+            }
+          },
+          "conflict_evidence": {
+            "all_agents_passed_hard_brake_lead": false,
+            "coordinated_avoidance_completed": false,
+            "ego_peak_deceleration_mps2": 30.354384361389542,
+            "formation_current_bumper_gaps_m": [
+              11.28998352050781,
+              13.321676025390623
+            ],
+            "formation_recovered_after_hazard": false,
+            "formation_recovery_stable_steps": 0,
+            "hazard_cleared": false,
+            "incidental_background_declared_count": 5,
+            "incidental_background_realized_count": 5,
+            "incidental_background_roles": [
+              "incidental_background_0",
+              "incidental_background_1",
+              "incidental_background_2",
+              "incidental_background_3",
+              "incidental_background_4"
+            ],
+            "lane_change_completion_lane_ids": {},
+            "lane_change_completion_steps": {},
+            "lane_change_direction": null,
+            "lane_change_direction_by_agent": {},
+            "lane_change_stable_steps_required": 2,
+            "lead_brake_profile_realized": true,
+            "lead_commanded_peak_deceleration_mps2": 5.669674464552488,
+            "lead_current_bumper_gap_m": -0.0960745239257812,
+            "lead_observed_max_speed_km_h": 21.723139572143577,
+            "lead_observed_min_speed_km_h": 1.7666730165483064,
+            "lead_observed_peak_deceleration_mps2": 5.669674464552488,
+            "minimum_actor_distance_m": 3.5293773519522644,
+            "minimum_actor_ttc_s": 0.8480986944475071,
+            "mixed_direction_lane_change_completed": false,
+            "observed_behavior_class": "keep_emergency_braking",
+            "real_lane_change_completed": false,
+            "reassembly_completed": false,
+            "reassembly_completion_steps": {},
+            "reassembly_lane_index": [],
+            "reassembly_to_initial_lane_completed": false,
+            "s5_adjacent_background_realization": {
+              "left": {
+                "actor_role": "s5_adjacent_left",
+                "realized_offset_m": 21.202011108398438,
+                "sampled_offset_m": 21.202008898460043,
+                "sampled_relation": "ahead"
+              },
+              "right": {
+                "actor_role": "s5_adjacent_right",
+                "realized_offset_m": -12.188827514648438,
+                "sampled_offset_m": -12.18882779139653,
+                "sampled_relation": "behind"
+              }
+            },
+            "s5_target_background_condition_realized": true
+          },
+          "expert_profile_id": null,
+          "functional_success": false,
+          "platoon_agent_ids": [
+            "agent0",
+            "agent1",
+            "agent2"
+          ],
+          "platoon_lead_agent_id": "agent0",
+          "resolved_recipe_parameters": {
+            "hard_brake_lead": {
+              "brake_deceleration_mps2": 5.669674464552486,
+              "brake_target_speed_kmh": 0.7512278898903428,
+              "lead_bumper_gap_m": 10.706175437745221,
+              "lead_target_speed_kmh": 21.72313930489053
+            }
+          },
+          "resolved_scenario_parameters": {
+            "brake_trigger_time_s": 3.1951536191306826,
+            "ego_initial_speed_km_h": 23.999999427795412,
+            "incidental_background_actor_count": 5,
+            "incidental_background_layout_seed": 1696795910,
+            "incidental_background_speeds_km_h": [
+              25.150318541697782,
+              23.076489838515922,
+              24.47257090206272,
+              24.01720481943957,
+              23.12483682455877
+            ],
+            "lead_approach_speed_km_h": 21.72313930489053,
+            "lead_brake_deceleration_mps2": 5.669674464552486,
+            "lead_pressure_bucket": "high",
+            "lead_speed_delta_from_ego_km_h": -2.276860122904883,
+            "lead_target_speed_km_h": 0.7512278898903428,
+            "lead_trigger_bumper_gap_m": 10.706175437745221,
+            "left_offset_m": 21.202008898460043,
+            "left_relation": "ahead",
+            "left_speed_km_h": 25.281788620501896,
+            "recipe_trigger_after_s": 3.1951536191306826,
+            "right_offset_m": -12.18882779139653,
+            "right_relation": "behind",
+            "right_speed_km_h": 22.309677384477837,
+            "scenario_seed": 3553005254,
+            "severity_bucket": "medium"
+          },
+          "route_completion": {
+            "agent_lane_transitions": {
+              "agent0": [],
+              "agent1": [],
+              "agent2": []
+            },
+            "all_agents_changed_lane": false,
+            "all_agents_cleared_narrow_section": false,
+            "all_agents_entered_exit_ramp": false,
+            "all_agents_entered_mainline": false,
+            "all_agents_passed_blocker": false,
+            "all_agents_returned_to_original_lane": false,
+            "returned_to_original_lane": false,
+            "s5_real_lane_change_completed": false,
+            "s5_reassembled": false,
+            "s5_reassembled_to_initial_lane": false
+          },
+          "scenario_completed_recipe_count": 3,
+          "scenario_id": "S5_hard_brake_lead",
+          "scenario_notes": [
+            "adjacent_spawned:left_side",
+            "adjacent_spawned:right_side",
+            "incidental_background_spawned",
+            "lead_spawned",
+            "lead_brake_profile"
+          ],
+          "scenario_random_seed": 3553005254,
+          "scenario_realized": true,
+          "scenario_realized_step": 0,
+          "scenario_recipe_count": 3,
+          "scenario_recipes_complete": true,
+          "scenario_trigger_step": 0,
+          "scenario_triggered": true,
+          "severity_bucket": "medium"
+        },
+        "terminated_all": true,
+        "truncated_all": false
+      },
+      "failure": {
+        "agent_speeds_km_h": {
+          "agent0": null,
+          "agent1": 21.800670114626115,
+          "agent2": 13.170909373793474
+        },
+        "baseline_step": 21,
+        "exception": "episode ended before 200 frozen baseline execution steps",
+        "exception_type": "OnlineGRPOError",
+        "failed_roles": [],
+        "hard_valid_modes": [
+          [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true
+          ],
+          [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ]
+        ],
+        "model_input_speeds_mps": [
+          6.9196648597717285,
+          6.129798889160156,
+          3.735316276550293
+        ],
+        "projection_audits": {
+          "selected": [
+            {
+              "accepted": true,
+              "agent_id": "agent0",
+              "exception": null,
+              "mode": 0,
+              "role": 0,
+              "speed_mps": 6.9196648597717285
+            },
+            {
+              "accepted": true,
+              "agent_id": "agent1",
+              "exception": null,
+              "mode": 1,
+              "role": 1,
+              "speed_mps": 6.129798889160156
+            },
+            {
+              "accepted": true,
+              "agent_id": "agent2",
+              "exception": null,
+              "mode": 1,
+              "role": 2,
+              "speed_mps": 3.735316276550293
+            }
+          ],
+          "stop": [
+            {
+              "accepted": true,
+              "agent_id": "agent0",
+              "exception": null,
+              "mode": 9,
+              "role": 0,
+              "speed_mps": 6.9196648597717285
+            },
+            {
+              "accepted": true,
+              "agent_id": "agent1",
+              "exception": null,
+              "mode": 9,
+              "role": 1,
+              "speed_mps": 6.129798889160156
+            },
+            {
+              "accepted": true,
+              "agent_id": "agent2",
+              "exception": null,
+              "mode": 9,
+              "role": 2,
+              "speed_mps": 3.735316276550293
+            }
+          ]
+        },
+        "rule_condition": {
+          "is_commitment": false,
+          "rule_actions": {
+            "agent0": 0,
+            "agent1": 0,
+            "agent2": 0
+          }
+        },
+        "selected_modes": [
+          0,
+          1,
+          1
+        ],
+        "stage": "baseline_episode_ended_early"
+      },
+      "local_route": "R1_entry_straight",
+      "ready_state_reached": true,
+      "safety": {
+        "collision_agent_steps": 1,
+        "condition_failure_steps": 0,
+        "forced_safe_stop_steps": 0,
+        "out_of_drivable_agent_steps": 0,
+        "per_vehicle": {
+          "agent0": {
+            "collision_steps": 1,
+            "maximum_speed_km_h": 30.073820114448473,
+            "minimum_speed_km_h": 24.910794333013722,
+            "out_of_drivable_steps": 0,
+            "unsafe_steps": 1
+          },
+          "agent1": {
+            "collision_steps": 0,
+            "maximum_speed_km_h": 30.073826980903416,
+            "minimum_speed_km_h": 22.067276560727773,
+            "out_of_drivable_steps": 0,
+            "unsafe_steps": 0
+          },
+          "agent2": {
+            "collision_steps": 0,
+            "maximum_speed_km_h": 30.07382698090254,
+            "minimum_speed_km_h": 13.447138399668834,
+            "out_of_drivable_steps": 0,
+            "unsafe_steps": 0
+          }
+        },
+        "unsafe_steps": 1
+      },
+      "scenario_id": "S5_hard_brake_lead",
+      "seed": 17,
+      "selected_mode_counts": {
+        "agent0": {
+          "0": 1,
+          "1": 20,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 0
+        },
+        "agent1": {
+          "0": 0,
+          "1": 14,
+          "2": 7,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 0
+        },
+        "agent2": {
+          "0": 0,
+          "1": 11,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 10
+        }
+      },
+      "status": "failed"
+    }
+  ],
+  "diagnostic_only": true,
+  "eligible_for_formal_training": false,
+  "execution_contract": {
+    "baseline_steps_per_bucket": 200,
+    "expected_bucket_count": 10,
+    "expected_total_baseline_steps": 2000,
+    "grpo_sampler_called": false,
+    "optimizer_thresholds_or_fallbacks_changed": false,
+    "pipeline": [
+      "warm history and realized scenario ready state",
+      "execution_mode_valid_mask",
+      "one deterministic frozen Stage-1 argmax inference",
+      "trajectory optimizer",
+      "RuleMaker finalize or safe-stop",
+      "env.step"
+    ],
+    "scenarios": [
+      [
+        "S5_hard_brake_lead",
+        "R1_entry_straight"
+      ],
+      [
+        "S6_background_merge_in",
+        "R6_mainline_merge_approach"
+      ],
+      [
+        "S7_ego_merge_from_ramp",
+        "R7_merge_core"
+      ],
+      [
+        "S8_ego_exit_to_ramp",
+        "R6_exit_to_ramp"
+      ],
+      [
+        "S9_narrow_channel_negotiation",
+        "R8_narrow_channel"
+      ]
+    ],
+    "seeds": [
+      17,
+      23
+    ]
+  },
+  "format": "bev_frozen_stage1_baseline_gate_v1",
+  "gates": {
+    "all_ten_buckets_completed": false,
+    "exact_total_baseline_steps": false,
+    "exactly_200_baseline_steps_per_bucket": false,
+    "no_collision_or_out_of_drivable": false,
+    "one_inference_mask_optimizer_finalize_and_step_per_baseline_state": true,
+    "sampled_grpo_candidates_absent": true
+  },
+  "passed": false,
+  "source_stage1": {
+    "checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "checkpoint_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779",
+    "run_mode": "formal",
+    "variant": "A"
+  },
+  "status": "failed",
+  "totals": {
+    "attempted_buckets": 1,
+    "baseline_execution_steps": 21,
+    "collision_agent_steps": 1,
+    "forced_safe_stop_steps": 0,
+    "out_of_drivable_agent_steps": 0,
+    "warmup_environment_steps": 32
+  }
+}

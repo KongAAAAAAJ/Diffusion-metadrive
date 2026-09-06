@@ -2,7 +2,7 @@
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
   "updated_at": "2026-09-06T21:05:45+08:00",
-  "status": "stage2_grpo_ddim_alignment_and_stability_diagnostics_authorized",
+  "status": "stage2_grpo_ddim_alignment_implemented_frozen_baseline_gate_failed",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -1322,7 +1322,7 @@
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "stage2_ddim_alignment_and_stability_diagnostics": {
-    "status": "authorized_reconciliation_complete_implementation_pending",
+    "status": "implementation_verified_frozen_baseline_gate_failed",
     "authorized_on": "2026-09-06",
     "objective": "Unify current-policy, frozen Stage1 and validation DDIM transition semantics before any further long training, then diagnose the run25/run26 post-500-state degradation with bounded paired experiments.",
     "ddim_path": {
@@ -1389,6 +1389,16 @@
       "actual_clip_bounds": [0.9, 1.2],
       "next_unoccupied_run": "run_27"
     },
+    "implementation_result": {
+      "implementation_commit": "ec7851c56afce57a99503f62ae1126be251b5cd2",
+      "expanded_regression": "346 passed",
+      "cuda_n48_single_update": "passed at 587.497 MiB with schema-v5 checkpoint round-trip",
+      "fixed_validation_state_bank_sha256": "7612658a96d9b40a87d12af3e9ad7b7583c97670d6c41747b4faa27f6d4164b6",
+      "fixed_validation_replays": "10/10 exact; repeated selected/simulator/S7 safety deltas all zero",
+      "frozen_baseline_gate": "failed on S5/R1 seed17 at baseline step21 due agent0 collision",
+      "p95_gate": "not run; retained as an independent hard-gate task",
+      "bounded_experiments_started": false
+    },
     "formal_boundary": "No 5000-state formal training until the aligned frozen Stage1 S5-S9 x seeds 17/23 x 200-step qualification gate and the complete three-vehicle planning-tick P95 <= 200 ms gate both pass."
   },
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
@@ -1410,5 +1420,9 @@
   "stage2_asymmetric_clip_implementation_evidence_sha256": "bddc7107f5472844acb79e6b75739b827775918db0f6f7acf637b12a96623f81",
   "stage2_per_vehicle_same_mode_implementation_evidence": "evaluation/STAGE2_PER_VEHICLE_SAME_MODE_GRPO_IMPLEMENTATION_REPORT.json",
   "stage2_per_vehicle_same_mode_implementation_evidence_sha256": "41ba19f0e4b5d9a49a5d6b11b1b98e6140b14b3e37514b2ce21f240298ff3472",
-  "current_next_action": "Implement and verify the shared four-step DDIM path, mean same-mode gate, full-valid BC/KL anchoring, fixed validation diagnostics and safety-constrained checkpoint selection. Run only bounded 500-state diagnostics from fresh run_27+ paths; keep formal GRPO blocked until the aligned frozen Stage1 qualification and P95 gates pass."
+  "stage2_grpo_ddim_alignment_implementation_evidence": "evaluation/STAGE2_GRPO_DDIM_ALIGNMENT_IMPLEMENTATION_REPORT.json",
+  "stage2_grpo_ddim_alignment_implementation_evidence_sha256": "92e7b33d0c414b400b3110ebb053aada7dde2b6a40d127db27288de3668cf3fd",
+  "stage2_grpo_ddim_aligned_frozen_gate_evidence": "evaluation/STAGE2_GRPO_DDIM_ALIGNED_FROZEN_BASELINE_GATE.json",
+  "stage2_grpo_ddim_aligned_frozen_gate_evidence_sha256": "315af191a5884a898dda85e1d0347264094bc446cd6379ebdb82e4f0b109152a",
+  "current_next_action": "Keep formal and bounded GRPO runs blocked at the current one-hard-gate boundary. In a separate execution thread, audit the S5/R1 seed17 agent0 collision under the aligned frozen baseline and make only a cause-specific Stage1 fix; rerun the complete frozen gate afterward. Run the P95 gate as a separate hard-gate task."
 }

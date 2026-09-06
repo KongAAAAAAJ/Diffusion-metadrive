@@ -1,11 +1,11 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-09-06T21:05:45+08:00",
+  "updated_at": "2026-09-06T22:11:20+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "366354219ac589aafc76d4274e90fd3b43dded89",
-    "worktree_clean_before_this_update": true,
+    "git_commit": "ec7851c56afce57a99503f62ae1126be251b5cd2",
+    "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": true,
     "uncommitted_stage2_at_risk_grpo_launcher_present": false,
@@ -43,7 +43,7 @@
     "uncommitted_stage2_grpo_open_tau_d_v1_report_present": false,
     "uncommitted_stage2_grpo_rollout_identity_fix_present": false,
     "uncommitted_bev_only_diffusion_planner_v2_present": false,
-    "uncommitted_state_reconciliation_present": true,
+    "uncommitted_state_reconciliation_present": false,
     "uncommitted_rule_conditioned_v2_dataset_preparation_present": false,
     "uncommitted_rule_conditioned_v2_diagnostic_verifier_fix_present": false,
     "uncommitted_rule_conditioned_v2_parallel_collection_preparation_present": false,
@@ -94,18 +94,20 @@
     "uncommitted_stage2_grpo_per_vehicle_same_mode_present": false,
     "uncommitted_stage2_grpo_per_vehicle_same_mode_report_present": false,
     "uncommitted_stage2_grpo_ddim_alignment_plan_present": true,
-    "uncommitted_stage2_grpo_run24_run26_reconciliation_report_present": true
+    "uncommitted_stage2_grpo_run24_run26_reconciliation_report_present": false,
+    "uncommitted_stage2_grpo_ddim_alignment_implementation_report_present": true,
+    "uncommitted_stage2_grpo_ddim_aligned_frozen_gate_report_present": true
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
     "round": "stage2-grpo-ddim-alignment-and-stability-20260906",
-    "status": "run24_run26_reconciled_ddim_alignment_implementation_pending",
+    "status": "ddim_alignment_implementation_verified_frozen_baseline_gate_failed",
     "active_hard_gate": "strict_stage1_v2_run3_qualification"
   },
   "active_workstreams": {
     "bev_only_diffusion_planner_v2": {
       "branch": "BEV",
-      "status": "per_vehicle_same_mode_implementation_verified_frozen_baseline_gate_failed",
+      "status": "ddim_alignment_implementation_verified_frozen_baseline_gate_failed",
       "rule_maker_implementation": "MultiAgentRuleMaker via make_rule_maker(config)",
       "normal_planner_online": false,
       "v1_runtime_supported": false,
@@ -1168,8 +1170,15 @@
     "stage2_grpo_ddim_alignment_and_stability_authorized": true,
     "stage2_grpo_ddim_alignment_and_stability_authorized_on": "2026-09-06",
     "stage2_grpo_ddim_alignment_and_stability_scope": "Unify current, frozen and validation DDIM paths at timesteps [8,5,3,0], previous timesteps [5,3,0,-1], eta=1; add fixed validation and reward diagnostics; replace max gating with mean gating and anchor all valid executable modes with BC/KL; select checkpoints by safety-constrained simulator reward; run only three-seed 500-accepted-state diagnostic arms.",
+    "stage2_grpo_ddim_alignment_and_stability_implementation_complete": true,
+    "stage2_grpo_ddim_alignment_and_stability_implementation_commit": "ec7851c56afce57a99503f62ae1126be251b5cd2",
+    "stage2_grpo_ddim_alignment_and_stability_cuda_n48_passed": true,
+    "stage2_grpo_ddim_alignment_and_stability_fixed_validation_passed": true,
+    "stage2_grpo_ddim_alignment_and_stability_frozen_gate_passed": false,
+    "stage2_grpo_ddim_alignment_and_stability_p95_gate_run": false,
+    "stage2_grpo_ddim_alignment_and_stability_bounded_runs_started": false,
     "stage2_grpo_ddim_alignment_and_stability_long_training_authorized_in_this_thread": false,
-    "note": "Stage1 v2 run_3 remains unqualified. Run24 is interrupted historical evidence; run25 and run26 are complete but project-ineligible diagnostics despite their self-reported formal metadata. Preserve all historical artifacts unchanged; allocate run27 next."
+    "note": "The shared DDIM/mean-gate/full-valid-anchor implementation is verified, but Stage1 v2 run_3 remains unqualified after agent0 collided on aligned frozen-baseline S5/R1 seed17 step21. Run24 is interrupted history; run25/run26 remain project-ineligible diagnostics; run27 is still unallocated."
   },
   "source_of_truth": {
     "stage2_grpo_run24_run26_ddim_alignment_reconciliation_report": {
@@ -1482,8 +1491,23 @@
     },
     "current_project_plan": {
       "path": "docs/project/project_plan.json",
-      "sha256": "d0752eaae152d23f9c60ef3237aab937c330b024eed9c7c3e2aed0b71cf6d004",
-      "role": "Records the verified per-vehicle same-mode n=48 implementation, the passing CUDA single-update smoke, the failed S5 seed-17 frozen-baseline gate, run18-run23 reconciliation, reserved run24, and the unchanged strict Stage1 v2 run_3 formal hard gate."
+      "sha256": "c52eae039389df3eea7dc938cdea8c0f1978b2a7e509bdc5bc807d56087f4399",
+      "role": "Records the verified shared DDIM path, mean same-mode gate, full-valid anchors, fixed validation bank, passing n=48 CUDA smoke, failed aligned S5 seed17 frozen gate, and the blocked run27+ diagnostic/formal boundary."
+    },
+    "stage2_grpo_ddim_alignment_implementation_report": {
+      "path": "evaluation/STAGE2_GRPO_DDIM_ALIGNMENT_IMPLEMENTATION_REPORT.json",
+      "sha256": "92e7b33d0c414b400b3110ebb053aada7dde2b6a40d127db27288de3668cf3fd",
+      "role": "Records schema-v5 DDIM alignment and stability contracts, 346 passing regressions, the n=48 CUDA update, exact ten-record fixed-state replay, repeated current/frozen selected and simulator equality, three real validation defects fixed, and the failed hard-gate boundary."
+    },
+    "stage2_grpo_ddim_aligned_frozen_baseline_gate_report": {
+      "path": "evaluation/STAGE2_GRPO_DDIM_ALIGNED_FROZEN_BASELINE_GATE.json",
+      "sha256": "315af191a5884a898dda85e1d0347264094bc446cd6379ebdb82e4f0b109152a",
+      "role": "Records the aligned frozen Stage1 S5/R1 seed17 agent0 collision at baseline step21, exact per-state inference/mask/optimizer/finalize/env-step counts, accepted selected and STOP projections, and unchanged optimizer/fallback semantics."
+    },
+    "stage2_grpo_fixed_validation_state_bank": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/validation_state_bank_v1.pt",
+      "sha256": "7612658a96d9b40a87d12af3e9ad7b7583c97670d6c41747b4faa27f6d4164b6",
+      "role": "Binds the ten S5-S9 seeds31/47 validation states, exact model inputs, RuleMaker conditions, executable masks, reference poses, resolved scenario parameters and common DDIM noises for every bounded arm."
     },
     "stage2_per_vehicle_same_mode_grpo_implementation_report": {
       "path": "evaluation/STAGE2_PER_VEHICLE_SAME_MODE_GRPO_IMPLEMENTATION_REPORT.json",
@@ -2755,7 +2779,7 @@
     }
   },
   "blockers": [
-    "The replacement frozen-baseline evaluator is available, but Stage1 v2 run_3 failed its strict S5-S9 closed-loop gate at S5/R1 seed 17: agent0 collided on baseline step 22. The full 10-bucket, 2000-step matrix therefore did not complete, and formal GRPO training remains blocked."
+    "The aligned four-step DDIM frozen baseline failed the strict S5-S9 closed-loop gate at S5/R1 seed17: agent0 collided on baseline execution step21 after all selected and STOP projections were accepted. The full ten-bucket matrix did not complete; bounded A/B, P95 in this thread, and formal GRPO remain blocked at the current hard-gate boundary."
   ],
   "future_hard_gates": [
     "Preserve the original 50070-sample Rule-conditioned v2 bundle at the retained pre_episode194_removal backup until the bounded Stage 1 v2 smoke is accepted; the installed 49870-sample curated root must remain bound to base fingerprint 23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779.",
@@ -2768,13 +2792,13 @@
     "GRPO-Exec requires a frozen real-TruckSim chassis surrogate that passes fit, ID/OOD, and probability-calibration gates.",
     "Round 14 cleanup requires both GRPO-Open and GRPO-Exec semantics and manifests to be frozen.",
     "GRPO-Open v3 must retain raw tau_d reward/probability semantics, zero tracking expansion, target-vehicle counterfactual training reward, and frozen Stage1 argmax baseline-only environment execution. Every new run must be stored under its exact source Stage1 run's grpo_open root; historical checkpoint resume and metadata promotion remain forbidden.",
-    "Future BEV-mainline GRPO-Open runs must use stage2_joint_grpo_optimizer_v5 with trajectory ratio bounds [0.9,1.2], stage2_joint_grpo_persistent_episode_v4, stage2_grpo_open_application_v3, schema-v3 checkpoints and v10 online artifacts. Historical run_4 through run_23 remain read-only diagnostics and cannot restore optimizer, RNG, or counters into v5."
+    "Future BEV-mainline GRPO-Open diagnostics must use the exact [8,5,3,0]/[5,3,0,-1]/eta=1 DDIM path, stage2_joint_grpo_optimizer_v7 with ratio bounds [0.9,1.2], stage2_joint_grpo_persistent_episode_v6, stage2_grpo_open_application_v5, schema-v5 checkpoints and v12 online artifacts. Historical and pre-v5 checkpoints remain weights-only and cannot restore optimizer, RNG or counters."
   ],
   "next_actions": [
-    "Implement one shared four-step DDIM path for current policy, frozen Stage1 and validation, then pass focused CPU tests and the n=48 CUDA single-update smoke before any diagnostic training.",
-    "Run the aligned frozen Stage1 S5-S9 x seeds 17/23 x 200-step gate and complete three-vehicle planning-tick P95 measurement; keep formal GRPO blocked unless both pass.",
-    "After implementation evidence, run only bounded diagnostic arms with seeds 17/23/42 and at most 500 accepted states per seed from fresh run27+ paths; never relabel these artifacts as formal.",
-    "The n=48 CUDA single-update smoke and 216-test regression are implementation evidence only. They do not qualify Stage1 run_3, authorize formal long training, or provide paper evidence.",
+    "In a separate execution thread, audit the aligned S5/R1 seed17 agent0 longitudinal response, gap/TTC/collision geometry and hard-brake actor interaction at baseline step21; do not change optimizer thresholds or add a speculative fallback.",
+    "After a cause-specific Stage1 fix, rerun the complete S5-S9 x seeds17/23 x 200-step frozen-baseline gate as its own hard-gate task.",
+    "Run the complete three-vehicle planning-tick P95 <=200 ms gate in a separate execution thread; implementation and CUDA-memory evidence do not substitute for it.",
+    "Only after the relevant gate boundary permits continuation, allocate fresh run27+ paths for the bounded legacy-control/aligned-max/aligned-mean-full-valid arms; all remain diagnostic-only and no 5000-state run is authorized.",
     "When a full diagnostic reward distribution is desired, run scripts/run_eval_grpo.sh at its default 800-step horizon to populate evaluation/reward_compare/step_rewards.csv, one total/progress/TTC/comfort 2-by-2 figure, and five individual reward figures. The deleted evaluation/compare output must not be treated as available evidence; the reward-only output remains non-formal.",
     "The bounded Stage 1 single-step smoke passed. Continue retaining the original 50070-sample backup; no permanent backup deletion is authorized.",
     "The S5 release30 append is installed and fully verified at 50260 samples with all 233 prior base episodes preserved. Bind any consumer to base fingerprint e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511 and sidecar fingerprint a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6; retain the complete pre-append backup unless a separate cleanup round is explicitly authorized.",

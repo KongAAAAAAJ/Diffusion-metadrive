@@ -1,0 +1,157 @@
+{
+  "format": "stage2_grpo_ddim_alignment_implementation_report_v1",
+  "recorded_at": "2026-09-06T22:09:28+08:00",
+  "status": "implementation_verified_frozen_baseline_hard_gate_failed",
+  "repository": {
+    "branch": "BEV",
+    "reconciliation_commit": "1c6accafc6d9b46e008824aad464a8b3f7d6206e",
+    "implementation_commit": "ec7851c56afce57a99503f62ae1126be251b5cd2"
+  },
+  "implemented_contracts": {
+    "ddim_path": {
+      "timesteps": [8, 5, 3, 0],
+      "previous_timesteps": [5, 3, 0, -1],
+      "eta": 1.0,
+      "decoder_calls": 4,
+      "stochastic_log_probability_transitions": 3,
+      "shared_implementation": "models/bev_planner/ddim_transition.py"
+    },
+    "checkpoint_schema": 5,
+    "checkpoint_formats": ["bev_joint_grpo_a_v5", "bev_joint_grpo_b_v5"],
+    "optimizer": "stage2_joint_grpo_optimizer_v7",
+    "application": "stage2_grpo_open_application_v5",
+    "collection": "stage2_joint_grpo_persistent_episode_v6",
+    "online_config": "bev_joint_grpo_online_config_v12",
+    "online_report": "bev_joint_grpo_online_report_v12",
+    "stability_manifest": "stage2_grpo_stability_ab_manifest_v6",
+    "stability_report": "stage2_grpo_stability_ab_report_v6",
+    "active_gate": "hard_valid AND optimizer_executable AND mean_j(R_j) >= same_mode_frozen_pretrain_reward",
+    "trajectory_pg_scope": "active_modes_only",
+    "bc_and_reference_kl_scope": "all_valid_executable_modes",
+    "trainable_parameters": "diffusion_decoder.trajectory_head_only"
+  },
+  "diagnostic_infrastructure": {
+    "independent_rng_streams": [
+      "environment_initial_state",
+      "rollout_initial_noise",
+      "ddim_transition_noise",
+      "validation_noise"
+    ],
+    "retry_sequence_rule": "stateless noise derivation by training_seed, live_state_index and retry_index; retries do not shift later live-state noise",
+    "fixed_validation_state_bank": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/validation_state_bank_v1.pt",
+      "sha256": "7612658a96d9b40a87d12af3e9ad7b7583c97670d6c41747b4faa27f6d4164b6",
+      "format": "bev_joint_grpo_validation_state_bank_v1",
+      "scenarios": ["S5", "S6", "S7", "S8", "S9"],
+      "seeds": [31, 47],
+      "records": 10,
+      "exact_replays_passed": 10,
+      "bound_state": [
+        "warmup_action_prefix",
+        "model_inputs",
+        "RuleMaker_actions",
+        "optimizer_executable_mask",
+        "reference_pose",
+        "scenario_random_seed",
+        "severity_bucket",
+        "resolved_scenario_parameters",
+        "initial_noise_and_three_transition_noises"
+      ]
+    },
+    "reward_and_advantage_logs": "per vehicle-mode JSONL plus hierarchical TensorBoard summaries for baseline-relative distribution, advantage audit, reward components, safety and inactive reason",
+    "checkpoint_selection": "state>=60 trailing-three safety-constrained simulator reward gain, then selected-trajectory gain, then earlier state; no eligible checkpoint means no best.pt",
+    "three_arm_comparator": [
+      "legacy_control",
+      "aligned_max",
+      "aligned_mean_full_valid"
+    ]
+  },
+  "verification": {
+    "expanded_bev_grpo_regression": {
+      "passed": 346,
+      "failed": 0,
+      "warnings": 15
+    },
+    "python_compile": "passed",
+    "flake8_F401_F811_F821_E999": "passed",
+    "git_diff_check": "passed",
+    "json_parse": "passed",
+    "fixed_validation_current_frozen_consistency": {
+      "simulator_errors_first_pass": 0,
+      "simulator_errors_second_pass": 0,
+      "repeat_selected_reward_gain": 0.0,
+      "repeat_simulator_reward_gain": 0.0,
+      "repeat_collision_delta": 0.0,
+      "repeat_out_delta": 0.0,
+      "repeat_s7_road_penalty_delta": 0.0,
+      "repeat_s7_road_margin_delta": 0.0,
+      "all_mode_internal_gain_absolute_error": 2.4649003949051007e-08
+    }
+  },
+  "cuda_n48_single_update": {
+    "status": "passed",
+    "report": "/tmp/grpo_ddim_alignment_cuda_smoke_20260906/report.json",
+    "report_sha256": "8536f3ac0b273295c9815e416b4e8a6c6960f93f6cdb286cc8309d448bd1f5b1",
+    "rollout_shapes": {
+      "chain": [1, 48, 5, 3, 10, 8, 2],
+      "candidates": [1, 3, 10, 48, 8, 3],
+      "trajectory_log_probability": [1, 3, 10, 48, 3]
+    },
+    "update_epochs": 10,
+    "optimizer_steps": 10,
+    "zero_signal_epochs": 0,
+    "finite_total_loss": -0.011724918149411678,
+    "trajectory_log_probability_replay_max_abs_error": 0.0,
+    "trajectory_head_gradient_norm_before_clip": 1.9580986499786377,
+    "trajectory_head_max_abs_delta": 0.00010159891098737717,
+    "decoder_shared_max_abs_delta": 0.0,
+    "mode_head_max_abs_delta": 0.0,
+    "backbone_max_abs_delta": 0.0,
+    "reference_max_abs_delta": 0.0,
+    "peak_cuda_memory_mib": 587.4970703125,
+    "memory_limit_mib": 16376,
+    "checkpoint_round_trip": true,
+    "checkpoint_schema": 5
+  },
+  "defects_found_by_real_validation_and_fixed": [
+    {
+      "defect": "Post-construction scenario route switching allowed S7 formation target spacing to depend on previously created environments.",
+      "fix": "Bind scenario_id and local_route in environment construction for training, fixed validation and simulator branches; also audit resolved scenario parameters during bank replay."
+    },
+    {
+      "defect": "A generic cuda device was rejected against tensors placed on cuda:0.",
+      "fix": "Treat an unspecified CUDA index as the selected CUDA device while retaining strict checks for explicit indices."
+    },
+    {
+      "defect": "Validation passed selected modes as [1,3] into the RuleMaker feedback interface that consumes [3].",
+      "fix": "Use the same batch-unwrapping semantics as the online frozen-baseline execution path."
+    }
+  ],
+  "frozen_stage1_hard_gate": {
+    "status": "failed",
+    "report": "evaluation/STAGE2_GRPO_DDIM_ALIGNED_FROZEN_BASELINE_GATE.json",
+    "report_sha256": "315af191a5884a898dda85e1d0347264094bc446cd6379ebdb82e4f0b109152a",
+    "required_matrix": "S5-S9 x seeds 17/23 x 200 frozen-baseline execution steps",
+    "attempted_buckets": 1,
+    "failure_bucket": "S5_hard_brake_lead/R1_entry_straight seed17",
+    "failure_step": 21,
+    "failed_vehicle": "agent0",
+    "failure_type": "collision_and_early_episode_termination",
+    "selected_modes": [0, 1, 1],
+    "model_input_speeds_mps": [6.9196648597717285, 6.129798889160156, 3.735316276550293],
+    "selected_projection_executable_for_all_vehicles": true,
+    "stop_projection_executable_for_all_vehicles": true,
+    "rule_actions": {"agent0": 0, "agent1": 0, "agent2": 0},
+    "forced_safe_stop_steps": 0,
+    "optimizer_thresholds_changed": false,
+    "fallback_added": false,
+    "interpretation": "The aligned runtime sampler is implemented correctly, but frozen Stage1 run3 remains unsafe and unqualified. The failure is not a STOP projection or executable-mask failure."
+  },
+  "deferred_by_hard_gate_boundary": {
+    "p95_gate": "not run in this execution thread; it is an independent hard gate",
+    "bounded_runs_27_to_35": "not launched",
+    "stability_manifest": "not created until all arm runs exist",
+    "formal_5000_state_training": "blocked"
+  },
+  "next_action": "In a separate execution thread, audit the S5 seed17 agent0 longitudinal response and collision geometry under the unchanged aligned frozen baseline. Rerun the complete frozen-baseline gate after a cause-specific Stage1 fix; run the independent P95 gate only as its own hard-gate task."
+}
