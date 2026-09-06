@@ -12,7 +12,6 @@ from typing import Mapping
 
 import torch
 import torch.nn.functional as F
-from diffusers.schedulers import DDIMScheduler
 from torch import Tensor, nn
 from torch.optim import AdamW
 
@@ -23,6 +22,11 @@ from models.bev_planner.bev_only_diffusion_planner import (
     TRAJECTORY_DIM,
 )
 from models.bev_planner.mode_contract import NUM_MODES, TRAJECTORY_STEPS
+from models.bev_planner.ddim_transition import (
+    DDIMNoiseBundle,
+    DEFAULT_DDIM_PATH,
+    StandardGaussianDDIM,
+)
 
 
 class JointGRPOError(RuntimeError):
@@ -32,9 +36,6 @@ class JointGRPOError(RuntimeError):
 @dataclass(frozen=True)
 class JointGRPOConfig:
     trajectories_per_mode: int = 48
-    initial_noise_timestep: int = 8
-    denoise_steps: int = 4
-    eta: float = 1.0
     trajectory_pg_weight: float = 1.0
     bc_weight: float = 0.1
     reference_kl_weight: float = 0.02
@@ -55,12 +56,6 @@ class JointGRPOConfig:
             raise JointGRPOError(
                 "trajectories_per_mode must be an integer greater than or equal to 2"
             )
-        if self.initial_noise_timestep != 8:
-            raise JointGRPOError("initial_noise_timestep is frozen to 8")
-        if self.denoise_steps != 4:
-            raise JointGRPOError("denoise_steps is frozen to 4")
-        if not math.isclose(float(self.eta), 1.0):
-            raise JointGRPOError("eta is frozen to 1.0")
         positive = (
             "learning_rate",
             "max_grad_norm",
@@ -86,11 +81,11 @@ class JointGRPOConfig:
 
     @property
     def roll_timesteps(self) -> tuple[int, ...]:
-        return BEVOnlyDiffusionPlanner.inference_roll_timesteps(self.denoise_steps)
+        return DEFAULT_DDIM_PATH.timesteps
 
     @property
     def stochastic_timesteps(self) -> tuple[int, ...]:
-        return tuple(value for value in self.roll_timesteps if value > 0)
+        return self.roll_timesteps[:-1]
 
 
 @dataclass(frozen=True)
@@ -125,7 +120,8 @@ def joint_grpo_optimizer_contract(
 
     policy_update = config if config is not None else JointGRPOPolicyUpdateConfig()
     return {
-        "version": "stage2_joint_grpo_optimizer_v5",
+        "version": "stage2_joint_grpo_optimizer_v7",
+        "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "behavior_policy_snapshot": (
             "detached per-vehicle, per-mode stochastic DDIM-transition log "
             "probabilities captured before any policy update"
@@ -143,7 +139,7 @@ def joint_grpo_optimizer_contract(
         ),
         "activation_gate": (
             "active = hard_valid_and_executable AND "
-            "max_j(reward[b,r,k,j]) >= frozen_pretrain_reward[b,r,k]"
+            "mean_j(reward[b,r,k,j]) >= frozen_pretrain_reward[b,r,k]"
         ),
         "advantage_normalization": (
             "independently for every [B,vehicle,mode] block: subtract the "
@@ -163,8 +159,8 @@ def joint_grpo_optimizer_contract(
         ),
         "minibatch_semantics": "none; reuse the complete all-mode rollout each epoch",
         "reference_regularization": (
-            "recompute active-mode trajectory behavior-cloning and frozen-Stage1 "
-            "trajectory KL every epoch; no mode KL"
+            "recompute trajectory behavior-cloning and frozen-Stage1 trajectory "
+            "KL for every hard-valid optimizer-executable mode each epoch; no mode KL"
         ),
         "kl_early_stop": False,
         "budget_unit": "accepted_update_state",
@@ -186,137 +182,6 @@ def joint_grpo_optimizer_contract_sha256(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-@dataclass(frozen=True)
-class GaussianDDIMStep:
-    prev_sample: Tensor
-    mean: Tensor
-    std: Tensor
-    log_prob: Tensor | None
-
-
-class StandardGaussianDDIM:
-    """DDIM transition with additive Gaussian noise and exact log-probability."""
-
-    def __init__(self, num_train_timesteps: int = 1000) -> None:
-        self.scheduler = DDIMScheduler(
-            num_train_timesteps=num_train_timesteps,
-            beta_schedule="scaled_linear",
-            prediction_type="sample",
-        )
-        self.scheduler.set_timesteps(num_train_timesteps)
-
-    def add_noise(
-        self, original: Tensor, noise: Tensor, timesteps: Tensor
-    ) -> Tensor:
-        return self.scheduler.add_noise(original, noise, timesteps)
-
-    def step(
-        self,
-        *,
-        model_output: Tensor,
-        timestep: int,
-        previous_timestep: int,
-        sample: Tensor,
-        eta: float,
-        generator: torch.Generator | None = None,
-        prev_sample: Tensor | None = None,
-    ) -> GaussianDDIMStep:
-        if isinstance(timestep, bool) or not isinstance(timestep, int):
-            raise JointGRPOError("DDIM timestep must be an integer")
-        if timestep < 0 or timestep >= self.scheduler.config.num_train_timesteps:
-            raise JointGRPOError("DDIM timestep is outside the scheduler")
-        if (
-            isinstance(previous_timestep, bool)
-            or not isinstance(previous_timestep, int)
-            or previous_timestep < -1
-            or previous_timestep >= timestep
-        ):
-            raise JointGRPOError(
-                "DDIM previous_timestep must be an integer in [-1,timestep)"
-            )
-        if timestep == 0 and previous_timestep != -1:
-            raise JointGRPOError("the deterministic t=0 step must terminate at -1")
-        if timestep > 0 and previous_timestep < 0:
-            raise JointGRPOError("only t=0 may transition to -1")
-        if sample.shape != model_output.shape:
-            raise JointGRPOError("DDIM sample and model_output shapes must match")
-        if sample.dtype != torch.float32 or model_output.dtype != torch.float32:
-            raise JointGRPOError("DDIM probability tensors must use float32")
-        if sample.device != model_output.device:
-            raise JointGRPOError("DDIM sample and model_output devices must match")
-        if not bool(torch.isfinite(sample).all()) or not bool(
-            torch.isfinite(model_output).all()
-        ):
-            raise JointGRPOError("DDIM inputs must be finite")
-        if not math.isfinite(float(eta)) or float(eta) < 0.0:
-            raise JointGRPOError("DDIM eta must be non-negative and finite")
-
-        device = sample.device
-        dtype = sample.dtype
-        alpha_t = self.scheduler.alphas_cumprod[timestep].to(device, dtype)
-        alpha_previous = (
-            self.scheduler.alphas_cumprod[previous_timestep].to(device, dtype)
-            if previous_timestep >= 0
-            else self.scheduler.final_alpha_cumprod.to(device, dtype)
-        )
-        beta_t = 1.0 - alpha_t
-        prediction = model_output.clamp(
-            -float(self.scheduler.config.clip_sample_range),
-            float(self.scheduler.config.clip_sample_range),
-        )
-        epsilon = (sample - alpha_t.sqrt() * prediction) / beta_t.sqrt().clamp_min(
-            torch.finfo(dtype).eps
-        )
-        variance = (
-            (1.0 - alpha_previous)
-            / (1.0 - alpha_t).clamp_min(torch.finfo(dtype).eps)
-            * (1.0 - alpha_t / alpha_previous)
-        ).clamp_min(0.0)
-        std = float(eta) * variance.sqrt()
-        direction_scale = (1.0 - alpha_previous - std.square()).clamp_min(0.0)
-        mean = alpha_previous.sqrt() * prediction + direction_scale.sqrt() * epsilon
-
-        stochastic = bool(float(std.detach().cpu()) > 0.0)
-        if prev_sample is None:
-            if stochastic:
-                noise = torch.randn(
-                    sample.shape,
-                    dtype=dtype,
-                    device=device,
-                    generator=generator,
-                )
-                sampled = mean + std * noise
-            else:
-                sampled = mean
-        else:
-            if prev_sample.shape != sample.shape or prev_sample.dtype != dtype:
-                raise JointGRPOError(
-                    "replayed DDIM prev_sample must match sample shape and dtype"
-                )
-            if prev_sample.device != device or not bool(
-                torch.isfinite(prev_sample).all()
-            ):
-                raise JointGRPOError(
-                    "replayed DDIM prev_sample must be finite and colocated"
-                )
-            sampled = prev_sample
-
-        log_prob = None
-        if stochastic:
-            elementwise = (
-                -0.5 * ((sampled.detach() - mean) / std).square()
-                - torch.log(std)
-                - 0.5 * math.log(2.0 * math.pi)
-            )
-            log_prob = elementwise.sum(dim=(-2, -1))
-        return GaussianDDIMStep(
-            prev_sample=sampled,
-            mean=mean,
-            std=std,
-            log_prob=log_prob,
-        )
 
 
 @dataclass(frozen=True)
@@ -424,7 +289,9 @@ class JointGRPOEpochUpdateResult:
     epoch_in_rollout: int
     loss: JointGRPOLossResult
     gradient_norms: Mapping[str, float]
+    clipped_gradient_norms: Mapping[str, float]
     total_gradient_norm: float
+    trajectory_head_relative_drift: float
     optimizer_step: int
     zero_signal_epoch: bool
 
@@ -433,7 +300,9 @@ class JointGRPOEpochUpdateResult:
 class JointGRPOUpdateResult:
     loss: JointGRPOLossResult
     gradient_norms: Mapping[str, float]
+    clipped_gradient_norms: Mapping[str, float]
     total_gradient_norm: float
+    trajectory_head_relative_drift: float
     optimizer_step: int
     epoch_results: tuple[JointGRPOEpochUpdateResult, ...]
     zero_signal_epochs: int
@@ -511,9 +380,7 @@ def same_mode_active_mask(
         rewards.device == pretrain_rewards.device == valid_mode_mask.device
     ):
         raise JointGRPOError("gate tensors must use the same device")
-    return valid_mode_mask & (
-        rewards.amax(dim=-1) >= pretrain_rewards
-    )
+    return valid_mode_mask & (rewards.mean(dim=-1) >= pretrain_rewards)
 
 
 def normalize_same_mode_advantages(
@@ -797,6 +664,8 @@ class _JointGRPOTrainerBase:
     def infer_frozen_pretrain(
         self,
         rollout: JointGRPORollout,
+        *,
+        noise_bundle: DDIMNoiseBundle | None = None,
     ) -> dict[str, Tensor]:
         """Run one deterministic Stage-1 policy inference on a rollout state."""
 
@@ -806,12 +675,15 @@ class _JointGRPOTrainerBase:
             rollout.context,
             rollout.coarse_trajectories,
             rollout.mode_valid_mask,
+            noise_bundle=noise_bundle,
         )
 
     @torch.inference_mode()
     def infer_frozen_pretrain_from_inputs(
         self,
         model_inputs: Mapping[str, Tensor],
+        *,
+        noise_bundle: DDIMNoiseBundle | None = None,
     ) -> dict[str, Tensor]:
         """Run deterministic Stage-1 inference without allocating an N-rollout."""
 
@@ -820,6 +692,7 @@ class _JointGRPOTrainerBase:
             context,
             model_inputs["coarse_trajectories"],
             model_inputs["mode_valid_mask"],
+            noise_bundle=noise_bundle,
         )
 
     def _infer_frozen_pretrain_context(
@@ -827,6 +700,8 @@ class _JointGRPOTrainerBase:
         context: BEVPlannerContext,
         coarse: Tensor,
         valid_mask: Tensor,
+        *,
+        noise_bundle: DDIMNoiseBundle | None,
     ) -> dict[str, Tensor]:
         self.planner._validate_trajectory_inputs(
             coarse,
@@ -838,13 +713,18 @@ class _JointGRPOTrainerBase:
         batch_size = context.batch_size
         device = coarse.device
         anchor_normalized = self.planner._normalize_xy(coarse[..., :2])
-        noise = self.planner._inference_noise(
-            anchor_normalized.shape,
-            device=device,
+        bundle = (
+            self.planner._inference_noise_bundle(
+                anchor_normalized.shape,
+                device=device,
+            )
+            if noise_bundle is None
+            else noise_bundle
         )
+        bundle.validate(anchor_normalized.shape, device=device)
         noise_timesteps = torch.full(
             (batch_size * NUM_PLATOON_ROLES,),
-            self.planner.config.inference_noise_timestep,
+            DEFAULT_DDIM_PATH.initial_timestep,
             device=device,
             dtype=torch.int64,
         )
@@ -856,19 +736,14 @@ class _JointGRPOTrainerBase:
         )
         sample = self.planner.diffusion_scheduler.add_noise(
             anchor_normalized.reshape(flat_shape),
-            noise.reshape(flat_shape),
+            bundle.initial_noise.reshape(flat_shape),
             noise_timesteps,
         ).reshape_as(anchor_normalized)
-        self.planner.diffusion_scheduler.set_timesteps(
-            self.planner.config.num_train_timesteps,
-            device=device,
-        )
 
         candidates: Tensor | None = None
         raw_logits: Tensor | None = None
-        for timestep in self.planner.inference_roll_timesteps(
-            self.planner.config.inference_denoise_steps
-        ):
+        transition_noise_index = 0
+        for timestep, previous_timestep in DEFAULT_DDIM_PATH.transitions():
             batch_timesteps = torch.full(
                 (batch_size, NUM_PLATOON_ROLES),
                 timestep,
@@ -885,11 +760,23 @@ class _JointGRPOTrainerBase:
             predicted_normalized = self.planner._normalize_xy(
                 candidates[..., :2]
             )
-            sample = self.planner.diffusion_scheduler.step(
+            step_noise = None
+            if previous_timestep >= 0:
+                step_noise = bundle.transition_noises[transition_noise_index]
+                transition_noise_index += 1
+            transition = self.transition.step(
                 model_output=predicted_normalized.reshape(flat_shape),
                 timestep=timestep,
+                previous_timestep=previous_timestep,
                 sample=sample.reshape(flat_shape),
-            ).prev_sample.reshape_as(sample)
+                eta=DEFAULT_DDIM_PATH.eta,
+                noise=(
+                    step_noise.reshape(flat_shape)
+                    if step_noise is not None
+                    else None
+                ),
+            )
+            sample = transition.prev_sample.reshape_as(sample)
         if candidates is None or raw_logits is None:
             raise JointGRPOError(
                 "frozen pretrain inference produced no denoising steps"
@@ -933,9 +820,16 @@ class _JointGRPOTrainerBase:
         model_inputs: Mapping[str, Tensor],
         *,
         generator: torch.Generator,
+        transition_generator: torch.Generator | None = None,
     ) -> JointGRPORollout:
         if not isinstance(generator, torch.Generator):
             raise JointGRPOError("sample_groups requires an explicit torch.Generator")
+        if transition_generator is None:
+            transition_generator = generator
+        if not isinstance(transition_generator, torch.Generator):
+            raise JointGRPOError(
+                "sample_groups transition_generator must be a torch.Generator"
+            )
         context = self._context_from_inputs(model_inputs)
         coarse = model_inputs["coarse_trajectories"]
         valid_mask = model_inputs["mode_valid_mask"]
@@ -958,7 +852,7 @@ class _JointGRPOTrainerBase:
         )
         noise_timestep = torch.full(
             (anchor.shape[0] * NUM_PLATOON_ROLES,),
-            self.config.initial_noise_timestep,
+            DEFAULT_DDIM_PATH.initial_timestep,
             device=anchor.device,
             dtype=torch.int64,
         )
@@ -977,10 +871,7 @@ class _JointGRPOTrainerBase:
         stochastic_log_probs = []
         step_histories: list[Tensor] = []
         final_candidates = final_logits = None
-        destinations = (*self.config.roll_timesteps[1:], -1)
-        for timestep, previous_timestep in zip(
-            self.config.roll_timesteps, destinations
-        ):
+        for timestep, previous_timestep in DEFAULT_DDIM_PATH.transitions():
             batch_timestep = torch.full(
                 (anchor.shape[0], NUM_PLATOON_ROLES),
                 timestep,
@@ -1002,8 +893,8 @@ class _JointGRPOTrainerBase:
                 timestep=timestep,
                 previous_timestep=previous_timestep,
                 sample=sample.float(),
-                eta=self.config.eta,
-                generator=generator,
+                eta=DEFAULT_DDIM_PATH.eta,
+                generator=transition_generator,
             )
             if transition.log_prob is not None:
                 stochastic_log_probs.append(transition.log_prob)
@@ -1188,9 +1079,8 @@ class _JointGRPOTrainerBase:
         current_log_probs = []
         trajectory_kls = []
         final_current_candidates = final_reference_candidates = None
-        destinations = (*self.config.roll_timesteps[1:], -1)
         for step_index, (timestep, previous_timestep) in enumerate(
-            zip(self.config.roll_timesteps, destinations)
+            DEFAULT_DDIM_PATH.transitions()
         ):
             sample = chains[:, step_index]
             next_sample = chains[:, step_index + 1]
@@ -1229,7 +1119,7 @@ class _JointGRPOTrainerBase:
                 timestep=timestep,
                 previous_timestep=previous_timestep,
                 sample=sample.float(),
-                eta=self.config.eta,
+                eta=DEFAULT_DDIM_PATH.eta,
                 prev_sample=next_sample.float(),
             )
             with torch.no_grad():
@@ -1238,7 +1128,7 @@ class _JointGRPOTrainerBase:
                     timestep=timestep,
                     previous_timestep=previous_timestep,
                     sample=sample.float(),
-                    eta=self.config.eta,
+                    eta=DEFAULT_DDIM_PATH.eta,
                     prev_sample=next_sample.float(),
             )
             if current_transition.log_prob is not None:
@@ -1320,7 +1210,7 @@ class _JointGRPOTrainerBase:
                 reference_all_modes,
                 self.config,
             ),
-            active_mode_mask,
+            valid_mode_mask,
         )
         trajectory_kl_blocks = torch.stack(
             trajectory_kls, dim=-1
@@ -1333,7 +1223,7 @@ class _JointGRPOTrainerBase:
         ).permute(0, 2, 3, 1, 4)
         trajectory_reference_kl = _hierarchical_active_mean(
             trajectory_kl_blocks,
-            active_mode_mask,
+            valid_mode_mask,
         )
         reference_kl = trajectory_reference_kl
         total = (
@@ -1392,6 +1282,20 @@ class _JointGRPOTrainerBase:
         if not bool(torch.isfinite(gradient).all()):
             raise JointGRPOError("joint GRPO gradient is non-finite")
         return float(torch.linalg.vector_norm(gradient).cpu())
+
+    def _trajectory_head_relative_drift(self) -> float:
+        numerator: list[Tensor] = []
+        denominator: list[Tensor] = []
+        current = self.planner.diffusion_decoder.trajectory_head.parameters()
+        frozen = self.reference.diffusion_decoder.trajectory_head.parameters()
+        for current_parameter, frozen_parameter in zip(current, frozen):
+            current_value = current_parameter.detach().float()
+            frozen_value = frozen_parameter.detach().float()
+            numerator.append((current_value - frozen_value).square().sum())
+            denominator.append(frozen_value.square().sum())
+        numerator_norm = torch.stack(numerator).sum().sqrt()
+        denominator_norm = torch.stack(denominator).sum().sqrt().clamp_min(1e-12)
+        return float((numerator_norm / denominator_norm).cpu())
 
     def update(
         self,
@@ -1465,6 +1369,7 @@ class _JointGRPOTrainerBase:
             zero_signal_epoch = gradient_norms["trajectory_head"] == 0.0
             if zero_signal_epoch:
                 total_gradient_norm = 0.0
+                clipped_gradient_norms = dict(gradient_norms)
             else:
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     trainable, float(self.config.max_grad_norm)
@@ -1474,14 +1379,22 @@ class _JointGRPOTrainerBase:
                         "joint GRPO total gradient norm is non-finite"
                     )
                 total_gradient_norm = float(total_norm.detach().cpu())
+                clipped_gradient_norms = {
+                    "trajectory_head": self._module_gradient_norm(
+                        self.planner.diffusion_decoder.trajectory_head
+                    )
+                }
                 self.optimizer.step()
                 self.optimizer_step += 1
+            relative_drift = self._trajectory_head_relative_drift()
             epoch_results.append(
                 JointGRPOEpochUpdateResult(
                     epoch_in_rollout=epoch_index + 1,
                     loss=loss.detached(),
                     gradient_norms=gradient_norms,
+                    clipped_gradient_norms=clipped_gradient_norms,
                     total_gradient_norm=total_gradient_norm,
+                    trajectory_head_relative_drift=relative_drift,
                     optimizer_step=self.optimizer_step,
                     zero_signal_epoch=zero_signal_epoch,
                 )
@@ -1492,7 +1405,11 @@ class _JointGRPOTrainerBase:
         return JointGRPOUpdateResult(
             loss=final_epoch.loss,
             gradient_norms=final_epoch.gradient_norms,
+            clipped_gradient_norms=final_epoch.clipped_gradient_norms,
             total_gradient_norm=final_epoch.total_gradient_norm,
+            trajectory_head_relative_drift=(
+                final_epoch.trajectory_head_relative_drift
+            ),
             optimizer_step=final_epoch.optimizer_step,
             epoch_results=frozen_epoch_results,
             zero_signal_epochs=sum(
@@ -1743,7 +1660,6 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
 __all__ = [
     "FrozenGRPOReference",
     "FrozenVariantAReference",
-    "GaussianDDIMStep",
     "JointGRPOConfig",
     "JointGRPOEpochUpdateResult",
     "JointGRPOError",
@@ -1754,7 +1670,6 @@ __all__ = [
     "JointGRPOTrainerA",
     "JointGRPOTrainerB",
     "JointGRPOUpdateResult",
-    "StandardGaussianDDIM",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
     "normalize_same_mode_advantages",

@@ -23,6 +23,12 @@ from models.bev_planner.bev_resnet18_backbone import (
     BEVResNet18Config,
 )
 from models.bev_planner.mode_contract import NUM_MODES, TRAJECTORY_STEPS
+from models.bev_planner.ddim_transition import (
+    DDIMNoiseBundle,
+    DDIMTransitionError,
+    DEFAULT_DDIM_PATH,
+    StandardGaussianDDIM,
+)
 
 
 NUM_PLATOON_ROLES: Final[int] = 3
@@ -52,8 +58,6 @@ class BEVOnlyDiffusionPlannerConfig:
     dropout: float = 0.0
     num_train_timesteps: int = 1000
     train_timestep_upper: int = 50
-    inference_noise_timestep: int = 8
-    inference_denoise_steps: int = 2
     inference_seed: int = 0
     max_xy_residual_m: float = 12.0
     predecessor_condition: Literal["none", "predicted_detached"] = "none"
@@ -67,8 +71,6 @@ class BEVOnlyDiffusionPlannerConfig:
             "decoder_layers",
             "num_train_timesteps",
             "train_timestep_upper",
-            "inference_noise_timestep",
-            "inference_denoise_steps",
         )
         for name in integer_fields:
             value = getattr(self, name)
@@ -76,10 +78,6 @@ class BEVOnlyDiffusionPlannerConfig:
                 raise BEVPlannerError(f"{name} must be a positive integer")
         if self.d_model % self.num_heads != 0:
             raise BEVPlannerError("d_model must be divisible by num_heads")
-        if not 0 <= self.inference_noise_timestep < self.num_train_timesteps:
-            raise BEVPlannerError(
-                "inference_noise_timestep must be smaller than num_train_timesteps"
-            )
         if self.train_timestep_upper > self.num_train_timesteps:
             raise BEVPlannerError(
                 "train_timestep_upper must not exceed num_train_timesteps"
@@ -721,6 +719,9 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             beta_schedule="scaled_linear",
             prediction_type="sample",
         )
+        self.ddim_transition = StandardGaussianDDIM(
+            self.config.num_train_timesteps
+        )
         bev_config = SemanticBEVConfig()
         self.register_buffer(
             "trajectory_xy_min",
@@ -734,15 +735,8 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         )
 
     @staticmethod
-    def inference_roll_timesteps(denoise_steps: int = 2) -> tuple[int, ...]:
-        if isinstance(denoise_steps, bool) or not isinstance(denoise_steps, int):
-            raise BEVPlannerError("denoise_steps must be a positive integer")
-        if denoise_steps <= 0:
-            raise BEVPlannerError("denoise_steps must be a positive integer")
-        step_ratio = 20.0 / float(denoise_steps)
-        return tuple(
-            int(round(index * step_ratio)) for index in reversed(range(denoise_steps))
-        )
+    def inference_roll_timesteps() -> tuple[int, ...]:
+        return DEFAULT_DDIM_PATH.timesteps
 
     @staticmethod
     def _require_tensor(
@@ -1287,18 +1281,17 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             mode_valid_mask,
         )
 
-    def _inference_noise(
+    def _inference_noise_bundle(
         self,
         shape: torch.Size,
         *,
         device: torch.device,
-    ) -> Tensor:
+    ) -> DDIMNoiseBundle:
         generator = torch.Generator(device=device)
         generator.manual_seed(int(self.config.inference_seed))
-        return torch.randn(
+        return DDIMNoiseBundle.sample(
             shape,
             device=device,
-            dtype=torch.float32,
             generator=generator,
         )
 
@@ -1307,20 +1300,24 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         context: BEVPlannerContext,
         coarse_trajectories: Tensor,
         *,
-        diffusion_noise: Tensor | None,
+        noise_bundle: DDIMNoiseBundle | None,
         mode_valid_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
         batch_size = context.batch_size
         device = coarse_trajectories.device
         anchor_normalized = self._normalize_xy(coarse_trajectories[..., :2])
-        noise = (
-            self._inference_noise(anchor_normalized.shape, device=device)
-            if diffusion_noise is None
-            else diffusion_noise
+        bundle = (
+            self._inference_noise_bundle(anchor_normalized.shape, device=device)
+            if noise_bundle is None
+            else noise_bundle
         )
+        try:
+            bundle.validate(anchor_normalized.shape, device=device)
+        except DDIMTransitionError as exc:
+            raise BEVPlannerError(str(exc)) from exc
         noise_timesteps = torch.full(
             (batch_size * NUM_PLATOON_ROLES,),
-            self.config.inference_noise_timestep,
+            DEFAULT_DDIM_PATH.initial_timestep,
             device=device,
             dtype=torch.int64,
         )
@@ -1332,18 +1329,14 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         )
         sample = self.diffusion_scheduler.add_noise(
             anchor_normalized.reshape(flat_shape),
-            noise.reshape(flat_shape),
+            bundle.initial_noise.reshape(flat_shape),
             noise_timesteps,
         ).reshape_as(anchor_normalized)
-        self.diffusion_scheduler.set_timesteps(
-            self.config.num_train_timesteps, device=device
-        )
 
         candidates: Tensor | None = None
         raw_logits: Tensor | None = None
-        for timestep in self.inference_roll_timesteps(
-            self.config.inference_denoise_steps
-        ):
+        transition_noise_index = 0
+        for timestep, previous_timestep in DEFAULT_DDIM_PATH.transitions():
             batch_timesteps = torch.full(
                 (batch_size, NUM_PLATOON_ROLES),
                 timestep,
@@ -1358,11 +1351,23 @@ class BEVOnlyDiffusionPlanner(nn.Module):
                 mode_valid_mask,
             )
             predicted_normalized = self._normalize_xy(candidates[..., :2])
-            sample = self.diffusion_scheduler.step(
+            step_noise = None
+            if previous_timestep >= 0:
+                step_noise = bundle.transition_noises[transition_noise_index]
+                transition_noise_index += 1
+            transition = self.ddim_transition.step(
                 model_output=predicted_normalized.reshape(flat_shape),
                 timestep=timestep,
+                previous_timestep=previous_timestep,
                 sample=sample.reshape(flat_shape),
-            ).prev_sample.reshape_as(sample)
+                eta=DEFAULT_DDIM_PATH.eta,
+                noise=(
+                    step_noise.reshape(flat_shape)
+                    if step_noise is not None
+                    else None
+                ),
+            )
+            sample = transition.prev_sample.reshape_as(sample)
         if candidates is None or raw_logits is None:
             raise BEVPlannerError("inference produced no denoising steps")
         return candidates, raw_logits
@@ -1403,6 +1408,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
         rule_action_condition: Tensor | None = None,
         diffusion_noise: Tensor | None = None,
         diffusion_timesteps: Tensor | None = None,
+        ddim_noise_bundle: DDIMNoiseBundle | None = None,
     ) -> dict[str, Tensor]:
         context = self.encode_context(
             bev,
@@ -1429,6 +1435,10 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             device=bev.device,
         )
         if self.training:
+            if ddim_noise_bundle is not None:
+                raise BEVPlannerError(
+                    "ddim_noise_bundle is only valid during inference"
+                )
             candidates, raw_logits = self._training_forward(
                 context,
                 coarse_trajectories,
@@ -1437,6 +1447,11 @@ class BEVOnlyDiffusionPlanner(nn.Module):
                 mode_valid_mask=mode_valid_mask,
             )
         else:
+            if diffusion_noise is not None:
+                raise BEVPlannerError(
+                    "diffusion_noise is training-only; inference requires "
+                    "ddim_noise_bundle"
+                )
             if diffusion_timesteps is not None:
                 raise BEVPlannerError(
                     "diffusion_timesteps override is only valid during training"
@@ -1444,7 +1459,7 @@ class BEVOnlyDiffusionPlanner(nn.Module):
             candidates, raw_logits = self._inference_forward(
                 context,
                 coarse_trajectories,
-                diffusion_noise=noise,
+                noise_bundle=ddim_noise_bundle,
                 mode_valid_mask=mode_valid_mask,
             )
         return self._select(candidates, raw_logits, mode_valid_mask)

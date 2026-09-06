@@ -210,7 +210,7 @@ def test_b_only_trajectory_head_updates() -> None:
     )
 
 
-def test_b_source_metadata_and_schema3_strict_resume(tmp_path: Path) -> None:
+def test_b_source_metadata_and_schema5_strict_resume(tmp_path: Path) -> None:
     source = _source_metadata(diagnostic=True)
     validate_stage1_b_source_metadata(source, allow_diagnostic_source=True)
     with pytest.raises(JointGRPOError, match="explicit opt-in"):
@@ -226,7 +226,7 @@ def test_b_source_metadata_and_schema3_strict_resume(tmp_path: Path) -> None:
         metrics={"loss/total": 0.0},
         diagnostic_only=True,
     )
-    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 3
+    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 5
     assert payload["format"] == GRPO_B_CHECKPOINT_FORMAT
     path = save_grpo_checkpoint(tmp_path / "b.pt", payload)
     restored = JointGRPOTrainerB(

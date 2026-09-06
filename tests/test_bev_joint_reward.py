@@ -302,7 +302,7 @@ def test_reward_rejects_labels_and_invalid_contracts() -> None:
 
 def test_grpo_open_application_contract_is_vehicle_mode_baseline_only() -> None:
     assert GRPO_OPEN_REWARD_APPLICATION_CONTRACT == {
-        "version": "stage2_grpo_open_application_v3",
+        "version": "stage2_grpo_open_application_v5",
         "comparison_unit": "vehicle_mode",
         "policy_sample_domain": "all-mode raw tau_d",
         "policy_probability_domain": (
@@ -316,12 +316,15 @@ def test_grpo_open_application_contract_is_vehicle_mode_baseline_only() -> None:
             "per-(vehicle,mode) mean-centered population-RMS standardization"
         ),
         "active_mode_condition": (
-            "hard-valid and max(candidate_reward) >= same-mode pretrain reward"
+            "hard-valid, optimizer-executable and mean(candidate_reward) >= "
+            "same-mode pretrain reward"
         ),
         "activation_margin": None,
         "activation_reward_span_threshold": None,
-        "inactive_mode_loss_terms": (
-            "excluded from trajectory PG, trajectory BC and trajectory KL"
+        "inactive_mode_loss_terms": "excluded from trajectory PG only",
+        "anchor_scope": (
+            "trajectory BC and trajectory KL cover every hard-valid "
+            "optimizer-executable vehicle-mode"
         ),
         "sampled_candidate_execution": False,
         "sampled_candidate_optimizer_or_rule_maker": False,
@@ -339,11 +342,13 @@ def test_grpo_open_application_contract_is_vehicle_mode_baseline_only() -> None:
         "baseline_execution_per_live_state": 1,
         "tracking_expansion_enabled": False,
         "calibration_required": False,
-        "best_checkpoint_metric": "validation/vehicle_reward_mean",
+        "best_checkpoint_metric": (
+            "validation/safety_constrained_simulator_reward_gain_trailing3"
+        ),
         "joint_reward_role": "historical/final team evaluation diagnostic only",
     }
     assert GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 == (
-        "4ea5af5edfdab318b0d6de6cabeecc5f75c4d2f4b976c47913ba594eb8c3eb5a"
+        "3b7d91149c99fb54f7489465e8a0243ffa52e9be54d95c4cfd55d6e076d4aafd"
     )
 
 

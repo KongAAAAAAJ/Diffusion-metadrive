@@ -39,6 +39,7 @@ from models.bev_planner import (
     BEVOnlyDiffusionPlannerConfig,
     BEVPlannerError,
     BEVResNet18Config,
+    DDIMNoiseBundle,
     JointStage1Loss,
     Stage1LossConfig,
     Stage1LossResult,
@@ -250,9 +251,21 @@ def stage1_planner_config_from_mapping(
     if not isinstance(value, Mapping):
         raise Stage1TrainingError("Stage 1 planner_config must be a mapping")
     planner_fields = {field.name for field in dataclasses.fields(BEVOnlyDiffusionPlannerConfig)}
-    if set(value) != planner_fields:
+    legacy_sampler_fields = {"inference_noise_timestep", "inference_denoise_steps"}
+    observed_fields = set(value)
+    if observed_fields == planner_fields | legacy_sampler_fields:
+        if (
+            value.get("inference_noise_timestep") != 8
+            or value.get("inference_denoise_steps") not in (2, 4)
+        ):
+            raise Stage1TrainingError(
+                "legacy Stage 1 sampler fields do not match a supported source"
+            )
+    elif observed_fields != planner_fields:
         raise Stage1TrainingError("Stage 1 planner_config fields mismatch")
     config_values = dict(value)
+    config_values.pop("inference_noise_timestep", None)
+    config_values.pop("inference_denoise_steps", None)
     backbone = config_values.get("backbone")
     if not isinstance(backbone, Mapping):
         raise Stage1TrainingError("Stage 1 planner_config backbone is invalid")
@@ -540,6 +553,7 @@ def planner_forward_from_batch(
     *,
     diffusion_noise: Tensor | None = None,
     diffusion_timesteps: Tensor | None = None,
+    ddim_noise_bundle: DDIMNoiseBundle | None = None,
 ) -> dict[str, Tensor]:
     return planner(
         batch["bev"],
@@ -556,6 +570,7 @@ def planner_forward_from_batch(
         rule_action_condition=batch["rule_action_condition"],
         diffusion_noise=diffusion_noise,
         diffusion_timesteps=diffusion_timesteps,
+        ddim_noise_bundle=ddim_noise_bundle,
     )
 
 

@@ -109,7 +109,7 @@ VEHICLE_MODE_REWARD_CONTRACT_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
-    "version": "stage2_grpo_open_application_v3",
+    "version": "stage2_grpo_open_application_v5",
     "comparison_unit": "vehicle_mode",
     "policy_sample_domain": "all-mode raw tau_d",
     "policy_probability_domain": "per-vehicle per-mode DDIM trajectory transitions",
@@ -121,12 +121,15 @@ GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
         "per-(vehicle,mode) mean-centered population-RMS standardization"
     ),
     "active_mode_condition": (
-        "hard-valid and max(candidate_reward) >= same-mode pretrain reward"
+        "hard-valid, optimizer-executable and mean(candidate_reward) >= "
+        "same-mode pretrain reward"
     ),
     "activation_margin": None,
     "activation_reward_span_threshold": None,
-    "inactive_mode_loss_terms": (
-        "excluded from trajectory PG, trajectory BC and trajectory KL"
+    "inactive_mode_loss_terms": "excluded from trajectory PG only",
+    "anchor_scope": (
+        "trajectory BC and trajectory KL cover every hard-valid "
+        "optimizer-executable vehicle-mode"
     ),
     "sampled_candidate_execution": False,
     "sampled_candidate_optimizer_or_rule_maker": False,
@@ -144,7 +147,9 @@ GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
     "baseline_execution_per_live_state": 1,
     "tracking_expansion_enabled": False,
     "calibration_required": False,
-    "best_checkpoint_metric": "validation/vehicle_reward_mean",
+    "best_checkpoint_metric": (
+        "validation/safety_constrained_simulator_reward_gain_trailing3"
+    ),
     "joint_reward_role": "historical/final team evaluation diagnostic only",
 }
 GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 = hashlib.sha256(

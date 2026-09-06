@@ -13,6 +13,7 @@ import torch
 
 from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
+    DEFAULT_DDIM_PATH,
     JointGRPOConfig,
     JointGRPOError,
     JointGRPOTrainerA,
@@ -28,10 +29,13 @@ from train.train_bev_diffusion_stage1 import (
 )
 
 
-GRPO_CHECKPOINT_SCHEMA_VERSION = 3
-GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v3"
-GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v3"
+GRPO_CHECKPOINT_SCHEMA_VERSION = 5
+GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v5"
+GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v5"
 GRPO_REWARD_SOURCE = "external_per_vehicle_same_mode_counterfactual"
+SAME_MODE_GRPO_CHECKPOINT_SCHEMA_VERSION = 3
+SAME_MODE_GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v3"
+SAME_MODE_GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v3"
 PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION = 2
 PREVIOUS_GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v2"
 PREVIOUS_GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v2"
@@ -287,6 +291,7 @@ def _grpo_checkpoint_payload(
         "optimizer_contract_version": joint_grpo_optimizer_contract()[
             "version"
         ],
+        "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "source_stage1_sha256": source_stage1_sha256,
         "source_dataset_fingerprint": fingerprint,
         "diagnostic_only": bool(diagnostic_only),
@@ -428,6 +433,16 @@ def _validate_grpo_a_evaluation_identity(payload: Mapping[str, Any]) -> str:
     if all(payload.get(name) == value for name, value in current_identity.items()):
         return "current"
     if (
+        payload.get("schema_version") == SAME_MODE_GRPO_CHECKPOINT_SCHEMA_VERSION
+        and payload.get("format") == SAME_MODE_GRPO_CHECKPOINT_FORMAT
+        and payload.get("variant") == "A"
+        and payload.get("predecessor_condition") == "none"
+        and payload.get("reward_source") == GRPO_REWARD_SOURCE
+        and payload.get("optimizer_contract_version")
+        == "stage2_joint_grpo_optimizer_v5"
+    ):
+        return "same_mode_v3"
+    if (
         payload.get("schema_version") == PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION
         and payload.get("format") == PREVIOUS_GRPO_CHECKPOINT_FORMAT
         and payload.get("variant") == "A"
@@ -525,6 +540,7 @@ def _load_grpo_checkpoint(
         "optimizer_contract_version": joint_grpo_optimizer_contract()[
             "version"
         ],
+        "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "source_stage1_sha256": expected_source_stage1_sha256,
     }
     for name, value in expected.items():
@@ -711,6 +727,9 @@ __all__ = [
     "PREVIOUS_GRPO_B_CHECKPOINT_FORMAT",
     "PREVIOUS_GRPO_CHECKPOINT_FORMAT",
     "PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION",
+    "SAME_MODE_GRPO_B_CHECKPOINT_FORMAT",
+    "SAME_MODE_GRPO_CHECKPOINT_FORMAT",
+    "SAME_MODE_GRPO_CHECKPOINT_SCHEMA_VERSION",
     "grpo_b_checkpoint_payload",
     "grpo_checkpoint_payload",
     "load_grpo_a_checkpoint_for_evaluation",

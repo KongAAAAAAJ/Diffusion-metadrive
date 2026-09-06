@@ -18,6 +18,14 @@ from .bev_only_diffusion_planner import (
     MetricTrajectoryBEVSampler,
     PredecessorActionEncoder,
 )
+from .ddim_transition import (
+    DDIMNoiseBundle,
+    DDIMPathConfig,
+    DDIMTransitionError,
+    DEFAULT_DDIM_PATH,
+    GaussianDDIMStep,
+    StandardGaussianDDIM,
+)
 from .dynamic_anchors import (
     DynamicAnchorConfig,
     DynamicAnchorError,
@@ -58,7 +66,6 @@ from .trajectory_optimizer import (
 from .joint_grpo import (
     FrozenGRPOReference,
     FrozenVariantAReference,
-    GaussianDDIMStep,
     JointGRPOConfig,
     JointGRPOEpochUpdateResult,
     JointGRPOError,
@@ -69,7 +76,6 @@ from .joint_grpo import (
     JointGRPOTrainerA,
     JointGRPOTrainerB,
     JointGRPOUpdateResult,
-    StandardGaussianDDIM,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
     normalize_same_mode_advantages,
@@ -113,6 +119,10 @@ __all__ = [
     "BEVResNet18Backbone",
     "BEVResNet18Config",
     "CrossBEVDiffusionDecoder",
+    "DDIMNoiseBundle",
+    "DDIMPathConfig",
+    "DDIMTransitionError",
+    "DEFAULT_DDIM_PATH",
     "DEFAULT_RESNET18_A1_WEIGHTS",
     "DynamicAnchorConfig",
     "DynamicAnchorError",

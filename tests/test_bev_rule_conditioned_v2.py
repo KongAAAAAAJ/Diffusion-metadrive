@@ -41,6 +41,7 @@ from models.bev_planner.bev_only_diffusion_planner import (
     BEVPlannerError,
     JointStateRelationEncoder,
 )
+from models.bev_planner.ddim_transition import DDIMNoiseBundle
 from models.bev_planner.mode_contract import ModeIndex, mode_index_to_rule_action
 from models.decisioner.rule_decisioner import (
     JointActionProposal,
@@ -242,6 +243,7 @@ def test_v2_planner_requires_conditions_and_rule_action_does_not_override_hard_m
     with pytest.raises(BEVPlannerError, match="requires all explicit condition"):
         planner(bev, ego, relation, relation_mask, roles, anchors, hard_mask)
     with torch.no_grad():
+        zero_noise = torch.zeros((1, 3, 10, 8, 2))
         output = planner(
             bev,
             ego,
@@ -251,7 +253,14 @@ def test_v2_planner_requires_conditions_and_rule_action_does_not_override_hard_m
             anchors,
             hard_mask,
             **conditions,
-            diffusion_noise=torch.zeros((1, 3, 10, 8, 2)),
+            ddim_noise_bundle=DDIMNoiseBundle(
+                initial_noise=zero_noise,
+                transition_noises=(
+                    zero_noise.clone(),
+                    zero_noise.clone(),
+                    zero_noise.clone(),
+                ),
+            ),
         )
 
     assert torch.equal(

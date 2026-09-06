@@ -22,10 +22,13 @@ from models.bev_planner.bev_only_diffusion_planner import MAX_BACKGROUND_ACTORS
 from train.bev_joint_grpo import (
     GRPO_CHECKPOINT_FORMAT,
     GRPO_CHECKPOINT_SCHEMA_VERSION,
+    GRPO_REWARD_SOURCE,
     LEGACY_GRPO_CHECKPOINT_FORMAT,
     LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
     PREVIOUS_GRPO_CHECKPOINT_FORMAT,
     PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION,
+    SAME_MODE_GRPO_CHECKPOINT_FORMAT,
+    SAME_MODE_GRPO_CHECKPOINT_SCHEMA_VERSION,
     grpo_checkpoint_payload,
     load_grpo_a_checkpoint_for_evaluation,
     load_grpo_a_config_for_evaluation,
@@ -203,7 +206,7 @@ def test_stage1_source_metadata_requires_explicit_diagnostic_opt_in() -> None:
         validate_stage1_a_source_metadata(wrong, allow_diagnostic_source=True)
 
 
-def test_schema3_strict_resume_restores_optimizer_and_reference(tmp_path: Path) -> None:
+def test_schema5_strict_resume_restores_optimizer_and_reference(tmp_path: Path) -> None:
     trainer = JointGRPOTrainerA(
         _planner(), JointGRPOConfig(trajectories_per_mode=2)
     )
@@ -214,9 +217,9 @@ def test_schema3_strict_resume_restores_optimizer_and_reference(tmp_path: Path) 
         metrics={"loss/total": 0.0},
         diagnostic_only=True,
     )
-    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 3
+    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 5
     assert payload["format"] == GRPO_CHECKPOINT_FORMAT
-    assert payload["optimizer_contract_version"] == "stage2_joint_grpo_optimizer_v5"
+    assert payload["optimizer_contract_version"] == "stage2_joint_grpo_optimizer_v7"
     path = save_grpo_checkpoint(tmp_path / "current.pt", payload)
 
     restored = JointGRPOTrainerA(
@@ -231,7 +234,7 @@ def test_schema3_strict_resume_restores_optimizer_and_reference(tmp_path: Path) 
     assert load_grpo_config_from_checkpoint(path) == trainer.config
 
 
-@pytest.mark.parametrize("generation", ["legacy", "previous"])
+@pytest.mark.parametrize("generation", ["legacy", "previous", "same_mode_v3"])
 def test_old_schema_is_planner_only_for_historical_evaluation(
     tmp_path: Path, generation: str
 ) -> None:
@@ -253,11 +256,16 @@ def test_old_schema_is_planner_only_for_historical_evaluation(
         historical["format"] = LEGACY_GRPO_CHECKPOINT_FORMAT
         historical["reward_source"] = "external"
         historical.pop("optimizer_contract_version")
-    else:
+    elif generation == "previous":
         historical["schema_version"] = PREVIOUS_GRPO_CHECKPOINT_SCHEMA_VERSION
         historical["format"] = PREVIOUS_GRPO_CHECKPOINT_FORMAT
         historical["reward_source"] = "external_with_explicit_pretrain_baseline"
         historical["optimizer_contract_version"] = "stage2_joint_grpo_optimizer_v4"
+    else:
+        historical["schema_version"] = SAME_MODE_GRPO_CHECKPOINT_SCHEMA_VERSION
+        historical["format"] = SAME_MODE_GRPO_CHECKPOINT_FORMAT
+        historical["reward_source"] = GRPO_REWARD_SOURCE
+        historical["optimizer_contract_version"] = "stage2_joint_grpo_optimizer_v5"
     historical["grpo_config"] = raw_config
     historical["optimizer_step"] = 27
     path = save_grpo_checkpoint(tmp_path / f"{generation}.pt", historical)

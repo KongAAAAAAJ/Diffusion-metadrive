@@ -8,6 +8,7 @@ import torch
 from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
     BEVOnlyDiffusionPlannerConfig,
+    DDIMNoiseBundle,
     JointGRPOConfig,
     JointGRPOError,
     JointGRPOPolicyUpdateConfig,
@@ -99,7 +100,7 @@ def test_same_mode_config_contract_advantage_and_strict_gate() -> None:
         0.2,
     )
     contract = joint_grpo_optimizer_contract(policy)
-    assert contract["version"] == "stage2_joint_grpo_optimizer_v5"
+    assert contract["version"] == "stage2_joint_grpo_optimizer_v7"
     assert contract["trainable_modules"] == ["diffusion_decoder.trajectory_head"]
     assert "mode_ratio_factorization" not in contract
 
@@ -135,10 +136,12 @@ def test_same_mode_config_contract_advantage_and_strict_gate() -> None:
     valid = torch.ones_like(pretrain, dtype=torch.bool)
     below = torch.full_like(rewards, -0.01)
     assert not bool(same_mode_active_mask(below, pretrain, valid_mode_mask=valid).any())
-    below[0, 2, 4, 0] = 0.0
+    below[0, 2, 4, 0] = 0.02
     gated = same_mode_active_mask(below, pretrain, valid_mode_mask=valid)
-    assert gated.sum().item() == 1
-    assert gated[0, 2, 4]
+    assert not bool(gated.any())
+    below[0, 2, 4] = 0.0
+    gated = same_mode_active_mask(below, pretrain, valid_mode_mask=valid)
+    assert gated.sum().item() == 1 and gated[0, 2, 4]
     valid[0, 2, 4] = False
     assert not bool(
         same_mode_active_mask(below, pretrain, valid_mode_mask=valid).any()
@@ -191,6 +194,46 @@ def test_all_mode_rollout_shapes_and_frozen_outputs(rollout_a) -> None:
     assert frozen["selected_mode"].shape == (1, 3)
 
 
+def test_unmodified_current_and_frozen_match_with_common_ddim_noise() -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(), JointGRPOConfig(trajectories_per_mode=2)
+    )
+    inputs = _inputs()
+    generator = torch.Generator().manual_seed(711)
+    bundle = DDIMNoiseBundle.sample(
+        inputs["coarse_trajectories"][..., :2].shape,
+        device=torch.device("cpu"),
+        generator=generator,
+    )
+    with torch.no_grad():
+        current = trainer.planner(
+            inputs["bev"],
+            inputs["ego_state"],
+            inputs["formation_relation_state"],
+            inputs["relation_valid_mask"],
+            inputs["agent_role"],
+            inputs["coarse_trajectories"],
+            inputs["mode_valid_mask"],
+            background_actor_state=inputs["background_actor_state"],
+            background_actor_valid_mask=inputs["background_actor_valid_mask"],
+            scenario_code=inputs["scenario_code"],
+            rule_formation_state=inputs["rule_formation_state"],
+            rule_action_condition=inputs["rule_action_condition"],
+            ddim_noise_bundle=bundle,
+        )
+        frozen = trainer.infer_frozen_pretrain_from_inputs(
+            inputs, noise_bundle=bundle
+        )
+    torch.testing.assert_close(
+        current["trajectory_candidates"], frozen["all_mode_trajectories"]
+    )
+    torch.testing.assert_close(current["mode_logits"], frozen["mode_logits"])
+    torch.testing.assert_close(
+        current["selected_trajectory"], frozen["selected_trajectory"]
+    )
+    torch.testing.assert_close(current["selected_mode"], frozen["selected_mode"])
+
+
 def test_loss_keeps_vehicle_mode_log_prob_groups_isolated(rollout_a) -> None:
     trainer, rollout = rollout_a
     rewards = torch.zeros((1, 3, 10, 2), dtype=torch.float32)
@@ -229,11 +272,16 @@ def test_loss_keeps_vehicle_mode_log_prob_groups_isolated(rollout_a) -> None:
 
 
 @pytest.mark.parametrize(
-    "loss_name",
-    ("trajectory_pg", "behavior_cloning", "trajectory_reference_kl"),
+    ("loss_name", "anchors_cover_inactive"),
+    (
+        ("trajectory_pg", False),
+        ("behavior_cloning", True),
+        ("trajectory_reference_kl", True),
+    ),
 )
-def test_inactive_modes_have_zero_gradient_for_every_loss_term(
+def test_inactive_modes_only_receive_full_valid_anchor_gradients(
     loss_name: str,
+    anchors_cover_inactive: bool,
 ) -> None:
     trainer = JointGRPOTrainerA(
         _planner(), JointGRPOConfig(trajectories_per_mode=2)
@@ -274,11 +322,62 @@ def test_inactive_modes_have_zero_gradient_for_every_loss_term(
         if output.grad is None:
             continue
         gradient = output.grad.reshape(1, 2, 3, 10, -1)
-        assert torch.count_nonzero(gradient.masked_select(~active_outputs)) == 0
+        inactive_count = torch.count_nonzero(
+            gradient.masked_select(~active_outputs)
+        )
+        if anchors_cover_inactive:
+            assert inactive_count > 0
+        else:
+            assert inactive_count == 0
         saw_active_gradient |= bool(
             torch.count_nonzero(gradient.masked_select(active_outputs))
         )
     assert saw_active_gradient
+
+
+@pytest.mark.parametrize("loss_name", ("behavior_cloning", "trajectory_reference_kl"))
+def test_invalid_modes_receive_no_anchor_gradient(loss_name: str) -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(), JointGRPOConfig(trajectories_per_mode=2)
+    )
+    inputs = _inputs()
+    inputs["mode_valid_mask"][0, 0, 0] = False
+    rollout = trainer.sample_groups(
+        inputs, generator=torch.Generator().manual_seed(24)
+    )
+    with torch.no_grad():
+        trainer.planner.diffusion_decoder.trajectory_head[-1].bias.add_(0.02)
+    rewards = torch.zeros((1, 3, 10, 2), dtype=torch.float32)
+    rewards[..., 0] = -1.0
+    rewards[..., 1] = 1.0
+    active = torch.zeros((1, 3, 10), dtype=torch.bool)
+    active[0, 1, 4] = True
+    outputs: list[torch.Tensor] = []
+
+    def capture(
+        _module: torch.nn.Module,
+        _inputs: tuple[torch.Tensor, ...],
+        output: torch.Tensor,
+    ) -> None:
+        output.retain_grad()
+        outputs.append(output)
+
+    handle = trainer.planner.diffusion_decoder.trajectory_head.register_forward_hook(
+        capture
+    )
+    try:
+        loss = trainer.compute_loss(rollout, rewards, active)
+        getattr(loss, loss_name).backward()
+    finally:
+        handle.remove()
+    saw_valid_gradient = False
+    for output in outputs:
+        if output.grad is None:
+            continue
+        gradient = output.grad.reshape(1, 2, 3, 10, -1)
+        assert torch.count_nonzero(gradient[:, :, 0, 0]) == 0
+        saw_valid_gradient |= bool(torch.count_nonzero(gradient[:, :, 1, 4]))
+    assert saw_valid_gradient
 
 
 def test_only_trajectory_head_is_trainable_and_zero_signal_skips_step() -> None:

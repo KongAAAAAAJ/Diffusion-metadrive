@@ -123,7 +123,7 @@ def test_launcher_allocates_run_and_forwards_only_config_and_run_dir(
         / "logs"
         / "grpo-open-training.log"
     ).exists()
-    assert "application=stage2_grpo_open_application_v3" in result.stdout
+    assert "application=stage2_grpo_open_application_v5" in result.stdout
     assert "reward_domain=tau_d" in result.stdout
 
 
@@ -351,7 +351,7 @@ def test_launcher_uses_static_default_artifact_root() -> None:
     assert "training_v1" not in source
     assert "logs_v1" not in source
     assert "calibrate_bev_joint_reward.py" not in source
-    assert "stage2_grpo_open_application_v3" in source
+    assert "stage2_grpo_open_application_v5" in source
     assert "stage2_grpo_open_application_v2" not in source
     assert "stage2_grpo_open_application_v1" not in source
 

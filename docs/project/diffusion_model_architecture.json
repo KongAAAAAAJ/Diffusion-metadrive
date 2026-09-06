@@ -1,6 +1,6 @@
 {
   "format": "bev_diffusion_model_architecture_v2",
-  "schema_version": 2,
+  "schema_version": 3,
   "recorded_at": "2026-08-27T11:00:12+08:00",
   "repository": {
     "branch": "BEV",
@@ -372,34 +372,39 @@
       "noised_components": "normalized XY only",
       "heading": "not diffused; predicted as a residual around the coarse heading"
     },
-    "stage1_inference": {
-      "initial_noise_timestep": 8,
-      "denoise_steps": 2,
-      "roll_timesteps": [
-        10,
-        0
+    "runtime_ddim_path": {
+      "timesteps": [8, 5, 3, 0],
+      "previous_timesteps": [5, 3, 0, -1],
+      "eta": 1.0,
+      "decoder_calls": 4,
+      "stochastic_log_probability_transitions": 3,
+      "shared_by": [
+        "planner inference",
+        "frozen Stage-1 inference",
+        "GRPO rollout and replay",
+        "fixed validation"
       ],
-      "default_noise_seed": 0
+      "scheduler_role": "alpha schedule and add_noise only"
     },
     "grpo_rollout": {
-      "group_size": 4,
-      "initial_noise_timestep": 8,
-      "denoise_steps": 4,
+      "trajectories_per_mode": 48,
       "roll_timesteps": [
-        15,
-        10,
+        8,
         5,
+        3,
         0
       ],
+      "previous_timesteps": [5, 3, 0, -1],
       "ddim_eta": 1.0,
       "trainable_modules": [
-        "diffusion_decoder",
-        "mode_head"
+        "diffusion_decoder.trajectory_head"
       ],
       "frozen_modules": [
         "backbone",
         "bev_fusion",
         "context_encoder",
+        "diffusion_decoder shared layers",
+        "mode_head",
         "reference diffusion_decoder",
         "reference mode_head"
       ]

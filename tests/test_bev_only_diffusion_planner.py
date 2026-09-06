@@ -13,6 +13,8 @@ from models.bev_planner import (
     BEVOnlyDiffusionPlanner,
     BEVOnlyDiffusionPlannerConfig,
     BEVPlannerError,
+    DDIMNoiseBundle,
+    DEFAULT_DDIM_PATH,
     MetricTrajectoryBEVSampler,
 )
 
@@ -113,15 +115,25 @@ def _call(
     )
 
 
+def _zero_noise_bundle(shape: tuple[int, ...]) -> DDIMNoiseBundle:
+    return DDIMNoiseBundle(
+        initial_noise=torch.zeros(shape, dtype=torch.float32),
+        transition_noises=tuple(
+            torch.zeros(shape, dtype=torch.float32)
+            for _ in range(DEFAULT_DDIM_PATH.stochastic_transition_count)
+        ),
+    )
+
+
 def test_public_forward_shapes_mask_and_fixed_noise_determinism(
     planner: BEVOnlyDiffusionPlanner,
 ) -> None:
     batch = _joint_batch()
     batch["mode_valid_mask"][:, :, :9] = False
-    noise = torch.zeros((1, 3, 10, 8, 2), dtype=torch.float32)
+    noise = _zero_noise_bundle((1, 3, 10, 8, 2))
     with torch.no_grad():
-        first = _call(planner, batch, diffusion_noise=noise)
-        second = _call(planner, batch, diffusion_noise=noise)
+        first = _call(planner, batch, ddim_noise_bundle=noise)
+        second = _call(planner, batch, ddim_noise_bundle=noise)
 
     assert set(first) == {
         "trajectory_candidates",
@@ -295,9 +307,10 @@ def test_diffusion_timestep_contract_is_preserved(
     assert planner.diffusion_scheduler.config.beta_schedule == "scaled_linear"
     assert planner.diffusion_scheduler.config.prediction_type == "sample"
     assert planner.config.train_timestep_upper == 50
-    assert planner.config.inference_noise_timestep == 8
-    assert planner.inference_roll_timesteps() == (10, 0)
-    assert planner.inference_roll_timesteps(4) == (15, 10, 5, 0)
+    assert DEFAULT_DDIM_PATH.initial_timestep == 8
+    assert planner.inference_roll_timesteps() == (8, 5, 3, 0)
+    assert DEFAULT_DDIM_PATH.previous_timesteps == (5, 3, 0, -1)
+    assert DEFAULT_DDIM_PATH.eta == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(
@@ -434,9 +447,9 @@ def test_backward_reaches_all_stage_one_components(
 def test_heading_is_wrapped_to_pi(planner: BEVOnlyDiffusionPlanner) -> None:
     batch = _joint_batch()
     batch["coarse_trajectories"][..., 2] = math.pi
-    noise = torch.zeros((1, 3, 10, 8, 2), dtype=torch.float32)
+    noise = _zero_noise_bundle((1, 3, 10, 8, 2))
     with torch.no_grad():
-        output = _call(planner, batch, diffusion_noise=noise)
+        output = _call(planner, batch, ddim_noise_bundle=noise)
     heading = output["trajectory_candidates"][..., 2]
     assert bool((heading >= -math.pi).all())
     assert bool((heading <= math.pi).all())
@@ -506,7 +519,5 @@ def test_config_rejects_inconsistent_architecture() -> None:
         BEVOnlyDiffusionPlannerConfig(d_model=130, num_heads=4)
     with pytest.raises(BEVPlannerError, match="train_timestep_upper"):
         BEVOnlyDiffusionPlannerConfig(train_timestep_upper=1001)
-    with pytest.raises(BEVPlannerError, match="inference_noise_timestep"):
-        BEVOnlyDiffusionPlannerConfig(inference_noise_timestep=1000)
     with pytest.raises(BEVPlannerError, match="must be v2"):
         BEVOnlyDiffusionPlannerConfig(model_version="v1")  # type: ignore[arg-type]

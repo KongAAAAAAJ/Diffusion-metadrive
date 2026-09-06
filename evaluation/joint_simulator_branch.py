@@ -495,13 +495,11 @@ class JointSimulatorBranchEvaluator:
             ),
             "start_seed": spec.seed,
             "num_scenarios": 1,
+            "scenario_id": spec.scenario_id,
+            "local_route": spec.local_route,
             **dict(spec.env_config),
         }
         env = self._env_factory(config)
-        setter = getattr(env, "set_runtime_scenario_route", None)
-        if not callable(setter):
-            raise JointRewardError("branch environment has no route setter")
-        setter(spec.scenario_id, spec.local_route)
         spawn_manager = getattr(
             getattr(env, "engine", None), "spawn_manager", None
         )

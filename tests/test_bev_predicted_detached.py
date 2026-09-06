@@ -27,6 +27,7 @@ from models.bev_planner import (
     BEVOnlyDiffusionPlannerConfig,
     BEVPlannerContext,
     BEVPlannerError,
+    DDIMNoiseBundle,
     JointStage1Loss,
 )
 from models.bev_planner.mode_contract import ModeIndex
@@ -91,6 +92,12 @@ def _call(
     noise: torch.Tensor,
     timesteps: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
+    inference_noise = None
+    if timesteps is None:
+        inference_noise = DDIMNoiseBundle(
+            initial_noise=noise,
+            transition_noises=(noise.clone(), noise.clone(), noise.clone()),
+        )
     return planner(
         batch["bev"],
         batch["ego_state"],
@@ -104,8 +111,9 @@ def _call(
         scenario_code=batch["scenario_code"],
         rule_formation_state=batch["rule_formation_state"],
         rule_action_condition=batch["rule_action_condition"],
-        diffusion_noise=noise,
+        diffusion_noise=noise if timesteps is not None else None,
         diffusion_timesteps=timesteps,
+        ddim_noise_bundle=inference_noise,
     )
 
 
@@ -219,7 +227,7 @@ def test_inference_decodes_every_step_in_role_order(
     ):
         with torch.no_grad():
             _call(planner, batch, noise=noise)
-    assert order == [0, 1, 2, 0, 1, 2]
+    assert order == [0, 1, 2] * 4
 
 
 def test_nonzero_gate_propagates_predictions_only_downstream() -> None:
