@@ -100,6 +100,7 @@ BEST_CHECKPOINT_METRIC = (
     "validation/safety_constrained_simulator_reward_gain_trailing3"
 )
 VALIDATION_STATE_BANK_FORMAT = "bev_joint_grpo_validation_state_bank_v1"
+MUTABLE_RUNTIME_CONFIG_PATH = "configs/train/bev_joint_grpo.yaml"
 
 
 class OnlineGRPOError(RuntimeError):
@@ -107,7 +108,7 @@ class OnlineGRPOError(RuntimeError):
 
 
 def _implementation_commit() -> str:
-    """Return the clean tracked implementation identity for run provenance."""
+    """Return the committed code identity while allowing the runtime YAML."""
 
     try:
         commit = subprocess.run(
@@ -117,16 +118,33 @@ def _implementation_commit() -> str:
             text=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            ("git", "status", "--porcelain", "--untracked-files=no"),
+            (
+                "git",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+            ),
             check=True,
             capture_output=True,
             text=True,
-        ).stdout.strip()
+        ).stdout.rstrip("\n")
     except (OSError, subprocess.CalledProcessError) as exc:
         raise OnlineGRPOError("unable to resolve GRPO implementation commit") from exc
-    if len(commit) != 40 or dirty:
+    disallowed = []
+    for record in dirty.splitlines():
+        status = record[:2]
+        path = record[3:] if len(record) >= 4 else ""
+        runtime_config_edit = (
+            path == MUTABLE_RUNTIME_CONFIG_PATH
+            and status in {" M", "M ", "MM"}
+        )
+        if not runtime_config_edit:
+            disallowed.append(record)
+    if len(commit) != 40 or disallowed:
+        detail = ", ".join(disallowed) if disallowed else "invalid HEAD"
         raise OnlineGRPOError(
-            "bounded GRPO diagnostics require a clean committed implementation"
+            "bounded GRPO diagnostics require committed implementation files; "
+            f"disallowed tracked changes: {detail}"
         )
     return commit
 

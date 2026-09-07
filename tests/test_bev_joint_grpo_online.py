@@ -84,6 +84,52 @@ def test_checked_in_yaml_uses_only_new_sampling_fields() -> None:
         assert removed not in payload
 
 
+def _stub_git_status(monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    def run(arguments, **kwargs):
+        del kwargs
+        if arguments[1:3] == ("rev-parse", "HEAD"):
+            stdout = "a" * 40 + "\n"
+        else:
+            stdout = status
+        return SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr(online.subprocess, "run", run)
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        "",
+        " M configs/train/bev_joint_grpo.yaml\n",
+        "M  configs/train/bev_joint_grpo.yaml\n",
+        "MM configs/train/bev_joint_grpo.yaml\n",
+    ),
+)
+def test_implementation_commit_allows_only_runtime_config_edits(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    _stub_git_status(monkeypatch, status)
+    assert online._implementation_commit() == "a" * 40
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        " M train/train_bev_joint_grpo_online.py\n",
+        " D configs/train/bev_joint_grpo.yaml\n",
+        "R  configs/train/bev_joint_grpo.yaml -> configs/train/moved.yaml\n",
+    ),
+)
+def test_implementation_commit_rejects_code_and_config_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    _stub_git_status(monkeypatch, status)
+    with pytest.raises(OnlineGRPOError, match="disallowed tracked changes"):
+        online._implementation_commit()
+
+
 def test_yaml_rejects_obsolete_group_size(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
