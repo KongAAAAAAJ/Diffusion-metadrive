@@ -1,0 +1,95 @@
+{
+  "format": "stage2_grpo_single_step_fixed_scale_mode_isolation_implementation_report_v1",
+  "recorded_at": "2026-09-07T09:10:42+08:00",
+  "status": "implementation_verified_bounded_diagnostics_pending",
+  "repository": {
+    "branch": "BEV",
+    "implementation_base_commit": "9005a18cda5dfa2f8a8e7e9b4a8a5da064372307",
+    "implementation_commit": "1307eb8e17015337107efff7ccac27be3c03e862"
+  },
+  "run27_reconciliation": {
+    "status": "failed_nonformal_diagnostic_preserved",
+    "accepted_update_states": 240,
+    "optimizer_steps": 2400,
+    "last_reference_kl": 4.00083065032959,
+    "last_trajectory_head_relative_drift": 0.045796677470207214,
+    "last_selected_reward_gain": -1.5453866669287284,
+    "last_simulator_reward_gain": -1.8485180184245111,
+    "evidence": "evaluation/STAGE2_GRPO_RUN27_RECONCILIATION_REPORT.json",
+    "resume_allowed": false
+  },
+  "implemented_contracts": {
+    "checkpoint_schema": 6,
+    "checkpoint_formats": ["bev_joint_grpo_a_v6", "bev_joint_grpo_b_v6"],
+    "optimizer": "stage2_joint_grpo_optimizer_v8",
+    "collection": "stage2_joint_grpo_persistent_episode_v7",
+    "application_unchanged": "stage2_grpo_open_application_v5",
+    "online_config": "bev_joint_grpo_online_config_v13",
+    "online_report": "bev_joint_grpo_online_report_v13",
+    "stability_manifest": "stage2_grpo_stability_ab_manifest_v7",
+    "stability_report": "stage2_grpo_stability_ab_report_v7",
+    "paired_sampling": "current and frozen N=48 use identical initial and three transition noises",
+    "advantage": "collision_or_out=-1; otherwise max(R_current-mean(R_current),0) only when R_current>=R_frozen-1e-6; no per-group standard deviation",
+    "policy_update": "one score-function replay, backward and tentative AdamW step per accepted state; no PPO ratio, clipping or repeated epoch",
+    "anchor_scope": "BC and trajectory reference-KL cover all hard-valid optimizer-executable modes whenever a signal update occurs",
+    "trainable_parameters": "ten zero-initialized mode-specific output residual weights [10,24,128] and biases [10,24] only",
+    "stability_guard": "restore residual parameters and Adam state when post-update reference KL exceeds 0.25 or any mode adapter drift exceeds 0.02"
+  },
+  "verification": {
+    "focused_core_online_checkpoint_plot_manifest_tests": {
+      "passed": 68,
+      "failed": 0
+    },
+    "adjacent_ddim_reward_launcher_tests": {
+      "passed": 47,
+      "failed": 0
+    },
+    "total_tests": {
+      "passed": 115,
+      "failed": 0
+    },
+    "python_compile": "passed",
+    "git_diff_check": "passed",
+    "mode_isolation": "changing or differentiating one mode residual leaves the other nine mode outputs and PG gradients unchanged; vehicle roles intentionally share the same-mode residual",
+    "guard_restore": "parameter tensors and Adam state restore exactly on rejection",
+    "online_execution": "three no-signal retries and exactly one cached frozen-baseline environment step are covered"
+  },
+  "cuda_n48_single_update": {
+    "status": "passed",
+    "variant": "A",
+    "source_checkpoint": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt",
+    "source_stage1_sha256": "98a4ec0c02ca29774f4363bbc4d07d3e23a86ae4b54e59d9b43f65181c37d635",
+    "source_dataset_fingerprint": "23aae3c3f8a177ebfae330d4c76544f9b72f4ea8e22db12195fb29d790ff8779",
+    "report": "/tmp/grpo_single_step_fixed_scale_residual_cuda_a/report.json",
+    "chain_shape": [1, 48, 5, 3, 10, 8, 2],
+    "candidate_shape": [1, 3, 10, 48, 8, 3],
+    "trajectory_log_probability_shape": [1, 3, 10, 48, 3],
+    "optimizer_steps": 1,
+    "finite_total_loss": -0.34131211042404175,
+    "gradient_norm_before_clip": 2.455507516860962,
+    "post_update_reference_kl": 0.000003988507160102017,
+    "stability_guard_rejected": false,
+    "current_frozen_candidate_max_abs_error_before_update": 0.0,
+    "trajectory_residual_max_abs_delta": 0.00000999999883788405,
+    "trajectory_base_max_abs_delta": 0.0,
+    "decoder_shared_max_abs_delta": 0.0,
+    "mode_head_max_abs_delta": 0.0,
+    "backbone_max_abs_delta": 0.0,
+    "reference_max_abs_delta": 0.0,
+    "peak_cuda_memory_mib": 579.951171875,
+    "memory_limit_mib": 16384,
+    "checkpoint_round_trip": true
+  },
+  "not_executed_in_this_implementation_thread": {
+    "three_seed_500_state_diagnostic": "pending in separate execution threads beginning at run28",
+    "stage1_s5_s9_frozen_baseline_gate": "remains failed from the prior independent gate",
+    "complete_planning_tick_p95_gate": "pending independent execution",
+    "formal_5000_state_training": "forbidden until both formal hard gates pass"
+  },
+  "readiness": {
+    "implementation_complete": true,
+    "bounded_diagnostic_ready": true,
+    "formal_training_ready": false,
+    "next_action": "Run diagnostic-only seeds 17/23/42 for at most 500 accepted states in separate execution threads, starting from Stage1 run3 with fresh schema-v6 residuals."
+  }
+}

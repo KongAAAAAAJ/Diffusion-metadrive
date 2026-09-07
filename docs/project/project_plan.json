@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-09-07T12:00:00+08:00",
-  "status": "stage2_grpo_single_step_fixed_scale_mode_isolation_implementation_in_progress",
+  "updated_at": "2026-09-07T09:10:42+08:00",
+  "status": "stage2_grpo_single_step_fixed_scale_mode_isolation_verified_diagnostics_pending",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -1402,7 +1402,7 @@
     "formal_boundary": "No 5000-state formal training until the aligned frozen Stage1 S5-S9 x seeds 17/23 x 200-step qualification gate and the complete three-vehicle planning-tick P95 <= 200 ms gate both pass."
   },
   "stage2_grpo_single_step_fixed_scale_mode_isolation": {
-    "status": "implementation_in_progress",
+    "status": "implementation_verified_bounded_diagnostics_pending",
     "authorized_on": "2026-09-07",
     "objective": "Remove per-group reward-scale amplification and repeated off-policy reuse, and structurally prevent active-mode gradients from changing inactive-mode trajectory outputs.",
     "supersedes_for_new_training": [
@@ -1485,6 +1485,15 @@
       "next_unoccupied_run": "run_28",
       "evidence": "evaluation/STAGE2_GRPO_RUN27_RECONCILIATION_REPORT.json"
     },
+    "implementation_result": {
+      "implementation_commit": "1307eb8e17015337107efff7ccac27be3c03e862",
+      "implementation_evidence": "evaluation/STAGE2_GRPO_SINGLE_STEP_FIXED_SCALE_MODE_ISOLATION_IMPLEMENTATION_REPORT.json",
+      "implementation_evidence_sha256": "dcbb22dad1232ac909a16a316762d903c92bb0d5b191f1c61292796812fc34c6",
+      "focused_and_adjacent_tests": "115 passed, 0 failed",
+      "cuda_n48_single_update": "passed with one optimizer step, post-update KL 3.99e-6, residual-only change, schema-v6 round-trip and 579.951 MiB peak memory",
+      "bounded_diagnostics_started": false,
+      "formal_training_ready": false
+    },
     "diagnostic_run_boundary": "After implementation and bounded verification, run seeds 17/23/42 for at most 500 accepted states each in separate execution threads. These runs remain diagnostic-only.",
     "formal_boundary": "Stage1 S5-S9 frozen-baseline and complete planning-tick P95 gates remain failed or pending; no 5000-state formal training is authorized."
   },
@@ -1511,5 +1520,7 @@
   "stage2_grpo_ddim_alignment_implementation_evidence_sha256": "92e7b33d0c414b400b3110ebb053aada7dde2b6a40d127db27288de3668cf3fd",
   "stage2_grpo_ddim_aligned_frozen_gate_evidence": "evaluation/STAGE2_GRPO_DDIM_ALIGNED_FROZEN_BASELINE_GATE.json",
   "stage2_grpo_ddim_aligned_frozen_gate_evidence_sha256": "315af191a5884a898dda85e1d0347264094bc446cd6379ebdb82e4f0b109152a",
-  "current_next_action": "Complete and verify the authorized single-step fixed-scale mode-isolated GRPO implementation without starting long training. Then run the three bounded 500-state diagnostic seeds in separate execution threads; Stage1 S5-S9 qualification and the complete P95 gate remain independent blockers for formal training."
+  "stage2_grpo_single_step_fixed_scale_mode_isolation_implementation_evidence": "evaluation/STAGE2_GRPO_SINGLE_STEP_FIXED_SCALE_MODE_ISOLATION_IMPLEMENTATION_REPORT.json",
+  "stage2_grpo_single_step_fixed_scale_mode_isolation_implementation_evidence_sha256": "dcbb22dad1232ac909a16a316762d903c92bb0d5b191f1c61292796812fc34c6",
+  "current_next_action": "Run the three bounded schema-v6 single-step fixed-scale mode-residual diagnostic seeds 17/23/42 for at most 500 accepted states each in separate execution threads, starting at run28. Independently resolve and rerun the Stage1 S5-S9 frozen-baseline gate and complete planning-tick P95 gate before any formal 5000-state training."
 }
