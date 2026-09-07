@@ -8,6 +8,7 @@
   },
   "failure": {
     "exception": "OnlineGRPOError: bounded GRPO diagnostics require a clean committed implementation",
+    "failed_run_directory": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_29",
     "observed_tracked_change": " M configs/train/bev_joint_grpo.yaml",
     "observed_runtime_change": "online.seed changed from 17 to 23",
     "training_started": false
@@ -38,8 +39,13 @@
     }
   },
   "execution_boundary": {
-    "bounded_500_state_training_started": false,
+    "bounded_500_state_training_started_by_fix_verification": false,
     "new_run_directory_created_by_verification": false,
-    "next_action": "Rerun scripts/run_bev_joint_grpo.sh with the preserved seed-23 runtime YAML."
+    "artifact_reconciliation": {
+      "run28": "incomplete seed-17 diagnostic stopped after 29 accepted updates; config, metrics, TensorBoard and last.pt exist but report.json is absent; preserve without overwrite or implicit resume",
+      "run29": "failed seed-23 preflight directory containing training.log only; preserve without reuse",
+      "next_unoccupied_run": "run_30"
+    },
+    "next_action": "Rerun scripts/run_bev_joint_grpo.sh with the preserved seed-23 runtime YAML; the launcher will allocate run30."
   }
 }

@@ -1505,7 +1505,7 @@
     },
     "stage2_grpo_runtime_config_provenance_fix_report": {
       "path": "evaluation/STAGE2_GRPO_RUNTIME_CONFIG_PROVENANCE_FIX_REPORT.json",
-      "sha256": "2586fe8a98cb6d881f07690d6fea0ac9ec1446909e108c70e9ab643354d305ca",
+      "sha256": "44706469b5a37a7da7a789c3652b087ab2e2b00ed0e205f6ce215d0f14b37ea4",
       "role": "Records the clean-implementation gate failure caused by an intentional seed-only runtime YAML edit, preservation of strict rejection for every other tracked change, 39 passing online/launcher tests, and a passing real-worktree provenance preflight."
     },
     "stage2_grpo_ddim_aligned_frozen_baseline_gate_report": {
@@ -2807,8 +2807,13 @@
       "all_other_tracked_changes_rejected": true,
       "runtime_config_delete_or_rename_rejected": true,
       "real_worktree_preflight_passed": true,
+      "artifact_reconciliation": {
+        "run28": "incomplete_seed17_at_29_accepted_updates_no_report_preserve_no_implicit_resume",
+        "run29": "seed23_clean_gate_failure_training_log_only_preserve_no_reuse",
+        "next_unoccupied_run": "run_30"
+      },
       "report": "evaluation/STAGE2_GRPO_RUNTIME_CONFIG_PROVENANCE_FIX_REPORT.json",
-      "report_sha256": "2586fe8a98cb6d881f07690d6fea0ac9ec1446909e108c70e9ab643354d305ca"
+      "report_sha256": "44706469b5a37a7da7a789c3652b087ab2e2b00ed0e205f6ce215d0f14b37ea4"
     },
     "run27": {
       "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_27",
@@ -2851,8 +2856,8 @@
       "cuda_checkpoint_round_trip_passed": true,
       "only_mode_residual_parameters_changed": true
     },
-    "next_unoccupied_run": "run_28",
-    "bounded_three_seed_diagnostic_started": false,
+    "next_unoccupied_run": "run_30",
+    "bounded_three_seed_diagnostic_started": true,
     "long_training_started": false,
     "formal_experiment_status_changed": false
   },
@@ -2876,7 +2881,7 @@
     "In a separate execution thread, audit the aligned S5/R1 seed17 agent0 longitudinal response, gap/TTC/collision geometry and hard-brake actor interaction at baseline step21; do not change optimizer thresholds or add a speculative fallback.",
     "After a cause-specific Stage1 fix, rerun the complete S5-S9 x seeds17/23 x 200-step frozen-baseline gate as its own hard-gate task.",
     "Run the complete three-vehicle planning-tick P95 <=200 ms gate in a separate execution thread; implementation and CUDA-memory evidence do not substitute for it.",
-    "Run the new combined single-step fixed-scale mode-residual diagnostic for seeds 17/23/42 in separate execution threads, at most 500 accepted states each, using fresh immutable paths beginning at run28. These runs remain diagnostic-only and no 5000-state run is authorized.",
+    "Preserve incomplete run28 and failed-preflight run29 without overwrite or implicit resume. Run the next single-step fixed-scale mode-residual diagnostic from fresh run30, at most 500 accepted states, with the configured seed; all runs remain diagnostic-only and no 5000-state run is authorized.",
     "When a full diagnostic reward distribution is desired, run scripts/run_eval_grpo.sh at its default 800-step horizon to populate evaluation/reward_compare/step_rewards.csv, one total/progress/TTC/comfort 2-by-2 figure, and five individual reward figures. The deleted evaluation/compare output must not be treated as available evidence; the reward-only output remains non-formal.",
     "The bounded Stage 1 single-step smoke passed. Continue retaining the original 50070-sample backup; no permanent backup deletion is authorized.",
     "The S5 release30 append is installed and fully verified at 50260 samples with all 233 prior base episodes preserved. Bind any consumer to base fingerprint e1142a35e80951f686e9b81a3d24a379a4c39d98f4fc8a058b40412729de5511 and sidecar fingerprint a3c4239de8f6fd1e0bd1078299f7b0b27b8ba7050898248e14ed737f1b096ea6; retain the complete pre-append backup unless a separate cleanup round is explicitly authorized.",
