@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-09-07T09:10:42+08:00",
+  "updated_at": "2026-09-07T09:33:48+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "1307eb8e17015337107efff7ccac27be3c03e862",
+    "git_commit": "12a6c529ab1d3713a5ea756d2866031855ab1454",
     "worktree_clean_before_this_update": true,
     "project_state_update_committed": true,
     "uncommitted_plan_update_present": false,
@@ -99,7 +99,8 @@
     "uncommitted_stage2_grpo_ddim_aligned_frozen_gate_report_present": true,
     "uncommitted_stage2_grpo_run27_reconciliation_report_present": false,
     "uncommitted_stage2_grpo_single_step_mode_isolation_plan_present": false,
-    "uncommitted_stage2_grpo_single_step_mode_isolation_implementation_report_present": false
+    "uncommitted_stage2_grpo_single_step_mode_isolation_implementation_report_present": false,
+    "uncommitted_stage2_grpo_runtime_config_provenance_fix_present": false
   },
   "current": {
     "phase": "bev_only_diffusion_planner_v2",
@@ -1502,6 +1503,11 @@
       "sha256": "92e7b33d0c414b400b3110ebb053aada7dde2b6a40d127db27288de3668cf3fd",
       "role": "Records schema-v5 DDIM alignment and stability contracts, 346 passing regressions, the n=48 CUDA update, exact ten-record fixed-state replay, repeated current/frozen selected and simulator equality, three real validation defects fixed, and the failed hard-gate boundary."
     },
+    "stage2_grpo_runtime_config_provenance_fix_report": {
+      "path": "evaluation/STAGE2_GRPO_RUNTIME_CONFIG_PROVENANCE_FIX_REPORT.json",
+      "sha256": "2586fe8a98cb6d881f07690d6fea0ac9ec1446909e108c70e9ab643354d305ca",
+      "role": "Records the clean-implementation gate failure caused by an intentional seed-only runtime YAML edit, preservation of strict rejection for every other tracked change, 39 passing online/launcher tests, and a passing real-worktree provenance preflight."
+    },
     "stage2_grpo_ddim_aligned_frozen_baseline_gate_report": {
       "path": "evaluation/STAGE2_GRPO_DDIM_ALIGNED_FROZEN_BASELINE_GATE.json",
       "sha256": "315af191a5884a898dda85e1d0347264094bc446cd6379ebdb82e4f0b109152a",
@@ -2793,6 +2799,17 @@
     "implementation_commit": "1307eb8e17015337107efff7ccac27be3c03e862",
     "implementation_evidence": "evaluation/STAGE2_GRPO_SINGLE_STEP_FIXED_SCALE_MODE_ISOLATION_IMPLEMENTATION_REPORT.json",
     "implementation_evidence_sha256": "dcbb22dad1232ac909a16a316762d903c92bb0d5b191f1c61292796812fc34c6",
+    "runtime_config_provenance_fix": {
+      "status": "verified_complete",
+      "implementation_commit": "12a6c529ab1d3713a5ea756d2866031855ab1454",
+      "mutable_runtime_config": "configs/train/bev_joint_grpo.yaml",
+      "current_uncommitted_runtime_seed": 23,
+      "all_other_tracked_changes_rejected": true,
+      "runtime_config_delete_or_rename_rejected": true,
+      "real_worktree_preflight_passed": true,
+      "report": "evaluation/STAGE2_GRPO_RUNTIME_CONFIG_PROVENANCE_FIX_REPORT.json",
+      "report_sha256": "2586fe8a98cb6d881f07690d6fea0ac9ec1446909e108c70e9ab643354d305ca"
+    },
     "run27": {
       "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_27",
       "status": "failed_nonformal_diagnostic",

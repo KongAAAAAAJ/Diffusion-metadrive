@@ -1,0 +1,45 @@
+{
+  "format": "stage2_grpo_runtime_config_provenance_fix_report_v1",
+  "recorded_at": "2026-09-07T09:33:48+08:00",
+  "status": "verified_complete",
+  "repository": {
+    "branch": "BEV",
+    "implementation_commit": "12a6c529ab1d3713a5ea756d2866031855ab1454"
+  },
+  "failure": {
+    "exception": "OnlineGRPOError: bounded GRPO diagnostics require a clean committed implementation",
+    "observed_tracked_change": " M configs/train/bev_joint_grpo.yaml",
+    "observed_runtime_change": "online.seed changed from 17 to 23",
+    "training_started": false
+  },
+  "root_cause": "The provenance gate treated the YAML-only runtime parameter source as implementation code. It also stripped the leading porcelain status character, so the first worktree-only modification could not be parsed reliably.",
+  "fix": {
+    "allowed_mutable_runtime_config": "configs/train/bev_joint_grpo.yaml",
+    "allowed_statuses": ["worktree_modified", "index_modified", "index_and_worktree_modified"],
+    "still_rejected": [
+      "any other tracked path change",
+      "runtime config deletion",
+      "runtime config rename",
+      "invalid or unavailable Git HEAD"
+    ],
+    "provenance": "The 40-character implementation commit remains bound to committed code; the parsed runtime YAML remains snapshotted in each run-local config.json.",
+    "user_runtime_config_committed": false,
+    "user_runtime_config_preserved": true
+  },
+  "verification": {
+    "online_and_launcher_tests_passed": 39,
+    "online_and_launcher_tests_failed": 0,
+    "python_compile": "passed",
+    "git_diff_check": "passed",
+    "real_worktree_preflight": {
+      "only_tracked_change": " M configs/train/bev_joint_grpo.yaml",
+      "resolved_implementation_commit": "12a6c529ab1d3713a5ea756d2866031855ab1454",
+      "passed": true
+    }
+  },
+  "execution_boundary": {
+    "bounded_500_state_training_started": false,
+    "new_run_directory_created_by_verification": false,
+    "next_action": "Rerun scripts/run_bev_joint_grpo.sh with the preserved seed-23 runtime YAML."
+  }
+}
