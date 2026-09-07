@@ -11,19 +11,19 @@ from torch.utils.tensorboard import SummaryWriter
 import evaluation.plot_grpo as plot_grpo
 from evaluation.plot_grpo import (
     ACTIVE_SIGNAL_TAGS,
+    ADAPTER_DRIFT_TAGS,
     ADVANTAGE_VECTOR_TAG,
     ACCEPTED_ROLLOUT_AXIS_LABEL,
-    CLIP_FRACTION_TAGS,
     FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG,
     FRESH_ROLLOUT_AXIS_LABEL,
     GRPO_LOSS_CURVE_TAGS,
+    GUARD_SIGNAL_TAGS,
     KL_LOSS_CURVE_TAGS,
     LEGACY_REWARD_CURVE_TAGS,
-    OLD_POLICY_APPROX_KL_TAGS,
+    POST_UPDATE_KL_TAGS,
     OPTIMIZER_STEP_AXIS_LABEL,
     POLICY_STABILITY_CURVE_TAGS,
     REWARD_CURVE_TAGS,
-    TRAJECTORY_RATIO_TAGS,
     VALIDATION_REWARD_CURVE_TAGS,
     AdvantageHeatmapError,
     generate_advantage_heatmap,
@@ -396,7 +396,7 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
             plot_grpo.event_accumulator.SCALARS: 0,
         }
     ]
-    assert len(plot_calls) == 18
+    assert len(plot_calls) == 17
     calls_by_tag = {tag: (axis, steps, values) for axis, tag, steps, values in plot_calls}
     assert set(calls_by_tag) == set(expected_series)
     for tag, (expected_steps, expected_values) in expected_series.items():
@@ -411,15 +411,17 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
     }
     grpo_axes = {calls_by_tag[tag][0] for tag in GRPO_LOSS_CURVE_TAGS}
     kl_axes = {calls_by_tag[tag][0] for tag in KL_LOSS_CURVE_TAGS}
-    trajectory_ratio_axes = {
-        calls_by_tag[tag][0] for tag in TRAJECTORY_RATIO_TAGS
+    post_update_kl_axes = {
+        calls_by_tag[tag][0] for tag in POST_UPDATE_KL_TAGS
     }
-    clip_axes = {calls_by_tag[tag][0] for tag in CLIP_FRACTION_TAGS}
-    old_policy_kl_axes = {
-        calls_by_tag[tag][0] for tag in OLD_POLICY_APPROX_KL_TAGS
+    adapter_drift_axes = {
+        calls_by_tag[tag][0] for tag in ADAPTER_DRIFT_TAGS
     }
     active_signal_axes = {
         calls_by_tag[tag][0] for tag in ACTIVE_SIGNAL_TAGS
+    }
+    guard_signal_axes = {
+        calls_by_tag[tag][0] for tag in GUARD_SIGNAL_TAGS
     }
     assert (
         len(reward_axes)
@@ -443,27 +445,25 @@ def test_generate_grpo_plots_round_trips_tags_steps_and_writes_six_pngs(
     assert next(iter(grpo_axes)).get_ylabel() == "Loss"
     assert next(iter(kl_axes)).get_ylabel() == "Unweighted KL divergence"
     assert (
-        len(trajectory_ratio_axes)
-        == len(clip_axes)
-        == len(old_policy_kl_axes)
+        len(post_update_kl_axes)
+        == len(adapter_drift_axes)
         == len(active_signal_axes)
+        == len(guard_signal_axes)
         == 1
     )
-    assert next(iter(trajectory_ratio_axes)).get_ylabel() == "Importance ratio"
-    clip_axis = next(iter(clip_axes))
-    assert clip_axis.get_ylabel() == "Fraction"
-    assert tuple(round(value, 8) for value in clip_axis.get_ylim()) == (0.0, 1.0)
-    assert next(iter(old_policy_kl_axes)).get_ylabel() == "Approximate KL"
-    assert next(iter(active_signal_axes)).get_ylabel() == "Count / indicator"
+    assert next(iter(post_update_kl_axes)).get_ylabel() == "KL divergence"
+    assert next(iter(adapter_drift_axes)).get_ylabel() == "Relative drift"
+    assert next(iter(active_signal_axes)).get_ylabel() == "Mode count"
+    assert next(iter(guard_signal_axes)).get_ylabel() == "Count / indicator"
     assert all(
         next(iter(axes)).get_xlabel() == ACCEPTED_ROLLOUT_AXIS_LABEL
         for axes in (
             grpo_axes,
             kl_axes,
-            trajectory_ratio_axes,
-            clip_axes,
-            old_policy_kl_axes,
+            post_update_kl_axes,
+            adapter_drift_axes,
             active_signal_axes,
+            guard_signal_axes,
         )
     )
 
@@ -692,7 +692,7 @@ def test_generate_grpo_plots_rejects_missing_policy_stability_tag(
             *KL_LOSS_CURVE_TAGS,
             *POLICY_STABILITY_CURVE_TAGS,
         ):
-            if tag != "policy/trajectory_old_policy_approx_kl":
+            if tag != "policy/post_update_reference_kl":
                 writer.add_scalar(tag, 0.25, global_step=1)
 
     with pytest.raises(AdvantageHeatmapError, match="missing required scalar tags"):
@@ -713,7 +713,7 @@ def test_generate_grpo_plots_rejects_invalid_policy_stability_series(
     expected_message: str,
 ) -> None:
     tb_dir = tmp_path / "tb"
-    invalid_tag = "policy/trajectory_ratio_mean"
+    invalid_tag = "policy/adapter_drift_max"
     with SummaryWriter(log_dir=str(tb_dir)) as writer:
         writer.add_tensor(
             ADVANTAGE_VECTOR_TAG,
@@ -759,3 +759,4 @@ def test_grpo_plot_cli_uses_tensorboard_and_output_directories() -> None:
         ]
     )
     assert accepted_args.rollout_axis_label == ACCEPTED_ROLLOUT_AXIS_LABEL
+    GUARD_SIGNAL_TAGS,

@@ -1,4 +1,4 @@
-"""Validate and compare the bounded three-arm GRPO stability diagnostic."""
+"""Validate the bounded single-step mode-isolated GRPO diagnostic."""
 
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-MANIFEST_FORMAT = "stage2_grpo_stability_ab_manifest_v6"
-REPORT_FORMAT = "stage2_grpo_stability_ab_report_v6"
-ARMS = ("legacy_control", "aligned_max", "aligned_mean_full_valid")
+MANIFEST_FORMAT = "stage2_grpo_stability_manifest_v7"
+REPORT_FORMAT = "stage2_grpo_stability_report_v7"
+ARMS = ("single_step_fixed_scale_mode_residual",)
 PAIRED_SEEDS = (17, 23, 42)
 SCENARIO_SEEDS = (17, 23)
 VALIDATION_SEEDS = (31, 47)
@@ -31,13 +31,14 @@ TARGET_ACCEPTED_UPDATE_STATES = 500
 VALIDATION_INTERVAL_ROLLOUTS = 20
 TAIL_STATES = (420, 440, 460, 480, 500)
 TRAJECTORIES_PER_MODE = 48
-UPDATE_EPOCHS = 10
-CLIP_EPSILON_LOW = 0.1
-CLIP_EPSILON_HIGH = 0.2
 LEARNING_RATE = 1e-5
 BC_WEIGHT = 0.1
 REFERENCE_KL_WEIGHT = 0.02
 MAX_GRAD_NORM = 1.0
+ADVANTAGE_SCALE = 1.0
+BASELINE_TOLERANCE = 1e-6
+POST_UPDATE_REFERENCE_KL_MAX = 0.25
+MAX_ADAPTER_RELATIVE_DRIFT = 0.02
 ALIGNED_DDIM_PATH = {
     "timesteps": [8, 5, 3, 0],
     "previous_timesteps": [5, 3, 0, -1],
@@ -48,7 +49,7 @@ ALIGNED_DDIM_PATH = {
 
 
 class GRPOStabilityComparisonError(ValueError):
-    """Raised when a diagnostic manifest or run artifact violates v6."""
+    """Raised when a diagnostic manifest or run artifact violates v7."""
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,9 @@ class _Run:
         )
 
     @property
-    def first_difference_std(self) -> float:
+    def first_difference_std(self) -> float | None:
+        if self.simulator_gain.size < 2:
+            return None
         return float(np.std(np.diff(self.simulator_gain)))
 
 
@@ -153,7 +156,7 @@ def _finite(value: object, *, label: str) -> float:
 def _arm_specs(value: object) -> dict[str, dict[str, object]]:
     if not isinstance(value, Mapping) or set(value) != set(ARMS):
         raise GRPOStabilityComparisonError(
-            "manifest arms must contain the exact three arms"
+            "manifest arms must contain the fixed-scale residual arm"
         )
     result: dict[str, dict[str, object]] = {}
     for arm in ARMS:
@@ -167,8 +170,11 @@ def _arm_specs(value: object) -> dict[str, dict[str, object]]:
             "online_config_format",
             "online_report_format",
             "ddim_path",
-            "gate",
+            "advantage",
+            "policy_update",
             "anchor_scope",
+            "trainable_parameters",
+            "stability_guard",
         }
         if set(raw) != required:
             raise GRPOStabilityComparisonError(
@@ -176,19 +182,20 @@ def _arm_specs(value: object) -> dict[str, dict[str, object]]:
             )
         spec = {str(name): item for name, item in raw.items()}
         spec["commit"] = _commit(spec["commit"], label=f"{arm} commit")
-        if arm != "legacy_control" and spec["ddim_path"] != ALIGNED_DDIM_PATH:
+        if spec["ddim_path"] != ALIGNED_DDIM_PATH:
             raise GRPOStabilityComparisonError(
                 f"{arm} must use the aligned DDIM path"
             )
-        expected_gate = "mean" if arm == "aligned_mean_full_valid" else "max"
-        expected_anchor = (
-            "all_valid_executable"
-            if arm == "aligned_mean_full_valid"
-            else "active_only"
-        )
         if (
-            spec["gate"] != expected_gate
-            or spec["anchor_scope"] != expected_anchor
+            spec["advantage"] != "fixed_scale_baseline_relative_safe_truncation"
+            or spec["policy_update"] != "single_step_on_policy"
+            or spec["anchor_scope"] != "all_valid_executable"
+            or spec["trainable_parameters"] != "mode_specific_output_residuals"
+            or spec["stability_guard"]
+            != {
+                "post_update_reference_kl_max": POST_UPDATE_REFERENCE_KL_MAX,
+                "max_adapter_relative_drift": MAX_ADAPTER_RELATIVE_DRIFT,
+            }
         ):
             raise GRPOStabilityComparisonError(
                 f"{arm} optimization semantics mismatch"
@@ -200,13 +207,13 @@ def _arm_specs(value: object) -> dict[str, dict[str, object]]:
 def _validate_common(value: object) -> None:
     expected = {
         "trajectories_per_mode": TRAJECTORIES_PER_MODE,
-        "update_epochs": UPDATE_EPOCHS,
-        "clip_epsilon_low": CLIP_EPSILON_LOW,
-        "clip_epsilon_high": CLIP_EPSILON_HIGH,
         "learning_rate": LEARNING_RATE,
         "bc_weight": BC_WEIGHT,
         "reference_kl_weight": REFERENCE_KL_WEIGHT,
         "max_grad_norm": MAX_GRAD_NORM,
+        "advantage_scale": ADVANTAGE_SCALE,
+        "baseline_tolerance": BASELINE_TOLERANCE,
+        "weight_decay": 0.0,
     }
     if not isinstance(value, Mapping) or dict(value) != expected:
         raise GRPOStabilityComparisonError("manifest hyperparameters mismatch")
@@ -275,30 +282,32 @@ def _validate_semantics(
         raise GRPOStabilityComparisonError(
             f"{arm} is missing optimizer contracts"
         )
-    gate_text = str(policy.get("activation_gate", "")) + str(
-        collection.get("active_mode_gate", "")
-    )
-    if spec["gate"] == "mean" and "mean" not in gate_text:
+    if policy.get("version") != "stage2_joint_grpo_optimizer_v8":
         raise GRPOStabilityComparisonError(
-            f"{arm} does not record the mean gate"
+            f"{arm} optimizer contract is not v8"
         )
-    if spec["gate"] == "max" and "max" not in gate_text:
+    if collection.get("version") != "stage2_joint_grpo_persistent_episode_v7":
         raise GRPOStabilityComparisonError(
-            f"{arm} does not record the max gate"
+            f"{arm} collection contract is not v7"
+        )
+    if policy.get("ppo_ratio_or_clipping") is not False:
+        raise GRPOStabilityComparisonError(f"{arm} still enables PPO replay")
+    if policy.get("ddim_path") != ALIGNED_DDIM_PATH:
+        raise GRPOStabilityComparisonError(f"{arm} optimizer DDIM path mismatch")
+    if "collision_or_out=-1" not in str(policy.get("advantage", "")):
+        raise GRPOStabilityComparisonError(
+            f"{arm} does not record fixed-scale safety truncation"
         )
     regularization = str(policy.get("reference_regularization", ""))
-    if spec["anchor_scope"] == "all_valid_executable":
-        if "every hard-valid optimizer-executable mode" not in regularization:
-            raise GRPOStabilityComparisonError(
-                f"{arm} does not anchor all valid modes"
-            )
-    elif "active" not in regularization:
+    if "every hard-valid optimizer-executable mode" not in regularization:
         raise GRPOStabilityComparisonError(
-            f"{arm} does not record active-only anchors"
+            f"{arm} does not anchor all valid modes"
         )
-    if arm != "legacy_control" and policy.get("ddim_path") != ALIGNED_DDIM_PATH:
+    if policy.get("trainable_parameters") != (
+        "ten zero-initialized mode-specific output residual weights and biases"
+    ):
         raise GRPOStabilityComparisonError(
-            f"{arm} optimizer DDIM path mismatch"
+            f"{arm} does not record isolated residual parameters"
         )
 
 
@@ -354,9 +363,6 @@ def _load_run(
         "seed": seed,
         "trajectories_per_mode": TRAJECTORIES_PER_MODE,
         "total_rollout_groups": TARGET_ACCEPTED_UPDATE_STATES,
-        "update_epochs": UPDATE_EPOCHS,
-        "clip_epsilon_low": CLIP_EPSILON_LOW,
-        "clip_epsilon_high": CLIP_EPSILON_HIGH,
         "validation_interval_rollouts": VALIDATION_INTERVAL_ROLLOUTS,
     }
     for name, expected in expected_online.items():
@@ -371,14 +377,24 @@ def _load_run(
         raise GRPOStabilityComparisonError(
             f"{arm}/seed{seed} must be diagnostic-only"
         )
-    _validate_semantics(config, arm=arm, spec=spec)
-    states, simulator, selected, s7 = _history(
-        report, label=f"{arm}/seed{seed}"
-    )
     status = str(report.get("training_status"))
-    if status not in ("complete", "diagnostic_early_stop"):
+    if status not in (
+        "complete",
+        "diagnostic_early_stop",
+        "stability_guard_rejected",
+    ):
         raise GRPOStabilityComparisonError(
             f"{arm}/seed{seed} training status is invalid"
+        )
+    _validate_semantics(config, arm=arm, spec=spec)
+    if status == "stability_guard_rejected" and not report.get(
+        "validation_selection_history"
+    ):
+        states = np.asarray([], dtype=np.int64)
+        simulator = selected = s7 = np.asarray([], dtype=np.float64)
+    else:
+        states, simulator, selected, s7 = _history(
+            report, label=f"{arm}/seed{seed}"
         )
     accepted = int(report.get("accepted_update_states", -1))
     if status == "complete" and accepted != TARGET_ACCEPTED_UPDATE_STATES:
@@ -423,9 +439,11 @@ def _plot(runs: Sequence[_Run], path: Path) -> Path:
     axis.axhline(0.0, color="black", linewidth=0.8)
     axis.set_xlabel("Accepted update state")
     axis.set_ylabel("Closed-loop simulator reward gain")
-    axis.set_title("Bounded GRPO DDIM/stability diagnostic")
+    axis.set_title("Bounded single-step fixed-scale GRPO diagnostic")
     axis.grid(alpha=0.25)
-    axis.legend()
+    handles, labels = axis.get_legend_handles_labels()
+    if handles:
+        axis.legend(handles, labels)
     figure.tight_layout()
     figure.savefig(path, dpi=160)
     plt.close(figure)
@@ -456,6 +474,7 @@ def compare_grpo_stability(
         "validation_state_bank_sha256",
         "hyperparameters",
         "arms",
+        "historical_control_run27",
         "runs",
     }
     if set(manifest) != required or manifest.get("format") != MANIFEST_FORMAT:
@@ -478,6 +497,33 @@ def compare_grpo_stability(
             raise GRPOStabilityComparisonError(f"manifest {name} mismatch")
     _validate_common(manifest.get("hyperparameters"))
     specs = _arm_specs(manifest.get("arms"))
+    historical = manifest.get("historical_control_run27")
+    if (
+        not isinstance(historical, Mapping)
+        or set(historical)
+        != {"run_dir", "training_status", "accepted_update_states"}
+        or historical.get("training_status") != "diagnostic_early_stop"
+        or historical.get("accepted_update_states") != 240
+    ):
+        raise GRPOStabilityComparisonError(
+            "historical_control_run27 must record the stopped 240-state run"
+        )
+    historical_run_dir = _resolve(
+        manifest_path.parent,
+        historical.get("run_dir"),
+        label="historical_control_run27 run_dir",
+    )
+    historical_report = _load_json(
+        historical_run_dir / "report.json",
+        label="historical_control_run27 report",
+    )
+    if (
+        historical_report.get("training_status") != "diagnostic_early_stop"
+        or historical_report.get("accepted_update_states") != 240
+    ):
+        raise GRPOStabilityComparisonError(
+            "historical_control_run27 report conflicts with the manifest"
+        )
     source_sha = _digest(
         manifest.get("source_stage1_sha256"), label="source SHA"
     )
@@ -497,10 +543,10 @@ def compare_grpo_stability(
     raw_runs = manifest.get("runs")
     if (
         not isinstance(raw_runs, list)
-        or len(raw_runs) != len(ARMS) * len(PAIRED_SEEDS)
+        or len(raw_runs) != len(PAIRED_SEEDS)
     ):
         raise GRPOStabilityComparisonError(
-            "manifest must contain exactly nine runs"
+            "manifest must contain exactly three fixed-scale residual runs"
         )
     runs: list[_Run] = []
     seen: set[tuple[str, int]] = set()
@@ -532,36 +578,28 @@ def compare_grpo_stability(
 
     by_key = {(run.arm, run.seed): run for run in runs}
     stable = [
-        by_key[("aligned_mean_full_valid", seed)] for seed in PAIRED_SEEDS
+        by_key[("single_step_fixed_scale_mode_residual", seed)]
+        for seed in PAIRED_SEEDS
     ]
-    control = [by_key[("aligned_max", seed)] for seed in PAIRED_SEEDS]
     eligible_all = all(run.safety_eligible_checkpoint for run in stable)
+    guard_rejected = any(
+        run.training_status == "stability_guard_rejected" for run in stable
+    )
     stable_tail = [_tail_gain_or_none(run) for run in stable]
     complete_tail = [value for value in stable_tail if value is not None]
     tail_nonnegative_count = sum(value >= 0.0 for value in complete_tail)
-    paired_tail_deltas = []
-    for stable_run, control_run in zip(stable, control):
-        stable_value = _tail_gain_or_none(stable_run)
-        control_value = _tail_gain_or_none(control_run)
-        if stable_value is not None and control_value is not None:
-            paired_tail_deltas.append(stable_value - control_value)
-    volatility_deltas = [
-        stable_run.first_difference_std - control_run.first_difference_std
-        for stable_run, control_run in zip(stable, control)
-    ]
     passed = (
-        eligible_all
+        not guard_rejected
+        and eligible_all
         and tail_nonnegative_count >= 2
         and len(complete_tail) == len(PAIRED_SEEDS)
         and float(np.mean(complete_tail)) >= 0.0
-        and len(paired_tail_deltas) == len(PAIRED_SEEDS)
-        and sum(value > 0.0 for value in paired_tail_deltas) >= 2
-        and float(np.mean(paired_tail_deltas)) > 0.0
-        and sum(value <= 0.0 for value in volatility_deltas) >= 2
+        and sum(value > 0.0 for value in complete_tail) >= 2
+        and float(np.mean(complete_tail)) > 0.0
     )
     output_dir = Path(output_dir).resolve()
     plot_path = _plot(
-        runs, output_dir / "simulator_reward_gain_three_arm.png"
+        runs, output_dir / "simulator_reward_gain_fixed_scale_residual.png"
     )
     report: dict[str, object] = {
         "format": REPORT_FORMAT,
@@ -570,6 +608,10 @@ def compare_grpo_stability(
         "manifest": str(manifest_path),
         "validation_state_bank": str(bank_path),
         "validation_state_bank_sha256": bank_sha,
+        "historical_control_run27": {
+            **dict(historical),
+            "run_dir": str(historical_run_dir),
+        },
         "arms": {name: dict(specs[name]) for name in ARMS},
         "per_run": [
             {
@@ -589,20 +631,15 @@ def compare_grpo_stability(
         ],
         "stable_arm_500_state_gate": {
             "all_three_seeds_have_safety_eligible_checkpoint": eligible_all,
+            "any_stability_guard_rejection": guard_rejected,
             "tail_nonnegative_seed_count": tail_nonnegative_count,
             "tail_simulator_gain_cross_seed_mean": (
                 float(np.mean(complete_tail))
                 if len(complete_tail) == len(PAIRED_SEEDS)
                 else None
             ),
-            "paired_tail_improvement_positive_seed_count": sum(
-                value > 0.0 for value in paired_tail_deltas
-            ),
-            "paired_tail_improvement_cross_seed_mean": float(
-                np.mean(paired_tail_deltas)
-            ) if len(paired_tail_deltas) == len(PAIRED_SEEDS) else None,
-            "volatility_not_higher_seed_count": sum(
-                value <= 0.0 for value in volatility_deltas
+            "paired_frozen_tail_gain_positive_seed_count": sum(
+                value > 0.0 for value in complete_tail
             ),
             "passed": passed,
         },

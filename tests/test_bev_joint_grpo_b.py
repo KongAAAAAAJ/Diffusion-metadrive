@@ -11,7 +11,6 @@ from models.bev_planner import (
     BEVOnlyDiffusionPlannerConfig,
     JointGRPOConfig,
     JointGRPOError,
-    JointGRPOPolicyUpdateConfig,
     JointGRPORolloutB,
     JointGRPOTrainerA,
     JointGRPOTrainerB,
@@ -32,7 +31,7 @@ from train.train_bev_diffusion_stage1 import (
 
 
 def _planner(condition: str = "predicted_detached") -> BEVOnlyDiffusionPlanner:
-    return BEVOnlyDiffusionPlanner(
+    planner = BEVOnlyDiffusionPlanner(
         BEVOnlyDiffusionPlannerConfig(
             d_model=32,
             num_heads=4,
@@ -41,6 +40,11 @@ def _planner(condition: str = "predicted_detached") -> BEVOnlyDiffusionPlanner:
             predecessor_condition=condition,
         )
     )
+    with torch.no_grad():
+        torch.nn.init.normal_(
+            planner.diffusion_decoder.trajectory_head[-1].weight, std=0.01
+        )
+    return planner
 
 
 def _inputs() -> dict[str, torch.Tensor]:
@@ -144,7 +148,7 @@ def test_b_rollout_and_replay_use_all_mode_contract_and_fixed_history() -> None:
     assert isinstance(rollout, JointGRPORolloutB)
     assert rollout.chains_normalized.shape == (1, 2, 5, 3, 10, 8, 2)
     assert rollout.candidate_trajectories.shape == (1, 3, 10, 2, 8, 3)
-    assert rollout.old_trajectory_log_prob.shape == (1, 3, 10, 2, 3)
+    assert rollout.frozen_candidate_trajectories.shape == (1, 3, 10, 2, 8, 3)
     assert rollout.predecessor_action_history_normalized.shape == (1, 2, 4, 2, 8, 3)
 
     seen: list[torch.Tensor] = []
@@ -159,19 +163,20 @@ def test_b_rollout_and_replay_use_all_mode_contract_and_fixed_history() -> None:
     rewards = torch.zeros((1, 3, 10, 2), dtype=torch.float32)
     rewards[..., 0] = -1.0
     rewards[..., 1] = 1.0
+    rollout = rollout.with_reward_signals(
+        current_rewards=rewards,
+        frozen_rewards=rewards - 1.0,
+        collision_mask=torch.zeros_like(rewards, dtype=torch.bool),
+        out_of_drivable_mask=torch.zeros_like(rewards, dtype=torch.bool),
+        valid_executable_mode_mask=rollout.mode_valid_mask,
+    )
     with mock.patch.object(trainer, "_decode_roles", side_effect=traced):
-        loss = trainer.compute_loss(
-            rollout, rewards, rollout.mode_valid_mask
-        )
+        loss = trainer.compute_loss(rollout)
     assert len(seen) == 8
     for index in range(0, len(seen), 2):
         assert seen[index].data_ptr() == seen[index + 1].data_ptr()
-    torch.testing.assert_close(
-        loss.new_trajectory_log_prob,
-        rollout.old_trajectory_log_prob,
-        rtol=0,
-        atol=2e-5,
-    )
+    assert loss.new_trajectory_log_prob.shape == (1, 3, 10, 2, 3)
+    assert bool(torch.isfinite(loss.new_trajectory_log_prob).all())
 
 
 def test_b_only_trajectory_head_updates() -> None:
@@ -179,7 +184,12 @@ def test_b_only_trajectory_head_updates() -> None:
     with torch.no_grad():
         planner.diffusion_decoder.predecessor_residual_gate.fill_(0.25)
     trainer = JointGRPOTrainerB(
-        planner, JointGRPOConfig(trajectories_per_mode=2)
+        planner,
+        JointGRPOConfig(
+            trajectories_per_mode=2,
+            post_update_reference_kl_max=1e6,
+            max_adapter_relative_drift=1e6,
+        ),
     )
     rollout = trainer.sample_groups(
         _inputs(), generator=torch.Generator().manual_seed(23)
@@ -194,12 +204,14 @@ def test_b_only_trajectory_head_updates() -> None:
     rewards[..., 0] = -1.0
     rewards[..., 1] = 1.0
 
-    result = trainer.update(
-        rollout,
-        rewards,
-        rollout.mode_valid_mask,
-        policy_update=JointGRPOPolicyUpdateConfig(update_epochs=1),
+    rollout = rollout.with_reward_signals(
+        current_rewards=rewards,
+        frozen_rewards=rewards - 1.0,
+        collision_mask=torch.zeros_like(rewards, dtype=torch.bool),
+        out_of_drivable_mask=torch.zeros_like(rewards, dtype=torch.bool),
+        valid_executable_mode_mask=rollout.mode_valid_mask,
     )
+    result = trainer.update(rollout)
 
     assert result.optimizer_step == 1
     assert not _same_state(head_before, _state(planner.diffusion_decoder.trajectory_head))
@@ -210,7 +222,7 @@ def test_b_only_trajectory_head_updates() -> None:
     )
 
 
-def test_b_source_metadata_and_schema5_strict_resume(tmp_path: Path) -> None:
+def test_b_source_metadata_and_schema6_strict_resume(tmp_path: Path) -> None:
     source = _source_metadata(diagnostic=True)
     validate_stage1_b_source_metadata(source, allow_diagnostic_source=True)
     with pytest.raises(JointGRPOError, match="explicit opt-in"):
@@ -226,7 +238,7 @@ def test_b_source_metadata_and_schema5_strict_resume(tmp_path: Path) -> None:
         metrics={"loss/total": 0.0},
         diagnostic_only=True,
     )
-    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 5
+    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 6
     assert payload["format"] == GRPO_B_CHECKPOINT_FORMAT
     path = save_grpo_checkpoint(tmp_path / "b.pt", payload)
     restored = JointGRPOTrainerB(

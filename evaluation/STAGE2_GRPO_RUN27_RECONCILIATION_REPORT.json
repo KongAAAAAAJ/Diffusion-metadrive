@@ -1,0 +1,40 @@
+{
+  "format": "stage2_grpo_run27_reconciliation_report_v1",
+  "recorded_at": "2026-09-07T12:00:00+08:00",
+  "status": "failed_nonformal_diagnostic_preserved",
+  "repository": {
+    "branch": "BEV",
+    "implementation_commit": "9005a18cda5dfa2f8a8e7e9b4a8a5da064372307",
+    "worktree_clean_before_reconciliation": true
+  },
+  "run": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_27",
+    "source_stage1_qualified": false,
+    "training_status": "diagnostic_early_stop",
+    "target_accepted_update_states": 500,
+    "accepted_update_states": 240,
+    "optimizer_steps": 2400,
+    "optimizer_contract": "stage2_joint_grpo_optimizer_v7",
+    "update_epochs": 10,
+    "checkpoint_schema": 5,
+    "resume_allowed": false,
+    "historical_artifacts_modified": false
+  },
+  "last_optimizer_epoch": {
+    "reference_kl": 4.00083065032959,
+    "trajectory_head_relative_frozen_drift": 0.045796677470207214,
+    "trajectory_clip_fraction": 0.2413194626569748,
+    "gradient_pre_clip": 8.117844581604004,
+    "gradient_post_clip": 0.9999998211860657
+  },
+  "last_validation": {
+    "accepted_update_state": 240,
+    "selected_reward_gain": -1.5453866669287284,
+    "simulator_reward_gain": -1.8485180184245111,
+    "s7_out_delta": 2.0,
+    "s7_collision_delta": 2.0,
+    "safety_eligible": false
+  },
+  "classification": "Run27 is a failed bounded diagnostic. Its checkpoints, report, metrics, plots and log remain immutable historical evidence and may not seed new training.",
+  "next_unoccupied_run": "run_28"
+}

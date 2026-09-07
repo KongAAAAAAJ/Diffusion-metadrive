@@ -166,6 +166,9 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         "trajectory_head": _snapshot(
             trainer.planner.diffusion_decoder.trajectory_head
         ),
+        "trajectory_head_base": _snapshot(
+            trainer.planner.diffusion_decoder.trajectory_head.base
+        ),
         "mode_head": _snapshot(trainer.planner.mode_head),
         "backbone": _snapshot(trainer.planner.backbone),
         "bev_fusion": _snapshot(trainer.planner.bev_fusion),
@@ -201,19 +204,28 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         dtype=torch.float32,
         device=device,
     ).reshape(1, 1, 1, trajectories).expand(1, 3, 10, -1).clone()
-    active_mode_mask = rollout.mode_valid_mask.clone()
-    if not bool(active_mode_mask.any()):
+    frozen_rewards = rewards - 0.25
+    collision = torch.zeros_like(rewards, dtype=torch.bool)
+    out_of_drivable = torch.zeros_like(rewards, dtype=torch.bool)
+    collision[..., 0] = True
+    out_of_drivable[..., 1] = True
+    valid_executable_mode_mask = rollout.mode_valid_mask.clone()
+    if not bool(valid_executable_mode_mask.any()):
         raise JointGRPOError("diagnostic sample contains no valid mode")
+    rollout = rollout.with_reward_signals(
+        current_rewards=rewards,
+        frozen_rewards=frozen_rewards,
+        collision_mask=collision,
+        out_of_drivable_mask=out_of_drivable,
+        valid_executable_mode_mask=valid_executable_mode_mask,
+    )
     with torch.no_grad():
-        pre_update_loss = trainer.compute_loss(
-            rollout,
-            rewards,
-            active_mode_mask,
-        )
+        pre_update_loss = trainer.compute_loss(rollout)
+        replayed_loss = trainer.compute_loss(rollout)
     trajectory_replay_error = float(
         (
             pre_update_loss.new_trajectory_log_prob
-            - rollout.old_trajectory_log_prob
+            - replayed_loss.new_trajectory_log_prob
         )
         .abs()
         .max()
@@ -223,15 +235,13 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
     if trajectory_replay_error > 2e-5:
         raise JointGRPOError("fixed-chain trajectory log-prob replay exceeded tolerance")
     update_start = time.perf_counter()
-    update = trainer.update(rollout, rewards, active_mode_mask)
+    update = trainer.update(rollout)
     _synchronize(device)
+    if update.stability_guard_rejected:
+        raise JointGRPOError("diagnostic update hit the stability guard")
     update_ms = 1000.0 * (time.perf_counter() - update_start)
     with torch.no_grad():
-        post_update_loss = trainer.compute_loss(
-            rollout,
-            rewards,
-            active_mode_mask,
-        )
+        post_update_loss = trainer.compute_loss(rollout)
     _synchronize(device)
 
     after = {
@@ -241,6 +251,9 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         ),
         "trajectory_head": _snapshot(
             trainer.planner.diffusion_decoder.trajectory_head
+        ),
+        "trajectory_head_base": _snapshot(
+            trainer.planner.diffusion_decoder.trajectory_head.base
         ),
         "mode_head": _snapshot(trainer.planner.mode_head),
         "backbone": _snapshot(trainer.planner.backbone),
@@ -268,6 +281,7 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         raise JointGRPOError("diagnostic trajectory head did not update")
     for name in (
         "decoder_shared",
+        "trajectory_head_base",
         "mode_head",
         "backbone",
         "bev_fusion",
@@ -285,13 +299,26 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
     metrics.update(
         {
             "replay/trajectory_log_prob_max_abs": trajectory_replay_error,
+            "paired/candidate_max_abs": float(
+                (
+                    rollout.candidate_trajectories
+                    - rollout.frozen_candidate_trajectories
+                )
+                .abs()
+                .max()
+                .detach()
+                .cpu()
+            ),
             "post_update/reference_kl": float(
                 post_update_loss.reference_kl.detach().cpu()
             ),
             "gradient/total_before_clip": update.total_gradient_norm,
             "timing/sample_groups_ms": sample_ms,
             "timing/update_ms": update_ms,
-            "zero_signal_epochs": float(update.zero_signal_epochs),
+            "zero_signal": float(update.zero_signal),
+            "stability_guard_rejected": float(
+                update.stability_guard_rejected
+            ),
         }
     )
     metrics.update(
@@ -347,8 +374,11 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
     rollout_shapes = {
         "chains_normalized": list(rollout.chains_normalized.shape),
         "candidate_trajectories": list(rollout.candidate_trajectories.shape),
-        "old_trajectory_log_prob": list(
-            rollout.old_trajectory_log_prob.shape
+        "frozen_candidate_trajectories": list(
+            rollout.frozen_candidate_trajectories.shape
+        ),
+        "replayed_trajectory_log_prob": list(
+            pre_update_loss.new_trajectory_log_prob.shape
         ),
     }
     if isinstance(rollout, JointGRPORolloutB):
@@ -356,14 +386,14 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
             rollout.predecessor_action_history_normalized.shape
         )
     report: dict[str, object] = {
-        "format": f"bev_joint_grpo_{variant.lower()}_same_mode_smoke_v2",
+        "format": f"bev_joint_grpo_{variant.lower()}_fixed_scale_smoke_v3",
         "variant": variant,
         "predecessor_condition": (
             "none" if variant == "A" else "predicted_detached"
         ),
         "diagnostic_only": True,
         "eligible_for_formal_training": False,
-        "reward_source": "synthetic_per_vehicle_same_mode_ordered_values",
+        "reward_source": "synthetic_paired_per_vehicle_same_mode_values",
         "source_stage1_checkpoint": str(args.stage1_checkpoint.resolve()),
         "source_stage1_sha256": source_sha256,
         "source_dataset_fingerprint": source_payload["dataset_fingerprint"],
@@ -375,7 +405,7 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
         "stochastic_timesteps": list(trainer.config.stochastic_timesteps),
         "rollout_shapes": rollout_shapes,
         "rewards": rewards.detach().cpu().tolist(),
-        "active_mode_mask": active_mode_mask.detach().cpu().tolist(),
+        "signal_mode_mask": update.loss.signal_mode_mask.detach().cpu().tolist(),
         "advantages": update.loss.advantages.detach().cpu().tolist(),
         "metrics": metrics,
         "parameter_max_abs_delta": deltas,

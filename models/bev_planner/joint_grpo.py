@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping
 
 import torch
@@ -40,9 +40,12 @@ class JointGRPOConfig:
     bc_weight: float = 0.1
     reference_kl_weight: float = 0.02
     learning_rate: float = 1e-5
-    weight_decay: float = 1e-4
+    weight_decay: float = 0.0
     max_grad_norm: float = 1.0
-    advantage_eps: float = 1e-6
+    advantage_scale: float = 1.0
+    baseline_tolerance: float = 1e-6
+    post_update_reference_kl_max: float = 0.25
+    max_adapter_relative_drift: float = 0.02
     xy_beta_m: float = 1.0
     heading_beta_rad: float = 0.1
     heading_bc_weight: float = 0.2
@@ -59,7 +62,10 @@ class JointGRPOConfig:
         positive = (
             "learning_rate",
             "max_grad_norm",
-            "advantage_eps",
+            "advantage_scale",
+            "baseline_tolerance",
+            "post_update_reference_kl_max",
+            "max_adapter_relative_drift",
             "xy_beta_m",
             "heading_beta_rad",
         )
@@ -88,96 +94,56 @@ class JointGRPOConfig:
         return self.roll_timesteps[:-1]
 
 
-@dataclass(frozen=True)
-class JointGRPOPolicyUpdateConfig:
-    """PPO-style update semantics applied to one frozen joint rollout."""
+def joint_grpo_optimizer_contract() -> dict[str, object]:
+    """Return the machine-readable single-step on-policy optimizer contract."""
 
-    update_epochs: int = 10
-    clip_epsilon_low: float = 0.1
-    clip_epsilon_high: float = 0.2
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.update_epochs, bool)
-            or not isinstance(self.update_epochs, int)
-            or self.update_epochs < 1
-        ):
-            raise JointGRPOError("update_epochs must be a positive integer")
-        for name in ("clip_epsilon_low", "clip_epsilon_high"):
-            clip_epsilon = float(getattr(self, name))
-            if (
-                not math.isfinite(clip_epsilon)
-                or clip_epsilon <= 0.0
-                or clip_epsilon >= 1.0
-            ):
-                raise JointGRPOError(f"{name} must be finite and in (0,1)")
-
-
-def joint_grpo_optimizer_contract(
-    config: JointGRPOPolicyUpdateConfig | None = None,
-) -> dict[str, object]:
-    """Return the machine-readable Stage-2 clipped-GRPO optimizer contract."""
-
-    policy_update = config if config is not None else JointGRPOPolicyUpdateConfig()
     return {
-        "version": "stage2_joint_grpo_optimizer_v7",
+        "version": "stage2_joint_grpo_optimizer_v8",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
-        "behavior_policy_snapshot": (
-            "detached per-vehicle, per-mode stochastic DDIM-transition log "
-            "probabilities captured before any policy update"
+        "paired_behavior_policy": (
+            "current and frozen N=48 paths use identical initial and DDIM "
+            "transition noise"
         ),
-        "update_epochs": int(policy_update.update_epochs),
-        "clip_epsilon_low": float(policy_update.clip_epsilon_low),
-        "clip_epsilon_high": float(policy_update.clip_epsilon_high),
-        "trajectory_ratio_factorization": (
-            "one ratio per vehicle, mode, trajectory and stochastic DDIM "
-            "transition [B,3,10,N,S]"
+        "policy_gradient": "-exp(logp-logp.detach())*advantage",
+        "ppo_ratio_or_clipping": False,
+        "advantage": (
+            "collision_or_out=-1; otherwise max(R_current-mean(R_current),0) "
+            "only when R_current>=R_frozen-1e-6; fixed scale 1"
         ),
-        "clipped_surrogate": (
-            "negative mean of min(ratio*advantage, "
-            "clip(ratio,1-epsilon_low,1+epsilon_high)*advantage)"
-        ),
-        "activation_gate": (
-            "active = hard_valid_and_executable AND "
-            "mean_j(reward[b,r,k,j]) >= frozen_pretrain_reward[b,r,k]"
-        ),
-        "advantage_normalization": (
-            "independently for every [B,vehicle,mode] block: subtract the "
-            "trajectory mean and divide by sqrt(population_variance+epsilon)"
-        ),
-        "advantage_reuse": (
-            "same-mode normalize once, detach, and freeze across "
-            "all epochs of the accepted rollout"
-        ),
+        "signal_mode": "at least one nonzero sample advantage",
         "rollout_consumption": (
             "one external update call consumes one accepted live rollout and "
-            "performs exactly update_epochs serial optimizer steps"
+            "performs at most one backward and one optimizer step"
         ),
         "loss_reduction": (
-            "mean over trajectories*DDIM steps, then active modes per vehicle, "
+            "fixed mean over 48 trajectories*3 DDIM steps, then signal modes, "
             "then vehicles, then batch"
         ),
-        "minibatch_semantics": "none; reuse the complete all-mode rollout each epoch",
+        "minibatch_semantics": "none; one complete paired rollout",
         "reference_regularization": (
-            "recompute trajectory behavior-cloning and frozen-Stage1 trajectory "
-            "KL for every hard-valid optimizer-executable mode each epoch; no mode KL"
+            "trajectory behavior-cloning and frozen-Stage1 trajectory KL cover "
+            "every hard-valid optimizer-executable mode; no mode KL"
         ),
-        "kl_early_stop": False,
+        "trainable_parameters": (
+            "ten zero-initialized mode-specific output residual weights and biases"
+        ),
+        "weight_decay": 0.0,
+        "post_update_guard": {
+            "reference_kl_max": 0.25,
+            "max_mode_adapter_relative_drift": 0.02,
+            "failure": "restore residual parameters and Adam state",
+        },
         "budget_unit": "accepted_update_state",
-        "checkpoint_boundary": (
-            "after a complete rollout and all of its optimizer epochs"
-        ),
-        "trainable_modules": ["diffusion_decoder.trajectory_head"],
+        "checkpoint_boundary": "after one accepted guarded optimizer step",
+        "trainable_modules": ["diffusion_decoder.trajectory_head.mode_residual"],
     }
 
 
-def joint_grpo_optimizer_contract_sha256(
-    config: JointGRPOPolicyUpdateConfig | None = None,
-) -> str:
+def joint_grpo_optimizer_contract_sha256() -> str:
     """Return the canonical digest for a concrete optimizer contract."""
 
     encoded = json.dumps(
-        joint_grpo_optimizer_contract(config),
+        joint_grpo_optimizer_contract(),
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -191,7 +157,13 @@ class JointGRPORollout:
     mode_valid_mask: Tensor
     chains_normalized: Tensor
     candidate_trajectories: Tensor
-    old_trajectory_log_prob: Tensor
+    frozen_candidate_trajectories: Tensor
+    noise_bundle_identity: tuple[int, int, int] | None = None
+    current_rewards: Tensor | None = None
+    frozen_rewards: Tensor | None = None
+    collision_mask: Tensor | None = None
+    out_of_drivable_mask: Tensor | None = None
+    valid_executable_mode_mask: Tensor | None = None
 
     @property
     def batch_size(self) -> int:
@@ -201,10 +173,30 @@ class JointGRPORollout:
     def trajectories_per_mode(self) -> int:
         return int(self.candidate_trajectories.shape[3])
 
+    def with_reward_signals(
+        self,
+        *,
+        current_rewards: Tensor,
+        frozen_rewards: Tensor,
+        collision_mask: Tensor,
+        out_of_drivable_mask: Tensor,
+        valid_executable_mode_mask: Tensor,
+    ) -> "JointGRPORollout":
+        """Bind paired reward and safety tensors without mutating the rollout."""
+
+        return replace(
+            self,
+            current_rewards=current_rewards.detach(),
+            frozen_rewards=frozen_rewards.detach(),
+            collision_mask=collision_mask.detach(),
+            out_of_drivable_mask=out_of_drivable_mask.detach(),
+            valid_executable_mode_mask=valid_executable_mode_mask.detach(),
+        )
+
 
 @dataclass(frozen=True)
 class JointGRPORolloutB(JointGRPORollout):
-    predecessor_action_history_normalized: Tensor
+    predecessor_action_history_normalized: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -214,13 +206,14 @@ class JointGRPOLossResult:
     behavior_cloning: Tensor
     trajectory_reference_kl: Tensor
     reference_kl: Tensor
+    centered_rewards: Tensor
     advantages: Tensor
-    active_mode_mask: Tensor
+    signal_mode_mask: Tensor
+    valid_executable_mode_mask: Tensor
     new_trajectory_log_prob: Tensor
-    trajectory_importance_ratio: Tensor
-    trajectory_clip_fraction_low: Tensor
-    trajectory_clip_fraction_high: Tensor
-    trajectory_old_policy_approx_kl: Tensor
+    trajectory_pg_by_mode: Tensor
+    behavior_cloning_by_mode: Tensor
+    reference_kl_by_mode: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -230,35 +223,44 @@ class JointGRPOLossResult:
             "loss/trajectory_reference_kl": self.trajectory_reference_kl,
             "loss/reference_kl": self.reference_kl,
             "advantage/mean": _active_tensor_mean(
-                self.advantages, self.active_mode_mask
+                self.advantages, self.valid_executable_mode_mask
             ),
             "advantage/rms": torch.sqrt(
-                _active_tensor_mean(self.advantages.square(), self.active_mode_mask)
-            ),
-            "active_mode/count": self.active_mode_mask.float().sum(),
-            "policy/trajectory_ratio_mean": (
                 _active_tensor_mean(
-                    self.trajectory_importance_ratio, self.active_mode_mask
+                    self.advantages.square(), self.valid_executable_mode_mask
                 )
             ),
-            "policy/trajectory_clip_fraction_low": (
-                self.trajectory_clip_fraction_low
+            "advantage/positive_fraction": _active_tensor_mean(
+                (self.advantages > 0).float(), self.valid_executable_mode_mask
             ),
-            "policy/trajectory_clip_fraction_high": (
-                self.trajectory_clip_fraction_high
+            "advantage/collision_or_out_negative_fraction": _active_tensor_mean(
+                (self.advantages < 0).float(), self.valid_executable_mode_mask
             ),
-            "policy/trajectory_clip_fraction": (
-                self.trajectory_clip_fraction_low
-                + self.trajectory_clip_fraction_high
+            "advantage/centered_rms": torch.sqrt(
+                _active_tensor_mean(
+                    self.centered_rewards.square(),
+                    self.valid_executable_mode_mask,
+                )
             ),
-            "policy/trajectory_old_policy_approx_kl": (
-                self.trajectory_old_policy_approx_kl
-            ),
+            "signal_mode/count": self.signal_mode_mask.float().sum(),
+            "no_signal_mode/count": (
+                self.valid_executable_mode_mask & ~self.signal_mode_mask
+            ).float().sum(),
         }
+        for mode in range(NUM_MODES):
+            values[f"loss/mode_{mode}/trajectory_pg"] = (
+                self.trajectory_pg_by_mode[mode]
+            )
+            values[f"loss/mode_{mode}/behavior_cloning"] = (
+                self.behavior_cloning_by_mode[mode]
+            )
+            values[f"loss/mode_{mode}/reference_kl"] = (
+                self.reference_kl_by_mode[mode]
+            )
         return {name: float(value.detach().cpu()) for name, value in values.items()}
 
     def detached(self) -> JointGRPOLossResult:
-        """Return a graph-free result safe to retain across optimizer epochs."""
+        """Return a graph-free result safe to retain after the one update."""
 
         return JointGRPOLossResult(
             total=self.total.detach(),
@@ -266,34 +268,15 @@ class JointGRPOLossResult:
             behavior_cloning=self.behavior_cloning.detach(),
             trajectory_reference_kl=self.trajectory_reference_kl.detach(),
             reference_kl=self.reference_kl.detach(),
+            centered_rewards=self.centered_rewards.detach(),
             advantages=self.advantages.detach(),
-            active_mode_mask=self.active_mode_mask.detach(),
+            signal_mode_mask=self.signal_mode_mask.detach(),
+            valid_executable_mode_mask=self.valid_executable_mode_mask.detach(),
             new_trajectory_log_prob=self.new_trajectory_log_prob.detach(),
-            trajectory_importance_ratio=(
-                self.trajectory_importance_ratio.detach()
-            ),
-            trajectory_clip_fraction_low=(
-                self.trajectory_clip_fraction_low.detach()
-            ),
-            trajectory_clip_fraction_high=(
-                self.trajectory_clip_fraction_high.detach()
-            ),
-            trajectory_old_policy_approx_kl=(
-                self.trajectory_old_policy_approx_kl.detach()
-            ),
+            trajectory_pg_by_mode=self.trajectory_pg_by_mode.detach(),
+            behavior_cloning_by_mode=self.behavior_cloning_by_mode.detach(),
+            reference_kl_by_mode=self.reference_kl_by_mode.detach(),
         )
-
-
-@dataclass(frozen=True)
-class JointGRPOEpochUpdateResult:
-    epoch_in_rollout: int
-    loss: JointGRPOLossResult
-    gradient_norms: Mapping[str, float]
-    clipped_gradient_norms: Mapping[str, float]
-    total_gradient_norm: float
-    trajectory_head_relative_drift: float
-    optimizer_step: int
-    zero_signal_epoch: bool
 
 
 @dataclass(frozen=True)
@@ -302,10 +285,12 @@ class JointGRPOUpdateResult:
     gradient_norms: Mapping[str, float]
     clipped_gradient_norms: Mapping[str, float]
     total_gradient_norm: float
-    trajectory_head_relative_drift: float
+    adapter_relative_drifts: tuple[float, ...]
+    post_update_reference_kl: float
     optimizer_step: int
-    epoch_results: tuple[JointGRPOEpochUpdateResult, ...]
-    zero_signal_epochs: int
+    zero_signal: bool
+    stability_guard_rejected: bool
+    stability_guard_trigger_modes: tuple[int, ...]
 
 
 class FrozenGRPOReference(nn.Module):
@@ -342,65 +327,90 @@ class FrozenGRPOReference(nn.Module):
 FrozenVariantAReference = FrozenGRPOReference
 
 
-def same_mode_active_mask(
-    rewards: Tensor,
-    pretrain_rewards: Tensor,
-    *,
-    valid_mode_mask: Tensor,
-) -> Tensor:
-    """Apply the strict same-mode frozen-pretrain acceptance gate."""
+class ModeResidualTrajectoryHead(nn.Module):
+    """Frozen Stage-1 head plus disjoint zero-initialized mode residuals."""
 
-    if not isinstance(rewards, Tensor) or rewards.dtype != torch.float32:
-        raise JointGRPOError("rewards must be a float32 torch.Tensor")
-    if rewards.ndim != 4 or tuple(rewards.shape[1:3]) != (
-        NUM_PLATOON_ROLES,
-        NUM_MODES,
-    ):
-        raise JointGRPOError("rewards must have shape [B,3,10,N]")
-    if int(rewards.shape[0]) <= 0 or int(rewards.shape[3]) < 2:
-        raise JointGRPOError("rewards must contain a non-empty trajectory group")
-    if not bool(torch.isfinite(rewards).all()):
-        raise JointGRPOError("rewards must contain finite values")
-    expected = tuple(rewards.shape[:3])
-    if (
-        not isinstance(pretrain_rewards, Tensor)
-        or pretrain_rewards.dtype != torch.float32
-        or tuple(pretrain_rewards.shape) != expected
-    ):
-        raise JointGRPOError("pretrain_rewards must be float32 with shape [B,3,10]")
-    if not bool(torch.isfinite(pretrain_rewards).all()):
-        raise JointGRPOError("pretrain_rewards must contain finite values")
-    if (
-        not isinstance(valid_mode_mask, Tensor)
-        or valid_mode_mask.dtype != torch.bool
-        or tuple(valid_mode_mask.shape) != expected
-    ):
-        raise JointGRPOError("valid_mode_mask must be bool with shape [B,3,10]")
-    if not (
-        rewards.device == pretrain_rewards.device == valid_mode_mask.device
-    ):
-        raise JointGRPOError("gate tensors must use the same device")
-    return valid_mode_mask & (rewards.mean(dim=-1) >= pretrain_rewards)
+    def __init__(self, base: nn.Sequential) -> None:
+        super().__init__()
+        if (
+            not isinstance(base, nn.Sequential)
+            or len(base) != 3
+            or not isinstance(base[0], nn.Linear)
+            or not isinstance(base[1], nn.GELU)
+            or not isinstance(base[2], nn.Linear)
+            or base[0].out_features != base[2].in_features
+            or base[2].out_features != TRAJECTORY_STEPS * TRAJECTORY_DIM
+        ):
+            raise JointGRPOError("trajectory head does not match the Stage-1 MLP")
+        self.base = base
+        self.base.requires_grad_(False)
+        hidden = int(base[2].in_features)
+        output = int(base[2].out_features)
+        dtype = base[2].weight.dtype
+        self.mode_residual_weight = nn.Parameter(
+            torch.zeros(
+                NUM_MODES,
+                output,
+                hidden,
+                device=base[2].weight.device,
+                dtype=dtype,
+            )
+        )
+        self.mode_residual_bias = nn.Parameter(
+            torch.zeros(
+                NUM_MODES,
+                output,
+                device=base[2].weight.device,
+                dtype=dtype,
+            )
+        )
+
+    def forward(self, mode_features: Tensor) -> Tensor:
+        if mode_features.ndim < 2 or int(mode_features.shape[-2]) != NUM_MODES:
+            raise JointGRPOError("mode residual head requires a size-10 mode axis")
+        hidden = self.base[1](self.base[0](mode_features))
+        base_output = self.base[2](hidden)
+        residual = torch.einsum(
+            "...kh,koh->...ko", hidden, self.mode_residual_weight
+        ) + self.mode_residual_bias
+        return base_output + residual
+
+    def residual_parameters(self) -> tuple[nn.Parameter, nn.Parameter]:
+        return self.mode_residual_weight, self.mode_residual_bias
+
+    def adapter_relative_drifts(self) -> tuple[float, ...]:
+        base_norm = torch.sqrt(
+            self.base[2].weight.detach().float().square().sum()
+            + self.base[2].bias.detach().float().square().sum()
+        ).clamp_min(1e-12)
+        weight = self.mode_residual_weight.detach().float()
+        bias = self.mode_residual_bias.detach().float()
+        norms = torch.sqrt(weight.square().sum(dim=(1, 2)) + bias.square().sum(dim=1))
+        return tuple(float(value.cpu()) for value in norms / base_norm)
 
 
-def normalize_same_mode_advantages(
-    rewards: Tensor,
-    active_mode_mask: Tensor,
+def fixed_scale_safe_advantages(
+    current_rewards: Tensor,
+    frozen_rewards: Tensor,
+    collision_mask: Tensor,
+    out_of_drivable_mask: Tensor,
+    valid_executable_mode_mask: Tensor,
     *,
     trajectories_per_mode: int | None = None,
-    eps: float = 1e-6,
-) -> Tensor:
-    """Center and population-standardize each vehicle-mode trajectory group."""
+    advantage_scale: float = 1.0,
+    baseline_tolerance: float = 1e-6,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Return centered reward, fixed-scale truncated advantage and signal mask."""
 
-    if not isinstance(rewards, Tensor) or rewards.dtype != torch.float32:
-        raise JointGRPOError("rewards must be a float32 torch.Tensor")
-    if rewards.ndim != 4 or tuple(rewards.shape[1:3]) != (
+    if not isinstance(current_rewards, Tensor) or current_rewards.dtype != torch.float32:
+        raise JointGRPOError("current_rewards must be a float32 torch.Tensor")
+    if current_rewards.ndim != 4 or tuple(current_rewards.shape[1:3]) != (
         NUM_PLATOON_ROLES,
         NUM_MODES,
     ):
-        raise JointGRPOError("rewards must have shape [B,3,10,N]")
-    count = int(rewards.shape[-1])
-    if int(rewards.shape[0]) <= 0 or count < 2:
+        raise JointGRPOError("current_rewards must have shape [B,3,10,N]")
+    count = int(current_rewards.shape[-1])
+    if int(current_rewards.shape[0]) <= 0 or count < 2:
         raise JointGRPOError("rewards must contain a non-empty trajectory group")
     if trajectories_per_mode is not None and (
         isinstance(trajectories_per_mode, bool)
@@ -410,25 +420,56 @@ def normalize_same_mode_advantages(
         raise JointGRPOError(
             "trajectories_per_mode must match the rewards trajectory axis"
         )
-    if not bool(torch.isfinite(rewards).all()):
-        raise JointGRPOError("rewards must contain finite values")
+    expected = tuple(current_rewards.shape)
+    tensors = {
+        "frozen_rewards": frozen_rewards,
+        "collision_mask": collision_mask,
+        "out_of_drivable_mask": out_of_drivable_mask,
+    }
+    for name, value in tensors.items():
+        expected_dtype = torch.float32 if name == "frozen_rewards" else torch.bool
+        if (
+            not isinstance(value, Tensor)
+            or value.dtype != expected_dtype
+            or tuple(value.shape) != expected
+            or value.device != current_rewards.device
+        ):
+            raise JointGRPOError(
+                f"{name} must be colocated {expected_dtype} with shape [B,3,10,N]"
+            )
+    if not bool(torch.isfinite(current_rewards).all()) or not bool(
+        torch.isfinite(frozen_rewards).all()
+    ):
+        raise JointGRPOError("paired rewards must contain finite values")
     if (
-        not isinstance(active_mode_mask, Tensor)
-        or active_mode_mask.dtype != torch.bool
-        or tuple(active_mode_mask.shape) != tuple(rewards.shape[:3])
+        not isinstance(valid_executable_mode_mask, Tensor)
+        or valid_executable_mode_mask.dtype != torch.bool
+        or tuple(valid_executable_mode_mask.shape) != tuple(current_rewards.shape[:3])
+        or valid_executable_mode_mask.device != current_rewards.device
     ):
         raise JointGRPOError(
-            "active_mode_mask must be bool with shape [B,3,10]"
+            "valid_executable_mode_mask must be colocated bool [B,3,10]"
         )
-    if active_mode_mask.device != rewards.device:
-        raise JointGRPOError("rewards and active_mode_mask must use the same device")
-    epsilon = float(eps)
-    if not math.isfinite(epsilon) or epsilon <= 0.0:
-        raise JointGRPOError("advantage eps must be positive and finite")
-    centered = rewards - rewards.mean(dim=-1, keepdim=True)
-    scale = torch.sqrt(centered.square().mean(dim=-1, keepdim=True) + epsilon)
-    normalized = centered / scale
-    return normalized * active_mode_mask.unsqueeze(-1).to(normalized.dtype)
+    scale = float(advantage_scale)
+    tolerance = float(baseline_tolerance)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise JointGRPOError("advantage_scale must be positive and finite")
+    if not math.isfinite(tolerance) or tolerance < 0.0:
+        raise JointGRPOError("baseline_tolerance must be non-negative and finite")
+
+    centered = current_rewards - current_rewards.mean(dim=-1, keepdim=True)
+    unsafe = collision_mask | out_of_drivable_mask
+    baseline_pass = current_rewards >= frozen_rewards - tolerance
+    advantages = torch.where(
+        unsafe,
+        torch.full_like(centered, -scale),
+        torch.where(baseline_pass, centered.clamp_min(0.0) * scale, 0.0),
+    )
+    advantages = advantages * valid_executable_mode_mask.unsqueeze(-1).to(
+        advantages.dtype
+    )
+    signal_mode_mask = valid_executable_mode_mask & (advantages != 0).any(dim=-1)
+    return centered, advantages, signal_mode_mask
 
 
 def _active_tensor_mean(value: Tensor, active_mode_mask: Tensor) -> Tensor:
@@ -452,55 +493,16 @@ def _hierarchical_active_mean(value: Tensor, active_mode_mask: Tensor) -> Tensor
     return per_role.mean(dim=1).mean(dim=0)
 
 
-def _clipped_grpo_surrogate(
-    importance_ratio: Tensor,
-    advantages: Tensor,
-    *,
-    clip_epsilon_low: float,
-    clip_epsilon_high: float,
-) -> Tensor:
-    """Return the negative PPO clipped surrogate for aligned components."""
+def _per_mode_masked_mean(value: Tensor, mode_mask: Tensor) -> Tensor:
+    """Reduce fixed trailing axes and valid batch/role blocks per mode."""
 
-    return -torch.minimum(
-        importance_ratio * advantages,
-        importance_ratio.clamp(
-            1.0 - float(clip_epsilon_low),
-            1.0 + float(clip_epsilon_high),
-        )
-        * advantages,
-    ).mean()
-
-
-def _clipped_grpo_terms(
-    importance_ratio: Tensor,
-    advantages: Tensor,
-    *,
-    clip_epsilon_low: float,
-    clip_epsilon_high: float,
-) -> Tensor:
-    unclipped = importance_ratio * advantages
-    clipped = importance_ratio.clamp(
-        1.0 - float(clip_epsilon_low),
-        1.0 + float(clip_epsilon_high),
-    ) * advantages
-    return -torch.minimum(unclipped, clipped)
-
-
-def _importance_ratio_diagnostics(
-    log_ratio: Tensor,
-    importance_ratio: Tensor,
-    *,
-    clip_epsilon_low: float,
-    clip_epsilon_high: float,
-) -> tuple[Tensor, Tensor, Tensor]:
-    detached_log_ratio = log_ratio.detach()
-    detached_ratio = importance_ratio.detach()
-    low = (detached_ratio < 1.0 - float(clip_epsilon_low)).float().mean()
-    high = (detached_ratio > 1.0 + float(clip_epsilon_high)).float().mean()
-    approximate_kl = (
-        detached_ratio - 1.0 - detached_log_ratio
-    ).mean().clamp_min(0.0)
-    return low, high, approximate_kl
+    if tuple(value.shape[:3]) != tuple(mode_mask.shape):
+        raise JointGRPOError("loss blocks and mode mask do not align")
+    block_mean = value.reshape(*value.shape[:3], -1).mean(dim=-1)
+    weights = mode_mask.to(block_mean.dtype)
+    numerator = (block_mean * weights).sum(dim=(0, 1))
+    denominator = weights.sum(dim=(0, 1)).clamp_min(1.0)
+    return numerator / denominator
 
 
 def _repeat_context(context: BEVPlannerContext, groups: int) -> BEVPlannerContext:
@@ -524,10 +526,6 @@ def _repeat_groups(value: Tensor, groups: int) -> Tensor:
         .expand(-1, groups, *([-1] * (value.ndim - 1)))
         .reshape(value.shape[0] * groups, *value.shape[1:])
     )
-
-
-def _trajectory_bc(current: Tensor, reference: Tensor, config: JointGRPOConfig) -> Tensor:
-    return _trajectory_bc_blocks(current, reference, config).mean()
 
 
 def _trajectory_bc_blocks(
@@ -555,7 +553,7 @@ def _trajectory_bc_blocks(
 
 
 class _JointGRPOTrainerBase:
-    """Variant-neutral clipped joint GRPO implementation."""
+    """Variant-neutral single-step, fixed-scale joint GRPO implementation."""
 
     variant = ""
     predecessor_condition = ""
@@ -583,18 +581,24 @@ class _JointGRPOTrainerBase:
         self.planner = planner
         self.config = config or JointGRPOConfig()
         self.transition = StandardGaussianDDIM(planner.config.num_train_timesteps)
-        for parameter in planner.parameters():
-            parameter.requires_grad_(False)
-        for parameter in planner.diffusion_decoder.trajectory_head.parameters():
-            parameter.requires_grad_(True)
         self.reference = FrozenGRPOReference(planner).to(
             next(planner.parameters()).device
         )
+        planner.diffusion_decoder.trajectory_head = ModeResidualTrajectoryHead(
+            planner.diffusion_decoder.trajectory_head
+        )
+        for parameter in planner.parameters():
+            parameter.requires_grad_(False)
+        residual_head = planner.diffusion_decoder.trajectory_head
+        if not isinstance(residual_head, ModeResidualTrajectoryHead):
+            raise JointGRPOError("failed to install mode residual trajectory head")
+        for parameter in residual_head.residual_parameters():
+            parameter.requires_grad_(True)
         self.planner.eval()
         self.optimizer = AdamW(
-            self.planner.diffusion_decoder.trajectory_head.parameters(),
+            residual_head.residual_parameters(),
             lr=float(self.config.learning_rate),
-            weight_decay=float(self.config.weight_decay),
+            weight_decay=0.0,
         )
         self.optimizer_step = 0
         self._consumed_rollouts: weakref.WeakValueDictionary[
@@ -797,7 +801,8 @@ class _JointGRPOTrainerBase:
         valid_mask: Tensor,
         chains: Tensor,
         candidates: Tensor,
-        trajectory_log_prob: Tensor,
+        frozen_candidates: Tensor,
+        noise_bundle_identity: tuple[int, int, int] | None,
         step_histories: list[Tensor],
     ) -> JointGRPORollout:
         if step_histories:
@@ -811,8 +816,85 @@ class _JointGRPOTrainerBase:
             mode_valid_mask=valid_mask.detach(),
             chains_normalized=chains.detach(),
             candidate_trajectories=candidates.detach(),
-            old_trajectory_log_prob=trajectory_log_prob.detach(),
+            frozen_candidate_trajectories=frozen_candidates.detach(),
+            noise_bundle_identity=noise_bundle_identity,
         )
+
+    @torch.no_grad()
+    def _sample_frozen_candidates(
+        self,
+        *,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+        bundle: DDIMNoiseBundle,
+    ) -> Tensor:
+        trajectories = self.config.trajectories_per_mode
+        repeated_context = _repeat_context(context, trajectories)
+        repeated_coarse = _repeat_groups(coarse, trajectories)
+        repeated_mask = _repeat_groups(valid_mask, trajectories)
+        anchor = self.planner._normalize_xy(repeated_coarse[..., :2])
+        bundle.validate(anchor.shape, device=anchor.device)
+        flat_shape = (
+            anchor.shape[0] * NUM_PLATOON_ROLES,
+            NUM_MODES,
+            TRAJECTORY_STEPS,
+            2,
+        )
+        noise_timestep = torch.full(
+            (anchor.shape[0] * NUM_PLATOON_ROLES,),
+            DEFAULT_DDIM_PATH.initial_timestep,
+            device=anchor.device,
+            dtype=torch.int64,
+        )
+        sample = self.transition.add_noise(
+            anchor.reshape(flat_shape),
+            bundle.initial_noise.reshape(flat_shape),
+            noise_timestep,
+        ).reshape_as(anchor).clamp(-1.0, 1.0)
+        final_candidates: Tensor | None = None
+        transition_index = 0
+        for timestep, previous_timestep in DEFAULT_DDIM_PATH.transitions():
+            batch_timestep = torch.full(
+                (anchor.shape[0], NUM_PLATOON_ROLES),
+                timestep,
+                device=anchor.device,
+                dtype=torch.int64,
+            )
+            final_candidates, _ = self._frozen_reference_prediction(
+                sample,
+                batch_timestep,
+                repeated_context,
+                repeated_coarse,
+                repeated_mask,
+            )
+            model_output = self.planner._normalize_xy(
+                final_candidates[..., :2]
+            ).float()
+            step_noise = None
+            if previous_timestep >= 0:
+                step_noise = bundle.transition_noises[transition_index]
+                transition_index += 1
+            transition = self.transition.step(
+                model_output=model_output,
+                timestep=timestep,
+                previous_timestep=previous_timestep,
+                sample=sample.float(),
+                eta=DEFAULT_DDIM_PATH.eta,
+                noise=step_noise,
+            )
+            sample = transition.prev_sample.detach()
+        if final_candidates is None:
+            raise JointGRPOError("frozen paired rollout produced no decoder output")
+        batch_size = context.batch_size
+        return final_candidates.reshape(
+            batch_size,
+            trajectories,
+            NUM_PLATOON_ROLES,
+            NUM_MODES,
+            TRAJECTORY_STEPS,
+            TRAJECTORY_DIM,
+        ).permute(0, 2, 3, 1, 4, 5).contiguous()
 
     @torch.no_grad()
     def sample_groups(
@@ -821,6 +903,7 @@ class _JointGRPOTrainerBase:
         *,
         generator: torch.Generator,
         transition_generator: torch.Generator | None = None,
+        noise_bundle_identity: tuple[int, int, int] | None = None,
     ) -> JointGRPORollout:
         if not isinstance(generator, torch.Generator):
             raise JointGRPOError("sample_groups requires an explicit torch.Generator")
@@ -844,12 +927,24 @@ class _JointGRPOTrainerBase:
         repeated_coarse = _repeat_groups(coarse, trajectories)
         repeated_mask = _repeat_groups(valid_mask, trajectories)
         anchor = self.planner._normalize_xy(repeated_coarse[..., :2])
-        noise = torch.randn(
-            anchor.shape,
-            device=anchor.device,
-            dtype=torch.float32,
-            generator=generator,
+        bundle = DDIMNoiseBundle(
+            initial_noise=torch.randn(
+                anchor.shape,
+                device=anchor.device,
+                dtype=torch.float32,
+                generator=generator,
+            ),
+            transition_noises=tuple(
+                torch.randn(
+                    anchor.shape,
+                    device=anchor.device,
+                    dtype=torch.float32,
+                    generator=transition_generator,
+                )
+                for _ in range(DEFAULT_DDIM_PATH.stochastic_transition_count)
+            ),
         )
+        bundle.validate(anchor.shape, device=anchor.device)
         noise_timestep = torch.full(
             (anchor.shape[0] * NUM_PLATOON_ROLES,),
             DEFAULT_DDIM_PATH.initial_timestep,
@@ -864,11 +959,10 @@ class _JointGRPOTrainerBase:
         )
         sample = self.transition.add_noise(
             anchor.reshape(flat_shape),
-            noise.reshape(flat_shape),
+            bundle.initial_noise.reshape(flat_shape),
             noise_timestep,
         ).reshape_as(anchor).clamp(-1.0, 1.0)
         chains = [sample]
-        stochastic_log_probs = []
         step_histories: list[Tensor] = []
         final_candidates = final_logits = None
         for timestep, previous_timestep in DEFAULT_DDIM_PATH.transitions():
@@ -888,23 +982,22 @@ class _JointGRPOTrainerBase:
             if step_history is not None:
                 step_histories.append(step_history)
             model_output = self.planner._normalize_xy(candidates[..., :2]).float()
+            step_noise = None
+            if previous_timestep >= 0:
+                step_noise = bundle.transition_noises[len(chains) - 1]
             transition = self.transition.step(
                 model_output=model_output,
                 timestep=timestep,
                 previous_timestep=previous_timestep,
                 sample=sample.float(),
                 eta=DEFAULT_DDIM_PATH.eta,
-                generator=transition_generator,
+                noise=step_noise,
             )
-            if transition.log_prob is not None:
-                stochastic_log_probs.append(transition.log_prob)
             sample = transition.prev_sample.detach()
             chains.append(sample)
             final_candidates, final_logits = candidates, logits
         if final_candidates is None or final_logits is None:
             raise JointGRPOError("joint rollout produced no decoder output")
-        if len(stochastic_log_probs) != len(self.config.stochastic_timesteps):
-            raise JointGRPOError("joint rollout stochastic transition count mismatch")
         batch_size = context.batch_size
         chain_tensor = torch.stack(chains, dim=1).reshape(
             batch_size,
@@ -923,23 +1016,20 @@ class _JointGRPOTrainerBase:
             TRAJECTORY_STEPS,
             TRAJECTORY_DIM,
         ).permute(0, 2, 3, 1, 4, 5).contiguous()
-        trajectory_log_prob = torch.stack(
-            stochastic_log_probs,
-            dim=-1,
-        ).reshape(
-            batch_size,
-            trajectories,
-            NUM_PLATOON_ROLES,
-            NUM_MODES,
-            len(self.config.stochastic_timesteps),
-        ).permute(0, 2, 3, 1, 4).contiguous()
+        frozen_candidate_tensor = self._sample_frozen_candidates(
+            context=context,
+            coarse=coarse,
+            valid_mask=valid_mask,
+            bundle=bundle,
+        )
         return self._make_rollout(
             context=context,
             coarse=coarse,
             valid_mask=valid_mask,
             chains=chain_tensor,
             candidates=candidate_tensor,
-            trajectory_log_prob=trajectory_log_prob,
+            frozen_candidates=frozen_candidate_tensor,
+            noise_bundle_identity=noise_bundle_identity,
             step_histories=step_histories,
         )
 
@@ -992,42 +1082,41 @@ class _JointGRPOTrainerBase:
     def compute_loss(
         self,
         rollout: JointGRPORollout,
-        rewards: Tensor,
-        active_mode_mask: Tensor,
-        *,
-        clip_epsilon_low: float = 0.1,
-        clip_epsilon_high: float = 0.2,
     ) -> JointGRPOLossResult:
-        policy_update = JointGRPOPolicyUpdateConfig(
-            update_epochs=1,
-            clip_epsilon_low=clip_epsilon_low,
-            clip_epsilon_high=clip_epsilon_high,
+        signals = (
+            rollout.current_rewards,
+            rollout.frozen_rewards,
+            rollout.collision_mask,
+            rollout.out_of_drivable_mask,
+            rollout.valid_executable_mode_mask,
         )
-        advantages = normalize_same_mode_advantages(
-            rewards,
-            active_mode_mask,
+        if any(value is None for value in signals):
+            raise JointGRPOError("rollout is missing paired reward signals")
+        centered, advantages, signal_mode_mask = fixed_scale_safe_advantages(
+            rollout.current_rewards,
+            rollout.frozen_rewards,
+            rollout.collision_mask,
+            rollout.out_of_drivable_mask,
+            rollout.valid_executable_mode_mask,
             trajectories_per_mode=self.config.trajectories_per_mode,
-            eps=self.config.advantage_eps,
-        ).to(device=rollout.old_trajectory_log_prob.device).detach()
-        active_mode_mask = active_mode_mask.to(
-            device=rollout.old_trajectory_log_prob.device
+            advantage_scale=self.config.advantage_scale,
+            baseline_tolerance=self.config.baseline_tolerance,
         )
         return self._compute_loss_from_advantages(
             rollout,
-            advantages,
-            active_mode_mask,
-            clip_epsilon_low=policy_update.clip_epsilon_low,
-            clip_epsilon_high=policy_update.clip_epsilon_high,
+            centered.detach(),
+            advantages.detach(),
+            signal_mode_mask,
+            rollout.valid_executable_mode_mask,
         )
 
     def _compute_loss_from_advantages(
         self,
         rollout: JointGRPORollout,
+        centered_rewards: Tensor,
         advantages: Tensor,
-        active_mode_mask: Tensor,
-        *,
-        clip_epsilon_low: float,
-        clip_epsilon_high: float,
+        signal_mode_mask: Tensor,
+        valid_executable_mode_mask: Tensor,
     ) -> JointGRPOLossResult:
         batch_size = rollout.batch_size
         trajectories = rollout.trajectories_per_mode
@@ -1041,28 +1130,36 @@ class _JointGRPOTrainerBase:
             raise JointGRPOError("reward batch does not match rollout")
         expected_mask = expected_advantage[:3]
         if (
-            active_mode_mask.dtype != torch.bool
-            or tuple(active_mode_mask.shape) != expected_mask
-            or active_mode_mask.device != advantages.device
+            signal_mode_mask.dtype != torch.bool
+            or tuple(signal_mode_mask.shape) != expected_mask
+            or signal_mode_mask.device != advantages.device
+            or valid_executable_mode_mask.dtype != torch.bool
+            or tuple(valid_executable_mode_mask.shape) != expected_mask
+            or valid_executable_mode_mask.device != advantages.device
         ):
             raise JointGRPOError(
-                "active_mode_mask must be colocated bool with shape [B,3,10]"
+                "signal and valid-executable masks must be colocated bool [B,3,10]"
             )
-        valid_mode_mask = rollout.mode_valid_mask.to(active_mode_mask.device)
-        if bool((active_mode_mask & ~valid_mode_mask).any()):
-            raise JointGRPOError("active modes must be a subset of hard-valid modes")
+        if tuple(centered_rewards.shape) != expected_advantage:
+            raise JointGRPOError("centered reward batch does not match rollout")
+        valid_mode_mask = rollout.mode_valid_mask.to(signal_mode_mask.device)
+        if bool((valid_executable_mode_mask & ~valid_mode_mask).any()):
+            raise JointGRPOError(
+                "valid-executable modes must be a subset of hard-valid modes"
+            )
+        if bool((signal_mode_mask & ~valid_executable_mode_mask).any()):
+            raise JointGRPOError("signal modes must be valid and executable")
         stochastic_steps = len(self.config.stochastic_timesteps)
-        if tuple(rollout.old_trajectory_log_prob.shape) != (
-            *expected_advantage,
-            stochastic_steps,
-        ):
-            raise JointGRPOError("rollout trajectory log-probability shape is invalid")
         if tuple(rollout.candidate_trajectories.shape) != (
             *expected_advantage,
             TRAJECTORY_STEPS,
             TRAJECTORY_DIM,
         ):
             raise JointGRPOError("rollout candidate trajectory shape is invalid")
+        if tuple(rollout.frozen_candidate_trajectories.shape) != tuple(
+            rollout.candidate_trajectories.shape
+        ):
+            raise JointGRPOError("paired frozen candidates do not match current shape")
         flat_count = batch_size * trajectories
         context = _repeat_context(rollout.context, trajectories)
         coarse = _repeat_groups(rollout.coarse_trajectories, trajectories)
@@ -1160,33 +1257,21 @@ class _JointGRPOTrainerBase:
             NUM_MODES,
             stochastic_steps,
         ).permute(0, 2, 3, 1, 4).contiguous()
-        trajectory_log_ratio = (
-            new_trajectory_log_prob - rollout.old_trajectory_log_prob
+        score_function_weight = torch.exp(
+            new_trajectory_log_prob - new_trajectory_log_prob.detach()
         )
-        trajectory_ratio = torch.exp(trajectory_log_ratio)
+        trajectory_pg_blocks = (
+            -score_function_weight
+            * advantages.unsqueeze(-1).expand_as(score_function_weight)
+        )
         trajectory_pg = _hierarchical_active_mean(
-            _clipped_grpo_terms(
-                trajectory_ratio,
-                advantages.unsqueeze(-1).expand_as(trajectory_ratio),
-                clip_epsilon_low=clip_epsilon_low,
-                clip_epsilon_high=clip_epsilon_high,
-            ),
-            active_mode_mask,
+            trajectory_pg_blocks,
+            signal_mode_mask,
         )
-        detached_ratio = trajectory_ratio.detach()
-        detached_log_ratio = trajectory_log_ratio.detach()
-        trajectory_clip_fraction_low = _hierarchical_active_mean(
-            (detached_ratio < 1.0 - float(clip_epsilon_low)).float(),
-            active_mode_mask,
+        trajectory_pg_by_mode = _per_mode_masked_mean(
+            trajectory_pg_blocks,
+            signal_mode_mask,
         )
-        trajectory_clip_fraction_high = _hierarchical_active_mean(
-            (detached_ratio > 1.0 + float(clip_epsilon_high)).float(),
-            active_mode_mask,
-        )
-        trajectory_old_policy_approx_kl = _hierarchical_active_mean(
-            detached_ratio - 1.0 - detached_log_ratio,
-            active_mode_mask,
-        ).clamp_min(0.0)
 
         current_all_modes = final_current_candidates.reshape(
             batch_size,
@@ -1204,13 +1289,18 @@ class _JointGRPOTrainerBase:
             TRAJECTORY_STEPS,
             TRAJECTORY_DIM,
         ).permute(0, 2, 3, 1, 4, 5)
+        behavior_cloning_blocks = _trajectory_bc_blocks(
+            current_all_modes,
+            reference_all_modes,
+            self.config,
+        )
         behavior_cloning = _hierarchical_active_mean(
-            _trajectory_bc_blocks(
-                current_all_modes,
-                reference_all_modes,
-                self.config,
-            ),
-            valid_mode_mask,
+            behavior_cloning_blocks,
+            valid_executable_mode_mask,
+        )
+        behavior_cloning_by_mode = _per_mode_masked_mean(
+            behavior_cloning_blocks,
+            valid_executable_mode_mask,
         )
         trajectory_kl_blocks = torch.stack(
             trajectory_kls, dim=-1
@@ -1223,7 +1313,11 @@ class _JointGRPOTrainerBase:
         ).permute(0, 2, 3, 1, 4)
         trajectory_reference_kl = _hierarchical_active_mean(
             trajectory_kl_blocks,
-            valid_mode_mask,
+            valid_executable_mode_mask,
+        )
+        reference_kl_by_mode = _per_mode_masked_mean(
+            trajectory_kl_blocks,
+            valid_executable_mode_mask,
         )
         reference_kl = trajectory_reference_kl
         total = (
@@ -1238,8 +1332,8 @@ class _JointGRPOTrainerBase:
             trajectory_reference_kl,
             reference_kl,
             new_trajectory_log_prob,
-            trajectory_ratio,
-            trajectory_old_policy_approx_kl,
+            centered_rewards,
+            advantages,
         )
         if not all(bool(torch.isfinite(value).all()) for value in tensors):
             raise JointGRPOError("joint GRPO loss contains non-finite values")
@@ -1251,13 +1345,14 @@ class _JointGRPOTrainerBase:
             behavior_cloning=behavior_cloning,
             trajectory_reference_kl=trajectory_reference_kl,
             reference_kl=reference_kl,
+            centered_rewards=centered_rewards,
             advantages=advantages,
-            active_mode_mask=active_mode_mask,
+            signal_mode_mask=signal_mode_mask,
+            valid_executable_mode_mask=valid_executable_mode_mask,
             new_trajectory_log_prob=new_trajectory_log_prob,
-            trajectory_importance_ratio=trajectory_ratio,
-            trajectory_clip_fraction_low=trajectory_clip_fraction_low,
-            trajectory_clip_fraction_high=trajectory_clip_fraction_high,
-            trajectory_old_policy_approx_kl=trajectory_old_policy_approx_kl,
+            trajectory_pg_by_mode=trajectory_pg_by_mode,
+            behavior_cloning_by_mode=behavior_cloning_by_mode,
+            reference_kl_by_mode=reference_kl_by_mode,
         )
 
     @staticmethod
@@ -1274,147 +1369,173 @@ class _JointGRPOTrainerBase:
             return 0.0
         return float(torch.stack(values).sum().sqrt().cpu())
 
-    @staticmethod
-    def _parameter_gradient_norm(parameter: Tensor) -> float:
-        if parameter.grad is None:
-            return 0.0
-        gradient = parameter.grad.detach().float()
-        if not bool(torch.isfinite(gradient).all()):
-            raise JointGRPOError("joint GRPO gradient is non-finite")
-        return float(torch.linalg.vector_norm(gradient).cpu())
+    def _residual_gradient_norms(
+        self, head: ModeResidualTrajectoryHead
+    ) -> dict[str, float]:
+        weight, bias = head.residual_parameters()
+        values = {"mode_residual": self._module_gradient_norm(head)}
+        for mode in range(NUM_MODES):
+            squared = torch.zeros((), device=weight.device, dtype=torch.float32)
+            if weight.grad is not None:
+                squared = squared + weight.grad[mode].detach().float().square().sum()
+            if bias.grad is not None:
+                squared = squared + bias.grad[mode].detach().float().square().sum()
+            if not bool(torch.isfinite(squared)):
+                raise JointGRPOError("joint GRPO gradient is non-finite")
+            values[f"mode_{mode}"] = float(torch.sqrt(squared).cpu())
+        return values
 
-    def _trajectory_head_relative_drift(self) -> float:
-        numerator: list[Tensor] = []
-        denominator: list[Tensor] = []
-        current = self.planner.diffusion_decoder.trajectory_head.parameters()
-        frozen = self.reference.diffusion_decoder.trajectory_head.parameters()
-        for current_parameter, frozen_parameter in zip(current, frozen):
-            current_value = current_parameter.detach().float()
-            frozen_value = frozen_parameter.detach().float()
-            numerator.append((current_value - frozen_value).square().sum())
-            denominator.append(frozen_value.square().sum())
-        numerator_norm = torch.stack(numerator).sum().sqrt()
-        denominator_norm = torch.stack(denominator).sum().sqrt().clamp_min(1e-12)
-        return float((numerator_norm / denominator_norm).cpu())
+    def _residual_head(self) -> ModeResidualTrajectoryHead:
+        head = self.planner.diffusion_decoder.trajectory_head
+        if not isinstance(head, ModeResidualTrajectoryHead):
+            raise JointGRPOError("trainer trajectory head lost its residual contract")
+        return head
 
     def update(
         self,
         rollout: JointGRPORollout,
-        rewards: Tensor,
-        active_mode_mask: Tensor,
-        *,
-        policy_update: JointGRPOPolicyUpdateConfig | None = None,
     ) -> JointGRPOUpdateResult:
-        update_config = (
-            policy_update
-            if policy_update is not None
-            else JointGRPOPolicyUpdateConfig()
-        )
-        if not isinstance(update_config, JointGRPOPolicyUpdateConfig):
-            raise JointGRPOError(
-                "policy_update must be a JointGRPOPolicyUpdateConfig"
-            )
         rollout_id = id(rollout)
         if self._consumed_rollouts.get(rollout_id) is rollout:
             raise JointGRPOError(
                 "each live joint rollout may enter update exactly once"
             )
-        advantages = normalize_same_mode_advantages(
-            rewards,
-            active_mode_mask,
+        signals = (
+            rollout.current_rewards,
+            rollout.frozen_rewards,
+            rollout.collision_mask,
+            rollout.out_of_drivable_mask,
+            rollout.valid_executable_mode_mask,
+        )
+        if any(value is None for value in signals):
+            raise JointGRPOError("rollout is missing paired reward signals")
+        centered, advantages, signal_mode_mask = fixed_scale_safe_advantages(
+            rollout.current_rewards,
+            rollout.frozen_rewards,
+            rollout.collision_mask,
+            rollout.out_of_drivable_mask,
+            rollout.valid_executable_mode_mask,
             trajectories_per_mode=self.config.trajectories_per_mode,
-            eps=self.config.advantage_eps,
-        ).to(device=rollout.old_trajectory_log_prob.device).detach()
-        active_mode_mask = active_mode_mask.to(
-            device=rollout.old_trajectory_log_prob.device
+            advantage_scale=self.config.advantage_scale,
+            baseline_tolerance=self.config.baseline_tolerance,
         )
         self.optimizer.zero_grad(set_to_none=True)
-        first_loss = self._compute_loss_from_advantages(
+        loss = self._compute_loss_from_advantages(
             rollout,
-            advantages,
-            active_mode_mask,
-            clip_epsilon_low=update_config.clip_epsilon_low,
-            clip_epsilon_high=update_config.clip_epsilon_high,
+            centered.detach(),
+            advantages.detach(),
+            signal_mode_mask,
+            rollout.valid_executable_mode_mask,
         )
-        # Register consumption before the first optimizer mutation.  A failed
-        # later epoch must never make a partially-updated rollout reusable.
+        # Register before any mutation. A rejected or zero-signal rollout is
+        # still an on-policy sample and must never be consumed twice.
         self._consumed_rollouts[rollout_id] = rollout
-        trainable = list(
-            self.planner.diffusion_decoder.trajectory_head.parameters()
-        )
-        epoch_results = []
-        for epoch_index in range(update_config.update_epochs):
-            if epoch_index == 0:
-                loss = first_loss
-                del first_loss
-            else:
-                self.optimizer.zero_grad(set_to_none=True)
-                loss = self._compute_loss_from_advantages(
-                    rollout,
-                    advantages,
-                    active_mode_mask,
-                    clip_epsilon_low=update_config.clip_epsilon_low,
-                    clip_epsilon_high=update_config.clip_epsilon_high,
-                )
-            loss.total.backward()
-            gradient_norms = {
-                "trajectory_head": self._module_gradient_norm(
-                    self.planner.diffusion_decoder.trajectory_head
-                ),
-            }
-            if any(
-                not math.isfinite(value) for value in gradient_norms.values()
-            ):
-                raise JointGRPOError("joint GRPO gradients must be finite")
-            zero_signal_epoch = gradient_norms["trajectory_head"] == 0.0
-            if zero_signal_epoch:
-                total_gradient_norm = 0.0
-                clipped_gradient_norms = dict(gradient_norms)
-            else:
-                total_norm = torch.nn.utils.clip_grad_norm_(
-                    trainable, float(self.config.max_grad_norm)
-                )
-                if not bool(torch.isfinite(total_norm)):
-                    raise JointGRPOError(
-                        "joint GRPO total gradient norm is non-finite"
-                    )
-                total_gradient_norm = float(total_norm.detach().cpu())
-                clipped_gradient_norms = {
-                    "trajectory_head": self._module_gradient_norm(
-                        self.planner.diffusion_decoder.trajectory_head
-                    )
-                }
-                self.optimizer.step()
-                self.optimizer_step += 1
-            relative_drift = self._trajectory_head_relative_drift()
-            epoch_results.append(
-                JointGRPOEpochUpdateResult(
-                    epoch_in_rollout=epoch_index + 1,
-                    loss=loss.detached(),
-                    gradient_norms=gradient_norms,
-                    clipped_gradient_norms=clipped_gradient_norms,
-                    total_gradient_norm=total_gradient_norm,
-                    trajectory_head_relative_drift=relative_drift,
-                    optimizer_step=self.optimizer_step,
-                    zero_signal_epoch=zero_signal_epoch,
-                )
+        head = self._residual_head()
+        trainable = list(head.residual_parameters())
+        if not bool(signal_mode_mask.any()):
+            zero_gradients = {"mode_residual": 0.0}
+            zero_gradients.update(
+                {f"mode_{mode}": 0.0 for mode in range(NUM_MODES)}
             )
-            del loss
-        frozen_epoch_results = tuple(epoch_results)
-        final_epoch = frozen_epoch_results[-1]
+            return JointGRPOUpdateResult(
+                loss=loss.detached(),
+                gradient_norms=zero_gradients,
+                clipped_gradient_norms=dict(zero_gradients),
+                total_gradient_norm=0.0,
+                adapter_relative_drifts=head.adapter_relative_drifts(),
+                post_update_reference_kl=float(loss.reference_kl.detach().cpu()),
+                optimizer_step=self.optimizer_step,
+                zero_signal=True,
+                stability_guard_rejected=False,
+                stability_guard_trigger_modes=(),
+            )
+
+        parameter_snapshot = tuple(
+            parameter.detach().clone() for parameter in trainable
+        )
+        optimizer_snapshot = copy.deepcopy(self.optimizer.state_dict())
+        loss.total.backward()
+        gradient_norms = self._residual_gradient_norms(head)
+        total_norm = torch.nn.utils.clip_grad_norm_(
+            trainable, float(self.config.max_grad_norm)
+        )
+        if not bool(torch.isfinite(total_norm)):
+            raise JointGRPOError("joint GRPO total gradient norm is non-finite")
+        total_gradient_norm = float(total_norm.detach().cpu())
+        clipped_gradient_norms = self._residual_gradient_norms(head)
+        zero_signal = gradient_norms["mode_residual"] == 0.0
+        if zero_signal:
+            return JointGRPOUpdateResult(
+                loss=loss.detached(),
+                gradient_norms=gradient_norms,
+                clipped_gradient_norms=clipped_gradient_norms,
+                total_gradient_norm=total_gradient_norm,
+                adapter_relative_drifts=head.adapter_relative_drifts(),
+                post_update_reference_kl=float(loss.reference_kl.detach().cpu()),
+                optimizer_step=self.optimizer_step,
+                zero_signal=True,
+                stability_guard_rejected=False,
+                stability_guard_trigger_modes=(),
+            )
+
+        self.optimizer.step()
+        with torch.no_grad():
+            post_loss = self._compute_loss_from_advantages(
+                rollout,
+                centered.detach(),
+                advantages.detach(),
+                signal_mode_mask,
+                rollout.valid_executable_mode_mask,
+            )
+        post_kl = float(post_loss.reference_kl.detach().cpu())
+        drifts = head.adapter_relative_drifts()
+        drift_modes = tuple(
+            mode
+            for mode, drift in enumerate(drifts)
+            if drift > float(self.config.max_adapter_relative_drift)
+        )
+        kl_rejected = post_kl > float(self.config.post_update_reference_kl_max)
+        guard_rejected = kl_rejected or bool(drift_modes)
+        if guard_rejected:
+            with torch.no_grad():
+                for parameter, saved in zip(trainable, parameter_snapshot):
+                    parameter.copy_(saved)
+            self.optimizer.load_state_dict(optimizer_snapshot)
+            self.optimizer.zero_grad(set_to_none=True)
+            trigger_modes = drift_modes
+            if kl_rejected and not trigger_modes:
+                trigger_modes = tuple(
+                    int(mode)
+                    for mode in torch.where(signal_mode_mask.any(dim=(0, 1)))[0]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+            return JointGRPOUpdateResult(
+                loss=loss.detached(),
+                gradient_norms=gradient_norms,
+                clipped_gradient_norms=clipped_gradient_norms,
+                total_gradient_norm=total_gradient_norm,
+                adapter_relative_drifts=drifts,
+                post_update_reference_kl=post_kl,
+                optimizer_step=self.optimizer_step,
+                zero_signal=False,
+                stability_guard_rejected=True,
+                stability_guard_trigger_modes=trigger_modes,
+            )
+
+        self.optimizer_step += 1
         return JointGRPOUpdateResult(
-            loss=final_epoch.loss,
-            gradient_norms=final_epoch.gradient_norms,
-            clipped_gradient_norms=final_epoch.clipped_gradient_norms,
-            total_gradient_norm=final_epoch.total_gradient_norm,
-            trajectory_head_relative_drift=(
-                final_epoch.trajectory_head_relative_drift
-            ),
-            optimizer_step=final_epoch.optimizer_step,
-            epoch_results=frozen_epoch_results,
-            zero_signal_epochs=sum(
-                int(epoch.zero_signal_epoch) for epoch in frozen_epoch_results
-            ),
+            loss=loss.detached(),
+            gradient_norms=gradient_norms,
+            clipped_gradient_norms=clipped_gradient_norms,
+            total_gradient_norm=total_gradient_norm,
+            adapter_relative_drifts=drifts,
+            post_update_reference_kl=post_kl,
+            optimizer_step=self.optimizer_step,
+            zero_signal=False,
+            stability_guard_rejected=False,
+            stability_guard_trigger_modes=(),
         )
 
 
@@ -1551,7 +1672,8 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
         valid_mask: Tensor,
         chains: Tensor,
         candidates: Tensor,
-        trajectory_log_prob: Tensor,
+        frozen_candidates: Tensor,
+        noise_bundle_identity: tuple[int, int, int] | None,
         step_histories: list[Tensor],
     ) -> JointGRPORolloutB:
         if len(step_histories) != len(self.config.roll_timesteps):
@@ -1580,7 +1702,8 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
             mode_valid_mask=valid_mask.detach(),
             chains_normalized=chains.detach(),
             candidate_trajectories=candidates.detach(),
-            old_trajectory_log_prob=trajectory_log_prob.detach(),
+            frozen_candidate_trajectories=frozen_candidates.detach(),
+            noise_bundle_identity=noise_bundle_identity,
             predecessor_action_history_normalized=history.detach(),
         )
 
@@ -1660,11 +1783,10 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
 __all__ = [
     "FrozenGRPOReference",
     "FrozenVariantAReference",
+    "ModeResidualTrajectoryHead",
     "JointGRPOConfig",
-    "JointGRPOEpochUpdateResult",
     "JointGRPOError",
     "JointGRPOLossResult",
-    "JointGRPOPolicyUpdateConfig",
     "JointGRPORollout",
     "JointGRPORolloutB",
     "JointGRPOTrainerA",
@@ -1672,6 +1794,5 @@ __all__ = [
     "JointGRPOUpdateResult",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
-    "normalize_same_mode_advantages",
-    "same_mode_active_mask",
+    "fixed_scale_safe_advantages",
 ]

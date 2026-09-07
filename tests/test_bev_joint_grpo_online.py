@@ -12,14 +12,12 @@ import train.train_bev_joint_grpo_online as online
 from train.train_bev_joint_grpo_online import (
     JointGRPOOnlineConfig,
     OnlineGRPOError,
-    _active_vehicle_mode_mask,
     _append_validation_selection_event,
-    _candidate_group_rejection_reason,
     _config_from_yaml,
     _diffusion_attempt_generators,
+    _fixed_scale_reward_signals,
     _sampler_state,
     _validate_sampler_state,
-    _vehicle_mode_rewards_are_active,
     _write_dynamic_sampling_attempt_event,
     execute_cached_frozen_baseline,
     rollout_collection_contract,
@@ -65,9 +63,9 @@ def _valid_sampler_state() -> tuple[dict[str, object], dict[str, object]]:
 def test_online_config_defaults_match_formal_same_mode_contract() -> None:
     config = JointGRPOOnlineConfig()
     assert config.trajectories_per_mode == 48
-    assert config.update_epochs == 10
-    assert config.clip_epsilon_low == pytest.approx(0.1)
-    assert config.clip_epsilon_high == pytest.approx(0.2)
+    assert not hasattr(config, "update_epochs")
+    assert not hasattr(config, "clip_epsilon_low")
+    assert not hasattr(config, "clip_epsilon_high")
     assert config.max_sampling_attempts_per_state == 3
 
 
@@ -75,7 +73,7 @@ def test_checked_in_yaml_uses_only_new_sampling_fields() -> None:
     config = _config_from_yaml(Path("configs/train/bev_joint_grpo.yaml"))
     assert config.online.trajectories_per_mode == 48
     assert config.online.max_sampling_attempts_per_state == 3
-    assert config.online.update_epochs == 10
+    assert not hasattr(config.online, "update_epochs")
     payload = Path("configs/train/bev_joint_grpo.yaml").read_text(encoding="utf-8")
     for removed in (
         "group_size:",
@@ -104,51 +102,25 @@ online:
         _config_from_yaml(path)
 
 
-def test_strict_gate_accepts_equal_reward_and_zero_variance() -> None:
-    rewards = np.full((48,), 1.5, dtype=np.float32)
-    assert (
-        _candidate_group_rejection_reason(
-            rewards,
-            pretrain_reward=1.5,
-            trajectories_per_mode=48,
-        )
-        is None
-    )
-    assert _vehicle_mode_rewards_are_active(
-        rewards,
-        pretrain_reward=1.5,
-        trajectories_per_mode=48,
-    )
-
-
-def test_mean_gate_rejects_when_group_mean_is_below() -> None:
-    rewards = np.nextafter(
-        np.full((48,), 1.5, dtype=np.float32),
-        np.float32(-np.inf),
-    )
-    assert (
-        _candidate_group_rejection_reason(
-            rewards,
-            pretrain_reward=1.5,
-            trajectories_per_mode=48,
-        )
-        == "mean_below_same_mode_pretrain"
-    )
-
-
-def test_active_mask_is_independent_per_vehicle_mode_and_honors_validity() -> None:
-    rewards = np.zeros((3, 10, 48), dtype=np.float32)
-    pretrain = np.ones((3, 10), dtype=np.float32)
+def test_fixed_scale_signal_is_independent_per_vehicle_mode_and_validity() -> None:
+    rewards = np.zeros((3, 10, 4), dtype=np.float32)
+    frozen = np.ones((3, 10, 4), dtype=np.float32)
     valid = np.ones((3, 10), dtype=np.bool_)
-    rewards[1, 7] = 1.0
-    rewards[2, 4, 0] = 3.0
+    rewards[1, 7] = np.asarray([0.0, 1.0, 2.0, 3.0])
+    frozen[1, 7] = rewards[1, 7]
+    rewards[2, 4] = np.asarray([0.0, 1.0, 2.0, 3.0])
+    frozen[2, 4] = rewards[2, 4]
     valid[2, 4] = False
-
-    active = _active_vehicle_mode_mask(rewards, pretrain, valid)
-
-    assert active.sum() == 1
-    assert active[1, 7]
-    assert not active[2, 4]
+    _, advantages, signal = _fixed_scale_reward_signals(
+        rewards,
+        frozen,
+        np.zeros_like(rewards, dtype=np.bool_),
+        np.zeros_like(rewards, dtype=np.bool_),
+        valid,
+    )
+    assert signal.sum() == 1 and signal[1, 7]
+    assert not signal[2, 4]
+    assert advantages[1, 7].max() == pytest.approx(1.5)
 
 
 def test_dynamic_attempt_metrics_exclude_invalid_modes(tmp_path: Path) -> None:
@@ -159,7 +131,14 @@ def test_dynamic_attempt_metrics_exclude_invalid_modes(tmp_path: Path) -> None:
     valid[0, 0] = True
     rewards[0, 0] = np.arange(48, dtype=np.float32)
     pretrain[0, 0] = 23.5
-    active = _active_vehicle_mode_mask(rewards, pretrain, valid)
+    paired = np.broadcast_to(pretrain[..., None], rewards.shape).copy()
+    centered, advantages, signal = _fixed_scale_reward_signals(
+        rewards,
+        paired,
+        np.zeros_like(rewards, dtype=np.bool_),
+        np.zeros_like(rewards, dtype=np.bool_),
+        valid,
+    )
 
     shape = rewards.shape
     components = {
@@ -198,8 +177,11 @@ def test_dynamic_attempt_metrics_exclude_invalid_modes(tmp_path: Path) -> None:
         scenario=("S5_hard_brake_lead", "R1_entry_straight"),
         seed=17,
         reward_result=result,
+        paired_frozen_rewards=paired,
+        centered_rewards=centered,
+        advantages=advantages,
         hard_valid_mode_mask=valid,
-        active_mode_mask=active,
+        signal_mode_mask=signal,
         reward_config=VehicleModeRewardConfig(trajectories_per_mode=48),
     )
 
@@ -207,7 +189,7 @@ def test_dynamic_attempt_metrics_exclude_invalid_modes(tmp_path: Path) -> None:
     assert metrics["train/valid_all/same_mode_pretrain_reward_mean"] == pytest.approx(23.5 / 3.0)
     event = json.loads(path.read_text(encoding="utf-8"))
     assert event["accepted"] is True
-    assert event["active_mode_count"] == 1.0
+    assert event["signal_mode_count"] == 1.0
     assert len(event["vehicle_mode_groups"]) == 30
     assert sum(group["valid"] for group in event["vehicle_mode_groups"]) == 1
     assert (
@@ -285,10 +267,10 @@ def test_sampler_state_rejects_baseline_execution_drift() -> None:
 
 def test_collection_contract_forbids_sampled_candidate_execution() -> None:
     contract = rollout_collection_contract(JointGRPOOnlineConfig())
-    assert contract["version"] == "stage2_joint_grpo_persistent_episode_v6"
+    assert contract["version"] == "stage2_joint_grpo_persistent_episode_v7"
     assert contract["comparison_unit"] == "vehicle_mode"
     assert contract["trajectories_per_mode"] == 48
-    assert contract["retry_condition"] == "all_vehicle_modes_inactive"
+    assert contract["retry_condition"] == "all_vehicle_modes_have_zero_signal"
     assert contract["sampled_candidate_execution"] is False
     assert contract["environment_action"] == "cached_frozen_stage1_argmax_only"
 
@@ -485,8 +467,33 @@ def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen
             return values
 
     class Loss:
+        advantages = torch.zeros((1, 3, 10, 2), dtype=torch.float32)
+
         def scalar_metrics(self):
             return {"loss/total": 0.5, "advantage/mean": 0.0}
+
+    class Rollout:
+        def __init__(self):
+            self.candidate_trajectories = torch.full(
+                (1, 3, 10, 2, 8, 3), 99.0, dtype=torch.float32
+            )
+            self.frozen_candidate_trajectories = torch.full(
+                (1, 3, 10, 2, 8, 3), 98.0, dtype=torch.float32
+            )
+            self.noise_bundle_identity = (17, 0, 0)
+            self.signal_mode_mask = np.zeros((3, 10), dtype=np.bool_)
+
+        def with_reward_signals(self, **kwargs):
+            _, advantages, signal = _fixed_scale_reward_signals(
+                kwargs["current_rewards"].squeeze(0).cpu().numpy(),
+                kwargs["frozen_rewards"].squeeze(0).cpu().numpy(),
+                kwargs["collision_mask"].squeeze(0).cpu().numpy(),
+                kwargs["out_of_drivable_mask"].squeeze(0).cpu().numpy(),
+                kwargs["valid_executable_mode_mask"].squeeze(0).cpu().numpy(),
+            )
+            self.signal_mode_mask = signal
+            Loss.advantages = torch.from_numpy(advantages).unsqueeze(0)
+            return self
 
     class Trainer:
         def __init__(self):
@@ -502,16 +509,20 @@ def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen
             self.frozen_calls = 0
             self.update_masks: list[np.ndarray] = []
 
-        def sample_groups(self, batch, *, generator, transition_generator):
+        def sample_groups(
+            self,
+            batch,
+            *,
+            generator,
+            transition_generator,
+            noise_bundle_identity,
+        ):
             del batch
+            assert len(noise_bundle_identity) == 3
             torch.randn((1,), generator=generator)
             torch.randn((1,), generator=transition_generator)
             self.sample_calls += 1
-            return SimpleNamespace(
-                candidate_trajectories=torch.full(
-                    (1, 3, 10, 2, 8, 3), 99.0, dtype=torch.float32
-                )
-            )
+            return Rollout()
 
         def infer_frozen_pretrain(self, rollout):
             del rollout
@@ -526,26 +537,20 @@ def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen
                 ),
             }
 
-        def update(self, rollout, rewards, active_modes, *, policy_update):
-            del rollout, rewards, policy_update
-            self.update_masks.append(active_modes.cpu().numpy())
+        def update(self, rollout):
+            self.update_masks.append(rollout.signal_mode_mask.copy())
             self.optimizer_step += 1
-            epoch = SimpleNamespace(
-                optimizer_step=self.optimizer_step,
-                epoch_in_rollout=1,
-                total_gradient_norm=1.0,
-                gradient_norms={"trajectory_head": 1.0},
-                clipped_gradient_norms={"trajectory_head": 1.0},
-                trajectory_head_relative_drift=0.0,
-                zero_signal_epoch=False,
-                loss=Loss(),
-            )
             return SimpleNamespace(
-                epoch_results=(epoch,),
-                loss=SimpleNamespace(
-                    advantages=torch.zeros((1, 3, 10, 2), dtype=torch.float32)
-                ),
-                zero_signal_epochs=0,
+                loss=Loss(),
+                optimizer_step=self.optimizer_step,
+                total_gradient_norm=1.0,
+                gradient_norms={"mode_residual": 1.0},
+                clipped_gradient_norms={"mode_residual": 1.0},
+                adapter_relative_drifts=(0.0,) * 10,
+                post_update_reference_kl=0.0,
+                zero_signal=False,
+                stability_guard_rejected=False,
+                stability_guard_trigger_modes=(),
             )
 
     trainer = Trainer()
@@ -562,10 +567,16 @@ def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen
 
         def score_candidates(self, env, model_inputs, candidates, *args):
             del env, model_inputs, args
-            np.testing.assert_array_equal(candidates, 99.0)
             rewards = np.full((3, 10, 2), -1.0, dtype=np.float32)
-            if has_active_mode:
-                rewards[1, 4] = 0.0
+            if np.all(candidates == 99.0):
+                if has_active_mode:
+                    rewards[1, 4] = np.asarray([-1.0, 1.0], dtype=np.float32)
+            elif np.all(candidates == 98.0):
+                rewards.fill(0.0)
+                if has_active_mode:
+                    rewards[1, 4] = np.asarray([-2.0, 0.0], dtype=np.float32)
+            else:
+                raise AssertionError("unexpected candidate source")
             shape = rewards.shape
             components = {
                 "progress_score": rewards / np.float32(0.47),
@@ -737,7 +748,6 @@ def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen
             device="cpu",
             trajectories_per_mode=2,
             total_rollout_groups=1,
-            update_epochs=1,
             environment_steps_per_episode=10,
             rollout_groups_per_bucket_visit=1,
             rollout_start_offset_max_steps=0,

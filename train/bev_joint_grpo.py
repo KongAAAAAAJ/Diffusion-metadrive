@@ -29,10 +29,13 @@ from train.train_bev_diffusion_stage1 import (
 )
 
 
-GRPO_CHECKPOINT_SCHEMA_VERSION = 5
-GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v5"
-GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v5"
+GRPO_CHECKPOINT_SCHEMA_VERSION = 6
+GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v6"
+GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v6"
 GRPO_REWARD_SOURCE = "external_per_vehicle_same_mode_counterfactual"
+ALIGNED_GRPO_CHECKPOINT_SCHEMA_VERSION = 5
+ALIGNED_GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v5"
+ALIGNED_GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v5"
 SAME_MODE_GRPO_CHECKPOINT_SCHEMA_VERSION = 3
 SAME_MODE_GRPO_CHECKPOINT_FORMAT = "bev_joint_grpo_a_v3"
 SAME_MODE_GRPO_B_CHECKPOINT_FORMAT = "bev_joint_grpo_b_v3"
@@ -433,6 +436,16 @@ def _validate_grpo_a_evaluation_identity(payload: Mapping[str, Any]) -> str:
     if all(payload.get(name) == value for name, value in current_identity.items()):
         return "current"
     if (
+        payload.get("schema_version") == ALIGNED_GRPO_CHECKPOINT_SCHEMA_VERSION
+        and payload.get("format") == ALIGNED_GRPO_CHECKPOINT_FORMAT
+        and payload.get("variant") == "A"
+        and payload.get("predecessor_condition") == "none"
+        and payload.get("reward_source") == GRPO_REWARD_SOURCE
+        and payload.get("optimizer_contract_version")
+        == "stage2_joint_grpo_optimizer_v7"
+    ):
+        return "aligned_v5"
+    if (
         payload.get("schema_version") == SAME_MODE_GRPO_CHECKPOINT_SCHEMA_VERSION
         and payload.get("format") == SAME_MODE_GRPO_CHECKPOINT_FORMAT
         and payload.get("variant") == "A"
@@ -678,10 +691,25 @@ def load_grpo_a_checkpoint_for_evaluation(
             raise JointGRPOError(
                 "GRPO evaluation checkpoint metrics must be finite scalars"
             )
+    planner_state = dict(payload["planner_state"])
+    if generation != "current":
+        translated = dict(trainer.planner.state_dict())
+        translated_prefix = "diffusion_decoder.trajectory_head.base."
+        legacy_prefix = "diffusion_decoder.trajectory_head."
+        for name, value in planner_state.items():
+            translated_name = (
+                translated_prefix + name[len(legacy_prefix) :]
+                if name.startswith(legacy_prefix)
+                else name
+            )
+            if translated_name not in translated:
+                raise JointGRPOError(
+                    "historical GRPO planner state does not match evaluation model"
+                )
+            translated[translated_name] = value
+        planner_state = translated
     try:
-        trainer.planner.load_state_dict(
-            dict(payload["planner_state"]), strict=True
-        )
+        trainer.planner.load_state_dict(planner_state, strict=True)
     except (RuntimeError, ValueError, KeyError) as exc:
         raise JointGRPOError(
             "GRPO evaluation checkpoint does not strictly match the planner"
@@ -719,6 +747,9 @@ def load_grpo_b_checkpoint(
 
 
 __all__ = [
+    "ALIGNED_GRPO_B_CHECKPOINT_FORMAT",
+    "ALIGNED_GRPO_CHECKPOINT_FORMAT",
+    "ALIGNED_GRPO_CHECKPOINT_SCHEMA_VERSION",
     "GRPO_B_CHECKPOINT_FORMAT",
     "GRPO_CHECKPOINT_FORMAT",
     "GRPO_CHECKPOINT_SCHEMA_VERSION",

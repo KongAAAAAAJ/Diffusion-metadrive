@@ -47,7 +47,6 @@ from models.bev_planner import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     JointGRPOConfig,
-    JointGRPOPolicyUpdateConfig,
     JointRewardConfig,
     JointTrajectoryProxyReward,
     KinematicTrajectoryOptimizer,
@@ -96,7 +95,7 @@ from scenarios.bev_round13_contract import (
 
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
-ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v6"
+ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v7"
 BEST_CHECKPOINT_METRIC = (
     "validation/safety_constrained_simulator_reward_gain_trailing3"
 )
@@ -152,8 +151,8 @@ def _frozen_pretrain_reward_logging_metadata(
         "inference_seed": int(planner_config.inference_seed),
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "fixed_inference_noise": True,
-        "advantage_formula_role": "none",
-        "active_mode_gate_role": "same_mode_threshold",
+        "advantage_formula_role": "paired_sample_baseline_filter",
+        "active_mode_gate_role": "none; signal is derived per sample",
         "environment_action_role": "sole_executed_policy",
     }
 
@@ -164,9 +163,6 @@ class JointGRPOOnlineConfig:
     seed: int = 17
     trajectories_per_mode: int = 48
     total_rollout_groups: int = 100
-    update_epochs: int = 10
-    clip_epsilon_low: float = 0.1
-    clip_epsilon_high: float = 0.2
     resume_checkpoint: Path | None = None
     validation_state_bank: Path = Path(
         "evaluation/artifacts/grpo_validation_state_bank_v1.pt"
@@ -197,7 +193,6 @@ class JointGRPOOnlineConfig:
             )
         for name in (
             "total_rollout_groups",
-            "update_epochs",
             "environment_steps_per_episode",
             "rollout_groups_per_bucket_visit",
             "validation_interval_rollouts",
@@ -239,17 +234,6 @@ class JointGRPOOnlineConfig:
                 "environment_steps_per_episode must be greater than or equal "
                 "to rollout_start_min_remaining_steps"
             )
-        for name in ("clip_epsilon_low", "clip_epsilon_high"):
-            value = getattr(self, name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-                or not 0.0 < float(value) < 1.0
-            ):
-                raise OnlineGRPOError(
-                    f"{name} must be a finite scalar strictly between 0 and 1"
-                )
         if not self.scenarios or any(
             len(value) != 2 or not value[0] or not value[1] for value in self.scenarios
         ):
@@ -301,18 +285,15 @@ def rollout_collection_contract(
         "pretrain_inference_per_live_state": 1,
         "comparison_unit": "vehicle_mode",
         "trajectories_per_mode": int(config.trajectories_per_mode),
-        "advantage_normalization": "within_vehicle_mode_centered_rms",
-        "active_mode_gate": (
-            "hard_valid_and_optimizer_executable_and_mean_reward_gte_"
-            "same_mode_frozen_pretrain_reward"
-        ),
+        "advantage": "fixed_scale_baseline_relative_safety_truncation",
+        "signal_mode": "at_least_one_nonzero_sample_advantage",
         "max_sampling_attempts_per_state": int(config.max_sampling_attempts_per_state),
         "max_sampling_attempts_multiplier": int(
             config.max_sampling_attempts_multiplier
         ),
         "retry_scope": "same_live_state",
-        "partial_active_policy": "merge_all_active_modes_without_backfill",
-        "retry_condition": "all_vehicle_modes_inactive",
+        "partial_active_policy": "merge_all_signal_modes_without_backfill",
+        "retry_condition": "all_vehicle_modes_have_zero_signal",
         "sampled_candidate_execution": False,
         "environment_action": "cached_frozen_stage1_argmax_only",
         "bucket_order": "ordered_scenario_then_seed",
@@ -1174,88 +1155,47 @@ def _reward_contract_version() -> str:
     return version
 
 
-def _candidate_group_rejection_reason(
-    rewards: np.ndarray,
-    *,
-    pretrain_reward: float,
-    trajectories_per_mode: int,
-) -> str | None:
-    """Apply the exact same-mode gate for one vehicle-mode block."""
-
-    if (
-        isinstance(trajectories_per_mode, bool)
-        or not isinstance(trajectories_per_mode, int)
-        or trajectories_per_mode < 2
-    ):
-        raise OnlineGRPOError(
-            "trajectories_per_mode must be an integer greater than or equal " "to 2"
-        )
-    values = np.asarray(rewards)
-    if values.shape != (trajectories_per_mode,) or values.dtype not in (
-        np.float32,
-        np.float64,
-    ):
-        raise OnlineGRPOError(
-            "vehicle-mode rewards must be float " f"[{trajectories_per_mode}]"
-        )
-    if not np.isfinite(values).all():
-        raise OnlineGRPOError("joint proxy rewards must be finite")
-    if (
-        isinstance(pretrain_reward, bool)
-        or not isinstance(pretrain_reward, (int, float))
-        or not math.isfinite(float(pretrain_reward))
-    ):
-        raise OnlineGRPOError("frozen pretrain reward must be a finite scalar")
-    values64 = values.astype(np.float64, copy=False)
-    return (
-        None
-        if float(values64.mean()) >= float(pretrain_reward)
-        else "mean_below_same_mode_pretrain"
-    )
-
-
-def _vehicle_mode_rewards_are_active(
-    rewards: np.ndarray,
-    *,
-    pretrain_reward: float,
-    trajectories_per_mode: int,
-) -> bool:
-    """Whether one same-mode group passes the strict frozen-pretrain gate."""
-
-    return (
-        _candidate_group_rejection_reason(
-            rewards,
-            pretrain_reward=pretrain_reward,
-            trajectories_per_mode=trajectories_per_mode,
-        )
-        is None
-    )
-
-
-def _active_vehicle_mode_mask(
-    rewards: np.ndarray,
-    pretrain_rewards: np.ndarray,
+def _fixed_scale_reward_signals(
+    current_rewards: np.ndarray,
+    frozen_rewards: np.ndarray,
+    collision: np.ndarray,
+    out_of_drivable: np.ndarray,
     valid_mode_mask: np.ndarray,
-) -> np.ndarray:
-    """Return active `(vehicle, mode)` blocks; equality is intentionally active."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Mirror the fixed-scale torch advantage contract for online gating/logging."""
 
-    values = np.asarray(rewards)
-    baseline = np.asarray(pretrain_rewards)
+    values = np.asarray(current_rewards)
+    paired = np.asarray(frozen_rewards)
+    collision_values = np.asarray(collision)
+    out_values = np.asarray(out_of_drivable)
     valid = np.asarray(valid_mode_mask)
     if values.ndim != 3 or values.shape[:2] != (3, 10):
         raise OnlineGRPOError("vehicle-mode rewards must have shape [3,10,N]")
     if values.shape[2] < 2 or values.dtype not in (np.float32, np.float64):
         raise OnlineGRPOError("vehicle-mode rewards must be float [3,10,N>=2]")
-    if baseline.shape != (3, 10) or baseline.dtype not in (
-        np.float32,
-        np.float64,
+    if paired.shape != values.shape or paired.dtype not in (np.float32, np.float64):
+        raise OnlineGRPOError("paired frozen rewards must be float [3,10,N]")
+    if (
+        collision_values.shape != values.shape
+        or collision_values.dtype != np.bool_
+        or out_values.shape != values.shape
+        or out_values.dtype != np.bool_
     ):
-        raise OnlineGRPOError("same-mode pretrain rewards must be float [3,10]")
+        raise OnlineGRPOError("paired safety masks must be bool [3,10,N]")
     if valid.shape != (3, 10) or valid.dtype != np.bool_:
         raise OnlineGRPOError("valid mode mask must be bool [3,10]")
-    if not np.isfinite(values).all() or not np.isfinite(baseline).all():
-        raise OnlineGRPOError("vehicle-mode rewards and baselines must be finite")
-    return valid & (values.mean(axis=-1) >= baseline)
+    if not np.isfinite(values).all() or not np.isfinite(paired).all():
+        raise OnlineGRPOError("paired vehicle-mode rewards must be finite")
+    centered = values - values.mean(axis=-1, keepdims=True)
+    unsafe = collision_values | out_values
+    advantages = np.where(
+        unsafe,
+        -1.0,
+        np.where(values >= paired - 1e-6, np.maximum(centered, 0.0), 0.0),
+    ).astype(np.float32, copy=False)
+    advantages *= valid[..., None]
+    signal = valid & np.any(advantages != 0.0, axis=-1)
+    return centered.astype(np.float32, copy=False), advantages, signal
 
 
 def _diffusion_attempt_generators(
@@ -1651,8 +1591,11 @@ def _write_dynamic_sampling_attempt_event(
     scenario: tuple[str, str],
     seed: int,
     reward_result: VehicleModeRewardResult,
+    paired_frozen_rewards: np.ndarray,
+    centered_rewards: np.ndarray,
+    advantages: np.ndarray,
     hard_valid_mode_mask: np.ndarray,
-    active_mode_mask: np.ndarray,
+    signal_mode_mask: np.ndarray,
     reward_config: VehicleModeRewardConfig,
 ) -> dict[str, float]:
     if not isinstance(reward_result, VehicleModeRewardResult):
@@ -1661,11 +1604,17 @@ def _write_dynamic_sampling_attempt_event(
     baseline = np.asarray(reward_result.pretrain_rewards, dtype=np.float64)
     valid = np.asarray(reward_result.valid_mode_mask, dtype=np.bool_)
     hard_valid = np.asarray(hard_valid_mode_mask, dtype=np.bool_)
-    active = np.asarray(active_mode_mask, dtype=np.bool_)
+    paired = np.asarray(paired_frozen_rewards, dtype=np.float64)
+    centered_all = np.asarray(centered_rewards, dtype=np.float64)
+    advantages_all = np.asarray(advantages, dtype=np.float64)
+    active = np.asarray(signal_mode_mask, dtype=np.bool_)
     if values.ndim != 3 or values.shape[:2] != (3, 10):
         raise OnlineGRPOError("sampling rewards must have shape [3,10,N]")
     if (
         baseline.shape != (3, 10)
+        or paired.shape != values.shape
+        or centered_all.shape != values.shape
+        or advantages_all.shape != values.shape
         or valid.shape != (3, 10)
         or hard_valid.shape != (3, 10)
         or active.shape != (3, 10)
@@ -1719,12 +1668,15 @@ def _write_dynamic_sampling_attempt_event(
                 continue
             group = values[role, mode]
             reference = float(baseline[role, mode])
-            centered = group - float(group.mean())
-            advantage = centered / math.sqrt(float(np.mean(centered**2)) + 1e-6)
-            mean_gain = float(group.mean() - reference)
-            median_gain = float(np.median(group) - reference)
-            fraction_ge = float(np.mean(group >= reference))
-            positive_below = float(np.mean((advantage > 0.0) & (group < reference)))
+            paired_group = paired[role, mode]
+            centered = centered_all[role, mode]
+            advantage = advantages_all[role, mode]
+            mean_gain = float(np.mean(group - paired_group))
+            median_gain = float(np.median(group - paired_group))
+            fraction_ge = float(np.mean(group >= paired_group))
+            positive_below = float(
+                np.mean((advantage > 0.0) & (group < paired_group - 1e-6))
+            )
             group_mean_gains[role, mode] = mean_gain
             group_median_gains[role, mode] = median_gain
             group_fractions[role, mode] = fraction_ge
@@ -1778,9 +1730,10 @@ def _write_dynamic_sampling_attempt_event(
                     "inactive_reason": (
                         None
                         if active[role, mode]
-                        else "mean_below_same_mode_pretrain"
+                        else "no_nonzero_sample_advantage"
                     ),
                     "pretrain_reward": reference,
+                    "paired_frozen_reward_mean": float(paired_group.mean()),
                     "reward_mean": float(group.mean()),
                     "reward_std": float(group.std()),
                     "reward_min": float(group.min()),
@@ -1790,7 +1743,7 @@ def _write_dynamic_sampling_attempt_event(
                     "reward_p95": float(np.quantile(group, 0.95)),
                     "mean_gain": mean_gain,
                     "median_gain": median_gain,
-                    "max_gain": float(group.max() - reference),
+                    "max_gain": float(np.max(group - paired_group)),
                     "fraction_reward_ge_pretrain": fraction_ge,
                     "positive_advantage_below_pretrain_fraction": positive_below,
                     "advantage_min": float(advantage.min()),
@@ -1844,10 +1797,10 @@ def _write_dynamic_sampling_attempt_event(
         return float(np.mean(role_means))
 
     valid_values = values[valid]
-    valid_baseline = baseline[valid]
-    deltas = valid_values - valid_baseline[:, None]
+    paired_valid = paired[valid]
+    deltas = valid_values - paired_valid
     reward_group_means = values.mean(axis=-1)
-    reward_group_gains = reward_group_means - baseline
+    reward_group_gains = (values - paired).mean(axis=-1)
     metrics = {
         "train/valid_all/vehicle_reward_mean": hierarchical_mean(
             reward_group_means, valid
@@ -1860,7 +1813,7 @@ def _write_dynamic_sampling_attempt_event(
         ),
         "train/valid_all/reward_gain_max": float(deltas.max()),
         "train/valid_all/fraction_reward_ge_pretrain": float(
-            np.mean(valid_values >= valid_baseline[:, None])
+            np.mean(valid_values >= paired_valid)
         ),
         "train/active_only/group_mean_gain": hierarchical_mean(
             group_mean_gains, active
@@ -1874,8 +1827,26 @@ def _write_dynamic_sampling_attempt_event(
         "train/active_only/positive_advantage_below_pretrain_fraction": (
             hierarchical_mean(positive_below_fractions, active)
         ),
-        "active_mode_count": float(active.sum()),
-        "active_vehicle_count": float(np.any(active, axis=1).sum()),
+        "signal_mode_count": float(active.sum()),
+        "no_signal_mode_count": float((valid & ~active).sum()),
+        "invalid_or_unexecutable_mode_count": float((~valid).sum()),
+        "signal_vehicle_count": float(np.any(active, axis=1).sum()),
+        "train/valid_all/paired_reward_gain_mean": float(deltas.mean()),
+        "train/valid_all/paired_reward_gain_median": float(np.median(deltas)),
+        "train/valid_all/paired_reward_gain_p05": float(np.quantile(deltas, 0.05)),
+        "train/valid_all/paired_reward_gain_p95": float(np.quantile(deltas, 0.95)),
+        "train/valid_all/positive_fraction": float(
+            np.mean(advantages_all[valid] > 0.0)
+        ),
+        "train/valid_all/baseline_filtered_fraction": float(
+            np.mean((centered_all[valid] > 0.0) & (values[valid] < paired_valid - 1e-6))
+        ),
+        "train/valid_all/collision_negative_fraction": float(
+            np.mean(np.asarray(reward_result.collision)[valid])
+        ),
+        "train/valid_all/out_negative_fraction": float(
+            np.mean(np.asarray(reward_result.out_of_drivable)[valid])
+        ),
     }
     active_samples = np.broadcast_to(active[..., None], values.shape)
     for name, coefficient in weights.items():
@@ -1938,7 +1909,7 @@ def _write_dynamic_sampling_attempt_event(
         "route": str(scenario[1]),
         "seed": int(seed),
         "accepted": bool(active.any()),
-        "rejection_reason": (None if active.any() else "all_vehicle_modes_inactive"),
+        "rejection_reason": (None if active.any() else "all_vehicle_modes_no_signal"),
         "vehicle_mode_groups": group_records,
         **metrics,
     }
@@ -2018,16 +1989,6 @@ def _validate_vehicle_mode_reward_config(
         raise OnlineGRPOError(
             "vehicle-mode reward trajectory count does not match GRPO config"
         )
-
-
-def _policy_update_config(
-    config: JointGRPOOnlineConfig,
-) -> JointGRPOPolicyUpdateConfig:
-    return JointGRPOPolicyUpdateConfig(
-        update_epochs=config.update_epochs,
-        clip_epsilon_low=float(config.clip_epsilon_low),
-        clip_epsilon_high=float(config.clip_epsilon_high),
-    )
 
 
 def _grpo_config_artifact_payload(
@@ -2375,7 +2336,6 @@ def _checkpoint_payload(
     best_selected_reward_gain: float | None,
     best_checkpoint_sha256: str | None,
     validation_selection_history: Sequence[Mapping[str, float]],
-    policy_update: JointGRPOPolicyUpdateConfig,
     collection_contract: Mapping[str, object],
     sampler_state: Mapping[str, object],
 ) -> dict[str, object]:
@@ -2445,10 +2405,8 @@ def _checkpoint_payload(
             ),
             "best_checkpoint_sha256": best_checkpoint_sha256,
             "validation_selection_history": checked_history,
-            "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
-            "policy_update_contract_sha256": (
-                joint_grpo_optimizer_contract_sha256(policy_update)
-            ),
+            "policy_update_contract": joint_grpo_optimizer_contract(),
+            "policy_update_contract_sha256": joint_grpo_optimizer_contract_sha256(),
             "rollout_collection_contract": dict(collection_contract),
             "sampler_state": dict(sampler_state),
             "trajectory_optimizer_config": dataclasses.asdict(
@@ -2469,7 +2427,6 @@ def _validate_online_checkpoint_metadata(
     reward_config: VehicleModeRewardConfig,
     scenario_contract_sha: str,
     scenario_seeds: Sequence[int],
-    policy_update: JointGRPOPolicyUpdateConfig,
     collection_contract: Mapping[str, object],
     bucket_count: int,
     bucket_target_counts: Sequence[int],
@@ -2511,10 +2468,8 @@ def _validate_online_checkpoint_metadata(
         "joint_reward_role": "historical_and_final_evaluation_only",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
-        "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
-        "policy_update_contract_sha256": (
-            joint_grpo_optimizer_contract_sha256(policy_update)
-        ),
+        "policy_update_contract": joint_grpo_optimizer_contract(),
+        "policy_update_contract_sha256": joint_grpo_optimizer_contract_sha256(),
         "rollout_collection_contract": dict(collection_contract),
         "scenario_contract_sha256": scenario_contract_sha,
         "scenario_seeds": [int(value) for value in scenario_seeds],
@@ -2617,6 +2572,9 @@ def _fixed_raw_proxy_and_simulator_validation(
     pretrain_vehicle_rewards: list[float] = []
     macro_context_vehicle_rewards: list[float] = []
     macro_context_pretrain_rewards: list[float] = []
+    paired_n48_reward_means: list[float] = []
+    paired_n48_frozen_reward_means: list[float] = []
+    paired_n48_gain_means: list[float] = []
     vehicle_unsafe_count = 0
     vehicle_collision_count = 0
     vehicle_out_count = 0
@@ -2640,7 +2598,7 @@ def _fixed_raw_proxy_and_simulator_validation(
     scenario_simulator_rewards: dict[str, list[float]] = defaultdict(list)
     scenario_simulator_collisions: dict[str, int] = defaultdict(int)
     scenario_simulator_outs: dict[str, int] = defaultdict(int)
-    for scenario in scenarios:
+    for scenario_index, scenario in enumerate(scenarios):
         for seed in seeds:
             record = validation_state_bank.get((tuple(scenario), int(seed)))
             if record is None:
@@ -2712,6 +2670,62 @@ def _fixed_raw_proxy_and_simulator_validation(
                     frozen_all_modes,
                     frozen_argmax,
                     execution_mask,
+                )
+                paired_initial, paired_transition = _diffusion_attempt_generators(
+                    device=device,
+                    training_seed=10_000_019 + 1_009 * int(seed),
+                    live_state_index=scenario_index,
+                    retry_index=0,
+                )
+                paired_rollout = trainer.sample_groups(
+                    batch,
+                    generator=paired_initial,
+                    transition_generator=paired_transition,
+                    noise_bundle_identity=(
+                        10_000_019 + 1_009 * int(seed),
+                        int(scenario_index),
+                        0,
+                    ),
+                )
+                paired_current = vehicle_backend.score_candidates(
+                    env,
+                    values,
+                    paired_rollout.candidate_trajectories[0]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False),
+                    frozen_argmax,
+                    execution_mask,
+                    pretrain_local,
+                )
+                paired_frozen = vehicle_backend.score_candidates(
+                    env,
+                    values,
+                    paired_rollout.frozen_candidate_trajectories[0]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False),
+                    frozen_argmax,
+                    execution_mask,
+                    pretrain_local,
+                )
+                paired_valid = np.asarray(
+                    paired_current.valid_mode_mask, dtype=np.bool_
+                )
+                role_current = [
+                    float(paired_current.rewards[role][paired_valid[role]].mean())
+                    for role in range(3)
+                ]
+                role_frozen = [
+                    float(paired_frozen.rewards[role][paired_valid[role]].mean())
+                    for role in range(3)
+                ]
+                paired_n48_reward_means.append(float(np.mean(role_current)))
+                paired_n48_frozen_reward_means.append(float(np.mean(role_frozen)))
+                paired_n48_gain_means.append(
+                    float(np.mean(np.asarray(role_current) - np.asarray(role_frozen)))
                 )
                 validation_candidates = np.repeat(
                     current_all_modes[:, :, None],
@@ -2893,6 +2907,15 @@ def _fixed_raw_proxy_and_simulator_validation(
         "validation/vehicle_reward_gain": float(
             np.mean(macro_context_vehicle_rewards)
             - np.mean(macro_context_pretrain_rewards)
+        ),
+        "validation/paired_n48_vehicle_reward_mean": float(
+            np.mean(paired_n48_reward_means)
+        ),
+        "validation/paired_n48_frozen_reward_mean": float(
+            np.mean(paired_n48_frozen_reward_means)
+        ),
+        "validation/paired_n48_reward_gain": float(
+            np.mean(paired_n48_gain_means)
         ),
         "validation/vehicle_unsafe_count": float(vehicle_unsafe_count),
         "validation/vehicle_collision_count": float(vehicle_collision_count),
@@ -3260,7 +3283,6 @@ def run_joint_grpo_training(
         raise OnlineGRPOError(str(exc)) from exc
     torch_device = _device(config.device)
     grpo_config = JointGRPOConfig(trajectories_per_mode=config.trajectories_per_mode)
-    policy_update = _policy_update_config(config)
     trainer, source_payload, source_sha = _load_trainer(
         variant,
         Path(source_checkpoint),
@@ -3358,7 +3380,6 @@ def run_joint_grpo_training(
             reward_config=reward_config,
             scenario_contract_sha=scenario_contract_sha,
             scenario_seeds=config.scenario_seeds,
-            policy_update=policy_update,
             collection_contract=collection_contract,
             bucket_count=len(training_buckets),
             bucket_target_counts=bucket_target_counts,
@@ -3436,7 +3457,7 @@ def run_joint_grpo_training(
     )
     online_config["validation_state_bank"] = str(config.validation_state_bank)
     frozen = {
-        "format": "bev_joint_grpo_online_config_v12",
+        "format": "bev_joint_grpo_online_config_v13",
         "implementation_commit": implementation_commit,
         "variant": variant,
         "run_mode": run_mode,
@@ -3445,10 +3466,8 @@ def run_joint_grpo_training(
         "online_config": online_config,
         "grpo_config": _grpo_config_artifact_payload(grpo_config),
         "source_stage1_sha256": source_sha,
-        "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
-        "policy_update_contract_sha256": (
-            joint_grpo_optimizer_contract_sha256(policy_update)
-        ),
+        "policy_update_contract": joint_grpo_optimizer_contract(),
+        "policy_update_contract_sha256": joint_grpo_optimizer_contract_sha256(),
         "rollout_collection_contract": collection_contract,
         "reward_contract_version": _reward_contract_version(),
         "reward_contract": VEHICLE_MODE_REWARD_CONTRACT,
@@ -3514,10 +3533,13 @@ def run_joint_grpo_training(
     _reset_cuda_peak_memory(torch_device)
     attempt_budget_exhausted = False
     diagnostic_early_stop = False
+    stability_guard_rejections = 0
+    stability_guard_diagnostic: dict[str, object] | None = None
     try:
         while (
             accepted_update_states < target_accepted_update_states
             and not diagnostic_early_stop
+            and stability_guard_diagnostic is None
         ):
             bucket_index = next_bucket_index
             if (
@@ -3550,6 +3572,7 @@ def run_joint_grpo_training(
                 while (
                     accepted_update_states < target_accepted_update_states
                     and not diagnostic_early_stop
+                    and stability_guard_diagnostic is None
                     and bucket_accepted_update_counts[bucket_index]
                     < bucket_target_counts[bucket_index]
                     and current_visit_progress < config.rollout_groups_per_bucket_visit
@@ -3663,7 +3686,14 @@ def run_joint_grpo_training(
                             mode_valid_mask=execution_mask,
                         )
                         accepted_attempt: (
-                            tuple[object, object, np.ndarray, dict[str, float]] | None
+                            tuple[
+                                object,
+                                object,
+                                object,
+                                np.ndarray,
+                                dict[str, float],
+                            ]
+                            | None
                         ) = None
                         frozen_raw_candidate: np.ndarray | None = None
                         frozen_all_mode_candidates: np.ndarray | None = None
@@ -3695,6 +3725,11 @@ def run_joint_grpo_training(
                                 batch,
                                 generator=initial_noise_generator,
                                 transition_generator=transition_noise_generator,
+                                noise_bundle_identity=(
+                                    int(config.seed),
+                                    int(baseline_execution_steps),
+                                    int(retry_index - 1),
+                                ),
                             )
                             attempts_for_state += 1
                             if frozen_raw_candidate is None:
@@ -3745,10 +3780,29 @@ def run_joint_grpo_training(
                                 execution_mask,
                                 pretrain_score,
                             )
-                            active_mode_mask = _active_vehicle_mode_mask(
-                                proxy.rewards,
-                                proxy.pretrain_rewards,
-                                proxy.valid_mode_mask,
+                            frozen_paired_candidates = (
+                                rollout.frozen_candidate_trajectories[0]
+                                .detach()
+                                .cpu()
+                                .numpy()
+                                .astype(np.float32, copy=False)
+                            )
+                            frozen_proxy = vehicle_reward_backend.score_candidates(
+                                env,
+                                values,
+                                frozen_paired_candidates,
+                                frozen_raw_candidate[0],
+                                execution_mask,
+                                pretrain_score,
+                            )
+                            centered_rewards, advantages, signal_mode_mask = (
+                                _fixed_scale_reward_signals(
+                                    proxy.rewards,
+                                    frozen_proxy.rewards,
+                                    proxy.collision,
+                                    proxy.out_of_drivable,
+                                    proxy.valid_mode_mask,
+                                )
                             )
                             sampling_attempts += 1
                             bucket_sampling_attempt_counts[bucket_index] += 1
@@ -3762,27 +3816,31 @@ def run_joint_grpo_training(
                                 scenario=scenario,
                                 seed=seed,
                                 reward_result=proxy,
+                                paired_frozen_rewards=frozen_proxy.rewards,
+                                centered_rewards=centered_rewards,
+                                advantages=advantages,
                                 hard_valid_mode_mask=np.asarray(
                                     values.mode_valid_mask, dtype=np.bool_
                                 ),
-                                active_mode_mask=active_mode_mask,
+                                signal_mode_mask=signal_mode_mask,
                                 reward_config=reward_config,
                             )
                             writer.add_scalar(
                                 "dynamic_sampling/accepted",
-                                float(active_mode_mask.any()),
+                                float(signal_mode_mask.any()),
                                 sampling_attempts,
                             )
                             writer.add_scalar(
-                                "dynamic_sampling/active_mode_count",
-                                attempt_metrics["active_mode_count"],
+                                "dynamic_sampling/signal_mode_count",
+                                attempt_metrics["signal_mode_count"],
                                 sampling_attempts,
                             )
-                            if active_mode_mask.any():
+                            if signal_mode_mask.any():
                                 accepted_attempt = (
                                     rollout,
                                     proxy,
-                                    active_mode_mask,
+                                    frozen_proxy,
+                                    signal_mode_mask,
                                     attempt_metrics,
                                 )
                                 break
@@ -3805,103 +3863,117 @@ def run_joint_grpo_training(
                             (
                                 rollout,
                                 proxy,
-                                active_mode_mask,
+                                frozen_proxy,
+                                signal_mode_mask,
                                 accepted_attempt_metrics,
                             ) = accepted_attempt
-                            rewards = (
-                                torch.from_numpy(
+                            rollout = rollout.with_reward_signals(
+                                current_rewards=torch.from_numpy(
                                     np.asarray(proxy.rewards, dtype=np.float32)
-                                )
-                                .unsqueeze(0)
-                                .to(torch_device)
-                            )
-                            active_modes = (
-                                torch.from_numpy(
-                                    np.asarray(active_mode_mask, dtype=np.bool_)
-                                )
-                                .unsqueeze(0)
-                                .to(torch_device)
+                                ).unsqueeze(0).to(torch_device),
+                                frozen_rewards=torch.from_numpy(
+                                    np.asarray(
+                                        frozen_proxy.rewards, dtype=np.float32
+                                    )
+                                ).unsqueeze(0).to(torch_device),
+                                collision_mask=torch.from_numpy(
+                                    np.asarray(proxy.collision, dtype=np.bool_)
+                                ).unsqueeze(0).to(torch_device),
+                                out_of_drivable_mask=torch.from_numpy(
+                                    np.asarray(
+                                        proxy.out_of_drivable, dtype=np.bool_
+                                    )
+                                ).unsqueeze(0).to(torch_device),
+                                valid_executable_mode_mask=torch.from_numpy(
+                                    np.asarray(
+                                        proxy.valid_mode_mask, dtype=np.bool_
+                                    )
+                                ).unsqueeze(0).to(torch_device),
                             )
                             optimizer_step_before = trainer.optimizer_step
-                            update = trainer.update(
-                                rollout,
-                                rewards,
-                                active_modes,
-                                policy_update=policy_update,
-                            )
-                            if len(update.epoch_results) != config.update_epochs:
-                                raise OnlineGRPOError(
-                                    "vehicle-mode GRPO update did not complete "
-                                    "every configured epoch"
-                                )
+                            update = trainer.update(rollout)
+                            if update.stability_guard_rejected:
+                                stability_guard_rejections += 1
+                                stability_guard_diagnostic = {
+                                    "accepted_update_state": int(
+                                        accepted_update_states
+                                    ),
+                                    "sampling_attempt": int(sampling_attempts),
+                                    "noise_bundle_identity": list(
+                                        rollout.noise_bundle_identity or ()
+                                    ),
+                                    "post_update_reference_kl": float(
+                                        update.post_update_reference_kl
+                                    ),
+                                    "adapter_relative_drifts": list(
+                                        update.adapter_relative_drifts
+                                    ),
+                                    "trigger_modes": list(
+                                        update.stability_guard_trigger_modes
+                                    ),
+                                }
+                                accepted_this_step = False
                             optimizer_steps_for_state = (
                                 trainer.optimizer_step - optimizer_step_before
                             )
                             bucket_optimizer_step_counts[
                                 bucket_index
                             ] += optimizer_steps_for_state
-                            zero_signal_epochs += int(update.zero_signal_epochs)
+                            zero_signal_epochs += int(update.zero_signal)
                             bucket_zero_signal_epoch_counts[bucket_index] += int(
-                                update.zero_signal_epochs
+                                update.zero_signal
                             )
-                            next_update_state = accepted_update_states + 1
+                            next_update_state = accepted_update_states + int(
+                                not update.stability_guard_rejected
+                            )
                             rollout_advantages = update.loss.advantages
-                            update_metric_values: dict[str, list[float]] = {}
-                            for epoch in update.epoch_results:
-                                _, epoch_metrics = _split_loss_metrics_by_step_axis(
-                                    epoch.loss.scalar_metrics()
-                                )
-                                epoch_metrics["gradient_total"] = float(
-                                    epoch.total_gradient_norm
-                                )
-                                epoch_metrics["zero_signal_epoch"] = float(
-                                    epoch.zero_signal_epoch
-                                )
-                                for name, value in epoch.gradient_norms.items():
-                                    epoch_metrics[f"gradient_pre_clip/{name}"] = float(
-                                        value
-                                    )
-                                for name, value in epoch.clipped_gradient_norms.items():
-                                    epoch_metrics[f"gradient_post_clip/{name}"] = float(
-                                        value
-                                    )
-                                epoch_metrics[
-                                    "policy/trajectory_head_relative_frozen_drift"
-                                ] = float(epoch.trajectory_head_relative_drift)
-                                for metric_name, metric_value in epoch_metrics.items():
-                                    update_metric_values.setdefault(
-                                        metric_name, []
-                                    ).append(float(metric_value))
-                                optimizer_metrics = {
-                                    **epoch_metrics,
-                                    "optimizer_step": float(epoch.optimizer_step),
-                                    "accepted_update_state": float(next_update_state),
-                                    "epoch_in_rollout": float(epoch.epoch_in_rollout),
+                            _, optimizer_metrics = _split_loss_metrics_by_step_axis(
+                                update.loss.scalar_metrics()
+                            )
+                            optimizer_metrics.update(
+                                {
+                                    "gradient_total": float(
+                                        update.total_gradient_norm
+                                    ),
+                                    "zero_signal_epoch": float(
+                                        update.zero_signal
+                                    ),
+                                    "policy/post_update_reference_kl": float(
+                                        update.post_update_reference_kl
+                                    ),
+                                    "policy/adapter_drift_max": float(
+                                        max(update.adapter_relative_drifts)
+                                    ),
+                                    "stability_guard/rejected": float(
+                                        update.stability_guard_rejected
+                                    ),
+                                    "optimizer_step": float(
+                                        update.optimizer_step
+                                    ),
+                                    "accepted_update_state": float(
+                                        next_update_state
+                                    ),
                                 }
-                                with metrics_path.open("a", encoding="utf-8") as stream:
-                                    stream.write(
-                                        json.dumps(
-                                            {
-                                                "event": "optimizer_epoch",
-                                                **optimizer_metrics,
-                                            },
-                                            sort_keys=True,
-                                        )
-                                        + "\n"
-                                    )
-                                last_metrics.update(optimizer_metrics)
-                            for (
-                                metric_name,
-                                metric_values,
-                            ) in update_metric_values.items():
-                                mean_value = float(np.mean(metric_values))
-                                writer.add_scalar(
-                                    metric_name,
-                                    mean_value,
-                                    next_update_state,
+                            )
+                            for name, value in update.gradient_norms.items():
+                                optimizer_metrics[f"gradient_pre_clip/{name}"] = float(
+                                    value
                                 )
-                                last_metrics[metric_name] = mean_value
-                            if _write_advantage_vector_summary(
+                            for name, value in update.clipped_gradient_norms.items():
+                                optimizer_metrics[f"gradient_post_clip/{name}"] = float(
+                                    value
+                                )
+                            for mode, drift in enumerate(
+                                update.adapter_relative_drifts
+                            ):
+                                optimizer_metrics[
+                                    f"policy/mode_{mode}/adapter_drift"
+                                ] = float(drift)
+                            for metric_name, metric_value in optimizer_metrics.items():
+                                writer.add_scalar(
+                                    metric_name, metric_value, next_update_state
+                                )
+                            if not update.stability_guard_rejected and _write_advantage_vector_summary(
                                 writer,
                                 rollout_advantages,
                                 next_update_state,
@@ -3949,9 +4021,9 @@ def run_joint_grpo_training(
                                         "train/valid_all/reward_gain_mean"
                                     ]
                                 ),
-                                "active_mode_count": float(active_mode_mask.sum()),
-                                "active_vehicle_count": float(
-                                    np.any(active_mode_mask, axis=1).sum()
+                                "signal_mode_count": float(signal_mode_mask.sum()),
+                                "signal_vehicle_count": float(
+                                    np.any(signal_mode_mask, axis=1).sum()
                                 ),
                                 "vehicle_unsafe_rate": float(
                                     np.asarray(proxy.unsafe)[valid].mean()
@@ -3983,7 +4055,12 @@ def run_joint_grpo_training(
                                 stream.write(
                                     json.dumps(
                                         {
-                                            "event": "update_state",
+                                            "event": (
+                                                "stability_guard_rejection"
+                                                if update.stability_guard_rejected
+                                                else "update_state"
+                                            ),
+                                            **optimizer_metrics,
                                             **rollout_metrics,
                                         },
                                         sort_keys=True,
@@ -3991,6 +4068,7 @@ def run_joint_grpo_training(
                                     + "\n"
                                 )
                             last_metrics.update(rollout_metrics)
+                            last_metrics.update(optimizer_metrics)
 
                         try:
                             (
@@ -4060,6 +4138,8 @@ def run_joint_grpo_training(
                         accepted_update_states += 1
                         bucket_accepted_update_counts[bucket_index] += 1
                         current_visit_progress += 1
+                    if stability_guard_diagnostic is not None:
+                        break
                     if not baseline_this_step:
                         warmup_environment_steps += 1
                     if _attempt_budget_is_exhausted(
@@ -4159,6 +4239,8 @@ def run_joint_grpo_training(
             else:
                 next_bucket_index = bucket_index
             if attempt_budget_exhausted:
+                break
+            if stability_guard_diagnostic is not None:
                 break
             if accepted_update_states != last_validated_update_state and (
                 accepted_update_states == target_accepted_update_states
@@ -4290,17 +4372,21 @@ def run_joint_grpo_training(
                             validation_selection_history=(
                                 validation_selection_history
                             ),
-                            policy_update=policy_update,
                             collection_contract=collection_contract,
                             sampler_state=current_sampler_state,
                         )
                         save_grpo_checkpoint(
                             best_unconstrained_path, unconstrained_checkpoint
                         )
-                if safety_eligible and selection_score is not None and (
+                if (
+                    safety_eligible
+                    and selection_score is not None
+                    and selection_score[0] >= 0.0
+                    and (
                     best_reward is None
                     or selection_score
                     > (best_reward, float(best_selected_reward_gain))
+                    )
                 ):
                     best_reward, best_selected_reward_gain = selection_score
                     best_checkpoint = _checkpoint_payload(
@@ -4319,7 +4405,6 @@ def run_joint_grpo_training(
                         best_selected_reward_gain=best_selected_reward_gain,
                         best_checkpoint_sha256=None,
                         validation_selection_history=validation_selection_history,
-                        policy_update=policy_update,
                         collection_contract=collection_contract,
                         sampler_state=current_sampler_state,
                     )
@@ -4342,7 +4427,6 @@ def run_joint_grpo_training(
                     best_selected_reward_gain=best_selected_reward_gain,
                     best_checkpoint_sha256=best_checkpoint_sha256,
                     validation_selection_history=validation_selection_history,
-                    policy_update=policy_update,
                     collection_contract=collection_contract,
                     sampler_state=current_sampler_state,
                 )
@@ -4366,6 +4450,99 @@ def run_joint_grpo_training(
                     )
     finally:
         writer.close()
+
+    if stability_guard_diagnostic is not None:
+        guard_sampler_state = _sampler_state(
+            accepted_update_states=accepted_update_states,
+            sampling_attempts=sampling_attempts,
+            rejected_sampling_attempts=rejected_sampling_attempts,
+            exhausted_states=exhausted_states,
+            baseline_execution_steps=baseline_execution_steps,
+            zero_signal_epochs=zero_signal_epochs,
+            warmup_environment_steps=warmup_environment_steps,
+            bucket_target_counts=bucket_target_counts,
+            bucket_accepted_update_counts=bucket_accepted_update_counts,
+            bucket_sampling_attempt_counts=bucket_sampling_attempt_counts,
+            bucket_rejected_sampling_attempt_counts=(
+                bucket_rejected_sampling_attempt_counts
+            ),
+            bucket_exhausted_state_counts=bucket_exhausted_state_counts,
+            bucket_baseline_execution_step_counts=(
+                bucket_baseline_execution_step_counts
+            ),
+            bucket_zero_signal_epoch_counts=bucket_zero_signal_epoch_counts,
+            bucket_optimizer_step_counts=bucket_optimizer_step_counts,
+            bucket_episode_counts=bucket_episode_counts,
+            next_bucket_index=next_bucket_index,
+            current_visit_progress=current_visit_progress,
+            rollout_start_generator_state=rollout_start_generator.get_state(),
+            last_validated_update_state=last_validated_update_state,
+            rollout_groups_per_bucket_visit=config.rollout_groups_per_bucket_visit,
+            optimizer_step=trainer.optimizer_step,
+            environment_steps=environment_steps,
+            max_sampling_attempts=max_sampling_attempts,
+        )
+        guard_payload = _checkpoint_payload(
+            variant=variant,
+            trainer=trainer,
+            source_sha=source_sha,
+            source_payload=source_payload,
+            metrics=last_metrics,
+            diagnostic_only=True,
+            run_mode=run_mode,
+            reward_config=reward_config,
+            scenario_contract_sha=scenario_contract_sha,
+            scenario_seeds=config.scenario_seeds,
+            environment_steps=environment_steps,
+            best_validation_reward=best_reward,
+            best_selected_reward_gain=best_selected_reward_gain,
+            best_checkpoint_sha256=best_checkpoint_sha256,
+            validation_selection_history=validation_selection_history,
+            collection_contract=collection_contract,
+            sampler_state=guard_sampler_state,
+        )
+        guard_payload["training_status"] = "stability_guard_rejected"
+        guard_path = save_grpo_checkpoint(
+            run_dir / "checkpoints" / "stability_guard.pt", guard_payload
+        )
+        guard_record = {
+            "format": "stage2_grpo_stability_guard_diagnostic_v1",
+            "training_status": "stability_guard_rejected",
+            "stability_guard_rejections": stability_guard_rejections,
+            "optimizer_steps": trainer.optimizer_step,
+            "accepted_update_states": accepted_update_states,
+            "baseline_execution_steps": baseline_execution_steps,
+            "environment_steps": environment_steps,
+            "checkpoint": str(guard_path.resolve()),
+            **stability_guard_diagnostic,
+        }
+        (run_dir / "stability_guard.json").write_text(
+            json.dumps(guard_record, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        report = {
+            "format": "bev_joint_grpo_online_report_v13",
+            "training_status": "stability_guard_rejected",
+            "diagnostic_only": True,
+            "eligible_for_formal_training": False,
+            "accepted_update_states": accepted_update_states,
+            "target_accepted_update_states": target_accepted_update_states,
+            "optimizer_steps": trainer.optimizer_step,
+            "sampling_attempts": sampling_attempts,
+            "rejected_sampling_attempts": rejected_sampling_attempts,
+            "exhausted_states": exhausted_states,
+            "baseline_execution_steps": baseline_execution_steps,
+            "environment_steps": environment_steps,
+            "stability_guard_rejections": stability_guard_rejections,
+            "stability_guard": guard_record,
+            "last_checkpoint": str(guard_path.resolve()),
+            "wall_time_seconds": time.monotonic() - started_at,
+        }
+        (run_dir / "report.json").write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return report
 
     if attempt_budget_exhausted:
         incomplete_sampler_state = _sampler_state(
@@ -4414,14 +4591,13 @@ def run_joint_grpo_training(
             best_selected_reward_gain=best_selected_reward_gain,
             best_checkpoint_sha256=best_checkpoint_sha256,
             validation_selection_history=validation_selection_history,
-            policy_update=policy_update,
             collection_contract=collection_contract,
             sampler_state=incomplete_sampler_state,
         )
         incomplete_checkpoint["training_status"] = "incomplete_attempt_budget_exhausted"
         last_path = save_grpo_checkpoint(last_path, incomplete_checkpoint)
         incomplete_report = {
-            "format": "bev_joint_grpo_online_report_v12",
+            "format": "bev_joint_grpo_online_report_v13",
             "training_status": "incomplete_attempt_budget_exhausted",
             "variant": variant,
             "run_mode": run_mode,
@@ -4439,6 +4615,7 @@ def run_joint_grpo_training(
             "exhausted_states": exhausted_states,
             "baseline_execution_steps": baseline_execution_steps,
             "zero_signal_epochs": zero_signal_epochs,
+            "stability_guard_rejections": stability_guard_rejections,
             "warmup_environment_steps": warmup_environment_steps,
             "environment_steps": environment_steps,
             "optimizer_steps": trainer.optimizer_step,
@@ -4525,7 +4702,6 @@ def run_joint_grpo_training(
         best_selected_reward_gain=best_selected_reward_gain,
         best_checkpoint_sha256=best_checkpoint_sha256,
         validation_selection_history=validation_selection_history,
-        policy_update=policy_update,
         collection_contract=collection_contract,
         sampler_state=final_sampler_state,
     )
@@ -4550,7 +4726,6 @@ def run_joint_grpo_training(
         reward_config=reward_config,
         scenario_contract_sha=scenario_contract_sha,
         scenario_seeds=config.scenario_seeds,
-        policy_update=policy_update,
         collection_contract=collection_contract,
         bucket_count=len(training_buckets),
         bucket_target_counts=bucket_target_counts,
@@ -4573,7 +4748,7 @@ def run_joint_grpo_training(
         )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v12",
+        "format": "bev_joint_grpo_online_report_v13",
         "implementation_commit": implementation_commit,
         "training_status": (
             "diagnostic_early_stop" if diagnostic_early_stop else "complete"
@@ -4600,6 +4775,7 @@ def run_joint_grpo_training(
         "exhausted_states": exhausted_states,
         "baseline_execution_steps": baseline_execution_steps,
         "zero_signal_epochs": zero_signal_epochs,
+        "stability_guard_rejections": stability_guard_rejections,
         "rollout_start_diagnostics_this_run": {
             "attempt_count": len(rollout_start_offsets_this_run),
             "accepted_count": rollout_start_accepted_count,
@@ -4642,10 +4818,8 @@ def run_joint_grpo_training(
         "joint_reward_role": "historical_and_final_evaluation_only",
         "tracking_expansion_enabled": False,
         "calibration_required": False,
-        "policy_update_contract": joint_grpo_optimizer_contract(policy_update),
-        "policy_update_contract_sha256": (
-            joint_grpo_optimizer_contract_sha256(policy_update)
-        ),
+        "policy_update_contract": joint_grpo_optimizer_contract(),
+        "policy_update_contract_sha256": joint_grpo_optimizer_contract_sha256(),
         "rollout_collection_contract": collection_contract,
         "simulator_validation_role": "diagnostic_only",
         "simulator_diagnostic_errors": simulator_diagnostic_errors,
@@ -4784,6 +4958,9 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         "validation_interval_steps",
         "advantage_vector_log_interval_steps",
         "clip_epsilon",
+        "clip_epsilon_low",
+        "clip_epsilon_high",
+        "update_epochs",
         "group_size",
         "pretrain_improvement_margin",
         "max_candidate_groups_per_state",
@@ -4804,9 +4981,6 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         seed=online.get("seed", 17),
         trajectories_per_mode=online.get("trajectories_per_mode", 48),
         total_rollout_groups=online.get("total_rollout_groups", 100),
-        update_epochs=online.get("update_epochs", 10),
-        clip_epsilon_low=online.get("clip_epsilon_low", 0.1),
-        clip_epsilon_high=online.get("clip_epsilon_high", 0.2),
         resume_checkpoint=(
             Path(str(online["resume_checkpoint"]))
             if online.get("resume_checkpoint")

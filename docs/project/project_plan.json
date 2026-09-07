@@ -1,8 +1,8 @@
 {
   "format": "bev_chassis_fusion_project_plan_v1",
   "schema_version": 1,
-  "updated_at": "2026-09-06T21:05:45+08:00",
-  "status": "stage2_grpo_ddim_alignment_implemented_frozen_baseline_gate_failed",
+  "updated_at": "2026-09-07T12:00:00+08:00",
+  "status": "stage2_grpo_single_step_fixed_scale_mode_isolation_implementation_in_progress",
   "purpose": "Machine-readable memory for the BEVOnlyDiffusionPlanner v2 RuleMaker-conditioned input refresh, the user-authorized formal50070 collision-episode curation and temporary quota waiver, Stage1-A-only training, and GRPO-Open versus GRPO-Exec reward-domain comparison.",
   "v2_only_training_evaluation_cleanup": {
     "authorized_on": "2026-08-27",
@@ -1401,6 +1401,93 @@
     },
     "formal_boundary": "No 5000-state formal training until the aligned frozen Stage1 S5-S9 x seeds 17/23 x 200-step qualification gate and the complete three-vehicle planning-tick P95 <= 200 ms gate both pass."
   },
+  "stage2_grpo_single_step_fixed_scale_mode_isolation": {
+    "status": "implementation_in_progress",
+    "authorized_on": "2026-09-07",
+    "objective": "Remove per-group reward-scale amplification and repeated off-policy reuse, and structurally prevent active-mode gradients from changing inactive-mode trajectory outputs.",
+    "supersedes_for_new_training": [
+      "stage2_joint_grpo_optimizer_v7",
+      "stage2_joint_grpo_persistent_episode_v6",
+      "bev_joint_grpo_online_config_v12",
+      "bev_joint_grpo_online_report_v12",
+      "stage2_grpo_stability_ab_manifest_v6",
+      "stage2_grpo_stability_ab_report_v6"
+    ],
+    "paired_sampling": {
+      "current_and_frozen_shape": "[B,3,10,48,8,3]",
+      "shared_noise": "identical initial noise and three DDIM transition noises",
+      "current_chain": "[B,48,5,3,10,8,2]",
+      "frozen_environment_baseline": "separate deterministic N=1 argmax cached for teammate context and sole environment execution"
+    },
+    "advantage": {
+      "center": "R_current_j - mean_j(R_current)",
+      "safe_positive": "max(centered_j,0) when R_current_j >= R_frozen_j - 1e-6",
+      "unsafe_negative": "-1 for collision or out_of_drivable",
+      "otherwise": 0,
+      "advantage_scale": 1.0,
+      "per_group_standard_deviation": false,
+      "group_gate": false,
+      "signal_mode": "at least one nonzero sample advantage",
+      "pg_reduction": "fixed mean over 48 trajectories and 3 stochastic transitions, then equal mean over signal modes, vehicles and batch"
+    },
+    "optimizer": {
+      "version": "stage2_joint_grpo_optimizer_v8",
+      "updates_per_accepted_state": 1,
+      "policy_gradient": "-exp(logp-logp.detach())*advantage",
+      "ppo_ratio_and_clipping": false,
+      "learning_rate": 1e-5,
+      "weight_decay": 0.0,
+      "bc_weight": 0.1,
+      "reference_kl_weight": 0.02,
+      "max_grad_norm": 1.0,
+      "anchor_scope": "all hard-valid optimizer-executable modes"
+    },
+    "mode_isolation": {
+      "base_head": "frozen Stage1 W1/b1/GELU/W2/b2",
+      "trainable_residual_weight_shape": [10, 24, 128],
+      "trainable_residual_bias_shape": [10, 24],
+      "initialization": "zero and output-identical to Stage1",
+      "sharing": "vehicles share the adapter for the same mode; different modes use disjoint residual slices",
+      "implementation": "vectorized einsum"
+    },
+    "stability_guard": {
+      "post_update_reference_kl_max": 0.25,
+      "max_mode_adapter_relative_drift": 0.02,
+      "failure_action": "restore residual parameters and Adam state, do not advance accepted/optimizer counters, execute cached frozen baseline once, save stability_guard.pt and diagnostics, then terminate the seed"
+    },
+    "artifacts": {
+      "checkpoint_schema": 6,
+      "optimizer_contract": "stage2_joint_grpo_optimizer_v8",
+      "collection_contract": "stage2_joint_grpo_persistent_episode_v7",
+      "application_contract_unchanged": "stage2_grpo_open_application_v5",
+      "online_config": "bev_joint_grpo_online_config_v13",
+      "online_report": "bev_joint_grpo_online_report_v13",
+      "stability_manifest": "stage2_grpo_stability_ab_manifest_v7",
+      "stability_report": "stage2_grpo_stability_ab_report_v7",
+      "legacy_policy": "schema v5 and older are weights-only historical evaluation sources; never restore optimizer, RNG or counters"
+    },
+    "run27_reconciliation": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_27",
+      "implementation_commit": "9005a18cda5dfa2f8a8e7e9b4a8a5da064372307",
+      "classification": "failed_nonformal_diagnostic",
+      "training_status": "diagnostic_early_stop",
+      "target_accepted_states": 500,
+      "accepted_states": 240,
+      "optimizer_steps": 2400,
+      "update_epochs": 10,
+      "last_reference_kl": 4.00083065032959,
+      "last_shared_head_relative_drift": 0.045796677470207214,
+      "last_selected_reward_gain": -1.5453866669287284,
+      "last_simulator_reward_gain": -1.8485180184245111,
+      "last_s7_out_delta": 2.0,
+      "last_s7_collision_delta": 2.0,
+      "resume_allowed": false,
+      "next_unoccupied_run": "run_28",
+      "evidence": "evaluation/STAGE2_GRPO_RUN27_RECONCILIATION_REPORT.json"
+    },
+    "diagnostic_run_boundary": "After implementation and bounded verification, run seeds 17/23/42 for at most 500 accepted states each in separate execution threads. These runs remain diagnostic-only.",
+    "formal_boundary": "Stage1 S5-S9 frozen-baseline and complete planning-tick P95 gates remain failed or pending; no 5000-state formal training is authorized."
+  },
   "historical_implementation_evidence": "evaluation/STAGE2_CONTINUOUS_REWARD_V2_IMPLEMENTATION_REPORT.json",
   "implementation_evidence": "evaluation/STAGE2_GRPO_OPEN_TAU_D_V1_IMPLEMENTATION_REPORT.json",
   "implementation_evidence_sha256": "c9e00780581700c7a41ccc2a2f6cd38f55d9a4dc80439258829cbc9614980294",
@@ -1424,5 +1511,5 @@
   "stage2_grpo_ddim_alignment_implementation_evidence_sha256": "92e7b33d0c414b400b3110ebb053aada7dde2b6a40d127db27288de3668cf3fd",
   "stage2_grpo_ddim_aligned_frozen_gate_evidence": "evaluation/STAGE2_GRPO_DDIM_ALIGNED_FROZEN_BASELINE_GATE.json",
   "stage2_grpo_ddim_aligned_frozen_gate_evidence_sha256": "315af191a5884a898dda85e1d0347264094bc446cd6379ebdb82e4f0b109152a",
-  "current_next_action": "Keep formal and bounded GRPO runs blocked at the current one-hard-gate boundary. In a separate execution thread, audit the S5/R1 seed17 agent0 collision under the aligned frozen baseline and make only a cause-specific Stage1 fix; rerun the complete frozen gate afterward. Run the P95 gate as a separate hard-gate task."
+  "current_next_action": "Complete and verify the authorized single-step fixed-scale mode-isolated GRPO implementation without starting long training. Then run the three bounded 500-state diagnostic seeds in separate execution threads; Stage1 S5-S9 qualification and the complete P95 gate remain independent blockers for formal training."
 }

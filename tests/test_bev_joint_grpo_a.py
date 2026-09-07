@@ -14,7 +14,6 @@ from models.bev_planner import (
     BEVOnlyDiffusionPlannerConfig,
     JointGRPOConfig,
     JointGRPOError,
-    JointGRPOPolicyUpdateConfig,
     JointGRPOTrainerA,
     StandardGaussianDDIM,
 )
@@ -23,6 +22,8 @@ from train.bev_joint_grpo import (
     GRPO_CHECKPOINT_FORMAT,
     GRPO_CHECKPOINT_SCHEMA_VERSION,
     GRPO_REWARD_SOURCE,
+    ALIGNED_GRPO_CHECKPOINT_FORMAT,
+    ALIGNED_GRPO_CHECKPOINT_SCHEMA_VERSION,
     LEGACY_GRPO_CHECKPOINT_FORMAT,
     LEGACY_GRPO_CHECKPOINT_SCHEMA_VERSION,
     PREVIOUS_GRPO_CHECKPOINT_FORMAT,
@@ -44,7 +45,7 @@ from train.train_bev_diffusion_stage1 import (
 
 
 def _planner() -> BEVOnlyDiffusionPlanner:
-    return BEVOnlyDiffusionPlanner(
+    planner = BEVOnlyDiffusionPlanner(
         BEVOnlyDiffusionPlannerConfig(
             d_model=32,
             num_heads=4,
@@ -53,6 +54,11 @@ def _planner() -> BEVOnlyDiffusionPlanner:
             predecessor_condition="none",
         )
     )
+    with torch.no_grad():
+        torch.nn.init.normal_(
+            planner.diffusion_decoder.trajectory_head[-1].weight, std=0.01
+        )
+    return planner
 
 
 def _inputs() -> dict[str, torch.Tensor]:
@@ -140,7 +146,12 @@ def test_standard_gaussian_ddim_sampling_and_exact_replay() -> None:
 
 def test_frozen_pretrain_returns_all_modes_and_matches_stage1() -> None:
     trainer = JointGRPOTrainerA(
-        _planner(), JointGRPOConfig(trajectories_per_mode=2)
+        _planner(),
+        JointGRPOConfig(
+            trajectories_per_mode=2,
+            post_update_reference_kl_max=1e6,
+            max_adapter_relative_drift=1e6,
+        ),
     )
     inputs = _inputs()
     rollout = trainer.sample_groups(
@@ -167,7 +178,12 @@ def test_frozen_pretrain_returns_all_modes_and_matches_stage1() -> None:
 
 def test_rollout_can_enter_update_only_once() -> None:
     trainer = JointGRPOTrainerA(
-        _planner(), JointGRPOConfig(trajectories_per_mode=2)
+        _planner(),
+        JointGRPOConfig(
+            trajectories_per_mode=2,
+            post_update_reference_kl_max=1e6,
+            max_adapter_relative_drift=1e6,
+        ),
     )
     rollout = trainer.sample_groups(
         _inputs(), generator=torch.Generator().manual_seed(19)
@@ -175,19 +191,16 @@ def test_rollout_can_enter_update_only_once() -> None:
     rewards = torch.zeros((1, 3, 10, 2), dtype=torch.float32)
     rewards[..., 0] = -1.0
     rewards[..., 1] = 1.0
-    trainer.update(
-        rollout,
-        rewards,
-        rollout.mode_valid_mask,
-        policy_update=JointGRPOPolicyUpdateConfig(update_epochs=1),
+    rollout = rollout.with_reward_signals(
+        current_rewards=rewards,
+        frozen_rewards=rewards - 1.0,
+        collision_mask=torch.zeros_like(rewards, dtype=torch.bool),
+        out_of_drivable_mask=torch.zeros_like(rewards, dtype=torch.bool),
+        valid_executable_mode_mask=rollout.mode_valid_mask,
     )
+    trainer.update(rollout)
     with pytest.raises(JointGRPOError, match="exactly once"):
-        trainer.update(
-            rollout,
-            rewards,
-            rollout.mode_valid_mask,
-            policy_update=JointGRPOPolicyUpdateConfig(update_epochs=1),
-        )
+        trainer.update(rollout)
     reference = weakref.ref(rollout)
     del rollout
     gc.collect()
@@ -206,7 +219,7 @@ def test_stage1_source_metadata_requires_explicit_diagnostic_opt_in() -> None:
         validate_stage1_a_source_metadata(wrong, allow_diagnostic_source=True)
 
 
-def test_schema5_strict_resume_restores_optimizer_and_reference(tmp_path: Path) -> None:
+def test_schema6_strict_resume_restores_optimizer_and_reference(tmp_path: Path) -> None:
     trainer = JointGRPOTrainerA(
         _planner(), JointGRPOConfig(trajectories_per_mode=2)
     )
@@ -217,9 +230,9 @@ def test_schema5_strict_resume_restores_optimizer_and_reference(tmp_path: Path) 
         metrics={"loss/total": 0.0},
         diagnostic_only=True,
     )
-    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 5
+    assert payload["schema_version"] == GRPO_CHECKPOINT_SCHEMA_VERSION == 6
     assert payload["format"] == GRPO_CHECKPOINT_FORMAT
-    assert payload["optimizer_contract_version"] == "stage2_joint_grpo_optimizer_v7"
+    assert payload["optimizer_contract_version"] == "stage2_joint_grpo_optimizer_v8"
     path = save_grpo_checkpoint(tmp_path / "current.pt", payload)
 
     restored = JointGRPOTrainerA(
@@ -234,7 +247,9 @@ def test_schema5_strict_resume_restores_optimizer_and_reference(tmp_path: Path) 
     assert load_grpo_config_from_checkpoint(path) == trainer.config
 
 
-@pytest.mark.parametrize("generation", ["legacy", "previous", "same_mode_v3"])
+@pytest.mark.parametrize(
+    "generation", ["legacy", "previous", "same_mode_v3", "aligned_v5"]
+)
 def test_old_schema_is_planner_only_for_historical_evaluation(
     tmp_path: Path, generation: str
 ) -> None:
@@ -249,6 +264,14 @@ def test_old_schema_is_planner_only_for_historical_evaluation(
         diagnostic_only=True,
     )
     historical = copy.deepcopy(payload)
+    historical["planner_state"] = {
+        name.replace(
+            "diffusion_decoder.trajectory_head.base.",
+            "diffusion_decoder.trajectory_head.",
+        ): value
+        for name, value in historical["planner_state"].items()
+        if "trajectory_head.mode_residual_" not in name
+    }
     raw_config = dataclasses.asdict(trainer.config)
     raw_config["group_size"] = raw_config.pop("trajectories_per_mode")
     if generation == "legacy":
@@ -261,11 +284,16 @@ def test_old_schema_is_planner_only_for_historical_evaluation(
         historical["format"] = PREVIOUS_GRPO_CHECKPOINT_FORMAT
         historical["reward_source"] = "external_with_explicit_pretrain_baseline"
         historical["optimizer_contract_version"] = "stage2_joint_grpo_optimizer_v4"
-    else:
+    elif generation == "same_mode_v3":
         historical["schema_version"] = SAME_MODE_GRPO_CHECKPOINT_SCHEMA_VERSION
         historical["format"] = SAME_MODE_GRPO_CHECKPOINT_FORMAT
         historical["reward_source"] = GRPO_REWARD_SOURCE
         historical["optimizer_contract_version"] = "stage2_joint_grpo_optimizer_v5"
+    else:
+        historical["schema_version"] = ALIGNED_GRPO_CHECKPOINT_SCHEMA_VERSION
+        historical["format"] = ALIGNED_GRPO_CHECKPOINT_FORMAT
+        historical["reward_source"] = GRPO_REWARD_SOURCE
+        historical["optimizer_contract_version"] = "stage2_joint_grpo_optimizer_v7"
     historical["grpo_config"] = raw_config
     historical["optimizer_step"] = 27
     path = save_grpo_checkpoint(tmp_path / f"{generation}.pt", historical)

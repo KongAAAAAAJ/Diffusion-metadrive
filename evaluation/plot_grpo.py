@@ -54,26 +54,25 @@ KL_LOSS_CURVE_TAGS = (
     "loss/reference_kl",
     "loss/trajectory_reference_kl",
 )
-TRAJECTORY_RATIO_TAGS = (
-    "policy/trajectory_ratio_mean",
+POST_UPDATE_KL_TAGS = (
+    "policy/post_update_reference_kl",
 )
-CLIP_FRACTION_TAGS = (
-    "policy/trajectory_clip_fraction_low",
-    "policy/trajectory_clip_fraction_high",
-    "policy/trajectory_clip_fraction",
-)
-OLD_POLICY_APPROX_KL_TAGS = (
-    "policy/trajectory_old_policy_approx_kl",
+ADAPTER_DRIFT_TAGS = (
+    "policy/adapter_drift_max",
 )
 ACTIVE_SIGNAL_TAGS = (
-    "active_mode/count",
+    "signal_mode/count",
+    "no_signal_mode/count",
+)
+GUARD_SIGNAL_TAGS = (
+    "stability_guard/rejected",
     "zero_signal_epoch",
 )
 POLICY_STABILITY_CURVE_TAGS = (
-    *TRAJECTORY_RATIO_TAGS,
-    *CLIP_FRACTION_TAGS,
-    *OLD_POLICY_APPROX_KL_TAGS,
+    *POST_UPDATE_KL_TAGS,
+    *ADAPTER_DRIFT_TAGS,
     *ACTIVE_SIGNAL_TAGS,
+    *GUARD_SIGNAL_TAGS,
 )
 
 _SCALAR_STEP_ALIGNMENT_GROUPS = (
@@ -253,7 +252,7 @@ def _render_advantage_heatmap(
     ax.set_ylabel("Flattened vehicle-mode trajectory slot")
     ax.set_title("Same-mode GRPO advantage by update state and trajectory slot")
     colorbar = fig.colorbar(image, ax=ax, pad=0.02)
-    colorbar.set_label("Normalized advantage")
+    colorbar.set_label("Fixed-scale truncated advantage")
     fig.text(
         0.5,
         0.015,
@@ -388,26 +387,26 @@ def _render_policy_stability_curve(
     panels = (
         (
             axes[0, 0],
-            TRAJECTORY_RATIO_TAGS,
-            "DDIM-transition importance ratio",
-            "Importance ratio",
+            POST_UPDATE_KL_TAGS,
+            "Post-update reference KL",
+            "KL divergence",
         ),
         (
             axes[0, 1],
-            CLIP_FRACTION_TAGS,
-            "Trajectory clipped fraction",
-            "Fraction",
+            ADAPTER_DRIFT_TAGS,
+            "Maximum mode-adapter drift",
+            "Relative drift",
         ),
         (
             axes[1, 0],
-            OLD_POLICY_APPROX_KL_TAGS,
-            "Approximate KL from rollout policy",
-            "Approximate KL",
+            ACTIVE_SIGNAL_TAGS,
+            "Signal and no-signal modes",
+            "Mode count",
         ),
         (
             axes[1, 1],
-            ACTIVE_SIGNAL_TAGS,
-            "Active modes and zero-signal epochs",
+            GUARD_SIGNAL_TAGS,
+            "Stability guard and zero-gradient update",
             "Count / indicator",
         ),
     )
@@ -432,8 +431,8 @@ def _render_policy_stability_curve(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.legend(frameon=False, fontsize=7.5)
-    axes[0, 0].axhspan(0.8, 1.2, color="#59A14F", alpha=0.08)
-    axes[0, 1].set_ylim(0.0, 1.0)
+    axes[0, 0].axhline(0.25, color="#E15759", linestyle="--", linewidth=1.0)
+    axes[0, 1].axhline(0.02, color="#E15759", linestyle="--", linewidth=1.0)
     fig.suptitle("GRPO policy-update stability", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
 
