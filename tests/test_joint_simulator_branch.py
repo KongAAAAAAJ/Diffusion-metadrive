@@ -32,6 +32,7 @@ class _BranchEnv:
             **dict(config),
         }
         self._closed = False
+        self._reset_calls = 0
         self.reset()
 
     def set_runtime_scenario_route(self, scenario_id: str, local_route: str) -> None:
@@ -39,6 +40,7 @@ class _BranchEnv:
         self.local_route = local_route
 
     def reset(self):
+        self._reset_calls += 1
         self._branch_trajectories = {}
         self.agents = {
             f"agent{role}": SimpleNamespace(
@@ -85,7 +87,7 @@ class _BranchEnv:
             for agent_id in actions
         }
         for agent_id in actions:
-            trajectory = self._branch_trajectories[agent_id]
+            trajectory = self._branch_trajectories.get(agent_id, actions[agent_id])
             vehicle = self.agents[agent_id]
             point = np.asarray(trajectory, dtype=np.float64)[0]
             heading = float(vehicle.heading_theta)
@@ -142,6 +144,40 @@ def _evaluator() -> JointSimulatorBranchEvaluator:
         (3, 256, 256), 255, dtype=np.uint8
     )
     return evaluator
+
+
+def _assert_branch_results_equal(expected, actual) -> None:
+    for name in (
+        "rewards",
+        "unsafe",
+        "collision",
+        "out_of_drivable",
+        "clearance_violation",
+    ):
+        np.testing.assert_array_equal(
+            getattr(actual.reward, name), getattr(expected.reward, name)
+        )
+    assert set(actual.reward.components) == set(expected.reward.components)
+    for name in expected.reward.components:
+        np.testing.assert_array_equal(
+            actual.reward.components[name], expected.reward.components[name]
+        )
+    for name in (
+        "initial_speed_mps",
+        "replay_position_error_m",
+        "replay_heading_error_rad",
+        "executed_steps",
+        "minimum_platoon_gap_m",
+        "minimum_background_gap_m",
+        "tracking_longitudinal_error_m",
+        "tracking_lateral_error_m",
+        "tracking_heading_error_rad",
+        "reference_curvature_max_per_m",
+        "minimum_road_clearance_m",
+    ):
+        np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name))
+    assert actual.failure_reasons == expected.failure_reasons
+    assert actual.tracking_traces == expected.tracking_traces
 
 
 def test_branch_recreates_each_group_and_tracks_for_four_seconds() -> None:
@@ -204,6 +240,69 @@ def test_branch_recreates_each_group_and_tracks_for_four_seconds() -> None:
     assert len(trace["actual_acceleration_mps2"]) == 8
     assert len(trace["lateral_heading_contaminated"]) == 8
     assert trace["maximum_continuous_saturation_s"] == pytest.approx(0.0)
+
+
+def test_replayed_env_path_matches_replay_and_keeps_caller_ownership() -> None:
+    created = []
+
+    def factory(config):
+        env = _BranchEnv(config)
+        created.append(env)
+        return env
+
+    evaluator = JointSimulatorBranchEvaluator(env_factory=factory)
+    evaluator._vehicle_helper._surrounding_vehicles = lambda _env: []
+    evaluator._reference_drivable_bev = lambda _env, _pose: np.full(
+        (3, 256, 256), 255, dtype=np.uint8
+    )
+    prefix_action = {
+        agent_id: _trajectory(1.0) for agent_id in ("agent0", "agent1", "agent2")
+    }
+    replayed_env = _BranchEnv({})
+    replayed_env.step(prefix_action)
+    spec = _spec(
+        np.asarray(
+            [
+                [0.5, 0.0, 0.0],
+                [-15.24, 0.0, 0.0],
+                [-30.98, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+    )
+    candidates = np.stack([np.stack([_trajectory(3.0)] * 3)])
+
+    expected = evaluator.evaluate(spec, (prefix_action,), candidates)
+    actual = evaluator.evaluate_from_replayed_env(spec, replayed_env, candidates)
+
+    _assert_branch_results_equal(expected, actual)
+    assert len(created) == 1
+    assert created[0]._closed
+    assert replayed_env._reset_calls == 1
+    assert not replayed_env._closed
+
+
+def test_replayed_env_path_requires_one_candidate_and_exact_pose() -> None:
+    evaluator = _evaluator()
+    env = _BranchEnv({})
+    candidate = np.stack([np.stack([_trajectory(3.0)] * 3)])
+
+    with pytest.raises(JointRewardError, match="group size one"):
+        evaluator.evaluate_from_replayed_env(
+            _spec(), env, np.repeat(candidate, 2, axis=0)
+        )
+    with pytest.raises(JointRewardError, match="did not reproduce"):
+        evaluator.evaluate_from_replayed_env(
+            _spec(
+                np.asarray(
+                    [[1.0, 0.0, 0.0], [-15.74, 0.0, 0.0], [-31.48, 0.0, 0.0]],
+                    dtype=np.float64,
+                )
+            ),
+            env,
+            candidate,
+        )
+    assert not env._closed
 
 
 def test_tracking_metric_does_not_turn_curve_timing_lag_into_lateral_error() -> None:

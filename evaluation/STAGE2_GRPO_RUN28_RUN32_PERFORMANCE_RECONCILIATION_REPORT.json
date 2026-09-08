@@ -1,0 +1,90 @@
+{
+  "format": "stage2_grpo_run28_run32_performance_reconciliation_v1",
+  "recorded_at": "2026-09-07T18:28:44+08:00",
+  "scope": "Reconcile completed and interrupted schema-v6 GRPO diagnostics before semantic-preserving performance work; do not change training, reward, validation, checkpoint, or eligibility contracts.",
+  "repository": {
+    "branch": "BEV",
+    "observed_head": "b2e3eef580fbc7934dd3e39051d77bd485b892f7",
+    "active_training_process": false,
+    "user_runtime_config_edit_preserved": {
+      "path": "configs/train/bev_joint_grpo.yaml",
+      "seed": 23,
+      "total_rollout_groups": 2000
+    }
+  },
+  "artifact_root": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open",
+  "runs": {
+    "run_28": {
+      "status": "complete_nonformal_diagnostic",
+      "implementation_commit": "0146ec366fc88f28529b5e3d70a23e48f2a8241e",
+      "target_accepted_update_states": 500,
+      "accepted_update_states": 500,
+      "sampling_attempts": 500,
+      "rejected_sampling_attempts": 0,
+      "optimizer_steps": 500,
+      "environment_steps": 5338,
+      "warmup_environment_steps": 4838,
+      "environment_episode_count": 95,
+      "wall_time_seconds": 9936.288739839103,
+      "checkpoint_round_trip": true,
+      "report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_28/report.json"
+    },
+    "run_29": {
+      "status": "failed_preflight",
+      "failure": "OnlineGRPOError: bounded GRPO diagnostics require a clean committed implementation",
+      "report_present": false,
+      "preservation_policy": "preserve without reuse or metadata backfill"
+    },
+    "run_30": {
+      "status": "interrupted_during_initial_fixed_validation",
+      "python_exit_status": 120,
+      "tee_exit_status": 130,
+      "config_metrics_report_present": false,
+      "preservation_policy": "preserve without reuse or metadata backfill"
+    },
+    "run_31": {
+      "status": "interrupted_during_initial_fixed_validation",
+      "python_exit_status": 120,
+      "tee_exit_status": 130,
+      "config_metrics_report_present": false,
+      "preservation_policy": "preserve without reuse or metadata backfill"
+    },
+    "run_32": {
+      "status": "complete_nonformal_diagnostic",
+      "implementation_commit": "9c36e4b82f2f06cc8978cfb9d60cba44e759ef5c",
+      "target_accepted_update_states": 500,
+      "accepted_update_states": 500,
+      "sampling_attempts": 500,
+      "rejected_sampling_attempts": 0,
+      "optimizer_steps": 500,
+      "environment_steps": 5754,
+      "warmup_environment_steps": 5254,
+      "environment_episode_count": 85,
+      "wall_time_seconds": 9486.445100000128,
+      "accepted_update_states_per_hour": 189.7444175373951,
+      "cuda_peak_memory_bytes": 623857664,
+      "checkpoint_round_trip": true,
+      "report": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_32/report.json"
+    }
+  },
+  "run_32_timing_evidence": {
+    "online_validation_events": 25,
+    "online_validation_wall_seconds": 4107.779,
+    "online_validation_wall_fraction": 0.433,
+    "initial_fixed_validation_is_additional": true,
+    "ordinary_step_median_seconds": 9.746,
+    "trainer_update_mean_seconds": 0.07216,
+    "trainer_update_wall_fraction": 0.0038,
+    "interpretation": "Fixed validation is the largest measured wall-time block. Optimizer/backward, retry handling, memory pressure, and final checkpoint/plot I/O are not primary bottlenecks."
+  },
+  "contract_boundary": {
+    "checkpoint_schema": 6,
+    "optimizer": "stage2_joint_grpo_optimizer_v8",
+    "collection": "stage2_joint_grpo_persistent_episode_v7",
+    "application": "stage2_grpo_open_application_v5",
+    "diagnostic_only": true,
+    "formal_eligibility_changed": false,
+    "stage1_qualification_gate_changed": false
+  },
+  "next_action": "Implement and verify semantic-preserving GRPO performance optimizations without running the user-owned 2000-state configuration."
+}

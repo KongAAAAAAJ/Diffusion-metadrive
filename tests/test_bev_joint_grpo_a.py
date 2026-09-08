@@ -176,6 +176,57 @@ def test_frozen_pretrain_returns_all_modes_and_matches_stage1() -> None:
     assert torch.equal(first["selected_mode"], stage1["selected_mode"])
 
 
+@pytest.mark.parametrize("separate_transition_generator", [False, True])
+def test_current_only_sampling_matches_paired_current_path_and_rng_progress(
+    separate_transition_generator: bool,
+) -> None:
+    trainer = JointGRPOTrainerA(
+        _planner(),
+        JointGRPOConfig(
+            trajectories_per_mode=2,
+            post_update_reference_kl_max=1e6,
+            max_adapter_relative_drift=1e6,
+        ),
+    )
+    paired_generator = torch.Generator().manual_seed(29)
+    current_generator = torch.Generator().manual_seed(29)
+    paired_transition_generator = (
+        torch.Generator().manual_seed(31)
+        if separate_transition_generator
+        else None
+    )
+    current_transition_generator = (
+        torch.Generator().manual_seed(31)
+        if separate_transition_generator
+        else None
+    )
+
+    paired = trainer.sample_groups(
+        _inputs(),
+        generator=paired_generator,
+        transition_generator=paired_transition_generator,
+    )
+    current = trainer.sample_current_groups(
+        _inputs(),
+        generator=current_generator,
+        transition_generator=current_transition_generator,
+    )
+
+    assert current.shape == (1, 3, 10, 2, 8, 3)
+    assert torch.equal(current, paired.candidate_trajectories)
+    assert torch.equal(
+        torch.rand((7,), generator=paired_generator),
+        torch.rand((7,), generator=current_generator),
+    )
+    if separate_transition_generator:
+        assert paired_transition_generator is not None
+        assert current_transition_generator is not None
+        assert torch.equal(
+            torch.rand((7,), generator=paired_transition_generator),
+            torch.rand((7,), generator=current_transition_generator),
+        )
+
+
 def test_rollout_can_enter_update_only_once() -> None:
     trainer = JointGRPOTrainerA(
         _planner(),

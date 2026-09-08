@@ -896,37 +896,15 @@ class _JointGRPOTrainerBase:
             TRAJECTORY_DIM,
         ).permute(0, 2, 3, 1, 4, 5).contiguous()
 
-    @torch.no_grad()
-    def sample_groups(
+    def _sample_noise_bundle(
         self,
-        model_inputs: Mapping[str, Tensor],
+        anchor: Tensor,
         *,
         generator: torch.Generator,
-        transition_generator: torch.Generator | None = None,
-        noise_bundle_identity: tuple[int, int, int] | None = None,
-    ) -> JointGRPORollout:
-        if not isinstance(generator, torch.Generator):
-            raise JointGRPOError("sample_groups requires an explicit torch.Generator")
-        if transition_generator is None:
-            transition_generator = generator
-        if not isinstance(transition_generator, torch.Generator):
-            raise JointGRPOError(
-                "sample_groups transition_generator must be a torch.Generator"
-            )
-        context = self._context_from_inputs(model_inputs)
-        coarse = model_inputs["coarse_trajectories"]
-        valid_mask = model_inputs["mode_valid_mask"]
-        self.planner._validate_trajectory_inputs(
-            coarse,
-            valid_mask,
-            batch_size=context.batch_size,
-            device=context.role_tokens.device,
-        )
-        trajectories = self.config.trajectories_per_mode
-        repeated_context = _repeat_context(context, trajectories)
-        repeated_coarse = _repeat_groups(coarse, trajectories)
-        repeated_mask = _repeat_groups(valid_mask, trajectories)
-        anchor = self.planner._normalize_xy(repeated_coarse[..., :2])
+        transition_generator: torch.Generator,
+    ) -> DDIMNoiseBundle:
+        """Draw the one paired DDIM noise bundle for a current rollout."""
+
         bundle = DDIMNoiseBundle(
             initial_noise=torch.randn(
                 anchor.shape,
@@ -944,6 +922,24 @@ class _JointGRPOTrainerBase:
                 for _ in range(DEFAULT_DDIM_PATH.stochastic_transition_count)
             ),
         )
+        bundle.validate(anchor.shape, device=anchor.device)
+        return bundle
+
+    def _sample_current_candidates(
+        self,
+        *,
+        context: BEVPlannerContext,
+        coarse: Tensor,
+        valid_mask: Tensor,
+        bundle: DDIMNoiseBundle,
+    ) -> tuple[Tensor, Tensor, list[Tensor]]:
+        """Run the current-policy DDIM path from an already-drawn noise bundle."""
+
+        trajectories = self.config.trajectories_per_mode
+        repeated_context = _repeat_context(context, trajectories)
+        repeated_coarse = _repeat_groups(coarse, trajectories)
+        repeated_mask = _repeat_groups(valid_mask, trajectories)
+        anchor = self.planner._normalize_xy(repeated_coarse[..., :2])
         bundle.validate(anchor.shape, device=anchor.device)
         noise_timestep = torch.full(
             (anchor.shape[0] * NUM_PLATOON_ROLES,),
@@ -1016,6 +1012,92 @@ class _JointGRPOTrainerBase:
             TRAJECTORY_STEPS,
             TRAJECTORY_DIM,
         ).permute(0, 2, 3, 1, 4, 5).contiguous()
+        return chain_tensor, candidate_tensor, step_histories
+
+    @torch.no_grad()
+    def sample_current_groups(
+        self,
+        model_inputs: Mapping[str, Tensor],
+        *,
+        generator: torch.Generator,
+        transition_generator: torch.Generator | None = None,
+    ) -> Tensor:
+        """Return current-policy N trajectories without frozen paired decoding."""
+
+        if not isinstance(generator, torch.Generator):
+            raise JointGRPOError(
+                "sample_current_groups requires an explicit torch.Generator"
+            )
+        if transition_generator is None:
+            transition_generator = generator
+        if not isinstance(transition_generator, torch.Generator):
+            raise JointGRPOError(
+                "sample_current_groups transition_generator must be a torch.Generator"
+            )
+        context = self._context_from_inputs(model_inputs)
+        coarse = model_inputs["coarse_trajectories"]
+        valid_mask = model_inputs["mode_valid_mask"]
+        self.planner._validate_trajectory_inputs(
+            coarse,
+            valid_mask,
+            batch_size=context.batch_size,
+            device=context.role_tokens.device,
+        )
+        repeated_coarse = _repeat_groups(coarse, self.config.trajectories_per_mode)
+        anchor = self.planner._normalize_xy(repeated_coarse[..., :2])
+        bundle = self._sample_noise_bundle(
+            anchor,
+            generator=generator,
+            transition_generator=transition_generator,
+        )
+        _, candidates, _ = self._sample_current_candidates(
+            context=context,
+            coarse=coarse,
+            valid_mask=valid_mask,
+            bundle=bundle,
+        )
+        return candidates.detach()
+
+    @torch.no_grad()
+    def sample_groups(
+        self,
+        model_inputs: Mapping[str, Tensor],
+        *,
+        generator: torch.Generator,
+        transition_generator: torch.Generator | None = None,
+        noise_bundle_identity: tuple[int, int, int] | None = None,
+    ) -> JointGRPORollout:
+        if not isinstance(generator, torch.Generator):
+            raise JointGRPOError("sample_groups requires an explicit torch.Generator")
+        if transition_generator is None:
+            transition_generator = generator
+        if not isinstance(transition_generator, torch.Generator):
+            raise JointGRPOError(
+                "sample_groups transition_generator must be a torch.Generator"
+            )
+        context = self._context_from_inputs(model_inputs)
+        coarse = model_inputs["coarse_trajectories"]
+        valid_mask = model_inputs["mode_valid_mask"]
+        self.planner._validate_trajectory_inputs(
+            coarse,
+            valid_mask,
+            batch_size=context.batch_size,
+            device=context.role_tokens.device,
+        )
+        trajectories = self.config.trajectories_per_mode
+        repeated_coarse = _repeat_groups(coarse, trajectories)
+        anchor = self.planner._normalize_xy(repeated_coarse[..., :2])
+        bundle = self._sample_noise_bundle(
+            anchor,
+            generator=generator,
+            transition_generator=transition_generator,
+        )
+        chain_tensor, candidate_tensor, step_histories = self._sample_current_candidates(
+            context=context,
+            coarse=coarse,
+            valid_mask=valid_mask,
+            bundle=bundle,
+        )
         frozen_candidate_tensor = self._sample_frozen_candidates(
             context=context,
             coarse=coarse,

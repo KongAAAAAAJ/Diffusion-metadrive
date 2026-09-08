@@ -162,6 +162,115 @@ def test_split_api_caches_same_mode_pretrain_across_noise_resamples() -> None:
     assert first.rewards[2, 5, 0] != second.rewards[2, 5, 0]
 
 
+def test_geometry_context_reuses_live_state_preprocessing(monkeypatch) -> None:
+    candidates, all_modes, selected = _inputs()
+    valid = np.zeros((3, 10), dtype=np.bool_)
+    valid[0, 2] = True
+    valid[1, 4] = True
+    scorer = _scorer()
+    reference = _scorer()
+    env = _env()
+    inputs = _model_inputs()
+    baseline = reference.score_counterfactuals(
+        env, inputs, candidates, all_modes, selected, valid
+    )
+    build_calls = 0
+    original = scorer.build_geometry_context
+
+    def counted(*args, **kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(scorer, "build_geometry_context", counted)
+    context = scorer.build_geometry_context(env, inputs, selected)
+    pretrain = scorer.score_pretrain(
+        env, inputs, all_modes, selected, valid, geometry_context=context
+    )
+    first = scorer.score_candidates(
+        env, inputs, candidates, selected, valid, pretrain, geometry_context=context
+    )
+    second = scorer.score_candidates(
+        env, inputs, candidates, selected, valid, pretrain, geometry_context=context
+    )
+
+    assert build_calls == 1
+    np.testing.assert_allclose(first.rewards, second.rewards, rtol=1e-7, atol=1e-8)
+    assert np.array_equal(first.unsafe, second.unsafe)
+    np.testing.assert_allclose(first.rewards, baseline.rewards, rtol=1e-7, atol=1e-8)
+    assert np.array_equal(first.unsafe, baseline.unsafe)
+    assert np.array_equal(first.collision, baseline.collision)
+    assert np.array_equal(first.out_of_drivable, baseline.out_of_drivable)
+    np.testing.assert_allclose(
+        first.pretrain_rewards, baseline.pretrain_rewards, rtol=1e-7, atol=1e-8
+    )
+    assert np.array_equal(first.pretrain_unsafe, baseline.pretrain_unsafe)
+    assert np.array_equal(first.pretrain_collision, baseline.pretrain_collision)
+    assert np.array_equal(
+        first.pretrain_out_of_drivable, baseline.pretrain_out_of_drivable
+    )
+    for name in first.components:
+        np.testing.assert_allclose(
+            first.components[name], baseline.components[name], rtol=1e-7, atol=1e-8
+        )
+        np.testing.assert_allclose(
+            first.pretrain_components[name],
+            baseline.pretrain_components[name],
+            rtol=1e-7,
+            atol=1e-8,
+        )
+
+
+def test_all_mode_n1_scorer_matches_repeated_candidate_scoring() -> None:
+    candidates, all_modes, selected = _inputs()
+    valid = np.zeros((3, 10), dtype=np.bool_)
+    valid[0, 2] = True
+    valid[1, 4] = True
+    valid[2, 7] = True
+    scorer = _scorer()
+    env = _env()
+    inputs = _model_inputs()
+    context = scorer.build_geometry_context(env, inputs, selected)
+    pretrain = scorer.score_pretrain(
+        env, inputs, all_modes, selected, valid, geometry_context=context
+    )
+    repeated = scorer.score_candidates(
+        env,
+        inputs,
+        candidates,
+        selected,
+        valid,
+        pretrain,
+        geometry_context=context,
+    )
+    n1 = scorer.score_all_mode_trajectories(
+        env,
+        inputs,
+        all_modes,
+        selected,
+        valid,
+        pretrain,
+        geometry_context=context,
+    )
+
+    assert n1.rewards.shape == (3, 10, 1)
+    np.testing.assert_allclose(
+        n1.rewards[..., 0], repeated.rewards[..., 0], rtol=1e-7, atol=1e-8
+    )
+    assert np.array_equal(n1.unsafe[..., 0], repeated.unsafe[..., 0])
+    assert np.array_equal(n1.collision[..., 0], repeated.collision[..., 0])
+    assert np.array_equal(
+        n1.out_of_drivable[..., 0], repeated.out_of_drivable[..., 0]
+    )
+    for name in n1.components:
+        np.testing.assert_allclose(
+            n1.components[name][..., 0],
+            repeated.components[name][..., 0],
+            rtol=1e-7,
+            atol=1e-8,
+        )
+
+
 def test_target_reward_responds_to_target_teammate_interaction() -> None:
     candidates, all_modes, selected = _inputs()
     valid = np.zeros((3, 10), dtype=np.bool_)

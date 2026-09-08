@@ -5,9 +5,9 @@ run:
 
 online:
   device: cuda
-  seed: 42
+  seed: 23
   trajectories_per_mode: 48
-  total_rollout_groups: 500
+  total_rollout_groups: 2000
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
   resume_checkpoint: null

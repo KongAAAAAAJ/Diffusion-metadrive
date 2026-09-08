@@ -60,6 +60,7 @@ from models.bev_planner.joint_reward import (
     VEHICLE_MODE_REWARD_CONTRACT,
     VEHICLE_MODE_REWARD_CONTRACT_SHA256,
     VehicleModeCounterfactualReward,
+    VehicleModePretrainRewardResult,
     VehicleModeRewardResult,
     VehicleModeRewardConfig,
     vehicle_mode_reward_config_sha256,
@@ -105,6 +106,31 @@ MUTABLE_RUNTIME_CONFIG_PATH = "configs/train/bev_joint_grpo.yaml"
 
 class OnlineGRPOError(RuntimeError):
     """Raised when online raw-domain GRPO violates its contract."""
+
+
+@dataclass(frozen=True)
+class _FixedValidationFrozenEntry:
+    """Immutable frozen-policy work reused within one training process."""
+
+    all_mode_trajectories: np.ndarray
+    selected_trajectory: np.ndarray
+    selected_mode: np.ndarray
+    pretrain_reward: VehicleModePretrainRewardResult
+    paired_candidates: np.ndarray
+    paired_reward: VehicleModeRewardResult
+
+
+def _performance_summary(
+    totals: Mapping[str, float], *, validation_calls: int
+) -> dict[str, object]:
+    """Return accumulated wall timings without changing checkpoint payloads."""
+
+    return {
+        "timing_totals_seconds": {
+            str(name): float(value) for name, value in sorted(totals.items())
+        },
+        "validation_calls": int(validation_calls),
+    }
 
 
 def _implementation_commit() -> str:
@@ -1942,6 +1968,7 @@ def _write_baseline_execution_event(
     optimizer_step: int,
     accepted_update_states: int,
     rejected_sampling_attempts: int,
+    stability_guard_rejections: int,
     exhausted_states: int,
     baseline_execution_steps: int,
     environment_steps: int,
@@ -1949,12 +1976,14 @@ def _write_baseline_execution_event(
     scenario: tuple[str, str],
     seed: int,
     pretrain_reward_mean: float,
+    performance: Mapping[str, float],
 ) -> None:
     record = {
         "event": "frozen_baseline_execution",
         "optimizer_step": int(optimizer_step),
         "accepted_update_states": int(accepted_update_states),
         "rejected_sampling_attempts": int(rejected_sampling_attempts),
+        "stability_guard_rejections": int(stability_guard_rejections),
         "exhausted_states": int(exhausted_states),
         "baseline_execution_steps": int(baseline_execution_steps),
         "environment_steps": int(environment_steps),
@@ -1963,6 +1992,7 @@ def _write_baseline_execution_event(
         "route": str(scenario[1]),
         "seed": int(seed),
         "same_mode_pretrain_reward_mean": float(pretrain_reward_mean),
+        **{str(name): float(value) for name, value in performance.items()},
     }
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(record, sort_keys=True) + "\n")
@@ -2020,6 +2050,7 @@ def _sampler_state(
     accepted_update_states: int,
     sampling_attempts: int,
     rejected_sampling_attempts: int,
+    stability_guard_rejections: int,
     exhausted_states: int,
     baseline_execution_steps: int,
     zero_signal_epochs: int,
@@ -2028,6 +2059,7 @@ def _sampler_state(
     bucket_accepted_update_counts: Sequence[int],
     bucket_sampling_attempt_counts: Sequence[int],
     bucket_rejected_sampling_attempt_counts: Sequence[int],
+    bucket_stability_guard_rejection_counts: Sequence[int],
     bucket_exhausted_state_counts: Sequence[int],
     bucket_baseline_execution_step_counts: Sequence[int],
     bucket_zero_signal_epoch_counts: Sequence[int],
@@ -2046,6 +2078,7 @@ def _sampler_state(
         "accepted_update_states": accepted_update_states,
         "sampling_attempts": sampling_attempts,
         "rejected_sampling_attempts": rejected_sampling_attempts,
+        "stability_guard_rejections": stability_guard_rejections,
         "exhausted_states": exhausted_states,
         "baseline_execution_steps": baseline_execution_steps,
         "zero_signal_epochs": zero_signal_epochs,
@@ -2055,6 +2088,9 @@ def _sampler_state(
         "bucket_sampling_attempt_counts": list(bucket_sampling_attempt_counts),
         "bucket_rejected_sampling_attempt_counts": list(
             bucket_rejected_sampling_attempt_counts
+        ),
+        "bucket_stability_guard_rejection_counts": list(
+            bucket_stability_guard_rejection_counts
         ),
         "bucket_exhausted_state_counts": list(bucket_exhausted_state_counts),
         "bucket_baseline_execution_step_counts": list(
@@ -2099,6 +2135,11 @@ def _validate_sampler_state(
         or bucket_count <= 0
     ):
         raise OnlineGRPOError("training bucket count must be a positive integer")
+    raw = dict(raw)
+    raw.setdefault("stability_guard_rejections", 0)
+    raw.setdefault(
+        "bucket_stability_guard_rejection_counts", [0 for _ in range(bucket_count)]
+    )
     if (
         isinstance(rollout_groups_per_bucket_visit, bool)
         or not isinstance(rollout_groups_per_bucket_visit, int)
@@ -2109,6 +2150,7 @@ def _validate_sampler_state(
         ("accepted_update_states", 0),
         ("sampling_attempts", 0),
         ("rejected_sampling_attempts", 0),
+        ("stability_guard_rejections", 0),
         ("exhausted_states", 0),
         ("baseline_execution_steps", 0),
         ("zero_signal_epochs", 0),
@@ -2125,6 +2167,7 @@ def _validate_sampler_state(
     accepted = int(raw["accepted_update_states"])
     attempts = int(raw["sampling_attempts"])
     rejected = int(raw["rejected_sampling_attempts"])
+    guard_rejected = int(raw["stability_guard_rejections"])
     exhausted = int(raw["exhausted_states"])
     baseline_steps = int(raw["baseline_execution_steps"])
     zero_signal = int(raw["zero_signal_epochs"])
@@ -2132,9 +2175,9 @@ def _validate_sampler_state(
     next_bucket = int(raw["next_bucket_index"])
     current_visit_progress = int(raw["current_visit_progress"])
     last_validated = int(raw["last_validated_update_state"])
-    if attempts != accepted + rejected or last_validated > accepted:
+    if attempts != accepted + rejected + guard_rejected or last_validated > accepted:
         raise OnlineGRPOError("online GRPO checkpoint sampler counters conflict")
-    if baseline_steps != accepted + exhausted:
+    if baseline_steps != accepted + exhausted + guard_rejected:
         raise OnlineGRPOError("online GRPO baseline execution counters conflict")
     if (
         isinstance(environment_steps, bool)
@@ -2162,6 +2205,7 @@ def _validate_sampler_state(
         "bucket_accepted_update_counts",
         "bucket_sampling_attempt_counts",
         "bucket_rejected_sampling_attempt_counts",
+        "bucket_stability_guard_rejection_counts",
         "bucket_exhausted_state_counts",
         "bucket_baseline_execution_step_counts",
         "bucket_zero_signal_epoch_counts",
@@ -2193,6 +2237,13 @@ def _validate_sampler_state(
         raise OnlineGRPOError("online GRPO checkpoint bucket attempts conflict")
     if sum(counts["bucket_rejected_sampling_attempt_counts"]) != rejected:
         raise OnlineGRPOError("online GRPO checkpoint bucket rejections conflict")
+    if (
+        sum(counts["bucket_stability_guard_rejection_counts"])
+        != guard_rejected
+    ):
+        raise OnlineGRPOError(
+            "online GRPO checkpoint bucket guard rejections conflict"
+        )
     if sum(counts["bucket_exhausted_state_counts"]) != exhausted:
         raise OnlineGRPOError("online GRPO checkpoint bucket exhaustions conflict")
     if sum(counts["bucket_baseline_execution_step_counts"]) != baseline_steps:
@@ -2202,20 +2253,22 @@ def _validate_sampler_state(
     if sum(counts["bucket_optimizer_step_counts"]) != optimizer_step:
         raise OnlineGRPOError("online GRPO checkpoint bucket updates conflict")
     if any(
-        attempt_count != accepted_count + rejected_count
-        for attempt_count, accepted_count, rejected_count in zip(
+        attempt_count != accepted_count + rejected_count + guard_rejected_count
+        for attempt_count, accepted_count, rejected_count, guard_rejected_count in zip(
             counts["bucket_sampling_attempt_counts"],
             counts["bucket_accepted_update_counts"],
             counts["bucket_rejected_sampling_attempt_counts"],
+            counts["bucket_stability_guard_rejection_counts"],
         )
     ):
         raise OnlineGRPOError("online GRPO checkpoint bucket attempt counters conflict")
     if any(
-        baseline_count != accepted_count + exhausted_count
-        for baseline_count, accepted_count, exhausted_count in zip(
+        baseline_count != accepted_count + exhausted_count + guard_rejected_count
+        for baseline_count, accepted_count, exhausted_count, guard_rejected_count in zip(
             counts["bucket_baseline_execution_step_counts"],
             counts["bucket_accepted_update_counts"],
             counts["bucket_exhausted_state_counts"],
+            counts["bucket_stability_guard_rejection_counts"],
         )
     ):
         raise OnlineGRPOError("online GRPO bucket baseline counters conflict")
@@ -2292,6 +2345,7 @@ def _validate_sampler_state(
         "accepted_update_states": accepted,
         "sampling_attempts": attempts,
         "rejected_sampling_attempts": rejected,
+        "stability_guard_rejections": guard_rejected,
         "exhausted_states": exhausted,
         "baseline_execution_steps": baseline_steps,
         "zero_signal_epochs": zero_signal,
@@ -2569,6 +2623,10 @@ def _fixed_raw_proxy_and_simulator_validation(
     validation_state_bank: Mapping[
         tuple[tuple[str, str], int], Mapping[str, object]
     ],
+    frozen_cache: dict[
+        tuple[tuple[str, str], int], _FixedValidationFrozenEntry
+    ]
+    | None = None,
 ) -> tuple[dict[str, float], tuple[dict[str, object], ...]]:
     """Evaluate per-vehicle reward; retain joint/simulator diagnostics only."""
 
@@ -2580,8 +2638,16 @@ def _fixed_raw_proxy_and_simulator_validation(
             trajectories_per_mode=trainer.config.trajectories_per_mode
         )
     )
+    single_vehicle_backend = VehicleModeCounterfactualReward(
+        VehicleModeRewardConfig(trajectories_per_mode=1)
+    )
     evaluator = JointSimulatorBranchEvaluator(reward_config)
     trajectory_optimizer = KinematicTrajectoryOptimizer()
+    cache = {} if frozen_cache is None else frozen_cache
+    performance: defaultdict[str, float] = defaultdict(float)
+    validation_started = time.perf_counter()
+    cache_hits = 0
+    cache_misses = 0
     raw_rewards: list[float] = []
     raw_unsafe_count = 0
     raw_collision_count = 0
@@ -2618,11 +2684,13 @@ def _fixed_raw_proxy_and_simulator_validation(
     scenario_simulator_outs: dict[str, int] = defaultdict(int)
     for scenario_index, scenario in enumerate(scenarios):
         for seed in seeds:
-            record = validation_state_bank.get((tuple(scenario), int(seed)))
+            cache_key = (tuple(scenario), int(seed))
+            record = validation_state_bank.get(cache_key)
             if record is None:
                 raise OnlineGRPOError(
                     "validation state bank is missing a scenario/seed record"
                 )
+            replay_started = time.perf_counter()
             (
                 env,
                 rule_maker,
@@ -2631,7 +2699,7 @@ def _fixed_raw_proxy_and_simulator_validation(
                 execution_mask,
                 batch,
                 noise_bundle,
-                prefix,
+                _,
                 reference_pose,
             ) = _replay_fixed_validation_state(
                 record,
@@ -2640,12 +2708,13 @@ def _fixed_raw_proxy_and_simulator_validation(
                 device=device,
                 trajectory_optimizer=trajectory_optimizer,
             )
+            performance["perf/validation/state_replay_seconds"] += (
+                time.perf_counter() - replay_started
+            )
             try:
+                current_inference_started = time.perf_counter()
                 output = planner_forward_from_batch(
                     planner, batch, ddim_noise_bundle=noise_bundle
-                )
-                frozen = trainer.infer_frozen_pretrain_from_inputs(
-                    batch, noise_bundle=noise_bundle
                 )
                 raw_candidate = (
                     output["selected_trajectory"][0]
@@ -2668,67 +2737,149 @@ def _fixed_raw_proxy_and_simulator_validation(
                     .numpy()
                     .astype(np.float32, copy=False)
                 )
-                frozen_all_modes = (
-                    frozen["all_mode_trajectories"][0]
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .astype(np.float32, copy=False)
+                performance["perf/validation/current_inference_seconds"] += (
+                    time.perf_counter() - current_inference_started
                 )
-                frozen_argmax = (
-                    frozen["selected_trajectory"][0]
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .astype(np.float32, copy=False)
-                )
-                pretrain_local = vehicle_backend.score_pretrain(
-                    env,
-                    values,
-                    frozen_all_modes,
-                    frozen_argmax,
-                    execution_mask,
-                )
+                cached = cache.get(cache_key)
+                if cached is None:
+                    cache_misses += 1
+                    frozen_inference_started = time.perf_counter()
+                    frozen = trainer.infer_frozen_pretrain_from_inputs(
+                        batch, noise_bundle=noise_bundle
+                    )
+                    frozen_all_modes = (
+                        frozen["all_mode_trajectories"][0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=False)
+                    )
+                    frozen_argmax = (
+                        frozen["selected_trajectory"][0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=False)
+                    )
+                    frozen_selected_modes = (
+                        frozen["selected_mode"][0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.int64, copy=False)
+                    )
+                    performance["perf/validation/frozen_inference_seconds"] += (
+                        time.perf_counter() - frozen_inference_started
+                    )
+                    pretrain_reward_started = time.perf_counter()
+                    pretrain_local = vehicle_backend.score_pretrain(
+                        env,
+                        values,
+                        frozen_all_modes,
+                        frozen_argmax,
+                        execution_mask,
+                    )
+                    performance["perf/validation/pretrain_reward_seconds"] += (
+                        time.perf_counter() - pretrain_reward_started
+                    )
+                else:
+                    cache_hits += 1
+                    frozen_all_modes = cached.all_mode_trajectories
+                    frozen_argmax = cached.selected_trajectory
+                    frozen_selected_modes = cached.selected_mode
+                    pretrain_local = cached.pretrain_reward
                 paired_initial, paired_transition = _diffusion_attempt_generators(
                     device=device,
                     training_seed=10_000_019 + 1_009 * int(seed),
                     live_state_index=scenario_index,
                     retry_index=0,
                 )
-                paired_rollout = trainer.sample_groups(
-                    batch,
-                    generator=paired_initial,
-                    transition_generator=paired_transition,
-                    noise_bundle_identity=(
-                        10_000_019 + 1_009 * int(seed),
-                        int(scenario_index),
-                        0,
-                    ),
+                paired_sampling_started = time.perf_counter()
+                if cached is None:
+                    paired_rollout = trainer.sample_groups(
+                        batch,
+                        generator=paired_initial,
+                        transition_generator=paired_transition,
+                        noise_bundle_identity=(
+                            10_000_019 + 1_009 * int(seed),
+                            int(scenario_index),
+                            0,
+                        ),
+                    )
+                    paired_current_candidates = (
+                        paired_rollout.candidate_trajectories[0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=False)
+                    )
+                    paired_frozen_candidates = (
+                        paired_rollout.frozen_candidate_trajectories[0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=False)
+                    )
+                else:
+                    paired_current_candidates = (
+                        trainer.sample_current_groups(
+                            batch,
+                            generator=paired_initial,
+                            transition_generator=paired_transition,
+                        )[0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=False)
+                    )
+                    paired_frozen_candidates = cached.paired_candidates
+                performance["perf/validation/paired_sampling_seconds"] += (
+                    time.perf_counter() - paired_sampling_started
                 )
+                current_reward_started = time.perf_counter()
                 paired_current = vehicle_backend.score_candidates(
                     env,
                     values,
-                    paired_rollout.candidate_trajectories[0]
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .astype(np.float32, copy=False),
+                    paired_current_candidates,
                     frozen_argmax,
                     execution_mask,
                     pretrain_local,
                 )
-                paired_frozen = vehicle_backend.score_candidates(
-                    env,
-                    values,
-                    paired_rollout.frozen_candidate_trajectories[0]
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .astype(np.float32, copy=False),
-                    frozen_argmax,
-                    execution_mask,
-                    pretrain_local,
+                performance["perf/validation/current_n48_reward_seconds"] += (
+                    time.perf_counter() - current_reward_started
                 )
+                if cached is None:
+                    frozen_reward_started = time.perf_counter()
+                    paired_frozen = vehicle_backend.score_candidates(
+                        env,
+                        values,
+                        paired_frozen_candidates,
+                        frozen_argmax,
+                        execution_mask,
+                        pretrain_local,
+                    )
+                    performance["perf/validation/frozen_n48_reward_seconds"] += (
+                        time.perf_counter() - frozen_reward_started
+                    )
+                    cached = _FixedValidationFrozenEntry(
+                        all_mode_trajectories=np.array(
+                            frozen_all_modes, dtype=np.float32, copy=True
+                        ),
+                        selected_trajectory=np.array(
+                            frozen_argmax, dtype=np.float32, copy=True
+                        ),
+                        selected_mode=np.array(
+                            frozen_selected_modes, dtype=np.int64, copy=True
+                        ),
+                        pretrain_reward=pretrain_local,
+                        paired_candidates=np.array(
+                            paired_frozen_candidates, dtype=np.float32, copy=True
+                        ),
+                        paired_reward=paired_frozen,
+                    )
+                    cache[cache_key] = cached
+                else:
+                    paired_frozen = cached.paired_reward
                 paired_valid = np.asarray(
                     paired_current.valid_mode_mask, dtype=np.bool_
                 )
@@ -2745,28 +2896,20 @@ def _fixed_raw_proxy_and_simulator_validation(
                 paired_n48_gain_means.append(
                     float(np.mean(np.asarray(role_current) - np.asarray(role_frozen)))
                 )
-                validation_candidates = np.repeat(
-                    current_all_modes[:, :, None],
-                    trainer.config.trajectories_per_mode,
-                    axis=2,
-                )
-                current_local = vehicle_backend.score_candidates(
+                n1_reward_started = time.perf_counter()
+                current_local = single_vehicle_backend.score_candidates(
                     env,
                     values,
-                    validation_candidates,
+                    current_all_modes[:, :, None],
                     frozen_argmax,
                     execution_mask,
                     pretrain_local,
                 )
+                performance["perf/validation/current_n1_reward_seconds"] += (
+                    time.perf_counter() - n1_reward_started
+                )
                 valid = np.asarray(current_local.valid_mode_mask, dtype=np.bool_)
                 scenario_key = str(scenario[0]).split("_", 1)[0]
-                frozen_selected_modes = (
-                    frozen["selected_mode"][0]
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .astype(np.int64, copy=False)
-                )
                 for role in range(3):
                     current_mode = int(selected_modes[0, role])
                     frozen_mode = int(frozen_selected_modes[role])
@@ -2855,7 +2998,11 @@ def _fixed_raw_proxy_and_simulator_validation(
                         per_mode_collision[role][role_valid].sum()
                     )
                     role_out_counts[role] += int(per_mode_out[role][role_valid].sum())
+                joint_reward_started = time.perf_counter()
                 raw_proxy = proxy_backend.score(env, values, raw_candidate)
+                performance["perf/validation/joint_reward_seconds"] += (
+                    time.perf_counter() - joint_reward_started
+                )
                 raw_rewards.append(float(raw_proxy.rewards[0]))
                 raw_unsafe_count += int(raw_proxy.unsafe[0])
                 raw_collision_count += int(raw_proxy.collision[0])
@@ -2883,20 +3030,29 @@ def _fixed_raw_proxy_and_simulator_validation(
                     seed=int(seed),
                     reference_pose_global=reference_pose,
                 )
+                simulator_started = time.perf_counter()
+                try:
+                    branch = evaluator.evaluate_from_replayed_env(
+                        spec, env, command_candidate
+                    )
+                except Exception as exc:
+                    simulator_errors.append(
+                        {
+                            "scenario": str(scenario[0]),
+                            "route": str(scenario[1]),
+                            "seed": int(seed),
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        }
+                    )
+                    branch = None
+                finally:
+                    performance["perf/validation/simulator_seconds"] += (
+                        time.perf_counter() - simulator_started
+                    )
             finally:
                 env.close()
-            try:
-                branch = evaluator.evaluate(spec, prefix, command_candidate)
-            except Exception as exc:
-                simulator_errors.append(
-                    {
-                        "scenario": str(scenario[0]),
-                        "route": str(scenario[1]),
-                        "seed": int(seed),
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    }
-                )
+            if branch is None:
                 continue
             simulator_rewards.append(float(branch.reward.rewards[0]))
             scenario_key = str(scenario[0]).split("_", 1)[0]
@@ -3025,6 +3181,12 @@ def _fixed_raw_proxy_and_simulator_validation(
                     ),
                 }
             )
+    performance["perf/validation/total_seconds"] = (
+        time.perf_counter() - validation_started
+    )
+    metrics.update(performance)
+    metrics["perf/validation/frozen_cache_hits"] = float(cache_hits)
+    metrics["perf/validation/frozen_cache_misses"] = float(cache_misses)
     if not all(math.isfinite(value) for value in metrics.values()):
         raise OnlineGRPOError("fixed validation metrics must be finite")
     return metrics, tuple(simulator_errors)
@@ -3279,6 +3441,11 @@ def run_joint_grpo_training(
     (run_dir / "checkpoints").mkdir()
 
     started_at = time.monotonic()
+    performance_totals: defaultdict[str, float] = defaultdict(float)
+    validation_calls = 0
+    fixed_validation_cache: dict[
+        tuple[tuple[str, str], int], _FixedValidationFrozenEntry
+    ] = {}
     config = training_config.online
     variant = training_config.variant
     run_mode = training_config.run_mode
@@ -3330,8 +3497,13 @@ def run_joint_grpo_training(
             scenarios=config.scenarios,
             seeds=HOLDOUT_SEEDS,
             validation_state_bank=validation_state_bank,
+            frozen_cache=fixed_validation_cache,
         )
     )
+    validation_calls += 1
+    for name, value in pretrain_validation.items():
+        if name.startswith("perf/") and name.endswith("_seconds"):
+            performance_totals[name] += float(value)
     checkpoint_loader = (
         load_grpo_checkpoint if variant == "A" else load_grpo_b_checkpoint
     )
@@ -3349,12 +3521,14 @@ def run_joint_grpo_training(
     accepted_update_states = 0
     sampling_attempts = 0
     rejected_sampling_attempts = 0
+    stability_guard_rejections = 0
     exhausted_states = 0
     baseline_execution_steps = 0
     zero_signal_epochs = 0
     bucket_accepted_update_counts = [0 for _ in training_buckets]
     bucket_sampling_attempt_counts = [0 for _ in training_buckets]
     bucket_rejected_sampling_attempt_counts = [0 for _ in training_buckets]
+    bucket_stability_guard_rejection_counts = [0 for _ in training_buckets]
     bucket_exhausted_state_counts = [0 for _ in training_buckets]
     bucket_baseline_execution_step_counts = [0 for _ in training_buckets]
     bucket_zero_signal_epoch_counts = [0 for _ in training_buckets]
@@ -3414,6 +3588,9 @@ def run_joint_grpo_training(
         rejected_sampling_attempts = int(
             restored_sampler_state["rejected_sampling_attempts"]
         )
+        stability_guard_rejections = int(
+            restored_sampler_state["stability_guard_rejections"]
+        )
         exhausted_states = int(restored_sampler_state["exhausted_states"])
         baseline_execution_steps = int(
             restored_sampler_state["baseline_execution_steps"]
@@ -3427,6 +3604,9 @@ def run_joint_grpo_training(
         )
         bucket_rejected_sampling_attempt_counts = list(
             restored_sampler_state["bucket_rejected_sampling_attempt_counts"]
+        )
+        bucket_stability_guard_rejection_counts = list(
+            restored_sampler_state["bucket_stability_guard_rejection_counts"]
         )
         bucket_exhausted_state_counts = list(
             restored_sampler_state["bucket_exhausted_state_counts"]
@@ -3527,6 +3707,25 @@ def run_joint_grpo_training(
     )
     metrics_path = run_dir / "metrics.jsonl"
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
+    initial_performance = {
+        name: float(value)
+        for name, value in pretrain_validation.items()
+        if name.startswith("perf/")
+    }
+    for metric_name, metric_value in initial_performance.items():
+        writer.add_scalar(metric_name, metric_value, 0)
+    with metrics_path.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "event": "initial_validation_performance",
+                    "accepted_update_state": 0,
+                    **initial_performance,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
     vehicle_reward_backend = VehicleModeCounterfactualReward(reward_config)
     trajectory_optimizer = KinematicTrajectoryOptimizer()
     consecutive_empty_episodes = 0
@@ -3551,7 +3750,7 @@ def run_joint_grpo_training(
     _reset_cuda_peak_memory(torch_device)
     attempt_budget_exhausted = False
     diagnostic_early_stop = False
-    stability_guard_rejections = 0
+    stability_guard_rejections_this_run = 0
     stability_guard_diagnostic: dict[str, object] | None = None
     try:
         while (
@@ -3713,6 +3912,7 @@ def run_joint_grpo_training(
                             ]
                             | None
                         ) = None
+                        state_performance: defaultdict[str, float] = defaultdict(float)
                         frozen_raw_candidate: np.ndarray | None = None
                         frozen_all_mode_candidates: np.ndarray | None = None
                         frozen_modes: np.ndarray | None = None
@@ -3739,6 +3939,7 @@ def run_joint_grpo_training(
                                     retry_index=retry_index - 1,
                                 )
                             )
+                            sampling_started = time.perf_counter()
                             rollout = trainer.sample_groups(
                                 batch,
                                 generator=initial_noise_generator,
@@ -3749,8 +3950,26 @@ def run_joint_grpo_training(
                                     int(retry_index - 1),
                                 ),
                             )
+                            raw_candidates = (
+                                rollout.candidate_trajectories[0]
+                                .detach()
+                                .cpu()
+                                .numpy()
+                                .astype(np.float32, copy=False)
+                            )
+                            frozen_paired_candidates = (
+                                rollout.frozen_candidate_trajectories[0]
+                                .detach()
+                                .cpu()
+                                .numpy()
+                                .astype(np.float32, copy=False)
+                            )
+                            state_performance["perf/train/n48_sampling_seconds"] += (
+                                time.perf_counter() - sampling_started
+                            )
                             attempts_for_state += 1
                             if frozen_raw_candidate is None:
+                                frozen_inference_started = time.perf_counter()
                                 frozen_pretrain = trainer.infer_frozen_pretrain(rollout)
                                 frozen_raw_candidate = (
                                     frozen_pretrain["selected_trajectory"]
@@ -3773,6 +3992,10 @@ def run_joint_grpo_training(
                                     .numpy()
                                     .astype(np.float32, copy=False)
                                 )
+                                state_performance[
+                                    "perf/train/frozen_inference_seconds"
+                                ] += (time.perf_counter() - frozen_inference_started)
+                                pretrain_reward_started = time.perf_counter()
                                 pretrain_score = vehicle_reward_backend.score_pretrain(
                                     env,
                                     values,
@@ -3780,16 +4003,13 @@ def run_joint_grpo_training(
                                     frozen_raw_candidate[0],
                                     execution_mask,
                                 )
+                                state_performance[
+                                    "perf/train/pretrain_reward_seconds"
+                                ] += (time.perf_counter() - pretrain_reward_started)
                             assert frozen_raw_candidate is not None
                             assert frozen_all_mode_candidates is not None
                             assert pretrain_score is not None
-                            raw_candidates = (
-                                rollout.candidate_trajectories[0]
-                                .detach()
-                                .cpu()
-                                .numpy()
-                                .astype(np.float32, copy=False)
-                            )
+                            current_reward_started = time.perf_counter()
                             proxy = vehicle_reward_backend.score_candidates(
                                 env,
                                 values,
@@ -3798,13 +4018,10 @@ def run_joint_grpo_training(
                                 execution_mask,
                                 pretrain_score,
                             )
-                            frozen_paired_candidates = (
-                                rollout.frozen_candidate_trajectories[0]
-                                .detach()
-                                .cpu()
-                                .numpy()
-                                .astype(np.float32, copy=False)
-                            )
+                            state_performance[
+                                "perf/train/current_reward_seconds"
+                            ] += (time.perf_counter() - current_reward_started)
+                            frozen_reward_started = time.perf_counter()
                             frozen_proxy = vehicle_reward_backend.score_candidates(
                                 env,
                                 values,
@@ -3813,6 +4030,9 @@ def run_joint_grpo_training(
                                 execution_mask,
                                 pretrain_score,
                             )
+                            state_performance[
+                                "perf/train/frozen_reward_seconds"
+                            ] += (time.perf_counter() - frozen_reward_started)
                             centered_rewards, advantages, signal_mode_mask = (
                                 _fixed_scale_reward_signals(
                                     proxy.rewards,
@@ -3909,14 +4129,26 @@ def run_joint_grpo_training(
                                 ).unsqueeze(0).to(torch_device),
                             )
                             optimizer_step_before = trainer.optimizer_step
+                            update_started = time.perf_counter()
                             update = trainer.update(rollout)
+                            state_performance["perf/train/update_seconds"] += (
+                                time.perf_counter() - update_started
+                            )
                             if update.stability_guard_rejected:
                                 stability_guard_rejections += 1
+                                stability_guard_rejections_this_run += 1
+                                bucket_stability_guard_rejection_counts[
+                                    bucket_index
+                                ] += 1
                                 stability_guard_diagnostic = {
-                                    "accepted_update_state": int(
+                                    "last_accepted_update_state": int(
                                         accepted_update_states
                                     ),
-                                    "sampling_attempt": int(sampling_attempts),
+                                    "guard_rejected_sampling_attempt": int(
+                                        sampling_attempts
+                                    ),
+                                    "frozen_baseline_executed": True,
+                                    "optimizer_rollback_applied": True,
                                     "noise_bundle_identity": list(
                                         rollout.noise_bundle_identity or ()
                                     ),
@@ -4010,6 +4242,9 @@ def run_joint_grpo_training(
                                 "rejected_sampling_attempts": float(
                                     rejected_sampling_attempts
                                 ),
+                                "stability_guard_rejections": float(
+                                    stability_guard_rejections
+                                ),
                                 "exhausted_states": float(exhausted_states),
                                 "baseline_execution_steps": float(
                                     baseline_execution_steps + 1
@@ -4088,6 +4323,7 @@ def run_joint_grpo_training(
                             last_metrics.update(rollout_metrics)
                             last_metrics.update(optimizer_metrics)
 
+                        baseline_started = time.perf_counter()
                         try:
                             (
                                 baseline_step_result,
@@ -4105,6 +4341,9 @@ def run_joint_grpo_training(
                                 frozen_selected_modes=frozen_modes,
                                 optimizer=trajectory_optimizer,
                             )
+                            state_performance[
+                                "perf/train/baseline_step_seconds"
+                            ] += (time.perf_counter() - baseline_started)
                         except TrajectoryOptimizationError:
                             np.savez_compressed(
                                 run_dir / "trajectory_optimizer_failure.npz",
@@ -4126,6 +4365,14 @@ def run_joint_grpo_training(
                             rule_diagnostics[name] += int(value)
                         baseline_execution_steps += 1
                         bucket_baseline_execution_step_counts[bucket_index] += 1
+                        for metric_name, metric_value in state_performance.items():
+                            performance_totals[metric_name] += float(metric_value)
+                            writer.add_scalar(
+                                metric_name,
+                                float(metric_value),
+                                baseline_execution_steps,
+                            )
+                        last_metrics.update(state_performance)
                         pretrain_values = np.asarray(pretrain_score.rewards)[
                             execution_mask
                         ]
@@ -4136,6 +4383,9 @@ def run_joint_grpo_training(
                                 accepted_update_states + int(accepted_this_step)
                             ),
                             rejected_sampling_attempts=(rejected_sampling_attempts),
+                            stability_guard_rejections=(
+                                stability_guard_rejections
+                            ),
                             exhausted_states=exhausted_states,
                             baseline_execution_steps=(baseline_execution_steps),
                             environment_steps=environment_steps + 1,
@@ -4143,6 +4393,7 @@ def run_joint_grpo_training(
                             scenario=scenario,
                             seed=seed,
                             pretrain_reward_mean=float(pretrain_values.mean()),
+                            performance=state_performance,
                         )
 
                     stepped_from = episode_step
@@ -4276,8 +4527,13 @@ def run_joint_grpo_training(
                         scenarios=config.scenarios,
                         seeds=HOLDOUT_SEEDS,
                         validation_state_bank=validation_state_bank,
+                        frozen_cache=fixed_validation_cache,
                     )
                 )
+                validation_calls += 1
+                for name, value in validation.items():
+                    if name.startswith("perf/") and name.endswith("_seconds"):
+                        performance_totals[name] += float(value)
                 validation.update(
                     _validation_reward_comparison_metrics(
                         validation, pretrain_validation
@@ -4304,6 +4560,7 @@ def run_joint_grpo_training(
                     accepted_update_states=accepted_update_states,
                     sampling_attempts=sampling_attempts,
                     rejected_sampling_attempts=rejected_sampling_attempts,
+                    stability_guard_rejections=stability_guard_rejections,
                     exhausted_states=exhausted_states,
                     baseline_execution_steps=baseline_execution_steps,
                     zero_signal_epochs=zero_signal_epochs,
@@ -4313,6 +4570,9 @@ def run_joint_grpo_training(
                     bucket_sampling_attempt_counts=(bucket_sampling_attempt_counts),
                     bucket_rejected_sampling_attempt_counts=(
                         bucket_rejected_sampling_attempt_counts
+                    ),
+                    bucket_stability_guard_rejection_counts=(
+                        bucket_stability_guard_rejection_counts
                     ),
                     bucket_exhausted_state_counts=(bucket_exhausted_state_counts),
                     bucket_baseline_execution_step_counts=(
@@ -4364,6 +4624,7 @@ def run_joint_grpo_training(
                             validation[metric_name],
                             accepted_update_states,
                         )
+                checkpoint_started = time.perf_counter()
                 if selection_score is not None:
                     if (
                         best_unconstrained_score is None
@@ -4456,6 +4717,34 @@ def run_joint_grpo_training(
                         else milestone_500_path,
                         checkpoint,
                     )
+                checkpoint_seconds = time.perf_counter() - checkpoint_started
+                checkpoint_metric = "perf/validation/checkpoint_seconds"
+                validation[checkpoint_metric] = float(checkpoint_seconds)
+                performance_totals[checkpoint_metric] += float(checkpoint_seconds)
+                last_metrics[checkpoint_metric] = float(checkpoint_seconds)
+                writer.add_scalar(
+                    checkpoint_metric,
+                    float(checkpoint_seconds),
+                    accepted_update_states,
+                )
+                with metrics_path.open("a", encoding="utf-8") as stream:
+                    stream.write(
+                        json.dumps(
+                            {
+                                "event": "validation_performance",
+                                "accepted_update_state": int(
+                                    accepted_update_states
+                                ),
+                                **{
+                                    name: float(value)
+                                    for name, value in validation.items()
+                                    if name.startswith("perf/")
+                                },
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
                 if accepted_update_states >= 200 and len(
                     validation_selection_history
                 ) >= 3:
@@ -4474,6 +4763,7 @@ def run_joint_grpo_training(
             accepted_update_states=accepted_update_states,
             sampling_attempts=sampling_attempts,
             rejected_sampling_attempts=rejected_sampling_attempts,
+            stability_guard_rejections=stability_guard_rejections,
             exhausted_states=exhausted_states,
             baseline_execution_steps=baseline_execution_steps,
             zero_signal_epochs=zero_signal_epochs,
@@ -4483,6 +4773,9 @@ def run_joint_grpo_training(
             bucket_sampling_attempt_counts=bucket_sampling_attempt_counts,
             bucket_rejected_sampling_attempt_counts=(
                 bucket_rejected_sampling_attempt_counts
+            ),
+            bucket_stability_guard_rejection_counts=(
+                bucket_stability_guard_rejection_counts
             ),
             bucket_exhausted_state_counts=bucket_exhausted_state_counts,
             bucket_baseline_execution_step_counts=(
@@ -4524,9 +4817,12 @@ def run_joint_grpo_training(
             run_dir / "checkpoints" / "stability_guard.pt", guard_payload
         )
         guard_record = {
-            "format": "stage2_grpo_stability_guard_diagnostic_v1",
+            "format": "stage2_grpo_stability_guard_diagnostic_v2",
             "training_status": "stability_guard_rejected",
             "stability_guard_rejections": stability_guard_rejections,
+            "stability_guard_rejections_this_run": (
+                stability_guard_rejections_this_run
+            ),
             "optimizer_steps": trainer.optimizer_step,
             "accepted_update_states": accepted_update_states,
             "baseline_execution_steps": baseline_execution_steps,
@@ -4539,7 +4835,7 @@ def run_joint_grpo_training(
             encoding="utf-8",
         )
         report = {
-            "format": "bev_joint_grpo_online_report_v13",
+            "format": "bev_joint_grpo_online_report_v14",
             "training_status": "stability_guard_rejected",
             "diagnostic_only": True,
             "eligible_for_formal_training": False,
@@ -4552,9 +4848,15 @@ def run_joint_grpo_training(
             "baseline_execution_steps": baseline_execution_steps,
             "environment_steps": environment_steps,
             "stability_guard_rejections": stability_guard_rejections,
+            "stability_guard_rejections_this_run": (
+                stability_guard_rejections_this_run
+            ),
             "stability_guard": guard_record,
             "last_checkpoint": str(guard_path.resolve()),
             "wall_time_seconds": time.monotonic() - started_at,
+            "performance": _performance_summary(
+                performance_totals, validation_calls=validation_calls
+            ),
         }
         (run_dir / "report.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -4567,6 +4869,7 @@ def run_joint_grpo_training(
             accepted_update_states=accepted_update_states,
             sampling_attempts=sampling_attempts,
             rejected_sampling_attempts=rejected_sampling_attempts,
+            stability_guard_rejections=stability_guard_rejections,
             exhausted_states=exhausted_states,
             baseline_execution_steps=baseline_execution_steps,
             zero_signal_epochs=zero_signal_epochs,
@@ -4576,6 +4879,9 @@ def run_joint_grpo_training(
             bucket_sampling_attempt_counts=bucket_sampling_attempt_counts,
             bucket_rejected_sampling_attempt_counts=(
                 bucket_rejected_sampling_attempt_counts
+            ),
+            bucket_stability_guard_rejection_counts=(
+                bucket_stability_guard_rejection_counts
             ),
             bucket_exhausted_state_counts=bucket_exhausted_state_counts,
             bucket_baseline_execution_step_counts=(
@@ -4615,7 +4921,7 @@ def run_joint_grpo_training(
         incomplete_checkpoint["training_status"] = "incomplete_attempt_budget_exhausted"
         last_path = save_grpo_checkpoint(last_path, incomplete_checkpoint)
         incomplete_report = {
-            "format": "bev_joint_grpo_online_report_v13",
+            "format": "bev_joint_grpo_online_report_v14",
             "training_status": "incomplete_attempt_budget_exhausted",
             "variant": variant,
             "run_mode": run_mode,
@@ -4634,10 +4940,16 @@ def run_joint_grpo_training(
             "baseline_execution_steps": baseline_execution_steps,
             "zero_signal_epochs": zero_signal_epochs,
             "stability_guard_rejections": stability_guard_rejections,
+            "stability_guard_rejections_this_run": (
+                stability_guard_rejections_this_run
+            ),
             "warmup_environment_steps": warmup_environment_steps,
             "environment_steps": environment_steps,
             "optimizer_steps": trainer.optimizer_step,
             "wall_time_seconds": time.monotonic() - started_at,
+            "performance": _performance_summary(
+                performance_totals, validation_calls=validation_calls
+            ),
             "cuda_peak_memory_bytes": _cuda_peak_memory_bytes(torch_device),
             "rollout_collection_contract": collection_contract,
             "training_bucket_counters": [
@@ -4650,6 +4962,9 @@ def run_joint_grpo_training(
                     "sampling_attempts": (bucket_sampling_attempt_counts[index]),
                     "rejected_sampling_attempts": (
                         bucket_rejected_sampling_attempt_counts[index]
+                    ),
+                    "stability_guard_rejections": (
+                        bucket_stability_guard_rejection_counts[index]
                     ),
                     "exhausted_states": (bucket_exhausted_state_counts[index]),
                     "baseline_execution_steps": (
@@ -4680,6 +4995,7 @@ def run_joint_grpo_training(
         accepted_update_states=accepted_update_states,
         sampling_attempts=sampling_attempts,
         rejected_sampling_attempts=rejected_sampling_attempts,
+        stability_guard_rejections=stability_guard_rejections,
         exhausted_states=exhausted_states,
         baseline_execution_steps=baseline_execution_steps,
         zero_signal_epochs=zero_signal_epochs,
@@ -4689,6 +5005,9 @@ def run_joint_grpo_training(
         bucket_sampling_attempt_counts=bucket_sampling_attempt_counts,
         bucket_rejected_sampling_attempt_counts=(
             bucket_rejected_sampling_attempt_counts
+        ),
+        bucket_stability_guard_rejection_counts=(
+            bucket_stability_guard_rejection_counts
         ),
         bucket_exhausted_state_counts=bucket_exhausted_state_counts,
         bucket_baseline_execution_step_counts=(bucket_baseline_execution_step_counts),
@@ -4766,7 +5085,7 @@ def run_joint_grpo_training(
         )
 
     report = {
-        "format": "bev_joint_grpo_online_report_v13",
+        "format": "bev_joint_grpo_online_report_v14",
         "implementation_commit": implementation_commit,
         "training_status": (
             "diagnostic_early_stop" if diagnostic_early_stop else "complete"
@@ -4794,6 +5113,9 @@ def run_joint_grpo_training(
         "baseline_execution_steps": baseline_execution_steps,
         "zero_signal_epochs": zero_signal_epochs,
         "stability_guard_rejections": stability_guard_rejections,
+        "stability_guard_rejections_this_run": (
+            stability_guard_rejections_this_run
+        ),
         "rollout_start_diagnostics_this_run": {
             "attempt_count": len(rollout_start_offsets_this_run),
             "accepted_count": rollout_start_accepted_count,
@@ -4815,6 +5137,9 @@ def run_joint_grpo_training(
             ),
         },
         "wall_time_seconds": time.monotonic() - started_at,
+        "performance": _performance_summary(
+            performance_totals, validation_calls=validation_calls
+        ),
         "cuda_peak_memory_bytes": cuda_peak_memory_bytes,
         "v2_rule_conditioning": {
             "enabled": True,
@@ -4854,6 +5179,9 @@ def run_joint_grpo_training(
                 "sampling_attempts": bucket_sampling_attempt_counts[index],
                 "rejected_sampling_attempts": (
                     bucket_rejected_sampling_attempt_counts[index]
+                ),
+                "stability_guard_rejections": (
+                    bucket_stability_guard_rejection_counts[index]
                 ),
                 "exhausted_states": (bucket_exhausted_state_counts[index]),
                 "baseline_execution_steps": (

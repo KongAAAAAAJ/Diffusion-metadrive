@@ -1,0 +1,98 @@
+{
+  "format": "stage2_grpo_run33_stability_guard_accounting_fix_v1",
+  "recorded_at": "2026-09-08T21:04:51+08:00",
+  "scope": "Repair stability-guard terminal accounting and diagnostics without changing the guard thresholds, optimizer rollback, frozen-baseline execution, sampling, reward, validation, or random streams.",
+  "repository": {
+    "branch": "BEV",
+    "observed_head": "b2e3eef580fbc7934dd3e39051d77bd485b892f7",
+    "worktree_clean": false,
+    "implementation_state": "uncommitted_on_top_of_existing_semantic_performance_work",
+    "user_runtime_config_preserved": {
+      "path": "configs/train/bev_joint_grpo.yaml",
+      "seed": 23,
+      "total_rollout_groups": 2000
+    },
+    "active_training_process": false
+  },
+  "run_33_failure_evidence": {
+    "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_33",
+    "implementation_commit": "b2e3eef580fbc7934dd3e39051d77bd485b892f7",
+    "target_accepted_update_states": 2000,
+    "last_accepted_update_state": 534,
+    "guard_rejected_sampling_attempt": 535,
+    "baseline_execution_steps": 535,
+    "environment_steps": 6617,
+    "rejected_sampling_attempts": 0,
+    "exhausted_states": 0,
+    "trigger_mode": 8,
+    "trigger_adapter_relative_drift": 0.020069759339094162,
+    "adapter_relative_drift_limit": 0.02,
+    "post_update_reference_kl": 0.03757265955209732,
+    "post_update_reference_kl_limit": 0.25,
+    "original_terminal_exception": "OnlineGRPOError: online GRPO checkpoint sampler counters conflict",
+    "missing_due_to_original_exception": [
+      "checkpoints/stability_guard.pt",
+      "stability_guard.json",
+      "report.json"
+    ],
+    "last_recoverable_checkpoint": {
+      "path": "/media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/run_33/checkpoints/last.pt",
+      "accepted_update_states": 520,
+      "optimizer_steps": 520,
+      "environment_steps": 6433,
+      "sha256": "9903ea7e2d430304e1276b32091537f52a3837d33aec57f219e41edab168179f"
+    }
+  },
+  "root_cause": {
+    "primary_event": "The mode-8 adapter drift exceeded the frozen 0.02 guard and the trainer restored residual parameters and Adam state without advancing optimizer_step.",
+    "masking_bug": "The online sampler state represented only accepted and no-signal rejected sampling outcomes, so the legitimate guard-rejected attempt and its frozen baseline step violated both persisted counter equations before terminal artifacts could be written."
+  },
+  "implemented_accounting": {
+    "checkpoint_schema": 6,
+    "sampler_state_additions": [
+      "stability_guard_rejections",
+      "bucket_stability_guard_rejection_counts"
+    ],
+    "attempt_invariant": "sampling_attempts = accepted_update_states + rejected_sampling_attempts + stability_guard_rejections",
+    "baseline_invariant": "baseline_execution_steps = accepted_update_states + exhausted_states + stability_guard_rejections",
+    "legacy_schema_v6_behavior": "Missing guard counters are normalized to zero and all existing counter invariants remain strict.",
+    "resume_behavior": "A stability_guard.pt checkpoint may be explicitly resumed under the exact same training, reward, collection, and guard contracts; cumulative guard counters and rollout-start RNG state are restored and collection resumes from the same bucket in a fresh episode.",
+    "online_report_format": "bev_joint_grpo_online_report_v14",
+    "guard_diagnostic_format": "stage2_grpo_stability_guard_diagnostic_v2",
+    "unchanged_contracts": {
+      "checkpoint_schema": 6,
+      "optimizer": "stage2_joint_grpo_optimizer_v8",
+      "collection": "stage2_joint_grpo_persistent_episode_v7",
+      "application": "stage2_grpo_open_application_v5"
+    }
+  },
+  "verification": {
+    "focused_online_command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_bev_joint_grpo_online.py",
+    "focused_online_result": "26 passed",
+    "trainer_checkpoint_command": "/home/kong/anaconda3/envs/meta_drive/bin/python -m pytest -q tests/test_bev_same_mode_grpo.py tests/test_bev_joint_grpo_a.py tests/test_bev_joint_grpo_b.py",
+    "trainer_checkpoint_result": "25 passed",
+    "guard_flow_verified": {
+      "parameters_and_adam_restored": true,
+      "optimizer_step_not_advanced": true,
+      "frozen_baseline_executed_once": true,
+      "terminal_artifacts_written": true,
+      "explicit_resume_preserves_cumulative_guard_count": true
+    },
+    "run_33_last_checkpoint_legacy_compatibility": {
+      "passed": true,
+      "accepted_update_states": 520,
+      "sampling_attempts": 520,
+      "stability_guard_rejections_after_normalization": 0,
+      "bucket_stability_guard_rejection_counts_after_normalization": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    "python_compile_passed": true,
+    "git_diff_check_passed": true,
+    "training_run_started": false
+  },
+  "eligibility": {
+    "diagnostic_only": true,
+    "stage1_qualification_gate_changed": false,
+    "formal_grpo_eligibility_changed": false
+  },
+  "remaining_limit": "The exact rolled-back state after accepted update 534 was not checkpointed by the original code and cannot be reconstructed from metrics; run_33 last.pt at state 520 remains its latest recoverable checkpoint."
+}

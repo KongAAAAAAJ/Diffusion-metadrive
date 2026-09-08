@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ def _valid_sampler_state() -> tuple[dict[str, object], dict[str, object]]:
         "accepted_update_states": 2,
         "sampling_attempts": 5,
         "rejected_sampling_attempts": 3,
+        "stability_guard_rejections": 0,
         "exhausted_states": 1,
         "baseline_execution_steps": 3,
         "zero_signal_epochs": 4,
@@ -42,6 +44,7 @@ def _valid_sampler_state() -> tuple[dict[str, object], dict[str, object]]:
         "bucket_accepted_update_counts": [2],
         "bucket_sampling_attempt_counts": [5],
         "bucket_rejected_sampling_attempt_counts": [3],
+        "bucket_stability_guard_rejection_counts": [0],
         "bucket_exhausted_state_counts": [1],
         "bucket_baseline_execution_step_counts": [3],
         "bucket_zero_signal_epoch_counts": [4],
@@ -292,8 +295,72 @@ def test_sampler_state_round_trip_allows_zero_signal_epochs() -> None:
     )
     assert restored["accepted_update_states"] == 2
     assert restored["rejected_sampling_attempts"] == 3
+    assert restored["stability_guard_rejections"] == 0
     assert restored["zero_signal_epochs"] == 4
     assert restored["baseline_execution_steps"] == 3
+
+
+def test_sampler_state_accounts_for_guard_rejected_state() -> None:
+    state, kwargs = _valid_sampler_state()
+    state.update(
+        {
+            "sampling_attempts": 6,
+            "stability_guard_rejections": 1,
+            "baseline_execution_steps": 4,
+            "bucket_sampling_attempt_counts": [6],
+            "bucket_stability_guard_rejection_counts": [1],
+            "bucket_baseline_execution_step_counts": [4],
+        }
+    )
+    restored = _validate_sampler_state(
+        state,
+        bucket_count=1,
+        expected_bucket_target_counts=[4],
+        rollout_groups_per_bucket_visit=2,
+        optimizer_step=kwargs["optimizer_step"],
+        environment_steps=11,
+        max_sampling_attempts=12,
+    )
+    assert restored["accepted_update_states"] == 2
+    assert restored["stability_guard_rejections"] == 1
+    assert restored["bucket_stability_guard_rejection_counts"] == [1]
+    assert restored["baseline_execution_steps"] == 4
+
+
+def test_sampler_state_defaults_legacy_guard_counters_to_zero() -> None:
+    state, kwargs = _valid_sampler_state()
+    state.pop("stability_guard_rejections")
+    state.pop("bucket_stability_guard_rejection_counts")
+    restored = _validate_sampler_state(
+        state,
+        bucket_count=1,
+        expected_bucket_target_counts=[4],
+        rollout_groups_per_bucket_visit=2,
+        optimizer_step=kwargs["optimizer_step"],
+        environment_steps=kwargs["environment_steps"],
+        max_sampling_attempts=kwargs["max_sampling_attempts"],
+    )
+    assert restored["stability_guard_rejections"] == 0
+    assert restored["bucket_stability_guard_rejection_counts"] == [0]
+
+
+def test_sampler_state_rejects_guard_bucket_drift() -> None:
+    state, kwargs = _valid_sampler_state()
+    state["stability_guard_rejections"] = 1
+    state["sampling_attempts"] = 6
+    state["baseline_execution_steps"] = 4
+    state["bucket_sampling_attempt_counts"] = [6]
+    state["bucket_baseline_execution_step_counts"] = [4]
+    with pytest.raises(OnlineGRPOError, match="bucket guard rejections"):
+        _validate_sampler_state(
+            state,
+            bucket_count=1,
+            expected_bucket_target_counts=[4],
+            rollout_groups_per_bucket_visit=2,
+            optimizer_step=kwargs["optimizer_step"],
+            environment_steps=11,
+            max_sampling_attempts=kwargs["max_sampling_attempts"],
+        )
 
 
 def test_sampler_state_rejects_baseline_execution_drift() -> None:
@@ -451,20 +518,270 @@ def test_cached_baseline_helper_has_no_candidate_input_and_rejects_bad_shape(
     assert not called
 
 
-@pytest.mark.parametrize("has_active_mode", [True, False])
+def test_fixed_validation_reuses_frozen_work_and_replayed_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trajectories_per_mode = 2
+    execution_mask = np.ones((3, 10), dtype=np.bool_)
+    cache: dict[object, object] = {}
+    counters = {
+        "full_sample": 0,
+        "current_sample": 0,
+        "frozen_inference": 0,
+        "pretrain_reward": 0,
+        "candidate_reward": 0,
+        "replayed_simulator": 0,
+        "reconstructed_simulator": 0,
+    }
+
+    class Env:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Trainer:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(
+                trajectories_per_mode=trajectories_per_mode
+            )
+            self.planner = object()
+
+        def sample_groups(self, batch, **kwargs):
+            del batch, kwargs
+            counters["full_sample"] += 1
+            return SimpleNamespace(
+                candidate_trajectories=torch.full(
+                    (1, 3, 10, trajectories_per_mode, 8, 3),
+                    3.0,
+                    dtype=torch.float32,
+                ),
+                frozen_candidate_trajectories=torch.full(
+                    (1, 3, 10, trajectories_per_mode, 8, 3),
+                    2.0,
+                    dtype=torch.float32,
+                ),
+            )
+
+        def sample_current_groups(self, batch, **kwargs):
+            del batch, kwargs
+            counters["current_sample"] += 1
+            return torch.full(
+                (1, 3, 10, trajectories_per_mode, 8, 3),
+                3.0,
+                dtype=torch.float32,
+            )
+
+        def infer_frozen_pretrain_from_inputs(self, batch, **kwargs):
+            del batch, kwargs
+            counters["frozen_inference"] += 1
+            return {
+                "all_mode_trajectories": torch.full(
+                    (1, 3, 10, 8, 3), 1.0, dtype=torch.float32
+                ),
+                "selected_trajectory": torch.full(
+                    (1, 3, 8, 3), 1.0, dtype=torch.float32
+                ),
+                "selected_mode": torch.zeros((1, 3), dtype=torch.int64),
+            }
+
+    class VehicleRewardBackend:
+        def __init__(self, config) -> None:
+            self.trajectories_per_mode = config.trajectories_per_mode
+
+        def score_pretrain(self, *args):
+            del args
+            counters["pretrain_reward"] += 1
+            return SimpleNamespace(
+                rewards=np.ones((3, 10), dtype=np.float32),
+                valid_mode_mask=execution_mask.copy(),
+                unsafe=np.zeros((3, 10), dtype=np.bool_),
+                collision=np.zeros((3, 10), dtype=np.bool_),
+                out_of_drivable=np.zeros((3, 10), dtype=np.bool_),
+                clearance_violation=np.zeros((3, 10), dtype=np.bool_),
+                components={
+                    "road_penalty": np.zeros((3, 10), dtype=np.float32),
+                    "minimum_road_margin_m": np.ones(
+                        (3, 10), dtype=np.float32
+                    ),
+                },
+            )
+
+        def score_candidates(
+            self, env, model_inputs, candidates, frozen_argmax, valid, pretrain
+        ):
+            del env, model_inputs, frozen_argmax
+            counters["candidate_reward"] += 1
+            candidate_values = np.asarray(candidates)
+            assert candidate_values.shape == (
+                3,
+                10,
+                self.trajectories_per_mode,
+                8,
+                3,
+            )
+            np.testing.assert_array_equal(valid, execution_mask)
+            shape = candidate_values.shape[:3]
+            rewards = np.full(
+                shape, float(candidate_values[0, 0, 0, 0, 0]), dtype=np.float32
+            )
+            zeros = np.zeros(shape, dtype=np.bool_)
+            return SimpleNamespace(
+                rewards=rewards,
+                pretrain_rewards=pretrain.rewards,
+                valid_mode_mask=execution_mask.copy(),
+                unsafe=zeros.copy(),
+                collision=zeros.copy(),
+                out_of_drivable=zeros.copy(),
+                clearance_violation=zeros.copy(),
+                components={
+                    "road_penalty": np.zeros(shape, dtype=np.float32),
+                    "minimum_road_margin_m": np.ones(shape, dtype=np.float32),
+                },
+            )
+
+    class ProxyBackend:
+        def __init__(self, config) -> None:
+            del config
+
+        def score(self, env, values, candidates):
+            del env, values, candidates
+            return SimpleNamespace(
+                rewards=np.asarray([3.0], dtype=np.float32),
+                unsafe=np.asarray([False]),
+                collision=np.asarray([False]),
+                out_of_drivable=np.asarray([False]),
+            )
+
+    class SimulatorEvaluator:
+        def __init__(self, config) -> None:
+            del config
+
+        def evaluate(self, *args, **kwargs):
+            del args, kwargs
+            counters["reconstructed_simulator"] += 1
+            raise AssertionError("validation must not replay the prefix twice")
+
+        def evaluate_from_replayed_env(self, spec, env, trajectories):
+            del spec, trajectories
+            assert not env.closed
+            counters["replayed_simulator"] += 1
+            return SimpleNamespace(
+                reward=SimpleNamespace(
+                    rewards=np.asarray([4.0], dtype=np.float32),
+                    unsafe=np.asarray([False]),
+                    collision=np.asarray([False]),
+                    out_of_drivable=np.asarray([False]),
+                )
+            )
+
+    planner_calls = 0
+
+    def planner_forward(*args, **kwargs):
+        nonlocal planner_calls
+        del args, kwargs
+        planner_calls += 1
+        return {
+            "selected_trajectory": torch.full(
+                (1, 3, 8, 3), 3.0, dtype=torch.float32
+            ),
+            "selected_mode": torch.zeros((1, 3), dtype=torch.int64),
+            "trajectory_candidates": torch.full(
+                (1, 3, 10, 8, 3), 3.0, dtype=torch.float32
+            ),
+        }
+
+    def replay(*args, **kwargs):
+        del args, kwargs
+        return (
+            Env(),
+            object(),
+            object(),
+            object(),
+            execution_mask.copy(),
+            {},
+            object(),
+            [],
+            np.zeros((3, 3), dtype=np.float64),
+        )
+
+    monkeypatch.setattr(online, "VehicleModeCounterfactualReward", VehicleRewardBackend)
+    monkeypatch.setattr(online, "JointTrajectoryProxyReward", ProxyBackend)
+    monkeypatch.setattr(online, "JointSimulatorBranchEvaluator", SimulatorEvaluator)
+    monkeypatch.setattr(online, "_replay_fixed_validation_state", replay)
+    monkeypatch.setattr(online, "planner_forward_from_batch", planner_forward)
+    monkeypatch.setattr(
+        online,
+        "optimize_selected_model_trajectories",
+        lambda values, trajectories, modes, **kwargs: SimpleNamespace(
+            optimized_trajectories=trajectories
+        ),
+    )
+    monkeypatch.setattr(
+        online,
+        "_finalize_online_rule_action",
+        lambda rule_maker, condition, **kwargs: (
+            kwargs["optimization"],
+            {},
+            None,
+            None,
+        ),
+    )
+    trainer = Trainer()
+    scenario = online.PRIMARY_S5_S9_SCENARIOS[0]
+    kwargs = {
+        "device": torch.device("cpu"),
+        "reward_config": online.JointRewardConfig(),
+        "scenarios": (scenario,),
+        "seeds": (31,),
+        "validation_state_bank": {(scenario, 31): {}},
+        "frozen_cache": cache,
+    }
+
+    first, first_errors = online._fixed_raw_proxy_and_simulator_validation(
+        trainer, **kwargs
+    )
+    second, second_errors = online._fixed_raw_proxy_and_simulator_validation(
+        trainer, **kwargs
+    )
+
+    first_semantics = {name: value for name, value in first.items() if not name.startswith("perf/")}
+    second_semantics = {name: value for name, value in second.items() if not name.startswith("perf/")}
+    assert first_semantics == second_semantics
+    assert first_errors == second_errors == ()
+    assert first["perf/validation/frozen_cache_misses"] == 1.0
+    assert second["perf/validation/frozen_cache_hits"] == 1.0
+    assert len(cache) == 1
+    assert counters == {
+        "full_sample": 1,
+        "current_sample": 1,
+        "frozen_inference": 1,
+        "pretrain_reward": 1,
+        "candidate_reward": 5,
+        "replayed_simulator": 2,
+        "reconstructed_simulator": 0,
+    }
+    assert planner_calls == 2
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "no_signal", "guard_then_resume"])
 def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    has_active_mode: bool,
+    outcome: str,
 ) -> None:
+    has_active_mode = outcome != "no_signal"
     executed: list[np.ndarray] = []
+    written_scalars: list[str] = []
 
     class Writer:
         def __init__(self, *args, **kwargs):
             pass
 
         def add_scalar(self, *args, **kwargs):
-            pass
+            del kwargs
+            written_scalars.append(str(args[0]))
 
         def add_tensor(self, *args, **kwargs):
             pass
@@ -554,6 +871,7 @@ def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen
             self.sample_calls = 0
             self.frozen_calls = 0
             self.update_masks: list[np.ndarray] = []
+            self.guard_rejected = outcome == "guard_then_resume"
 
         def sample_groups(
             self,
@@ -585,18 +903,22 @@ def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen
 
         def update(self, rollout):
             self.update_masks.append(rollout.signal_mode_mask.copy())
-            self.optimizer_step += 1
+            if not self.guard_rejected:
+                self.optimizer_step += 1
+            drifts = [0.0] * 10
+            if self.guard_rejected:
+                drifts[8] = 0.0201
             return SimpleNamespace(
                 loss=Loss(),
                 optimizer_step=self.optimizer_step,
                 total_gradient_norm=1.0,
                 gradient_norms={"mode_residual": 1.0},
                 clipped_gradient_norms={"mode_residual": 1.0},
-                adapter_relative_drifts=(0.0,) * 10,
+                adapter_relative_drifts=tuple(drifts),
                 post_update_reference_kl=0.0,
                 zero_signal=False,
-                stability_guard_rejected=False,
-                stability_guard_trigger_modes=(),
+                stability_guard_rejected=self.guard_rejected,
+                stability_guard_trigger_modes=((8,) if self.guard_rejected else ()),
             )
 
     trainer = Trainer()
@@ -805,27 +1127,99 @@ def test_one_update_state_retries_only_if_all_modes_inactive_and_executes_frozen
         ),
     )
 
-    if has_active_mode:
-        report = online.run_joint_grpo_training(config, run_dir=run_dir)
-    else:
+    if outcome == "no_signal":
         with pytest.raises(OnlineGRPOError, match="max_sampling_attempts"):
             online.run_joint_grpo_training(config, run_dir=run_dir)
         report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+    else:
+        report = online.run_joint_grpo_training(config, run_dir=run_dir)
 
-    assert report["accepted_update_states"] == int(has_active_mode)
-    assert report["sampling_attempts"] == (1 if has_active_mode else 3)
-    assert report["rejected_sampling_attempts"] == (0 if has_active_mode else 3)
-    assert report["exhausted_states"] == int(not has_active_mode)
-    assert report["baseline_execution_steps"] == 1
-    assert trainer.sample_calls == (1 if has_active_mode else 3)
-    assert trainer.frozen_calls == 1
+    if outcome == "guard_then_resume":
+        assert report["format"] == "bev_joint_grpo_online_report_v14"
+        assert report["training_status"] == "stability_guard_rejected"
+        assert report["accepted_update_states"] == 0
+        assert report["sampling_attempts"] == 1
+        assert report["baseline_execution_steps"] == 1
+        assert report["stability_guard_rejections"] == 1
+        assert report["stability_guard_rejections_this_run"] == 1
+        guard_path = run_dir / "checkpoints" / "stability_guard.pt"
+        guard_record_path = run_dir / "stability_guard.json"
+        assert guard_path.is_file()
+        assert guard_record_path.is_file()
+        assert (run_dir / "report.json").is_file()
+        guard_payload = torch.load(guard_path, map_location="cpu", weights_only=False)
+        guard_state = guard_payload["sampler_state"]
+        assert guard_payload["training_status"] == "stability_guard_rejected"
+        assert guard_payload["optimizer_step"] == 0
+        assert guard_state["stability_guard_rejections"] == 1
+        assert guard_state["bucket_stability_guard_rejection_counts"] == [1]
+        guard_record = json.loads(guard_record_path.read_text(encoding="utf-8"))
+        assert guard_record["format"] == "stage2_grpo_stability_guard_diagnostic_v2"
+        assert guard_record["last_accepted_update_state"] == 0
+        assert guard_record["guard_rejected_sampling_attempt"] == 1
+        assert guard_record["frozen_baseline_executed"] is True
+        assert guard_record["optimizer_rollback_applied"] is True
+
+        trainer.guard_rejected = False
+        resumed_config = dataclasses.replace(
+            config,
+            online=dataclasses.replace(config.online, resume_checkpoint=guard_path),
+        )
+        resumed_run_dir = tmp_path / "resumed"
+        resumed_run_dir.mkdir()
+        report = online.run_joint_grpo_training(
+            resumed_config, run_dir=resumed_run_dir
+        )
+
+    expected_accepted = int(outcome != "no_signal")
+    expected_attempts = {
+        "accepted": 1,
+        "no_signal": 3,
+        "guard_then_resume": 2,
+    }[outcome]
+    expected_baselines = 2 if outcome == "guard_then_resume" else 1
+    expected_guard_rejections = int(outcome == "guard_then_resume")
+    assert report["format"] == "bev_joint_grpo_online_report_v14"
+    assert report["accepted_update_states"] == expected_accepted
+    assert report["sampling_attempts"] == expected_attempts
+    assert report["rejected_sampling_attempts"] == (
+        3 if outcome == "no_signal" else 0
+    )
+    assert report["stability_guard_rejections"] == expected_guard_rejections
+    assert report["stability_guard_rejections_this_run"] == 0
+    assert report["exhausted_states"] == int(outcome == "no_signal")
+    assert report["baseline_execution_steps"] == expected_baselines
+    assert trainer.sample_calls == expected_attempts
+    assert trainer.frozen_calls == expected_baselines
     if has_active_mode:
         assert trainer.update_masks[0].sum() == 1
     else:
         assert not trainer.update_masks
-    assert len(executed) == env.step_calls == 1
+    assert len(executed) == env.step_calls == expected_baselines
     np.testing.assert_array_equal(executed[0], -7.0)
+    expected_performance = {
+        "perf/train/n48_sampling_seconds",
+        "perf/train/frozen_inference_seconds",
+        "perf/train/pretrain_reward_seconds",
+        "perf/train/current_reward_seconds",
+        "perf/train/frozen_reward_seconds",
+        "perf/train/baseline_step_seconds",
+    }
     if has_active_mode:
+        expected_performance.add("perf/train/update_seconds")
+    timing_totals = report["performance"]["timing_totals_seconds"]
+    assert expected_performance <= timing_totals.keys()
+    assert all(timing_totals[name] >= 0.0 for name in expected_performance)
+    assert expected_performance <= set(written_scalars)
+    records = [
+        json.loads(line)
+        for line in (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    baseline_record = next(
+        value for value in records if value["event"] == "frozen_baseline_execution"
+    )
+    assert expected_performance <= baseline_record.keys()
+    if outcome != "no_signal":
         assert report["checkpoint_selection_status"] == "no_eligible_checkpoint"
         assert report["best_checkpoint"] is None
         assert not (run_dir / "checkpoints" / "best.pt").exists()

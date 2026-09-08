@@ -1453,7 +1453,10 @@
     "stability_guard": {
       "post_update_reference_kl_max": 0.25,
       "max_mode_adapter_relative_drift": 0.02,
-      "failure_action": "restore residual parameters and Adam state, do not advance accepted/optimizer counters, execute cached frozen baseline once, save stability_guard.pt and diagnostics, then terminate the seed"
+      "failure_action": "restore residual parameters and Adam state, do not advance accepted/optimizer counters, execute cached frozen baseline once, save stability_guard.pt and diagnostics, then terminate the seed",
+      "sampler_attempt_accounting": "sampling_attempts = accepted_update_states + rejected_sampling_attempts + stability_guard_rejections",
+      "baseline_step_accounting": "baseline_execution_steps = accepted_update_states + exhausted_states + stability_guard_rejections",
+      "resume_policy": "stability_guard.pt may be explicitly resumed under exact unchanged contracts; restore cumulative guard counters and rollout-start RNG, then continue the same bucket from a fresh episode"
     },
     "artifacts": {
       "checkpoint_schema": 6,
@@ -1461,7 +1464,7 @@
       "collection_contract": "stage2_joint_grpo_persistent_episode_v7",
       "application_contract_unchanged": "stage2_grpo_open_application_v5",
       "online_config": "bev_joint_grpo_online_config_v13",
-      "online_report": "bev_joint_grpo_online_report_v13",
+      "online_report": "bev_joint_grpo_online_report_v14",
       "stability_manifest": "stage2_grpo_stability_ab_manifest_v7",
       "stability_report": "stage2_grpo_stability_ab_report_v7",
       "legacy_policy": "schema v5 and older are weights-only historical evaluation sources; never restore optimizer, RNG or counters"

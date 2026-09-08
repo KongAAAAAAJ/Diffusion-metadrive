@@ -830,6 +830,49 @@ class JointSimulatorBranchEvaluator:
         prefix_actions: Sequence[Mapping[str, np.ndarray]],
         trajectories: np.ndarray,
     ) -> SimulatorBranchResult:
+        """Recreate, replay, evaluate, and close one env per candidate group."""
+
+        return self._evaluate(
+            episode_spec,
+            prefix_actions,
+            trajectories,
+            replayed_env=None,
+        )
+
+    def evaluate_from_replayed_env(
+        self,
+        episode_spec: JointEpisodeSpec,
+        env: object,
+        trajectories: np.ndarray,
+    ) -> SimulatorBranchResult:
+        """Evaluate one candidate from an env already at the reference pose.
+
+        The branch advances ``env`` in place.  The caller retains ownership and
+        is responsible for closing it; this method never resets or closes it.
+        """
+
+        if env is None:
+            raise JointRewardError("replayed branch env must be provided")
+        candidates = np.asarray(trajectories)
+        if candidates.ndim != 4 or candidates.shape[0] != 1:
+            raise JointRewardError(
+                "replayed branch trajectories must have group size one"
+            )
+        return self._evaluate(
+            episode_spec,
+            (),
+            candidates,
+            replayed_env=env,
+        )
+
+    def _evaluate(
+        self,
+        episode_spec: JointEpisodeSpec,
+        prefix_actions: Sequence[Mapping[str, np.ndarray]],
+        trajectories: np.ndarray,
+        *,
+        replayed_env: object | None,
+    ) -> SimulatorBranchResult:
         candidates = np.asarray(trajectories)
         if (
             candidates.ndim != 4
@@ -916,7 +959,8 @@ class JointSimulatorBranchEvaluator:
         signed_distance_fields: tuple[np.ndarray, ...] | None = None
 
         for group in range(group_size):
-            env = self._make_env(episode_spec)
+            owns_env = replayed_env is None
+            env = self._make_env(episode_spec) if owns_env else replayed_env
             try:
                 for action in prefix:
                     env.step(action)
@@ -1398,7 +1442,8 @@ class JointSimulatorBranchEvaluator:
                         "maximum_continuous_saturation_s"
                     ] = longest * dt_s
             finally:
-                env.close()
+                if owns_env:
+                    env.close()
 
         # An absent background vehicle is represented as a large finite gap in
         # the report, never as an NaN/inf sentinel.

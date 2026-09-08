@@ -440,6 +440,24 @@ class VehicleModePretrainRewardResult:
 
 
 @dataclass(frozen=True)
+class RewardGeometryContext:
+    """Immutable geometry shared by every reward pass for one live state.
+
+    The context is intentionally process-local: it is valid only while the
+    simulator state, BEV observation, and frozen teammate trajectories remain
+    the state used to build it.  It avoids rebuilding background predictions
+    and signed-distance fields for same-state pretrain/current/frozen scoring.
+    """
+
+    bev: np.ndarray
+    poses: tuple[np.ndarray, ...]
+    backgrounds: tuple[
+        Mapping[str, list[tuple[str, np.ndarray, tuple[float, float]]]], ...
+    ]
+    road_fields: tuple[np.ndarray, ...]
+
+
+@dataclass(frozen=True)
 class VehicleModeRewardResult:
     """Current and frozen same-mode rewards under identical teammate context."""
 
@@ -1444,14 +1462,24 @@ class VehicleModeCounterfactualReward:
             raise JointRewardError(f"{name} has the wrong rank")
         return array
 
-    def _candidate_values(self, candidates: object) -> np.ndarray:
+    def _candidate_values(
+        self,
+        candidates: object,
+        *,
+        trajectories_per_mode: int | None = None,
+    ) -> np.ndarray:
         values = self._array_without_optional_batch(
             candidates, unbatched_ndim=5, name="candidates"
+        )
+        sample_count = (
+            self.config.trajectories_per_mode
+            if trajectories_per_mode is None
+            else int(trajectories_per_mode)
         )
         expected = (
             NUM_ROLES,
             NUM_MODES,
-            self.config.trajectories_per_mode,
+            sample_count,
             *TRAJECTORY_SHAPE,
         )
         if (
@@ -1796,17 +1824,14 @@ class VehicleModeCounterfactualReward:
             },
         }
 
-    def _geometry_context(
+    def build_geometry_context(
         self,
         env: object,
         model_inputs: object,
         frozen_argmax: np.ndarray,
-    ) -> tuple[
-        np.ndarray,
-        list[np.ndarray],
-        list[dict[str, list[tuple[str, np.ndarray, tuple[float, float]]]]],
-        list[np.ndarray],
-    ]:
+    ) -> RewardGeometryContext:
+        """Build reusable reward geometry for one unchanged live state."""
+
         bev = _as_numpy_model_field(model_inputs, "bev")
         if bev.ndim == 5:
             if bev.shape[0] != 1:
@@ -1814,18 +1839,23 @@ class VehicleModeCounterfactualReward:
             bev = bev[0]
         if bev.shape != (NUM_ROLES, 8, 256, 256) or bev.dtype != np.uint8:
             raise JointRewardError("model input BEV contract mismatch")
-        poses = [_agent_pose(env, agent_id) for agent_id in AGENT_IDS]
+        poses = tuple(_agent_pose(env, agent_id) for agent_id in AGENT_IDS)
         probe = frozen_argmax[None]
         _, times = _dense_local_trajectories(probe, self.config)
-        backgrounds = [
+        backgrounds = tuple(
             self._background_by_actor(env, role, times)
             for role in range(NUM_ROLES)
-        ]
-        road_fields = [
+        )
+        road_fields = tuple(
             drivable_signed_distance_m(bev[role, int(BEVChannel.DRIVABLE)])
             for role in range(NUM_ROLES)
-        ]
-        return bev, poses, backgrounds, road_fields
+        )
+        return RewardGeometryContext(
+            bev=bev,
+            poses=poses,
+            backgrounds=backgrounds,
+            road_fields=road_fields,
+        )
 
     def score_pretrain(
         self,
@@ -1834,6 +1864,8 @@ class VehicleModeCounterfactualReward:
         frozen_all_mode_trajectories: object,
         frozen_argmax_joint_trajectories: object,
         valid_mode_mask: object,
+        *,
+        geometry_context: RewardGeometryContext | None = None,
     ) -> VehicleModePretrainRewardResult:
         """Score all valid frozen modes once for one live-state cache."""
 
@@ -1852,8 +1884,10 @@ class VehicleModeCounterfactualReward:
             name: np.zeros(shape, dtype=np.float32)
             for name in self._COMPONENT_NAMES
         }
-        bev, poses, backgrounds, road_fields = self._geometry_context(
-            env, model_inputs, frozen_argmax
+        context = (
+            geometry_context
+            if geometry_context is not None
+            else self.build_geometry_context(env, model_inputs, frozen_argmax)
         )
 
         for role in range(NUM_ROLES):
@@ -1864,10 +1898,10 @@ class VehicleModeCounterfactualReward:
                     target_role=role,
                     target_trajectories=frozen_all[role, mode][None],
                     frozen_argmax_joint_trajectories=frozen_argmax,
-                    poses=poses,
-                    drivable=bev[role, int(BEVChannel.DRIVABLE)],
-                    road_field=road_fields[role],
-                    background_by_actor=backgrounds[role],
+                    poses=list(context.poses),
+                    drivable=context.bev[role, int(BEVChannel.DRIVABLE)],
+                    road_field=context.road_fields[role],
+                    background_by_actor=context.backgrounds[role],
                 )
                 rewards[role, mode] = scored["rewards"][0]
                 unsafe[role, mode] = scored["unsafe"][0]
@@ -1896,10 +1930,15 @@ class VehicleModeCounterfactualReward:
         frozen_argmax_joint_trajectories: object,
         valid_mode_mask: object,
         pretrain: VehicleModePretrainRewardResult,
+        *,
+        geometry_context: RewardGeometryContext | None = None,
+        trajectories_per_mode: int | None = None,
     ) -> VehicleModeRewardResult:
         """Score one noise resample while reusing cached pretrain rewards."""
 
-        candidate_values = self._candidate_values(candidates)
+        candidate_values = self._candidate_values(
+            candidates, trajectories_per_mode=trajectories_per_mode
+        )
         frozen_argmax = self._frozen_argmax_values(
             frozen_argmax_joint_trajectories
         )
@@ -1913,7 +1952,7 @@ class VehicleModeCounterfactualReward:
         current_shape = (
             NUM_ROLES,
             NUM_MODES,
-            self.config.trajectories_per_mode,
+            candidate_values.shape[2],
         )
         rewards = np.zeros(current_shape, dtype=np.float32)
         unsafe = np.zeros(current_shape, dtype=np.bool_)
@@ -1924,8 +1963,10 @@ class VehicleModeCounterfactualReward:
             name: np.zeros(current_shape, dtype=np.float32)
             for name in self._COMPONENT_NAMES
         }
-        bev, poses, backgrounds, road_fields = self._geometry_context(
-            env, model_inputs, frozen_argmax
+        context = (
+            geometry_context
+            if geometry_context is not None
+            else self.build_geometry_context(env, model_inputs, frozen_argmax)
         )
 
         for role in range(NUM_ROLES):
@@ -1936,10 +1977,10 @@ class VehicleModeCounterfactualReward:
                     target_role=role,
                     target_trajectories=candidate_values[role, mode],
                     frozen_argmax_joint_trajectories=frozen_argmax,
-                    poses=poses,
-                    drivable=bev[role, int(BEVChannel.DRIVABLE)],
-                    road_field=road_fields[role],
-                    background_by_actor=backgrounds[role],
+                    poses=list(context.poses),
+                    drivable=context.bev[role, int(BEVChannel.DRIVABLE)],
+                    road_field=context.road_fields[role],
+                    background_by_actor=context.backgrounds[role],
                 )
                 rewards[role, mode] = scored["rewards"]
                 unsafe[role, mode] = scored["unsafe"]
@@ -1964,6 +2005,35 @@ class VehicleModeCounterfactualReward:
             pretrain_clearance_violation=pretrain.clearance_violation,
             components=components,
             pretrain_components=pretrain.components,
+        )
+
+    def score_all_mode_trajectories(
+        self,
+        env: object,
+        model_inputs: object,
+        all_mode_trajectories: object,
+        frozen_argmax_joint_trajectories: object,
+        valid_mode_mask: object,
+        pretrain: VehicleModePretrainRewardResult,
+        *,
+        geometry_context: RewardGeometryContext | None = None,
+    ) -> VehicleModeRewardResult:
+        """Score one deterministic trajectory for every vehicle-mode pair.
+
+        This is the exact N=1 counterpart of :meth:`score_candidates` for
+        validation.  It avoids materializing N identical trajectory copies.
+        """
+
+        all_mode_values = self._frozen_all_values(all_mode_trajectories)
+        return self.score_candidates(
+            env,
+            model_inputs,
+            all_mode_values[:, :, None],
+            frozen_argmax_joint_trajectories,
+            valid_mode_mask,
+            pretrain,
+            geometry_context=geometry_context,
+            trajectories_per_mode=1,
         )
 
     def score_counterfactuals(
@@ -2005,6 +2075,7 @@ __all__ = [
     "JointRewardError",
     "JointRewardResult",
     "JointTrajectoryProxyReward",
+    "RewardGeometryContext",
     "VehicleModeCounterfactualReward",
     "VehicleModePretrainRewardResult",
     "VehicleModeRewardConfig",
