@@ -64,13 +64,13 @@ set +e
   echo "[GRPO] output_root=$OUTPUT_ROOT"
   echo "[GRPO] run_dir=$RUN_DIR"
 
-  "$PYTHON_BIN" -m train.train_bev_joint_grpo_online \
+  # "$PYTHON_BIN" -m train.train_bev_joint_grpo_online \
+  #   --config "$CONFIG" \
+  #   --run-dir "$RUN_DIR"
+
+    "$PYTHON_BIN" -m train.bev_joint_grpo_online.train \
     --config "$CONFIG" \
     --run-dir "$RUN_DIR"
-
-    # "$PYTHON_BIN" -m train.bev_joint_grpo_online.train \
-    # --config "$CONFIG" \
-    # --run-dir "$RUN_DIR"
 
 } 2>&1 | tee "$RUN_LOG"
 pipeline_status=("${PIPESTATUS[@]}")
