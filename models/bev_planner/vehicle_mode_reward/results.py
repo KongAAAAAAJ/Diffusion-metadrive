@@ -10,6 +10,7 @@ import numpy as np
 from .config import JointRewardError
 from .constants import NUM_MODES, NUM_ROLES
 
+@dataclass(frozen=True)
 class VehicleModePretrainRewardResult:
     """Frozen same-mode target rewards cached once for one live state."""
 
