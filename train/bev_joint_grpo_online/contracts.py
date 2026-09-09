@@ -16,7 +16,7 @@ from models.bev_planner import (
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
 )
-from models.bev_planner.joint_reward import (
+from models.bev_planner.vehicle_mode_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     VEHICLE_MODE_REWARD_CONTRACT,

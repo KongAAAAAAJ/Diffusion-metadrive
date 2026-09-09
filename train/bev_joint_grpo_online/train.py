@@ -1,4 +1,4 @@
-"""Online raw-diffusion proxy-reward joint GRPO training for Variants A/B."""
+"""Online vehicle-mode reward joint GRPO training for Variants A/B."""
 from __future__ import annotations
 import argparse, json, sys
 from pathlib import Path

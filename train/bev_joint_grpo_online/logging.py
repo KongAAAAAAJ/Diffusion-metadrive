@@ -10,7 +10,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from evaluation.plot_grpo import ADVANTAGE_VECTOR_TAG
-from models.bev_planner.joint_reward import VehicleModeRewardConfig, VehicleModeRewardResult
+from models.bev_planner.vehicle_mode_reward import VehicleModeRewardConfig, VehicleModeRewardResult
 
 from .config import OnlineGRPOError
 from .validation import _validation_is_safety_eligible

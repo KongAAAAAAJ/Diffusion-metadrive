@@ -68,7 +68,7 @@ set +e
   #   --config "$CONFIG" \
   #   --run-dir "$RUN_DIR"
 
-    "$PYTHON_BIN" -m train.bev_joint_grpo_online.train \  # 代码分割
+    "$PYTHON_BIN" -m train.bev_joint_grpo_online.train \
     --config "$CONFIG" \
     --run-dir "$RUN_DIR"
 

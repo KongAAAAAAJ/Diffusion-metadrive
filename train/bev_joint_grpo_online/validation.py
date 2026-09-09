@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from models.bev_planner import KinematicTrajectoryOptimizer
-from models.bev_planner.joint_reward import (
+from models.bev_planner.vehicle_mode_reward import (
     VehicleModeCounterfactualReward,
     VehicleModePretrainRewardResult,
     VehicleModeRewardConfig,
