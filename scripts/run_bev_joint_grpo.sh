@@ -59,7 +59,7 @@ RUN_LOG="$RUN_DIR/training.log"
 
 set +e
 {
-  echo "[GRPO] application=stage2_grpo_open_application_v5 reward_domain=tau_d"
+  echo "[GRPO] application=stage2_grpo_open_application_v6 reward_domain=tau_d"
   echo "[GRPO] config=$CONFIG"
   echo "[GRPO] output_root=$OUTPUT_ROOT"
   echo "[GRPO] run_dir=$RUN_DIR"
@@ -68,7 +68,7 @@ set +e
   #   --config "$CONFIG" \
   #   --run-dir "$RUN_DIR"
 
-    "$PYTHON_BIN" -m train.bev_joint_grpo_online.train \
+  "$PYTHON_BIN" -m train.bev_joint_grpo_online.train \
     --config "$CONFIG" \
     --run-dir "$RUN_DIR"
 
