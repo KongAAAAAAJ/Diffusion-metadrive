@@ -1,27 +1,18 @@
 """TensorBoard and JSONL logging helpers."""
 from __future__ import annotations
-import dataclasses, hashlib, json, math, shutil, subprocess, time
-from collections import defaultdict
-from dataclasses import dataclass
+import json
+import math
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Literal, Mapping, Sequence
+from typing import Mapping
+
 import numpy as np
 import torch
-from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
-from evaluation.plot_grpo import ACCEPTED_ROLLOUT_AXIS_LABEL, ADVANTAGE_VECTOR_TAG, FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG, REWARD_CURVE_TAGS, VALIDATION_REWARD_CURVE_TAGS, generate_grpo_plots
-from evaluation.joint_simulator_branch import JointEpisodeSpec, JointSimulatorBranchEvaluator, capture_joint_pose_global
-from expert_dataset.collect_joint_bev import JointBEVSampleBuilder, SensorlessJointBEVPlatoonEnv, simulator_decision_dt_s
-from models.bev_planner import DDIMNoiseBundle, DDIMTransitionError, DEFAULT_DDIM_PATH, GRPO_OPEN_REWARD_APPLICATION_CONTRACT, GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256, JointGRPOConfig, JointRewardConfig, JointTrajectoryProxyReward, KinematicTrajectoryOptimizer, KinematicTrajectoryOptimizerConfig, TrajectoryOptimizationError, TrajectoryOptimizationResult, joint_grpo_optimizer_contract, joint_grpo_optimizer_contract_sha256
-from models.bev_planner.joint_reward import VEHICLE_MODE_REWARD_CONTRACT, VEHICLE_MODE_REWARD_CONTRACT_SHA256, VehicleModeCounterfactualReward, VehicleModePretrainRewardResult, VehicleModeRewardResult, VehicleModeRewardConfig, vehicle_mode_reward_config_sha256
-from models.bev_planner.mode_contract import ModeIndex
-from models.decisioner.rule_decisioner import LaneChangeCommitmentError, diffusion_mode_feedback_actions, hard_valid_modes_by_rule_action, joint_proposal_actions, make_rule_maker, match_joint_action_proposal
-from train.bev_joint_grpo import grpo_b_checkpoint_payload, grpo_checkpoint_payload, load_grpo_b_checkpoint, load_grpo_checkpoint, load_stage1_a_for_grpo, load_stage1_b_for_grpo, save_grpo_checkpoint
-from train.train_bev_diffusion_stage1 import planner_forward_from_batch
-from scenarios.bev_round13_contract import DEVELOPMENT_SEEDS, HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS, BEVScenarioContractError, deterministic_initial_speed_km_h, primary_scenario_contract, validate_primary_scenario_contract
+
+from evaluation.plot_grpo import ADVANTAGE_VECTOR_TAG
+from models.bev_planner.joint_reward import VehicleModeRewardConfig, VehicleModeRewardResult
+
 from .config import OnlineGRPOError
-from .contracts import BEST_CHECKPOINT_METRIC
 from .validation import _validation_is_safety_eligible
 
 def _should_record_advantage_vector(rollout_group: int, target_rollout_groups: int, interval_rollouts: int) -> bool:
@@ -149,15 +140,24 @@ def _write_baseline_execution_event(path: Path, *, optimizer_step: int, accepted
         stream.write(json.dumps(record, sort_keys=True) + '\n')
 
 def _append_validation_selection_event(history: list[dict[str, float]], *, accepted_update_state: int, validation: Mapping[str, object], pretrain_validation: Mapping[str, object]) -> tuple[bool, tuple[float, float] | None]:
-    """Append one validation and return its safety-constrained trailing score."""
-    simulator_gain = float(validation['validation/simulator_reward_gain'])
+    """Append one vehicle-mode validation and return its trailing score."""
+    vehicle_gain = float(validation['validation/vehicle_reward_gain_vs_fixed_pretrain'])
     selected_gain = float(validation['validation/selected_reward_gain'])
     s7_out_delta = float(validation['validation/S7/out_delta'])
-    if not all((math.isfinite(value) for value in (simulator_gain, selected_gain, s7_out_delta))):
+    if not all(math.isfinite(value) for value in (vehicle_gain, selected_gain, s7_out_delta)):
         raise OnlineGRPOError('checkpoint selection gains must be finite')
     safety_eligible = _validation_is_safety_eligible(validation, pretrain_validation)
-    history.append({'accepted_update_state': float(accepted_update_state), 'simulator_reward_gain': simulator_gain, 'selected_reward_gain': selected_gain, 's7_out_delta': s7_out_delta, 'safety_eligible': float(safety_eligible)})
+    history.append({
+        'accepted_update_state': float(accepted_update_state),
+        'vehicle_reward_gain': vehicle_gain,
+        'selected_reward_gain': selected_gain,
+        's7_out_delta': s7_out_delta,
+        'safety_eligible': float(safety_eligible),
+    })
     if accepted_update_state < 60 or len(history) < 3:
-        return (safety_eligible, None)
+        return safety_eligible, None
     trailing = history[-3:]
-    return (safety_eligible, (float(np.mean([value['simulator_reward_gain'] for value in trailing])), float(np.mean([value['selected_reward_gain'] for value in trailing]))))
+    return safety_eligible, (
+        float(np.mean([value['vehicle_reward_gain'] for value in trailing])),
+        float(np.mean([value['selected_reward_gain'] for value in trailing])),
+    )

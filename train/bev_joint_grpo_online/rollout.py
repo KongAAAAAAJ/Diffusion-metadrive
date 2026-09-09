@@ -1,25 +1,15 @@
-"""GRPO sampling, reward-signal construction, and bucket scheduling."""
+"""GRPO trainer loading, reward gating, and rollout scheduling helpers."""
 from __future__ import annotations
-import dataclasses, hashlib, json, math, shutil, subprocess, time
-from collections import defaultdict
-from dataclasses import dataclass
+
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Literal, Mapping, Sequence
+from typing import Sequence
+
 import numpy as np
 import torch
-from torch import Tensor
-from torch.utils.tensorboard import SummaryWriter
-from evaluation.plot_grpo import ACCEPTED_ROLLOUT_AXIS_LABEL, ADVANTAGE_VECTOR_TAG, FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG, REWARD_CURVE_TAGS, VALIDATION_REWARD_CURVE_TAGS, generate_grpo_plots
-from evaluation.joint_simulator_branch import JointEpisodeSpec, JointSimulatorBranchEvaluator, capture_joint_pose_global
-from expert_dataset.collect_joint_bev import JointBEVSampleBuilder, SensorlessJointBEVPlatoonEnv, simulator_decision_dt_s
-from models.bev_planner import DDIMNoiseBundle, DDIMTransitionError, DEFAULT_DDIM_PATH, GRPO_OPEN_REWARD_APPLICATION_CONTRACT, GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256, JointGRPOConfig, JointRewardConfig, JointTrajectoryProxyReward, KinematicTrajectoryOptimizer, KinematicTrajectoryOptimizerConfig, TrajectoryOptimizationError, TrajectoryOptimizationResult, joint_grpo_optimizer_contract, joint_grpo_optimizer_contract_sha256
-from models.bev_planner.joint_reward import VEHICLE_MODE_REWARD_CONTRACT, VEHICLE_MODE_REWARD_CONTRACT_SHA256, VehicleModeCounterfactualReward, VehicleModePretrainRewardResult, VehicleModeRewardResult, VehicleModeRewardConfig, vehicle_mode_reward_config_sha256
-from models.bev_planner.mode_contract import ModeIndex
-from models.decisioner.rule_decisioner import LaneChangeCommitmentError, diffusion_mode_feedback_actions, hard_valid_modes_by_rule_action, joint_proposal_actions, make_rule_maker, match_joint_action_proposal
-from train.bev_joint_grpo import grpo_b_checkpoint_payload, grpo_checkpoint_payload, load_grpo_b_checkpoint, load_grpo_checkpoint, load_stage1_a_for_grpo, load_stage1_b_for_grpo, save_grpo_checkpoint
-from train.train_bev_diffusion_stage1 import planner_forward_from_batch
-from scenarios.bev_round13_contract import DEVELOPMENT_SEEDS, HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS, BEVScenarioContractError, deterministic_initial_speed_km_h, primary_scenario_contract, validate_primary_scenario_contract
+
+from models.bev_planner import JointGRPOConfig
+from train.bev_joint_grpo import load_stage1_a_for_grpo, load_stage1_b_for_grpo
+
 from .config import OnlineGRPOError
 
 def _load_trainer(variant: str, source_checkpoint: Path, device: torch.device, *, grpo_config: JointGRPOConfig, allow_diagnostic_source: bool):

@@ -1,31 +1,39 @@
 """Experiment contracts, reproducibility metadata, and checkpoint state."""
 from __future__ import annotations
-import dataclasses, hashlib, json, math, shutil, subprocess, time
-from collections import defaultdict
-from dataclasses import dataclass
+import dataclasses
+import hashlib
+import math
+import subprocess
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Literal, Mapping, Sequence
-import numpy as np
+from typing import Mapping, Sequence
+
 import torch
-from torch import Tensor
-from torch.utils.tensorboard import SummaryWriter
-from evaluation.plot_grpo import ACCEPTED_ROLLOUT_AXIS_LABEL, ADVANTAGE_VECTOR_TAG, FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG, REWARD_CURVE_TAGS, VALIDATION_REWARD_CURVE_TAGS, generate_grpo_plots
-from evaluation.joint_simulator_branch import JointEpisodeSpec, JointSimulatorBranchEvaluator, capture_joint_pose_global
-from expert_dataset.collect_joint_bev import JointBEVSampleBuilder, SensorlessJointBEVPlatoonEnv, simulator_decision_dt_s
-from models.bev_planner import DDIMNoiseBundle, DDIMTransitionError, DEFAULT_DDIM_PATH, GRPO_OPEN_REWARD_APPLICATION_CONTRACT, GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256, JointGRPOConfig, JointRewardConfig, JointTrajectoryProxyReward, KinematicTrajectoryOptimizer, KinematicTrajectoryOptimizerConfig, TrajectoryOptimizationError, TrajectoryOptimizationResult, joint_grpo_optimizer_contract, joint_grpo_optimizer_contract_sha256
-from models.bev_planner.joint_reward import VEHICLE_MODE_REWARD_CONTRACT, VEHICLE_MODE_REWARD_CONTRACT_SHA256, VehicleModeCounterfactualReward, VehicleModePretrainRewardResult, VehicleModeRewardResult, VehicleModeRewardConfig, vehicle_mode_reward_config_sha256
-from models.bev_planner.mode_contract import ModeIndex
-from models.decisioner.rule_decisioner import LaneChangeCommitmentError, diffusion_mode_feedback_actions, hard_valid_modes_by_rule_action, joint_proposal_actions, make_rule_maker, match_joint_action_proposal
-from train.bev_joint_grpo import grpo_b_checkpoint_payload, grpo_checkpoint_payload, load_grpo_b_checkpoint, load_grpo_checkpoint, load_stage1_a_for_grpo, load_stage1_b_for_grpo, save_grpo_checkpoint
-from train.train_bev_diffusion_stage1 import planner_forward_from_batch
-from scenarios.bev_round13_contract import DEVELOPMENT_SEEDS, HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS, BEVScenarioContractError, deterministic_initial_speed_km_h, primary_scenario_contract, validate_primary_scenario_contract
+
+from models.bev_planner import (
+    DEFAULT_DDIM_PATH,
+    JointGRPOConfig,
+    KinematicTrajectoryOptimizerConfig,
+    joint_grpo_optimizer_contract,
+    joint_grpo_optimizer_contract_sha256,
+)
+from models.bev_planner.joint_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+    VEHICLE_MODE_REWARD_CONTRACT,
+    VEHICLE_MODE_REWARD_CONTRACT_SHA256,
+    VehicleModeRewardConfig,
+    vehicle_mode_reward_config_sha256,
+)
+from train.bev_joint_grpo import grpo_b_checkpoint_payload, grpo_checkpoint_payload
+
 from .config import JointGRPOOnlineConfig, OnlineGRPOError
 from .rollout import _attempt_budget_is_exhausted, _next_unfinished_bucket_index
 ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v7"
-BEST_CHECKPOINT_METRIC = "validation/safety_constrained_simulator_reward_gain_trailing3"
+BEST_CHECKPOINT_METRIC = "validation/safety_constrained_vehicle_reward_gain_trailing3"
 VALIDATION_STATE_BANK_FORMAT = "bev_joint_grpo_validation_state_bank_v1"
 MUTABLE_RUNTIME_CONFIG_PATH = "configs/train/bev_joint_grpo.yaml"
+FROZEN_PRETRAIN_VEHICLE_REWARD_TAG = "reward/same_mode_pretrain_vehicle_reward_mean"
+VALIDATION_REWARD_FAMILY = "vehicle_mode_counterfactual"
 
 def _performance_summary(totals: Mapping[str, float], *, validation_calls: int) -> dict[str, object]:
     """Return accumulated wall timings without changing checkpoint payloads."""
@@ -53,7 +61,7 @@ def _implementation_commit() -> str:
 def _frozen_pretrain_reward_logging_metadata(planner: torch.nn.Module) -> dict[str, object]:
     """Describe the per-live-state frozen Stage1 reward diagnostic."""
     planner_config = planner.config
-    return {'tensorboard_tag': FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG, 'metrics_jsonl_field': FROZEN_PRETRAIN_RAW_PROXY_REWARD_TAG, 'step_axis': 'absolute_accepted_update_state', 'same_live_state_as_current_exploration': True, 'reward_baseline_trajectory_count': 30, 'reward_baseline_selection': 'all_valid_vehicle_modes', 'execution_trajectory_count': 3, 'execution_selection': 'valid_mode_masked_argmax_per_vehicle', 'trajectory_domain': 'raw_tau_d', 'inference': 'frozen_stage1_standard_deterministic_ddim', 'inference_seed': int(planner_config.inference_seed), 'ddim_path': DEFAULT_DDIM_PATH.as_dict(), 'fixed_inference_noise': True, 'advantage_formula_role': 'paired_sample_baseline_filter', 'active_mode_gate_role': 'none; signal is derived per sample', 'environment_action_role': 'sole_executed_policy'}
+    return {'tensorboard_tag': FROZEN_PRETRAIN_VEHICLE_REWARD_TAG, 'metrics_jsonl_field': FROZEN_PRETRAIN_VEHICLE_REWARD_TAG, 'step_axis': 'absolute_accepted_update_state', 'same_live_state_as_current_exploration': True, 'reward_baseline_trajectory_count': 30, 'reward_baseline_selection': 'all_valid_vehicle_modes', 'execution_trajectory_count': 3, 'execution_selection': 'valid_mode_masked_argmax_per_vehicle', 'trajectory_domain': 'raw_tau_d', 'inference': 'frozen_stage1_standard_deterministic_ddim', 'inference_seed': int(planner_config.inference_seed), 'ddim_path': DEFAULT_DDIM_PATH.as_dict(), 'fixed_inference_noise': True, 'advantage_formula_role': 'paired_sample_baseline_filter', 'active_mode_gate_role': 'none; signal is derived per sample', 'environment_action_role': 'sole_executed_policy'}
 
 def rollout_collection_contract(config: JointGRPOOnlineConfig) -> dict[str, object]:
     """Return the exact persistent-episode collection protocol."""
@@ -80,16 +88,6 @@ def _application_contract_version() -> str:
     if not isinstance(version, str) or not version:
         raise OnlineGRPOError('GRPO-Open application contract version is invalid')
     return version
-
-def _validate_raw_reward_config(config: JointRewardConfig) -> None:
-    """Require the frozen zero-expansion V2 config for raw tau_d scoring."""
-    if not isinstance(config, JointRewardConfig):
-        raise OnlineGRPOError('raw reward config must be JointRewardConfig')
-    if any((float(getattr(config, name)) != 0.0 for name in ('tracking_longitudinal_margin_m', 'tracking_lateral_margin_m', 'tracking_heading_margin_rad'))):
-        raise OnlineGRPOError('GRPO-Open tau_d reward requires zero tracking margins')
-    default = JointRewardConfig()
-    if dataclasses.asdict(config) != dataclasses.asdict(default):
-        raise OnlineGRPOError('GRPO-Open tau_d reward config must match the frozen base config')
 
 def _validate_vehicle_mode_reward_config(config: VehicleModeRewardConfig, *, trajectories_per_mode: int) -> None:
     if not isinstance(config, VehicleModeRewardConfig):
@@ -195,7 +193,7 @@ def _validate_sampler_state(raw: object, *, bucket_count: int, expected_bucket_t
 def _validated_selection_history(raw: object) -> list[dict[str, float]]:
     if not isinstance(raw, (list, tuple)):
         raise OnlineGRPOError('validation selection history must be a sequence')
-    expected = {'accepted_update_state', 'simulator_reward_gain', 'selected_reward_gain', 's7_out_delta', 'safety_eligible'}
+    expected = {'accepted_update_state', 'vehicle_reward_gain', 'selected_reward_gain', 's7_out_delta', 'safety_eligible'}
     checked: list[dict[str, float]] = []
     previous_state = -1.0
     for entry in raw:
@@ -228,15 +226,15 @@ def _checkpoint_payload(*, variant: str, trainer: object, source_sha: str, sourc
             raise OnlineGRPOError('best checkpoint SHA256 is invalid') from exc
     builder = grpo_checkpoint_payload if variant == 'A' else grpo_b_checkpoint_payload
     payload = builder(trainer=trainer, source_stage1_sha256=source_sha, source_stage1_payload=source_payload, metrics=metrics, diagnostic_only=diagnostic_only)
-    payload.update({'run_mode': run_mode, 'reward_contract_version': _reward_contract_version(), 'reward_contract_sha256': VEHICLE_MODE_REWARD_CONTRACT_SHA256, 'reward_config': dataclasses.asdict(reward_config), 'reward_config_sha256': vehicle_mode_reward_config_sha256(reward_config), 'reward_application_contract': GRPO_OPEN_REWARD_APPLICATION_CONTRACT, 'reward_application_contract_sha256': GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256, 'reward_input_domain': 'tau_d', 'training_candidate_domain': 'tau_d_all_vehicle_modes', 'environment_action_source': 'cached_frozen_stage1_argmax', 'execution_input_domain': 'tau_cmd', 'best_checkpoint_metric': BEST_CHECKPOINT_METRIC, 'joint_reward_role': 'historical_and_final_evaluation_only', 'tracking_expansion_enabled': False, 'calibration_required': False, 'scenario_contract_sha256': scenario_contract_sha, 'scenario_seeds': [int(value) for value in scenario_seeds], 'environment_steps': int(environment_steps), 'best_validation_reward': None if best_validation_reward is None else float(best_validation_reward), 'best_selected_reward_gain': None if best_selected_reward_gain is None else float(best_selected_reward_gain), 'best_checkpoint_sha256': best_checkpoint_sha256, 'validation_selection_history': checked_history, 'policy_update_contract': joint_grpo_optimizer_contract(), 'policy_update_contract_sha256': joint_grpo_optimizer_contract_sha256(), 'rollout_collection_contract': dict(collection_contract), 'sampler_state': dict(sampler_state), 'trajectory_optimizer_config': dataclasses.asdict(KinematicTrajectoryOptimizerConfig()), 'trajectory_optimizer_sha256': KinematicTrajectoryOptimizerConfig().sha256()})
+    payload.update({'run_mode': run_mode, 'reward_contract_version': _reward_contract_version(), 'reward_contract_sha256': VEHICLE_MODE_REWARD_CONTRACT_SHA256, 'reward_config': dataclasses.asdict(reward_config), 'reward_config_sha256': vehicle_mode_reward_config_sha256(reward_config), 'reward_application_contract': GRPO_OPEN_REWARD_APPLICATION_CONTRACT, 'reward_application_contract_sha256': GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256, 'reward_input_domain': 'tau_d', 'training_candidate_domain': 'tau_d_all_vehicle_modes', 'environment_action_source': 'cached_frozen_stage1_argmax', 'execution_input_domain': 'tau_cmd', 'best_checkpoint_metric': BEST_CHECKPOINT_METRIC, 'validation_reward_family': VALIDATION_REWARD_FAMILY, 'tracking_expansion_enabled': False, 'calibration_required': False, 'scenario_contract_sha256': scenario_contract_sha, 'scenario_seeds': [int(value) for value in scenario_seeds], 'environment_steps': int(environment_steps), 'best_validation_reward': None if best_validation_reward is None else float(best_validation_reward), 'best_selected_reward_gain': None if best_selected_reward_gain is None else float(best_selected_reward_gain), 'best_checkpoint_sha256': best_checkpoint_sha256, 'validation_selection_history': checked_history, 'policy_update_contract': joint_grpo_optimizer_contract(), 'policy_update_contract_sha256': joint_grpo_optimizer_contract_sha256(), 'rollout_collection_contract': dict(collection_contract), 'sampler_state': dict(sampler_state), 'trajectory_optimizer_config': dataclasses.asdict(KinematicTrajectoryOptimizerConfig()), 'trajectory_optimizer_sha256': KinematicTrajectoryOptimizerConfig().sha256()})
     return payload
 
 def _validate_online_checkpoint_metadata(payload: Mapping[str, object], *, run_mode: str, reward_config: VehicleModeRewardConfig, scenario_contract_sha: str, scenario_seeds: Sequence[int], collection_contract: Mapping[str, object], bucket_count: int, bucket_target_counts: Sequence[int], rollout_groups_per_bucket_visit: int, optimizer_step: int, max_sampling_attempts: int | None=None) -> dict[str, object]:
     _validate_vehicle_mode_reward_config(reward_config, trajectories_per_mode=int(collection_contract.get('trajectories_per_mode', -1)))
-    legacy_fields = ('calibration_report_sha256', 'calibration_gate_bypassed', 'calibration_report_passed', 'calibration_blockers')
+    legacy_fields = ('calibration_report_sha256', 'calibration_gate_bypassed', 'calibration_report_passed', 'calibration_blockers', 'joint_reward_role', 'simulator_validation_role')
     if any((name in payload for name in legacy_fields)):
         raise OnlineGRPOError('online GRPO checkpoint contains legacy calibration semantics')
-    expected = {'run_mode': run_mode, 'diagnostic_only': run_mode != 'formal', 'eligible_for_formal_training': run_mode == 'formal', 'reward_contract_version': _reward_contract_version(), 'reward_contract_sha256': VEHICLE_MODE_REWARD_CONTRACT_SHA256, 'reward_config': dataclasses.asdict(reward_config), 'reward_config_sha256': vehicle_mode_reward_config_sha256(reward_config), 'reward_application_contract': GRPO_OPEN_REWARD_APPLICATION_CONTRACT, 'reward_application_contract_sha256': GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256, 'reward_input_domain': 'tau_d', 'training_candidate_domain': 'tau_d_all_vehicle_modes', 'environment_action_source': 'cached_frozen_stage1_argmax', 'execution_input_domain': 'tau_cmd', 'best_checkpoint_metric': BEST_CHECKPOINT_METRIC, 'joint_reward_role': 'historical_and_final_evaluation_only', 'tracking_expansion_enabled': False, 'calibration_required': False, 'policy_update_contract': joint_grpo_optimizer_contract(), 'policy_update_contract_sha256': joint_grpo_optimizer_contract_sha256(), 'rollout_collection_contract': dict(collection_contract), 'scenario_contract_sha256': scenario_contract_sha, 'scenario_seeds': [int(value) for value in scenario_seeds], 'trajectory_optimizer_config': dataclasses.asdict(KinematicTrajectoryOptimizerConfig()), 'trajectory_optimizer_sha256': KinematicTrajectoryOptimizerConfig().sha256()}
+    expected = {'run_mode': run_mode, 'diagnostic_only': run_mode != 'formal', 'eligible_for_formal_training': run_mode == 'formal', 'reward_contract_version': _reward_contract_version(), 'reward_contract_sha256': VEHICLE_MODE_REWARD_CONTRACT_SHA256, 'reward_config': dataclasses.asdict(reward_config), 'reward_config_sha256': vehicle_mode_reward_config_sha256(reward_config), 'reward_application_contract': GRPO_OPEN_REWARD_APPLICATION_CONTRACT, 'reward_application_contract_sha256': GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256, 'reward_input_domain': 'tau_d', 'training_candidate_domain': 'tau_d_all_vehicle_modes', 'environment_action_source': 'cached_frozen_stage1_argmax', 'execution_input_domain': 'tau_cmd', 'best_checkpoint_metric': BEST_CHECKPOINT_METRIC, 'validation_reward_family': VALIDATION_REWARD_FAMILY, 'tracking_expansion_enabled': False, 'calibration_required': False, 'policy_update_contract': joint_grpo_optimizer_contract(), 'policy_update_contract_sha256': joint_grpo_optimizer_contract_sha256(), 'rollout_collection_contract': dict(collection_contract), 'scenario_contract_sha256': scenario_contract_sha, 'scenario_seeds': [int(value) for value in scenario_seeds], 'trajectory_optimizer_config': dataclasses.asdict(KinematicTrajectoryOptimizerConfig()), 'trajectory_optimizer_sha256': KinematicTrajectoryOptimizerConfig().sha256()}
     for name, value in expected.items():
         if payload.get(name) != value:
             raise OnlineGRPOError(f'online GRPO checkpoint {name} mismatch')
