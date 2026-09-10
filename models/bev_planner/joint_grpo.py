@@ -28,8 +28,8 @@ from models.bev_planner.ddim_transition import (
     StandardGaussianDDIM,
 )
 from models.bev_planner.time_varying_cbf import (
-    curvature_cbf_safe_target,
-    time_varying_curvature_limit,
+    steering_cbf_safe_target,
+    time_varying_steering_limit_deg,
 )
 
 
@@ -54,17 +54,19 @@ class JointGRPOConfig:
     heading_beta_rad: float = 0.1
     heading_bc_weight: float = 0.2
     constraint_mode: str = "none"
-    curvature_cbf_weight: float = 0.05
-    curvature_initial_limit_inv_m: float = 0.20
-    curvature_final_limit_inv_m: float = 0.08
-    curvature_schedule_power: float = 1.0
-    curvature_projection_passes: int = 2
-    curvature_max_target_correction_m: float = 0.75
+    steering_cbf_weight: float = 0.05
+    wheelbase_m: float = 5.6
+    min_segment_length_m: float = 0.2
+    steering_initial_limit_deg: float = 48.24
+    steering_final_limit_deg: float = 24.13
+    steering_schedule_power: float = 1.0
+    steering_projection_passes: int = 2
+    steering_max_target_correction_m: float = 0.75
 
     def __post_init__(self) -> None:
-        if self.constraint_mode not in ("none", "tv_cbf_curvature"):
+        if self.constraint_mode not in ("none", "tv_cbf_steering"):
             raise JointGRPOError(
-                "constraint_mode must be none or tv_cbf_curvature"
+                "constraint_mode must be none or tv_cbf_steering"
             )
         if (
             isinstance(self.trajectories_per_mode, bool)
@@ -83,9 +85,11 @@ class JointGRPOConfig:
             "max_adapter_relative_drift",
             "xy_beta_m",
             "heading_beta_rad",
-            "curvature_initial_limit_inv_m",
-            "curvature_final_limit_inv_m",
-            "curvature_schedule_power",
+            "wheelbase_m",
+            "min_segment_length_m",
+            "steering_initial_limit_deg",
+            "steering_final_limit_deg",
+            "steering_schedule_power",
         )
         non_negative = (
             "trajectory_pg_weight",
@@ -93,8 +97,8 @@ class JointGRPOConfig:
             "reference_kl_weight",
             "weight_decay",
             "heading_bc_weight",
-            "curvature_cbf_weight",
-            "curvature_max_target_correction_m",
+            "steering_cbf_weight",
+            "steering_max_target_correction_m",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -104,26 +108,30 @@ class JointGRPOConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
                 raise JointGRPOError(f"{name} must be non-negative and finite")
-        if float(self.curvature_initial_limit_inv_m) < float(
-            self.curvature_final_limit_inv_m
+        if float(self.steering_initial_limit_deg) >= 90.0 or float(
+            self.steering_final_limit_deg
+        ) >= 90.0:
+            raise JointGRPOError("steering limits must be smaller than 90 degrees")
+        if float(self.steering_initial_limit_deg) < float(
+            self.steering_final_limit_deg
         ):
             raise JointGRPOError(
-                "curvature_initial_limit_inv_m must be greater than or equal to "
-                "curvature_final_limit_inv_m"
+                "steering_initial_limit_deg must be greater than or equal to "
+                "steering_final_limit_deg"
             )
         if (
-            isinstance(self.curvature_projection_passes, bool)
-            or not isinstance(self.curvature_projection_passes, int)
-            or self.curvature_projection_passes <= 0
+            isinstance(self.steering_projection_passes, bool)
+            or not isinstance(self.steering_projection_passes, int)
+            or self.steering_projection_passes <= 0
         ):
             raise JointGRPOError(
-                "curvature_projection_passes must be a positive integer"
+                "steering_projection_passes must be a positive integer"
             )
-        if self.constraint_mode == "tv_cbf_curvature" and float(
-            self.curvature_cbf_weight
+        if self.constraint_mode == "tv_cbf_steering" and float(
+            self.steering_cbf_weight
         ) <= 0.0:
             raise JointGRPOError(
-                "tv_cbf_curvature requires curvature_cbf_weight > 0"
+                "tv_cbf_steering requires steering_cbf_weight > 0"
             )
 
     @property
@@ -255,14 +263,16 @@ class JointGRPOLossResult:
     trajectory_pg_by_mode: Tensor
     behavior_cloning_by_mode: Tensor
     reference_kl_by_mode: Tensor
-    curvature_cbf: Tensor
-    curvature_cbf_by_step: Tensor
-    curvature_nominal_violation_fraction_by_step: Tensor
-    curvature_target_violation_fraction_by_step: Tensor
-    curvature_target_correction_rms_m_by_step: Tensor
-    curvature_nominal_max_abs_curvature_by_step: Tensor
-    curvature_target_max_abs_curvature_by_step: Tensor
-    curvature_correction_clipped_fraction_by_step: Tensor
+    steering_cbf: Tensor
+    steering_cbf_by_step: Tensor
+    steering_nominal_violation_fraction_by_step: Tensor
+    steering_target_violation_fraction_by_step: Tensor
+    steering_target_correction_rms_m_by_step: Tensor
+    steering_nominal_max_abs_rad_by_step: Tensor
+    steering_target_max_abs_rad_by_step: Tensor
+    steering_nominal_degenerate_segment_fraction_by_step: Tensor
+    steering_target_degenerate_segment_fraction_by_step: Tensor
+    steering_correction_clipped_fraction_by_step: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -271,7 +281,7 @@ class JointGRPOLossResult:
             "loss/behavior_cloning": self.behavior_cloning,
             "loss/trajectory_reference_kl": self.trajectory_reference_kl,
             "loss/reference_kl": self.reference_kl,
-            "loss/curvature_cbf": self.curvature_cbf,
+            "loss/steering_cbf": self.steering_cbf,
             "advantage/mean": _active_tensor_mean(
                 self.advantages, self.valid_executable_mode_mask
             ),
@@ -298,26 +308,32 @@ class JointGRPOLossResult:
             ).float().sum(),
         }
         for step_index, timestep in enumerate(DEFAULT_DDIM_PATH.timesteps):
-            values[f"constraint/t{timestep}/curvature_cbf_loss"] = (
-                self.curvature_cbf_by_step[step_index]
+            values[f"constraint/t{timestep}/steering_cbf_loss"] = (
+                self.steering_cbf_by_step[step_index]
             )
             values[f"constraint/t{timestep}/nominal_violation_fraction"] = (
-                self.curvature_nominal_violation_fraction_by_step[step_index]
+                self.steering_nominal_violation_fraction_by_step[step_index]
             )
             values[f"constraint/t{timestep}/target_violation_fraction"] = (
-                self.curvature_target_violation_fraction_by_step[step_index]
+                self.steering_target_violation_fraction_by_step[step_index]
             )
             values[f"constraint/t{timestep}/target_correction_rms_m"] = (
-                self.curvature_target_correction_rms_m_by_step[step_index]
+                self.steering_target_correction_rms_m_by_step[step_index]
             )
-            values[f"constraint/t{timestep}/nominal_max_abs_curvature"] = (
-                self.curvature_nominal_max_abs_curvature_by_step[step_index]
+            values[f"constraint/t{timestep}/nominal_max_abs_steering_deg"] = (
+                torch.rad2deg(self.steering_nominal_max_abs_rad_by_step[step_index])
             )
-            values[f"constraint/t{timestep}/target_max_abs_curvature"] = (
-                self.curvature_target_max_abs_curvature_by_step[step_index]
+            values[f"constraint/t{timestep}/target_max_abs_steering_deg"] = (
+                torch.rad2deg(self.steering_target_max_abs_rad_by_step[step_index])
+            )
+            values[f"constraint/t{timestep}/nominal_degenerate_segment_fraction"] = (
+                self.steering_nominal_degenerate_segment_fraction_by_step[step_index]
+            )
+            values[f"constraint/t{timestep}/target_degenerate_segment_fraction"] = (
+                self.steering_target_degenerate_segment_fraction_by_step[step_index]
             )
             values[f"constraint/t{timestep}/correction_clipped_fraction"] = (
-                self.curvature_correction_clipped_fraction_by_step[step_index]
+                self.steering_correction_clipped_fraction_by_step[step_index]
             )
         for mode in range(NUM_MODES):
             values[f"loss/mode_{mode}/trajectory_pg"] = (
@@ -348,25 +364,31 @@ class JointGRPOLossResult:
             trajectory_pg_by_mode=self.trajectory_pg_by_mode.detach(),
             behavior_cloning_by_mode=self.behavior_cloning_by_mode.detach(),
             reference_kl_by_mode=self.reference_kl_by_mode.detach(),
-            curvature_cbf=self.curvature_cbf.detach(),
-            curvature_cbf_by_step=self.curvature_cbf_by_step.detach(),
-            curvature_nominal_violation_fraction_by_step=(
-                self.curvature_nominal_violation_fraction_by_step.detach()
+            steering_cbf=self.steering_cbf.detach(),
+            steering_cbf_by_step=self.steering_cbf_by_step.detach(),
+            steering_nominal_violation_fraction_by_step=(
+                self.steering_nominal_violation_fraction_by_step.detach()
             ),
-            curvature_target_violation_fraction_by_step=(
-                self.curvature_target_violation_fraction_by_step.detach()
+            steering_target_violation_fraction_by_step=(
+                self.steering_target_violation_fraction_by_step.detach()
             ),
-            curvature_target_correction_rms_m_by_step=(
-                self.curvature_target_correction_rms_m_by_step.detach()
+            steering_target_correction_rms_m_by_step=(
+                self.steering_target_correction_rms_m_by_step.detach()
             ),
-            curvature_nominal_max_abs_curvature_by_step=(
-                self.curvature_nominal_max_abs_curvature_by_step.detach()
+            steering_nominal_max_abs_rad_by_step=(
+                self.steering_nominal_max_abs_rad_by_step.detach()
             ),
-            curvature_target_max_abs_curvature_by_step=(
-                self.curvature_target_max_abs_curvature_by_step.detach()
+            steering_target_max_abs_rad_by_step=(
+                self.steering_target_max_abs_rad_by_step.detach()
             ),
-            curvature_correction_clipped_fraction_by_step=(
-                self.curvature_correction_clipped_fraction_by_step.detach()
+            steering_nominal_degenerate_segment_fraction_by_step=(
+                self.steering_nominal_degenerate_segment_fraction_by_step.detach()
+            ),
+            steering_target_degenerate_segment_fraction_by_step=(
+                self.steering_target_degenerate_segment_fraction_by_step.detach()
+            ),
+            steering_correction_clipped_fraction_by_step=(
+                self.steering_correction_clipped_fraction_by_step.detach()
             ),
         )
 
@@ -1361,13 +1383,15 @@ class _JointGRPOTrainerBase:
 
         current_log_probs = []
         trajectory_kls = []
-        curvature_cbf_step_losses: list[Tensor] = []
-        curvature_nominal_violation_step: list[Tensor] = []
-        curvature_target_violation_step: list[Tensor] = []
-        curvature_target_correction_step: list[Tensor] = []
-        curvature_nominal_max_step: list[Tensor] = []
-        curvature_target_max_step: list[Tensor] = []
-        curvature_correction_clipped_step: list[Tensor] = []
+        steering_cbf_step_losses: list[Tensor] = []
+        steering_nominal_violation_step: list[Tensor] = []
+        steering_target_violation_step: list[Tensor] = []
+        steering_target_correction_step: list[Tensor] = []
+        steering_nominal_max_step: list[Tensor] = []
+        steering_target_max_step: list[Tensor] = []
+        steering_nominal_degenerate_step: list[Tensor] = []
+        steering_target_degenerate_step: list[Tensor] = []
+        steering_correction_clipped_step: list[Tensor] = []
         final_current_candidates = final_reference_candidates = None
         for step_index, (timestep, previous_timestep) in enumerate(
             DEFAULT_DDIM_PATH.transitions()
@@ -1398,19 +1422,21 @@ class _JointGRPOTrainerBase:
                 valid_mask=valid_mask,
                 predecessor_history=predecessor_history,
             )
-            if self.config.constraint_mode == "tv_cbf_curvature":
-                curvature_limit = time_varying_curvature_limit(
+            if self.config.constraint_mode == "tv_cbf_steering":
+                steering_limit_deg = time_varying_steering_limit_deg(
                     timestep=timestep,
                     initial_timestep=DEFAULT_DDIM_PATH.initial_timestep,
-                    initial_limit_inv_m=self.config.curvature_initial_limit_inv_m,
-                    final_limit_inv_m=self.config.curvature_final_limit_inv_m,
-                    schedule_power=self.config.curvature_schedule_power,
+                    initial_limit_deg=self.config.steering_initial_limit_deg,
+                    final_limit_deg=self.config.steering_final_limit_deg,
+                    schedule_power=self.config.steering_schedule_power,
                 )
-                cbf_target = curvature_cbf_safe_target(
+                cbf_target = steering_cbf_safe_target(
                     current_candidates[..., :2],
-                    curvature_limit_inv_m=curvature_limit,
-                    projection_passes=self.config.curvature_projection_passes,
-                    max_correction_m=self.config.curvature_max_target_correction_m,
+                    steering_limit_deg=steering_limit_deg,
+                    wheelbase_m=self.config.wheelbase_m,
+                    min_segment_length_m=self.config.min_segment_length_m,
+                    projection_passes=self.config.steering_projection_passes,
+                    max_correction_m=self.config.steering_max_target_correction_m,
                 )
                 cbf_blocks_flat = (
                     current_candidates[..., :2] - cbf_target.target_xy
@@ -1421,7 +1447,7 @@ class _JointGRPOTrainerBase:
                     NUM_PLATOON_ROLES,
                     NUM_MODES,
                 ).permute(0, 2, 3, 1).contiguous()
-                curvature_cbf_step_losses.append(
+                steering_cbf_step_losses.append(
                     _hierarchical_active_mean(cbf_blocks, valid_executable_mode_mask)
                 )
 
@@ -1430,37 +1456,53 @@ class _JointGRPOTrainerBase:
                         batch_size, trajectories, NUM_PLATOON_ROLES, NUM_MODES
                     ).permute(0, 2, 3, 1).contiguous()
 
-                curvature_nominal_violation_step.append(
+                steering_nominal_violation_step.append(
                     _active_tensor_mean(
                         _cbf_diag_blocks(cbf_target.nominal_violation_fraction),
                         valid_executable_mode_mask,
                     )
                 )
-                curvature_target_violation_step.append(
+                steering_target_violation_step.append(
                     _active_tensor_mean(
                         _cbf_diag_blocks(cbf_target.target_violation_fraction),
                         valid_executable_mode_mask,
                     )
                 )
-                curvature_target_correction_step.append(
+                steering_target_correction_step.append(
                     _active_tensor_mean(
                         _cbf_diag_blocks(cbf_target.correction_rms_m),
                         valid_executable_mode_mask,
                     )
                 )
-                curvature_nominal_max_step.append(
+                steering_nominal_max_step.append(
                     _active_tensor_max(
-                        _cbf_diag_blocks(cbf_target.nominal_max_abs_curvature),
+                        _cbf_diag_blocks(cbf_target.nominal_max_abs_steering_rad),
                         valid_executable_mode_mask,
                     )
                 )
-                curvature_target_max_step.append(
+                steering_target_max_step.append(
                     _active_tensor_max(
-                        _cbf_diag_blocks(cbf_target.target_max_abs_curvature),
+                        _cbf_diag_blocks(cbf_target.target_max_abs_steering_rad),
                         valid_executable_mode_mask,
                     )
                 )
-                curvature_correction_clipped_step.append(
+                steering_nominal_degenerate_step.append(
+                    _active_tensor_mean(
+                        _cbf_diag_blocks(
+                            cbf_target.nominal_degenerate_segment_fraction
+                        ),
+                        valid_executable_mode_mask,
+                    )
+                )
+                steering_target_degenerate_step.append(
+                    _active_tensor_mean(
+                        _cbf_diag_blocks(
+                            cbf_target.target_degenerate_segment_fraction
+                        ),
+                        valid_executable_mode_mask,
+                    )
+                )
+                steering_correction_clipped_step.append(
                     _active_tensor_mean(
                         _cbf_diag_blocks(cbf_target.correction_clipped_fraction),
                         valid_executable_mode_mask,
@@ -1468,13 +1510,15 @@ class _JointGRPOTrainerBase:
                 )
             else:
                 zero = current_candidates.new_zeros(())
-                curvature_cbf_step_losses.append(zero)
-                curvature_nominal_violation_step.append(zero)
-                curvature_target_violation_step.append(zero)
-                curvature_target_correction_step.append(zero)
-                curvature_nominal_max_step.append(zero)
-                curvature_target_max_step.append(zero)
-                curvature_correction_clipped_step.append(zero)
+                steering_cbf_step_losses.append(zero)
+                steering_nominal_violation_step.append(zero)
+                steering_target_violation_step.append(zero)
+                steering_target_correction_step.append(zero)
+                steering_nominal_max_step.append(zero)
+                steering_target_max_step.append(zero)
+                steering_nominal_degenerate_step.append(zero)
+                steering_target_degenerate_step.append(zero)
+                steering_correction_clipped_step.append(zero)
 
             current_output = self.planner._normalize_xy(
                 current_candidates[..., :2]
@@ -1591,31 +1635,37 @@ class _JointGRPOTrainerBase:
             valid_executable_mode_mask,
         )
         reference_kl = trajectory_reference_kl
-        curvature_cbf_by_step = torch.stack(curvature_cbf_step_losses)
-        curvature_nominal_violation_fraction_by_step = torch.stack(
-            curvature_nominal_violation_step
+        steering_cbf_by_step = torch.stack(steering_cbf_step_losses)
+        steering_nominal_violation_fraction_by_step = torch.stack(
+            steering_nominal_violation_step
         )
-        curvature_target_violation_fraction_by_step = torch.stack(
-            curvature_target_violation_step
+        steering_target_violation_fraction_by_step = torch.stack(
+            steering_target_violation_step
         )
-        curvature_target_correction_rms_m_by_step = torch.stack(
-            curvature_target_correction_step
+        steering_target_correction_rms_m_by_step = torch.stack(
+            steering_target_correction_step
         )
-        curvature_nominal_max_abs_curvature_by_step = torch.stack(
-            curvature_nominal_max_step
+        steering_nominal_max_abs_rad_by_step = torch.stack(
+            steering_nominal_max_step
         )
-        curvature_target_max_abs_curvature_by_step = torch.stack(
-            curvature_target_max_step
+        steering_target_max_abs_rad_by_step = torch.stack(
+            steering_target_max_step
         )
-        curvature_correction_clipped_fraction_by_step = torch.stack(
-            curvature_correction_clipped_step
+        steering_nominal_degenerate_segment_fraction_by_step = torch.stack(
+            steering_nominal_degenerate_step
         )
-        curvature_cbf = curvature_cbf_by_step.mean()
+        steering_target_degenerate_segment_fraction_by_step = torch.stack(
+            steering_target_degenerate_step
+        )
+        steering_correction_clipped_fraction_by_step = torch.stack(
+            steering_correction_clipped_step
+        )
+        steering_cbf = steering_cbf_by_step.mean()
         total = (
             float(self.config.trajectory_pg_weight) * trajectory_pg
             + float(self.config.bc_weight) * behavior_cloning
             + float(self.config.reference_kl_weight) * reference_kl
-            + float(self.config.curvature_cbf_weight) * curvature_cbf
+            + float(self.config.steering_cbf_weight) * steering_cbf
         )
         tensors = (
             total,
@@ -1626,11 +1676,13 @@ class _JointGRPOTrainerBase:
             new_trajectory_log_prob,
             centered_rewards,
             advantages,
-            curvature_cbf,
-            curvature_cbf_by_step,
-            curvature_nominal_max_abs_curvature_by_step,
-            curvature_target_max_abs_curvature_by_step,
-            curvature_correction_clipped_fraction_by_step,
+            steering_cbf,
+            steering_cbf_by_step,
+            steering_nominal_max_abs_rad_by_step,
+            steering_target_max_abs_rad_by_step,
+            steering_nominal_degenerate_segment_fraction_by_step,
+            steering_target_degenerate_segment_fraction_by_step,
+            steering_correction_clipped_fraction_by_step,
         )
         if not all(bool(torch.isfinite(value).all()) for value in tensors):
             raise JointGRPOError("joint GRPO loss contains non-finite values")
@@ -1650,25 +1702,31 @@ class _JointGRPOTrainerBase:
             trajectory_pg_by_mode=trajectory_pg_by_mode,
             behavior_cloning_by_mode=behavior_cloning_by_mode,
             reference_kl_by_mode=reference_kl_by_mode,
-            curvature_cbf=curvature_cbf,
-            curvature_cbf_by_step=curvature_cbf_by_step,
-            curvature_nominal_violation_fraction_by_step=(
-                curvature_nominal_violation_fraction_by_step
+            steering_cbf=steering_cbf,
+            steering_cbf_by_step=steering_cbf_by_step,
+            steering_nominal_violation_fraction_by_step=(
+                steering_nominal_violation_fraction_by_step
             ),
-            curvature_target_violation_fraction_by_step=(
-                curvature_target_violation_fraction_by_step
+            steering_target_violation_fraction_by_step=(
+                steering_target_violation_fraction_by_step
             ),
-            curvature_target_correction_rms_m_by_step=(
-                curvature_target_correction_rms_m_by_step
+            steering_target_correction_rms_m_by_step=(
+                steering_target_correction_rms_m_by_step
             ),
-            curvature_nominal_max_abs_curvature_by_step=(
-                curvature_nominal_max_abs_curvature_by_step
+            steering_nominal_max_abs_rad_by_step=(
+                steering_nominal_max_abs_rad_by_step
             ),
-            curvature_target_max_abs_curvature_by_step=(
-                curvature_target_max_abs_curvature_by_step
+            steering_target_max_abs_rad_by_step=(
+                steering_target_max_abs_rad_by_step
             ),
-            curvature_correction_clipped_fraction_by_step=(
-                curvature_correction_clipped_fraction_by_step
+            steering_nominal_degenerate_segment_fraction_by_step=(
+                steering_nominal_degenerate_segment_fraction_by_step
+            ),
+            steering_target_degenerate_segment_fraction_by_step=(
+                steering_target_degenerate_segment_fraction_by_step
+            ),
+            steering_correction_clipped_fraction_by_step=(
+                steering_correction_clipped_fraction_by_step
             ),
         )
 

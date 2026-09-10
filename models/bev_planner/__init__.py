@@ -27,11 +27,12 @@ from .ddim_transition import (
     StandardGaussianDDIM,
 )
 from .time_varying_cbf import (
-    CurvatureCBFTargetResult,
+    SteeringCBFTargetResult,
     TimeVaryingCBFError,
-    curvature_cbf_safe_target,
-    discrete_curvature_xy,
-    time_varying_curvature_limit,
+    regularized_curvature_xy,
+    steering_angle_xy,
+    steering_cbf_safe_target,
+    time_varying_steering_limit_deg,
 )
 from .dynamic_anchors import (
     DynamicAnchorConfig,
@@ -160,11 +161,12 @@ __all__ = [
     "ModeResidualTrajectoryHead",
     "GaussianDDIMStep",
     "StandardGaussianDDIM",
-    "CurvatureCBFTargetResult",
+    "SteeringCBFTargetResult",
     "TimeVaryingCBFError",
-    "curvature_cbf_safe_target",
-    "discrete_curvature_xy",
-    "time_varying_curvature_limit",
+    "regularized_curvature_xy",
+    "steering_angle_xy",
+    "steering_cbf_safe_target",
+    "time_varying_steering_limit_deg",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
     "fixed_scale_safe_advantages",

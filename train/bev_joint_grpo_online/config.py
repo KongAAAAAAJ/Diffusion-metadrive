@@ -66,39 +66,45 @@ class JointGRPOOnlineConfig:
 
 @dataclass(frozen=True)
 class JointGRPOConstraintConfig:
-    mode: Literal['none', 'tv_cbf_curvature'] = 'none'
+    mode: Literal['none', 'tv_cbf_steering'] = 'none'
     loss_weight: float = 0.05
-    curvature_initial_limit_inv_m: float = 0.20
-    curvature_final_limit_inv_m: float = 0.08
-    curvature_schedule_power: float = 1.0
-    curvature_projection_passes: int = 2
-    curvature_max_target_correction_m: float = 0.75
+    wheelbase_m: float = 5.6
+    min_segment_length_m: float = 0.2
+    steering_initial_limit_deg: float = 48.24
+    steering_final_limit_deg: float = 24.13
+    steering_schedule_power: float = 1.0
+    steering_projection_passes: int = 2
+    steering_max_target_correction_m: float = 0.75
 
     def __post_init__(self) -> None:
-        if self.mode not in ('none', 'tv_cbf_curvature'):
-            raise OnlineGRPOError('constraint mode must be none or tv_cbf_curvature')
+        if self.mode not in ('none', 'tv_cbf_steering'):
+            raise OnlineGRPOError('constraint mode must be none or tv_cbf_steering')
         for name in (
-            'curvature_initial_limit_inv_m',
-            'curvature_final_limit_inv_m',
-            'curvature_schedule_power',
+            'wheelbase_m',
+            'min_segment_length_m',
+            'steering_initial_limit_deg',
+            'steering_final_limit_deg',
+            'steering_schedule_power',
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise OnlineGRPOError(f'{name} must be positive and finite')
-        for name in ('loss_weight', 'curvature_max_target_correction_m'):
+        for name in ('loss_weight', 'steering_max_target_correction_m'):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
                 raise OnlineGRPOError(f'{name} must be non-negative and finite')
-        if self.curvature_initial_limit_inv_m < self.curvature_final_limit_inv_m:
-            raise OnlineGRPOError('initial curvature limit must be >= final curvature limit')
+        if self.steering_initial_limit_deg >= 90.0 or self.steering_final_limit_deg >= 90.0:
+            raise OnlineGRPOError('steering limits must be smaller than 90 degrees')
+        if self.steering_initial_limit_deg < self.steering_final_limit_deg:
+            raise OnlineGRPOError('initial steering limit must be >= final steering limit')
         if (
-            isinstance(self.curvature_projection_passes, bool)
-            or not isinstance(self.curvature_projection_passes, int)
-            or self.curvature_projection_passes <= 0
+            isinstance(self.steering_projection_passes, bool)
+            or not isinstance(self.steering_projection_passes, int)
+            or self.steering_projection_passes <= 0
         ):
-            raise OnlineGRPOError('curvature_projection_passes must be a positive integer')
-        if self.mode == 'tv_cbf_curvature' and self.loss_weight <= 0.0:
-            raise OnlineGRPOError('tv_cbf_curvature requires loss_weight > 0')
+            raise OnlineGRPOError('steering_projection_passes must be a positive integer')
+        if self.mode == 'tv_cbf_steering' and self.loss_weight <= 0.0:
+            raise OnlineGRPOError('tv_cbf_steering requires loss_weight > 0')
 
 @dataclass(frozen=True)
 class JointGRPOTrainingConfig:

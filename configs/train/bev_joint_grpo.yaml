@@ -7,7 +7,7 @@ online:
   device: cuda
   seed: 23
   trajectories_per_mode: 48
-  total_rollout_groups: 10
+  total_rollout_groups: 50
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
   resume_checkpoint: null
@@ -27,13 +27,17 @@ online:
     - {scenario: S9_narrow_channel_negotiation, route: R8_narrow_channel}
 
 # Constraint training switch.
-# mode: none -> original GRPO; tv_cbf_curvature -> add detached time-varying
-# curvature-barrier teacher loss without changing the rollout distribution.
+# mode: none -> original GRPO; tv_cbf_steering -> add detached time-varying
+# steering-angle barrier teacher loss without changing the rollout distribution.
+# The numeric values below are initial debugging defaults; calibrate them for
+# the target truck before formal experiments.
 constraint:
-  mode: tv_cbf_curvature
+  mode: none
   loss_weight: 0.05
-  curvature_initial_limit_inv_m: 0.20
-  curvature_final_limit_inv_m: 0.08
-  curvature_schedule_power: 1.0
-  curvature_projection_passes: 2
-  curvature_max_target_correction_m: 0.75
+  wheelbase_m: 5.6
+  min_segment_length_m: 0.2
+  steering_initial_limit_deg: 48.24
+  steering_final_limit_deg: 24.13
+  steering_schedule_power: 1.0
+  steering_projection_passes: 2
+  steering_max_target_correction_m: 0.75

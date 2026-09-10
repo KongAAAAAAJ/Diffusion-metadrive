@@ -51,11 +51,13 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
     constraint_config = JointGRPOConstraintConfig(
         mode=str(constraint.get('mode', 'none')),
         loss_weight=float(constraint.get('loss_weight', 0.05)),
-        curvature_initial_limit_inv_m=float(constraint.get('curvature_initial_limit_inv_m', 0.20)),
-        curvature_final_limit_inv_m=float(constraint.get('curvature_final_limit_inv_m', 0.08)),
-        curvature_schedule_power=float(constraint.get('curvature_schedule_power', 1.0)),
-        curvature_projection_passes=int(constraint.get('curvature_projection_passes', 2)),
-        curvature_max_target_correction_m=float(constraint.get('curvature_max_target_correction_m', 0.75)),
+        wheelbase_m=float(constraint.get('wheelbase_m', 5.6)),
+        min_segment_length_m=float(constraint.get('min_segment_length_m', 0.2)),
+        steering_initial_limit_deg=float(constraint.get('steering_initial_limit_deg', 48.24)),
+        steering_final_limit_deg=float(constraint.get('steering_final_limit_deg', 24.13)),
+        steering_schedule_power=float(constraint.get('steering_schedule_power', 1.0)),
+        steering_projection_passes=int(constraint.get('steering_projection_passes', 2)),
+        steering_max_target_correction_m=float(constraint.get('steering_max_target_correction_m', 0.75)),
     )
     return JointGRPOTrainingConfig(variant=variant, run_mode=run_mode, source_checkpoint=Path(source_checkpoint), online=online_config, constraint=constraint_config)
 

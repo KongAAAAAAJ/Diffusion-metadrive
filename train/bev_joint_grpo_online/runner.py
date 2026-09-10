@@ -50,19 +50,17 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
     grpo_config = JointGRPOConfig(
         trajectories_per_mode=config.trajectories_per_mode,
         constraint_mode=training_config.constraint.mode,
-        curvature_cbf_weight=training_config.constraint.loss_weight,
-        curvature_initial_limit_inv_m=(
-            training_config.constraint.curvature_initial_limit_inv_m
+        steering_cbf_weight=training_config.constraint.loss_weight,
+        wheelbase_m=training_config.constraint.wheelbase_m,
+        min_segment_length_m=training_config.constraint.min_segment_length_m,
+        steering_initial_limit_deg=training_config.constraint.steering_initial_limit_deg,
+        steering_final_limit_deg=training_config.constraint.steering_final_limit_deg,
+        steering_schedule_power=training_config.constraint.steering_schedule_power,
+        steering_projection_passes=(
+            training_config.constraint.steering_projection_passes
         ),
-        curvature_final_limit_inv_m=(
-            training_config.constraint.curvature_final_limit_inv_m
-        ),
-        curvature_schedule_power=training_config.constraint.curvature_schedule_power,
-        curvature_projection_passes=(
-            training_config.constraint.curvature_projection_passes
-        ),
-        curvature_max_target_correction_m=(
-            training_config.constraint.curvature_max_target_correction_m
+        steering_max_target_correction_m=(
+            training_config.constraint.steering_max_target_correction_m
         ),
     )
     trainer, source_payload, source_sha = _load_trainer(variant, Path(source_checkpoint), torch_device, grpo_config=grpo_config, allow_diagnostic_source=run_mode == 'smoke')
