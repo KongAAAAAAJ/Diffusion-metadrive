@@ -9,7 +9,7 @@ online:
   trajectories_per_mode: 48
   # Keep this diagnostic run short first. Restore the formal budget after the
   # feasibility loss scale and violation trends are verified.
-  total_rollout_groups: 10
+  total_rollout_groups: 500
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
   resume_checkpoint: null
@@ -36,8 +36,8 @@ online:
 # the final values with the actual truck/TruckSim steering system before formal
 # experiments.
 constraint:
-  mode: tv_feasibility
-  loss_weight: 0
+  mode: none
+  loss_weight: 0.01
   steering_weight: 1.0
   steering_rate_weight: 1.0
 
