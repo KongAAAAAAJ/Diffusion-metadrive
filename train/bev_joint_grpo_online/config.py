@@ -28,7 +28,8 @@ class JointGRPOOnlineConfig:
     validation_interval_rollouts: int = 20
     advantage_vector_log_interval_rollouts: int = 10
     max_sampling_attempts_per_state: int = 3
-    max_sampling_attempts_multiplier: int = 3
+    max_sampling_attempts_multiplier: int = 10
+    max_consecutive_empty_episodes: int = 5
 
     def __post_init__(self) -> None:
         if self.device not in ('cpu', 'cuda'):
@@ -37,7 +38,7 @@ class JointGRPOOnlineConfig:
             raise OnlineGRPOError('online GRPO seed must be an integer')
         if isinstance(self.trajectories_per_mode, bool) or not isinstance(self.trajectories_per_mode, int) or self.trajectories_per_mode < 2:
             raise OnlineGRPOError('trajectories_per_mode must be an integer greater than or equal to 2')
-        for name in ('total_rollout_groups', 'environment_steps_per_episode', 'rollout_groups_per_bucket_visit', 'validation_interval_rollouts', 'advantage_vector_log_interval_rollouts', 'max_sampling_attempts_per_state', 'max_sampling_attempts_multiplier'):
+        for name in ('total_rollout_groups', 'environment_steps_per_episode', 'rollout_groups_per_bucket_visit', 'validation_interval_rollouts', 'advantage_vector_log_interval_rollouts', 'max_sampling_attempts_per_state', 'max_sampling_attempts_multiplier', 'max_consecutive_empty_episodes'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise OnlineGRPOError(f'{name} must be a positive integer')

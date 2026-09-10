@@ -134,8 +134,37 @@ def _write_dynamic_sampling_attempt_event(path: Path, *, optimizer_step: int, ac
         stream.write(json.dumps(record, sort_keys=True) + '\n')
     return metrics
 
-def _write_baseline_execution_event(path: Path, *, optimizer_step: int, accepted_update_states: int, rejected_sampling_attempts: int, stability_guard_rejections: int, exhausted_states: int, baseline_execution_steps: int, environment_steps: int, bucket_index: int, scenario: tuple[str, str], seed: int, pretrain_reward_mean: float, performance: Mapping[str, float]) -> None:
-    record = {'event': 'frozen_baseline_execution', 'optimizer_step': int(optimizer_step), 'accepted_update_states': int(accepted_update_states), 'rejected_sampling_attempts': int(rejected_sampling_attempts), 'stability_guard_rejections': int(stability_guard_rejections), 'exhausted_states': int(exhausted_states), 'baseline_execution_steps': int(baseline_execution_steps), 'environment_steps': int(environment_steps), 'training_bucket_index': int(bucket_index), 'scenario': str(scenario[0]), 'route': str(scenario[1]), 'seed': int(seed), 'same_mode_pretrain_reward_mean': float(pretrain_reward_mean), **{str(name): float(value) for name, value in performance.items()}}
+def _sampling_health_metrics(*, sampling_attempts: int, rejected_sampling_attempts: int, exhausted_states: int, visited_live_states: int) -> dict[str, float]:
+    """Return cumulative sampling-health rates for the current run state.
+
+    A sampling attempt is accepted when it yields at least one signal-bearing
+    vehicle-mode group, so accepted sampling attempts equal total attempts
+    minus rejected no-signal attempts.  Under the rollout contract each
+    visited live state executes the frozen baseline exactly once, therefore
+    ``visited_live_states`` is the current baseline-execution count.
+    """
+    counts = {
+        'sampling_attempts': sampling_attempts,
+        'rejected_sampling_attempts': rejected_sampling_attempts,
+        'exhausted_states': exhausted_states,
+        'visited_live_states': visited_live_states,
+    }
+    for name, value in counts.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise OnlineGRPOError(f'{name} must be a non-negative integer')
+    if rejected_sampling_attempts > sampling_attempts:
+        raise OnlineGRPOError('rejected_sampling_attempts cannot exceed sampling_attempts')
+    if exhausted_states > visited_live_states:
+        raise OnlineGRPOError('exhausted_states cannot exceed visited_live_states')
+    accepted_sampling_attempts = sampling_attempts - rejected_sampling_attempts
+    return {
+        'sampling_health/sampling_acceptance_rate': float(accepted_sampling_attempts / sampling_attempts) if sampling_attempts else 0.0,
+        'sampling_health/retry_rate': float(rejected_sampling_attempts / sampling_attempts) if sampling_attempts else 0.0,
+        'sampling_health/state_exhaustion_rate': float(exhausted_states / visited_live_states) if visited_live_states else 0.0,
+    }
+
+def _write_baseline_execution_event(path: Path, *, optimizer_step: int, accepted_update_states: int, rejected_sampling_attempts: int, stability_guard_rejections: int, exhausted_states: int, baseline_execution_steps: int, environment_steps: int, bucket_index: int, scenario: tuple[str, str], seed: int, pretrain_reward_mean: float, performance: Mapping[str, float], sampling_health: Mapping[str, float]) -> None:
+    record = {'event': 'frozen_baseline_execution', 'optimizer_step': int(optimizer_step), 'accepted_update_states': int(accepted_update_states), 'rejected_sampling_attempts': int(rejected_sampling_attempts), 'stability_guard_rejections': int(stability_guard_rejections), 'exhausted_states': int(exhausted_states), 'baseline_execution_steps': int(baseline_execution_steps), 'environment_steps': int(environment_steps), 'training_bucket_index': int(bucket_index), 'scenario': str(scenario[0]), 'route': str(scenario[1]), 'seed': int(seed), 'same_mode_pretrain_reward_mean': float(pretrain_reward_mean), **{str(name): float(value) for name, value in performance.items()}, **{str(name): float(value) for name, value in sampling_health.items()}}
     with path.open('a', encoding='utf-8') as stream:
         stream.write(json.dumps(record, sort_keys=True) + '\n')
 

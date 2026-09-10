@@ -299,6 +299,8 @@ def generate_advantage_heatmap(
 def _load_scalar_series(
     accumulator: event_accumulator.EventAccumulator,
     tags: tuple[str, ...],
+    *,
+    duplicate_step_tags: frozenset[str] = frozenset(),
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     available_tags = set(accumulator.Tags().get("scalars", ()))
     missing_tags = [tag for tag in tags if tag not in available_tags]
@@ -319,7 +321,7 @@ def _load_scalar_series(
         records: list[tuple[int, float]] = []
         for event in events:
             step = int(event.step)
-            if step in observed_steps:
+            if step in observed_steps and tag not in duplicate_step_tags:
                 raise AdvantageHeatmapError(
                     f"TensorBoard scalar tag {tag!r} has duplicate step {step}"
                 )
@@ -336,6 +338,43 @@ def _load_scalar_series(
             np.asarray([value for _, value in records], dtype=np.float64),
         )
     return series
+
+
+def _validate_terminal_guard_duplicate(
+    series: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    tags: tuple[str, ...],
+) -> None:
+    expected_steps = series[tags[0]][0]
+    for tag in tags[1:]:
+        if not np.array_equal(series[tag][0], expected_steps):
+            raise AdvantageHeatmapError(
+                "terminal stability-guard scalar tags must use aligned steps: "
+                + ", ".join(tags)
+            )
+
+    unique_steps, counts = np.unique(expected_steps, return_counts=True)
+    duplicate_steps = unique_steps[counts > 1]
+    valid_duplicate = (
+        len(duplicate_steps) == 1
+        and int(duplicate_steps[0]) == int(expected_steps[-1])
+        and int(counts[unique_steps == duplicate_steps[0]][0]) == 2
+        and np.array_equal(
+            np.flatnonzero(expected_steps == duplicate_steps[0]),
+            np.asarray([len(expected_steps) - 2, len(expected_steps) - 1]),
+        )
+    )
+    if not valid_duplicate:
+        raise AdvantageHeatmapError(
+            "allowed terminal stability-guard logs must contain exactly two "
+            "records at one final duplicate step"
+        )
+
+    guard_values = series["stability_guard/rejected"][1][-2:]
+    if not np.array_equal(guard_values, np.asarray([0.0, 1.0])):
+        raise AdvantageHeatmapError(
+            "the final duplicate step must have stability_guard/rejected "
+            "values 0 then 1"
+        )
 
 
 def _render_scalar_curve(
@@ -464,10 +503,18 @@ def generate_grpo_plots(
     *,
     require_frozen_pretrain_reward: bool = False,
     rollout_axis_label: str = FRESH_ROLLOUT_AXIS_LABEL,
+    allow_terminal_guard_duplicate: bool = False,
 ) -> Mapping[str, Path]:
     """Generate GRPO plots, accepting legacy reward logs unless strict."""
 
     rollout_axis_label = _validate_rollout_axis_label(rollout_axis_label)
+    if (
+        allow_terminal_guard_duplicate
+        and rollout_axis_label != ACCEPTED_ROLLOUT_AXIS_LABEL
+    ):
+        raise AdvantageHeatmapError(
+            "allow_terminal_guard_duplicate requires Accepted update state"
+        )
     accumulator = _load_event_accumulator(tb_dir)
     steps, advantages = _load_advantage_vectors_from_accumulator(
         accumulator, ADVANTAGE_VECTOR_TAG
@@ -517,7 +564,27 @@ def generate_grpo_plots(
         for tag in tags
     )
     all_scalar_tags += POLICY_STABILITY_CURVE_TAGS
-    scalar_series = _load_scalar_series(accumulator, all_scalar_tags)
+    update_tags = tuple(
+        dict.fromkeys(
+            (
+                *reward_tags,
+                *GRPO_LOSS_CURVE_TAGS,
+                *KL_LOSS_CURVE_TAGS,
+                *POLICY_STABILITY_CURVE_TAGS,
+            )
+        )
+    )
+    scalar_series = _load_scalar_series(
+        accumulator,
+        all_scalar_tags,
+        duplicate_step_tags=(
+            frozenset(update_tags)
+            if allow_terminal_guard_duplicate
+            else frozenset()
+        ),
+    )
+    if allow_terminal_guard_duplicate:
+        _validate_terminal_guard_duplicate(scalar_series, update_tags)
     _validate_aligned_scalar_steps(
         scalar_series,
         reward_tags=reward_tags,
@@ -565,6 +632,14 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=ROLLOUT_AXIS_LABELS,
         default=FRESH_ROLLOUT_AXIS_LABEL,
     )
+    parser.add_argument(
+        "--allow-terminal-guard-duplicate",
+        action="store_true",
+        help=(
+            "Allow one aligned final duplicate accepted-update step when "
+            "stability_guard/rejected transitions from 0 to 1."
+        ),
+    )
     return parser
 
 
@@ -574,6 +649,7 @@ def main() -> None:
         args.tensorboard_dir,
         args.output_dir,
         rollout_axis_label=args.rollout_axis_label,
+        allow_terminal_guard_duplicate=args.allow_terminal_guard_duplicate,
     ).items():
         print(f"{name}={output_path}")
 
