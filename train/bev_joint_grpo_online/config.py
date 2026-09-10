@@ -108,8 +108,7 @@ class JointGRPOConstraintConfig:
                 'initial steering-rate limit must be >= final steering-rate limit'
             )
         if self.mode == 'tv_feasibility':
-            if self.loss_weight <= 0.0:
-                raise OnlineGRPOError('tv_feasibility requires loss_weight > 0')
+            # loss_weight == 0 is allowed for observer-only baseline runs.
             if self.steering_weight <= 0.0 and self.steering_rate_weight <= 0.0:
                 raise OnlineGRPOError(
                     'tv_feasibility requires at least one positive component weight'

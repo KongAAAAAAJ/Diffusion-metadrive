@@ -134,10 +134,7 @@ class JointGRPOConfig:
                 "to steering_rate_final_limit_deg_s"
             )
         if self.constraint_mode == "tv_feasibility":
-            if float(self.feasibility_weight) <= 0.0:
-                raise JointGRPOError(
-                    "tv_feasibility requires feasibility_weight > 0"
-                )
+            # feasibility_weight == 0 keeps diagnostics enabled but contributes zero gradient.
             if (
                 float(self.steering_feasibility_weight) <= 0.0
                 and float(self.steering_rate_feasibility_weight) <= 0.0
