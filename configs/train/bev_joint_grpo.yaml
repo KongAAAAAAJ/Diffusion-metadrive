@@ -25,3 +25,15 @@ online:
     - {scenario: S7_ego_merge_from_ramp, route: R7_merge_core}
     - {scenario: S8_ego_exit_to_ramp, route: R6_exit_to_ramp}
     - {scenario: S9_narrow_channel_negotiation, route: R8_narrow_channel}
+
+# Constraint training switch.
+# mode: none -> original GRPO; tv_cbf_curvature -> add detached time-varying
+# curvature-barrier teacher loss without changing the rollout distribution.
+constraint:
+  mode: none
+  loss_weight: 0.05
+  curvature_initial_limit_inv_m: 0.20
+  curvature_final_limit_inv_m: 0.08
+  curvature_schedule_power: 1.0
+  curvature_projection_passes: 2
+  curvature_max_target_correction_m: 0.75

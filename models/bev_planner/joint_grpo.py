@@ -27,6 +27,10 @@ from models.bev_planner.ddim_transition import (
     DEFAULT_DDIM_PATH,
     StandardGaussianDDIM,
 )
+from models.bev_planner.time_varying_cbf import (
+    curvature_cbf_safe_target,
+    time_varying_curvature_limit,
+)
 
 
 class JointGRPOError(RuntimeError):
@@ -49,8 +53,19 @@ class JointGRPOConfig:
     xy_beta_m: float = 1.0
     heading_beta_rad: float = 0.1
     heading_bc_weight: float = 0.2
+    constraint_mode: str = "none"
+    curvature_cbf_weight: float = 0.05
+    curvature_initial_limit_inv_m: float = 0.20
+    curvature_final_limit_inv_m: float = 0.08
+    curvature_schedule_power: float = 1.0
+    curvature_projection_passes: int = 2
+    curvature_max_target_correction_m: float = 0.75
 
     def __post_init__(self) -> None:
+        if self.constraint_mode not in ("none", "tv_cbf_curvature"):
+            raise JointGRPOError(
+                "constraint_mode must be none or tv_cbf_curvature"
+            )
         if (
             isinstance(self.trajectories_per_mode, bool)
             or not isinstance(self.trajectories_per_mode, int)
@@ -68,6 +83,9 @@ class JointGRPOConfig:
             "max_adapter_relative_drift",
             "xy_beta_m",
             "heading_beta_rad",
+            "curvature_initial_limit_inv_m",
+            "curvature_final_limit_inv_m",
+            "curvature_schedule_power",
         )
         non_negative = (
             "trajectory_pg_weight",
@@ -75,6 +93,8 @@ class JointGRPOConfig:
             "reference_kl_weight",
             "weight_decay",
             "heading_bc_weight",
+            "curvature_cbf_weight",
+            "curvature_max_target_correction_m",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -84,6 +104,27 @@ class JointGRPOConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
                 raise JointGRPOError(f"{name} must be non-negative and finite")
+        if float(self.curvature_initial_limit_inv_m) < float(
+            self.curvature_final_limit_inv_m
+        ):
+            raise JointGRPOError(
+                "curvature_initial_limit_inv_m must be greater than or equal to "
+                "curvature_final_limit_inv_m"
+            )
+        if (
+            isinstance(self.curvature_projection_passes, bool)
+            or not isinstance(self.curvature_projection_passes, int)
+            or self.curvature_projection_passes <= 0
+        ):
+            raise JointGRPOError(
+                "curvature_projection_passes must be a positive integer"
+            )
+        if self.constraint_mode == "tv_cbf_curvature" and float(
+            self.curvature_cbf_weight
+        ) <= 0.0:
+            raise JointGRPOError(
+                "tv_cbf_curvature requires curvature_cbf_weight > 0"
+            )
 
     @property
     def roll_timesteps(self) -> tuple[int, ...]:
@@ -214,6 +255,11 @@ class JointGRPOLossResult:
     trajectory_pg_by_mode: Tensor
     behavior_cloning_by_mode: Tensor
     reference_kl_by_mode: Tensor
+    curvature_cbf: Tensor
+    curvature_cbf_by_step: Tensor
+    curvature_nominal_violation_fraction_by_step: Tensor
+    curvature_target_violation_fraction_by_step: Tensor
+    curvature_target_correction_rms_m_by_step: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -222,6 +268,7 @@ class JointGRPOLossResult:
             "loss/behavior_cloning": self.behavior_cloning,
             "loss/trajectory_reference_kl": self.trajectory_reference_kl,
             "loss/reference_kl": self.reference_kl,
+            "loss/curvature_cbf": self.curvature_cbf,
             "advantage/mean": _active_tensor_mean(
                 self.advantages, self.valid_executable_mode_mask
             ),
@@ -247,6 +294,19 @@ class JointGRPOLossResult:
                 self.valid_executable_mode_mask & ~self.signal_mode_mask
             ).float().sum(),
         }
+        for step_index, timestep in enumerate(DEFAULT_DDIM_PATH.timesteps):
+            values[f"constraint/t{timestep}/curvature_cbf_loss"] = (
+                self.curvature_cbf_by_step[step_index]
+            )
+            values[f"constraint/t{timestep}/nominal_violation_fraction"] = (
+                self.curvature_nominal_violation_fraction_by_step[step_index]
+            )
+            values[f"constraint/t{timestep}/target_violation_fraction"] = (
+                self.curvature_target_violation_fraction_by_step[step_index]
+            )
+            values[f"constraint/t{timestep}/target_correction_rms_m"] = (
+                self.curvature_target_correction_rms_m_by_step[step_index]
+            )
         for mode in range(NUM_MODES):
             values[f"loss/mode_{mode}/trajectory_pg"] = (
                 self.trajectory_pg_by_mode[mode]
@@ -276,6 +336,17 @@ class JointGRPOLossResult:
             trajectory_pg_by_mode=self.trajectory_pg_by_mode.detach(),
             behavior_cloning_by_mode=self.behavior_cloning_by_mode.detach(),
             reference_kl_by_mode=self.reference_kl_by_mode.detach(),
+            curvature_cbf=self.curvature_cbf.detach(),
+            curvature_cbf_by_step=self.curvature_cbf_by_step.detach(),
+            curvature_nominal_violation_fraction_by_step=(
+                self.curvature_nominal_violation_fraction_by_step.detach()
+            ),
+            curvature_target_violation_fraction_by_step=(
+                self.curvature_target_violation_fraction_by_step.detach()
+            ),
+            curvature_target_correction_rms_m_by_step=(
+                self.curvature_target_correction_rms_m_by_step.detach()
+            ),
         )
 
 
@@ -1257,6 +1328,10 @@ class _JointGRPOTrainerBase:
 
         current_log_probs = []
         trajectory_kls = []
+        curvature_cbf_step_losses: list[Tensor] = []
+        curvature_nominal_violation_step: list[Tensor] = []
+        curvature_target_violation_step: list[Tensor] = []
+        curvature_target_correction_step: list[Tensor] = []
         final_current_candidates = final_reference_candidates = None
         for step_index, (timestep, previous_timestep) in enumerate(
             DEFAULT_DDIM_PATH.transitions()
@@ -1287,6 +1362,63 @@ class _JointGRPOTrainerBase:
                 valid_mask=valid_mask,
                 predecessor_history=predecessor_history,
             )
+            if self.config.constraint_mode == "tv_cbf_curvature":
+                curvature_limit = time_varying_curvature_limit(
+                    timestep=timestep,
+                    initial_timestep=DEFAULT_DDIM_PATH.initial_timestep,
+                    initial_limit_inv_m=self.config.curvature_initial_limit_inv_m,
+                    final_limit_inv_m=self.config.curvature_final_limit_inv_m,
+                    schedule_power=self.config.curvature_schedule_power,
+                )
+                cbf_target = curvature_cbf_safe_target(
+                    current_candidates[..., :2],
+                    curvature_limit_inv_m=curvature_limit,
+                    projection_passes=self.config.curvature_projection_passes,
+                    max_correction_m=self.config.curvature_max_target_correction_m,
+                )
+                cbf_blocks_flat = (
+                    current_candidates[..., :2] - cbf_target.target_xy
+                ).square().mean(dim=(-2, -1))
+                cbf_blocks = cbf_blocks_flat.reshape(
+                    batch_size,
+                    trajectories,
+                    NUM_PLATOON_ROLES,
+                    NUM_MODES,
+                ).permute(0, 2, 3, 1).contiguous()
+                curvature_cbf_step_losses.append(
+                    _hierarchical_active_mean(cbf_blocks, valid_executable_mode_mask)
+                )
+
+                def _cbf_diag_blocks(value: Tensor) -> Tensor:
+                    return value.reshape(
+                        batch_size, trajectories, NUM_PLATOON_ROLES, NUM_MODES
+                    ).permute(0, 2, 3, 1).contiguous()
+
+                curvature_nominal_violation_step.append(
+                    _active_tensor_mean(
+                        _cbf_diag_blocks(cbf_target.nominal_violation_fraction),
+                        valid_executable_mode_mask,
+                    )
+                )
+                curvature_target_violation_step.append(
+                    _active_tensor_mean(
+                        _cbf_diag_blocks(cbf_target.target_violation_fraction),
+                        valid_executable_mode_mask,
+                    )
+                )
+                curvature_target_correction_step.append(
+                    _active_tensor_mean(
+                        _cbf_diag_blocks(cbf_target.correction_rms_m),
+                        valid_executable_mode_mask,
+                    )
+                )
+            else:
+                zero = current_candidates.new_zeros(())
+                curvature_cbf_step_losses.append(zero)
+                curvature_nominal_violation_step.append(zero)
+                curvature_target_violation_step.append(zero)
+                curvature_target_correction_step.append(zero)
+
             current_output = self.planner._normalize_xy(
                 current_candidates[..., :2]
             ).float()
@@ -1402,10 +1534,22 @@ class _JointGRPOTrainerBase:
             valid_executable_mode_mask,
         )
         reference_kl = trajectory_reference_kl
+        curvature_cbf_by_step = torch.stack(curvature_cbf_step_losses)
+        curvature_nominal_violation_fraction_by_step = torch.stack(
+            curvature_nominal_violation_step
+        )
+        curvature_target_violation_fraction_by_step = torch.stack(
+            curvature_target_violation_step
+        )
+        curvature_target_correction_rms_m_by_step = torch.stack(
+            curvature_target_correction_step
+        )
+        curvature_cbf = curvature_cbf_by_step.mean()
         total = (
             float(self.config.trajectory_pg_weight) * trajectory_pg
             + float(self.config.bc_weight) * behavior_cloning
             + float(self.config.reference_kl_weight) * reference_kl
+            + float(self.config.curvature_cbf_weight) * curvature_cbf
         )
         tensors = (
             total,
@@ -1416,6 +1560,8 @@ class _JointGRPOTrainerBase:
             new_trajectory_log_prob,
             centered_rewards,
             advantages,
+            curvature_cbf,
+            curvature_cbf_by_step,
         )
         if not all(bool(torch.isfinite(value).all()) for value in tensors):
             raise JointGRPOError("joint GRPO loss contains non-finite values")
@@ -1435,6 +1581,17 @@ class _JointGRPOTrainerBase:
             trajectory_pg_by_mode=trajectory_pg_by_mode,
             behavior_cloning_by_mode=behavior_cloning_by_mode,
             reference_kl_by_mode=reference_kl_by_mode,
+            curvature_cbf=curvature_cbf,
+            curvature_cbf_by_step=curvature_cbf_by_step,
+            curvature_nominal_violation_fraction_by_step=(
+                curvature_nominal_violation_fraction_by_step
+            ),
+            curvature_target_violation_fraction_by_step=(
+                curvature_target_violation_fraction_by_step
+            ),
+            curvature_target_correction_rms_m_by_step=(
+                curvature_target_correction_rms_m_by_step
+            ),
         )
 
     @staticmethod

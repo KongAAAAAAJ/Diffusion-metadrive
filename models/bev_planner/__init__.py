@@ -26,6 +26,13 @@ from .ddim_transition import (
     GaussianDDIMStep,
     StandardGaussianDDIM,
 )
+from .time_varying_cbf import (
+    CurvatureCBFTargetResult,
+    TimeVaryingCBFError,
+    curvature_cbf_safe_target,
+    discrete_curvature_xy,
+    time_varying_curvature_limit,
+)
 from .dynamic_anchors import (
     DynamicAnchorConfig,
     DynamicAnchorError,
@@ -153,6 +160,11 @@ __all__ = [
     "ModeResidualTrajectoryHead",
     "GaussianDDIMStep",
     "StandardGaussianDDIM",
+    "CurvatureCBFTargetResult",
+    "TimeVaryingCBFError",
+    "curvature_cbf_safe_target",
+    "discrete_curvature_xy",
+    "time_varying_curvature_limit",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
     "fixed_scale_safe_advantages",

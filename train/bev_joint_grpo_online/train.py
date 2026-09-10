@@ -9,7 +9,7 @@ if __package__ in (None, ""):
     if str(_repo_root) not in sys.path:
         sys.path.insert(0, str(_repo_root))
 from scenarios.bev_round13_contract import DEVELOPMENT_SEEDS, HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS
-from train.bev_joint_grpo_online.config import JointGRPOOnlineConfig, JointGRPOTrainingConfig, OnlineGRPOError
+from train.bev_joint_grpo_online.config import JointGRPOConstraintConfig, JointGRPOOnlineConfig, JointGRPOTrainingConfig, OnlineGRPOError
 from train.bev_joint_grpo_online.environment import constant_velocity_actions, episode_has_ended, execute_cached_frozen_baseline, joint_trajectory_action, model_inputs_to_batch, optimize_selected_model_trajectories
 from train.bev_joint_grpo_online.validation import build_grpo_validation_state_bank
 from train.bev_joint_grpo_online.runner import run_joint_grpo_training
@@ -45,7 +45,19 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         raise OnlineGRPOError('online GRPO YAML contains legacy fields: ' + ', '.join(present_legacy))
     scenarios = tuple(((str(value['scenario']), str(value['route'])) for value in online.get('scenarios', ()) if isinstance(value, Mapping)))
     online_config = JointGRPOOnlineConfig(device=str(online.get('device', 'cuda')), seed=online.get('seed', 17), trajectories_per_mode=online.get('trajectories_per_mode', 48), total_rollout_groups=online.get('total_rollout_groups', 100), resume_checkpoint=Path(str(online['resume_checkpoint'])) if online.get('resume_checkpoint') else None, validation_state_bank=Path(str(online.get('validation_state_bank', 'evaluation/artifacts/grpo_validation_state_bank_v1.pt'))), scenarios=scenarios or PRIMARY_S5_S9_SCENARIOS, scenario_seeds=tuple((int(value) for value in online.get('scenario_seeds', DEVELOPMENT_SEEDS))), environment_steps_per_episode=int(online.get('environment_steps_per_episode', 100)), rollout_groups_per_bucket_visit=online.get('rollout_groups_per_bucket_visit', 10), rollout_start_offset_max_steps=online.get('rollout_start_offset_max_steps', 200), rollout_start_min_remaining_steps=online.get('rollout_start_min_remaining_steps', 10), validation_interval_rollouts=online.get('validation_interval_rollouts', 20), advantage_vector_log_interval_rollouts=online.get('advantage_vector_log_interval_rollouts', 10), max_sampling_attempts_per_state=online.get('max_sampling_attempts_per_state', 3), max_sampling_attempts_multiplier=online.get('max_sampling_attempts_multiplier', 10), max_consecutive_empty_episodes=online.get('max_consecutive_empty_episodes', 5))
-    return JointGRPOTrainingConfig(variant=variant, run_mode=run_mode, source_checkpoint=Path(source_checkpoint), online=online_config)
+    constraint = payload.get('constraint', {'mode': 'none'})
+    if not isinstance(constraint, Mapping):
+        raise OnlineGRPOError('online GRPO YAML constraint must be a mapping')
+    constraint_config = JointGRPOConstraintConfig(
+        mode=str(constraint.get('mode', 'none')),
+        loss_weight=float(constraint.get('loss_weight', 0.05)),
+        curvature_initial_limit_inv_m=float(constraint.get('curvature_initial_limit_inv_m', 0.20)),
+        curvature_final_limit_inv_m=float(constraint.get('curvature_final_limit_inv_m', 0.08)),
+        curvature_schedule_power=float(constraint.get('curvature_schedule_power', 1.0)),
+        curvature_projection_passes=int(constraint.get('curvature_projection_passes', 2)),
+        curvature_max_target_correction_m=float(constraint.get('curvature_max_target_correction_m', 0.75)),
+    )
+    return JointGRPOTrainingConfig(variant=variant, run_mode=run_mode, source_checkpoint=Path(source_checkpoint), online=online_config, constraint=constraint_config)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

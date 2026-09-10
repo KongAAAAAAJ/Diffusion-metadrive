@@ -65,11 +65,48 @@ class JointGRPOOnlineConfig:
         object.__setattr__(self, 'validation_state_bank', Path(self.validation_state_bank))
 
 @dataclass(frozen=True)
+class JointGRPOConstraintConfig:
+    mode: Literal['none', 'tv_cbf_curvature'] = 'none'
+    loss_weight: float = 0.05
+    curvature_initial_limit_inv_m: float = 0.20
+    curvature_final_limit_inv_m: float = 0.08
+    curvature_schedule_power: float = 1.0
+    curvature_projection_passes: int = 2
+    curvature_max_target_correction_m: float = 0.75
+
+    def __post_init__(self) -> None:
+        if self.mode not in ('none', 'tv_cbf_curvature'):
+            raise OnlineGRPOError('constraint mode must be none or tv_cbf_curvature')
+        for name in (
+            'curvature_initial_limit_inv_m',
+            'curvature_final_limit_inv_m',
+            'curvature_schedule_power',
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise OnlineGRPOError(f'{name} must be positive and finite')
+        for name in ('loss_weight', 'curvature_max_target_correction_m'):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise OnlineGRPOError(f'{name} must be non-negative and finite')
+        if self.curvature_initial_limit_inv_m < self.curvature_final_limit_inv_m:
+            raise OnlineGRPOError('initial curvature limit must be >= final curvature limit')
+        if (
+            isinstance(self.curvature_projection_passes, bool)
+            or not isinstance(self.curvature_projection_passes, int)
+            or self.curvature_projection_passes <= 0
+        ):
+            raise OnlineGRPOError('curvature_projection_passes must be a positive integer')
+        if self.mode == 'tv_cbf_curvature' and self.loss_weight <= 0.0:
+            raise OnlineGRPOError('tv_cbf_curvature requires loss_weight > 0')
+
+@dataclass(frozen=True)
 class JointGRPOTrainingConfig:
     variant: Literal['A', 'B']
     run_mode: Literal['formal', 'smoke']
     source_checkpoint: Path
     online: JointGRPOOnlineConfig
+    constraint: JointGRPOConstraintConfig = JointGRPOConstraintConfig()
 
     def __post_init__(self) -> None:
         if self.variant not in ('A', 'B'):
@@ -80,3 +117,5 @@ class JointGRPOTrainingConfig:
             raise OnlineGRPOError('source_checkpoint must be a Path')
         if not isinstance(self.online, JointGRPOOnlineConfig):
             raise OnlineGRPOError('online must be a JointGRPOOnlineConfig')
+        if not isinstance(self.constraint, JointGRPOConstraintConfig):
+            raise OnlineGRPOError('constraint must be a JointGRPOConstraintConfig')

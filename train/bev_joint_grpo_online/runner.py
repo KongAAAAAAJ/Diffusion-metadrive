@@ -47,7 +47,24 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
     except BEVScenarioContractError as exc:
         raise OnlineGRPOError(str(exc)) from exc
     torch_device = _device(config.device)
-    grpo_config = JointGRPOConfig(trajectories_per_mode=config.trajectories_per_mode)
+    grpo_config = JointGRPOConfig(
+        trajectories_per_mode=config.trajectories_per_mode,
+        constraint_mode=training_config.constraint.mode,
+        curvature_cbf_weight=training_config.constraint.loss_weight,
+        curvature_initial_limit_inv_m=(
+            training_config.constraint.curvature_initial_limit_inv_m
+        ),
+        curvature_final_limit_inv_m=(
+            training_config.constraint.curvature_final_limit_inv_m
+        ),
+        curvature_schedule_power=training_config.constraint.curvature_schedule_power,
+        curvature_projection_passes=(
+            training_config.constraint.curvature_projection_passes
+        ),
+        curvature_max_target_correction_m=(
+            training_config.constraint.curvature_max_target_correction_m
+        ),
+    )
     trainer, source_payload, source_sha = _load_trainer(variant, Path(source_checkpoint), torch_device, grpo_config=grpo_config, allow_diagnostic_source=run_mode == 'smoke')
     if run_mode == 'formal' and source_payload.get('eligible_for_formal_training') is not True:
         raise OnlineGRPOError('formal GRPO requires an eligible Stage 1 source')
