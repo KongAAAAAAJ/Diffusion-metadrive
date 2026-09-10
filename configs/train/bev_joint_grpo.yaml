@@ -36,7 +36,7 @@ online:
 # the final values with the actual truck/TruckSim steering system before formal
 # experiments.
 constraint:
-  mode: none
+  mode: tv_feasibility
   loss_weight: 0.01
   steering_weight: 1.0
   steering_rate_weight: 1.0
