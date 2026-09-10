@@ -50,18 +50,23 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
     grpo_config = JointGRPOConfig(
         trajectories_per_mode=config.trajectories_per_mode,
         constraint_mode=training_config.constraint.mode,
-        steering_cbf_weight=training_config.constraint.loss_weight,
+        feasibility_weight=training_config.constraint.loss_weight,
+        steering_feasibility_weight=training_config.constraint.steering_weight,
+        steering_rate_feasibility_weight=(
+            training_config.constraint.steering_rate_weight
+        ),
         wheelbase_m=training_config.constraint.wheelbase_m,
+        trajectory_dt_s=training_config.constraint.trajectory_dt_s,
         min_segment_length_m=training_config.constraint.min_segment_length_m,
         steering_initial_limit_deg=training_config.constraint.steering_initial_limit_deg,
         steering_final_limit_deg=training_config.constraint.steering_final_limit_deg,
-        steering_schedule_power=training_config.constraint.steering_schedule_power,
-        steering_projection_passes=(
-            training_config.constraint.steering_projection_passes
+        steering_rate_initial_limit_deg_s=(
+            training_config.constraint.steering_rate_initial_limit_deg_s
         ),
-        steering_max_target_correction_m=(
-            training_config.constraint.steering_max_target_correction_m
+        steering_rate_final_limit_deg_s=(
+            training_config.constraint.steering_rate_final_limit_deg_s
         ),
+        feasibility_schedule_power=training_config.constraint.schedule_power,
     )
     trainer, source_payload, source_sha = _load_trainer(variant, Path(source_checkpoint), torch_device, grpo_config=grpo_config, allow_diagnostic_source=run_mode == 'smoke')
     if run_mode == 'formal' and source_payload.get('eligible_for_formal_training') is not True:

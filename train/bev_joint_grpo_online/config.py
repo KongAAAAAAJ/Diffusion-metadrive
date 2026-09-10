@@ -66,30 +66,36 @@ class JointGRPOOnlineConfig:
 
 @dataclass(frozen=True)
 class JointGRPOConstraintConfig:
-    mode: Literal['none', 'tv_cbf_steering'] = 'none'
-    loss_weight: float = 0.05
+    mode: Literal['none', 'tv_feasibility'] = 'none'
+    loss_weight: float = 0.01
+    steering_weight: float = 1.0
+    steering_rate_weight: float = 1.0
     wheelbase_m: float = 5.6
+    trajectory_dt_s: float = 0.5
     min_segment_length_m: float = 0.2
     steering_initial_limit_deg: float = 48.24
     steering_final_limit_deg: float = 24.13
-    steering_schedule_power: float = 1.0
-    steering_projection_passes: int = 2
-    steering_max_target_correction_m: float = 0.75
+    steering_rate_initial_limit_deg_s: float = 120.0
+    steering_rate_final_limit_deg_s: float = 60.0
+    schedule_power: float = 1.0
 
     def __post_init__(self) -> None:
-        if self.mode not in ('none', 'tv_cbf_steering'):
-            raise OnlineGRPOError('constraint mode must be none or tv_cbf_steering')
+        if self.mode not in ('none', 'tv_feasibility'):
+            raise OnlineGRPOError('constraint mode must be none or tv_feasibility')
         for name in (
             'wheelbase_m',
+            'trajectory_dt_s',
             'min_segment_length_m',
             'steering_initial_limit_deg',
             'steering_final_limit_deg',
-            'steering_schedule_power',
+            'steering_rate_initial_limit_deg_s',
+            'steering_rate_final_limit_deg_s',
+            'schedule_power',
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise OnlineGRPOError(f'{name} must be positive and finite')
-        for name in ('loss_weight', 'steering_max_target_correction_m'):
+        for name in ('loss_weight', 'steering_weight', 'steering_rate_weight'):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
                 raise OnlineGRPOError(f'{name} must be non-negative and finite')
@@ -97,14 +103,17 @@ class JointGRPOConstraintConfig:
             raise OnlineGRPOError('steering limits must be smaller than 90 degrees')
         if self.steering_initial_limit_deg < self.steering_final_limit_deg:
             raise OnlineGRPOError('initial steering limit must be >= final steering limit')
-        if (
-            isinstance(self.steering_projection_passes, bool)
-            or not isinstance(self.steering_projection_passes, int)
-            or self.steering_projection_passes <= 0
-        ):
-            raise OnlineGRPOError('steering_projection_passes must be a positive integer')
-        if self.mode == 'tv_cbf_steering' and self.loss_weight <= 0.0:
-            raise OnlineGRPOError('tv_cbf_steering requires loss_weight > 0')
+        if self.steering_rate_initial_limit_deg_s < self.steering_rate_final_limit_deg_s:
+            raise OnlineGRPOError(
+                'initial steering-rate limit must be >= final steering-rate limit'
+            )
+        if self.mode == 'tv_feasibility':
+            if self.loss_weight <= 0.0:
+                raise OnlineGRPOError('tv_feasibility requires loss_weight > 0')
+            if self.steering_weight <= 0.0 and self.steering_rate_weight <= 0.0:
+                raise OnlineGRPOError(
+                    'tv_feasibility requires at least one positive component weight'
+                )
 
 @dataclass(frozen=True)
 class JointGRPOTrainingConfig:

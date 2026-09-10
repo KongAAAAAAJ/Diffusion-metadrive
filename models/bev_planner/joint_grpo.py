@@ -27,9 +27,9 @@ from models.bev_planner.ddim_transition import (
     DEFAULT_DDIM_PATH,
     StandardGaussianDDIM,
 )
-from models.bev_planner.time_varying_cbf import (
-    steering_cbf_safe_target,
-    time_varying_steering_limit_deg,
+from models.bev_planner.time_varying_feasibility import (
+    steering_feasibility_loss,
+    time_varying_limit,
 )
 
 
@@ -54,19 +54,22 @@ class JointGRPOConfig:
     heading_beta_rad: float = 0.1
     heading_bc_weight: float = 0.2
     constraint_mode: str = "none"
-    steering_cbf_weight: float = 0.05
+    feasibility_weight: float = 0.01
+    steering_feasibility_weight: float = 1.0
+    steering_rate_feasibility_weight: float = 1.0
     wheelbase_m: float = 5.6
+    trajectory_dt_s: float = 0.5
     min_segment_length_m: float = 0.2
     steering_initial_limit_deg: float = 48.24
     steering_final_limit_deg: float = 24.13
-    steering_schedule_power: float = 1.0
-    steering_projection_passes: int = 2
-    steering_max_target_correction_m: float = 0.75
+    steering_rate_initial_limit_deg_s: float = 120.0
+    steering_rate_final_limit_deg_s: float = 60.0
+    feasibility_schedule_power: float = 1.0
 
     def __post_init__(self) -> None:
-        if self.constraint_mode not in ("none", "tv_cbf_steering"):
+        if self.constraint_mode not in ("none", "tv_feasibility"):
             raise JointGRPOError(
-                "constraint_mode must be none or tv_cbf_steering"
+                "constraint_mode must be none or tv_feasibility"
             )
         if (
             isinstance(self.trajectories_per_mode, bool)
@@ -86,10 +89,13 @@ class JointGRPOConfig:
             "xy_beta_m",
             "heading_beta_rad",
             "wheelbase_m",
+            "trajectory_dt_s",
             "min_segment_length_m",
             "steering_initial_limit_deg",
             "steering_final_limit_deg",
-            "steering_schedule_power",
+            "steering_rate_initial_limit_deg_s",
+            "steering_rate_final_limit_deg_s",
+            "feasibility_schedule_power",
         )
         non_negative = (
             "trajectory_pg_weight",
@@ -97,8 +103,9 @@ class JointGRPOConfig:
             "reference_kl_weight",
             "weight_decay",
             "heading_bc_weight",
-            "steering_cbf_weight",
-            "steering_max_target_correction_m",
+            "feasibility_weight",
+            "steering_feasibility_weight",
+            "steering_rate_feasibility_weight",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -119,20 +126,25 @@ class JointGRPOConfig:
                 "steering_initial_limit_deg must be greater than or equal to "
                 "steering_final_limit_deg"
             )
-        if (
-            isinstance(self.steering_projection_passes, bool)
-            or not isinstance(self.steering_projection_passes, int)
-            or self.steering_projection_passes <= 0
+        if float(self.steering_rate_initial_limit_deg_s) < float(
+            self.steering_rate_final_limit_deg_s
         ):
             raise JointGRPOError(
-                "steering_projection_passes must be a positive integer"
+                "steering_rate_initial_limit_deg_s must be greater than or equal "
+                "to steering_rate_final_limit_deg_s"
             )
-        if self.constraint_mode == "tv_cbf_steering" and float(
-            self.steering_cbf_weight
-        ) <= 0.0:
-            raise JointGRPOError(
-                "tv_cbf_steering requires steering_cbf_weight > 0"
-            )
+        if self.constraint_mode == "tv_feasibility":
+            if float(self.feasibility_weight) <= 0.0:
+                raise JointGRPOError(
+                    "tv_feasibility requires feasibility_weight > 0"
+                )
+            if (
+                float(self.steering_feasibility_weight) <= 0.0
+                and float(self.steering_rate_feasibility_weight) <= 0.0
+            ):
+                raise JointGRPOError(
+                    "tv_feasibility requires at least one positive component weight"
+                )
 
     @property
     def roll_timesteps(self) -> tuple[int, ...]:
@@ -147,7 +159,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v8",
+        "version": "stage2_joint_grpo_optimizer_v9",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -173,6 +185,14 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
             "trajectory behavior-cloning and frozen-Stage1 trajectory KL cover "
             "every hard-valid optimizer-executable mode; no mode KL"
         ),
+        "auxiliary_feasibility": {
+            "enabled_when": "constraint_mode=tv_feasibility",
+            "domain": "metric clean trajectory prediction at DDIM t=(8,5,3,0)",
+            "steering": "mean relu(abs(delta)/delta_limit(t)-1)^2 over valid triplets",
+            "steering_rate": "mean relu(abs(delta_dot)/delta_dot_limit(t)-1)^2 over valid adjacent triplets",
+            "schedule": "loose-to-tight bounds over diffusion timesteps",
+            "rollout_distribution_changed": False,
+        },
         "trainable_parameters": (
             "ten zero-initialized mode-specific output residual weights and biases"
         ),
@@ -263,16 +283,20 @@ class JointGRPOLossResult:
     trajectory_pg_by_mode: Tensor
     behavior_cloning_by_mode: Tensor
     reference_kl_by_mode: Tensor
-    steering_cbf: Tensor
-    steering_cbf_by_step: Tensor
-    steering_nominal_violation_fraction_by_step: Tensor
-    steering_target_violation_fraction_by_step: Tensor
-    steering_target_correction_rms_m_by_step: Tensor
-    steering_nominal_max_abs_rad_by_step: Tensor
-    steering_target_max_abs_rad_by_step: Tensor
-    steering_nominal_degenerate_segment_fraction_by_step: Tensor
-    steering_target_degenerate_segment_fraction_by_step: Tensor
-    steering_correction_clipped_fraction_by_step: Tensor
+    feasibility: Tensor
+    weighted_feasibility: Tensor
+    steering_feasibility: Tensor
+    steering_rate_feasibility: Tensor
+    feasibility_by_step: Tensor
+    steering_feasibility_by_step: Tensor
+    steering_rate_feasibility_by_step: Tensor
+    steering_violation_fraction_by_step: Tensor
+    steering_rate_violation_fraction_by_step: Tensor
+    steering_max_abs_rad_by_step: Tensor
+    steering_rate_max_abs_rad_s_by_step: Tensor
+    steering_limit_rad_by_step: Tensor
+    steering_rate_limit_rad_s_by_step: Tensor
+    degenerate_segment_fraction_by_step: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -281,7 +305,10 @@ class JointGRPOLossResult:
             "loss/behavior_cloning": self.behavior_cloning,
             "loss/trajectory_reference_kl": self.trajectory_reference_kl,
             "loss/reference_kl": self.reference_kl,
-            "loss/steering_cbf": self.steering_cbf,
+            "loss/feasibility": self.feasibility,
+            "loss/weighted_feasibility": self.weighted_feasibility,
+            "loss/steering_feasibility": self.steering_feasibility,
+            "loss/steering_rate_feasibility": self.steering_rate_feasibility,
             "advantage/mean": _active_tensor_mean(
                 self.advantages, self.valid_executable_mode_mask
             ),
@@ -308,32 +335,35 @@ class JointGRPOLossResult:
             ).float().sum(),
         }
         for step_index, timestep in enumerate(DEFAULT_DDIM_PATH.timesteps):
-            values[f"constraint/t{timestep}/steering_cbf_loss"] = (
-                self.steering_cbf_by_step[step_index]
+            values[f"constraint/t{timestep}/feasibility_loss"] = (
+                self.feasibility_by_step[step_index]
             )
-            values[f"constraint/t{timestep}/nominal_violation_fraction"] = (
-                self.steering_nominal_violation_fraction_by_step[step_index]
+            values[f"constraint/t{timestep}/steering_loss"] = (
+                self.steering_feasibility_by_step[step_index]
             )
-            values[f"constraint/t{timestep}/target_violation_fraction"] = (
-                self.steering_target_violation_fraction_by_step[step_index]
+            values[f"constraint/t{timestep}/steering_rate_loss"] = (
+                self.steering_rate_feasibility_by_step[step_index]
             )
-            values[f"constraint/t{timestep}/target_correction_rms_m"] = (
-                self.steering_target_correction_rms_m_by_step[step_index]
+            values[f"constraint/t{timestep}/steering_violation_fraction"] = (
+                self.steering_violation_fraction_by_step[step_index]
             )
-            values[f"constraint/t{timestep}/nominal_max_abs_steering_deg"] = (
-                torch.rad2deg(self.steering_nominal_max_abs_rad_by_step[step_index])
+            values[f"constraint/t{timestep}/steering_rate_violation_fraction"] = (
+                self.steering_rate_violation_fraction_by_step[step_index]
             )
-            values[f"constraint/t{timestep}/target_max_abs_steering_deg"] = (
-                torch.rad2deg(self.steering_target_max_abs_rad_by_step[step_index])
+            values[f"constraint/t{timestep}/max_abs_steering_deg"] = torch.rad2deg(
+                self.steering_max_abs_rad_by_step[step_index]
             )
-            values[f"constraint/t{timestep}/nominal_degenerate_segment_fraction"] = (
-                self.steering_nominal_degenerate_segment_fraction_by_step[step_index]
+            values[f"constraint/t{timestep}/max_abs_steering_rate_deg_s"] = (
+                torch.rad2deg(self.steering_rate_max_abs_rad_s_by_step[step_index])
             )
-            values[f"constraint/t{timestep}/target_degenerate_segment_fraction"] = (
-                self.steering_target_degenerate_segment_fraction_by_step[step_index]
+            values[f"constraint/t{timestep}/steering_limit_deg"] = torch.rad2deg(
+                self.steering_limit_rad_by_step[step_index]
             )
-            values[f"constraint/t{timestep}/correction_clipped_fraction"] = (
-                self.steering_correction_clipped_fraction_by_step[step_index]
+            values[f"constraint/t{timestep}/steering_rate_limit_deg_s"] = (
+                torch.rad2deg(self.steering_rate_limit_rad_s_by_step[step_index])
+            )
+            values[f"constraint/t{timestep}/degenerate_segment_fraction"] = (
+                self.degenerate_segment_fraction_by_step[step_index]
             )
         for mode in range(NUM_MODES):
             values[f"loss/mode_{mode}/trajectory_pg"] = (
@@ -364,31 +394,31 @@ class JointGRPOLossResult:
             trajectory_pg_by_mode=self.trajectory_pg_by_mode.detach(),
             behavior_cloning_by_mode=self.behavior_cloning_by_mode.detach(),
             reference_kl_by_mode=self.reference_kl_by_mode.detach(),
-            steering_cbf=self.steering_cbf.detach(),
-            steering_cbf_by_step=self.steering_cbf_by_step.detach(),
-            steering_nominal_violation_fraction_by_step=(
-                self.steering_nominal_violation_fraction_by_step.detach()
+            feasibility=self.feasibility.detach(),
+            weighted_feasibility=self.weighted_feasibility.detach(),
+            steering_feasibility=self.steering_feasibility.detach(),
+            steering_rate_feasibility=self.steering_rate_feasibility.detach(),
+            feasibility_by_step=self.feasibility_by_step.detach(),
+            steering_feasibility_by_step=self.steering_feasibility_by_step.detach(),
+            steering_rate_feasibility_by_step=(
+                self.steering_rate_feasibility_by_step.detach()
             ),
-            steering_target_violation_fraction_by_step=(
-                self.steering_target_violation_fraction_by_step.detach()
+            steering_violation_fraction_by_step=(
+                self.steering_violation_fraction_by_step.detach()
             ),
-            steering_target_correction_rms_m_by_step=(
-                self.steering_target_correction_rms_m_by_step.detach()
+            steering_rate_violation_fraction_by_step=(
+                self.steering_rate_violation_fraction_by_step.detach()
             ),
-            steering_nominal_max_abs_rad_by_step=(
-                self.steering_nominal_max_abs_rad_by_step.detach()
+            steering_max_abs_rad_by_step=self.steering_max_abs_rad_by_step.detach(),
+            steering_rate_max_abs_rad_s_by_step=(
+                self.steering_rate_max_abs_rad_s_by_step.detach()
             ),
-            steering_target_max_abs_rad_by_step=(
-                self.steering_target_max_abs_rad_by_step.detach()
+            steering_limit_rad_by_step=self.steering_limit_rad_by_step.detach(),
+            steering_rate_limit_rad_s_by_step=(
+                self.steering_rate_limit_rad_s_by_step.detach()
             ),
-            steering_nominal_degenerate_segment_fraction_by_step=(
-                self.steering_nominal_degenerate_segment_fraction_by_step.detach()
-            ),
-            steering_target_degenerate_segment_fraction_by_step=(
-                self.steering_target_degenerate_segment_fraction_by_step.detach()
-            ),
-            steering_correction_clipped_fraction_by_step=(
-                self.steering_correction_clipped_fraction_by_step.detach()
+            degenerate_segment_fraction_by_step=(
+                self.degenerate_segment_fraction_by_step.detach()
             ),
         )
 
@@ -1383,15 +1413,16 @@ class _JointGRPOTrainerBase:
 
         current_log_probs = []
         trajectory_kls = []
-        steering_cbf_step_losses: list[Tensor] = []
-        steering_nominal_violation_step: list[Tensor] = []
-        steering_target_violation_step: list[Tensor] = []
-        steering_target_correction_step: list[Tensor] = []
-        steering_nominal_max_step: list[Tensor] = []
-        steering_target_max_step: list[Tensor] = []
-        steering_nominal_degenerate_step: list[Tensor] = []
-        steering_target_degenerate_step: list[Tensor] = []
-        steering_correction_clipped_step: list[Tensor] = []
+        feasibility_step_losses: list[Tensor] = []
+        steering_feasibility_step_losses: list[Tensor] = []
+        steering_rate_feasibility_step_losses: list[Tensor] = []
+        steering_violation_step: list[Tensor] = []
+        steering_rate_violation_step: list[Tensor] = []
+        steering_max_step: list[Tensor] = []
+        steering_rate_max_step: list[Tensor] = []
+        steering_limit_step: list[Tensor] = []
+        steering_rate_limit_step: list[Tensor] = []
+        degenerate_segment_step: list[Tensor] = []
         final_current_candidates = final_reference_candidates = None
         for step_index, (timestep, previous_timestep) in enumerate(
             DEFAULT_DDIM_PATH.transitions()
@@ -1422,103 +1453,110 @@ class _JointGRPOTrainerBase:
                 valid_mask=valid_mask,
                 predecessor_history=predecessor_history,
             )
-            if self.config.constraint_mode == "tv_cbf_steering":
-                steering_limit_deg = time_varying_steering_limit_deg(
+
+            def _feasibility_blocks(value: Tensor) -> Tensor:
+                return value.reshape(
+                    batch_size, trajectories, NUM_PLATOON_ROLES, NUM_MODES
+                ).permute(0, 2, 3, 1).contiguous()
+
+            if self.config.constraint_mode == "tv_feasibility":
+                steering_limit_deg = time_varying_limit(
                     timestep=timestep,
                     initial_timestep=DEFAULT_DDIM_PATH.initial_timestep,
-                    initial_limit_deg=self.config.steering_initial_limit_deg,
-                    final_limit_deg=self.config.steering_final_limit_deg,
-                    schedule_power=self.config.steering_schedule_power,
+                    initial_limit=self.config.steering_initial_limit_deg,
+                    final_limit=self.config.steering_final_limit_deg,
+                    schedule_power=self.config.feasibility_schedule_power,
                 )
-                cbf_target = steering_cbf_safe_target(
+                steering_rate_limit_deg_s = time_varying_limit(
+                    timestep=timestep,
+                    initial_timestep=DEFAULT_DDIM_PATH.initial_timestep,
+                    initial_limit=self.config.steering_rate_initial_limit_deg_s,
+                    final_limit=self.config.steering_rate_final_limit_deg_s,
+                    schedule_power=self.config.feasibility_schedule_power,
+                )
+                feasibility = steering_feasibility_loss(
                     current_candidates[..., :2],
                     steering_limit_deg=steering_limit_deg,
+                    steering_rate_limit_deg_s=steering_rate_limit_deg_s,
                     wheelbase_m=self.config.wheelbase_m,
+                    trajectory_dt_s=self.config.trajectory_dt_s,
                     min_segment_length_m=self.config.min_segment_length_m,
-                    projection_passes=self.config.steering_projection_passes,
-                    max_correction_m=self.config.steering_max_target_correction_m,
                 )
-                cbf_blocks_flat = (
-                    current_candidates[..., :2] - cbf_target.target_xy
-                ).square().mean(dim=(-2, -1))
-                cbf_blocks = cbf_blocks_flat.reshape(
-                    batch_size,
-                    trajectories,
-                    NUM_PLATOON_ROLES,
-                    NUM_MODES,
-                ).permute(0, 2, 3, 1).contiguous()
-                steering_cbf_step_losses.append(
-                    _hierarchical_active_mean(cbf_blocks, valid_executable_mode_mask)
+                steering_step_loss = _hierarchical_active_mean(
+                    _feasibility_blocks(feasibility.steering_loss),
+                    valid_executable_mode_mask,
                 )
-
-                def _cbf_diag_blocks(value: Tensor) -> Tensor:
-                    return value.reshape(
-                        batch_size, trajectories, NUM_PLATOON_ROLES, NUM_MODES
-                    ).permute(0, 2, 3, 1).contiguous()
-
-                steering_nominal_violation_step.append(
+                steering_rate_step_loss = _hierarchical_active_mean(
+                    _feasibility_blocks(feasibility.steering_rate_loss),
+                    valid_executable_mode_mask,
+                )
+                combined_step_loss = (
+                    float(self.config.steering_feasibility_weight)
+                    * steering_step_loss
+                    + float(self.config.steering_rate_feasibility_weight)
+                    * steering_rate_step_loss
+                )
+                feasibility_step_losses.append(combined_step_loss)
+                steering_feasibility_step_losses.append(steering_step_loss)
+                steering_rate_feasibility_step_losses.append(steering_rate_step_loss)
+                steering_violation_step.append(
                     _active_tensor_mean(
-                        _cbf_diag_blocks(cbf_target.nominal_violation_fraction),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_target_violation_step.append(
-                    _active_tensor_mean(
-                        _cbf_diag_blocks(cbf_target.target_violation_fraction),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_target_correction_step.append(
-                    _active_tensor_mean(
-                        _cbf_diag_blocks(cbf_target.correction_rms_m),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_nominal_max_step.append(
-                    _active_tensor_max(
-                        _cbf_diag_blocks(cbf_target.nominal_max_abs_steering_rad),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_target_max_step.append(
-                    _active_tensor_max(
-                        _cbf_diag_blocks(cbf_target.target_max_abs_steering_rad),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_nominal_degenerate_step.append(
-                    _active_tensor_mean(
-                        _cbf_diag_blocks(
-                            cbf_target.nominal_degenerate_segment_fraction
+                        _feasibility_blocks(
+                            feasibility.steering_violation_fraction
                         ),
                         valid_executable_mode_mask,
                     )
                 )
-                steering_target_degenerate_step.append(
+                steering_rate_violation_step.append(
                     _active_tensor_mean(
-                        _cbf_diag_blocks(
-                            cbf_target.target_degenerate_segment_fraction
+                        _feasibility_blocks(
+                            feasibility.steering_rate_violation_fraction
                         ),
                         valid_executable_mode_mask,
                     )
                 )
-                steering_correction_clipped_step.append(
-                    _active_tensor_mean(
-                        _cbf_diag_blocks(cbf_target.correction_clipped_fraction),
+                steering_max_step.append(
+                    _active_tensor_max(
+                        _feasibility_blocks(feasibility.max_abs_steering_rad),
                         valid_executable_mode_mask,
+                    )
+                )
+                steering_rate_max_step.append(
+                    _active_tensor_max(
+                        _feasibility_blocks(
+                            feasibility.max_abs_steering_rate_rad_s
+                        ),
+                        valid_executable_mode_mask,
+                    )
+                )
+                degenerate_segment_step.append(
+                    _active_tensor_mean(
+                        _feasibility_blocks(
+                            feasibility.degenerate_segment_fraction
+                        ),
+                        valid_executable_mode_mask,
+                    )
+                )
+                steering_limit_step.append(
+                    current_candidates.new_tensor(math.radians(steering_limit_deg))
+                )
+                steering_rate_limit_step.append(
+                    current_candidates.new_tensor(
+                        math.radians(steering_rate_limit_deg_s)
                     )
                 )
             else:
                 zero = current_candidates.new_zeros(())
-                steering_cbf_step_losses.append(zero)
-                steering_nominal_violation_step.append(zero)
-                steering_target_violation_step.append(zero)
-                steering_target_correction_step.append(zero)
-                steering_nominal_max_step.append(zero)
-                steering_target_max_step.append(zero)
-                steering_nominal_degenerate_step.append(zero)
-                steering_target_degenerate_step.append(zero)
-                steering_correction_clipped_step.append(zero)
+                feasibility_step_losses.append(zero)
+                steering_feasibility_step_losses.append(zero)
+                steering_rate_feasibility_step_losses.append(zero)
+                steering_violation_step.append(zero)
+                steering_rate_violation_step.append(zero)
+                steering_max_step.append(zero)
+                steering_rate_max_step.append(zero)
+                steering_limit_step.append(zero)
+                steering_rate_limit_step.append(zero)
+                degenerate_segment_step.append(zero)
 
             current_output = self.planner._normalize_xy(
                 current_candidates[..., :2]
@@ -1635,37 +1673,34 @@ class _JointGRPOTrainerBase:
             valid_executable_mode_mask,
         )
         reference_kl = trajectory_reference_kl
-        steering_cbf_by_step = torch.stack(steering_cbf_step_losses)
-        steering_nominal_violation_fraction_by_step = torch.stack(
-            steering_nominal_violation_step
+        feasibility_by_step = torch.stack(feasibility_step_losses)
+        steering_feasibility_by_step = torch.stack(
+            steering_feasibility_step_losses
         )
-        steering_target_violation_fraction_by_step = torch.stack(
-            steering_target_violation_step
+        steering_rate_feasibility_by_step = torch.stack(
+            steering_rate_feasibility_step_losses
         )
-        steering_target_correction_rms_m_by_step = torch.stack(
-            steering_target_correction_step
+        steering_violation_fraction_by_step = torch.stack(
+            steering_violation_step
         )
-        steering_nominal_max_abs_rad_by_step = torch.stack(
-            steering_nominal_max_step
+        steering_rate_violation_fraction_by_step = torch.stack(
+            steering_rate_violation_step
         )
-        steering_target_max_abs_rad_by_step = torch.stack(
-            steering_target_max_step
-        )
-        steering_nominal_degenerate_segment_fraction_by_step = torch.stack(
-            steering_nominal_degenerate_step
-        )
-        steering_target_degenerate_segment_fraction_by_step = torch.stack(
-            steering_target_degenerate_step
-        )
-        steering_correction_clipped_fraction_by_step = torch.stack(
-            steering_correction_clipped_step
-        )
-        steering_cbf = steering_cbf_by_step.mean()
+        steering_max_abs_rad_by_step = torch.stack(steering_max_step)
+        steering_rate_max_abs_rad_s_by_step = torch.stack(steering_rate_max_step)
+        steering_limit_rad_by_step = torch.stack(steering_limit_step)
+        steering_rate_limit_rad_s_by_step = torch.stack(steering_rate_limit_step)
+        degenerate_segment_fraction_by_step = torch.stack(degenerate_segment_step)
+
+        feasibility = feasibility_by_step.mean()
+        steering_feasibility = steering_feasibility_by_step.mean()
+        steering_rate_feasibility = steering_rate_feasibility_by_step.mean()
+        weighted_feasibility = float(self.config.feasibility_weight) * feasibility
         total = (
             float(self.config.trajectory_pg_weight) * trajectory_pg
             + float(self.config.bc_weight) * behavior_cloning
             + float(self.config.reference_kl_weight) * reference_kl
-            + float(self.config.steering_cbf_weight) * steering_cbf
+            + weighted_feasibility
         )
         tensors = (
             total,
@@ -1676,13 +1711,20 @@ class _JointGRPOTrainerBase:
             new_trajectory_log_prob,
             centered_rewards,
             advantages,
-            steering_cbf,
-            steering_cbf_by_step,
-            steering_nominal_max_abs_rad_by_step,
-            steering_target_max_abs_rad_by_step,
-            steering_nominal_degenerate_segment_fraction_by_step,
-            steering_target_degenerate_segment_fraction_by_step,
-            steering_correction_clipped_fraction_by_step,
+            feasibility,
+            weighted_feasibility,
+            steering_feasibility,
+            steering_rate_feasibility,
+            feasibility_by_step,
+            steering_feasibility_by_step,
+            steering_rate_feasibility_by_step,
+            steering_violation_fraction_by_step,
+            steering_rate_violation_fraction_by_step,
+            steering_max_abs_rad_by_step,
+            steering_rate_max_abs_rad_s_by_step,
+            steering_limit_rad_by_step,
+            steering_rate_limit_rad_s_by_step,
+            degenerate_segment_fraction_by_step,
         )
         if not all(bool(torch.isfinite(value).all()) for value in tensors):
             raise JointGRPOError("joint GRPO loss contains non-finite values")
@@ -1702,31 +1744,29 @@ class _JointGRPOTrainerBase:
             trajectory_pg_by_mode=trajectory_pg_by_mode,
             behavior_cloning_by_mode=behavior_cloning_by_mode,
             reference_kl_by_mode=reference_kl_by_mode,
-            steering_cbf=steering_cbf,
-            steering_cbf_by_step=steering_cbf_by_step,
-            steering_nominal_violation_fraction_by_step=(
-                steering_nominal_violation_fraction_by_step
+            feasibility=feasibility,
+            weighted_feasibility=weighted_feasibility,
+            steering_feasibility=steering_feasibility,
+            steering_rate_feasibility=steering_rate_feasibility,
+            feasibility_by_step=feasibility_by_step,
+            steering_feasibility_by_step=steering_feasibility_by_step,
+            steering_rate_feasibility_by_step=steering_rate_feasibility_by_step,
+            steering_violation_fraction_by_step=(
+                steering_violation_fraction_by_step
             ),
-            steering_target_violation_fraction_by_step=(
-                steering_target_violation_fraction_by_step
+            steering_rate_violation_fraction_by_step=(
+                steering_rate_violation_fraction_by_step
             ),
-            steering_target_correction_rms_m_by_step=(
-                steering_target_correction_rms_m_by_step
+            steering_max_abs_rad_by_step=steering_max_abs_rad_by_step,
+            steering_rate_max_abs_rad_s_by_step=(
+                steering_rate_max_abs_rad_s_by_step
             ),
-            steering_nominal_max_abs_rad_by_step=(
-                steering_nominal_max_abs_rad_by_step
+            steering_limit_rad_by_step=steering_limit_rad_by_step,
+            steering_rate_limit_rad_s_by_step=(
+                steering_rate_limit_rad_s_by_step
             ),
-            steering_target_max_abs_rad_by_step=(
-                steering_target_max_abs_rad_by_step
-            ),
-            steering_nominal_degenerate_segment_fraction_by_step=(
-                steering_nominal_degenerate_segment_fraction_by_step
-            ),
-            steering_target_degenerate_segment_fraction_by_step=(
-                steering_target_degenerate_segment_fraction_by_step
-            ),
-            steering_correction_clipped_fraction_by_step=(
-                steering_correction_clipped_fraction_by_step
+            degenerate_segment_fraction_by_step=(
+                degenerate_segment_fraction_by_step
             ),
         )
 

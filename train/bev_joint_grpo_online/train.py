@@ -50,14 +50,21 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         raise OnlineGRPOError('online GRPO YAML constraint must be a mapping')
     constraint_config = JointGRPOConstraintConfig(
         mode=str(constraint.get('mode', 'none')),
-        loss_weight=float(constraint.get('loss_weight', 0.05)),
+        loss_weight=float(constraint.get('loss_weight', 0.01)),
+        steering_weight=float(constraint.get('steering_weight', 1.0)),
+        steering_rate_weight=float(constraint.get('steering_rate_weight', 1.0)),
         wheelbase_m=float(constraint.get('wheelbase_m', 5.6)),
+        trajectory_dt_s=float(constraint.get('trajectory_dt_s', 0.5)),
         min_segment_length_m=float(constraint.get('min_segment_length_m', 0.2)),
         steering_initial_limit_deg=float(constraint.get('steering_initial_limit_deg', 48.24)),
         steering_final_limit_deg=float(constraint.get('steering_final_limit_deg', 24.13)),
-        steering_schedule_power=float(constraint.get('steering_schedule_power', 1.0)),
-        steering_projection_passes=int(constraint.get('steering_projection_passes', 2)),
-        steering_max_target_correction_m=float(constraint.get('steering_max_target_correction_m', 0.75)),
+        steering_rate_initial_limit_deg_s=float(
+            constraint.get('steering_rate_initial_limit_deg_s', 120.0)
+        ),
+        steering_rate_final_limit_deg_s=float(
+            constraint.get('steering_rate_final_limit_deg_s', 60.0)
+        ),
+        schedule_power=float(constraint.get('schedule_power', 1.0)),
     )
     return JointGRPOTrainingConfig(variant=variant, run_mode=run_mode, source_checkpoint=Path(source_checkpoint), online=online_config, constraint=constraint_config)
 
