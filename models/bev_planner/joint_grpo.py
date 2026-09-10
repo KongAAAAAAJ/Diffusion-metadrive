@@ -260,6 +260,9 @@ class JointGRPOLossResult:
     curvature_nominal_violation_fraction_by_step: Tensor
     curvature_target_violation_fraction_by_step: Tensor
     curvature_target_correction_rms_m_by_step: Tensor
+    curvature_nominal_max_abs_curvature_by_step: Tensor
+    curvature_target_max_abs_curvature_by_step: Tensor
+    curvature_correction_clipped_fraction_by_step: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -307,6 +310,15 @@ class JointGRPOLossResult:
             values[f"constraint/t{timestep}/target_correction_rms_m"] = (
                 self.curvature_target_correction_rms_m_by_step[step_index]
             )
+            values[f"constraint/t{timestep}/nominal_max_abs_curvature"] = (
+                self.curvature_nominal_max_abs_curvature_by_step[step_index]
+            )
+            values[f"constraint/t{timestep}/target_max_abs_curvature"] = (
+                self.curvature_target_max_abs_curvature_by_step[step_index]
+            )
+            values[f"constraint/t{timestep}/correction_clipped_fraction"] = (
+                self.curvature_correction_clipped_fraction_by_step[step_index]
+            )
         for mode in range(NUM_MODES):
             values[f"loss/mode_{mode}/trajectory_pg"] = (
                 self.trajectory_pg_by_mode[mode]
@@ -346,6 +358,15 @@ class JointGRPOLossResult:
             ),
             curvature_target_correction_rms_m_by_step=(
                 self.curvature_target_correction_rms_m_by_step.detach()
+            ),
+            curvature_nominal_max_abs_curvature_by_step=(
+                self.curvature_nominal_max_abs_curvature_by_step.detach()
+            ),
+            curvature_target_max_abs_curvature_by_step=(
+                self.curvature_target_max_abs_curvature_by_step.detach()
+            ),
+            curvature_correction_clipped_fraction_by_step=(
+                self.curvature_correction_clipped_fraction_by_step.detach()
             ),
         )
 
@@ -551,6 +572,18 @@ def _active_tensor_mean(value: Tensor, active_mode_mask: Tensor) -> Tensor:
         expanded = expanded.unsqueeze(-1)
     weights = expanded.expand_as(value).to(value.dtype)
     return (value * weights).sum() / weights.sum().clamp_min(1.0)
+
+
+def _active_tensor_max(value: Tensor, active_mode_mask: Tensor) -> Tensor:
+    """Maximum over all trailing entries belonging to active [B,R,K] blocks."""
+
+    expanded = active_mode_mask
+    while expanded.ndim < value.ndim:
+        expanded = expanded.unsqueeze(-1)
+    expanded = expanded.expand_as(value)
+    if not bool(expanded.any()):
+        return value.new_zeros(())
+    return value.masked_fill(~expanded, float("-inf")).amax()
 
 
 def _hierarchical_active_mean(value: Tensor, active_mode_mask: Tensor) -> Tensor:
@@ -1332,6 +1365,9 @@ class _JointGRPOTrainerBase:
         curvature_nominal_violation_step: list[Tensor] = []
         curvature_target_violation_step: list[Tensor] = []
         curvature_target_correction_step: list[Tensor] = []
+        curvature_nominal_max_step: list[Tensor] = []
+        curvature_target_max_step: list[Tensor] = []
+        curvature_correction_clipped_step: list[Tensor] = []
         final_current_candidates = final_reference_candidates = None
         for step_index, (timestep, previous_timestep) in enumerate(
             DEFAULT_DDIM_PATH.transitions()
@@ -1412,12 +1448,33 @@ class _JointGRPOTrainerBase:
                         valid_executable_mode_mask,
                     )
                 )
+                curvature_nominal_max_step.append(
+                    _active_tensor_max(
+                        _cbf_diag_blocks(cbf_target.nominal_max_abs_curvature),
+                        valid_executable_mode_mask,
+                    )
+                )
+                curvature_target_max_step.append(
+                    _active_tensor_max(
+                        _cbf_diag_blocks(cbf_target.target_max_abs_curvature),
+                        valid_executable_mode_mask,
+                    )
+                )
+                curvature_correction_clipped_step.append(
+                    _active_tensor_mean(
+                        _cbf_diag_blocks(cbf_target.correction_clipped_fraction),
+                        valid_executable_mode_mask,
+                    )
+                )
             else:
                 zero = current_candidates.new_zeros(())
                 curvature_cbf_step_losses.append(zero)
                 curvature_nominal_violation_step.append(zero)
                 curvature_target_violation_step.append(zero)
                 curvature_target_correction_step.append(zero)
+                curvature_nominal_max_step.append(zero)
+                curvature_target_max_step.append(zero)
+                curvature_correction_clipped_step.append(zero)
 
             current_output = self.planner._normalize_xy(
                 current_candidates[..., :2]
@@ -1544,6 +1601,15 @@ class _JointGRPOTrainerBase:
         curvature_target_correction_rms_m_by_step = torch.stack(
             curvature_target_correction_step
         )
+        curvature_nominal_max_abs_curvature_by_step = torch.stack(
+            curvature_nominal_max_step
+        )
+        curvature_target_max_abs_curvature_by_step = torch.stack(
+            curvature_target_max_step
+        )
+        curvature_correction_clipped_fraction_by_step = torch.stack(
+            curvature_correction_clipped_step
+        )
         curvature_cbf = curvature_cbf_by_step.mean()
         total = (
             float(self.config.trajectory_pg_weight) * trajectory_pg
@@ -1562,6 +1628,9 @@ class _JointGRPOTrainerBase:
             advantages,
             curvature_cbf,
             curvature_cbf_by_step,
+            curvature_nominal_max_abs_curvature_by_step,
+            curvature_target_max_abs_curvature_by_step,
+            curvature_correction_clipped_fraction_by_step,
         )
         if not all(bool(torch.isfinite(value).all()) for value in tensors):
             raise JointGRPOError("joint GRPO loss contains non-finite values")
@@ -1591,6 +1660,15 @@ class _JointGRPOTrainerBase:
             ),
             curvature_target_correction_rms_m_by_step=(
                 curvature_target_correction_rms_m_by_step
+            ),
+            curvature_nominal_max_abs_curvature_by_step=(
+                curvature_nominal_max_abs_curvature_by_step
+            ),
+            curvature_target_max_abs_curvature_by_step=(
+                curvature_target_max_abs_curvature_by_step
+            ),
+            curvature_correction_clipped_fraction_by_step=(
+                curvature_correction_clipped_fraction_by_step
             ),
         )
 

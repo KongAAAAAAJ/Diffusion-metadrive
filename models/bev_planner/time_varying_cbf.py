@@ -30,6 +30,7 @@ class CurvatureCBFTargetResult:
     nominal_violation_fraction: Tensor
     target_violation_fraction: Tensor
     correction_rms_m: Tensor
+    correction_clipped_fraction: Tensor
 
 
 def discrete_curvature_xy(xy: Tensor, *, eps: float = 1e-6) -> Tensor:
@@ -184,12 +185,19 @@ def curvature_cbf_safe_target(
                 scale = (-barrier).clamp_min(0.0) / gradient_sq
                 target = (work + scale[..., None, None] * gradient).detach()
 
+    correction_clipped = torch.zeros(
+        nominal.shape[:-2], device=nominal.device, dtype=nominal.dtype
+    )
     if float(max_correction_m) > 0.0:
         delta = target - nominal
         point_norm = torch.linalg.vector_norm(delta, dim=-1)
+        max_point_norm = point_norm.amax(dim=-1)
+        correction_clipped = (
+            max_point_norm > float(max_correction_m)
+        ).to(nominal.dtype)
         scale = (
             float(max_correction_m)
-            / point_norm.amax(dim=-1).clamp_min(float(eps))
+            / max_point_norm.clamp_min(float(eps))
         ).clamp_max(1.0)
         target = nominal + scale[..., None, None] * delta
 
@@ -208,6 +216,7 @@ def curvature_cbf_safe_target(
         nominal_violation_fraction=nominal_fraction.detach(),
         target_violation_fraction=target_fraction.detach(),
         correction_rms_m=correction_rms.detach(),
+        correction_clipped_fraction=correction_clipped.detach(),
     )
 
 

@@ -36,4 +36,4 @@ constraint:
   curvature_final_limit_inv_m: 0.08
   curvature_schedule_power: 1.0
   curvature_projection_passes: 2
-  curvature_max_target_correction_m: 0
+  curvature_max_target_correction_m: 0.75
