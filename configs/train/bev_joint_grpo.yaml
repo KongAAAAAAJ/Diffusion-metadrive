@@ -37,7 +37,7 @@ online:
 # experiments.
 constraint:
   mode: tv_feasibility
-  loss_weight: 0.01
+  loss_weight: 0.0
   steering_weight: 1.0
   steering_rate_weight: 1.0
 
