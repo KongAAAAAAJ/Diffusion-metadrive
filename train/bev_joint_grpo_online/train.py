@@ -54,22 +54,25 @@ def _risk_pact_from_mapping(value: Mapping[str, object]) -> RiskPACTPostTraining
     platoon = _mapping(value.get('platoon'), name='safety_post_training.risk_pact.platoon', default={})
     road = _mapping(value.get('road'), name='safety_post_training.risk_pact.road', default={})
 
-    # Nested Step-5.5 schema is preferred.  Legacy flat actor keys remain
-    # accepted so prior smoke configs continue to parse.
+    # Step-5.6 schema: signed-clearance actor geometry + smooth-max aggregation.
+    # Legacy Step-5.5 keys are intentionally not silently reinterpreted because
+    # Gaussian sigma margins and physical clearance margins have different units/semantics.
     risk_config = RiskPACTConfig(
         use_background_actor=bool(components.get('background_actor', True)),
         use_platoon_actor=bool(components.get('platoon_actor', True)),
         use_road_boundary=bool(components.get('road_boundary', True)),
         horizon_dt_s=float(value.get('horizon_dt_s', 0.5)),
-        longitudinal_margin_m=float(actor.get('longitudinal_margin_m', value.get('longitudinal_margin_m', 3.0))),
-        lateral_margin_m=float(actor.get('lateral_margin_m', value.get('lateral_margin_m', 1.2))),
-        minimum_sigma_x_m=float(actor.get('minimum_sigma_x_m', value.get('minimum_sigma_x_m', 2.5))),
-        minimum_sigma_y_m=float(actor.get('minimum_sigma_y_m', value.get('minimum_sigma_y_m', 1.2))),
-        ego_length_m=float(actor.get('ego_length_m', 8.0)),
-        ego_width_m=float(actor.get('ego_width_m', 2.5)),
-        inflate_actor_by_ego_footprint=bool(actor.get('inflate_by_ego_footprint', True)),
-        platoon_vehicle_length_m=float(platoon.get('vehicle_length_m', 8.0)),
-        platoon_vehicle_width_m=float(platoon.get('vehicle_width_m', 2.5)),
+        ego_length_m=float(actor.get('ego_length_m', 5.74)),
+        ego_width_m=float(actor.get('ego_width_m', 2.30)),
+        background_longitudinal_clearance_m=float(actor.get('background_longitudinal_clearance_m', 5.0)),
+        background_lateral_clearance_m=float(actor.get('background_lateral_clearance_m', 0.4)),
+        actor_temperature_m=float(actor.get('temperature_m', 0.50)),
+        actor_softmax_beta=float(actor.get('softmax_beta', 12.0)),
+        platoon_vehicle_length_m=float(platoon.get('vehicle_length_m', 5.74)),
+        platoon_vehicle_width_m=float(platoon.get('vehicle_width_m', 2.30)),
+        platoon_longitudinal_clearance_m=float(platoon.get('longitudinal_clearance_m', 7.0)),
+        platoon_lateral_clearance_m=float(platoon.get('lateral_clearance_m', 0.4)),
+        component_softmax_beta=float(value.get('component_softmax_beta', 12.0)),
         road_safety_margin_m=float(road.get('safety_margin_m', 0.4)),
         road_temperature_m=float(road.get('temperature_m', 0.30)),
         temporal_softmax_beta=float(value.get('temporal_softmax_beta', 12.0)),

@@ -81,15 +81,17 @@ class JointGRPOConfig:
     risk_pact_use_platoon_actor: bool = True
     risk_pact_use_road_boundary: bool = True
     risk_pact_horizon_dt_s: float = 0.5
-    risk_pact_longitudinal_margin_m: float = 3.0
-    risk_pact_lateral_margin_m: float = 1.2
-    risk_pact_minimum_sigma_x_m: float = 2.5
-    risk_pact_minimum_sigma_y_m: float = 1.2
-    risk_pact_ego_length_m: float = 8.0
-    risk_pact_ego_width_m: float = 2.5
-    risk_pact_inflate_actor_by_ego_footprint: bool = True
-    risk_pact_platoon_vehicle_length_m: float = 8.0
-    risk_pact_platoon_vehicle_width_m: float = 2.5
+    risk_pact_ego_length_m: float = 5.74
+    risk_pact_ego_width_m: float = 2.30
+    risk_pact_background_longitudinal_clearance_m: float = 5.0
+    risk_pact_background_lateral_clearance_m: float = 0.4
+    risk_pact_actor_temperature_m: float = 0.50
+    risk_pact_actor_softmax_beta: float = 12.0
+    risk_pact_platoon_vehicle_length_m: float = 5.74
+    risk_pact_platoon_vehicle_width_m: float = 2.30
+    risk_pact_platoon_longitudinal_clearance_m: float = 7.0
+    risk_pact_platoon_lateral_clearance_m: float = 0.4
+    risk_pact_component_softmax_beta: float = 12.0
     risk_pact_road_safety_margin_m: float = 0.4
     risk_pact_road_temperature_m: float = 0.30
     risk_pact_temporal_softmax_beta: float = 12.0
@@ -143,14 +145,13 @@ class JointGRPOConfig:
             "steering_rate_final_limit_deg_s",
             "feasibility_schedule_power",
             "risk_pact_horizon_dt_s",
-            "risk_pact_longitudinal_margin_m",
-            "risk_pact_lateral_margin_m",
-            "risk_pact_minimum_sigma_x_m",
-            "risk_pact_minimum_sigma_y_m",
             "risk_pact_ego_length_m",
             "risk_pact_ego_width_m",
+            "risk_pact_actor_temperature_m",
+            "risk_pact_actor_softmax_beta",
             "risk_pact_platoon_vehicle_length_m",
             "risk_pact_platoon_vehicle_width_m",
+            "risk_pact_component_softmax_beta",
             "risk_pact_road_temperature_m",
             "risk_pact_temporal_softmax_beta",
             "risk_pact_violation_temperature",
@@ -168,6 +169,10 @@ class JointGRPOConfig:
             "steering_feasibility_weight",
             "steering_rate_feasibility_weight",
             "risk_pact_distill_weight",
+            "risk_pact_background_longitudinal_clearance_m",
+            "risk_pact_background_lateral_clearance_m",
+            "risk_pact_platoon_longitudinal_clearance_m",
+            "risk_pact_platoon_lateral_clearance_m",
             "risk_pact_road_safety_margin_m",
         )
         for name in positive:
@@ -192,7 +197,6 @@ class JointGRPOConfig:
             "risk_pact_use_background_actor",
             "risk_pact_use_platoon_actor",
             "risk_pact_use_road_boundary",
-            "risk_pact_inflate_actor_by_ego_footprint",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise JointGRPOError(f"{name} must be bool")
@@ -240,7 +244,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v11_multisource_risk_pact_lite",
+        "version": "stage2_joint_grpo_optimizer_v12_clearance_smoothmax_risk_pact_lite",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -267,8 +271,8 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
             "every hard-valid optimizer-executable mode; no mode KL"
         ),
         "risk_pact_lite": (
-            "final-x0 projected teacher from bounded union of background actors, "
-            "platoon neighbors and DRIVABLE signed-distance road risk; masked "
+            "final-x0 projected teacher from signed-clearance actor fields and "
+            "DRIVABLE signed-distance road risk with smooth-max aggregation; masked "
             "distillation shares the same guarded optimizer step"
         ),
         "trainable_parameters": (
@@ -1857,15 +1861,17 @@ class _JointGRPOTrainerBase:
                 use_platoon_actor=self.config.risk_pact_use_platoon_actor,
                 use_road_boundary=self.config.risk_pact_use_road_boundary,
                 horizon_dt_s=self.config.risk_pact_horizon_dt_s,
-                longitudinal_margin_m=self.config.risk_pact_longitudinal_margin_m,
-                lateral_margin_m=self.config.risk_pact_lateral_margin_m,
-                minimum_sigma_x_m=self.config.risk_pact_minimum_sigma_x_m,
-                minimum_sigma_y_m=self.config.risk_pact_minimum_sigma_y_m,
                 ego_length_m=self.config.risk_pact_ego_length_m,
                 ego_width_m=self.config.risk_pact_ego_width_m,
-                inflate_actor_by_ego_footprint=self.config.risk_pact_inflate_actor_by_ego_footprint,
+                background_longitudinal_clearance_m=self.config.risk_pact_background_longitudinal_clearance_m,
+                background_lateral_clearance_m=self.config.risk_pact_background_lateral_clearance_m,
+                actor_temperature_m=self.config.risk_pact_actor_temperature_m,
+                actor_softmax_beta=self.config.risk_pact_actor_softmax_beta,
                 platoon_vehicle_length_m=self.config.risk_pact_platoon_vehicle_length_m,
                 platoon_vehicle_width_m=self.config.risk_pact_platoon_vehicle_width_m,
+                platoon_longitudinal_clearance_m=self.config.risk_pact_platoon_longitudinal_clearance_m,
+                platoon_lateral_clearance_m=self.config.risk_pact_platoon_lateral_clearance_m,
+                component_softmax_beta=self.config.risk_pact_component_softmax_beta,
                 road_safety_margin_m=self.config.risk_pact_road_safety_margin_m,
                 road_temperature_m=self.config.risk_pact_road_temperature_m,
                 temporal_softmax_beta=self.config.risk_pact_temporal_softmax_beta,

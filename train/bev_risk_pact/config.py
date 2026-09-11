@@ -8,10 +8,15 @@ import math
 class RiskPACTConfig:
     """Risk-PACT-lite safety-field configuration.
 
-    Step 5.5 upgrades the pilot from a background-actor-only field to a
-    multi-source field containing background traffic, platoon neighbors and the
-    drivable-road boundary.  All components remain differentiable with respect
-    to candidate trajectory coordinates; scene geometry itself stays detached.
+    Step 5.6 calibrates the multi-source field around physically interpretable
+    clearance geometry:
+      * actor risk uses an oriented-box signed-clearance field rather than a
+        Gaussian whose scale changes with actor count;
+      * actor and component aggregation use softmax-weighted smooth maxima;
+      * ego/platoon dimensions match the shared reward/environment geometry.
+
+    Scene geometry stays detached. Gradients flow only through queried
+    trajectory coordinates.
     """
 
     # Component switches (useful for ablations).
@@ -19,20 +24,30 @@ class RiskPACTConfig:
     use_platoon_actor: bool = True
     use_road_boundary: bool = True
 
-    # Shared horizon / dynamic-actor geometry.
+    # Shared horizon and vehicle geometry. 5.74 x 2.30 m is the common XL
+    # vehicle geometry already used by VehicleModeRewardConfig / mode_contract.
     horizon_dt_s: float = 0.5
-    longitudinal_margin_m: float = 3.0
-    lateral_margin_m: float = 1.2
-    minimum_sigma_x_m: float = 2.5
-    minimum_sigma_y_m: float = 1.2
-    ego_length_m: float = 8.0
-    ego_width_m: float = 2.5
-    inflate_actor_by_ego_footprint: bool = True
+    ego_length_m: float = 5.74
+    ego_width_m: float = 2.30
 
-    # Platoon-neighbor dimensions used to convert formation relation features
-    # to the same 8-D actor contract as background traffic.
-    platoon_vehicle_length_m: float = 8.0
-    platoon_vehicle_width_m: float = 2.5
+    # Background-traffic signed-clearance field.
+    background_longitudinal_clearance_m: float = 5.0
+    background_lateral_clearance_m: float = 0.4
+
+    # Platoon-neighbor geometry and signed-clearance field.
+    platoon_vehicle_length_m: float = 5.74
+    platoon_vehicle_width_m: float = 2.30
+    platoon_longitudinal_clearance_m: float = 7.0
+    platoon_lateral_clearance_m: float = 0.4
+
+    # Maps oriented-box signed clearance (m) to a bounded risk in (0,1).
+    # At clearance=0, risk=0.5; positive clearance decreases risk.
+    actor_temperature_m: float = 0.50
+
+    # Smooth-max temperatures. Larger beta approaches a hard max while
+    # avoiding actor-count / component-count inflation from probabilistic union.
+    actor_softmax_beta: float = 12.0
+    component_softmax_beta: float = 12.0
 
     # Road-boundary field from DRIVABLE signed distance.
     road_safety_margin_m: float = 0.4
@@ -52,7 +67,6 @@ class RiskPACTConfig:
             "use_background_actor",
             "use_platoon_actor",
             "use_road_boundary",
-            "inflate_actor_by_ego_footprint",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be bool")
@@ -61,14 +75,13 @@ class RiskPACTConfig:
 
         positive = (
             "horizon_dt_s",
-            "longitudinal_margin_m",
-            "lateral_margin_m",
-            "minimum_sigma_x_m",
-            "minimum_sigma_y_m",
             "ego_length_m",
             "ego_width_m",
             "platoon_vehicle_length_m",
             "platoon_vehicle_width_m",
+            "actor_temperature_m",
+            "actor_softmax_beta",
+            "component_softmax_beta",
             "road_temperature_m",
             "temporal_softmax_beta",
             "violation_temperature",
@@ -76,7 +89,13 @@ class RiskPACTConfig:
             "gradient_eps",
             "gradient_clip_norm",
         )
-        non_negative = ("road_safety_margin_m",)
+        non_negative = (
+            "background_longitudinal_clearance_m",
+            "background_lateral_clearance_m",
+            "platoon_longitudinal_clearance_m",
+            "platoon_lateral_clearance_m",
+            "road_safety_margin_m",
+        )
         for name in positive:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:

@@ -52,25 +52,31 @@ safety_post_training:
     distill_weight: 1.0
     horizon_dt_s: 0.5
 
-    # Step 5.5 multi-source safety field.  Keep these switches explicit so the
+    # Step 5.6 multi-source safety field. Keep these switches explicit so the
     # three sources can later be ablated independently.
     components:
       background_actor: true
       platoon_actor: true
       road_boundary: true
 
+    # Step 5.6: physically interpretable signed-clearance actor field.
+    # Geometry is aligned with VehicleModeRewardConfig / mode_contract.
     actor:
-      longitudinal_margin_m: 3.0
-      lateral_margin_m: 1.2
-      minimum_sigma_x_m: 2.5
-      minimum_sigma_y_m: 1.2
-      ego_length_m: 8.0
-      ego_width_m: 2.5
-      inflate_by_ego_footprint: true
+      ego_length_m: 5.74
+      ego_width_m: 2.30
+      background_longitudinal_clearance_m: 5.0
+      background_lateral_clearance_m: 0.4
+      temperature_m: 0.50
+      softmax_beta: 12.0
 
     platoon:
-      vehicle_length_m: 8.0
-      vehicle_width_m: 2.5
+      vehicle_length_m: 5.74
+      vehicle_width_m: 2.30
+      longitudinal_clearance_m: 7.0
+      lateral_clearance_m: 0.4
+
+    # Smooth-max across background/platoon/road components.
+    component_softmax_beta: 12.0
 
     road:
       safety_margin_m: 0.4
@@ -92,7 +98,9 @@ safety_post_training:
       schedule: linear
 
     visualization:
-      enabled: true
+      # Disabled in Step 5.6 because the legacy visualizer still assumes the
+      # Gaussian field. Step 6 will replace it with clearance-field plots.
+      enabled: false
       interval_steps: 5
       start_step: 0
       max_events: 5

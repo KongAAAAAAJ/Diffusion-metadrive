@@ -13,10 +13,9 @@ from .road_field import RoadBoundaryRiskField
 class RiskFieldResult:
     """Risk queried along candidate trajectories.
 
-    ``risk`` is the final bounded multi-source union.  ``per_actor_risk`` and
+    ``risk`` is the final smooth-max multi-source field. ``per_actor_risk`` and
     ``actor_future_xy`` concatenate enabled background and platoon actors for
-    backward-compatible diagnostics.  Component tensors expose the source of
-    each safety signal.
+    diagnostics. Component tensors expose each source separately.
     """
 
     risk: Tensor
@@ -28,8 +27,48 @@ class RiskFieldResult:
     road_signed_distance_m: Tensor | None = None
 
 
-class DynamicGaussianRiskField:
-    """Analytic differentiable spatio-temporal actor risk field."""
+def _masked_softmax_weighted_max(values: Tensor, valid: Tensor, *, beta: float, dim: int) -> Tensor:
+    """Differentiable bounded smooth-max that is invariant to invalid entries.
+
+    This is a softmax-weighted average, not log-sum-exp. Therefore if all valid
+    entries have the same risk r, the aggregate remains exactly r instead of
+    increasing with the number of actors/components.
+    """
+
+    if valid.dtype != torch.bool:
+        raise ValueError("valid mask must be boolean")
+    if values.shape != valid.shape:
+        raise ValueError("values and valid must have identical shapes")
+    masked_logits = torch.where(
+        valid,
+        float(beta) * values,
+        torch.full_like(values, -1.0e9),
+    )
+    weights = torch.softmax(masked_logits, dim=dim) * valid.to(values.dtype)
+    denom = weights.sum(dim=dim, keepdim=True)
+    weights = weights / denom.clamp_min(1.0e-12)
+    result = (weights * values).sum(dim=dim)
+    has_valid = valid.any(dim=dim)
+    return torch.where(has_valid, result, torch.zeros_like(result))
+
+
+class DynamicActorClearanceRiskField:
+    """Differentiable dynamic actor field based on oriented-box clearance.
+
+    For an actor-aligned relative point (longitudinal, lateral), construct an
+    ego-inflated rectangular safety set with half extents
+
+      a = (L_actor + L_ego)/2 + longitudinal_clearance
+      b = (W_actor + W_ego)/2 + lateral_clearance
+
+    and compute the standard oriented-box signed distance. Positive distance is
+    outside the safety box; negative distance is inside. Risk is
+
+      sigmoid(-signed_clearance / actor_temperature_m).
+
+    Actor aggregation uses a smooth max, avoiding the actor-count inflation of
+    the previous probabilistic union.
+    """
 
     def __init__(self, config: RiskPACTConfig | None = None) -> None:
         self.config = config or RiskPACTConfig()
@@ -48,11 +87,31 @@ class DynamicGaussianRiskField:
         velocity = actor_state[..., 4:6]
         return xy0.unsqueeze(-2) + velocity.unsqueeze(-2) * times.view(1, 1, 1, -1, 1)
 
+    @staticmethod
+    def _oriented_box_signed_distance(
+        longitudinal: Tensor,
+        lateral: Tensor,
+        half_extent_x: Tensor,
+        half_extent_y: Tensor,
+    ) -> Tensor:
+        # Standard rectangle SDF. It is differentiable almost everywhere and
+        # provides a physically interpretable zero level set.
+        qx = longitudinal.abs() - half_extent_x
+        qy = lateral.abs() - half_extent_y
+        outside_x = torch.relu(qx)
+        outside_y = torch.relu(qy)
+        outside = torch.sqrt(outside_x.square() + outside_y.square() + 1.0e-12)
+        inside = torch.minimum(torch.maximum(qx, qy), torch.zeros_like(qx))
+        return outside + inside
+
     def query(
         self,
         trajectory_xy: Tensor,
         actor_state: Tensor,
         actor_valid_mask: Tensor,
+        *,
+        longitudinal_clearance_m: float | None = None,
+        lateral_clearance_m: float | None = None,
     ) -> RiskFieldResult:
         squeeze_mode = False
         if trajectory_xy.ndim == 4:
@@ -68,6 +127,12 @@ class DynamicGaussianRiskField:
             raise ValueError("actor_valid_mask must be boolean")
         if trajectory_xy.shape[:2] != actor_state.shape[:2]:
             raise ValueError("trajectory and actor state B/R axes must match")
+        if longitudinal_clearance_m is None:
+            longitudinal_clearance_m = float(self.config.background_longitudinal_clearance_m)
+        if lateral_clearance_m is None:
+            lateral_clearance_m = float(self.config.background_lateral_clearance_m)
+        if longitudinal_clearance_m < 0.0 or lateral_clearance_m < 0.0:
+            raise ValueError("actor clearances must be non-negative")
 
         _, _, _, h, _ = trajectory_xy.shape
         future = self.actor_future_xy(actor_state, h)  # [B,R,A,H,2]
@@ -86,50 +151,64 @@ class DynamicGaussianRiskField:
 
         length = actor_state[..., 6].abs().clamp_min(0.1)
         width = actor_state[..., 7].abs().clamp_min(0.1)
-        ego_half_length = 0.5 * float(self.config.ego_length_m) if self.config.inflate_actor_by_ego_footprint else 0.0
-        ego_half_width = 0.5 * float(self.config.ego_width_m) if self.config.inflate_actor_by_ego_footprint else 0.0
-        sigma_x = torch.maximum(
-            0.5 * length + ego_half_length + float(self.config.longitudinal_margin_m),
-            torch.full_like(length, float(self.config.minimum_sigma_x_m)),
+        half_extent_x = (
+            0.5 * length
+            + 0.5 * float(self.config.ego_length_m)
+            + float(longitudinal_clearance_m)
         )[:, :, None, None, :]
-        sigma_y = torch.maximum(
-            0.5 * width + ego_half_width + float(self.config.lateral_margin_m),
-            torch.full_like(width, float(self.config.minimum_sigma_y_m)),
+        half_extent_y = (
+            0.5 * width
+            + 0.5 * float(self.config.ego_width_m)
+            + float(lateral_clearance_m)
         )[:, :, None, None, :]
 
-        mahalanobis = (longitudinal / sigma_x).square() + (lateral / sigma_y).square()
-        per_actor = torch.exp(-0.5 * mahalanobis)
-        valid = actor_valid_mask[:, :, None, None, :]
+        signed_clearance = self._oriented_box_signed_distance(
+            longitudinal, lateral, half_extent_x, half_extent_y
+        )
+        per_actor = torch.sigmoid(-signed_clearance / float(self.config.actor_temperature_m))
+        valid = actor_valid_mask[:, :, None, None, :].expand_as(per_actor)
         per_actor = torch.where(valid, per_actor, torch.zeros_like(per_actor))
-        one_minus = (1.0 - per_actor).clamp(1.0e-6, 1.0)
-        union_risk = (1.0 - torch.prod(one_minus, dim=-1)).clamp(0.0, 1.0)
+        aggregate = _masked_softmax_weighted_max(
+            per_actor,
+            valid,
+            beta=float(self.config.actor_softmax_beta),
+            dim=-1,
+        ).clamp(0.0, 1.0)
 
         if squeeze_mode:
-            union_risk = union_risk.squeeze(2)
+            aggregate = aggregate.squeeze(2)
             per_actor = per_actor.squeeze(2)
         return RiskFieldResult(
-            risk=union_risk,
+            risk=aggregate,
             per_actor_risk=per_actor,
             actor_future_xy=future_hr,
         )
 
 
+# Compatibility alias for older pilot imports. Its semantics are Step-5.6
+# signed-clearance, not Gaussian.
+DynamicGaussianRiskField = DynamicActorClearanceRiskField
+
+
 class MultiSourceSafetyRiskField:
-    """Background + platoon + road bounded union used by Risk-PACT-lite."""
+    """Background + platoon + road smooth-max field used by Risk-PACT-lite."""
 
     def __init__(self, config: RiskPACTConfig | None = None) -> None:
         self.config = config or RiskPACTConfig()
-        self.actor_field = DynamicGaussianRiskField(self.config)
+        self.actor_field = DynamicActorClearanceRiskField(self.config)
         self.road_field = RoadBoundaryRiskField(self.config)
 
-    @staticmethod
-    def _bounded_union(parts: list[Tensor]) -> Tensor:
+    def _smooth_component_max(self, parts: list[Tensor]) -> Tensor:
         if not parts:
             raise ValueError("at least one risk component must be present")
-        one_minus = torch.ones_like(parts[0])
-        for part in parts:
-            one_minus = one_minus * (1.0 - part).clamp(1.0e-6, 1.0)
-        return (1.0 - one_minus).clamp(0.0, 1.0)
+        stacked = torch.stack(parts, dim=-1)
+        valid = torch.ones_like(stacked, dtype=torch.bool)
+        return _masked_softmax_weighted_max(
+            stacked,
+            valid,
+            beta=float(self.config.component_softmax_beta),
+            dim=-1,
+        ).clamp(0.0, 1.0)
 
     def query(
         self,
@@ -157,7 +236,13 @@ class MultiSourceSafetyRiskField:
         if self.config.use_background_actor and background_actor_state is not None:
             if background_actor_valid_mask is None:
                 raise ValueError("background actor state requires a validity mask")
-            bg = self.actor_field.query(canonical, background_actor_state, background_actor_valid_mask)
+            bg = self.actor_field.query(
+                canonical,
+                background_actor_state,
+                background_actor_valid_mask,
+                longitudinal_clearance_m=float(self.config.background_longitudinal_clearance_m),
+                lateral_clearance_m=float(self.config.background_lateral_clearance_m),
+            )
             background_risk = bg.risk
             component_risks.append(background_risk)
             per_actor_parts.append(bg.per_actor_risk)
@@ -166,7 +251,13 @@ class MultiSourceSafetyRiskField:
         if self.config.use_platoon_actor and platoon_actor_state is not None:
             if platoon_actor_valid_mask is None:
                 raise ValueError("platoon actor state requires a validity mask")
-            platoon = self.actor_field.query(canonical, platoon_actor_state, platoon_actor_valid_mask)
+            platoon = self.actor_field.query(
+                canonical,
+                platoon_actor_state,
+                platoon_actor_valid_mask,
+                longitudinal_clearance_m=float(self.config.platoon_longitudinal_clearance_m),
+                lateral_clearance_m=float(self.config.platoon_lateral_clearance_m),
+            )
             platoon_risk = platoon.risk
             component_risks.append(platoon_risk)
             per_actor_parts.append(platoon.per_actor_risk)
@@ -181,7 +272,7 @@ class MultiSourceSafetyRiskField:
         if not component_risks:
             raise ValueError("no enabled Risk-PACT component has scene data")
 
-        combined = self._bounded_union(component_risks)
+        combined = self._smooth_component_max(component_risks)
         b, r, _, horizon, _ = canonical.shape
         if per_actor_parts:
             per_actor = torch.cat(per_actor_parts, dim=-1)
