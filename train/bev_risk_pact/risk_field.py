@@ -25,6 +25,9 @@ class RiskFieldResult:
     platoon_risk: Tensor | None = None
     road_risk: Tensor | None = None
     road_signed_distance_m: Tensor | None = None
+    per_actor_signed_clearance_m: Tensor | None = None
+    background_signed_clearance_m: Tensor | None = None
+    platoon_signed_clearance_m: Tensor | None = None
 
 
 def _masked_softmax_weighted_max(values: Tensor, valid: Tensor, *, beta: float, dim: int) -> Tensor:
@@ -175,13 +178,16 @@ class DynamicActorClearanceRiskField:
             dim=-1,
         ).clamp(0.0, 1.0)
 
+        signed_clearance = torch.where(valid, signed_clearance, torch.full_like(signed_clearance, float("inf")))
         if squeeze_mode:
             aggregate = aggregate.squeeze(2)
             per_actor = per_actor.squeeze(2)
+            signed_clearance = signed_clearance.squeeze(2)
         return RiskFieldResult(
             risk=aggregate,
             per_actor_risk=per_actor,
             actor_future_xy=future_hr,
+            per_actor_signed_clearance_m=signed_clearance,
         )
 
 
@@ -232,6 +238,8 @@ class MultiSourceSafetyRiskField:
         platoon_risk = None
         road_risk = None
         road_signed_distance = None
+        background_signed_clearance = None
+        platoon_signed_clearance = None
 
         if self.config.use_background_actor and background_actor_state is not None:
             if background_actor_valid_mask is None:
@@ -244,6 +252,7 @@ class MultiSourceSafetyRiskField:
                 lateral_clearance_m=float(self.config.background_lateral_clearance_m),
             )
             background_risk = bg.risk
+            background_signed_clearance = bg.per_actor_signed_clearance_m
             component_risks.append(background_risk)
             per_actor_parts.append(bg.per_actor_risk)
             future_parts.append(bg.actor_future_xy)
@@ -259,6 +268,7 @@ class MultiSourceSafetyRiskField:
                 lateral_clearance_m=float(self.config.platoon_lateral_clearance_m),
             )
             platoon_risk = platoon.risk
+            platoon_signed_clearance = platoon.per_actor_signed_clearance_m
             component_risks.append(platoon_risk)
             per_actor_parts.append(platoon.per_actor_risk)
             future_parts.append(platoon.actor_future_xy)
@@ -292,6 +302,18 @@ class MultiSourceSafetyRiskField:
                 road_risk = road_risk.squeeze(2)
             if road_signed_distance is not None:
                 road_signed_distance = road_signed_distance.squeeze(2)
+            if background_signed_clearance is not None:
+                background_signed_clearance = background_signed_clearance.squeeze(2)
+            if platoon_signed_clearance is not None:
+                platoon_signed_clearance = platoon_signed_clearance.squeeze(2)
+
+        all_signed_clearance = None
+        clearance_parts = [
+            value for value in (background_signed_clearance, platoon_signed_clearance)
+            if value is not None
+        ]
+        if clearance_parts:
+            all_signed_clearance = torch.cat(clearance_parts, dim=-1)
 
         return RiskFieldResult(
             risk=combined,
@@ -301,4 +323,7 @@ class MultiSourceSafetyRiskField:
             platoon_risk=platoon_risk,
             road_risk=road_risk,
             road_signed_distance_m=road_signed_distance,
+            per_actor_signed_clearance_m=all_signed_clearance,
+            background_signed_clearance_m=background_signed_clearance,
+            platoon_signed_clearance_m=platoon_signed_clearance,
         )

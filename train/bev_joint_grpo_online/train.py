@@ -18,7 +18,7 @@ from train.bev_joint_grpo_online.config import (
     RiskPACTPostTrainingConfig,
     SafetyPostTrainingConfig,
 )
-from train.bev_risk_pact.config import RiskPACTConfig, RiskPACTVisualizationConfig
+from train.bev_risk_pact.config import RiskPACTConfig, RiskPACTDiagnosticsConfig, RiskPACTVisualizationConfig
 from train.bev_joint_grpo_online.environment import constant_velocity_actions, episode_has_ended, execute_cached_frozen_baseline, joint_trajectory_action, model_inputs_to_batch, optimize_selected_model_trajectories
 from train.bev_joint_grpo_online.validation import build_grpo_validation_state_bank
 from train.bev_joint_grpo_online.runner import run_joint_grpo_training
@@ -48,6 +48,7 @@ def _feasibility_from_mapping(value: Mapping[str, object], *, enabled: bool) -> 
 
 def _risk_pact_from_mapping(value: Mapping[str, object]) -> RiskPACTPostTrainingConfig:
     curriculum = _mapping(value.get('curriculum'), name='safety_post_training.risk_pact.curriculum', default={})
+    diagnostics = _mapping(value.get('diagnostics'), name='safety_post_training.risk_pact.diagnostics', default={})
     visualization = _mapping(value.get('visualization'), name='safety_post_training.risk_pact.visualization', default={})
     components = _mapping(value.get('components'), name='safety_post_training.risk_pact.components', default={})
     actor = _mapping(value.get('actor'), name='safety_post_training.risk_pact.actor', default={})
@@ -90,6 +91,13 @@ def _risk_pact_from_mapping(value: Mapping[str, object]) -> RiskPACTPostTraining
         ramp_updates=int(curriculum.get('ramp_updates', 100)),
         schedule=str(curriculum.get('schedule', 'linear')),
     )
+    diagnostics_config = RiskPACTDiagnosticsConfig(
+        enabled=bool(diagnostics.get('enabled', True)),
+        gradient_diagnostics=bool(diagnostics.get('gradient_diagnostics', True)),
+        gradient_interval_steps=int(diagnostics.get('gradient_interval_steps', 1)),
+        teacher_improvement_eps=float(diagnostics.get('teacher_improvement_eps', 1.0e-6)),
+        late_horizon_start_step=int(diagnostics.get('late_horizon_start_step', 6)),
+    )
     max_events_raw = visualization.get('max_events', 4)
     visualization_config = RiskPACTVisualizationConfig(
         enabled=visualization.get('enabled', False),
@@ -99,12 +107,15 @@ def _risk_pact_from_mapping(value: Mapping[str, object]) -> RiskPACTPostTraining
         batch_index=int(visualization.get('batch_index', 0)),
         role_index=int(visualization.get('role_index', 0)),
         mode_index=int(visualization.get('mode_index', 0)),
+        selection=str(visualization.get('selection', 'highest_risk')),
+        candidate_index=int(visualization.get('candidate_index', 0)),
         output_subdir=str(visualization.get('output_subdir', 'risk_field_visualizations')),
     )
     return RiskPACTPostTrainingConfig(
         distill_weight=float(value.get('distill_weight', 1.0)),
         risk=risk_config,
         curriculum=curriculum_config,
+        diagnostics=diagnostics_config,
         visualization=visualization_config,
     )
 

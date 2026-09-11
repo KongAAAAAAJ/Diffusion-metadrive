@@ -107,6 +107,13 @@ class JointGRPOConfig:
     risk_pact_curriculum_ramp_updates: int = 100
     risk_pact_curriculum_schedule: str = "linear"
 
+    # Step-6 diagnostics. These do not change the optimized objective.
+    risk_pact_diagnostics_enabled: bool = True
+    risk_pact_gradient_diagnostics: bool = True
+    risk_pact_gradient_diagnostics_interval: int = 1
+    risk_pact_teacher_improvement_eps: float = 1.0e-6
+    risk_pact_late_horizon_start_step: int = 6
+
     def __post_init__(self) -> None:
         allowed_safety_modes = (
             "none",
@@ -174,6 +181,7 @@ class JointGRPOConfig:
             "risk_pact_platoon_longitudinal_clearance_m",
             "risk_pact_platoon_lateral_clearance_m",
             "risk_pact_road_safety_margin_m",
+            "risk_pact_teacher_improvement_eps",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -200,6 +208,21 @@ class JointGRPOConfig:
         ):
             if not isinstance(getattr(self, name), bool):
                 raise JointGRPOError(f"{name} must be bool")
+        for name in ("risk_pact_diagnostics_enabled", "risk_pact_gradient_diagnostics"):
+            if not isinstance(getattr(self, name), bool):
+                raise JointGRPOError(f"{name} must be bool")
+        if (
+            isinstance(self.risk_pact_gradient_diagnostics_interval, bool)
+            or int(self.risk_pact_gradient_diagnostics_interval) <= 0
+        ):
+            raise JointGRPOError("risk_pact_gradient_diagnostics_interval must be a positive integer")
+        if (
+            isinstance(self.risk_pact_late_horizon_start_step, bool)
+            or not 0 <= int(self.risk_pact_late_horizon_start_step) < TRAJECTORY_STEPS
+        ):
+            raise JointGRPOError(
+                "risk_pact_late_horizon_start_step must lie on the planning horizon"
+            )
         if self.uses_risk_pact and not (
             self.risk_pact_use_background_actor
             or self.risk_pact_use_platoon_actor
@@ -244,7 +267,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v12_clearance_smoothmax_risk_pact_lite",
+        "version": "stage2_joint_grpo_optimizer_v13_risk_pact_step6_diagnostics",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -485,6 +508,22 @@ class JointGRPOLossResult:
     risk_pact_platoon_risk_mean: Tensor
     risk_pact_road_risk_mean: Tensor
     risk_pact_road_signed_distance_min_m: Tensor
+    risk_pact_valid_active_ratio: Tensor
+    risk_pact_valid_active_count: Tensor
+    risk_pact_valid_candidate_count: Tensor
+    risk_pact_teacher_trajectory_risk_mean: Tensor
+    risk_pact_teacher_trajectory_risk_max: Tensor
+    risk_pact_teacher_risk_reduction_mean: Tensor
+    risk_pact_teacher_improvement_fraction: Tensor
+    risk_pact_critical_time_mean_s: Tensor
+    risk_pact_critical_time_max_s: Tensor
+    risk_pact_late_horizon_critical_fraction: Tensor
+    risk_pact_background_signed_clearance_min_mean_m: Tensor
+    risk_pact_background_signed_clearance_min_m: Tensor
+    risk_pact_platoon_signed_clearance_min_mean_m: Tensor
+    risk_pact_platoon_signed_clearance_min_m: Tensor
+    risk_pact_road_safety_clearance_min_mean_m: Tensor
+    risk_pact_road_safety_clearance_min_m: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -509,6 +548,22 @@ class JointGRPOLossResult:
             "risk_pact/platoon_risk_mean": self.risk_pact_platoon_risk_mean,
             "risk_pact/road_risk_mean": self.risk_pact_road_risk_mean,
             "risk_pact/road_signed_distance_min_m": self.risk_pact_road_signed_distance_min_m,
+            "risk_pact/valid_active_ratio": self.risk_pact_valid_active_ratio,
+            "risk_pact/valid_active_count": self.risk_pact_valid_active_count,
+            "risk_pact/valid_candidate_count": self.risk_pact_valid_candidate_count,
+            "risk_pact/teacher_trajectory_risk_mean": self.risk_pact_teacher_trajectory_risk_mean,
+            "risk_pact/teacher_trajectory_risk_max": self.risk_pact_teacher_trajectory_risk_max,
+            "risk_pact/teacher_risk_reduction_mean": self.risk_pact_teacher_risk_reduction_mean,
+            "risk_pact/teacher_improvement_fraction": self.risk_pact_teacher_improvement_fraction,
+            "risk_pact/critical_time_mean_s": self.risk_pact_critical_time_mean_s,
+            "risk_pact/critical_time_max_s": self.risk_pact_critical_time_max_s,
+            "risk_pact/late_horizon_critical_fraction": self.risk_pact_late_horizon_critical_fraction,
+            "risk_pact/background_signed_clearance_min_mean_m": self.risk_pact_background_signed_clearance_min_mean_m,
+            "risk_pact/background_signed_clearance_min_m": self.risk_pact_background_signed_clearance_min_m,
+            "risk_pact/platoon_signed_clearance_min_mean_m": self.risk_pact_platoon_signed_clearance_min_mean_m,
+            "risk_pact/platoon_signed_clearance_min_m": self.risk_pact_platoon_signed_clearance_min_m,
+            "risk_pact/road_safety_clearance_min_mean_m": self.risk_pact_road_safety_clearance_min_mean_m,
+            "risk_pact/road_safety_clearance_min_m": self.risk_pact_road_safety_clearance_min_m,
             "advantage/mean": _active_tensor_mean(
                 self.advantages, self.valid_executable_mode_mask
             ),
@@ -579,6 +634,22 @@ class JointGRPOLossResult:
             risk_pact_platoon_risk_mean=self.risk_pact_platoon_risk_mean.detach(),
             risk_pact_road_risk_mean=self.risk_pact_road_risk_mean.detach(),
             risk_pact_road_signed_distance_min_m=self.risk_pact_road_signed_distance_min_m.detach(),
+            risk_pact_valid_active_ratio=self.risk_pact_valid_active_ratio.detach(),
+            risk_pact_valid_active_count=self.risk_pact_valid_active_count.detach(),
+            risk_pact_valid_candidate_count=self.risk_pact_valid_candidate_count.detach(),
+            risk_pact_teacher_trajectory_risk_mean=self.risk_pact_teacher_trajectory_risk_mean.detach(),
+            risk_pact_teacher_trajectory_risk_max=self.risk_pact_teacher_trajectory_risk_max.detach(),
+            risk_pact_teacher_risk_reduction_mean=self.risk_pact_teacher_risk_reduction_mean.detach(),
+            risk_pact_teacher_improvement_fraction=self.risk_pact_teacher_improvement_fraction.detach(),
+            risk_pact_critical_time_mean_s=self.risk_pact_critical_time_mean_s.detach(),
+            risk_pact_critical_time_max_s=self.risk_pact_critical_time_max_s.detach(),
+            risk_pact_late_horizon_critical_fraction=self.risk_pact_late_horizon_critical_fraction.detach(),
+            risk_pact_background_signed_clearance_min_mean_m=self.risk_pact_background_signed_clearance_min_mean_m.detach(),
+            risk_pact_background_signed_clearance_min_m=self.risk_pact_background_signed_clearance_min_m.detach(),
+            risk_pact_platoon_signed_clearance_min_mean_m=self.risk_pact_platoon_signed_clearance_min_mean_m.detach(),
+            risk_pact_platoon_signed_clearance_min_m=self.risk_pact_platoon_signed_clearance_min_m.detach(),
+            risk_pact_road_safety_clearance_min_mean_m=self.risk_pact_road_safety_clearance_min_mean_m.detach(),
+            risk_pact_road_safety_clearance_min_m=self.risk_pact_road_safety_clearance_min_m.detach(),
         )
 
 
@@ -594,6 +665,7 @@ class JointGRPOUpdateResult:
     zero_signal: bool
     stability_guard_rejected: bool
     stability_guard_trigger_modes: tuple[int, ...]
+    objective_gradient_diagnostics: Mapping[str, float]
 
 
 class FrozenGRPOReference(nn.Module):
@@ -1839,6 +1911,22 @@ class _JointGRPOTrainerBase:
         risk_pact_platoon_risk_mean = zero_aux.detach()
         risk_pact_road_risk_mean = zero_aux.detach()
         risk_pact_road_signed_distance_min_m = zero_aux.detach()
+        risk_pact_valid_active_ratio = zero_aux.detach()
+        risk_pact_valid_active_count = zero_aux.detach()
+        risk_pact_valid_candidate_count = zero_aux.detach()
+        risk_pact_teacher_trajectory_risk_mean = zero_aux.detach()
+        risk_pact_teacher_trajectory_risk_max = zero_aux.detach()
+        risk_pact_teacher_risk_reduction_mean = zero_aux.detach()
+        risk_pact_teacher_improvement_fraction = zero_aux.detach()
+        risk_pact_critical_time_mean_s = zero_aux.detach()
+        risk_pact_critical_time_max_s = zero_aux.detach()
+        risk_pact_late_horizon_critical_fraction = zero_aux.detach()
+        risk_pact_background_signed_clearance_min_mean_m = zero_aux.detach()
+        risk_pact_background_signed_clearance_min_m = zero_aux.detach()
+        risk_pact_platoon_signed_clearance_min_mean_m = zero_aux.detach()
+        risk_pact_platoon_signed_clearance_min_m = zero_aux.detach()
+        risk_pact_road_safety_clearance_min_mean_m = zero_aux.detach()
+        risk_pact_road_safety_clearance_min_m = zero_aux.detach()
 
         if self.config.uses_risk_pact and include_risk_pact_teacher:
             actor = rollout.require_risk_pact_context()
@@ -1908,6 +1996,7 @@ class _JointGRPOTrainerBase:
                 ),
                 curriculum_scale=curriculum.scale,
                 config=risk_cfg,
+                evaluate_teacher=self.config.risk_pact_diagnostics_enabled,
             )
             valid_flat = valid_executable_mode_mask.unsqueeze(-1).expand(
                 batch_size, NUM_PLATOON_ROLES, NUM_MODES, trajectories
@@ -1979,6 +2068,100 @@ class _JointGRPOTrainerBase:
                     road_min.new_zeros(()),
                 ).detach()
 
+            # Step-6 diagnostics. These are detached scalar summaries and do not
+            # change the optimized objective or the teacher target.
+            if self.config.risk_pact_diagnostics_enabled:
+                raw_valid_count = valid_weight.sum()
+                risk_pact_valid_candidate_count = raw_valid_count.detach()
+                active_weight = active_flat.to(valid_weight.dtype)
+                raw_active_count = active_weight.sum()
+                risk_pact_valid_active_count = raw_active_count.detach()
+                risk_pact_valid_active_ratio = (
+                    raw_active_count / raw_valid_count.clamp_min(1.0)
+                ).detach()
+
+                projected_constraint = teacher.teacher_constraint
+                if projected_constraint is None:
+                    raise JointGRPOError("Risk-PACT Step-6 teacher diagnostics are missing")
+                projected_risk = projected_constraint.trajectory_risk
+                risk_pact_teacher_trajectory_risk_mean = (
+                    projected_risk * valid_weight
+                ).sum().div(valid_count).detach()
+                projected_masked = torch.where(
+                    valid_flat,
+                    projected_risk,
+                    torch.full_like(projected_risk, float("-inf")),
+                )
+                projected_max = projected_masked.max()
+                risk_pact_teacher_trajectory_risk_max = torch.where(
+                    torch.isfinite(projected_max),
+                    projected_max,
+                    projected_max.new_zeros(()),
+                ).detach()
+
+                risk_reduction = teacher.constraint.trajectory_risk - projected_risk
+                active_count_safe = raw_active_count.clamp_min(1.0)
+                risk_pact_teacher_risk_reduction_mean = (
+                    risk_reduction * active_weight
+                ).sum().div(active_count_safe).detach()
+                improved = (
+                    risk_reduction > float(self.config.risk_pact_teacher_improvement_eps)
+                ) & active_flat
+                risk_pact_teacher_improvement_fraction = (
+                    improved.to(valid_weight.dtype).sum().div(active_count_safe)
+                ).detach()
+
+                critical_index = teacher.constraint.critical_timestep_index
+                if critical_index is None:
+                    critical_index = teacher.field.risk.argmax(dim=-1)
+                critical_time = (critical_index.to(valid_weight.dtype) + 1.0) * float(
+                    self.config.risk_pact_horizon_dt_s
+                )
+                if bool(active_flat.any()):
+                    active_critical = critical_time[active_flat]
+                    risk_pact_critical_time_mean_s = active_critical.mean().detach()
+                    risk_pact_critical_time_max_s = active_critical.max().detach()
+                    late = critical_index >= int(self.config.risk_pact_late_horizon_start_step)
+                    risk_pact_late_horizon_critical_fraction = (
+                        (late & active_flat).to(valid_weight.dtype).sum().div(active_count_safe)
+                    ).detach()
+
+                def _signed_clearance_stats(value: Tensor | None) -> tuple[Tensor, Tensor]:
+                    zero = current_all_modes.new_zeros(()).detach()
+                    if value is None:
+                        return zero, zero
+                    per_trajectory = value.amin(dim=(-1, -2))
+                    finite_valid = valid_flat & torch.isfinite(per_trajectory)
+                    if not bool(finite_valid.any()):
+                        return zero, zero
+                    selected = per_trajectory[finite_valid]
+                    return selected.mean().detach(), selected.min().detach()
+
+                (
+                    risk_pact_background_signed_clearance_min_mean_m,
+                    risk_pact_background_signed_clearance_min_m,
+                ) = _signed_clearance_stats(teacher.field.background_signed_clearance_m)
+                (
+                    risk_pact_platoon_signed_clearance_min_mean_m,
+                    risk_pact_platoon_signed_clearance_min_m,
+                ) = _signed_clearance_stats(teacher.field.platoon_signed_clearance_m)
+                if teacher.field.road_signed_distance_m is not None:
+                    required_road_clearance = (
+                        0.5 * float(self.config.risk_pact_ego_width_m)
+                        + float(self.config.risk_pact_road_safety_margin_m)
+                    )
+                    road_safety_clearance = (
+                        teacher.field.road_signed_distance_m - required_road_clearance
+                    )
+                    per_trajectory_road = road_safety_clearance.amin(dim=-1)
+                    finite_valid_road = valid_flat & torch.isfinite(per_trajectory_road)
+                    if bool(finite_valid_road.any()):
+                        selected_road = per_trajectory_road[finite_valid_road]
+                        risk_pact_road_safety_clearance_min_mean_m = (
+                            selected_road.mean().detach()
+                        )
+                        risk_pact_road_safety_clearance_min_m = selected_road.min().detach()
+
         total = (
             float(self.config.trajectory_pg_weight) * trajectory_pg
             + float(self.config.bc_weight) * behavior_cloning
@@ -2034,6 +2217,22 @@ class _JointGRPOTrainerBase:
             risk_pact_platoon_risk_mean=risk_pact_platoon_risk_mean,
             risk_pact_road_risk_mean=risk_pact_road_risk_mean,
             risk_pact_road_signed_distance_min_m=risk_pact_road_signed_distance_min_m,
+            risk_pact_valid_active_ratio=risk_pact_valid_active_ratio,
+            risk_pact_valid_active_count=risk_pact_valid_active_count,
+            risk_pact_valid_candidate_count=risk_pact_valid_candidate_count,
+            risk_pact_teacher_trajectory_risk_mean=risk_pact_teacher_trajectory_risk_mean,
+            risk_pact_teacher_trajectory_risk_max=risk_pact_teacher_trajectory_risk_max,
+            risk_pact_teacher_risk_reduction_mean=risk_pact_teacher_risk_reduction_mean,
+            risk_pact_teacher_improvement_fraction=risk_pact_teacher_improvement_fraction,
+            risk_pact_critical_time_mean_s=risk_pact_critical_time_mean_s,
+            risk_pact_critical_time_max_s=risk_pact_critical_time_max_s,
+            risk_pact_late_horizon_critical_fraction=risk_pact_late_horizon_critical_fraction,
+            risk_pact_background_signed_clearance_min_mean_m=risk_pact_background_signed_clearance_min_mean_m,
+            risk_pact_background_signed_clearance_min_m=risk_pact_background_signed_clearance_min_m,
+            risk_pact_platoon_signed_clearance_min_mean_m=risk_pact_platoon_signed_clearance_min_mean_m,
+            risk_pact_platoon_signed_clearance_min_m=risk_pact_platoon_signed_clearance_min_m,
+            risk_pact_road_safety_clearance_min_mean_m=risk_pact_road_safety_clearance_min_mean_m,
+            risk_pact_road_safety_clearance_min_m=risk_pact_road_safety_clearance_min_m,
         )
 
     @staticmethod
@@ -2071,6 +2270,67 @@ class _JointGRPOTrainerBase:
         if not isinstance(head, ModeResidualTrajectoryHead):
             raise JointGRPOError("trainer trajectory head lost its residual contract")
         return head
+
+    @staticmethod
+    def _objective_gradient_vector(loss_value: Tensor, parameters: list[nn.Parameter]) -> Tensor:
+        """Return a detached flat gradient vector without touching ``parameter.grad``."""
+        gradients = torch.autograd.grad(
+            loss_value,
+            parameters,
+            retain_graph=True,
+            create_graph=False,
+            allow_unused=True,
+        )
+        pieces: list[Tensor] = []
+        for parameter, gradient in zip(parameters, gradients):
+            if gradient is None:
+                pieces.append(torch.zeros_like(parameter, dtype=torch.float32).reshape(-1))
+            else:
+                detached = gradient.detach().float()
+                if not bool(torch.isfinite(detached).all()):
+                    raise JointGRPOError("objective-gradient diagnostic is non-finite")
+                pieces.append(detached.reshape(-1))
+        if not pieces:
+            return loss_value.new_zeros((0,), dtype=torch.float32)
+        return torch.cat(pieces, dim=0)
+
+    def _risk_pact_objective_gradient_diagnostics(
+        self,
+        loss: JointGRPOLossResult,
+        parameters: list[nn.Parameter],
+    ) -> dict[str, float]:
+        diagnostics = {"gradient_objective/computed": 0.0}
+        if not (
+            self.config.uses_risk_pact
+            and self.config.risk_pact_diagnostics_enabled
+            and self.config.risk_pact_gradient_diagnostics
+            and self.optimizer_step % int(self.config.risk_pact_gradient_diagnostics_interval) == 0
+            and float(loss.risk_pact_active_count.detach().cpu()) > 0.0
+        ):
+            return diagnostics
+
+        pact_objective = loss.weighted_risk_pact_distillation
+        base_objective = loss.total - pact_objective
+        base_gradient = self._objective_gradient_vector(base_objective, parameters)
+        pact_gradient = self._objective_gradient_vector(pact_objective, parameters)
+        base_norm = torch.linalg.vector_norm(base_gradient)
+        pact_norm = torch.linalg.vector_norm(pact_gradient)
+        denominator = (base_norm * pact_norm).clamp_min(1.0e-12)
+        cosine = torch.dot(base_gradient, pact_gradient) / denominator
+        if float(base_norm) <= 1.0e-12 or float(pact_norm) <= 1.0e-12:
+            cosine = cosine.new_zeros(())
+        diagnostics.update(
+            {
+                "gradient_objective/computed": 1.0,
+                "gradient_objective/base_norm": float(base_norm.cpu()),
+                "gradient_objective/risk_pact_norm": float(pact_norm.cpu()),
+                "gradient_objective/risk_pact_to_base_ratio": float(
+                    (pact_norm / base_norm.clamp_min(1.0e-12)).cpu()
+                ),
+                "gradient_objective/base_risk_pact_cosine": float(cosine.cpu()),
+            }
+        )
+        return diagnostics
 
     def update(
         self,
@@ -2113,6 +2373,9 @@ class _JointGRPOTrainerBase:
         self._consumed_rollouts[rollout_id] = rollout
         head = self._residual_head()
         trainable = list(head.residual_parameters())
+        objective_gradient_diagnostics = self._risk_pact_objective_gradient_diagnostics(
+            loss, trainable
+        )
         auxiliary_signal = (
             (self.config.uses_feasibility and float(loss.feasibility.detach().cpu()) > 0.0)
             or (
@@ -2137,6 +2400,7 @@ class _JointGRPOTrainerBase:
                 zero_signal=True,
                 stability_guard_rejected=False,
                 stability_guard_trigger_modes=(),
+                objective_gradient_diagnostics=objective_gradient_diagnostics,
             )
 
         parameter_snapshot = tuple(
@@ -2165,6 +2429,7 @@ class _JointGRPOTrainerBase:
                 zero_signal=True,
                 stability_guard_rejected=False,
                 stability_guard_trigger_modes=(),
+                objective_gradient_diagnostics=objective_gradient_diagnostics,
             )
 
         self.optimizer.step()
@@ -2212,6 +2477,7 @@ class _JointGRPOTrainerBase:
                 zero_signal=False,
                 stability_guard_rejected=True,
                 stability_guard_trigger_modes=trigger_modes,
+                objective_gradient_diagnostics=objective_gradient_diagnostics,
             )
 
         self.optimizer_step += 1
@@ -2226,6 +2492,7 @@ class _JointGRPOTrainerBase:
             zero_signal=False,
             stability_guard_rejected=False,
             stability_guard_trigger_modes=(),
+            objective_gradient_diagnostics=objective_gradient_diagnostics,
         )
 
 

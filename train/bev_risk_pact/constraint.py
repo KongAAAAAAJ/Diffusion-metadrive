@@ -16,6 +16,7 @@ class RiskConstraintResult:
     safe_mask: Tensor
     near_or_unsafe_mask: Tensor
     temporal_weights: Tensor
+    critical_timestep_index: Tensor | None = None
 
 
 class RiskLevelSetConstraint:
@@ -42,10 +43,12 @@ class RiskLevelSetConstraint:
         # Exact zero supervision for clearly safe trajectories.  This prevents
         # the pilot from learning "safer than necessary" conservative behavior.
         violation = torch.where(safe_mask, torch.zeros_like(violation), violation)
+        critical_timestep_index = risk.argmax(dim=-1)
         return RiskConstraintResult(
             trajectory_risk=trajectory_risk,
             violation=violation,
             safe_mask=safe_mask,
             near_or_unsafe_mask=near_or_unsafe,
             temporal_weights=temporal_weights,
+            critical_timestep_index=critical_timestep_index,
         )

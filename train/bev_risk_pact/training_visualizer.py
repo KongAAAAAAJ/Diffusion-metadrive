@@ -1,10 +1,4 @@
-"""Training-loop hook for Risk-PACT visual diagnostics.
-
-The key design goal is that visualization is *not* a separate executable mode.
-The training loop creates one ``RiskPACTTrainingVisualizer`` and calls
-``maybe_save`` after a teacher is built. When disabled, the hook is effectively
-free and imports matplotlib only when an actual plot event is due.
-"""
+"""Training-loop hook for Step-6 Risk-PACT diagnostics."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,10 +18,11 @@ class RiskPACTVisualizationEvent:
     step: int
     output_dir: Path
     event_index: int
+    summary: dict[str, object]
 
 
 class RiskPACTTrainingVisualizer:
-    """Small stateful gate around the Risk-PACT plotting utilities."""
+    """Stateful gate around the Step-6 multi-source plotting utilities."""
 
     def __init__(
         self,
@@ -49,15 +44,12 @@ class RiskPACTTrainingVisualizer:
     def should_save(self, step: int) -> bool:
         cfg = self.config
         step = int(step)
-        if not cfg.enabled:
-            return False
-        if step < cfg.start_step:
+        if not cfg.enabled or step < cfg.start_step:
             return False
         if (step - cfg.start_step) % cfg.interval_steps != 0:
             return False
         if cfg.max_events is not None and self._event_count >= cfg.max_events:
             return False
-        # Avoid duplicate plots if caller invokes maybe_save multiple times in one step.
         if self._last_step == step:
             return False
         return True
@@ -66,36 +58,34 @@ class RiskPACTTrainingVisualizer:
         self,
         *,
         step: int,
-        actor_state: Tensor,
-        actor_valid_mask: Tensor,
+        background_actor_state: Tensor,
+        background_actor_valid_mask: Tensor,
+        platoon_actor_state: Tensor,
+        platoon_actor_valid_mask: Tensor,
+        road_sdf: Tensor | None,
         old_trajectory: Tensor,
+        valid_executable_mode_mask: Tensor,
         teacher_result: "PACTTeacherResult",
     ) -> RiskPACTVisualizationEvent | None:
-        """Save debug plots if the configured step gate is active.
-
-        Call this immediately after ``build_x0_pact_teacher``. Tensors are
-        detached inside the plotting implementation; plotting therefore does not
-        alter the optimization graph.
-        """
         step = int(step)
         if not self.should_save(step):
             return None
-
-        # Lazy import means formal training with enabled=False never imports pyplot.
         from .visualize import save_risk_pact_debug_plots
 
         output_dir = self.run_dir / self.config.output_subdir
         output_dir.mkdir(parents=True, exist_ok=True)
-        save_risk_pact_debug_plots(
-            actor_state=actor_state,
-            actor_valid_mask=actor_valid_mask,
+        summary = save_risk_pact_debug_plots(
+            background_actor_state=background_actor_state,
+            background_actor_valid_mask=background_actor_valid_mask,
+            platoon_actor_state=platoon_actor_state,
+            platoon_actor_valid_mask=platoon_actor_valid_mask,
+            road_sdf=road_sdf,
             old_trajectory=old_trajectory,
-            teacher_trajectory=teacher_result.teacher_trajectory,
+            valid_executable_mode_mask=valid_executable_mode_mask,
+            teacher_result=teacher_result,
             output_dir=output_dir,
             step=step,
-            batch_index=self.config.batch_index,
-            role_index=self.config.role_index,
-            mode_index=self.config.mode_index,
+            visualization_config=self.config,
             config=self.risk_config,
         )
         self._event_count += 1
@@ -104,4 +94,5 @@ class RiskPACTTrainingVisualizer:
             step=step,
             output_dir=output_dir,
             event_index=self._event_count,
+            summary=summary,
         )

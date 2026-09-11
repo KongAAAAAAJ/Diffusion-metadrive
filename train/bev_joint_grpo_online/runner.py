@@ -9,6 +9,11 @@ from expert_dataset.collect_joint_bev import JointBEVSampleBuilder, simulator_de
 from models.bev_planner import DEFAULT_DDIM_PATH, JointGRPOConfig, KinematicTrajectoryOptimizer, KinematicTrajectoryOptimizerConfig, TrajectoryOptimizationError, joint_grpo_optimizer_contract, joint_grpo_optimizer_contract_sha256
 from models.bev_planner.vehicle_mode_reward import GRPO_OPEN_REWARD_APPLICATION_CONTRACT, GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256, VEHICLE_MODE_REWARD_CONTRACT, VEHICLE_MODE_REWARD_CONTRACT_SHA256, VehicleModeCounterfactualReward, VehicleModeRewardConfig, vehicle_mode_reward_config_sha256
 from train.bev_joint_grpo import load_grpo_b_checkpoint, load_grpo_checkpoint, save_grpo_checkpoint
+from train.bev_risk_pact import (
+    RiskPACTTrainingVisualizer,
+    build_platoon_actor_state,
+    build_x0_pact_teacher,
+)
 from scenarios.bev_round13_contract import HOLDOUT_SEEDS, BEVScenarioContractError, primary_scenario_contract, validate_primary_scenario_contract
 from .config import AGENT_IDS, JointGRPOTrainingConfig, OnlineGRPOError
 from .contracts import BEST_CHECKPOINT_METRIC, FROZEN_PRETRAIN_VEHICLE_REWARD_TAG, VALIDATION_REWARD_FAMILY, _application_contract_version, _checkpoint_file_sha256, _checkpoint_payload, _frozen_pretrain_reward_logging_metadata, _grpo_config_artifact_payload, _implementation_commit, _performance_summary, _reward_contract_version, _sampler_state, _validate_online_checkpoint_metadata, rollout_collection_contract
@@ -16,6 +21,54 @@ from .environment import _condition_online_model_inputs, _cuda_peak_memory_bytes
 from .logging import _advantage_scalar_metrics, _append_validation_selection_event, _sampling_health_metrics, _split_loss_metrics_by_step_axis, _write_advantage_vector_summary, _write_baseline_execution_event, _write_dynamic_sampling_attempt_event, _write_rollout_start_event
 from .rollout import _attempt_budget_is_exhausted, _balanced_bucket_targets, _bucket_visit_is_complete, _diffusion_attempt_generators, _fixed_scale_reward_signals, _load_trainer, _next_unfinished_bucket_index, _round_robin_training_buckets
 from .validation import _FixedValidationFrozenEntry, _fixed_vehicle_mode_validation, _load_grpo_validation_state_bank, _resume_best_checkpoint_anchor, _validation_reward_comparison_metrics
+
+
+def _maybe_save_risk_pact_visualization(
+    *,
+    visualizer: RiskPACTTrainingVisualizer,
+    step: int,
+    rollout,
+    curriculum_scale: float,
+    risk_config,
+):
+    """Rebuild the detached teacher only when a Step-6 plot event is due."""
+    if not visualizer.should_save(step):
+        return None
+    context = rollout.require_risk_pact_context()
+    old = rollout.candidate_trajectories
+    b, r, modes, groups, horizon, dims = old.shape
+    old_flat = old.reshape(b, r, modes * groups, horizon, dims)
+    platoon_state, platoon_valid = build_platoon_actor_state(
+        context.ego_state.to(old.device),
+        context.formation_relation_state.to(old.device),
+        context.relation_valid_mask.to(old.device),
+        config=risk_config,
+    )
+    teacher = build_x0_pact_teacher(
+        old_flat,
+        context.background_actor_state.to(old.device),
+        context.background_actor_valid_mask.to(old.device),
+        platoon_actor_state=platoon_state,
+        platoon_actor_valid_mask=platoon_valid,
+        road_sdf=(None if context.drivable_sdf is None else context.drivable_sdf.to(old.device)),
+        curriculum_scale=float(curriculum_scale),
+        config=risk_config,
+    )
+    if rollout.valid_executable_mode_mask is None:
+        raise OnlineGRPOError('Risk-PACT visualization requires valid executable mode mask')
+    return visualizer.maybe_save(
+        step=step,
+        background_actor_state=context.background_actor_state,
+        background_actor_valid_mask=context.background_actor_valid_mask,
+        platoon_actor_state=platoon_state,
+        platoon_actor_valid_mask=platoon_valid,
+        road_sdf=context.drivable_sdf,
+        old_trajectory=old,
+        valid_executable_mode_mask=rollout.valid_executable_mode_mask,
+        teacher_result=teacher,
+    )
+
+
 def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir: Path) -> dict[str, object]:
     if not isinstance(training_config, JointGRPOTrainingConfig):
         raise OnlineGRPOError('training_config must be a JointGRPOTrainingConfig')
@@ -52,6 +105,12 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
     risk_pact = safety.risk_pact
     risk = risk_pact.risk
     curriculum = risk_pact.curriculum
+    diagnostics = risk_pact.diagnostics
+    risk_visualizer = RiskPACTTrainingVisualizer(
+        run_dir=run_dir,
+        risk_config=risk,
+        visualization_config=risk_pact.visualization,
+    )
     grpo_config = JointGRPOConfig(
         trajectories_per_mode=config.trajectories_per_mode,
         safety_post_training_mode=safety.mode,
@@ -96,6 +155,11 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
         risk_pact_curriculum_warmup_updates=curriculum.warmup_updates,
         risk_pact_curriculum_ramp_updates=curriculum.ramp_updates,
         risk_pact_curriculum_schedule=curriculum.schedule,
+        risk_pact_diagnostics_enabled=diagnostics.enabled,
+        risk_pact_gradient_diagnostics=diagnostics.gradient_diagnostics,
+        risk_pact_gradient_diagnostics_interval=diagnostics.gradient_interval_steps,
+        risk_pact_teacher_improvement_eps=diagnostics.teacher_improvement_eps,
+        risk_pact_late_horizon_start_step=diagnostics.late_horizon_start_step,
     )
     trainer, source_payload, source_sha = _load_trainer(variant, Path(source_checkpoint), torch_device, grpo_config=grpo_config, allow_diagnostic_source=run_mode == 'smoke')
     if run_mode == 'formal' and source_payload.get('eligible_for_formal_training') is not True:
@@ -370,8 +434,26 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                                 optimizer_metrics[f'gradient_pre_clip/{name}'] = float(value)
                             for name, value in update.clipped_gradient_norms.items():
                                 optimizer_metrics[f'gradient_post_clip/{name}'] = float(value)
+                            for name, value in update.objective_gradient_diagnostics.items():
+                                optimizer_metrics[name] = float(value)
                             for mode, drift in enumerate(update.adapter_relative_drifts):
                                 optimizer_metrics[f'policy/mode_{mode}/adapter_drift'] = float(drift)
+                            if (
+                                safety.uses_risk_pact
+                                and not update.stability_guard_rejected
+                                and risk_visualizer.should_save(next_update_state)
+                            ):
+                                visual_event = _maybe_save_risk_pact_visualization(
+                                    visualizer=risk_visualizer,
+                                    step=next_update_state,
+                                    rollout=rollout,
+                                    curriculum_scale=float(update.loss.risk_pact_curriculum_scale),
+                                    risk_config=risk,
+                                )
+                                if visual_event is not None:
+                                    optimizer_metrics['risk_pact/visualization_event_count'] = float(
+                                        visual_event.event_index
+                                    )
                             for metric_name, metric_value in optimizer_metrics.items():
                                 writer.add_scalar(metric_name, metric_value, next_update_state)
                             if not update.stability_guard_rejected and _write_advantage_vector_summary(writer, rollout_advantages, next_update_state, target_accepted_update_states, config.advantage_vector_log_interval_rollouts, trajectories_per_mode=trainer.config.trajectories_per_mode):

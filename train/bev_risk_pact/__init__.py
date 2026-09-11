@@ -1,6 +1,6 @@
 """Risk-PACT-lite safety post-training helpers."""
 
-from .config import RiskPACTConfig, RiskPACTVisualizationConfig
+from .config import RiskPACTConfig, RiskPACTDiagnosticsConfig, RiskPACTVisualizationConfig
 from .constraint import RiskConstraintResult, RiskLevelSetConstraint
 from .curriculum import RiskPACTCurriculumState, risk_pact_curriculum_scale, risk_pact_curriculum_state
 from .loss import PACTLiteDistillationLossResult, pact_lite_distillation_loss
@@ -27,6 +27,7 @@ __all__ = [
     "RiskConstraintResult",
     "RiskFieldResult",
     "RiskPACTConfig",
+    "RiskPACTDiagnosticsConfig",
     "RiskPACTCurriculumState",
     "RiskPACTVisualizationConfig",
     "RiskLevelSetConstraint",

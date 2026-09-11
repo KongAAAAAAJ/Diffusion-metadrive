@@ -97,14 +97,25 @@ safety_post_training:
       ramp_updates: 100
       schedule: linear
 
+    # Step 6: mechanism diagnostics. Gradient decomposition uses extra
+    # autograd traversals but does not write parameter.grad or change the loss.
+    diagnostics:
+      enabled: true
+      gradient_diagnostics: true
+      gradient_interval_steps: 1
+      teacher_improvement_eps: 1.0e-6
+      # Index 6 means t >= 3.5 s is treated as late-horizon for an 8 x 0.5 s plan.
+      late_horizon_start_step: 6
+
     visualization:
-      # Disabled in Step 5.6 because the legacy visualizer still assumes the
-      # Gaussian field. Step 6 will replace it with clearance-field plots.
-      enabled: false
-      interval_steps: 5
-      start_step: 0
+      # Intended for smoke runs. Disable for long formal training if I/O cost matters.
+      enabled: true
+      interval_steps: 2
+      start_step: 1
       max_events: 5
       batch_index: 0
       role_index: 0
       mode_index: 0
+      selection: highest_risk
+      candidate_index: 0
       output_subdir: risk_field_visualizations

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from scenarios.bev_round13_contract import DEVELOPMENT_SEEDS, PRIMARY_S5_S9_SCENARIOS, BEVScenarioContractError, primary_scenario_contract
-from train.bev_risk_pact.config import RiskPACTConfig, RiskPACTVisualizationConfig
+from train.bev_risk_pact.config import RiskPACTConfig, RiskPACTDiagnosticsConfig, RiskPACTVisualizationConfig
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
 MUTABLE_RUNTIME_CONFIG_PATH = "configs/train/bev_joint_grpo.yaml"
@@ -126,6 +126,7 @@ class RiskPACTPostTrainingConfig:
     distill_weight: float = 1.0
     risk: RiskPACTConfig = RiskPACTConfig()
     curriculum: RiskPACTCurriculumConfig = RiskPACTCurriculumConfig()
+    diagnostics: RiskPACTDiagnosticsConfig = RiskPACTDiagnosticsConfig()
     visualization: RiskPACTVisualizationConfig = RiskPACTVisualizationConfig()
     def __post_init__(self) -> None:
         if not math.isfinite(float(self.distill_weight)) or float(self.distill_weight) < 0.0:
@@ -134,6 +135,8 @@ class RiskPACTPostTrainingConfig:
             raise OnlineGRPOError('risk must be a RiskPACTConfig')
         if not isinstance(self.curriculum, RiskPACTCurriculumConfig):
             raise OnlineGRPOError('curriculum must be a RiskPACTCurriculumConfig')
+        if not isinstance(self.diagnostics, RiskPACTDiagnosticsConfig):
+            raise OnlineGRPOError('diagnostics must be a RiskPACTDiagnosticsConfig')
         if not isinstance(self.visualization, RiskPACTVisualizationConfig):
             raise OnlineGRPOError('visualization must be a RiskPACTVisualizationConfig')
 
