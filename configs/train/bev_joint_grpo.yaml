@@ -9,7 +9,7 @@ online:
   trajectories_per_mode: 48
   # Keep this diagnostic run short first. Restore the formal budget after the
   # feasibility loss scale and violation trends are verified.
-  total_rollout_groups: 500
+  total_rollout_groups: 10
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
   resume_checkpoint: null
