@@ -33,7 +33,7 @@ class DynamicGaussianRiskField:
 
     Background actor state contract follows the current BEV planner's 8-D
     actor token convention inferred from its normalization scales:
-    [x, y, cos(yaw), sin(yaw), vx, vy, length, width].
+    [x, y, sin(yaw), cos(yaw), vx, vy, length, width].
 
     Actor motion is constant velocity over the 8-step planning horizon.  The
     risk field is an anisotropic Gaussian aligned with each actor's heading.
@@ -97,8 +97,8 @@ class DynamicGaussianRiskField:
 
         delta = trajectory_xy.unsqueeze(-2) - future_hr.unsqueeze(2)  # [B,R,M,H,A,2]
 
-        cos_yaw = actor_state[..., 2]
-        sin_yaw = actor_state[..., 3]
+        sin_yaw = actor_state[..., 2]
+        cos_yaw = actor_state[..., 3]
         norm = torch.sqrt(cos_yaw.square() + sin_yaw.square()).clamp_min(1.0e-6)
         cos_yaw = cos_yaw / norm
         sin_yaw = sin_yaw / norm
