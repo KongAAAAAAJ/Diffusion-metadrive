@@ -8,7 +8,7 @@ online:
   trajectories_per_mode: 48
   # Keep this diagnostic run short first. Restore the formal budget after the
   # safety post-training mechanism is verified.
-  total_rollout_groups: 10
+  total_rollout_groups: 5000
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
   resume_checkpoint: null
@@ -33,7 +33,7 @@ online:
 # mode: risk_pact_lite                -> GRPO + final-x0 Risk-PACT-lite curriculum distillation.
 # mode: feasibility_plus_risk_pact    -> GRPO + feasibility + Risk-PACT-lite.
 safety_post_training:
-  mode: risk_pact_lite
+  mode: none
 
   feasibility:
     loss_weight: 0.01
