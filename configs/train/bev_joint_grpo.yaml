@@ -2,13 +2,12 @@ run:
   variant: A
   run_mode: smoke
   source_checkpoint: /media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/checkpoints/best.pt
-
 online:
   device: cuda
   seed: 23
   trajectories_per_mode: 48
   # Keep this diagnostic run short first. Restore the formal budget after the
-  # feasibility loss scale and violation trends are verified.
+  # safety post-training mechanism is verified.
   total_rollout_groups: 10
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
@@ -28,26 +27,55 @@ online:
     - {scenario: S8_ego_exit_to_ramp, route: R6_exit_to_ramp}
     - {scenario: S9_narrow_channel_negotiation, route: R8_narrow_channel}
 
-# Training-time differentiable feasibility guidance.
-# mode: none            -> original GRPO baseline.
-# mode: tv_feasibility  -> add steering-angle and steering-rate soft losses on
-#                          the clean trajectory predicted at every DDIM step.
-# These bounds are diagnostic defaults for the first 10-step test. Calibrate
-# the final values with the actual truck/TruckSim steering system before formal
-# experiments.
-constraint:
-  mode: tv_feasibility
-  loss_weight: 0.01
-  steering_weight: 1.0
-  steering_rate_weight: 1.0
+# Unified safety post-training switch.
+# mode: none                          -> original GRPO baseline.
+# mode: feasibility_loss              -> existing time-varying feasibility soft loss.
+# mode: risk_pact_lite                -> Risk-PACT-lite config only in Step 1; training hookup follows later.
+# mode: feasibility_plus_risk_pact    -> feasibility active now; Risk-PACT-lite hookup follows later.
+safety_post_training:
+  mode: risk_pact_lite
 
-  wheelbase_m: 5.6
-  trajectory_dt_s: 0.5
-  min_segment_length_m: 0.2
+  feasibility:
+    loss_weight: 0.01
+    steering_weight: 1.0
+    steering_rate_weight: 1.0
+    wheelbase_m: 5.6
+    trajectory_dt_s: 0.5
+    min_segment_length_m: 0.2
+    steering_initial_limit_deg: 48.24
+    steering_final_limit_deg: 24.13
+    steering_rate_initial_limit_deg_s: 120.0
+    steering_rate_final_limit_deg_s: 60.0
+    schedule_power: 1.0
 
-  # Loose -> tight across DDIM t = 8 -> 5 -> 3 -> 0.
-  steering_initial_limit_deg: 48.24
-  steering_final_limit_deg: 24.13
-  steering_rate_initial_limit_deg_s: 120.0
-  steering_rate_final_limit_deg_s: 60.0
-  schedule_power: 1.0
+  risk_pact:
+    distill_weight: 1.0
+    horizon_dt_s: 0.5
+    longitudinal_margin_m: 3.0
+    lateral_margin_m: 1.2
+    minimum_sigma_x_m: 2.5
+    minimum_sigma_y_m: 1.2
+    temporal_softmax_beta: 12.0
+    risk_threshold: 0.35
+    violation_temperature: 0.04
+    safe_margin: 0.05
+    teacher_step_m: 0.20
+    gradient_eps: 1.0e-6
+    gradient_clip_norm: 10.0
+
+    curriculum:
+      start_scale: 0.2
+      end_scale: 1.0
+      warmup_updates: 0
+      ramp_updates: 100
+      schedule: linear
+
+    visualization:
+      enabled: true
+      interval_steps: 5
+      start_step: 0
+      max_events: 5
+      batch_index: 0
+      role_index: 0
+      mode_index: 0
+      output_subdir: risk_field_visualizations

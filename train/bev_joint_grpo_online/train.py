@@ -9,10 +9,111 @@ if __package__ in (None, ""):
     if str(_repo_root) not in sys.path:
         sys.path.insert(0, str(_repo_root))
 from scenarios.bev_round13_contract import DEVELOPMENT_SEEDS, HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS
-from train.bev_joint_grpo_online.config import JointGRPOConstraintConfig, JointGRPOOnlineConfig, JointGRPOTrainingConfig, OnlineGRPOError
+from train.bev_joint_grpo_online.config import (
+    JointGRPOConstraintConfig,
+    JointGRPOOnlineConfig,
+    JointGRPOTrainingConfig,
+    OnlineGRPOError,
+    RiskPACTCurriculumConfig,
+    RiskPACTPostTrainingConfig,
+    SafetyPostTrainingConfig,
+)
+from train.bev_risk_pact.config import RiskPACTConfig, RiskPACTVisualizationConfig
 from train.bev_joint_grpo_online.environment import constant_velocity_actions, episode_has_ended, execute_cached_frozen_baseline, joint_trajectory_action, model_inputs_to_batch, optimize_selected_model_trajectories
 from train.bev_joint_grpo_online.validation import build_grpo_validation_state_bank
 from train.bev_joint_grpo_online.runner import run_joint_grpo_training
+
+def _mapping(value: object, *, name: str, default: Mapping[str, object] | None = None) -> Mapping[str, object]:
+    if value is None and default is not None:
+        return default
+    if not isinstance(value, Mapping):
+        raise OnlineGRPOError(f'online GRPO YAML {name} must be a mapping')
+    return value
+
+def _feasibility_from_mapping(value: Mapping[str, object], *, enabled: bool) -> JointGRPOConstraintConfig:
+    return JointGRPOConstraintConfig(
+        mode='tv_feasibility' if enabled else 'none',
+        loss_weight=float(value.get('loss_weight', 0.01)),
+        steering_weight=float(value.get('steering_weight', 1.0)),
+        steering_rate_weight=float(value.get('steering_rate_weight', 1.0)),
+        wheelbase_m=float(value.get('wheelbase_m', 5.6)),
+        trajectory_dt_s=float(value.get('trajectory_dt_s', 0.5)),
+        min_segment_length_m=float(value.get('min_segment_length_m', 0.2)),
+        steering_initial_limit_deg=float(value.get('steering_initial_limit_deg', 48.24)),
+        steering_final_limit_deg=float(value.get('steering_final_limit_deg', 24.13)),
+        steering_rate_initial_limit_deg_s=float(value.get('steering_rate_initial_limit_deg_s', 120.0)),
+        steering_rate_final_limit_deg_s=float(value.get('steering_rate_final_limit_deg_s', 60.0)),
+        schedule_power=float(value.get('schedule_power', 1.0)),
+    )
+
+def _risk_pact_from_mapping(value: Mapping[str, object]) -> RiskPACTPostTrainingConfig:
+    curriculum = _mapping(value.get('curriculum'), name='safety_post_training.risk_pact.curriculum', default={})
+    visualization = _mapping(value.get('visualization'), name='safety_post_training.risk_pact.visualization', default={})
+    risk_config = RiskPACTConfig(
+        horizon_dt_s=float(value.get('horizon_dt_s', 0.5)),
+        longitudinal_margin_m=float(value.get('longitudinal_margin_m', 3.0)),
+        lateral_margin_m=float(value.get('lateral_margin_m', 1.2)),
+        minimum_sigma_x_m=float(value.get('minimum_sigma_x_m', 2.5)),
+        minimum_sigma_y_m=float(value.get('minimum_sigma_y_m', 1.2)),
+        temporal_softmax_beta=float(value.get('temporal_softmax_beta', 12.0)),
+        risk_threshold=float(value.get('risk_threshold', 0.35)),
+        violation_temperature=float(value.get('violation_temperature', 0.04)),
+        safe_margin=float(value.get('safe_margin', 0.05)),
+        teacher_step_m=float(value.get('teacher_step_m', 0.20)),
+        gradient_eps=float(value.get('gradient_eps', 1.0e-6)),
+        gradient_clip_norm=float(value.get('gradient_clip_norm', 10.0)),
+    )
+    curriculum_config = RiskPACTCurriculumConfig(
+        start_scale=float(curriculum.get('start_scale', 0.2)),
+        end_scale=float(curriculum.get('end_scale', 1.0)),
+        warmup_updates=int(curriculum.get('warmup_updates', 0)),
+        ramp_updates=int(curriculum.get('ramp_updates', 100)),
+        schedule=str(curriculum.get('schedule', 'linear')),
+    )
+    max_events_raw = visualization.get('max_events', 4)
+    visualization_config = RiskPACTVisualizationConfig(
+        enabled=visualization.get('enabled', False),
+        interval_steps=int(visualization.get('interval_steps', 5)),
+        start_step=int(visualization.get('start_step', 0)),
+        max_events=None if max_events_raw is None else int(max_events_raw),
+        batch_index=int(visualization.get('batch_index', 0)),
+        role_index=int(visualization.get('role_index', 0)),
+        mode_index=int(visualization.get('mode_index', 0)),
+        output_subdir=str(visualization.get('output_subdir', 'risk_field_visualizations')),
+    )
+    return RiskPACTPostTrainingConfig(
+        distill_weight=float(value.get('distill_weight', 1.0)),
+        risk=risk_config,
+        curriculum=curriculum_config,
+        visualization=visualization_config,
+    )
+
+def _legacy_safety_config(payload: Mapping[str, object]) -> tuple[SafetyPostTrainingConfig, JointGRPOConstraintConfig]:
+    constraint = _mapping(payload.get('constraint'), name='constraint', default={'mode': 'none'})
+    legacy_mode = str(constraint.get('mode', 'none'))
+    if legacy_mode not in ('none', 'tv_feasibility'):
+        raise OnlineGRPOError('constraint mode must be none or tv_feasibility')
+    enabled = legacy_mode == 'tv_feasibility'
+    feasibility = _feasibility_from_mapping(constraint, enabled=enabled)
+    mode = 'feasibility_loss' if enabled else 'none'
+    return SafetyPostTrainingConfig(mode=mode, feasibility=feasibility), feasibility
+
+def _safety_config_from_payload(payload: Mapping[str, object]) -> tuple[SafetyPostTrainingConfig, JointGRPOConstraintConfig]:
+    if 'safety_post_training' not in payload:
+        return _legacy_safety_config(payload)
+    if 'constraint' in payload:
+        raise OnlineGRPOError('use either safety_post_training or legacy constraint, not both')
+    safety = _mapping(payload.get('safety_post_training'), name='safety_post_training')
+    mode = str(safety.get('mode', 'none'))
+    allowed = ('none', 'feasibility_loss', 'risk_pact_lite', 'feasibility_plus_risk_pact')
+    if mode not in allowed:
+        raise OnlineGRPOError('safety_post_training mode must be one of: ' + ', '.join(allowed))
+    feasibility_mapping = _mapping(safety.get('feasibility'), name='safety_post_training.feasibility', default={})
+    feasibility_enabled = mode in ('feasibility_loss', 'feasibility_plus_risk_pact')
+    feasibility = _feasibility_from_mapping(feasibility_mapping, enabled=feasibility_enabled)
+    risk_mapping = _mapping(safety.get('risk_pact'), name='safety_post_training.risk_pact', default={})
+    risk_pact = _risk_pact_from_mapping(risk_mapping)
+    return SafetyPostTrainingConfig(mode=mode, feasibility=feasibility, risk_pact=risk_pact), feasibility
 
 def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
     try:
@@ -45,28 +146,15 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         raise OnlineGRPOError('online GRPO YAML contains legacy fields: ' + ', '.join(present_legacy))
     scenarios = tuple(((str(value['scenario']), str(value['route'])) for value in online.get('scenarios', ()) if isinstance(value, Mapping)))
     online_config = JointGRPOOnlineConfig(device=str(online.get('device', 'cuda')), seed=online.get('seed', 17), trajectories_per_mode=online.get('trajectories_per_mode', 48), total_rollout_groups=online.get('total_rollout_groups', 100), resume_checkpoint=Path(str(online['resume_checkpoint'])) if online.get('resume_checkpoint') else None, validation_state_bank=Path(str(online.get('validation_state_bank', 'evaluation/artifacts/grpo_validation_state_bank_v1.pt'))), scenarios=scenarios or PRIMARY_S5_S9_SCENARIOS, scenario_seeds=tuple((int(value) for value in online.get('scenario_seeds', DEVELOPMENT_SEEDS))), environment_steps_per_episode=int(online.get('environment_steps_per_episode', 100)), rollout_groups_per_bucket_visit=online.get('rollout_groups_per_bucket_visit', 10), rollout_start_offset_max_steps=online.get('rollout_start_offset_max_steps', 200), rollout_start_min_remaining_steps=online.get('rollout_start_min_remaining_steps', 10), validation_interval_rollouts=online.get('validation_interval_rollouts', 20), advantage_vector_log_interval_rollouts=online.get('advantage_vector_log_interval_rollouts', 10), max_sampling_attempts_per_state=online.get('max_sampling_attempts_per_state', 3), max_sampling_attempts_multiplier=online.get('max_sampling_attempts_multiplier', 10), max_consecutive_empty_episodes=online.get('max_consecutive_empty_episodes', 5))
-    constraint = payload.get('constraint', {'mode': 'none'})
-    if not isinstance(constraint, Mapping):
-        raise OnlineGRPOError('online GRPO YAML constraint must be a mapping')
-    constraint_config = JointGRPOConstraintConfig(
-        mode=str(constraint.get('mode', 'none')),
-        loss_weight=float(constraint.get('loss_weight', 0.01)),
-        steering_weight=float(constraint.get('steering_weight', 1.0)),
-        steering_rate_weight=float(constraint.get('steering_rate_weight', 1.0)),
-        wheelbase_m=float(constraint.get('wheelbase_m', 5.6)),
-        trajectory_dt_s=float(constraint.get('trajectory_dt_s', 0.5)),
-        min_segment_length_m=float(constraint.get('min_segment_length_m', 0.2)),
-        steering_initial_limit_deg=float(constraint.get('steering_initial_limit_deg', 48.24)),
-        steering_final_limit_deg=float(constraint.get('steering_final_limit_deg', 24.13)),
-        steering_rate_initial_limit_deg_s=float(
-            constraint.get('steering_rate_initial_limit_deg_s', 120.0)
-        ),
-        steering_rate_final_limit_deg_s=float(
-            constraint.get('steering_rate_final_limit_deg_s', 60.0)
-        ),
-        schedule_power=float(constraint.get('schedule_power', 1.0)),
+    safety_config, compatibility_constraint = _safety_config_from_payload(payload)
+    return JointGRPOTrainingConfig(
+        variant=variant,
+        run_mode=run_mode,
+        source_checkpoint=Path(source_checkpoint),
+        online=online_config,
+        constraint=compatibility_constraint,
+        safety_post_training=safety_config,
     )
-    return JointGRPOTrainingConfig(variant=variant, run_mode=run_mode, source_checkpoint=Path(source_checkpoint), online=online_config, constraint=constraint_config)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from scenarios.bev_round13_contract import DEVELOPMENT_SEEDS, PRIMARY_S5_S9_SCENARIOS, BEVScenarioContractError, primary_scenario_contract
+from train.bev_risk_pact.config import RiskPACTConfig, RiskPACTVisualizationConfig
+
 AGENT_IDS = ("agent0", "agent1", "agent2")
 MUTABLE_RUNTIME_CONFIG_PATH = "configs/train/bev_joint_grpo.yaml"
 
@@ -30,7 +32,6 @@ class JointGRPOOnlineConfig:
     max_sampling_attempts_per_state: int = 3
     max_sampling_attempts_multiplier: int = 10
     max_consecutive_empty_episodes: int = 5
-
     def __post_init__(self) -> None:
         if self.device not in ('cpu', 'cuda'):
             raise OnlineGRPOError('online GRPO device must be cpu or cuda')
@@ -66,6 +67,7 @@ class JointGRPOOnlineConfig:
 
 @dataclass(frozen=True)
 class JointGRPOConstraintConfig:
+    """Legacy feasibility-loss configuration retained for runner compatibility."""
     mode: Literal['none', 'tv_feasibility'] = 'none'
     loss_weight: float = 0.01
     steering_weight: float = 1.0
@@ -78,20 +80,10 @@ class JointGRPOConstraintConfig:
     steering_rate_initial_limit_deg_s: float = 120.0
     steering_rate_final_limit_deg_s: float = 60.0
     schedule_power: float = 1.0
-
     def __post_init__(self) -> None:
         if self.mode not in ('none', 'tv_feasibility'):
             raise OnlineGRPOError('constraint mode must be none or tv_feasibility')
-        for name in (
-            'wheelbase_m',
-            'trajectory_dt_s',
-            'min_segment_length_m',
-            'steering_initial_limit_deg',
-            'steering_final_limit_deg',
-            'steering_rate_initial_limit_deg_s',
-            'steering_rate_final_limit_deg_s',
-            'schedule_power',
-        ):
+        for name in ('wheelbase_m','trajectory_dt_s','min_segment_length_m','steering_initial_limit_deg','steering_final_limit_deg','steering_rate_initial_limit_deg_s','steering_rate_final_limit_deg_s','schedule_power'):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise OnlineGRPOError(f'{name} must be positive and finite')
@@ -104,15 +96,68 @@ class JointGRPOConstraintConfig:
         if self.steering_initial_limit_deg < self.steering_final_limit_deg:
             raise OnlineGRPOError('initial steering limit must be >= final steering limit')
         if self.steering_rate_initial_limit_deg_s < self.steering_rate_final_limit_deg_s:
-            raise OnlineGRPOError(
-                'initial steering-rate limit must be >= final steering-rate limit'
-            )
-        if self.mode == 'tv_feasibility':
-            # loss_weight == 0 is allowed for observer-only baseline runs.
-            if self.steering_weight <= 0.0 and self.steering_rate_weight <= 0.0:
-                raise OnlineGRPOError(
-                    'tv_feasibility requires at least one positive component weight'
-                )
+            raise OnlineGRPOError('initial steering-rate limit must be >= final steering-rate limit')
+        if self.mode == 'tv_feasibility' and self.steering_weight <= 0.0 and self.steering_rate_weight <= 0.0:
+            raise OnlineGRPOError('tv_feasibility requires at least one positive component weight')
+
+@dataclass(frozen=True)
+class RiskPACTCurriculumConfig:
+    start_scale: float = 0.2
+    end_scale: float = 1.0
+    warmup_updates: int = 0
+    ramp_updates: int = 100
+    schedule: Literal['linear'] = 'linear'
+    def __post_init__(self) -> None:
+        if self.schedule != 'linear':
+            raise OnlineGRPOError('Risk-PACT curriculum schedule must be linear in Step 1')
+        for name in ('start_scale', 'end_scale'):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0 or value > 1.0:
+                raise OnlineGRPOError(f'{name} must be finite and in [0,1]')
+        if self.start_scale > self.end_scale:
+            raise OnlineGRPOError('Risk-PACT start_scale must be <= end_scale')
+        if isinstance(self.warmup_updates, bool) or int(self.warmup_updates) < 0:
+            raise OnlineGRPOError('Risk-PACT warmup_updates must be a non-negative integer')
+        if isinstance(self.ramp_updates, bool) or int(self.ramp_updates) <= 0:
+            raise OnlineGRPOError('Risk-PACT ramp_updates must be a positive integer')
+
+@dataclass(frozen=True)
+class RiskPACTPostTrainingConfig:
+    distill_weight: float = 1.0
+    risk: RiskPACTConfig = RiskPACTConfig()
+    curriculum: RiskPACTCurriculumConfig = RiskPACTCurriculumConfig()
+    visualization: RiskPACTVisualizationConfig = RiskPACTVisualizationConfig()
+    def __post_init__(self) -> None:
+        if not math.isfinite(float(self.distill_weight)) or float(self.distill_weight) < 0.0:
+            raise OnlineGRPOError('Risk-PACT distill_weight must be non-negative and finite')
+        if not isinstance(self.risk, RiskPACTConfig):
+            raise OnlineGRPOError('risk must be a RiskPACTConfig')
+        if not isinstance(self.curriculum, RiskPACTCurriculumConfig):
+            raise OnlineGRPOError('curriculum must be a RiskPACTCurriculumConfig')
+        if not isinstance(self.visualization, RiskPACTVisualizationConfig):
+            raise OnlineGRPOError('visualization must be a RiskPACTVisualizationConfig')
+
+@dataclass(frozen=True)
+class SafetyPostTrainingConfig:
+    mode: Literal['none', 'feasibility_loss', 'risk_pact_lite', 'feasibility_plus_risk_pact'] = 'none'
+    feasibility: JointGRPOConstraintConfig = JointGRPOConstraintConfig()
+    risk_pact: RiskPACTPostTrainingConfig = RiskPACTPostTrainingConfig()
+    def __post_init__(self) -> None:
+        allowed = ('none', 'feasibility_loss', 'risk_pact_lite', 'feasibility_plus_risk_pact')
+        if self.mode not in allowed:
+            raise OnlineGRPOError('safety_post_training mode must be one of: ' + ', '.join(allowed))
+        if not isinstance(self.feasibility, JointGRPOConstraintConfig):
+            raise OnlineGRPOError('feasibility must be a JointGRPOConstraintConfig')
+        if not isinstance(self.risk_pact, RiskPACTPostTrainingConfig):
+            raise OnlineGRPOError('risk_pact must be a RiskPACTPostTrainingConfig')
+
+    @property
+    def uses_feasibility(self) -> bool:
+        return self.mode in ('feasibility_loss', 'feasibility_plus_risk_pact')
+
+    @property
+    def uses_risk_pact(self) -> bool:
+        return self.mode in ('risk_pact_lite', 'feasibility_plus_risk_pact')
 
 @dataclass(frozen=True)
 class JointGRPOTrainingConfig:
@@ -121,7 +166,7 @@ class JointGRPOTrainingConfig:
     source_checkpoint: Path
     online: JointGRPOOnlineConfig
     constraint: JointGRPOConstraintConfig = JointGRPOConstraintConfig()
-
+    safety_post_training: SafetyPostTrainingConfig = SafetyPostTrainingConfig()
     def __post_init__(self) -> None:
         if self.variant not in ('A', 'B'):
             raise OnlineGRPOError('online GRPO variant must be A or B')
@@ -133,3 +178,5 @@ class JointGRPOTrainingConfig:
             raise OnlineGRPOError('online must be a JointGRPOOnlineConfig')
         if not isinstance(self.constraint, JointGRPOConstraintConfig):
             raise OnlineGRPOError('constraint must be a JointGRPOConstraintConfig')
+        if not isinstance(self.safety_post_training, SafetyPostTrainingConfig):
+            raise OnlineGRPOError('safety_post_training must be a SafetyPostTrainingConfig')
