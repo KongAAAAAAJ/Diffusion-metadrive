@@ -26,12 +26,6 @@ from .ddim_transition import (
     GaussianDDIMStep,
     StandardGaussianDDIM,
 )
-from .time_varying_feasibility import (
-    SteeringFeasibilityResult,
-    TimeVaryingFeasibilityError,
-    steering_feasibility_loss,
-    time_varying_limit,
-)
 from .dynamic_anchors import (
     DynamicAnchorConfig,
     DynamicAnchorError,
@@ -78,6 +72,7 @@ from .joint_grpo import (
     JointGRPOLossResult,
     JointGRPORollout,
     JointGRPORolloutB,
+    RiskPACTRolloutContext,
     JointGRPOTrainerA,
     JointGRPOTrainerB,
     JointGRPOUpdateResult,
@@ -143,6 +138,7 @@ __all__ = [
     "JointGRPOLossResult",
     "JointGRPORollout",
     "JointGRPORolloutB",
+    "RiskPACTRolloutContext",
     "JointGRPOTrainerA",
     "JointGRPOTrainerB",
     "JointGRPOUpdateResult",
@@ -159,10 +155,6 @@ __all__ = [
     "ModeResidualTrajectoryHead",
     "GaussianDDIMStep",
     "StandardGaussianDDIM",
-    "SteeringFeasibilityResult",
-    "TimeVaryingFeasibilityError",
-    "steering_feasibility_loss",
-    "time_varying_limit",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
     "fixed_scale_safe_advantages",

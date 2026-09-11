@@ -27,10 +27,6 @@ from models.bev_planner.ddim_transition import (
     DEFAULT_DDIM_PATH,
     StandardGaussianDDIM,
 )
-from models.bev_planner.time_varying_feasibility import (
-    steering_feasibility_loss,
-    time_varying_limit,
-)
 
 
 class JointGRPOError(RuntimeError):
@@ -49,30 +45,12 @@ class JointGRPOConfig:
     advantage_scale: float = 1.0
     baseline_tolerance: float = 1e-6
     post_update_reference_kl_max: float = 0.25
-    # Legacy field name retained for checkpoint/config compatibility.
-    # This threshold is warning-only; adapter drift is not a hard stability guard.
     max_adapter_relative_drift: float = 0.02
     xy_beta_m: float = 1.0
     heading_beta_rad: float = 0.1
     heading_bc_weight: float = 0.2
-    constraint_mode: str = "none"
-    feasibility_weight: float = 0.01
-    steering_feasibility_weight: float = 1.0
-    steering_rate_feasibility_weight: float = 1.0
-    wheelbase_m: float = 5.6
-    trajectory_dt_s: float = 0.5
-    min_segment_length_m: float = 0.2
-    steering_initial_limit_deg: float = 48.24
-    steering_final_limit_deg: float = 24.13
-    steering_rate_initial_limit_deg_s: float = 120.0
-    steering_rate_final_limit_deg_s: float = 60.0
-    feasibility_schedule_power: float = 1.0
 
     def __post_init__(self) -> None:
-        if self.constraint_mode not in ("none", "tv_feasibility"):
-            raise JointGRPOError(
-                "constraint_mode must be none or tv_feasibility"
-            )
         if (
             isinstance(self.trajectories_per_mode, bool)
             or not isinstance(self.trajectories_per_mode, int)
@@ -90,14 +68,6 @@ class JointGRPOConfig:
             "max_adapter_relative_drift",
             "xy_beta_m",
             "heading_beta_rad",
-            "wheelbase_m",
-            "trajectory_dt_s",
-            "min_segment_length_m",
-            "steering_initial_limit_deg",
-            "steering_final_limit_deg",
-            "steering_rate_initial_limit_deg_s",
-            "steering_rate_final_limit_deg_s",
-            "feasibility_schedule_power",
         )
         non_negative = (
             "trajectory_pg_weight",
@@ -105,9 +75,6 @@ class JointGRPOConfig:
             "reference_kl_weight",
             "weight_decay",
             "heading_bc_weight",
-            "feasibility_weight",
-            "steering_feasibility_weight",
-            "steering_rate_feasibility_weight",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -117,33 +84,6 @@ class JointGRPOConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
                 raise JointGRPOError(f"{name} must be non-negative and finite")
-        if float(self.steering_initial_limit_deg) >= 90.0 or float(
-            self.steering_final_limit_deg
-        ) >= 90.0:
-            raise JointGRPOError("steering limits must be smaller than 90 degrees")
-        if float(self.steering_initial_limit_deg) < float(
-            self.steering_final_limit_deg
-        ):
-            raise JointGRPOError(
-                "steering_initial_limit_deg must be greater than or equal to "
-                "steering_final_limit_deg"
-            )
-        if float(self.steering_rate_initial_limit_deg_s) < float(
-            self.steering_rate_final_limit_deg_s
-        ):
-            raise JointGRPOError(
-                "steering_rate_initial_limit_deg_s must be greater than or equal "
-                "to steering_rate_final_limit_deg_s"
-            )
-        if self.constraint_mode == "tv_feasibility":
-            # feasibility_weight == 0 keeps diagnostics enabled but contributes zero gradient.
-            if (
-                float(self.steering_feasibility_weight) <= 0.0
-                and float(self.steering_rate_feasibility_weight) <= 0.0
-            ):
-                raise JointGRPOError(
-                    "tv_feasibility requires at least one positive component weight"
-                )
 
     @property
     def roll_timesteps(self) -> tuple[int, ...]:
@@ -158,7 +98,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v10",
+        "version": "stage2_joint_grpo_optimizer_v8",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -184,26 +124,14 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
             "trajectory behavior-cloning and frozen-Stage1 trajectory KL cover "
             "every hard-valid optimizer-executable mode; no mode KL"
         ),
-        "auxiliary_feasibility": {
-            "enabled_when": "constraint_mode=tv_feasibility",
-            "domain": "metric clean trajectory prediction at DDIM t=(8,5,3,0)",
-            "steering": "mean relu(abs(delta)/delta_limit(t)-1)^2 over valid triplets",
-            "steering_rate": "mean relu(abs(delta_dot)/delta_dot_limit(t)-1)^2 over valid adjacent triplets",
-            "schedule": "loose-to-tight bounds over diffusion timesteps",
-            "rollout_distribution_changed": False,
-        },
         "trainable_parameters": (
             "ten zero-initialized mode-specific output residual weights and biases"
         ),
         "weight_decay": 0.0,
         "post_update_guard": {
             "reference_kl_max": 0.25,
+            "max_mode_adapter_relative_drift": 0.02,
             "failure": "restore residual parameters and Adam state",
-        },
-        "adapter_relative_drift": {
-            "warning_threshold": 0.02,
-            "hard_guard": False,
-            "action": "log warning and continue training",
         },
         "budget_unit": "accepted_update_state",
         "checkpoint_boundary": "after one accepted guarded optimizer step",
@@ -223,6 +151,58 @@ def joint_grpo_optimizer_contract_sha256() -> str:
 
 
 @dataclass(frozen=True)
+class RiskPACTRolloutContext:
+    """Detached scene tensors needed by Risk-PACT post-training.
+
+    The actor state contract is [x_local, y_local, sin(d_heading),
+    cos(d_heading), dvx_local, dvy_local, length, width].
+    """
+
+    background_actor_state: Tensor
+    background_actor_valid_mask: Tensor
+
+    def __post_init__(self) -> None:
+        state = self.background_actor_state
+        valid = self.background_actor_valid_mask
+        if not isinstance(state, Tensor) or state.dtype != torch.float32:
+            raise JointGRPOError(
+                "background_actor_state must be a float32 torch.Tensor"
+            )
+        if state.ndim != 4 or int(state.shape[1]) != NUM_PLATOON_ROLES or int(state.shape[-1]) != 8:
+            raise JointGRPOError(
+                "background_actor_state must have shape [B,3,A,8]"
+            )
+        if int(state.shape[0]) <= 0 or int(state.shape[2]) <= 0:
+            raise JointGRPOError(
+                "background_actor_state must contain a non-empty batch and actor axis"
+            )
+        if not isinstance(valid, Tensor) or valid.dtype != torch.bool:
+            raise JointGRPOError(
+                "background_actor_valid_mask must be a bool torch.Tensor"
+            )
+        if tuple(valid.shape) != tuple(state.shape[:-1]):
+            raise JointGRPOError(
+                "background_actor_valid_mask must have shape [B,3,A]"
+            )
+        if valid.device != state.device:
+            raise JointGRPOError(
+                "Risk-PACT actor state and validity mask must share a device"
+            )
+        if state.requires_grad or valid.requires_grad:
+            raise JointGRPOError(
+                "Risk-PACT rollout context must be graph-free"
+            )
+        if not bool(torch.isfinite(state).all()):
+            raise JointGRPOError(
+                "background_actor_state must contain finite values"
+            )
+
+    @property
+    def batch_size(self) -> int:
+        return int(self.background_actor_state.shape[0])
+
+
+@dataclass(frozen=True)
 class JointGRPORollout:
     context: BEVPlannerContext
     coarse_trajectories: Tensor
@@ -230,6 +210,7 @@ class JointGRPORollout:
     chains_normalized: Tensor
     candidate_trajectories: Tensor
     frozen_candidate_trajectories: Tensor
+    risk_pact_context: RiskPACTRolloutContext | None = None
     noise_bundle_identity: tuple[int, int, int] | None = None
     current_rewards: Tensor | None = None
     frozen_rewards: Tensor | None = None
@@ -244,6 +225,20 @@ class JointGRPORollout:
     @property
     def trajectories_per_mode(self) -> int:
         return int(self.candidate_trajectories.shape[3])
+
+    def require_risk_pact_context(self) -> RiskPACTRolloutContext:
+        """Return the bound Risk-PACT scene context or fail closed."""
+
+        value = self.risk_pact_context
+        if value is None:
+            raise JointGRPOError(
+                "rollout is missing Risk-PACT actor context"
+            )
+        if value.batch_size != self.batch_size:
+            raise JointGRPOError(
+                "Risk-PACT actor context batch does not match rollout batch"
+            )
+        return value
 
     def with_reward_signals(
         self,
@@ -286,20 +281,6 @@ class JointGRPOLossResult:
     trajectory_pg_by_mode: Tensor
     behavior_cloning_by_mode: Tensor
     reference_kl_by_mode: Tensor
-    feasibility: Tensor
-    weighted_feasibility: Tensor
-    steering_feasibility: Tensor
-    steering_rate_feasibility: Tensor
-    feasibility_by_step: Tensor
-    steering_feasibility_by_step: Tensor
-    steering_rate_feasibility_by_step: Tensor
-    steering_violation_fraction_by_step: Tensor
-    steering_rate_violation_fraction_by_step: Tensor
-    steering_max_abs_rad_by_step: Tensor
-    steering_rate_max_abs_rad_s_by_step: Tensor
-    steering_limit_rad_by_step: Tensor
-    steering_rate_limit_rad_s_by_step: Tensor
-    degenerate_segment_fraction_by_step: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -308,10 +289,6 @@ class JointGRPOLossResult:
             "loss/behavior_cloning": self.behavior_cloning,
             "loss/trajectory_reference_kl": self.trajectory_reference_kl,
             "loss/reference_kl": self.reference_kl,
-            "loss/feasibility": self.feasibility,
-            "loss/weighted_feasibility": self.weighted_feasibility,
-            "loss/steering_feasibility": self.steering_feasibility,
-            "loss/steering_rate_feasibility": self.steering_rate_feasibility,
             "advantage/mean": _active_tensor_mean(
                 self.advantages, self.valid_executable_mode_mask
             ),
@@ -337,37 +314,6 @@ class JointGRPOLossResult:
                 self.valid_executable_mode_mask & ~self.signal_mode_mask
             ).float().sum(),
         }
-        for step_index, timestep in enumerate(DEFAULT_DDIM_PATH.timesteps):
-            values[f"constraint/t{timestep}/feasibility_loss"] = (
-                self.feasibility_by_step[step_index]
-            )
-            values[f"constraint/t{timestep}/steering_loss"] = (
-                self.steering_feasibility_by_step[step_index]
-            )
-            values[f"constraint/t{timestep}/steering_rate_loss"] = (
-                self.steering_rate_feasibility_by_step[step_index]
-            )
-            values[f"constraint/t{timestep}/steering_violation_fraction"] = (
-                self.steering_violation_fraction_by_step[step_index]
-            )
-            values[f"constraint/t{timestep}/steering_rate_violation_fraction"] = (
-                self.steering_rate_violation_fraction_by_step[step_index]
-            )
-            values[f"constraint/t{timestep}/max_abs_steering_deg"] = torch.rad2deg(
-                self.steering_max_abs_rad_by_step[step_index]
-            )
-            values[f"constraint/t{timestep}/max_abs_steering_rate_deg_s"] = (
-                torch.rad2deg(self.steering_rate_max_abs_rad_s_by_step[step_index])
-            )
-            values[f"constraint/t{timestep}/steering_limit_deg"] = torch.rad2deg(
-                self.steering_limit_rad_by_step[step_index]
-            )
-            values[f"constraint/t{timestep}/steering_rate_limit_deg_s"] = (
-                torch.rad2deg(self.steering_rate_limit_rad_s_by_step[step_index])
-            )
-            values[f"constraint/t{timestep}/degenerate_segment_fraction"] = (
-                self.degenerate_segment_fraction_by_step[step_index]
-            )
         for mode in range(NUM_MODES):
             values[f"loss/mode_{mode}/trajectory_pg"] = (
                 self.trajectory_pg_by_mode[mode]
@@ -397,32 +343,6 @@ class JointGRPOLossResult:
             trajectory_pg_by_mode=self.trajectory_pg_by_mode.detach(),
             behavior_cloning_by_mode=self.behavior_cloning_by_mode.detach(),
             reference_kl_by_mode=self.reference_kl_by_mode.detach(),
-            feasibility=self.feasibility.detach(),
-            weighted_feasibility=self.weighted_feasibility.detach(),
-            steering_feasibility=self.steering_feasibility.detach(),
-            steering_rate_feasibility=self.steering_rate_feasibility.detach(),
-            feasibility_by_step=self.feasibility_by_step.detach(),
-            steering_feasibility_by_step=self.steering_feasibility_by_step.detach(),
-            steering_rate_feasibility_by_step=(
-                self.steering_rate_feasibility_by_step.detach()
-            ),
-            steering_violation_fraction_by_step=(
-                self.steering_violation_fraction_by_step.detach()
-            ),
-            steering_rate_violation_fraction_by_step=(
-                self.steering_rate_violation_fraction_by_step.detach()
-            ),
-            steering_max_abs_rad_by_step=self.steering_max_abs_rad_by_step.detach(),
-            steering_rate_max_abs_rad_s_by_step=(
-                self.steering_rate_max_abs_rad_s_by_step.detach()
-            ),
-            steering_limit_rad_by_step=self.steering_limit_rad_by_step.detach(),
-            steering_rate_limit_rad_s_by_step=(
-                self.steering_rate_limit_rad_s_by_step.detach()
-            ),
-            degenerate_segment_fraction_by_step=(
-                self.degenerate_segment_fraction_by_step.detach()
-            ),
         )
 
 
@@ -629,18 +549,6 @@ def _active_tensor_mean(value: Tensor, active_mode_mask: Tensor) -> Tensor:
     return (value * weights).sum() / weights.sum().clamp_min(1.0)
 
 
-def _active_tensor_max(value: Tensor, active_mode_mask: Tensor) -> Tensor:
-    """Maximum over all trailing entries belonging to active [B,R,K] blocks."""
-
-    expanded = active_mode_mask
-    while expanded.ndim < value.ndim:
-        expanded = expanded.unsqueeze(-1)
-    expanded = expanded.expand_as(value)
-    if not bool(expanded.any()):
-        return value.new_zeros(())
-    return value.masked_fill(~expanded, float("-inf")).amax()
-
-
 def _hierarchical_active_mean(value: Tensor, active_mode_mask: Tensor) -> Tensor:
     """Reduce trailing axes, active modes, roles and batch in that order."""
 
@@ -763,6 +671,42 @@ class _JointGRPOTrainerBase:
         self._consumed_rollouts: weakref.WeakValueDictionary[
             int, JointGRPORollout
         ] = weakref.WeakValueDictionary()
+
+    def _risk_pact_context_from_inputs(
+        self,
+        model_inputs: Mapping[str, Tensor],
+        *,
+        batch_size: int,
+        device: torch.device,
+    ) -> RiskPACTRolloutContext | None:
+        """Capture graph-free actor geometry for later Risk-PACT replay.
+
+        Baseline rollouts remain valid when both fields are absent.  A partial
+        actor context fails closed because it cannot define a risk field.
+        """
+
+        state = model_inputs.get("background_actor_state")
+        valid = model_inputs.get("background_actor_valid_mask")
+        if state is None and valid is None:
+            return None
+        if state is None or valid is None:
+            raise JointGRPOError(
+                "Risk-PACT actor context requires both background_actor_state "
+                "and background_actor_valid_mask"
+            )
+        context = RiskPACTRolloutContext(
+            background_actor_state=state.detach(),
+            background_actor_valid_mask=valid.detach(),
+        )
+        if context.batch_size != int(batch_size):
+            raise JointGRPOError(
+                "Risk-PACT actor context batch does not match planner context"
+            )
+        if context.background_actor_state.device != device:
+            raise JointGRPOError(
+                "Risk-PACT actor context must be colocated with planner inputs"
+            )
+        return context
 
     def _context_from_inputs(self, model_inputs: Mapping[str, Tensor]) -> BEVPlannerContext:
         missing = [name for name in self.required_model_inputs if name not in model_inputs]
@@ -962,6 +906,7 @@ class _JointGRPOTrainerBase:
         candidates: Tensor,
         frozen_candidates: Tensor,
         noise_bundle_identity: tuple[int, int, int] | None,
+        risk_pact_context: RiskPACTRolloutContext | None,
         step_histories: list[Tensor],
     ) -> JointGRPORollout:
         if step_histories:
@@ -976,6 +921,7 @@ class _JointGRPOTrainerBase:
             chains_normalized=chains.detach(),
             candidate_trajectories=candidates.detach(),
             frozen_candidate_trajectories=frozen_candidates.detach(),
+            risk_pact_context=risk_pact_context,
             noise_bundle_identity=noise_bundle_identity,
         )
 
@@ -1235,6 +1181,11 @@ class _JointGRPOTrainerBase:
                 "sample_groups transition_generator must be a torch.Generator"
             )
         context = self._context_from_inputs(model_inputs)
+        risk_pact_context = self._risk_pact_context_from_inputs(
+            model_inputs,
+            batch_size=context.batch_size,
+            device=context.role_tokens.device,
+        )
         coarse = model_inputs["coarse_trajectories"]
         valid_mask = model_inputs["mode_valid_mask"]
         self.planner._validate_trajectory_inputs(
@@ -1271,6 +1222,7 @@ class _JointGRPOTrainerBase:
             candidates=candidate_tensor,
             frozen_candidates=frozen_candidate_tensor,
             noise_bundle_identity=noise_bundle_identity,
+            risk_pact_context=risk_pact_context,
             step_histories=step_histories,
         )
 
@@ -1416,16 +1368,6 @@ class _JointGRPOTrainerBase:
 
         current_log_probs = []
         trajectory_kls = []
-        feasibility_step_losses: list[Tensor] = []
-        steering_feasibility_step_losses: list[Tensor] = []
-        steering_rate_feasibility_step_losses: list[Tensor] = []
-        steering_violation_step: list[Tensor] = []
-        steering_rate_violation_step: list[Tensor] = []
-        steering_max_step: list[Tensor] = []
-        steering_rate_max_step: list[Tensor] = []
-        steering_limit_step: list[Tensor] = []
-        steering_rate_limit_step: list[Tensor] = []
-        degenerate_segment_step: list[Tensor] = []
         final_current_candidates = final_reference_candidates = None
         for step_index, (timestep, previous_timestep) in enumerate(
             DEFAULT_DDIM_PATH.transitions()
@@ -1456,111 +1398,6 @@ class _JointGRPOTrainerBase:
                 valid_mask=valid_mask,
                 predecessor_history=predecessor_history,
             )
-
-            def _feasibility_blocks(value: Tensor) -> Tensor:
-                return value.reshape(
-                    batch_size, trajectories, NUM_PLATOON_ROLES, NUM_MODES
-                ).permute(0, 2, 3, 1).contiguous()
-
-            if self.config.constraint_mode == "tv_feasibility":
-                steering_limit_deg = time_varying_limit(
-                    timestep=timestep,
-                    initial_timestep=DEFAULT_DDIM_PATH.initial_timestep,
-                    initial_limit=self.config.steering_initial_limit_deg,
-                    final_limit=self.config.steering_final_limit_deg,
-                    schedule_power=self.config.feasibility_schedule_power,
-                )
-                steering_rate_limit_deg_s = time_varying_limit(
-                    timestep=timestep,
-                    initial_timestep=DEFAULT_DDIM_PATH.initial_timestep,
-                    initial_limit=self.config.steering_rate_initial_limit_deg_s,
-                    final_limit=self.config.steering_rate_final_limit_deg_s,
-                    schedule_power=self.config.feasibility_schedule_power,
-                )
-                feasibility = steering_feasibility_loss(
-                    current_candidates[..., :2],
-                    steering_limit_deg=steering_limit_deg,
-                    steering_rate_limit_deg_s=steering_rate_limit_deg_s,
-                    wheelbase_m=self.config.wheelbase_m,
-                    trajectory_dt_s=self.config.trajectory_dt_s,
-                    min_segment_length_m=self.config.min_segment_length_m,
-                )
-                steering_step_loss = _hierarchical_active_mean(
-                    _feasibility_blocks(feasibility.steering_loss),
-                    valid_executable_mode_mask,
-                )
-                steering_rate_step_loss = _hierarchical_active_mean(
-                    _feasibility_blocks(feasibility.steering_rate_loss),
-                    valid_executable_mode_mask,
-                )
-                combined_step_loss = (
-                    float(self.config.steering_feasibility_weight)
-                    * steering_step_loss
-                    + float(self.config.steering_rate_feasibility_weight)
-                    * steering_rate_step_loss
-                )
-                feasibility_step_losses.append(combined_step_loss)
-                steering_feasibility_step_losses.append(steering_step_loss)
-                steering_rate_feasibility_step_losses.append(steering_rate_step_loss)
-                steering_violation_step.append(
-                    _active_tensor_mean(
-                        _feasibility_blocks(
-                            feasibility.steering_violation_fraction
-                        ),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_rate_violation_step.append(
-                    _active_tensor_mean(
-                        _feasibility_blocks(
-                            feasibility.steering_rate_violation_fraction
-                        ),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_max_step.append(
-                    _active_tensor_max(
-                        _feasibility_blocks(feasibility.max_abs_steering_rad),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_rate_max_step.append(
-                    _active_tensor_max(
-                        _feasibility_blocks(
-                            feasibility.max_abs_steering_rate_rad_s
-                        ),
-                        valid_executable_mode_mask,
-                    )
-                )
-                degenerate_segment_step.append(
-                    _active_tensor_mean(
-                        _feasibility_blocks(
-                            feasibility.degenerate_segment_fraction
-                        ),
-                        valid_executable_mode_mask,
-                    )
-                )
-                steering_limit_step.append(
-                    current_candidates.new_tensor(math.radians(steering_limit_deg))
-                )
-                steering_rate_limit_step.append(
-                    current_candidates.new_tensor(
-                        math.radians(steering_rate_limit_deg_s)
-                    )
-                )
-            else:
-                zero = current_candidates.new_zeros(())
-                feasibility_step_losses.append(zero)
-                steering_feasibility_step_losses.append(zero)
-                steering_rate_feasibility_step_losses.append(zero)
-                steering_violation_step.append(zero)
-                steering_rate_violation_step.append(zero)
-                steering_max_step.append(zero)
-                steering_rate_max_step.append(zero)
-                steering_limit_step.append(zero)
-                steering_rate_limit_step.append(zero)
-                degenerate_segment_step.append(zero)
-
             current_output = self.planner._normalize_xy(
                 current_candidates[..., :2]
             ).float()
@@ -1676,34 +1513,10 @@ class _JointGRPOTrainerBase:
             valid_executable_mode_mask,
         )
         reference_kl = trajectory_reference_kl
-        feasibility_by_step = torch.stack(feasibility_step_losses)
-        steering_feasibility_by_step = torch.stack(
-            steering_feasibility_step_losses
-        )
-        steering_rate_feasibility_by_step = torch.stack(
-            steering_rate_feasibility_step_losses
-        )
-        steering_violation_fraction_by_step = torch.stack(
-            steering_violation_step
-        )
-        steering_rate_violation_fraction_by_step = torch.stack(
-            steering_rate_violation_step
-        )
-        steering_max_abs_rad_by_step = torch.stack(steering_max_step)
-        steering_rate_max_abs_rad_s_by_step = torch.stack(steering_rate_max_step)
-        steering_limit_rad_by_step = torch.stack(steering_limit_step)
-        steering_rate_limit_rad_s_by_step = torch.stack(steering_rate_limit_step)
-        degenerate_segment_fraction_by_step = torch.stack(degenerate_segment_step)
-
-        feasibility = feasibility_by_step.mean()
-        steering_feasibility = steering_feasibility_by_step.mean()
-        steering_rate_feasibility = steering_rate_feasibility_by_step.mean()
-        weighted_feasibility = float(self.config.feasibility_weight) * feasibility
         total = (
             float(self.config.trajectory_pg_weight) * trajectory_pg
             + float(self.config.bc_weight) * behavior_cloning
             + float(self.config.reference_kl_weight) * reference_kl
-            + weighted_feasibility
         )
         tensors = (
             total,
@@ -1714,20 +1527,6 @@ class _JointGRPOTrainerBase:
             new_trajectory_log_prob,
             centered_rewards,
             advantages,
-            feasibility,
-            weighted_feasibility,
-            steering_feasibility,
-            steering_rate_feasibility,
-            feasibility_by_step,
-            steering_feasibility_by_step,
-            steering_rate_feasibility_by_step,
-            steering_violation_fraction_by_step,
-            steering_rate_violation_fraction_by_step,
-            steering_max_abs_rad_by_step,
-            steering_rate_max_abs_rad_s_by_step,
-            steering_limit_rad_by_step,
-            steering_rate_limit_rad_s_by_step,
-            degenerate_segment_fraction_by_step,
         )
         if not all(bool(torch.isfinite(value).all()) for value in tensors):
             raise JointGRPOError("joint GRPO loss contains non-finite values")
@@ -1747,30 +1546,6 @@ class _JointGRPOTrainerBase:
             trajectory_pg_by_mode=trajectory_pg_by_mode,
             behavior_cloning_by_mode=behavior_cloning_by_mode,
             reference_kl_by_mode=reference_kl_by_mode,
-            feasibility=feasibility,
-            weighted_feasibility=weighted_feasibility,
-            steering_feasibility=steering_feasibility,
-            steering_rate_feasibility=steering_rate_feasibility,
-            feasibility_by_step=feasibility_by_step,
-            steering_feasibility_by_step=steering_feasibility_by_step,
-            steering_rate_feasibility_by_step=steering_rate_feasibility_by_step,
-            steering_violation_fraction_by_step=(
-                steering_violation_fraction_by_step
-            ),
-            steering_rate_violation_fraction_by_step=(
-                steering_rate_violation_fraction_by_step
-            ),
-            steering_max_abs_rad_by_step=steering_max_abs_rad_by_step,
-            steering_rate_max_abs_rad_s_by_step=(
-                steering_rate_max_abs_rad_s_by_step
-            ),
-            steering_limit_rad_by_step=steering_limit_rad_by_step,
-            steering_rate_limit_rad_s_by_step=(
-                steering_rate_limit_rad_s_by_step
-            ),
-            degenerate_segment_fraction_by_step=(
-                degenerate_segment_fraction_by_step
-            ),
         )
 
     @staticmethod
@@ -1907,20 +1682,28 @@ class _JointGRPOTrainerBase:
             )
         post_kl = float(post_loss.reference_kl.detach().cpu())
         drifts = head.adapter_relative_drifts()
+        drift_modes = tuple(
+            mode
+            for mode, drift in enumerate(drifts)
+            if drift > float(self.config.max_adapter_relative_drift)
+        )
         kl_rejected = post_kl > float(self.config.post_update_reference_kl_max)
-        if kl_rejected:
+        guard_rejected = kl_rejected or bool(drift_modes)
+        if guard_rejected:
             with torch.no_grad():
                 for parameter, saved in zip(trainable, parameter_snapshot):
                     parameter.copy_(saved)
             self.optimizer.load_state_dict(optimizer_snapshot)
             self.optimizer.zero_grad(set_to_none=True)
-            trigger_modes = tuple(
-                int(mode)
-                for mode in torch.where(signal_mode_mask.any(dim=(0, 1)))[0]
-                .detach()
-                .cpu()
-                .tolist()
-            )
+            trigger_modes = drift_modes
+            if kl_rejected and not trigger_modes:
+                trigger_modes = tuple(
+                    int(mode)
+                    for mode in torch.where(signal_mode_mask.any(dim=(0, 1)))[0]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
             return JointGRPOUpdateResult(
                 loss=loss.detached(),
                 gradient_norms=gradient_norms,
@@ -2084,6 +1867,7 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
         candidates: Tensor,
         frozen_candidates: Tensor,
         noise_bundle_identity: tuple[int, int, int] | None,
+        risk_pact_context: RiskPACTRolloutContext | None,
         step_histories: list[Tensor],
     ) -> JointGRPORolloutB:
         if len(step_histories) != len(self.config.roll_timesteps):
@@ -2113,6 +1897,7 @@ class JointGRPOTrainerB(_JointGRPOTrainerBase):
             chains_normalized=chains.detach(),
             candidate_trajectories=candidates.detach(),
             frozen_candidate_trajectories=frozen_candidates.detach(),
+            risk_pact_context=risk_pact_context,
             noise_bundle_identity=noise_bundle_identity,
             predecessor_action_history_normalized=history.detach(),
         )
@@ -2199,6 +1984,7 @@ __all__ = [
     "JointGRPOLossResult",
     "JointGRPORollout",
     "JointGRPORolloutB",
+    "RiskPACTRolloutContext",
     "JointGRPOTrainerA",
     "JointGRPOTrainerB",
     "JointGRPOUpdateResult",
