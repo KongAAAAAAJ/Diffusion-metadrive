@@ -69,6 +69,15 @@ safety_post_training:
       temperature_m: 0.50
       softmax_beta: 12.0
 
+    # Step 6.5: CRV actor-prediction confidence. Keep near-term actor risk
+    # unchanged, then attenuate the nominal CRV risk after 2.5 s. With the
+    # defaults below gamma(3.0)=0.741, gamma(3.5)=0.549, gamma(4.0)=0.407.
+    actor_prediction:
+      confidence_decay_enabled: true
+      full_confidence_horizon_s: 2.5
+      decay_rate_per_s: 0.60
+      min_confidence: 0.40
+
     platoon:
       vehicle_length_m: 5.74
       vehicle_width_m: 2.30

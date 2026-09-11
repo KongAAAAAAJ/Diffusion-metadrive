@@ -183,12 +183,23 @@ def _plot_risk_curve(
     ax.plot(times, total_old, "o--", linewidth=2.0, label="total old")
     ax.plot(times, total_teacher, "o-", linewidth=2.0, label="total teacher")
     for label, value in (
-        ("background", old_field.background_risk),
-        ("platoon", old_field.platoon_risk),
+        ("background effective", old_field.background_risk),
+        ("platoon effective", old_field.platoon_risk),
         ("road", old_field.road_risk),
     ):
         if value is not None:
             ax.plot(times, _cpu(value).numpy(), linestyle=":", label=label)
+    for label, value in (
+        ("background raw CRV", old_field.background_risk_raw),
+        ("platoon raw CRV", old_field.platoon_risk_raw),
+    ):
+        if value is not None:
+            ax.plot(times, _cpu(value).numpy(), linestyle="--", alpha=0.5, label=label)
+    if old_field.actor_confidence is not None:
+        ax.plot(
+            times, _cpu(old_field.actor_confidence).numpy(),
+            linestyle="-.", alpha=0.7, label="actor confidence",
+        )
     ax.axhline(float(config.risk_threshold), linestyle="--", label="risk threshold")
     ax.axvline(times[critical_index], linestyle="--", alpha=0.6, label="critical timestep")
     ax.set_ylim(-0.02, 1.02)
@@ -258,8 +269,9 @@ def save_risk_pact_debug_plots(
     old_field = type("SelectedField", (), {})()
     new_field = type("SelectedField", (), {})()
     for name in (
-        "risk", "background_risk", "platoon_risk", "road_risk", "road_signed_distance_m",
-        "background_signed_clearance_m", "platoon_signed_clearance_m",
+        "risk", "background_risk", "platoon_risk", "road_risk",
+        "background_risk_raw", "platoon_risk_raw", "actor_confidence",
+        "road_signed_distance_m", "background_signed_clearance_m", "platoon_signed_clearance_m",
     ):
         value = getattr(teacher_result.field, name)
         setattr(old_field, name, None if value is None else value[b, r, flat])
@@ -307,6 +319,10 @@ def save_risk_pact_debug_plots(
         "trajectory_risk_before": risk_before,
         "trajectory_risk_after": risk_after,
         "trajectory_risk_reduction": risk_before - risk_after,
+        "actor_confidence_last": (
+            None if old_field.actor_confidence is None
+            else float(old_field.actor_confidence[-1].item())
+        ),
         "active": bool(teacher_result.constraint.near_or_unsafe_mask[b, r, flat].item()),
     }
     Path(str(prefix) + "_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

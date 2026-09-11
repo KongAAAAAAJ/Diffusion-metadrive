@@ -15,7 +15,9 @@ class RiskFieldResult:
 
     ``risk`` is the final smooth-max multi-source field. ``per_actor_risk`` and
     ``actor_future_xy`` concatenate enabled background and platoon actors for
-    diagnostics. Component tensors expose each source separately.
+    diagnostics. Step 6.5 keeps raw signed-clearance actor risk available in
+    ``*_risk_raw`` while ``background_risk``/``platoon_risk`` are the
+    confidence-weighted components actually used by Risk-PACT.
     """
 
     risk: Tensor
@@ -24,6 +26,9 @@ class RiskFieldResult:
     background_risk: Tensor | None = None
     platoon_risk: Tensor | None = None
     road_risk: Tensor | None = None
+    background_risk_raw: Tensor | None = None
+    platoon_risk_raw: Tensor | None = None
+    actor_confidence: Tensor | None = None
     road_signed_distance_m: Tensor | None = None
     per_actor_signed_clearance_m: Tensor | None = None
     background_signed_clearance_m: Tensor | None = None
@@ -204,6 +209,30 @@ class MultiSourceSafetyRiskField:
         self.actor_field = DynamicActorClearanceRiskField(self.config)
         self.road_field = RoadBoundaryRiskField(self.config)
 
+    def actor_prediction_confidence(self, horizon_steps: int, *, dtype: torch.dtype, device: torch.device) -> Tensor:
+        """Return CRV actor-prediction confidence for each future trajectory step.
+
+        Step 6.5 leaves the spatial safety geometry unchanged and attenuates only
+        the actor-risk contribution after the fully trusted CRV horizon:
+
+          gamma(t) = 1,                                           t <= t_full
+                   = max(gamma_min, exp(-lambda * (t-t_full))),   t >  t_full
+
+        The confidence is deterministic and independent of trajectory/actor state.
+        Road-boundary risk is never multiplied by this factor.
+        """
+        if horizon_steps <= 0:
+            raise ValueError("horizon_steps must be positive")
+        times = (
+            torch.arange(1, horizon_steps + 1, dtype=dtype, device=device)
+            * float(self.config.horizon_dt_s)
+        )
+        if not self.config.actor_confidence_decay_enabled:
+            return torch.ones_like(times)
+        excess = (times - float(self.config.actor_full_confidence_horizon_s)).clamp_min(0.0)
+        confidence = torch.exp(-float(self.config.actor_confidence_decay_rate_per_s) * excess)
+        return confidence.clamp(min=float(self.config.actor_min_confidence), max=1.0)
+
     def _smooth_component_max(self, parts: list[Tensor]) -> Tensor:
         if not parts:
             raise ValueError("at least one risk component must be present")
@@ -237,9 +266,20 @@ class MultiSourceSafetyRiskField:
         background_risk = None
         platoon_risk = None
         road_risk = None
+        background_risk_raw = None
+        platoon_risk_raw = None
+        actor_confidence = None
         road_signed_distance = None
         background_signed_clearance = None
         platoon_signed_clearance = None
+
+        horizon = canonical.shape[-2]
+        actor_confidence_1d = self.actor_prediction_confidence(
+            horizon, dtype=canonical.dtype, device=canonical.device
+        )
+        actor_confidence = actor_confidence_1d.view(1, 1, 1, horizon).expand(
+            canonical.shape[0], canonical.shape[1], canonical.shape[2], horizon
+        )
 
         if self.config.use_background_actor and background_actor_state is not None:
             if background_actor_valid_mask is None:
@@ -251,7 +291,8 @@ class MultiSourceSafetyRiskField:
                 longitudinal_clearance_m=float(self.config.background_longitudinal_clearance_m),
                 lateral_clearance_m=float(self.config.background_lateral_clearance_m),
             )
-            background_risk = bg.risk
+            background_risk_raw = bg.risk
+            background_risk = background_risk_raw * actor_confidence
             background_signed_clearance = bg.per_actor_signed_clearance_m
             component_risks.append(background_risk)
             per_actor_parts.append(bg.per_actor_risk)
@@ -267,7 +308,8 @@ class MultiSourceSafetyRiskField:
                 longitudinal_clearance_m=float(self.config.platoon_longitudinal_clearance_m),
                 lateral_clearance_m=float(self.config.platoon_lateral_clearance_m),
             )
-            platoon_risk = platoon.risk
+            platoon_risk_raw = platoon.risk
+            platoon_risk = platoon_risk_raw * actor_confidence
             platoon_signed_clearance = platoon.per_actor_signed_clearance_m
             component_risks.append(platoon_risk)
             per_actor_parts.append(platoon.per_actor_risk)
@@ -298,6 +340,12 @@ class MultiSourceSafetyRiskField:
                 background_risk = background_risk.squeeze(2)
             if platoon_risk is not None:
                 platoon_risk = platoon_risk.squeeze(2)
+            if background_risk_raw is not None:
+                background_risk_raw = background_risk_raw.squeeze(2)
+            if platoon_risk_raw is not None:
+                platoon_risk_raw = platoon_risk_raw.squeeze(2)
+            if actor_confidence is not None:
+                actor_confidence = actor_confidence.squeeze(2)
             if road_risk is not None:
                 road_risk = road_risk.squeeze(2)
             if road_signed_distance is not None:
@@ -322,6 +370,9 @@ class MultiSourceSafetyRiskField:
             background_risk=background_risk,
             platoon_risk=platoon_risk,
             road_risk=road_risk,
+            background_risk_raw=background_risk_raw,
+            platoon_risk_raw=platoon_risk_raw,
+            actor_confidence=actor_confidence,
             road_signed_distance_m=road_signed_distance,
             per_actor_signed_clearance_m=all_signed_clearance,
             background_signed_clearance_m=background_signed_clearance,

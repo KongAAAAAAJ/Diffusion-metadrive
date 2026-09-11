@@ -87,6 +87,10 @@ class JointGRPOConfig:
     risk_pact_background_lateral_clearance_m: float = 0.4
     risk_pact_actor_temperature_m: float = 0.50
     risk_pact_actor_softmax_beta: float = 12.0
+    risk_pact_actor_confidence_decay_enabled: bool = True
+    risk_pact_actor_full_confidence_horizon_s: float = 2.5
+    risk_pact_actor_confidence_decay_rate_per_s: float = 0.60
+    risk_pact_actor_min_confidence: float = 0.40
     risk_pact_platoon_vehicle_length_m: float = 5.74
     risk_pact_platoon_vehicle_width_m: float = 2.30
     risk_pact_platoon_longitudinal_clearance_m: float = 7.0
@@ -156,6 +160,7 @@ class JointGRPOConfig:
             "risk_pact_ego_width_m",
             "risk_pact_actor_temperature_m",
             "risk_pact_actor_softmax_beta",
+            "risk_pact_actor_confidence_decay_rate_per_s",
             "risk_pact_platoon_vehicle_length_m",
             "risk_pact_platoon_vehicle_width_m",
             "risk_pact_component_softmax_beta",
@@ -178,6 +183,7 @@ class JointGRPOConfig:
             "risk_pact_distill_weight",
             "risk_pact_background_longitudinal_clearance_m",
             "risk_pact_background_lateral_clearance_m",
+            "risk_pact_actor_full_confidence_horizon_s",
             "risk_pact_platoon_longitudinal_clearance_m",
             "risk_pact_platoon_lateral_clearance_m",
             "risk_pact_road_safety_margin_m",
@@ -205,9 +211,14 @@ class JointGRPOConfig:
             "risk_pact_use_background_actor",
             "risk_pact_use_platoon_actor",
             "risk_pact_use_road_boundary",
+            "risk_pact_actor_confidence_decay_enabled",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise JointGRPOError(f"{name} must be bool")
+        if not 0.0 < float(self.risk_pact_actor_min_confidence) <= 1.0:
+            raise JointGRPOError("risk_pact_actor_min_confidence must be in (0,1]")
+        if float(self.risk_pact_actor_full_confidence_horizon_s) > TRAJECTORY_STEPS * float(self.risk_pact_horizon_dt_s):
+            raise JointGRPOError("risk_pact_actor_full_confidence_horizon_s cannot exceed the planning horizon")
         for name in ("risk_pact_diagnostics_enabled", "risk_pact_gradient_diagnostics"):
             if not isinstance(getattr(self, name), bool):
                 raise JointGRPOError(f"{name} must be bool")
@@ -267,7 +278,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v13_risk_pact_step6_diagnostics",
+        "version": "stage2_joint_grpo_optimizer_v14_actor_confidence_decay",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -507,6 +518,10 @@ class JointGRPOLossResult:
     risk_pact_background_risk_mean: Tensor
     risk_pact_platoon_risk_mean: Tensor
     risk_pact_road_risk_mean: Tensor
+    risk_pact_background_risk_raw_mean: Tensor
+    risk_pact_platoon_risk_raw_mean: Tensor
+    risk_pact_actor_confidence_mean: Tensor
+    risk_pact_actor_confidence_last: Tensor
     risk_pact_road_signed_distance_min_m: Tensor
     risk_pact_valid_active_ratio: Tensor
     risk_pact_valid_active_count: Tensor
@@ -547,6 +562,10 @@ class JointGRPOLossResult:
             "risk_pact/background_risk_mean": self.risk_pact_background_risk_mean,
             "risk_pact/platoon_risk_mean": self.risk_pact_platoon_risk_mean,
             "risk_pact/road_risk_mean": self.risk_pact_road_risk_mean,
+            "risk_pact/background_risk_raw_mean": self.risk_pact_background_risk_raw_mean,
+            "risk_pact/platoon_risk_raw_mean": self.risk_pact_platoon_risk_raw_mean,
+            "risk_pact/actor_confidence_mean": self.risk_pact_actor_confidence_mean,
+            "risk_pact/actor_confidence_last": self.risk_pact_actor_confidence_last,
             "risk_pact/road_signed_distance_min_m": self.risk_pact_road_signed_distance_min_m,
             "risk_pact/valid_active_ratio": self.risk_pact_valid_active_ratio,
             "risk_pact/valid_active_count": self.risk_pact_valid_active_count,
@@ -633,6 +652,10 @@ class JointGRPOLossResult:
             risk_pact_background_risk_mean=self.risk_pact_background_risk_mean.detach(),
             risk_pact_platoon_risk_mean=self.risk_pact_platoon_risk_mean.detach(),
             risk_pact_road_risk_mean=self.risk_pact_road_risk_mean.detach(),
+            risk_pact_background_risk_raw_mean=self.risk_pact_background_risk_raw_mean.detach(),
+            risk_pact_platoon_risk_raw_mean=self.risk_pact_platoon_risk_raw_mean.detach(),
+            risk_pact_actor_confidence_mean=self.risk_pact_actor_confidence_mean.detach(),
+            risk_pact_actor_confidence_last=self.risk_pact_actor_confidence_last.detach(),
             risk_pact_road_signed_distance_min_m=self.risk_pact_road_signed_distance_min_m.detach(),
             risk_pact_valid_active_ratio=self.risk_pact_valid_active_ratio.detach(),
             risk_pact_valid_active_count=self.risk_pact_valid_active_count.detach(),
@@ -1910,6 +1933,10 @@ class _JointGRPOTrainerBase:
         risk_pact_background_risk_mean = zero_aux.detach()
         risk_pact_platoon_risk_mean = zero_aux.detach()
         risk_pact_road_risk_mean = zero_aux.detach()
+        risk_pact_background_risk_raw_mean = zero_aux.detach()
+        risk_pact_platoon_risk_raw_mean = zero_aux.detach()
+        risk_pact_actor_confidence_mean = zero_aux.detach()
+        risk_pact_actor_confidence_last = zero_aux.detach()
         risk_pact_road_signed_distance_min_m = zero_aux.detach()
         risk_pact_valid_active_ratio = zero_aux.detach()
         risk_pact_valid_active_count = zero_aux.detach()
@@ -1955,6 +1982,10 @@ class _JointGRPOTrainerBase:
                 background_lateral_clearance_m=self.config.risk_pact_background_lateral_clearance_m,
                 actor_temperature_m=self.config.risk_pact_actor_temperature_m,
                 actor_softmax_beta=self.config.risk_pact_actor_softmax_beta,
+                actor_confidence_decay_enabled=self.config.risk_pact_actor_confidence_decay_enabled,
+                actor_full_confidence_horizon_s=self.config.risk_pact_actor_full_confidence_horizon_s,
+                actor_confidence_decay_rate_per_s=self.config.risk_pact_actor_confidence_decay_rate_per_s,
+                actor_min_confidence=self.config.risk_pact_actor_min_confidence,
                 platoon_vehicle_length_m=self.config.risk_pact_platoon_vehicle_length_m,
                 platoon_vehicle_width_m=self.config.risk_pact_platoon_vehicle_width_m,
                 platoon_longitudinal_clearance_m=self.config.risk_pact_platoon_longitudinal_clearance_m,
@@ -2055,6 +2086,11 @@ class _JointGRPOTrainerBase:
             risk_pact_background_risk_mean = _component_mean(teacher.field.background_risk)
             risk_pact_platoon_risk_mean = _component_mean(teacher.field.platoon_risk)
             risk_pact_road_risk_mean = _component_mean(teacher.field.road_risk)
+            risk_pact_background_risk_raw_mean = _component_mean(teacher.field.background_risk_raw)
+            risk_pact_platoon_risk_raw_mean = _component_mean(teacher.field.platoon_risk_raw)
+            if teacher.field.actor_confidence is not None:
+                risk_pact_actor_confidence_mean = teacher.field.actor_confidence.mean().detach()
+                risk_pact_actor_confidence_last = teacher.field.actor_confidence[..., -1].mean().detach()
             if teacher.field.road_signed_distance_m is not None:
                 road_distance = torch.where(
                     valid_flat.unsqueeze(-1),
@@ -2216,6 +2252,10 @@ class _JointGRPOTrainerBase:
             risk_pact_background_risk_mean=risk_pact_background_risk_mean,
             risk_pact_platoon_risk_mean=risk_pact_platoon_risk_mean,
             risk_pact_road_risk_mean=risk_pact_road_risk_mean,
+            risk_pact_background_risk_raw_mean=risk_pact_background_risk_raw_mean,
+            risk_pact_platoon_risk_raw_mean=risk_pact_platoon_risk_raw_mean,
+            risk_pact_actor_confidence_mean=risk_pact_actor_confidence_mean,
+            risk_pact_actor_confidence_last=risk_pact_actor_confidence_last,
             risk_pact_road_signed_distance_min_m=risk_pact_road_signed_distance_min_m,
             risk_pact_valid_active_ratio=risk_pact_valid_active_ratio,
             risk_pact_valid_active_count=risk_pact_valid_active_count,

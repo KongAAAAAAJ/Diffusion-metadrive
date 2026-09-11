@@ -32,6 +32,15 @@ class RiskPACTConfig:
 
     actor_temperature_m: float = 0.50
     actor_softmax_beta: float = 12.0
+
+    # Step 6.5: confidence decay for constant-relative-velocity actor prediction.
+    # The CRV nominal center is trusted fully up to ``actor_full_confidence_horizon_s``.
+    # Beyond that horizon, only actor risk is attenuated; road risk remains unchanged.
+    actor_confidence_decay_enabled: bool = True
+    actor_full_confidence_horizon_s: float = 2.5
+    actor_confidence_decay_rate_per_s: float = 0.60
+    actor_min_confidence: float = 0.40
+
     component_softmax_beta: float = 12.0
 
     road_safety_margin_m: float = 0.4
@@ -46,7 +55,7 @@ class RiskPACTConfig:
     gradient_clip_norm: float = 10.0
 
     def __post_init__(self) -> None:
-        for name in ("use_background_actor", "use_platoon_actor", "use_road_boundary"):
+        for name in ("use_background_actor", "use_platoon_actor", "use_road_boundary", "actor_confidence_decay_enabled"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be bool")
         if not (self.use_background_actor or self.use_platoon_actor or self.use_road_boundary):
@@ -56,13 +65,14 @@ class RiskPACTConfig:
             "horizon_dt_s", "ego_length_m", "ego_width_m",
             "platoon_vehicle_length_m", "platoon_vehicle_width_m",
             "actor_temperature_m", "actor_softmax_beta", "component_softmax_beta",
+            "actor_confidence_decay_rate_per_s",
             "road_temperature_m", "temporal_softmax_beta", "violation_temperature",
             "teacher_step_m", "gradient_eps", "gradient_clip_norm",
         )
         non_negative = (
             "background_longitudinal_clearance_m", "background_lateral_clearance_m",
             "platoon_longitudinal_clearance_m", "platoon_lateral_clearance_m",
-            "road_safety_margin_m",
+            "road_safety_margin_m", "actor_full_confidence_horizon_s",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -72,6 +82,11 @@ class RiskPACTConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be non-negative and finite")
+        if not 0.0 < float(self.actor_min_confidence) <= 1.0:
+            raise ValueError("actor_min_confidence must be in (0,1]")
+        horizon_s = 8.0 * float(self.horizon_dt_s)
+        if float(self.actor_full_confidence_horizon_s) > horizon_s:
+            raise ValueError("actor_full_confidence_horizon_s cannot exceed the planning horizon")
         if not 0.0 < float(self.risk_threshold) < 1.0:
             raise ValueError("risk_threshold must be in (0,1)")
         if not 0.0 <= float(self.safe_margin) < float(self.risk_threshold):

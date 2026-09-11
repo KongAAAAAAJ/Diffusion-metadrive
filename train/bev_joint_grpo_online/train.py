@@ -52,6 +52,7 @@ def _risk_pact_from_mapping(value: Mapping[str, object]) -> RiskPACTPostTraining
     visualization = _mapping(value.get('visualization'), name='safety_post_training.risk_pact.visualization', default={})
     components = _mapping(value.get('components'), name='safety_post_training.risk_pact.components', default={})
     actor = _mapping(value.get('actor'), name='safety_post_training.risk_pact.actor', default={})
+    actor_prediction = _mapping(value.get('actor_prediction'), name='safety_post_training.risk_pact.actor_prediction', default={})
     platoon = _mapping(value.get('platoon'), name='safety_post_training.risk_pact.platoon', default={})
     road = _mapping(value.get('road'), name='safety_post_training.risk_pact.road', default={})
 
@@ -69,6 +70,10 @@ def _risk_pact_from_mapping(value: Mapping[str, object]) -> RiskPACTPostTraining
         background_lateral_clearance_m=float(actor.get('background_lateral_clearance_m', 0.4)),
         actor_temperature_m=float(actor.get('temperature_m', 0.50)),
         actor_softmax_beta=float(actor.get('softmax_beta', 12.0)),
+        actor_confidence_decay_enabled=bool(actor_prediction.get('confidence_decay_enabled', True)),
+        actor_full_confidence_horizon_s=float(actor_prediction.get('full_confidence_horizon_s', 2.5)),
+        actor_confidence_decay_rate_per_s=float(actor_prediction.get('decay_rate_per_s', 0.60)),
+        actor_min_confidence=float(actor_prediction.get('min_confidence', 0.40)),
         platoon_vehicle_length_m=float(platoon.get('vehicle_length_m', 5.74)),
         platoon_vehicle_width_m=float(platoon.get('vehicle_width_m', 2.30)),
         platoon_longitudinal_clearance_m=float(platoon.get('longitudinal_clearance_m', 7.0)),
