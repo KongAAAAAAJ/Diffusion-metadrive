@@ -8,7 +8,7 @@ online:
   trajectories_per_mode: 48
   # Keep this diagnostic run short first. Restore the formal budget after the
   # safety post-training mechanism is verified.
-  total_rollout_groups: 3
+  total_rollout_groups: 10
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
   resume_checkpoint: null
@@ -30,8 +30,8 @@ online:
 # Unified safety post-training switch.
 # mode: none                          -> original GRPO baseline.
 # mode: feasibility_loss              -> existing time-varying feasibility soft loss.
-# mode: risk_pact_lite                -> Risk-PACT-lite config only in Step 1; training hookup follows later.
-# mode: feasibility_plus_risk_pact    -> feasibility active now; Risk-PACT-lite hookup follows later.
+# mode: risk_pact_lite                -> GRPO + final-x0 Risk-PACT-lite curriculum distillation.
+# mode: feasibility_plus_risk_pact    -> GRPO + feasibility + Risk-PACT-lite.
 safety_post_training:
   mode: risk_pact_lite
 
@@ -51,10 +51,31 @@ safety_post_training:
   risk_pact:
     distill_weight: 1.0
     horizon_dt_s: 0.5
-    longitudinal_margin_m: 3.0
-    lateral_margin_m: 1.2
-    minimum_sigma_x_m: 2.5
-    minimum_sigma_y_m: 1.2
+
+    # Step 5.5 multi-source safety field.  Keep these switches explicit so the
+    # three sources can later be ablated independently.
+    components:
+      background_actor: true
+      platoon_actor: true
+      road_boundary: true
+
+    actor:
+      longitudinal_margin_m: 3.0
+      lateral_margin_m: 1.2
+      minimum_sigma_x_m: 2.5
+      minimum_sigma_y_m: 1.2
+      ego_length_m: 8.0
+      ego_width_m: 2.5
+      inflate_by_ego_footprint: true
+
+    platoon:
+      vehicle_length_m: 8.0
+      vehicle_width_m: 2.5
+
+    road:
+      safety_margin_m: 0.4
+      temperature_m: 0.30
+
     temporal_softmax_beta: 12.0
     risk_threshold: 0.35
     violation_temperature: 0.04

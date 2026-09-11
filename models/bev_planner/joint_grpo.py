@@ -34,6 +34,8 @@ from models.bev_planner.time_varying_feasibility import (
 from train.bev_risk_pact.config import RiskPACTConfig
 from train.bev_risk_pact.curriculum import risk_pact_curriculum_state
 from train.bev_risk_pact.loss import pact_lite_distillation_loss
+from train.bev_risk_pact.platoon_actor import build_platoon_actor_state
+from train.bev_risk_pact.road_field import build_drivable_signed_distance
 from train.bev_risk_pact.teacher import build_x0_pact_teacher
 
 
@@ -75,11 +77,21 @@ class JointGRPOConfig:
     feasibility_schedule_power: float = 1.0
 
     risk_pact_distill_weight: float = 1.0
+    risk_pact_use_background_actor: bool = True
+    risk_pact_use_platoon_actor: bool = True
+    risk_pact_use_road_boundary: bool = True
     risk_pact_horizon_dt_s: float = 0.5
     risk_pact_longitudinal_margin_m: float = 3.0
     risk_pact_lateral_margin_m: float = 1.2
     risk_pact_minimum_sigma_x_m: float = 2.5
     risk_pact_minimum_sigma_y_m: float = 1.2
+    risk_pact_ego_length_m: float = 8.0
+    risk_pact_ego_width_m: float = 2.5
+    risk_pact_inflate_actor_by_ego_footprint: bool = True
+    risk_pact_platoon_vehicle_length_m: float = 8.0
+    risk_pact_platoon_vehicle_width_m: float = 2.5
+    risk_pact_road_safety_margin_m: float = 0.4
+    risk_pact_road_temperature_m: float = 0.30
     risk_pact_temporal_softmax_beta: float = 12.0
     risk_pact_risk_threshold: float = 0.35
     risk_pact_violation_temperature: float = 0.04
@@ -135,6 +147,11 @@ class JointGRPOConfig:
             "risk_pact_lateral_margin_m",
             "risk_pact_minimum_sigma_x_m",
             "risk_pact_minimum_sigma_y_m",
+            "risk_pact_ego_length_m",
+            "risk_pact_ego_width_m",
+            "risk_pact_platoon_vehicle_length_m",
+            "risk_pact_platoon_vehicle_width_m",
+            "risk_pact_road_temperature_m",
             "risk_pact_temporal_softmax_beta",
             "risk_pact_violation_temperature",
             "risk_pact_teacher_step_m",
@@ -151,6 +168,7 @@ class JointGRPOConfig:
             "steering_feasibility_weight",
             "steering_rate_feasibility_weight",
             "risk_pact_distill_weight",
+            "risk_pact_road_safety_margin_m",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -170,6 +188,20 @@ class JointGRPOConfig:
             raise JointGRPOError("feasibility safety mode requires feasibility_weight > 0")
         if self.uses_feasibility and self.steering_feasibility_weight <= 0.0 and self.steering_rate_feasibility_weight <= 0.0:
             raise JointGRPOError("feasibility safety mode requires a positive component weight")
+        for name in (
+            "risk_pact_use_background_actor",
+            "risk_pact_use_platoon_actor",
+            "risk_pact_use_road_boundary",
+            "risk_pact_inflate_actor_by_ego_footprint",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise JointGRPOError(f"{name} must be bool")
+        if self.uses_risk_pact and not (
+            self.risk_pact_use_background_actor
+            or self.risk_pact_use_platoon_actor
+            or self.risk_pact_use_road_boundary
+        ):
+            raise JointGRPOError("Risk-PACT requires at least one enabled risk component")
         if self.uses_risk_pact and self.risk_pact_distill_weight <= 0.0:
             raise JointGRPOError("Risk-PACT safety mode requires risk_pact_distill_weight > 0")
         if not 0.0 < self.risk_pact_risk_threshold < 1.0:
@@ -208,7 +240,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v10_risk_pact_lite",
+        "version": "stage2_joint_grpo_optimizer_v11_multisource_risk_pact_lite",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -233,6 +265,11 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
         "reference_regularization": (
             "trajectory behavior-cloning and frozen-Stage1 trajectory KL cover "
             "every hard-valid optimizer-executable mode; no mode KL"
+        ),
+        "risk_pact_lite": (
+            "final-x0 projected teacher from bounded union of background actors, "
+            "platoon neighbors and DRIVABLE signed-distance road risk; masked "
+            "distillation shares the same guarded optimizer step"
         ),
         "trainable_parameters": (
             "ten zero-initialized mode-specific output residual weights and biases"
@@ -262,14 +299,23 @@ def joint_grpo_optimizer_contract_sha256() -> str:
 
 @dataclass(frozen=True)
 class RiskPACTRolloutContext:
-    """Detached scene tensors needed by Risk-PACT post-training.
+    """Detached scene tensors needed by multi-source Risk-PACT post-training.
 
-    The actor state contract is [x_local, y_local, sin(d_heading),
-    cos(d_heading), dvx_local, dvy_local, length, width].
+    Background actor state uses the shared 8-D contract
+    [x_local, y_local, sin(d_heading), cos(d_heading),
+     dvx_local, dvy_local, length, width].
+
+    Platoon neighbors are reconstructed from ``ego_state`` and
+    ``formation_relation_state`` during the guarded update.  ``drivable_sdf``
+    is a detached metric signed-distance raster built once at rollout capture.
     """
 
     background_actor_state: Tensor
     background_actor_valid_mask: Tensor
+    ego_state: Tensor
+    formation_relation_state: Tensor
+    relation_valid_mask: Tensor
+    drivable_sdf: Tensor | None = None
 
     def __post_init__(self) -> None:
         state = self.background_actor_state
@@ -294,18 +340,46 @@ class RiskPACTRolloutContext:
             raise JointGRPOError(
                 "background_actor_valid_mask must have shape [B,3,A]"
             )
-        if valid.device != state.device:
-            raise JointGRPOError(
-                "Risk-PACT actor state and validity mask must share a device"
-            )
-        if state.requires_grad or valid.requires_grad:
-            raise JointGRPOError(
-                "Risk-PACT rollout context must be graph-free"
-            )
-        if not bool(torch.isfinite(state).all()):
-            raise JointGRPOError(
-                "background_actor_state must contain finite values"
-            )
+
+        ego = self.ego_state
+        relation = self.formation_relation_state
+        relation_valid = self.relation_valid_mask
+        if not isinstance(ego, Tensor) or ego.dtype != torch.float32 or ego.ndim != 3:
+            raise JointGRPOError("ego_state must be float32 [B,3,D]")
+        if tuple(ego.shape[:2]) != (int(state.shape[0]), NUM_PLATOON_ROLES):
+            raise JointGRPOError("ego_state B/R axes must match Risk-PACT actor context")
+        if not isinstance(relation, Tensor) or relation.dtype != torch.float32:
+            raise JointGRPOError("formation_relation_state must be float32")
+        if tuple(relation.shape) != (int(state.shape[0]), NUM_PLATOON_ROLES, 12):
+            raise JointGRPOError("formation_relation_state must have shape [B,3,12]")
+        if not isinstance(relation_valid, Tensor) or relation_valid.dtype != torch.bool:
+            raise JointGRPOError("relation_valid_mask must be bool")
+        if tuple(relation_valid.shape) != (int(state.shape[0]), NUM_PLATOON_ROLES, 2):
+            raise JointGRPOError("relation_valid_mask must have shape [B,3,2]")
+
+        tensors = (state, valid, ego, relation, relation_valid)
+        if any(t.device != state.device for t in tensors):
+            raise JointGRPOError("Risk-PACT rollout context tensors must share a device")
+        if any(t.requires_grad for t in tensors):
+            raise JointGRPOError("Risk-PACT rollout context must be graph-free")
+        for name, tensor in (
+            ("background_actor_state", state),
+            ("ego_state", ego),
+            ("formation_relation_state", relation),
+        ):
+            if not bool(torch.isfinite(tensor).all()):
+                raise JointGRPOError(f"{name} must contain finite values")
+
+        sdf = self.drivable_sdf
+        if sdf is not None:
+            if not isinstance(sdf, Tensor) or sdf.dtype != torch.float32:
+                raise JointGRPOError("drivable_sdf must be float32")
+            if tuple(sdf.shape) != (int(state.shape[0]), NUM_PLATOON_ROLES, 256, 256):
+                raise JointGRPOError("drivable_sdf must have shape [B,3,256,256]")
+            if sdf.device != state.device or sdf.requires_grad:
+                raise JointGRPOError("drivable_sdf must be detached and colocated with context")
+            if not bool(torch.isfinite(sdf).all()):
+                raise JointGRPOError("drivable_sdf must contain finite values")
 
     @property
     def batch_size(self) -> int:
@@ -403,6 +477,10 @@ class JointGRPOLossResult:
     risk_pact_trajectory_risk_max: Tensor
     risk_pact_violation_mean: Tensor
     risk_pact_curriculum_scale: Tensor
+    risk_pact_background_risk_mean: Tensor
+    risk_pact_platoon_risk_mean: Tensor
+    risk_pact_road_risk_mean: Tensor
+    risk_pact_road_signed_distance_min_m: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -423,6 +501,10 @@ class JointGRPOLossResult:
             "risk_pact/trajectory_risk_max": self.risk_pact_trajectory_risk_max,
             "risk_pact/violation_mean": self.risk_pact_violation_mean,
             "risk_pact/curriculum_scale": self.risk_pact_curriculum_scale,
+            "risk_pact/background_risk_mean": self.risk_pact_background_risk_mean,
+            "risk_pact/platoon_risk_mean": self.risk_pact_platoon_risk_mean,
+            "risk_pact/road_risk_mean": self.risk_pact_road_risk_mean,
+            "risk_pact/road_signed_distance_min_m": self.risk_pact_road_signed_distance_min_m,
             "advantage/mean": _active_tensor_mean(
                 self.advantages, self.valid_executable_mode_mask
             ),
@@ -489,6 +571,10 @@ class JointGRPOLossResult:
             risk_pact_trajectory_risk_max=self.risk_pact_trajectory_risk_max.detach(),
             risk_pact_violation_mean=self.risk_pact_violation_mean.detach(),
             risk_pact_curriculum_scale=self.risk_pact_curriculum_scale.detach(),
+            risk_pact_background_risk_mean=self.risk_pact_background_risk_mean.detach(),
+            risk_pact_platoon_risk_mean=self.risk_pact_platoon_risk_mean.detach(),
+            risk_pact_road_risk_mean=self.risk_pact_road_risk_mean.detach(),
+            risk_pact_road_signed_distance_min_m=self.risk_pact_road_signed_distance_min_m.detach(),
         )
 
 
@@ -825,32 +911,53 @@ class _JointGRPOTrainerBase:
         batch_size: int,
         device: torch.device,
     ) -> RiskPACTRolloutContext | None:
-        """Capture graph-free actor geometry for later Risk-PACT replay.
+        """Capture graph-free multi-source scene geometry for Risk-PACT.
 
-        Baseline rollouts remain valid when both fields are absent.  A partial
-        actor context fails closed because it cannot define a risk field.
+        SDF construction is intentionally skipped for non-Risk-PACT baselines so
+        ``none`` and feasibility-only runs retain their previous collection cost.
         """
 
-        state = model_inputs.get("background_actor_state")
-        valid = model_inputs.get("background_actor_valid_mask")
-        if state is None and valid is None:
+        if not self.config.uses_risk_pact:
             return None
-        if state is None or valid is None:
+
+        required = (
+            "background_actor_state",
+            "background_actor_valid_mask",
+            "ego_state",
+            "formation_relation_state",
+            "relation_valid_mask",
+        )
+        missing = [name for name in required if name not in model_inputs]
+        if missing:
             raise JointGRPOError(
-                "Risk-PACT actor context requires both background_actor_state "
-                "and background_actor_valid_mask"
+                f"Risk-PACT multi-source context is missing fields: {missing}"
             )
+
+        drivable_sdf = None
+        if self.config.risk_pact_use_road_boundary:
+            bev = model_inputs.get("bev")
+            if bev is None:
+                raise JointGRPOError("road-boundary Risk-PACT requires bev input")
+            try:
+                drivable_sdf = build_drivable_signed_distance(bev)
+            except (TypeError, ValueError, RuntimeError) as exc:
+                raise JointGRPOError(f"failed to build Risk-PACT drivable SDF: {exc}") from exc
+
         context = RiskPACTRolloutContext(
-            background_actor_state=state.detach(),
-            background_actor_valid_mask=valid.detach(),
+            background_actor_state=model_inputs["background_actor_state"].detach(),
+            background_actor_valid_mask=model_inputs["background_actor_valid_mask"].detach(),
+            ego_state=model_inputs["ego_state"].detach(),
+            formation_relation_state=model_inputs["formation_relation_state"].detach(),
+            relation_valid_mask=model_inputs["relation_valid_mask"].detach(),
+            drivable_sdf=None if drivable_sdf is None else drivable_sdf.detach(),
         )
         if context.batch_size != int(batch_size):
             raise JointGRPOError(
-                "Risk-PACT actor context batch does not match planner context"
+                "Risk-PACT scene context batch does not match planner context"
             )
         if context.background_actor_state.device != device:
             raise JointGRPOError(
-                "Risk-PACT actor context must be colocated with planner inputs"
+                "Risk-PACT scene context must be colocated with planner inputs"
             )
         return context
 
@@ -1724,6 +1831,10 @@ class _JointGRPOTrainerBase:
         risk_pact_trajectory_risk_max = zero_aux.detach()
         risk_pact_violation_mean = zero_aux.detach()
         risk_pact_curriculum_scale = zero_aux.detach()
+        risk_pact_background_risk_mean = zero_aux.detach()
+        risk_pact_platoon_risk_mean = zero_aux.detach()
+        risk_pact_road_risk_mean = zero_aux.detach()
+        risk_pact_road_signed_distance_min_m = zero_aux.detach()
 
         if self.config.uses_risk_pact and include_risk_pact_teacher:
             actor = rollout.require_risk_pact_context()
@@ -1742,11 +1853,21 @@ class _JointGRPOTrainerBase:
                 TRAJECTORY_STEPS, TRAJECTORY_DIM,
             )
             risk_cfg = RiskPACTConfig(
+                use_background_actor=self.config.risk_pact_use_background_actor,
+                use_platoon_actor=self.config.risk_pact_use_platoon_actor,
+                use_road_boundary=self.config.risk_pact_use_road_boundary,
                 horizon_dt_s=self.config.risk_pact_horizon_dt_s,
                 longitudinal_margin_m=self.config.risk_pact_longitudinal_margin_m,
                 lateral_margin_m=self.config.risk_pact_lateral_margin_m,
                 minimum_sigma_x_m=self.config.risk_pact_minimum_sigma_x_m,
                 minimum_sigma_y_m=self.config.risk_pact_minimum_sigma_y_m,
+                ego_length_m=self.config.risk_pact_ego_length_m,
+                ego_width_m=self.config.risk_pact_ego_width_m,
+                inflate_actor_by_ego_footprint=self.config.risk_pact_inflate_actor_by_ego_footprint,
+                platoon_vehicle_length_m=self.config.risk_pact_platoon_vehicle_length_m,
+                platoon_vehicle_width_m=self.config.risk_pact_platoon_vehicle_width_m,
+                road_safety_margin_m=self.config.risk_pact_road_safety_margin_m,
+                road_temperature_m=self.config.risk_pact_road_temperature_m,
                 temporal_softmax_beta=self.config.risk_pact_temporal_softmax_beta,
                 risk_threshold=self.config.risk_pact_risk_threshold,
                 violation_temperature=self.config.risk_pact_violation_temperature,
@@ -1762,10 +1883,23 @@ class _JointGRPOTrainerBase:
                 ramp_updates = self.config.risk_pact_curriculum_ramp_updates
                 schedule = self.config.risk_pact_curriculum_schedule
             curriculum = risk_pact_curriculum_state(self.optimizer_step, _CurriculumConfig())
+            platoon_actor_state, platoon_actor_valid = build_platoon_actor_state(
+                actor.ego_state.to(current_all_modes.device),
+                actor.formation_relation_state.to(current_all_modes.device),
+                actor.relation_valid_mask.to(current_all_modes.device),
+                config=risk_cfg,
+            )
             teacher = build_x0_pact_teacher(
                 old_flat,
                 actor.background_actor_state.to(current_all_modes.device),
                 actor.background_actor_valid_mask.to(current_all_modes.device),
+                platoon_actor_state=platoon_actor_state,
+                platoon_actor_valid_mask=platoon_actor_valid,
+                road_sdf=(
+                    None
+                    if actor.drivable_sdf is None
+                    else actor.drivable_sdf.to(current_all_modes.device)
+                ),
                 curriculum_scale=curriculum.scale,
                 config=risk_cfg,
             )
@@ -1814,6 +1948,30 @@ class _JointGRPOTrainerBase:
                 teacher.constraint.violation * valid_weight
             ).sum().div(valid_count).detach()
             risk_pact_curriculum_scale = current_all_modes.new_tensor(curriculum.scale).detach()
+
+            valid_time_weight = valid_weight.unsqueeze(-1)
+            valid_time_count = (valid_count * float(TRAJECTORY_STEPS)).clamp_min(1.0)
+
+            def _component_mean(component: Tensor | None) -> Tensor:
+                if component is None:
+                    return current_all_modes.new_zeros(()).detach()
+                return (component * valid_time_weight).sum().div(valid_time_count).detach()
+
+            risk_pact_background_risk_mean = _component_mean(teacher.field.background_risk)
+            risk_pact_platoon_risk_mean = _component_mean(teacher.field.platoon_risk)
+            risk_pact_road_risk_mean = _component_mean(teacher.field.road_risk)
+            if teacher.field.road_signed_distance_m is not None:
+                road_distance = torch.where(
+                    valid_flat.unsqueeze(-1),
+                    teacher.field.road_signed_distance_m,
+                    torch.full_like(teacher.field.road_signed_distance_m, float("inf")),
+                )
+                road_min = road_distance.min()
+                risk_pact_road_signed_distance_min_m = torch.where(
+                    torch.isfinite(road_min),
+                    road_min,
+                    road_min.new_zeros(()),
+                ).detach()
 
         total = (
             float(self.config.trajectory_pg_weight) * trajectory_pg
@@ -1866,6 +2024,10 @@ class _JointGRPOTrainerBase:
             risk_pact_trajectory_risk_max=risk_pact_trajectory_risk_max,
             risk_pact_violation_mean=risk_pact_violation_mean,
             risk_pact_curriculum_scale=risk_pact_curriculum_scale,
+            risk_pact_background_risk_mean=risk_pact_background_risk_mean,
+            risk_pact_platoon_risk_mean=risk_pact_platoon_risk_mean,
+            risk_pact_road_risk_mean=risk_pact_road_risk_mean,
+            risk_pact_road_signed_distance_min_m=risk_pact_road_signed_distance_min_m,
         )
 
     @staticmethod

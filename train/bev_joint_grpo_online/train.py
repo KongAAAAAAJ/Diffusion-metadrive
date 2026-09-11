@@ -49,12 +49,29 @@ def _feasibility_from_mapping(value: Mapping[str, object], *, enabled: bool) -> 
 def _risk_pact_from_mapping(value: Mapping[str, object]) -> RiskPACTPostTrainingConfig:
     curriculum = _mapping(value.get('curriculum'), name='safety_post_training.risk_pact.curriculum', default={})
     visualization = _mapping(value.get('visualization'), name='safety_post_training.risk_pact.visualization', default={})
+    components = _mapping(value.get('components'), name='safety_post_training.risk_pact.components', default={})
+    actor = _mapping(value.get('actor'), name='safety_post_training.risk_pact.actor', default={})
+    platoon = _mapping(value.get('platoon'), name='safety_post_training.risk_pact.platoon', default={})
+    road = _mapping(value.get('road'), name='safety_post_training.risk_pact.road', default={})
+
+    # Nested Step-5.5 schema is preferred.  Legacy flat actor keys remain
+    # accepted so prior smoke configs continue to parse.
     risk_config = RiskPACTConfig(
+        use_background_actor=bool(components.get('background_actor', True)),
+        use_platoon_actor=bool(components.get('platoon_actor', True)),
+        use_road_boundary=bool(components.get('road_boundary', True)),
         horizon_dt_s=float(value.get('horizon_dt_s', 0.5)),
-        longitudinal_margin_m=float(value.get('longitudinal_margin_m', 3.0)),
-        lateral_margin_m=float(value.get('lateral_margin_m', 1.2)),
-        minimum_sigma_x_m=float(value.get('minimum_sigma_x_m', 2.5)),
-        minimum_sigma_y_m=float(value.get('minimum_sigma_y_m', 1.2)),
+        longitudinal_margin_m=float(actor.get('longitudinal_margin_m', value.get('longitudinal_margin_m', 3.0))),
+        lateral_margin_m=float(actor.get('lateral_margin_m', value.get('lateral_margin_m', 1.2))),
+        minimum_sigma_x_m=float(actor.get('minimum_sigma_x_m', value.get('minimum_sigma_x_m', 2.5))),
+        minimum_sigma_y_m=float(actor.get('minimum_sigma_y_m', value.get('minimum_sigma_y_m', 1.2))),
+        ego_length_m=float(actor.get('ego_length_m', 8.0)),
+        ego_width_m=float(actor.get('ego_width_m', 2.5)),
+        inflate_actor_by_ego_footprint=bool(actor.get('inflate_by_ego_footprint', True)),
+        platoon_vehicle_length_m=float(platoon.get('vehicle_length_m', 8.0)),
+        platoon_vehicle_width_m=float(platoon.get('vehicle_width_m', 2.5)),
+        road_safety_margin_m=float(road.get('safety_margin_m', 0.4)),
+        road_temperature_m=float(road.get('temperature_m', 0.30)),
         temporal_softmax_beta=float(value.get('temporal_softmax_beta', 12.0)),
         risk_threshold=float(value.get('risk_threshold', 0.35)),
         violation_temperature=float(value.get('violation_temperature', 0.04)),

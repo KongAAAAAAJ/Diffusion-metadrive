@@ -6,18 +6,39 @@ import math
 
 @dataclass(frozen=True)
 class RiskPACTConfig:
-    """Small-pilot defaults for risk-field PACT.
+    """Risk-PACT-lite safety-field configuration.
 
-    The first pilot intentionally uses a simple constant-velocity actor forecast
-    and center-point ego risk queries. Vehicle footprint support can be added
-    after the gradient sanity check passes.
+    Step 5.5 upgrades the pilot from a background-actor-only field to a
+    multi-source field containing background traffic, platoon neighbors and the
+    drivable-road boundary.  All components remain differentiable with respect
+    to candidate trajectory coordinates; scene geometry itself stays detached.
     """
 
+    # Component switches (useful for ablations).
+    use_background_actor: bool = True
+    use_platoon_actor: bool = True
+    use_road_boundary: bool = True
+
+    # Shared horizon / dynamic-actor geometry.
     horizon_dt_s: float = 0.5
     longitudinal_margin_m: float = 3.0
     lateral_margin_m: float = 1.2
     minimum_sigma_x_m: float = 2.5
     minimum_sigma_y_m: float = 1.2
+    ego_length_m: float = 8.0
+    ego_width_m: float = 2.5
+    inflate_actor_by_ego_footprint: bool = True
+
+    # Platoon-neighbor dimensions used to convert formation relation features
+    # to the same 8-D actor contract as background traffic.
+    platoon_vehicle_length_m: float = 8.0
+    platoon_vehicle_width_m: float = 2.5
+
+    # Road-boundary field from DRIVABLE signed distance.
+    road_safety_margin_m: float = 0.4
+    road_temperature_m: float = 0.30
+
+    # Trajectory-level risk / PACT teacher.
     temporal_softmax_beta: float = 12.0
     risk_threshold: float = 0.35
     violation_temperature: float = 0.04
@@ -27,22 +48,43 @@ class RiskPACTConfig:
     gradient_clip_norm: float = 10.0
 
     def __post_init__(self) -> None:
+        for name in (
+            "use_background_actor",
+            "use_platoon_actor",
+            "use_road_boundary",
+            "inflate_actor_by_ego_footprint",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be bool")
+        if not (self.use_background_actor or self.use_platoon_actor or self.use_road_boundary):
+            raise ValueError("at least one Risk-PACT risk component must be enabled")
+
         positive = (
             "horizon_dt_s",
             "longitudinal_margin_m",
             "lateral_margin_m",
             "minimum_sigma_x_m",
             "minimum_sigma_y_m",
+            "ego_length_m",
+            "ego_width_m",
+            "platoon_vehicle_length_m",
+            "platoon_vehicle_width_m",
+            "road_temperature_m",
             "temporal_softmax_beta",
             "violation_temperature",
             "teacher_step_m",
             "gradient_eps",
             "gradient_clip_norm",
         )
+        non_negative = ("road_safety_margin_m",)
         for name in positive:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be positive and finite")
+        for name in non_negative:
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be non-negative and finite")
         if not 0.0 < float(self.risk_threshold) < 1.0:
             raise ValueError("risk_threshold must be in (0,1)")
         if not 0.0 <= float(self.safe_margin) < float(self.risk_threshold):
@@ -51,18 +93,7 @@ class RiskPACTConfig:
 
 @dataclass(frozen=True)
 class RiskPACTVisualizationConfig:
-    """Training-time debug visualization controls.
-
-    This is deliberately separate from :class:`RiskPACTConfig` so enabling or
-    disabling plots never changes the learning objective.  The intended usage is:
-
-    * smoke run: enabled=True, interval_steps=5, max_events=4
-    * formal run: enabled=False
-
-    ``step`` is the caller's optimizer/update step.  A plot event is emitted at
-    ``start_step`` and then every ``interval_steps`` until ``max_events`` is hit.
-    Set ``max_events=None`` to remove that cap.
-    """
+    """Training-time debug visualization controls."""
 
     enabled: bool = False
     interval_steps: int = 5
