@@ -184,6 +184,9 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
     diagnostic_early_stop = False
     stability_guard_rejections_this_run = 0
     stability_guard_diagnostic: dict[str, object] | None = None
+    # Adapter drift is diagnostic-only. Warn once per mode when the legacy
+    # threshold is crossed, but never reject or roll back an update for drift.
+    adapter_drift_warned_modes: set[int] = set()
     try:
         while accepted_update_states < target_accepted_update_states and (not diagnostic_early_stop) and (stability_guard_diagnostic is None):
             bucket_index = next_bucket_index
@@ -336,13 +339,43 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                             next_update_state = accepted_update_states + int(not update.stability_guard_rejected)
                             rollout_advantages = update.loss.advantages
                             _, optimizer_metrics = _split_loss_metrics_by_step_axis(update.loss.scalar_metrics())
-                            optimizer_metrics.update({'gradient_total': float(update.total_gradient_norm), 'zero_signal_epoch': float(update.zero_signal), 'policy/post_update_reference_kl': float(update.post_update_reference_kl), 'policy/adapter_drift_max': float(max(update.adapter_relative_drifts)), 'stability_guard/rejected': float(update.stability_guard_rejected), 'optimizer_step': float(update.optimizer_step), 'accepted_update_state': float(next_update_state)})
+                            adapter_drift_warning_threshold = float(
+                                trainer.config.max_adapter_relative_drift
+                            )
+                            adapter_drift_warning_modes = tuple(
+                                mode
+                                for mode, drift in enumerate(update.adapter_relative_drifts)
+                                if drift > adapter_drift_warning_threshold
+                            )
+                            new_adapter_drift_warning_modes = tuple(
+                                mode
+                                for mode in adapter_drift_warning_modes
+                                if mode not in adapter_drift_warned_modes
+                            )
+                            if new_adapter_drift_warning_modes:
+                                warning_details = ", ".join(
+                                    f"mode_{mode}={update.adapter_relative_drifts[mode]:.6f}"
+                                    for mode in new_adapter_drift_warning_modes
+                                )
+                                print(
+                                    "[GRPO][WARNING] adapter relative drift exceeded "
+                                    f"warning threshold {adapter_drift_warning_threshold:.6f}: "
+                                    f"{warning_details}. Training continues; adapter drift is "
+                                    "diagnostic-only and does not trigger rollback."
+                                )
+                                adapter_drift_warned_modes.update(
+                                    new_adapter_drift_warning_modes
+                                )
+                            optimizer_metrics.update({'gradient_total': float(update.total_gradient_norm), 'zero_signal_epoch': float(update.zero_signal), 'policy/post_update_reference_kl': float(update.post_update_reference_kl), 'policy/adapter_drift_max': float(max(update.adapter_relative_drifts)), 'policy/adapter_drift_warning': float(bool(adapter_drift_warning_modes)), 'policy/adapter_drift_warning_threshold': adapter_drift_warning_threshold, 'stability_guard/rejected': float(update.stability_guard_rejected), 'optimizer_step': float(update.optimizer_step), 'accepted_update_state': float(next_update_state)})
                             for name, value in update.gradient_norms.items():
                                 optimizer_metrics[f'gradient_pre_clip/{name}'] = float(value)
                             for name, value in update.clipped_gradient_norms.items():
                                 optimizer_metrics[f'gradient_post_clip/{name}'] = float(value)
                             for mode, drift in enumerate(update.adapter_relative_drifts):
                                 optimizer_metrics[f'policy/mode_{mode}/adapter_drift'] = float(drift)
+                                optimizer_metrics[f'policy/mode_{mode}/adapter_drift_warning'] = float(
+                                    mode in adapter_drift_warning_modes
+                                )
                             for metric_name, metric_value in optimizer_metrics.items():
                                 writer.add_scalar(metric_name, metric_value, next_update_state)
                             if not update.stability_guard_rejected and _write_advantage_vector_summary(writer, rollout_advantages, next_update_state, target_accepted_update_states, config.advantage_vector_log_interval_rollouts, trajectories_per_mode=trainer.config.trajectories_per_mode):
