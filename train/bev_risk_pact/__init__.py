@@ -2,6 +2,11 @@
 
 from .config import RiskPACTConfig, RiskPACTVisualizationConfig
 from .constraint import RiskConstraintResult, RiskLevelSetConstraint
+from .curriculum import (
+    RiskPACTCurriculumState,
+    risk_pact_curriculum_scale,
+    risk_pact_curriculum_state,
+)
 from .risk_field import DynamicGaussianRiskField, RiskFieldResult
 from .teacher import PACTTeacherResult, build_x0_pact_teacher
 from .training_visualizer import (
@@ -14,6 +19,9 @@ __all__ = [
     "RiskPACTVisualizationConfig",
     "RiskConstraintResult",
     "RiskLevelSetConstraint",
+    "RiskPACTCurriculumState",
+    "risk_pact_curriculum_scale",
+    "risk_pact_curriculum_state",
     "DynamicGaussianRiskField",
     "RiskFieldResult",
     "PACTTeacherResult",
