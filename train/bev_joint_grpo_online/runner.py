@@ -322,6 +322,28 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                         if accepted_attempt is not None:
                             rollout, proxy, frozen_proxy, signal_mode_mask, accepted_attempt_metrics = accepted_attempt
                             rollout = rollout.with_reward_signals(current_rewards=torch.from_numpy(np.asarray(proxy.rewards, dtype=np.float32)).unsqueeze(0).to(torch_device), frozen_rewards=torch.from_numpy(np.asarray(frozen_proxy.rewards, dtype=np.float32)).unsqueeze(0).to(torch_device), collision_mask=torch.from_numpy(np.asarray(proxy.collision, dtype=np.bool_)).unsqueeze(0).to(torch_device), out_of_drivable_mask=torch.from_numpy(np.asarray(proxy.out_of_drivable, dtype=np.bool_)).unsqueeze(0).to(torch_device), valid_executable_mode_mask=torch.from_numpy(np.asarray(proxy.valid_mode_mask, dtype=np.bool_)).unsqueeze(0).to(torch_device))
+                            # TEMP: remove after confirming the live GRPO rollout shapes.
+                            ctx = rollout.require_risk_pact_context()
+                            print(
+                                "[GRPO debug] background_actor_state.shape="
+                                f"{tuple(ctx.background_actor_state.shape)}",
+                                flush=True,
+                            )
+                            print(
+                                "[GRPO debug] background_actor_valid_mask.shape="
+                                f"{tuple(ctx.background_actor_valid_mask.shape)}",
+                                flush=True,
+                            )
+                            print(
+                                "[GRPO debug] chains_normalized.shape="
+                                f"{tuple(rollout.chains_normalized.shape)}",
+                                flush=True,
+                            )
+                            print(
+                                "[GRPO debug] candidate_trajectories.shape="
+                                f"{tuple(rollout.candidate_trajectories.shape)}",
+                                flush=True,
+                            )
                             optimizer_step_before = trainer.optimizer_step
                             update_started = time.perf_counter()
                             update = trainer.update(rollout)
