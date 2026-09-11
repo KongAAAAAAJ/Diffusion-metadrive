@@ -33,7 +33,7 @@ online:
 # mode: risk_pact_lite                -> GRPO + final-x0 Risk-PACT-lite curriculum distillation.
 # mode: feasibility_plus_risk_pact    -> GRPO + feasibility + Risk-PACT-lite.
 safety_post_training:
-  mode: feasibility_loss
+  mode: risk_pact_lite
 
   feasibility:
     loss_weight: 0.01
