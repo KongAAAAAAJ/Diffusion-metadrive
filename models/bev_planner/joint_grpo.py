@@ -27,6 +27,14 @@ from models.bev_planner.ddim_transition import (
     DEFAULT_DDIM_PATH,
     StandardGaussianDDIM,
 )
+from models.bev_planner.time_varying_feasibility import (
+    steering_feasibility_loss,
+    time_varying_limit,
+)
+from train.bev_risk_pact.config import RiskPACTConfig
+from train.bev_risk_pact.curriculum import risk_pact_curriculum_state
+from train.bev_risk_pact.loss import pact_lite_distillation_loss
+from train.bev_risk_pact.teacher import build_x0_pact_teacher
 
 
 class JointGRPOError(RuntimeError):
@@ -50,7 +58,53 @@ class JointGRPOConfig:
     heading_beta_rad: float = 0.1
     heading_bc_weight: float = 0.2
 
+    # Unified safety post-training switch.  Risk-PACT-lite remains a final-x0
+    # pilot; feasibility is evaluated at every DDIM replay step.
+    safety_post_training_mode: str = "none"
+
+    feasibility_weight: float = 0.01
+    steering_feasibility_weight: float = 1.0
+    steering_rate_feasibility_weight: float = 1.0
+    wheelbase_m: float = 5.6
+    trajectory_dt_s: float = 0.5
+    min_segment_length_m: float = 0.2
+    steering_initial_limit_deg: float = 48.24
+    steering_final_limit_deg: float = 24.13
+    steering_rate_initial_limit_deg_s: float = 120.0
+    steering_rate_final_limit_deg_s: float = 60.0
+    feasibility_schedule_power: float = 1.0
+
+    risk_pact_distill_weight: float = 1.0
+    risk_pact_horizon_dt_s: float = 0.5
+    risk_pact_longitudinal_margin_m: float = 3.0
+    risk_pact_lateral_margin_m: float = 1.2
+    risk_pact_minimum_sigma_x_m: float = 2.5
+    risk_pact_minimum_sigma_y_m: float = 1.2
+    risk_pact_temporal_softmax_beta: float = 12.0
+    risk_pact_risk_threshold: float = 0.35
+    risk_pact_violation_temperature: float = 0.04
+    risk_pact_safe_margin: float = 0.05
+    risk_pact_teacher_step_m: float = 0.20
+    risk_pact_gradient_eps: float = 1.0e-6
+    risk_pact_gradient_clip_norm: float = 10.0
+    risk_pact_curriculum_start_scale: float = 0.2
+    risk_pact_curriculum_end_scale: float = 1.0
+    risk_pact_curriculum_warmup_updates: int = 0
+    risk_pact_curriculum_ramp_updates: int = 100
+    risk_pact_curriculum_schedule: str = "linear"
+
     def __post_init__(self) -> None:
+        allowed_safety_modes = (
+            "none",
+            "feasibility_loss",
+            "risk_pact_lite",
+            "feasibility_plus_risk_pact",
+        )
+        if self.safety_post_training_mode not in allowed_safety_modes:
+            raise JointGRPOError(
+                "safety_post_training_mode must be one of: "
+                + ", ".join(allowed_safety_modes)
+            )
         if (
             isinstance(self.trajectories_per_mode, bool)
             or not isinstance(self.trajectories_per_mode, int)
@@ -68,6 +122,24 @@ class JointGRPOConfig:
             "max_adapter_relative_drift",
             "xy_beta_m",
             "heading_beta_rad",
+            "wheelbase_m",
+            "trajectory_dt_s",
+            "min_segment_length_m",
+            "steering_initial_limit_deg",
+            "steering_final_limit_deg",
+            "steering_rate_initial_limit_deg_s",
+            "steering_rate_final_limit_deg_s",
+            "feasibility_schedule_power",
+            "risk_pact_horizon_dt_s",
+            "risk_pact_longitudinal_margin_m",
+            "risk_pact_lateral_margin_m",
+            "risk_pact_minimum_sigma_x_m",
+            "risk_pact_minimum_sigma_y_m",
+            "risk_pact_temporal_softmax_beta",
+            "risk_pact_violation_temperature",
+            "risk_pact_teacher_step_m",
+            "risk_pact_gradient_eps",
+            "risk_pact_gradient_clip_norm",
         )
         non_negative = (
             "trajectory_pg_weight",
@@ -75,6 +147,10 @@ class JointGRPOConfig:
             "reference_kl_weight",
             "weight_decay",
             "heading_bc_weight",
+            "feasibility_weight",
+            "steering_feasibility_weight",
+            "steering_rate_feasibility_weight",
+            "risk_pact_distill_weight",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -84,6 +160,40 @@ class JointGRPOConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
                 raise JointGRPOError(f"{name} must be non-negative and finite")
+        if self.steering_initial_limit_deg >= 90.0 or self.steering_final_limit_deg >= 90.0:
+            raise JointGRPOError("steering limits must be smaller than 90 degrees")
+        if self.steering_initial_limit_deg < self.steering_final_limit_deg:
+            raise JointGRPOError("initial steering limit must be >= final steering limit")
+        if self.steering_rate_initial_limit_deg_s < self.steering_rate_final_limit_deg_s:
+            raise JointGRPOError("initial steering-rate limit must be >= final steering-rate limit")
+        if self.uses_feasibility and self.feasibility_weight <= 0.0:
+            raise JointGRPOError("feasibility safety mode requires feasibility_weight > 0")
+        if self.uses_feasibility and self.steering_feasibility_weight <= 0.0 and self.steering_rate_feasibility_weight <= 0.0:
+            raise JointGRPOError("feasibility safety mode requires a positive component weight")
+        if self.uses_risk_pact and self.risk_pact_distill_weight <= 0.0:
+            raise JointGRPOError("Risk-PACT safety mode requires risk_pact_distill_weight > 0")
+        if not 0.0 < self.risk_pact_risk_threshold < 1.0:
+            raise JointGRPOError("risk_pact_risk_threshold must be in (0,1)")
+        if not 0.0 <= self.risk_pact_safe_margin < self.risk_pact_risk_threshold:
+            raise JointGRPOError("risk_pact_safe_margin must be in [0, risk_threshold)")
+        if not (0.0 <= self.risk_pact_curriculum_start_scale <= self.risk_pact_curriculum_end_scale <= 1.0):
+            raise JointGRPOError("Risk-PACT curriculum scales must satisfy 0 <= start <= end <= 1")
+        if self.risk_pact_curriculum_warmup_updates < 0 or self.risk_pact_curriculum_ramp_updates <= 0:
+            raise JointGRPOError("Risk-PACT curriculum update counts are invalid")
+        if self.risk_pact_curriculum_schedule != "linear":
+            raise JointGRPOError("Risk-PACT Step-5 supports only a linear curriculum")
+
+    @property
+    def uses_feasibility(self) -> bool:
+        return self.safety_post_training_mode in (
+            "feasibility_loss", "feasibility_plus_risk_pact"
+        )
+
+    @property
+    def uses_risk_pact(self) -> bool:
+        return self.safety_post_training_mode in (
+            "risk_pact_lite", "feasibility_plus_risk_pact"
+        )
 
     @property
     def roll_timesteps(self) -> tuple[int, ...]:
@@ -98,7 +208,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v8",
+        "version": "stage2_joint_grpo_optimizer_v10_risk_pact_lite",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -281,6 +391,18 @@ class JointGRPOLossResult:
     trajectory_pg_by_mode: Tensor
     behavior_cloning_by_mode: Tensor
     reference_kl_by_mode: Tensor
+    feasibility: Tensor
+    weighted_feasibility: Tensor
+    risk_pact_distillation: Tensor
+    weighted_risk_pact_distillation: Tensor
+    risk_pact_active_ratio: Tensor
+    risk_pact_active_count: Tensor
+    risk_pact_teacher_displacement_mean_m: Tensor
+    risk_pact_teacher_displacement_max_m: Tensor
+    risk_pact_trajectory_risk_mean: Tensor
+    risk_pact_trajectory_risk_max: Tensor
+    risk_pact_violation_mean: Tensor
+    risk_pact_curriculum_scale: Tensor
 
     def scalar_metrics(self) -> dict[str, float]:
         values = {
@@ -289,6 +411,18 @@ class JointGRPOLossResult:
             "loss/behavior_cloning": self.behavior_cloning,
             "loss/trajectory_reference_kl": self.trajectory_reference_kl,
             "loss/reference_kl": self.reference_kl,
+            "loss/feasibility": self.feasibility,
+            "loss/weighted_feasibility": self.weighted_feasibility,
+            "loss/risk_pact_distillation": self.risk_pact_distillation,
+            "loss/weighted_risk_pact_distillation": self.weighted_risk_pact_distillation,
+            "risk_pact/active_ratio": self.risk_pact_active_ratio,
+            "risk_pact/active_count": self.risk_pact_active_count,
+            "risk_pact/teacher_displacement_mean_m": self.risk_pact_teacher_displacement_mean_m,
+            "risk_pact/teacher_displacement_max_m": self.risk_pact_teacher_displacement_max_m,
+            "risk_pact/trajectory_risk_mean": self.risk_pact_trajectory_risk_mean,
+            "risk_pact/trajectory_risk_max": self.risk_pact_trajectory_risk_max,
+            "risk_pact/violation_mean": self.risk_pact_violation_mean,
+            "risk_pact/curriculum_scale": self.risk_pact_curriculum_scale,
             "advantage/mean": _active_tensor_mean(
                 self.advantages, self.valid_executable_mode_mask
             ),
@@ -343,6 +477,18 @@ class JointGRPOLossResult:
             trajectory_pg_by_mode=self.trajectory_pg_by_mode.detach(),
             behavior_cloning_by_mode=self.behavior_cloning_by_mode.detach(),
             reference_kl_by_mode=self.reference_kl_by_mode.detach(),
+            feasibility=self.feasibility.detach(),
+            weighted_feasibility=self.weighted_feasibility.detach(),
+            risk_pact_distillation=self.risk_pact_distillation.detach(),
+            weighted_risk_pact_distillation=self.weighted_risk_pact_distillation.detach(),
+            risk_pact_active_ratio=self.risk_pact_active_ratio.detach(),
+            risk_pact_active_count=self.risk_pact_active_count.detach(),
+            risk_pact_teacher_displacement_mean_m=self.risk_pact_teacher_displacement_mean_m.detach(),
+            risk_pact_teacher_displacement_max_m=self.risk_pact_teacher_displacement_max_m.detach(),
+            risk_pact_trajectory_risk_mean=self.risk_pact_trajectory_risk_mean.detach(),
+            risk_pact_trajectory_risk_max=self.risk_pact_trajectory_risk_max.detach(),
+            risk_pact_violation_mean=self.risk_pact_violation_mean.detach(),
+            risk_pact_curriculum_scale=self.risk_pact_curriculum_scale.detach(),
         )
 
 
@@ -1310,6 +1456,8 @@ class _JointGRPOTrainerBase:
         advantages: Tensor,
         signal_mode_mask: Tensor,
         valid_executable_mode_mask: Tensor,
+        *,
+        include_risk_pact_teacher: bool = True,
     ) -> JointGRPOLossResult:
         batch_size = rollout.batch_size
         trajectories = rollout.trajectories_per_mode
@@ -1368,6 +1516,7 @@ class _JointGRPOTrainerBase:
 
         current_log_probs = []
         trajectory_kls = []
+        feasibility_step_losses: list[Tensor] = []
         final_current_candidates = final_reference_candidates = None
         for step_index, (timestep, previous_timestep) in enumerate(
             DEFAULT_DDIM_PATH.transitions()
@@ -1398,6 +1547,46 @@ class _JointGRPOTrainerBase:
                 valid_mask=valid_mask,
                 predecessor_history=predecessor_history,
             )
+            if self.config.uses_feasibility:
+                steering_limit_deg = time_varying_limit(
+                    timestep=timestep,
+                    initial_timestep=DEFAULT_DDIM_PATH.initial_timestep,
+                    initial_limit=self.config.steering_initial_limit_deg,
+                    final_limit=self.config.steering_final_limit_deg,
+                    schedule_power=self.config.feasibility_schedule_power,
+                )
+                steering_rate_limit_deg_s = time_varying_limit(
+                    timestep=timestep,
+                    initial_timestep=DEFAULT_DDIM_PATH.initial_timestep,
+                    initial_limit=self.config.steering_rate_initial_limit_deg_s,
+                    final_limit=self.config.steering_rate_final_limit_deg_s,
+                    schedule_power=self.config.feasibility_schedule_power,
+                )
+                fea = steering_feasibility_loss(
+                    current_candidates[..., :2],
+                    steering_limit_deg=steering_limit_deg,
+                    steering_rate_limit_deg_s=steering_rate_limit_deg_s,
+                    wheelbase_m=self.config.wheelbase_m,
+                    trajectory_dt_s=self.config.trajectory_dt_s,
+                    min_segment_length_m=self.config.min_segment_length_m,
+                )
+                def _fea_blocks(value: Tensor) -> Tensor:
+                    return value.reshape(
+                        batch_size, trajectories, NUM_PLATOON_ROLES, NUM_MODES
+                    ).permute(0, 2, 3, 1).contiguous()
+                steering_loss = _hierarchical_active_mean(
+                    _fea_blocks(fea.steering_loss), valid_executable_mode_mask
+                )
+                steering_rate_loss = _hierarchical_active_mean(
+                    _fea_blocks(fea.steering_rate_loss), valid_executable_mode_mask
+                )
+                feasibility_step_losses.append(
+                    float(self.config.steering_feasibility_weight) * steering_loss
+                    + float(self.config.steering_rate_feasibility_weight) * steering_rate_loss
+                )
+            else:
+                feasibility_step_losses.append(current_candidates.sum() * 0.0)
+
             current_output = self.planner._normalize_xy(
                 current_candidates[..., :2]
             ).float()
@@ -1513,10 +1702,125 @@ class _JointGRPOTrainerBase:
             valid_executable_mode_mask,
         )
         reference_kl = trajectory_reference_kl
+
+        feasibility = torch.stack(feasibility_step_losses).mean()
+        weighted_feasibility = (
+            float(self.config.feasibility_weight) * feasibility
+            if self.config.uses_feasibility
+            else feasibility * 0.0
+        )
+
+        # PACT-lite deliberately projects the *on-policy rollout* final x0, not
+        # the frozen Stage-1 reference.  The student replay is generated from
+        # the exact stored DDIM chain, preserving timestep/noise/mode identity.
+        zero_aux = current_all_modes.sum() * 0.0
+        risk_pact_distillation = zero_aux
+        weighted_risk_pact_distillation = zero_aux
+        risk_pact_active_ratio = zero_aux.detach()
+        risk_pact_active_count = zero_aux.detach()
+        risk_pact_teacher_displacement_mean_m = zero_aux.detach()
+        risk_pact_teacher_displacement_max_m = zero_aux.detach()
+        risk_pact_trajectory_risk_mean = zero_aux.detach()
+        risk_pact_trajectory_risk_max = zero_aux.detach()
+        risk_pact_violation_mean = zero_aux.detach()
+        risk_pact_curriculum_scale = zero_aux.detach()
+
+        if self.config.uses_risk_pact and include_risk_pact_teacher:
+            actor = rollout.require_risk_pact_context()
+            old_all_modes = rollout.candidate_trajectories.to(current_all_modes.device)
+            if tuple(old_all_modes.shape) != tuple(current_all_modes.shape):
+                raise JointGRPOError(
+                    "Risk-PACT old/student candidate shapes must match exactly"
+                )
+            # [B,R,M,N,H,D] -> [B,R,M*N,H,D], preserving identical flatten order
+            old_flat = old_all_modes.reshape(
+                batch_size, NUM_PLATOON_ROLES, NUM_MODES * trajectories,
+                TRAJECTORY_STEPS, TRAJECTORY_DIM,
+            )
+            student_flat = current_all_modes.reshape(
+                batch_size, NUM_PLATOON_ROLES, NUM_MODES * trajectories,
+                TRAJECTORY_STEPS, TRAJECTORY_DIM,
+            )
+            risk_cfg = RiskPACTConfig(
+                horizon_dt_s=self.config.risk_pact_horizon_dt_s,
+                longitudinal_margin_m=self.config.risk_pact_longitudinal_margin_m,
+                lateral_margin_m=self.config.risk_pact_lateral_margin_m,
+                minimum_sigma_x_m=self.config.risk_pact_minimum_sigma_x_m,
+                minimum_sigma_y_m=self.config.risk_pact_minimum_sigma_y_m,
+                temporal_softmax_beta=self.config.risk_pact_temporal_softmax_beta,
+                risk_threshold=self.config.risk_pact_risk_threshold,
+                violation_temperature=self.config.risk_pact_violation_temperature,
+                safe_margin=self.config.risk_pact_safe_margin,
+                teacher_step_m=self.config.risk_pact_teacher_step_m,
+                gradient_eps=self.config.risk_pact_gradient_eps,
+                gradient_clip_norm=self.config.risk_pact_gradient_clip_norm,
+            )
+            class _CurriculumConfig:
+                start_scale = self.config.risk_pact_curriculum_start_scale
+                end_scale = self.config.risk_pact_curriculum_end_scale
+                warmup_updates = self.config.risk_pact_curriculum_warmup_updates
+                ramp_updates = self.config.risk_pact_curriculum_ramp_updates
+                schedule = self.config.risk_pact_curriculum_schedule
+            curriculum = risk_pact_curriculum_state(self.optimizer_step, _CurriculumConfig())
+            teacher = build_x0_pact_teacher(
+                old_flat,
+                actor.background_actor_state.to(current_all_modes.device),
+                actor.background_actor_valid_mask.to(current_all_modes.device),
+                curriculum_scale=curriculum.scale,
+                config=risk_cfg,
+            )
+            valid_flat = valid_executable_mode_mask.unsqueeze(-1).expand(
+                batch_size, NUM_PLATOON_ROLES, NUM_MODES, trajectories
+            ).reshape(batch_size, NUM_PLATOON_ROLES, NUM_MODES * trajectories)
+            active_flat = teacher.constraint.near_or_unsafe_mask & valid_flat
+            teacher = replace(
+                teacher,
+                constraint=replace(
+                    teacher.constraint,
+                    near_or_unsafe_mask=active_flat,
+                    safe_mask=teacher.constraint.safe_mask | ~valid_flat,
+                    violation=torch.where(
+                        valid_flat,
+                        teacher.constraint.violation,
+                        torch.zeros_like(teacher.constraint.violation),
+                    ),
+                ),
+            )
+            pact = pact_lite_distillation_loss(student_flat, teacher)
+            risk_pact_distillation = pact.loss
+            weighted_risk_pact_distillation = (
+                float(self.config.risk_pact_distill_weight) * pact.loss
+            )
+            risk_pact_active_ratio = pact.active_ratio.detach()
+            risk_pact_active_count = pact.active_count.detach()
+            risk_pact_teacher_displacement_mean_m = pact.teacher_displacement_mean_m.detach()
+            risk_pact_teacher_displacement_max_m = pact.teacher_displacement_max_m.detach()
+            valid_weight = valid_flat.to(teacher.constraint.trajectory_risk.dtype)
+            valid_count = valid_weight.sum().clamp_min(1.0)
+            risk_pact_trajectory_risk_mean = (
+                teacher.constraint.trajectory_risk * valid_weight
+            ).sum().div(valid_count).detach()
+            masked_risk = torch.where(
+                valid_flat,
+                teacher.constraint.trajectory_risk,
+                torch.full_like(teacher.constraint.trajectory_risk, float("-inf")),
+            )
+            risk_pact_trajectory_risk_max = torch.where(
+                torch.isfinite(masked_risk.max()),
+                masked_risk.max(),
+                masked_risk.new_zeros(()),
+            ).detach()
+            risk_pact_violation_mean = (
+                teacher.constraint.violation * valid_weight
+            ).sum().div(valid_count).detach()
+            risk_pact_curriculum_scale = current_all_modes.new_tensor(curriculum.scale).detach()
+
         total = (
             float(self.config.trajectory_pg_weight) * trajectory_pg
             + float(self.config.bc_weight) * behavior_cloning
             + float(self.config.reference_kl_weight) * reference_kl
+            + weighted_feasibility
+            + weighted_risk_pact_distillation
         )
         tensors = (
             total,
@@ -1527,6 +1831,10 @@ class _JointGRPOTrainerBase:
             new_trajectory_log_prob,
             centered_rewards,
             advantages,
+            feasibility,
+            weighted_feasibility,
+            risk_pact_distillation,
+            weighted_risk_pact_distillation,
         )
         if not all(bool(torch.isfinite(value).all()) for value in tensors):
             raise JointGRPOError("joint GRPO loss contains non-finite values")
@@ -1546,6 +1854,18 @@ class _JointGRPOTrainerBase:
             trajectory_pg_by_mode=trajectory_pg_by_mode,
             behavior_cloning_by_mode=behavior_cloning_by_mode,
             reference_kl_by_mode=reference_kl_by_mode,
+            feasibility=feasibility,
+            weighted_feasibility=weighted_feasibility,
+            risk_pact_distillation=risk_pact_distillation,
+            weighted_risk_pact_distillation=weighted_risk_pact_distillation,
+            risk_pact_active_ratio=risk_pact_active_ratio,
+            risk_pact_active_count=risk_pact_active_count,
+            risk_pact_teacher_displacement_mean_m=risk_pact_teacher_displacement_mean_m,
+            risk_pact_teacher_displacement_max_m=risk_pact_teacher_displacement_max_m,
+            risk_pact_trajectory_risk_mean=risk_pact_trajectory_risk_mean,
+            risk_pact_trajectory_risk_max=risk_pact_trajectory_risk_max,
+            risk_pact_violation_mean=risk_pact_violation_mean,
+            risk_pact_curriculum_scale=risk_pact_curriculum_scale,
         )
 
     @staticmethod
@@ -1625,7 +1945,15 @@ class _JointGRPOTrainerBase:
         self._consumed_rollouts[rollout_id] = rollout
         head = self._residual_head()
         trainable = list(head.residual_parameters())
-        if not bool(signal_mode_mask.any()):
+        auxiliary_signal = (
+            (self.config.uses_feasibility and float(loss.feasibility.detach().cpu()) > 0.0)
+            or (
+                self.config.uses_risk_pact
+                and float(loss.risk_pact_active_count.detach().cpu()) > 0.0
+                and float(loss.risk_pact_distillation.detach().cpu()) > 0.0
+            )
+        )
+        if not bool(signal_mode_mask.any()) and not auxiliary_signal:
             zero_gradients = {"mode_residual": 0.0}
             zero_gradients.update(
                 {f"mode_{mode}": 0.0 for mode in range(NUM_MODES)}
@@ -1679,6 +2007,7 @@ class _JointGRPOTrainerBase:
                 advantages.detach(),
                 signal_mode_mask,
                 rollout.valid_executable_mode_mask,
+                include_risk_pact_teacher=False,
             )
         post_kl = float(post_loss.reference_kl.detach().cpu())
         drifts = head.adapter_relative_drifts()

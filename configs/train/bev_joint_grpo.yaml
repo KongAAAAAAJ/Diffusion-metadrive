@@ -8,7 +8,7 @@ online:
   trajectories_per_mode: 48
   # Keep this diagnostic run short first. Restore the formal budget after the
   # safety post-training mechanism is verified.
-  total_rollout_groups: 2
+  total_rollout_groups: 3
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
   resume_checkpoint: null

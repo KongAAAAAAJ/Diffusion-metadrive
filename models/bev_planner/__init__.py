@@ -26,6 +26,13 @@ from .ddim_transition import (
     GaussianDDIMStep,
     StandardGaussianDDIM,
 )
+from .time_varying_feasibility import (
+    SteeringFeasibilityResult,
+    TimeVaryingFeasibilityError,
+    steering_angle_xy,
+    steering_feasibility_loss,
+    time_varying_limit,
+)
 from .dynamic_anchors import (
     DynamicAnchorConfig,
     DynamicAnchorError,
@@ -133,6 +140,11 @@ __all__ = [
     "GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256",
     "VEHICLE_MODE_REWARD_CONTRACT",
     "VEHICLE_MODE_REWARD_CONTRACT_SHA256",
+    "SteeringFeasibilityResult",
+    "TimeVaryingFeasibilityError",
+    "steering_angle_xy",
+    "steering_feasibility_loss",
+    "time_varying_limit",
     "JointGRPOConfig",
     "JointGRPOError",
     "JointGRPOLossResult",

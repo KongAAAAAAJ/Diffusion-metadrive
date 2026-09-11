@@ -47,26 +47,43 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
     except BEVScenarioContractError as exc:
         raise OnlineGRPOError(str(exc)) from exc
     torch_device = _device(config.device)
+    safety = training_config.safety_post_training
+    feasibility = safety.feasibility
+    risk_pact = safety.risk_pact
+    risk = risk_pact.risk
+    curriculum = risk_pact.curriculum
     grpo_config = JointGRPOConfig(
         trajectories_per_mode=config.trajectories_per_mode,
-        constraint_mode=training_config.constraint.mode,
-        feasibility_weight=training_config.constraint.loss_weight,
-        steering_feasibility_weight=training_config.constraint.steering_weight,
-        steering_rate_feasibility_weight=(
-            training_config.constraint.steering_rate_weight
-        ),
-        wheelbase_m=training_config.constraint.wheelbase_m,
-        trajectory_dt_s=training_config.constraint.trajectory_dt_s,
-        min_segment_length_m=training_config.constraint.min_segment_length_m,
-        steering_initial_limit_deg=training_config.constraint.steering_initial_limit_deg,
-        steering_final_limit_deg=training_config.constraint.steering_final_limit_deg,
-        steering_rate_initial_limit_deg_s=(
-            training_config.constraint.steering_rate_initial_limit_deg_s
-        ),
-        steering_rate_final_limit_deg_s=(
-            training_config.constraint.steering_rate_final_limit_deg_s
-        ),
-        feasibility_schedule_power=training_config.constraint.schedule_power,
+        safety_post_training_mode=safety.mode,
+        feasibility_weight=feasibility.loss_weight,
+        steering_feasibility_weight=feasibility.steering_weight,
+        steering_rate_feasibility_weight=feasibility.steering_rate_weight,
+        wheelbase_m=feasibility.wheelbase_m,
+        trajectory_dt_s=feasibility.trajectory_dt_s,
+        min_segment_length_m=feasibility.min_segment_length_m,
+        steering_initial_limit_deg=feasibility.steering_initial_limit_deg,
+        steering_final_limit_deg=feasibility.steering_final_limit_deg,
+        steering_rate_initial_limit_deg_s=feasibility.steering_rate_initial_limit_deg_s,
+        steering_rate_final_limit_deg_s=feasibility.steering_rate_final_limit_deg_s,
+        feasibility_schedule_power=feasibility.schedule_power,
+        risk_pact_distill_weight=risk_pact.distill_weight,
+        risk_pact_horizon_dt_s=risk.horizon_dt_s,
+        risk_pact_longitudinal_margin_m=risk.longitudinal_margin_m,
+        risk_pact_lateral_margin_m=risk.lateral_margin_m,
+        risk_pact_minimum_sigma_x_m=risk.minimum_sigma_x_m,
+        risk_pact_minimum_sigma_y_m=risk.minimum_sigma_y_m,
+        risk_pact_temporal_softmax_beta=risk.temporal_softmax_beta,
+        risk_pact_risk_threshold=risk.risk_threshold,
+        risk_pact_violation_temperature=risk.violation_temperature,
+        risk_pact_safe_margin=risk.safe_margin,
+        risk_pact_teacher_step_m=risk.teacher_step_m,
+        risk_pact_gradient_eps=risk.gradient_eps,
+        risk_pact_gradient_clip_norm=risk.gradient_clip_norm,
+        risk_pact_curriculum_start_scale=curriculum.start_scale,
+        risk_pact_curriculum_end_scale=curriculum.end_scale,
+        risk_pact_curriculum_warmup_updates=curriculum.warmup_updates,
+        risk_pact_curriculum_ramp_updates=curriculum.ramp_updates,
+        risk_pact_curriculum_schedule=curriculum.schedule,
     )
     trainer, source_payload, source_sha = _load_trainer(variant, Path(source_checkpoint), torch_device, grpo_config=grpo_config, allow_diagnostic_source=run_mode == 'smoke')
     if run_mode == 'formal' and source_payload.get('eligible_for_formal_training') is not True:
@@ -184,9 +201,6 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
     diagnostic_early_stop = False
     stability_guard_rejections_this_run = 0
     stability_guard_diagnostic: dict[str, object] | None = None
-    # Adapter drift is diagnostic-only. Warn once per mode when the legacy
-    # threshold is crossed, but never reject or roll back an update for drift.
-    adapter_drift_warned_modes: set[int] = set()
     try:
         while accepted_update_states < target_accepted_update_states and (not diagnostic_early_stop) and (stability_guard_diagnostic is None):
             bucket_index = next_bucket_index
@@ -322,28 +336,6 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                         if accepted_attempt is not None:
                             rollout, proxy, frozen_proxy, signal_mode_mask, accepted_attempt_metrics = accepted_attempt
                             rollout = rollout.with_reward_signals(current_rewards=torch.from_numpy(np.asarray(proxy.rewards, dtype=np.float32)).unsqueeze(0).to(torch_device), frozen_rewards=torch.from_numpy(np.asarray(frozen_proxy.rewards, dtype=np.float32)).unsqueeze(0).to(torch_device), collision_mask=torch.from_numpy(np.asarray(proxy.collision, dtype=np.bool_)).unsqueeze(0).to(torch_device), out_of_drivable_mask=torch.from_numpy(np.asarray(proxy.out_of_drivable, dtype=np.bool_)).unsqueeze(0).to(torch_device), valid_executable_mode_mask=torch.from_numpy(np.asarray(proxy.valid_mode_mask, dtype=np.bool_)).unsqueeze(0).to(torch_device))
-                            # TEMP: remove after confirming the live GRPO rollout shapes.
-                            ctx = rollout.require_risk_pact_context()
-                            print(
-                                "[GRPO debug] background_actor_state.shape="
-                                f"{tuple(ctx.background_actor_state.shape)}",
-                                flush=True,
-                            )
-                            print(
-                                "[GRPO debug] background_actor_valid_mask.shape="
-                                f"{tuple(ctx.background_actor_valid_mask.shape)}",
-                                flush=True,
-                            )
-                            print(
-                                "[GRPO debug] chains_normalized.shape="
-                                f"{tuple(rollout.chains_normalized.shape)}",
-                                flush=True,
-                            )
-                            print(
-                                "[GRPO debug] candidate_trajectories.shape="
-                                f"{tuple(rollout.candidate_trajectories.shape)}",
-                                flush=True,
-                            )
                             optimizer_step_before = trainer.optimizer_step
                             update_started = time.perf_counter()
                             update = trainer.update(rollout)
@@ -361,43 +353,13 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                             next_update_state = accepted_update_states + int(not update.stability_guard_rejected)
                             rollout_advantages = update.loss.advantages
                             _, optimizer_metrics = _split_loss_metrics_by_step_axis(update.loss.scalar_metrics())
-                            adapter_drift_warning_threshold = float(
-                                trainer.config.max_adapter_relative_drift
-                            )
-                            adapter_drift_warning_modes = tuple(
-                                mode
-                                for mode, drift in enumerate(update.adapter_relative_drifts)
-                                if drift > adapter_drift_warning_threshold
-                            )
-                            new_adapter_drift_warning_modes = tuple(
-                                mode
-                                for mode in adapter_drift_warning_modes
-                                if mode not in adapter_drift_warned_modes
-                            )
-                            if new_adapter_drift_warning_modes:
-                                warning_details = ", ".join(
-                                    f"mode_{mode}={update.adapter_relative_drifts[mode]:.6f}"
-                                    for mode in new_adapter_drift_warning_modes
-                                )
-                                print(
-                                    "[GRPO][WARNING] adapter relative drift exceeded "
-                                    f"warning threshold {adapter_drift_warning_threshold:.6f}: "
-                                    f"{warning_details}. Training continues; adapter drift is "
-                                    "diagnostic-only and does not trigger rollback."
-                                )
-                                adapter_drift_warned_modes.update(
-                                    new_adapter_drift_warning_modes
-                                )
-                            optimizer_metrics.update({'gradient_total': float(update.total_gradient_norm), 'zero_signal_epoch': float(update.zero_signal), 'policy/post_update_reference_kl': float(update.post_update_reference_kl), 'policy/adapter_drift_max': float(max(update.adapter_relative_drifts)), 'policy/adapter_drift_warning': float(bool(adapter_drift_warning_modes)), 'policy/adapter_drift_warning_threshold': adapter_drift_warning_threshold, 'stability_guard/rejected': float(update.stability_guard_rejected), 'optimizer_step': float(update.optimizer_step), 'accepted_update_state': float(next_update_state)})
+                            optimizer_metrics.update({'gradient_total': float(update.total_gradient_norm), 'zero_signal_epoch': float(update.zero_signal), 'policy/post_update_reference_kl': float(update.post_update_reference_kl), 'policy/adapter_drift_max': float(max(update.adapter_relative_drifts)), 'stability_guard/rejected': float(update.stability_guard_rejected), 'optimizer_step': float(update.optimizer_step), 'accepted_update_state': float(next_update_state)})
                             for name, value in update.gradient_norms.items():
                                 optimizer_metrics[f'gradient_pre_clip/{name}'] = float(value)
                             for name, value in update.clipped_gradient_norms.items():
                                 optimizer_metrics[f'gradient_post_clip/{name}'] = float(value)
                             for mode, drift in enumerate(update.adapter_relative_drifts):
                                 optimizer_metrics[f'policy/mode_{mode}/adapter_drift'] = float(drift)
-                                optimizer_metrics[f'policy/mode_{mode}/adapter_drift_warning'] = float(
-                                    mode in adapter_drift_warning_modes
-                                )
                             for metric_name, metric_value in optimizer_metrics.items():
                                 writer.add_scalar(metric_name, metric_value, next_update_state)
                             if not update.stability_guard_rejected and _write_advantage_vector_summary(writer, rollout_advantages, next_update_state, target_accepted_update_states, config.advantage_vector_log_interval_rollouts, trajectories_per_mode=trainer.config.trajectories_per_mode):
