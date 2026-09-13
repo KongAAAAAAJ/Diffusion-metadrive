@@ -4163,6 +4163,14 @@ def run_joint_grpo_training(
                             _, optimizer_metrics = _split_loss_metrics_by_step_axis(
                                 update.loss.scalar_metrics()
                             )
+                            drift_warning_modes = tuple(
+                                mode
+                                for mode, drift in enumerate(
+                                    update.adapter_relative_drifts
+                                )
+                                if drift
+                                > float(trainer.config.max_adapter_relative_drift)
+                            )
                             optimizer_metrics.update(
                                 {
                                     "gradient_total": float(
@@ -4176,6 +4184,12 @@ def run_joint_grpo_training(
                                     ),
                                     "policy/adapter_drift_max": float(
                                         max(update.adapter_relative_drifts)
+                                    ),
+                                    "policy/adapter_drift_warning": float(
+                                        bool(drift_warning_modes)
+                                    ),
+                                    "policy/adapter_drift_warning_mode_count": float(
+                                        len(drift_warning_modes)
                                     ),
                                     "stability_guard/rejected": float(
                                         update.stability_guard_rejected
@@ -4202,6 +4216,9 @@ def run_joint_grpo_training(
                                 optimizer_metrics[
                                     f"policy/mode_{mode}/adapter_drift"
                                 ] = float(drift)
+                                optimizer_metrics[
+                                    f"policy/mode_{mode}/adapter_drift_warning"
+                                ] = float(mode in drift_warning_modes)
                             for metric_name, metric_value in optimizer_metrics.items():
                                 writer.add_scalar(
                                     metric_name, metric_value, next_update_state

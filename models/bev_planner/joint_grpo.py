@@ -278,7 +278,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v15_standard_grpo_advantage",
+        "version": "stage2_joint_grpo_optimizer_v16_kl_stop_drift_warn",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -316,8 +316,11 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
         "weight_decay": 0.0,
         "post_update_guard": {
             "reference_kl_max": 0.25,
-            "max_mode_adapter_relative_drift": 0.02,
-            "failure": "restore residual parameters and Adam state",
+            "failure": "restore residual parameters and Adam state; reject update",
+        },
+        "adapter_drift_monitor": {
+            "warning_threshold": 0.02,
+            "action": "log warning only; do not rollback or reject update",
         },
         "budget_unit": "accepted_update_state",
         "checkpoint_boundary": "after one accepted guarded optimizer step",
@@ -2458,28 +2461,23 @@ class _JointGRPOTrainerBase:
             )
         post_kl = float(post_loss.reference_kl.detach().cpu())
         drifts = head.adapter_relative_drifts()
-        drift_modes = tuple(
-            mode
-            for mode, drift in enumerate(drifts)
-            if drift > float(self.config.max_adapter_relative_drift)
-        )
+        # Adapter drift remains a monitoring diagnostic only.  Crossing the
+        # configured 0.02 threshold must never reject or rollback an update.
+        # The sole hard stability guard is post-update reference KL.
         kl_rejected = post_kl > float(self.config.post_update_reference_kl_max)
-        guard_rejected = kl_rejected or bool(drift_modes)
-        if guard_rejected:
+        if kl_rejected:
             with torch.no_grad():
                 for parameter, saved in zip(trainable, parameter_snapshot):
                     parameter.copy_(saved)
             self.optimizer.load_state_dict(optimizer_snapshot)
             self.optimizer.zero_grad(set_to_none=True)
-            trigger_modes = drift_modes
-            if kl_rejected and not trigger_modes:
-                trigger_modes = tuple(
-                    int(mode)
-                    for mode in torch.where(signal_mode_mask.any(dim=(0, 1)))[0]
-                    .detach()
-                    .cpu()
-                    .tolist()
-                )
+            trigger_modes = tuple(
+                int(mode)
+                for mode in torch.where(signal_mode_mask.any(dim=(0, 1)))[0]
+                .detach()
+                .cpu()
+                .tolist()
+            )
             return JointGRPOUpdateResult(
                 loss=loss.detached(),
                 gradient_norms=gradient_norms,

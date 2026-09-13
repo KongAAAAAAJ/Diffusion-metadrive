@@ -433,7 +433,8 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                             next_update_state = accepted_update_states + int(not update.stability_guard_rejected)
                             rollout_advantages = update.loss.advantages
                             _, optimizer_metrics = _split_loss_metrics_by_step_axis(update.loss.scalar_metrics())
-                            optimizer_metrics.update({'gradient_total': float(update.total_gradient_norm), 'zero_signal_epoch': float(update.zero_signal), 'policy/post_update_reference_kl': float(update.post_update_reference_kl), 'policy/adapter_drift_max': float(max(update.adapter_relative_drifts)), 'stability_guard/rejected': float(update.stability_guard_rejected), 'optimizer_step': float(update.optimizer_step), 'accepted_update_state': float(next_update_state)})
+                            drift_warning_modes = tuple(mode for mode, drift in enumerate(update.adapter_relative_drifts) if drift > float(trainer.config.max_adapter_relative_drift))
+                            optimizer_metrics.update({'gradient_total': float(update.total_gradient_norm), 'zero_signal_epoch': float(update.zero_signal), 'policy/post_update_reference_kl': float(update.post_update_reference_kl), 'policy/adapter_drift_max': float(max(update.adapter_relative_drifts)), 'policy/adapter_drift_warning': float(bool(drift_warning_modes)), 'policy/adapter_drift_warning_mode_count': float(len(drift_warning_modes)), 'stability_guard/rejected': float(update.stability_guard_rejected), 'optimizer_step': float(update.optimizer_step), 'accepted_update_state': float(next_update_state)})
                             for name, value in update.gradient_norms.items():
                                 optimizer_metrics[f'gradient_pre_clip/{name}'] = float(value)
                             for name, value in update.clipped_gradient_norms.items():
@@ -442,6 +443,7 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                                 optimizer_metrics[name] = float(value)
                             for mode, drift in enumerate(update.adapter_relative_drifts):
                                 optimizer_metrics[f'policy/mode_{mode}/adapter_drift'] = float(drift)
+                                optimizer_metrics[f'policy/mode_{mode}/adapter_drift_warning'] = float(mode in drift_warning_modes)
                             if (
                                 safety.uses_risk_pact
                                 and not update.stability_guard_rejected
