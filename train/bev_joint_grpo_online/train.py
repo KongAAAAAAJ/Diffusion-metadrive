@@ -188,9 +188,13 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
     unsafe_override_enabled = advantage_mapping.get('unsafe_override_enabled', False)
     if not isinstance(unsafe_override_enabled, bool):
         raise OnlineGRPOError('grpo.advantage.unsafe_override_enabled must be a bool')
+    skip_all_unsafe_group = advantage_mapping.get('skip_all_unsafe_group', False)
+    if not isinstance(skip_all_unsafe_group, bool):
+        raise OnlineGRPOError('grpo.advantage.skip_all_unsafe_group must be a bool')
     grpo_advantage_config = JointGRPOAdvantageConfig(
         unsafe_override_enabled=unsafe_override_enabled,
         unsafe_advantage_value=float(advantage_mapping.get('unsafe_advantage_value', -1.0)),
+        skip_all_unsafe_group=skip_all_unsafe_group,
     )
     safety_config, compatibility_constraint = _safety_config_from_payload(payload)
     return JointGRPOTrainingConfig(

@@ -35,6 +35,7 @@ grpo:
   advantage:
     unsafe_override_enabled: true
     unsafe_advantage_value: -1.0
+    skip_all_unsafe_group: true
 
 # Unified safety post-training switch.
 # mode: none                          -> original GRPO baseline.

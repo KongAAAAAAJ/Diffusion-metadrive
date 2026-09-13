@@ -169,10 +169,13 @@ class JointGRPOAdvantageConfig:
 
     unsafe_override_enabled: bool = False
     unsafe_advantage_value: float = -1.0
+    skip_all_unsafe_group: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.unsafe_override_enabled, bool):
             raise OnlineGRPOError('grpo.advantage.unsafe_override_enabled must be a bool')
+        if not isinstance(self.skip_all_unsafe_group, bool):
+            raise OnlineGRPOError('grpo.advantage.skip_all_unsafe_group must be a bool')
         value = float(self.unsafe_advantage_value)
         if not math.isfinite(value) or value >= 0.0:
             raise OnlineGRPOError('grpo.advantage.unsafe_advantage_value must be finite and negative')

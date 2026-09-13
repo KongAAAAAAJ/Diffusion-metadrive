@@ -116,6 +116,7 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
         trajectories_per_mode=config.trajectories_per_mode,
         unsafe_advantage_override_enabled=advantage_config.unsafe_override_enabled,
         unsafe_advantage_value=advantage_config.unsafe_advantage_value,
+        skip_all_unsafe_group=advantage_config.skip_all_unsafe_group,
         safety_post_training_mode=safety.mode,
         feasibility_weight=feasibility.loss_weight,
         steering_feasibility_weight=feasibility.steering_weight,
@@ -401,6 +402,7 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                                 out_of_drivable_mask=proxy.out_of_drivable,
                                 unsafe_override_enabled=advantage_config.unsafe_override_enabled,
                                 unsafe_advantage_value=advantage_config.unsafe_advantage_value,
+                                skip_all_unsafe_group=advantage_config.skip_all_unsafe_group,
                             )
                             sampling_attempts += 1
                             bucket_sampling_attempt_counts[bucket_index] += 1

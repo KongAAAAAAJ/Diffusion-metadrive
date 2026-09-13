@@ -24,6 +24,7 @@ def _standard_grpo_reward_signals(
     out_of_drivable_mask: np.ndarray | None = None,
     unsafe_override_enabled: bool = False,
     unsafe_advantage_value: float = -1.0,
+    skip_all_unsafe_group: bool = False,
     epsilon: float = 1.0e-8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Mirror the standard torch GRPO advantage contract for gating/logging."""
@@ -42,22 +43,33 @@ def _standard_grpo_reward_signals(
         raise OnlineGRPOError('epsilon must be positive and finite')
     if not isinstance(unsafe_override_enabled, bool):
         raise OnlineGRPOError('unsafe_override_enabled must be a bool')
+    if not isinstance(skip_all_unsafe_group, bool):
+        raise OnlineGRPOError('skip_all_unsafe_group must be a bool')
     unsafe_value = float(unsafe_advantage_value)
     if not np.isfinite(unsafe_value) or unsafe_value >= 0.0:
         raise OnlineGRPOError('unsafe_advantage_value must be finite and negative')
-    if unsafe_override_enabled:
+    if unsafe_override_enabled or skip_all_unsafe_group:
         collision = np.asarray(collision_mask)
         out = np.asarray(out_of_drivable_mask)
         if collision.shape != values.shape or collision.dtype != np.bool_:
             raise OnlineGRPOError('collision mask must be bool [3,10,N] when unsafe override is enabled')
         if out.shape != values.shape or out.dtype != np.bool_:
             raise OnlineGRPOError('out-of-drivable mask must be bool [3,10,N] when unsafe override is enabled')
+    unsafe = None
+    if unsafe_override_enabled or skip_all_unsafe_group:
+        unsafe = collision | out
     centered = values - values.mean(axis=-1, keepdims=True)
     population_std = np.sqrt(np.mean(np.square(centered), axis=-1, keepdims=True))
     advantages = (centered / (population_std + eps)).astype(np.float32, copy=False)
     if unsafe_override_enabled:
-        unsafe = collision | out
         advantages = np.where(unsafe, np.float32(unsafe_value), advantages).astype(np.float32, copy=False)
+    if skip_all_unsafe_group:
+        all_unsafe_group = np.all(unsafe, axis=-1)
+        advantages = np.where(
+            all_unsafe_group[..., None],
+            np.float32(0.0),
+            advantages,
+        ).astype(np.float32, copy=False)
     advantages *= valid[..., None]
     signal = valid & np.any(advantages != 0.0, axis=-1)
     return centered.astype(np.float32, copy=False), advantages, signal
