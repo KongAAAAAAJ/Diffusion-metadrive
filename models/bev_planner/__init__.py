@@ -85,7 +85,7 @@ from .joint_grpo import (
     JointGRPOUpdateResult,
     joint_grpo_optimizer_contract,
     joint_grpo_optimizer_contract_sha256,
-    fixed_scale_safe_advantages,
+    standard_grpo_advantages,
 )
 from .vehicle_mode_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
@@ -169,7 +169,7 @@ __all__ = [
     "StandardGaussianDDIM",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
-    "fixed_scale_safe_advantages",
+    "standard_grpo_advantages",
     "ModeContractError",
     "ModeIndex",
     "ModeTopology",

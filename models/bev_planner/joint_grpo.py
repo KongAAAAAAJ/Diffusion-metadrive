@@ -278,7 +278,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v14_actor_confidence_decay",
+        "version": "stage2_joint_grpo_optimizer_v15_standard_grpo_advantage",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -287,8 +287,9 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
         "policy_gradient": "-exp(logp-logp.detach())*advantage",
         "ppo_ratio_or_clipping": False,
         "advantage": (
-            "collision_or_out=-1; otherwise max(R_current-mean(R_current),0) "
-            "only when R_current>=R_frozen-1e-6; fixed scale 1"
+            "per-(vehicle,mode) standard GRPO z-score: "
+            "(R_current-mean(R_current))/(population_std(R_current)+1e-8); "
+            "no frozen-reward gate and no hard-coded unsafe advantage override"
         ),
         "signal_mode": "at least one nonzero sample advantage",
         "rollout_consumption": (
@@ -787,18 +788,21 @@ class ModeResidualTrajectoryHead(nn.Module):
         return tuple(float(value.cpu()) for value in norms / base_norm)
 
 
-def fixed_scale_safe_advantages(
+def standard_grpo_advantages(
     current_rewards: Tensor,
-    frozen_rewards: Tensor,
-    collision_mask: Tensor,
-    out_of_drivable_mask: Tensor,
     valid_executable_mode_mask: Tensor,
     *,
     trajectories_per_mode: int | None = None,
     advantage_scale: float = 1.0,
-    baseline_tolerance: float = 1e-6,
+    epsilon: float = 1.0e-8,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Return centered reward, fixed-scale truncated advantage and signal mask."""
+    """Return centered rewards and standard per-group GRPO advantages.
+
+    Each valid (vehicle, mode) group is normalized independently across its
+    trajectory axis.  Frozen Stage-1 rewards and safety masks are deliberately
+    excluded from the advantage formula: collision and road-departure effects
+    already enter ``current_rewards`` through the reward function.
+    """
 
     if not isinstance(current_rewards, Tensor) or current_rewards.dtype != torch.float32:
         raise JointGRPOError("current_rewards must be a float32 torch.Tensor")
@@ -818,27 +822,8 @@ def fixed_scale_safe_advantages(
         raise JointGRPOError(
             "trajectories_per_mode must match the rewards trajectory axis"
         )
-    expected = tuple(current_rewards.shape)
-    tensors = {
-        "frozen_rewards": frozen_rewards,
-        "collision_mask": collision_mask,
-        "out_of_drivable_mask": out_of_drivable_mask,
-    }
-    for name, value in tensors.items():
-        expected_dtype = torch.float32 if name == "frozen_rewards" else torch.bool
-        if (
-            not isinstance(value, Tensor)
-            or value.dtype != expected_dtype
-            or tuple(value.shape) != expected
-            or value.device != current_rewards.device
-        ):
-            raise JointGRPOError(
-                f"{name} must be colocated {expected_dtype} with shape [B,3,10,N]"
-            )
-    if not bool(torch.isfinite(current_rewards).all()) or not bool(
-        torch.isfinite(frozen_rewards).all()
-    ):
-        raise JointGRPOError("paired rewards must contain finite values")
+    if not bool(torch.isfinite(current_rewards).all()):
+        raise JointGRPOError("current rewards must contain finite values")
     if (
         not isinstance(valid_executable_mode_mask, Tensor)
         or valid_executable_mode_mask.dtype != torch.bool
@@ -848,21 +833,18 @@ def fixed_scale_safe_advantages(
         raise JointGRPOError(
             "valid_executable_mode_mask must be colocated bool [B,3,10]"
         )
+
     scale = float(advantage_scale)
-    tolerance = float(baseline_tolerance)
+    eps = float(epsilon)
     if not math.isfinite(scale) or scale <= 0.0:
         raise JointGRPOError("advantage_scale must be positive and finite")
-    if not math.isfinite(tolerance) or tolerance < 0.0:
-        raise JointGRPOError("baseline_tolerance must be non-negative and finite")
+    if not math.isfinite(eps) or eps <= 0.0:
+        raise JointGRPOError("epsilon must be positive and finite")
 
     centered = current_rewards - current_rewards.mean(dim=-1, keepdim=True)
-    unsafe = collision_mask | out_of_drivable_mask
-    baseline_pass = current_rewards >= frozen_rewards - tolerance
-    advantages = torch.where(
-        unsafe,
-        torch.full_like(centered, -scale),
-        torch.where(baseline_pass, centered.clamp_min(0.0) * scale, 0.0),
-    )
+    population_std = torch.sqrt(centered.square().mean(dim=-1, keepdim=True))
+    advantages = centered / (population_std + eps)
+    advantages = advantages * scale
     advantages = advantages * valid_executable_mode_mask.unsqueeze(-1).to(
         advantages.dtype
     )
@@ -1637,15 +1619,11 @@ class _JointGRPOTrainerBase:
         )
         if any(value is None for value in signals):
             raise JointGRPOError("rollout is missing paired reward signals")
-        centered, advantages, signal_mode_mask = fixed_scale_safe_advantages(
+        centered, advantages, signal_mode_mask = standard_grpo_advantages(
             rollout.current_rewards,
-            rollout.frozen_rewards,
-            rollout.collision_mask,
-            rollout.out_of_drivable_mask,
             rollout.valid_executable_mode_mask,
             trajectories_per_mode=self.config.trajectories_per_mode,
             advantage_scale=self.config.advantage_scale,
-            baseline_tolerance=self.config.baseline_tolerance,
         )
         return self._compute_loss_from_advantages(
             rollout,
@@ -2390,15 +2368,11 @@ class _JointGRPOTrainerBase:
         )
         if any(value is None for value in signals):
             raise JointGRPOError("rollout is missing paired reward signals")
-        centered, advantages, signal_mode_mask = fixed_scale_safe_advantages(
+        centered, advantages, signal_mode_mask = standard_grpo_advantages(
             rollout.current_rewards,
-            rollout.frozen_rewards,
-            rollout.collision_mask,
-            rollout.out_of_drivable_mask,
             rollout.valid_executable_mode_mask,
             trajectories_per_mode=self.config.trajectories_per_mode,
             advantage_scale=self.config.advantage_scale,
-            baseline_tolerance=self.config.baseline_tolerance,
         )
         self.optimizer.zero_grad(set_to_none=True)
         loss = self._compute_loss_from_advantages(
@@ -2794,5 +2768,5 @@ __all__ = [
     "JointGRPOUpdateResult",
     "joint_grpo_optimizer_contract",
     "joint_grpo_optimizer_contract_sha256",
-    "fixed_scale_safe_advantages",
+    "standard_grpo_advantages",
 ]

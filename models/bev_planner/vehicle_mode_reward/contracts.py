@@ -41,20 +41,22 @@ VEHICLE_MODE_REWARD_CONTRACT_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 GRPO_OPEN_REWARD_APPLICATION_CONTRACT = {
-    "version": "stage2_grpo_open_application_v6",
+    "version": "stage2_grpo_open_application_v7_standard_grpo_advantage",
     "comparison_unit": "vehicle_mode",
     "policy_sample_domain": "all-mode raw tau_d",
     "policy_probability_domain": "per-vehicle per-mode DDIM trajectory transitions",
     "mode_policy_terms": False,
     "reward_input_domain": "tau_d",
     "teammate_reward_context": "frozen Stage 1 argmax raw tau_d",
-    "same_mode_reference": "frozen Stage 1 raw tau_d for the target mode",
+    "same_mode_reference": (
+        "frozen Stage 1 raw tau_d for diagnostics/reference regularization only; "
+        "not used in advantage gating"
+    ),
     "advantage_normalization": (
         "per-(vehicle,mode) mean-centered population-RMS standardization"
     ),
     "active_mode_condition": (
-        "hard-valid, optimizer-executable and mean(candidate_reward) >= "
-        "same-mode pretrain reward"
+        "hard-valid, optimizer-executable and nonzero within-group reward spread"
     ),
     "activation_margin": None,
     "activation_reward_span_threshold": None,

@@ -19,7 +19,7 @@ from .config import AGENT_IDS, JointGRPOTrainingConfig, OnlineGRPOError
 from .contracts import BEST_CHECKPOINT_METRIC, FROZEN_PRETRAIN_VEHICLE_REWARD_TAG, VALIDATION_REWARD_FAMILY, _application_contract_version, _checkpoint_file_sha256, _checkpoint_payload, _frozen_pretrain_reward_logging_metadata, _grpo_config_artifact_payload, _implementation_commit, _performance_summary, _reward_contract_version, _sampler_state, _validate_online_checkpoint_metadata, rollout_collection_contract
 from .environment import _condition_online_model_inputs, _cuda_peak_memory_bytes, _device, _new_env, _new_online_rule_maker, _reset_cuda_peak_memory, _sample_rollout_start_offset, _scenario_ready_from_summary, _scenario_sampling_window_closed_from_summary, _scenario_summary, episode_has_ended, execute_cached_frozen_baseline, execution_mode_valid_mask, model_inputs_to_batch, route_following_warmup_actions
 from .logging import _advantage_scalar_metrics, _append_validation_selection_event, _sampling_health_metrics, _split_loss_metrics_by_step_axis, _write_advantage_vector_summary, _write_baseline_execution_event, _write_dynamic_sampling_attempt_event, _write_rollout_start_event
-from .rollout import _attempt_budget_is_exhausted, _balanced_bucket_targets, _bucket_visit_is_complete, _diffusion_attempt_generators, _fixed_scale_reward_signals, _load_trainer, _next_unfinished_bucket_index, _round_robin_training_buckets
+from .rollout import _attempt_budget_is_exhausted, _balanced_bucket_targets, _bucket_visit_is_complete, _diffusion_attempt_generators, _standard_grpo_reward_signals, _load_trainer, _next_unfinished_bucket_index, _round_robin_training_buckets
 from .validation import _FixedValidationFrozenEntry, _fixed_vehicle_mode_validation, _load_grpo_validation_state_bank, _resume_best_checkpoint_anchor, _validation_reward_comparison_metrics
 
 
@@ -391,7 +391,7 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                             frozen_reward_started = time.perf_counter()
                             frozen_proxy = vehicle_reward_backend.score_candidates(env, values, frozen_paired_candidates, frozen_raw_candidate[0], execution_mask, pretrain_score)
                             state_performance['perf/train/frozen_reward_seconds'] += time.perf_counter() - frozen_reward_started
-                            centered_rewards, advantages, signal_mode_mask = _fixed_scale_reward_signals(proxy.rewards, frozen_proxy.rewards, proxy.collision, proxy.out_of_drivable, proxy.valid_mode_mask)
+                            centered_rewards, advantages, signal_mode_mask = _standard_grpo_reward_signals(proxy.rewards, proxy.valid_mode_mask)
                             sampling_attempts += 1
                             bucket_sampling_attempt_counts[bucket_index] += 1
                             attempt_metrics = _write_dynamic_sampling_attempt_event(metrics_path, optimizer_step=trainer.optimizer_step, accepted_update_state=accepted_update_states + 1, sampling_attempt=sampling_attempts, retry_index=retry_index, bucket_index=bucket_index, scenario=scenario, seed=seed, reward_result=proxy, paired_frozen_rewards=frozen_proxy.rewards, centered_rewards=centered_rewards, advantages=advantages, hard_valid_mode_mask=np.asarray(values.mode_valid_mask, dtype=np.bool_), signal_mode_mask=signal_mode_mask, reward_config=reward_config)

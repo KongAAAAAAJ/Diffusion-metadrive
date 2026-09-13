@@ -386,7 +386,7 @@ def run_diagnostic(variant: str, args: argparse.Namespace) -> dict[str, object]:
             rollout.predecessor_action_history_normalized.shape
         )
     report: dict[str, object] = {
-        "format": f"bev_joint_grpo_{variant.lower()}_fixed_scale_smoke_v3",
+        "format": f"bev_joint_grpo_{variant.lower()}_standard_grpo_smoke_v4",
         "variant": variant,
         "predecessor_condition": (
             "none" if variant == "A" else "predicted_detached"

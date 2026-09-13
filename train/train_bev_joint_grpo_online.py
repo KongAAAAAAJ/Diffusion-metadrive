@@ -96,7 +96,7 @@ from scenarios.bev_round13_contract import (
 
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
-ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v7"
+ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v8_standard_grpo_advantage"
 BEST_CHECKPOINT_METRIC = (
     "validation/safety_constrained_simulator_reward_gain_trailing3"
 )
@@ -195,7 +195,7 @@ def _frozen_pretrain_reward_logging_metadata(
         "inference_seed": int(planner_config.inference_seed),
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "fixed_inference_noise": True,
-        "advantage_formula_role": "paired_sample_baseline_filter",
+        "advantage_formula_role": "diagnostic_only_not_used_for_advantage",
         "active_mode_gate_role": "none; signal is derived per sample",
         "environment_action_role": "sole_executed_policy",
     }
@@ -329,7 +329,7 @@ def rollout_collection_contract(
         "pretrain_inference_per_live_state": 1,
         "comparison_unit": "vehicle_mode",
         "trajectories_per_mode": int(config.trajectories_per_mode),
-        "advantage": "fixed_scale_baseline_relative_safety_truncation",
+        "advantage": "standard_grpo_per_vehicle_mode_zscore_no_frozen_gate",
         "signal_mode": "at_least_one_nonzero_sample_advantage",
         "max_sampling_attempts_per_state": int(config.max_sampling_attempts_per_state),
         "max_sampling_attempts_multiplier": int(
@@ -1199,44 +1199,30 @@ def _reward_contract_version() -> str:
     return version
 
 
-def _fixed_scale_reward_signals(
+def _standard_grpo_reward_signals(
     current_rewards: np.ndarray,
-    frozen_rewards: np.ndarray,
-    collision: np.ndarray,
-    out_of_drivable: np.ndarray,
     valid_mode_mask: np.ndarray,
+    *,
+    epsilon: float = 1.0e-8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Mirror the fixed-scale torch advantage contract for online gating/logging."""
+    """Mirror the standard torch GRPO advantage contract for online gating/logging."""
 
     values = np.asarray(current_rewards)
-    paired = np.asarray(frozen_rewards)
-    collision_values = np.asarray(collision)
-    out_values = np.asarray(out_of_drivable)
     valid = np.asarray(valid_mode_mask)
     if values.ndim != 3 or values.shape[:2] != (3, 10):
         raise OnlineGRPOError("vehicle-mode rewards must have shape [3,10,N]")
     if values.shape[2] < 2 or values.dtype not in (np.float32, np.float64):
         raise OnlineGRPOError("vehicle-mode rewards must be float [3,10,N>=2]")
-    if paired.shape != values.shape or paired.dtype not in (np.float32, np.float64):
-        raise OnlineGRPOError("paired frozen rewards must be float [3,10,N]")
-    if (
-        collision_values.shape != values.shape
-        or collision_values.dtype != np.bool_
-        or out_values.shape != values.shape
-        or out_values.dtype != np.bool_
-    ):
-        raise OnlineGRPOError("paired safety masks must be bool [3,10,N]")
     if valid.shape != (3, 10) or valid.dtype != np.bool_:
         raise OnlineGRPOError("valid mode mask must be bool [3,10]")
-    if not np.isfinite(values).all() or not np.isfinite(paired).all():
-        raise OnlineGRPOError("paired vehicle-mode rewards must be finite")
+    if not np.isfinite(values).all():
+        raise OnlineGRPOError("vehicle-mode rewards must be finite")
+    eps = float(epsilon)
+    if not np.isfinite(eps) or eps <= 0.0:
+        raise OnlineGRPOError("epsilon must be positive and finite")
     centered = values - values.mean(axis=-1, keepdims=True)
-    unsafe = collision_values | out_values
-    advantages = np.where(
-        unsafe,
-        -1.0,
-        np.where(values >= paired - 1e-6, np.maximum(centered, 0.0), 0.0),
-    ).astype(np.float32, copy=False)
+    population_std = np.sqrt(np.mean(np.square(centered), axis=-1, keepdims=True))
+    advantages = (centered / (population_std + eps)).astype(np.float32, copy=False)
     advantages *= valid[..., None]
     signal = valid & np.any(advantages != 0.0, axis=-1)
     return centered.astype(np.float32, copy=False), advantages, signal
@@ -4034,11 +4020,8 @@ def run_joint_grpo_training(
                                 "perf/train/frozen_reward_seconds"
                             ] += (time.perf_counter() - frozen_reward_started)
                             centered_rewards, advantages, signal_mode_mask = (
-                                _fixed_scale_reward_signals(
+                                _standard_grpo_reward_signals(
                                     proxy.rewards,
-                                    frozen_proxy.rewards,
-                                    proxy.collision,
-                                    proxy.out_of_drivable,
                                     proxy.valid_mode_mask,
                                 )
                             )

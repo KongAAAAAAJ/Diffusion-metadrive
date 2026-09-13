@@ -16,31 +16,33 @@ def _load_trainer(variant: str, source_checkpoint: Path, device: torch.device, *
     loader = load_stage1_a_for_grpo if variant == 'A' else load_stage1_b_for_grpo
     return loader(source_checkpoint, device=device, config=grpo_config, allow_diagnostic_source=allow_diagnostic_source)
 
-def _fixed_scale_reward_signals(current_rewards: np.ndarray, frozen_rewards: np.ndarray, collision: np.ndarray, out_of_drivable: np.ndarray, valid_mode_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Mirror the fixed-scale torch advantage contract for online gating/logging."""
+def _standard_grpo_reward_signals(
+    current_rewards: np.ndarray,
+    valid_mode_mask: np.ndarray,
+    *,
+    epsilon: float = 1.0e-8,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Mirror the standard torch GRPO advantage contract for gating/logging."""
     values = np.asarray(current_rewards)
-    paired = np.asarray(frozen_rewards)
-    collision_values = np.asarray(collision)
-    out_values = np.asarray(out_of_drivable)
     valid = np.asarray(valid_mode_mask)
     if values.ndim != 3 or values.shape[:2] != (3, 10):
         raise OnlineGRPOError('vehicle-mode rewards must have shape [3,10,N]')
     if values.shape[2] < 2 or values.dtype not in (np.float32, np.float64):
         raise OnlineGRPOError('vehicle-mode rewards must be float [3,10,N>=2]')
-    if paired.shape != values.shape or paired.dtype not in (np.float32, np.float64):
-        raise OnlineGRPOError('paired frozen rewards must be float [3,10,N]')
-    if collision_values.shape != values.shape or collision_values.dtype != np.bool_ or out_values.shape != values.shape or (out_values.dtype != np.bool_):
-        raise OnlineGRPOError('paired safety masks must be bool [3,10,N]')
     if valid.shape != (3, 10) or valid.dtype != np.bool_:
         raise OnlineGRPOError('valid mode mask must be bool [3,10]')
-    if not np.isfinite(values).all() or not np.isfinite(paired).all():
-        raise OnlineGRPOError('paired vehicle-mode rewards must be finite')
+    if not np.isfinite(values).all():
+        raise OnlineGRPOError('vehicle-mode rewards must be finite')
+    eps = float(epsilon)
+    if not np.isfinite(eps) or eps <= 0.0:
+        raise OnlineGRPOError('epsilon must be positive and finite')
     centered = values - values.mean(axis=-1, keepdims=True)
-    unsafe = collision_values | out_values
-    advantages = np.where(unsafe, -1.0, np.where(values >= paired - 1e-06, np.maximum(centered, 0.0), 0.0)).astype(np.float32, copy=False)
+    population_std = np.sqrt(np.mean(np.square(centered), axis=-1, keepdims=True))
+    advantages = (centered / (population_std + eps)).astype(np.float32, copy=False)
     advantages *= valid[..., None]
     signal = valid & np.any(advantages != 0.0, axis=-1)
-    return (centered.astype(np.float32, copy=False), advantages, signal)
+    return centered.astype(np.float32, copy=False), advantages, signal
+
 
 def _diffusion_attempt_generators(*, device: torch.device, training_seed: int, live_state_index: int, retry_index: int) -> tuple[torch.Generator, torch.Generator]:
     """Create independent reproducible initial/transition noise streams."""
