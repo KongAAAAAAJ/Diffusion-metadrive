@@ -14,7 +14,7 @@ online:
   resume_checkpoint: null
   validation_state_bank: /media/kong/Elements_SE/Diffusion_Data/outputs/bev_diffusion_stage1/run_3/grpo_open/validation_state_bank_v1.pt
   environment_steps_per_episode: 200
-  rollout_groups_per_bucket_visit: 1
+  rollout_groups_per_bucket_visit: 10
   rollout_start_offset_max_steps: 200
   rollout_start_min_remaining_steps: 10
   validation_interval_rollouts: 20
