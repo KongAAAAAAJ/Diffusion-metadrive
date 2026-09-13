@@ -33,7 +33,7 @@ online:
 #       negative value below after z-score normalization.
 grpo:
   advantage:
-    unsafe_override_enabled: false
+    unsafe_override_enabled: true
     unsafe_advantage_value: -1.0
 
 # Unified safety post-training switch.

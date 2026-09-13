@@ -51,7 +51,7 @@ class JointGRPOConfig:
     reference_kl_weight: float = 0.02
     learning_rate: float = 1e-5
     weight_decay: float = 0.0
-    max_grad_norm: float = 3.0
+    max_grad_norm: float = 1.0
     advantage_scale: float = 1.0
     # Optional legacy safety override.  When disabled, all valid candidates use
     # the standard per-(vehicle, mode) GRPO z-score advantage.
