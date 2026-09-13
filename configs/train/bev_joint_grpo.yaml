@@ -8,7 +8,7 @@ online:
   trajectories_per_mode: 48
   # Keep this diagnostic run short first. Restore the formal budget after the
   # safety post-training mechanism is verified.
-  total_rollout_groups: 5000
+  total_rollout_groups: 100
   max_sampling_attempts_per_state: 3
   max_sampling_attempts_multiplier: 3
   resume_checkpoint: null
@@ -21,11 +21,11 @@ online:
   advantage_vector_log_interval_rollouts: 10
   scenario_seeds: [17, 23]
   scenarios:
-    - {scenario: S5_hard_brake_lead, route: R1_entry_straight}
+    # - {scenario: S5_hard_brake_lead, route: R1_entry_straight}
     - {scenario: S6_background_merge_in, route: R6_mainline_merge_approach}
-    - {scenario: S7_ego_merge_from_ramp, route: R7_merge_core}
-    - {scenario: S8_ego_exit_to_ramp, route: R6_exit_to_ramp}
-    - {scenario: S9_narrow_channel_negotiation, route: R8_narrow_channel}
+    # - {scenario: S7_ego_merge_from_ramp, route: R7_merge_core}
+    # - {scenario: S8_ego_exit_to_ramp, route: R6_exit_to_ramp}
+    # - {scenario: S9_narrow_channel_negotiation, route: R8_narrow_channel}
 
 # Unified safety post-training switch.
 # mode: none                          -> original GRPO baseline.
