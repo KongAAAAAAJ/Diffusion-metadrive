@@ -1,3 +1,0 @@
-apply_skip_all_unsafe_group.py
-README.md
-MANIFEST.txt
