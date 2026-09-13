@@ -162,12 +162,28 @@ class SafetyPostTrainingConfig:
     def uses_risk_pact(self) -> bool:
         return self.mode in ('risk_pact_lite', 'feasibility_plus_risk_pact')
 
+
+@dataclass(frozen=True)
+class JointGRPOAdvantageConfig:
+    """Configurable GRPO advantage ablations."""
+
+    unsafe_override_enabled: bool = False
+    unsafe_advantage_value: float = -1.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.unsafe_override_enabled, bool):
+            raise OnlineGRPOError('grpo.advantage.unsafe_override_enabled must be a bool')
+        value = float(self.unsafe_advantage_value)
+        if not math.isfinite(value) or value >= 0.0:
+            raise OnlineGRPOError('grpo.advantage.unsafe_advantage_value must be finite and negative')
+
 @dataclass(frozen=True)
 class JointGRPOTrainingConfig:
     variant: Literal['A', 'B']
     run_mode: Literal['formal', 'smoke']
     source_checkpoint: Path
     online: JointGRPOOnlineConfig
+    grpo_advantage: JointGRPOAdvantageConfig = JointGRPOAdvantageConfig()
     constraint: JointGRPOConstraintConfig = JointGRPOConstraintConfig()
     safety_post_training: SafetyPostTrainingConfig = SafetyPostTrainingConfig()
     def __post_init__(self) -> None:
@@ -179,6 +195,8 @@ class JointGRPOTrainingConfig:
             raise OnlineGRPOError('source_checkpoint must be a Path')
         if not isinstance(self.online, JointGRPOOnlineConfig):
             raise OnlineGRPOError('online must be a JointGRPOOnlineConfig')
+        if not isinstance(self.grpo_advantage, JointGRPOAdvantageConfig):
+            raise OnlineGRPOError('grpo_advantage must be a JointGRPOAdvantageConfig')
         if not isinstance(self.constraint, JointGRPOConstraintConfig):
             raise OnlineGRPOError('constraint must be a JointGRPOConstraintConfig')
         if not isinstance(self.safety_post_training, SafetyPostTrainingConfig):

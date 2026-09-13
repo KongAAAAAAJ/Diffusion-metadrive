@@ -96,7 +96,7 @@ from scenarios.bev_round13_contract import (
 
 
 AGENT_IDS = ("agent0", "agent1", "agent2")
-ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v8_standard_grpo_advantage"
+ROLLOUT_COLLECTION_CONTRACT_VERSION = "stage2_joint_grpo_persistent_episode_v9_optional_unsafe_advantage"
 BEST_CHECKPOINT_METRIC = (
     "validation/safety_constrained_simulator_reward_gain_trailing3"
 )
@@ -299,11 +299,25 @@ class JointGRPOOnlineConfig:
 
 
 @dataclass(frozen=True)
+class JointGRPOAdvantageConfig:
+    unsafe_override_enabled: bool = False
+    unsafe_advantage_value: float = -1.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.unsafe_override_enabled, bool):
+            raise OnlineGRPOError("grpo.advantage.unsafe_override_enabled must be a bool")
+        value = float(self.unsafe_advantage_value)
+        if not math.isfinite(value) or value >= 0.0:
+            raise OnlineGRPOError("grpo.advantage.unsafe_advantage_value must be finite and negative")
+
+
+@dataclass(frozen=True)
 class JointGRPOTrainingConfig:
     variant: Literal["A", "B"]
     run_mode: Literal["formal", "smoke"]
     source_checkpoint: Path
     online: JointGRPOOnlineConfig
+    grpo_advantage: JointGRPOAdvantageConfig = JointGRPOAdvantageConfig()
 
     def __post_init__(self) -> None:
         if self.variant not in ("A", "B"):
@@ -314,6 +328,8 @@ class JointGRPOTrainingConfig:
             raise OnlineGRPOError("source_checkpoint must be a Path")
         if not isinstance(self.online, JointGRPOOnlineConfig):
             raise OnlineGRPOError("online must be a JointGRPOOnlineConfig")
+        if not isinstance(self.grpo_advantage, JointGRPOAdvantageConfig):
+            raise OnlineGRPOError("grpo_advantage must be a JointGRPOAdvantageConfig")
 
 
 def rollout_collection_contract(
@@ -329,7 +345,7 @@ def rollout_collection_contract(
         "pretrain_inference_per_live_state": 1,
         "comparison_unit": "vehicle_mode",
         "trajectories_per_mode": int(config.trajectories_per_mode),
-        "advantage": "standard_grpo_per_vehicle_mode_zscore_no_frozen_gate",
+        "advantage": "standard_grpo_per_vehicle_mode_zscore_no_frozen_gate_optional_unsafe_override",
         "signal_mode": "at_least_one_nonzero_sample_advantage",
         "max_sampling_attempts_per_state": int(config.max_sampling_attempts_per_state),
         "max_sampling_attempts_multiplier": int(
@@ -1203,6 +1219,10 @@ def _standard_grpo_reward_signals(
     current_rewards: np.ndarray,
     valid_mode_mask: np.ndarray,
     *,
+    collision_mask: np.ndarray | None = None,
+    out_of_drivable_mask: np.ndarray | None = None,
+    unsafe_override_enabled: bool = False,
+    unsafe_advantage_value: float = -1.0,
     epsilon: float = 1.0e-8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Mirror the standard torch GRPO advantage contract for online gating/logging."""
@@ -1220,9 +1240,24 @@ def _standard_grpo_reward_signals(
     eps = float(epsilon)
     if not np.isfinite(eps) or eps <= 0.0:
         raise OnlineGRPOError("epsilon must be positive and finite")
+    if not isinstance(unsafe_override_enabled, bool):
+        raise OnlineGRPOError("unsafe_override_enabled must be a bool")
+    unsafe_value = float(unsafe_advantage_value)
+    if not np.isfinite(unsafe_value) or unsafe_value >= 0.0:
+        raise OnlineGRPOError("unsafe_advantage_value must be finite and negative")
+    if unsafe_override_enabled:
+        collision = np.asarray(collision_mask)
+        out = np.asarray(out_of_drivable_mask)
+        if collision.shape != values.shape or collision.dtype != np.bool_:
+            raise OnlineGRPOError("collision mask must be bool [3,10,N] when unsafe override is enabled")
+        if out.shape != values.shape or out.dtype != np.bool_:
+            raise OnlineGRPOError("out-of-drivable mask must be bool [3,10,N] when unsafe override is enabled")
     centered = values - values.mean(axis=-1, keepdims=True)
     population_std = np.sqrt(np.mean(np.square(centered), axis=-1, keepdims=True))
     advantages = (centered / (population_std + eps)).astype(np.float32, copy=False)
+    if unsafe_override_enabled:
+        unsafe = collision | out
+        advantages = np.where(unsafe, np.float32(unsafe_value), advantages).astype(np.float32, copy=False)
     advantages *= valid[..., None]
     signal = valid & np.any(advantages != 0.0, axis=-1)
     return centered.astype(np.float32, copy=False), advantages, signal
@@ -3453,7 +3488,12 @@ def run_joint_grpo_training(
     except BEVScenarioContractError as exc:
         raise OnlineGRPOError(str(exc)) from exc
     torch_device = _device(config.device)
-    grpo_config = JointGRPOConfig(trajectories_per_mode=config.trajectories_per_mode)
+    advantage_config = training_config.grpo_advantage
+    grpo_config = JointGRPOConfig(
+        trajectories_per_mode=config.trajectories_per_mode,
+        unsafe_advantage_override_enabled=advantage_config.unsafe_override_enabled,
+        unsafe_advantage_value=advantage_config.unsafe_advantage_value,
+    )
     trainer, source_payload, source_sha = _load_trainer(
         variant,
         Path(source_checkpoint),
@@ -4023,6 +4063,10 @@ def run_joint_grpo_training(
                                 _standard_grpo_reward_signals(
                                     proxy.rewards,
                                     proxy.valid_mode_mask,
+                                    collision_mask=proxy.collision,
+                                    out_of_drivable_mask=proxy.out_of_drivable,
+                                    unsafe_override_enabled=advantage_config.unsafe_override_enabled,
+                                    unsafe_advantage_value=advantage_config.unsafe_advantage_value,
                                 )
                             )
                             sampling_attempts += 1
@@ -5367,11 +5411,25 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
             "max_sampling_attempts_multiplier", 3
         ),
     )
+    grpo = payload.get("grpo", {})
+    if not isinstance(grpo, Mapping):
+        raise OnlineGRPOError("online GRPO YAML grpo must be a mapping")
+    advantage = grpo.get("advantage", {})
+    if not isinstance(advantage, Mapping):
+        raise OnlineGRPOError("online GRPO YAML grpo.advantage must be a mapping")
+    unsafe_override_enabled = advantage.get("unsafe_override_enabled", False)
+    if not isinstance(unsafe_override_enabled, bool):
+        raise OnlineGRPOError("grpo.advantage.unsafe_override_enabled must be a bool")
+    grpo_advantage_config = JointGRPOAdvantageConfig(
+        unsafe_override_enabled=unsafe_override_enabled,
+        unsafe_advantage_value=float(advantage.get("unsafe_advantage_value", -1.0)),
+    )
     return JointGRPOTrainingConfig(
         variant=variant,
         run_mode=run_mode,
         source_checkpoint=Path(source_checkpoint),
         online=online_config,
+        grpo_advantage=grpo_advantage_config,
     )
 
 

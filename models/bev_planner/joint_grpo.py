@@ -53,6 +53,10 @@ class JointGRPOConfig:
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
     advantage_scale: float = 1.0
+    # Optional legacy safety override.  When disabled, all valid candidates use
+    # the standard per-(vehicle, mode) GRPO z-score advantage.
+    unsafe_advantage_override_enabled: bool = False
+    unsafe_advantage_value: float = -1.0
     baseline_tolerance: float = 1e-6
     post_update_reference_kl_max: float = 0.25
     max_adapter_relative_drift: float = 0.02
@@ -125,6 +129,11 @@ class JointGRPOConfig:
             "risk_pact_lite",
             "feasibility_plus_risk_pact",
         )
+        if not isinstance(self.unsafe_advantage_override_enabled, bool):
+            raise JointGRPOError("unsafe_advantage_override_enabled must be a bool")
+        unsafe_value = float(self.unsafe_advantage_value)
+        if not math.isfinite(unsafe_value) or unsafe_value >= 0.0:
+            raise JointGRPOError("unsafe_advantage_value must be finite and negative")
         if self.safety_post_training_mode not in allowed_safety_modes:
             raise JointGRPOError(
                 "safety_post_training_mode must be one of: "
@@ -278,7 +287,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
     """Return the machine-readable single-step on-policy optimizer contract."""
 
     return {
-        "version": "stage2_joint_grpo_optimizer_v16_kl_stop_drift_warn",
+        "version": "stage2_joint_grpo_optimizer_v17_optional_unsafe_advantage",
         "ddim_path": DEFAULT_DDIM_PATH.as_dict(),
         "paired_behavior_policy": (
             "current and frozen N=48 paths use identical initial and DDIM "
@@ -289,7 +298,7 @@ def joint_grpo_optimizer_contract() -> dict[str, object]:
         "advantage": (
             "per-(vehicle,mode) standard GRPO z-score: "
             "(R_current-mean(R_current))/(population_std(R_current)+1e-8); "
-            "no frozen-reward gate and no hard-coded unsafe advantage override"
+            "no frozen-reward gate; optional fixed negative unsafe override is configurable"
         ),
         "signal_mode": "at least one nonzero sample advantage",
         "rollout_consumption": (
@@ -795,16 +804,20 @@ def standard_grpo_advantages(
     current_rewards: Tensor,
     valid_executable_mode_mask: Tensor,
     *,
+    collision_mask: Tensor | None = None,
+    out_of_drivable_mask: Tensor | None = None,
+    unsafe_override_enabled: bool = False,
+    unsafe_advantage_value: float = -1.0,
     trajectories_per_mode: int | None = None,
     advantage_scale: float = 1.0,
     epsilon: float = 1.0e-8,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Return centered rewards and standard per-group GRPO advantages.
+    """Return centered rewards and per-group GRPO advantages.
 
-    Each valid (vehicle, mode) group is normalized independently across its
-    trajectory axis.  Frozen Stage-1 rewards and safety masks are deliberately
-    excluded from the advantage formula: collision and road-departure effects
-    already enter ``current_rewards`` through the reward function.
+    By default, every valid candidate receives the standard per-(vehicle, mode)
+    reward z-score.  The optional unsafe override is an ablation switch: when
+    enabled, collision or out-of-drivable candidates are replaced by one fixed
+    negative advantage after z-score normalization.
     """
 
     if not isinstance(current_rewards, Tensor) or current_rewards.dtype != torch.float32:
@@ -843,11 +856,37 @@ def standard_grpo_advantages(
         raise JointGRPOError("advantage_scale must be positive and finite")
     if not math.isfinite(eps) or eps <= 0.0:
         raise JointGRPOError("epsilon must be positive and finite")
+    if not isinstance(unsafe_override_enabled, bool):
+        raise JointGRPOError("unsafe_override_enabled must be a bool")
+    unsafe_value = float(unsafe_advantage_value)
+    if not math.isfinite(unsafe_value) or unsafe_value >= 0.0:
+        raise JointGRPOError("unsafe_advantage_value must be finite and negative")
+    if unsafe_override_enabled:
+        for name, mask in (
+            ("collision_mask", collision_mask),
+            ("out_of_drivable_mask", out_of_drivable_mask),
+        ):
+            if (
+                not isinstance(mask, Tensor)
+                or mask.dtype != torch.bool
+                or tuple(mask.shape) != tuple(current_rewards.shape)
+                or mask.device != current_rewards.device
+            ):
+                raise JointGRPOError(
+                    f"{name} must be colocated bool [B,3,10,N] when unsafe override is enabled"
+                )
 
     centered = current_rewards - current_rewards.mean(dim=-1, keepdim=True)
     population_std = torch.sqrt(centered.square().mean(dim=-1, keepdim=True))
     advantages = centered / (population_std + eps)
     advantages = advantages * scale
+    if unsafe_override_enabled:
+        unsafe_mask = collision_mask | out_of_drivable_mask
+        advantages = torch.where(
+            unsafe_mask,
+            torch.full_like(advantages, unsafe_value),
+            advantages,
+        )
     advantages = advantages * valid_executable_mode_mask.unsqueeze(-1).to(
         advantages.dtype
     )
@@ -1625,6 +1664,10 @@ class _JointGRPOTrainerBase:
         centered, advantages, signal_mode_mask = standard_grpo_advantages(
             rollout.current_rewards,
             rollout.valid_executable_mode_mask,
+            collision_mask=rollout.collision_mask,
+            out_of_drivable_mask=rollout.out_of_drivable_mask,
+            unsafe_override_enabled=self.config.unsafe_advantage_override_enabled,
+            unsafe_advantage_value=self.config.unsafe_advantage_value,
             trajectories_per_mode=self.config.trajectories_per_mode,
             advantage_scale=self.config.advantage_scale,
         )
@@ -2374,6 +2417,10 @@ class _JointGRPOTrainerBase:
         centered, advantages, signal_mode_mask = standard_grpo_advantages(
             rollout.current_rewards,
             rollout.valid_executable_mode_mask,
+            collision_mask=rollout.collision_mask,
+            out_of_drivable_mask=rollout.out_of_drivable_mask,
+            unsafe_override_enabled=self.config.unsafe_advantage_override_enabled,
+            unsafe_advantage_value=self.config.unsafe_advantage_value,
             trajectories_per_mode=self.config.trajectories_per_mode,
             advantage_scale=self.config.advantage_scale,
         )

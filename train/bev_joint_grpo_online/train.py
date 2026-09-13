@@ -10,6 +10,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_repo_root))
 from scenarios.bev_round13_contract import DEVELOPMENT_SEEDS, HOLDOUT_SEEDS, PRIMARY_S5_S9_SCENARIOS
 from train.bev_joint_grpo_online.config import (
+    JointGRPOAdvantageConfig,
     JointGRPOConstraintConfig,
     JointGRPOOnlineConfig,
     JointGRPOTrainingConfig,
@@ -182,12 +183,22 @@ def _config_from_yaml(path: Path) -> JointGRPOTrainingConfig:
         raise OnlineGRPOError('online GRPO YAML contains legacy fields: ' + ', '.join(present_legacy))
     scenarios = tuple(((str(value['scenario']), str(value['route'])) for value in online.get('scenarios', ()) if isinstance(value, Mapping)))
     online_config = JointGRPOOnlineConfig(device=str(online.get('device', 'cuda')), seed=online.get('seed', 17), trajectories_per_mode=online.get('trajectories_per_mode', 48), total_rollout_groups=online.get('total_rollout_groups', 100), resume_checkpoint=Path(str(online['resume_checkpoint'])) if online.get('resume_checkpoint') else None, validation_state_bank=Path(str(online.get('validation_state_bank', 'evaluation/artifacts/grpo_validation_state_bank_v1.pt'))), scenarios=scenarios or PRIMARY_S5_S9_SCENARIOS, scenario_seeds=tuple((int(value) for value in online.get('scenario_seeds', DEVELOPMENT_SEEDS))), environment_steps_per_episode=int(online.get('environment_steps_per_episode', 100)), rollout_groups_per_bucket_visit=online.get('rollout_groups_per_bucket_visit', 10), rollout_start_offset_max_steps=online.get('rollout_start_offset_max_steps', 200), rollout_start_min_remaining_steps=online.get('rollout_start_min_remaining_steps', 10), validation_interval_rollouts=online.get('validation_interval_rollouts', 20), advantage_vector_log_interval_rollouts=online.get('advantage_vector_log_interval_rollouts', 10), max_sampling_attempts_per_state=online.get('max_sampling_attempts_per_state', 3), max_sampling_attempts_multiplier=online.get('max_sampling_attempts_multiplier', 10), max_consecutive_empty_episodes=online.get('max_consecutive_empty_episodes', 5))
+    grpo_mapping = _mapping(payload.get('grpo'), name='grpo', default={})
+    advantage_mapping = _mapping(grpo_mapping.get('advantage'), name='grpo.advantage', default={})
+    unsafe_override_enabled = advantage_mapping.get('unsafe_override_enabled', False)
+    if not isinstance(unsafe_override_enabled, bool):
+        raise OnlineGRPOError('grpo.advantage.unsafe_override_enabled must be a bool')
+    grpo_advantage_config = JointGRPOAdvantageConfig(
+        unsafe_override_enabled=unsafe_override_enabled,
+        unsafe_advantage_value=float(advantage_mapping.get('unsafe_advantage_value', -1.0)),
+    )
     safety_config, compatibility_constraint = _safety_config_from_payload(payload)
     return JointGRPOTrainingConfig(
         variant=variant,
         run_mode=run_mode,
         source_checkpoint=Path(source_checkpoint),
         online=online_config,
+        grpo_advantage=grpo_advantage_config,
         constraint=compatibility_constraint,
         safety_post_training=safety_config,
     )

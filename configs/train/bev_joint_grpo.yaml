@@ -27,6 +27,15 @@ online:
     - {scenario: S8_ego_exit_to_ramp, route: R6_exit_to_ramp}
     - {scenario: S9_narrow_channel_negotiation, route: R8_narrow_channel}
 
+# GRPO advantage ablations.
+# false: pure standard per-(vehicle, mode) z-score advantage.
+# true: collision/out-of-drivable candidates are overwritten with the fixed
+#       negative value below after z-score normalization.
+grpo:
+  advantage:
+    unsafe_override_enabled: false
+    unsafe_advantage_value: -1.0
+
 # Unified safety post-training switch.
 # mode: none                          -> original GRPO baseline.
 # mode: feasibility_loss              -> existing time-varying feasibility soft loss.

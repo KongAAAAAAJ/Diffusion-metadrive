@@ -111,8 +111,11 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
         risk_config=risk,
         visualization_config=risk_pact.visualization,
     )
+    advantage_config = training_config.grpo_advantage
     grpo_config = JointGRPOConfig(
         trajectories_per_mode=config.trajectories_per_mode,
+        unsafe_advantage_override_enabled=advantage_config.unsafe_override_enabled,
+        unsafe_advantage_value=advantage_config.unsafe_advantage_value,
         safety_post_training_mode=safety.mode,
         feasibility_weight=feasibility.loss_weight,
         steering_feasibility_weight=feasibility.steering_weight,
@@ -391,7 +394,14 @@ def run_joint_grpo_training(training_config: JointGRPOTrainingConfig, *, run_dir
                             frozen_reward_started = time.perf_counter()
                             frozen_proxy = vehicle_reward_backend.score_candidates(env, values, frozen_paired_candidates, frozen_raw_candidate[0], execution_mask, pretrain_score)
                             state_performance['perf/train/frozen_reward_seconds'] += time.perf_counter() - frozen_reward_started
-                            centered_rewards, advantages, signal_mode_mask = _standard_grpo_reward_signals(proxy.rewards, proxy.valid_mode_mask)
+                            centered_rewards, advantages, signal_mode_mask = _standard_grpo_reward_signals(
+                                proxy.rewards,
+                                proxy.valid_mode_mask,
+                                collision_mask=proxy.collision,
+                                out_of_drivable_mask=proxy.out_of_drivable,
+                                unsafe_override_enabled=advantage_config.unsafe_override_enabled,
+                                unsafe_advantage_value=advantage_config.unsafe_advantage_value,
+                            )
                             sampling_attempts += 1
                             bucket_sampling_attempt_counts[bucket_index] += 1
                             attempt_metrics = _write_dynamic_sampling_attempt_event(metrics_path, optimizer_step=trainer.optimizer_step, accepted_update_state=accepted_update_states + 1, sampling_attempt=sampling_attempts, retry_index=retry_index, bucket_index=bucket_index, scenario=scenario, seed=seed, reward_result=proxy, paired_frozen_rewards=frozen_proxy.rewards, centered_rewards=centered_rewards, advantages=advantages, hard_valid_mode_mask=np.asarray(values.mode_valid_mask, dtype=np.bool_), signal_mode_mask=signal_mode_mask, reward_config=reward_config)
