@@ -28,19 +28,21 @@ from expert_dataset.collect_joint_bev import (
     SensorlessJointBEVPlatoonEnv,
     simulator_decision_dt_s,
 )
-from models.bev_planner.joint_reward import (
-    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
-    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+from models.bev_planner.__joint_reward import (
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
-    VEHICLE_MODE_REWARD_CONTRACT,
-    VEHICLE_MODE_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
     JointRewardError,
     JointRewardResult,
     JointTrajectoryProxyReward,
-    VehicleModeRewardConfig,
     joint_reward_config_sha256,
+)
+from models.bev_planner.vehicle_mode_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+    VEHICLE_MODE_REWARD_CONTRACT,
+    VEHICLE_MODE_REWARD_CONTRACT_SHA256,
+    VehicleModeRewardConfig,
     vehicle_mode_reward_config_sha256,
 )
 from models.bev_planner.trajectory_optimizer import (
@@ -75,8 +77,8 @@ from train.bev_joint_grpo import (
     load_stage1_a_for_grpo,
 )
 from train.train_bev_diffusion_stage1 import planner_forward_from_batch
-from train.train_bev_joint_grpo_online import (
-    AGENT_IDS,
+from train.bev_joint_grpo_online.config import AGENT_IDS
+from train.bev_joint_grpo_online.environment import (
     constant_velocity_actions,
     episode_has_ended,
     execution_mode_valid_mask,
@@ -347,7 +349,7 @@ def _validate_grpo_checkpoint_contract(
             {
                 "training_candidate_domain",
                 "environment_action_source",
-                "joint_reward_role",
+                "validation_reward_family",
             }
         )
     else:
@@ -396,8 +398,12 @@ def _validate_grpo_checkpoint_contract(
             "training_candidate_domain": "tau_d_all_vehicle_modes",
             "environment_action_source": "cached_frozen_stage1_argmax",
             "execution_input_domain": "tau_cmd",
-            "best_checkpoint_metric": "validation/vehicle_reward_mean",
-            "joint_reward_role": "historical_and_final_evaluation_only",
+            "best_checkpoint_metric": GRPO_OPEN_REWARD_APPLICATION_CONTRACT[
+                "best_checkpoint_metric"
+            ],
+            "validation_reward_family": GRPO_OPEN_REWARD_APPLICATION_CONTRACT[
+                "validation_reward_family"
+            ],
             "tracking_expansion_enabled": False,
             "calibration_required": False,
         }

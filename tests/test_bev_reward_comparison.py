@@ -25,17 +25,19 @@ from evaluation.bev_reward_comparison import (
     _write_reward_csv,
     reward_values,
 )
-from models.bev_planner.joint_reward import (
-    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
-    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+from models.bev_planner.__joint_reward import (
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
-    VEHICLE_MODE_REWARD_CONTRACT,
-    VEHICLE_MODE_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
-    VehicleModeRewardConfig,
     compose_joint_reward,
     joint_reward_config_sha256,
+)
+from models.bev_planner.vehicle_mode_reward import (
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT,
+    GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
+    VEHICLE_MODE_REWARD_CONTRACT,
+    VEHICLE_MODE_REWARD_CONTRACT_SHA256,
+    VehicleModeRewardConfig,
     vehicle_mode_reward_config_sha256,
 )
 from models.bev_planner.joint_grpo import JointGRPOConfig, JointGRPOError
@@ -94,8 +96,8 @@ def _valid_grpo_contract_payload() -> dict[str, object]:
         "training_candidate_domain": "tau_d_all_vehicle_modes",
         "environment_action_source": "cached_frozen_stage1_argmax",
         "execution_input_domain": "tau_cmd",
-        "best_checkpoint_metric": "validation/vehicle_reward_mean",
-        "joint_reward_role": "historical_and_final_evaluation_only",
+        "best_checkpoint_metric": application["best_checkpoint_metric"],
+        "validation_reward_family": application["validation_reward_family"],
         "tracking_expansion_enabled": False,
         "calibration_required": False,
         "diagnostic_only": True,
@@ -229,8 +231,8 @@ def test_grpo_checkpoint_contract_accepts_exact_historical_application(
     current_identity["environment_action_source"] = (
         "cached_frozen_stage1_argmax"
     )
-    current_identity["joint_reward_role"] = (
-        "historical_and_final_evaluation_only"
+    current_identity["validation_reward_family"] = (
+        GRPO_OPEN_REWARD_APPLICATION_CONTRACT["validation_reward_family"]
     )
     with pytest.raises(RewardComparisonError, match="checkpoint schema"):
         reward_comparison._validate_grpo_checkpoint_contract(current_identity)

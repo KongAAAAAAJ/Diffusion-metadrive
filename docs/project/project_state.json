@@ -1,10 +1,10 @@
 {
   "format": "bev_project_state_v1",
   "schema_version": 1,
-  "updated_at": "2026-09-08T21:04:51+08:00",
+  "updated_at": "2026-09-14T08:14:54+08:00",
   "repository": {
     "branch": "BEV",
-    "git_commit": "b2e3eef580fbc7934dd3e39051d77bd485b892f7",
+    "git_commit": "4da3f68226ebb0d636d7b52ae50b16c006bbee6d",
     "worktree_clean_before_this_update": false,
     "project_state_update_committed": false,
     "uncommitted_plan_update_present": false,
@@ -66,6 +66,7 @@
     "uncommitted_grpo_evaluation_output_root_update_present": false,
     "uncommitted_stage1_grpo_reward_only_evaluation_present": false,
     "uncommitted_legacy_evaluation_cleanup_present": false,
+    "uncommitted_grpo_reward_evaluator_import_fix_present": true,
     "uncommitted_reward_only_smoke_evidence_present": false,
     "uncommitted_reward_boxplot_scatter_present": false,
     "uncommitted_reward_boxplot_grouping_present": false,
@@ -159,6 +160,15 @@
         "focused_tests_passed": 42,
         "real_checkpoint_cpu_loader_preflight_passed": true,
         "strict_stage1_qualification_entry_available": false,
+        "checkpoint_eligibility_changed": false,
+        "formal_experiment_status_changed": false
+      },
+      "grpo_reward_evaluator_import_fix": {
+        "status": "verified",
+        "report": "evaluation/GRPO_REWARD_EVALUATOR_IMPORT_FIX_REPORT.json",
+        "focused_tests_passed": 19,
+        "run78_real_checkpoint_cpu_loader_preflight_passed": true,
+        "formal_evaluation_started": false,
         "checkpoint_eligibility_changed": false,
         "formal_experiment_status_changed": false
       },

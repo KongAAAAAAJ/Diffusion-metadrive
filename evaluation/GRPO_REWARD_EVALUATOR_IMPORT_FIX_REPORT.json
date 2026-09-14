@@ -1,0 +1,26 @@
+{
+  "format": "grpo_reward_evaluator_import_fix_report_v1",
+  "recorded_at": "2026-09-14T08:14:54+08:00",
+  "repository_head_before_uncommitted_fix": "4da3f68226ebb0d636d7b52ae50b16c006bbee6d",
+  "status": "verified",
+  "problem": "evaluation.bev_reward_comparison imported the removed models.bev_planner.joint_reward module and the removed monolithic online-training module",
+  "resolution": {
+    "historical_joint_reward_module": "models.bev_planner.__joint_reward",
+    "active_vehicle_reward_module": "models.bev_planner.vehicle_mode_reward",
+    "online_config_module": "train.bev_joint_grpo_online.config",
+    "online_environment_module": "train.bev_joint_grpo_online.environment",
+    "current_checkpoint_identity": "derived from GRPO_OPEN_REWARD_APPLICATION_CONTRACT"
+  },
+  "verification": {
+    "python_compile_passed": true,
+    "module_help_passed": true,
+    "focused_tests": "pytest -q tests/test_bev_reward_comparison.py",
+    "focused_tests_passed": 19,
+    "run78_real_checkpoint_cpu_loader_preflight_passed": true,
+    "one_step_launcher_startup_reached_metadrive": true,
+    "one_step_launcher_note": "MAX_STEPS=1 is shorter than the required observation history and therefore intentionally produced no reward rows"
+  },
+  "formal_evaluation_started": false,
+  "checkpoint_eligibility_changed": false,
+  "formal_experiment_status_changed": false
+}
