@@ -108,7 +108,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 reward_columns = (
-    "total_reward", "progress_reward", "formation_reward", "gap_reward",
+    "total_reward", "progress_reward", "gap_reward",
     "ttc_reward", "road_reward", "comfort_reward", "collision_reward",
     "out_of_drivable_reward",
 )

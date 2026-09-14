@@ -34,7 +34,6 @@ MODEL_COLORS = {
 REWARD_COLUMNS = (
     "total_reward",
     "progress_reward",
-    "formation_reward",
     "gap_reward",
     "ttc_reward",
     "road_reward",
@@ -49,7 +48,6 @@ GROUPED_REWARD_COLUMNS = (
     "comfort_reward",
 )
 SINGLE_REWARD_COLUMNS = (
-    "formation_reward",
     "gap_reward",
     "road_reward",
     "collision_reward",
@@ -61,7 +59,6 @@ GROUPED_REWARD_BOXPLOT_FILENAME = (
 REWARD_LABELS = {
     "total_reward": "Total reward",
     "progress_reward": "Progress reward",
-    "formation_reward": "Formation reward",
     "gap_reward": "Gap reward",
     "ttc_reward": "TTC reward",
     "road_reward": "Road reward",
@@ -259,7 +256,7 @@ def _plot_grouped_rewards(
 
 
 def generate_reward_boxplots(csv_path: Path, output_dir: Path) -> tuple[Path, ...]:
-    """Generate one grouped and five individual two-checkpoint reward plots."""
+    """Generate one grouped and four individual two-checkpoint reward plots."""
 
     values = load_step_rewards(csv_path)
     output_dir = Path(output_dir)

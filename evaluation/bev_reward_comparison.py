@@ -1,4 +1,4 @@
-"""Compare Stage 1 and GRPO checkpoints using only per-step joint rewards."""
+"""Compare Stage 1 and GRPO using the active selected vehicle-mode reward."""
 
 from __future__ import annotations
 
@@ -32,9 +32,7 @@ from models.bev_planner.__joint_reward import (
     JOINT_REWARD_CONTRACT,
     JOINT_REWARD_CONTRACT_SHA256,
     JointRewardConfig,
-    JointRewardError,
-    JointRewardResult,
-    JointTrajectoryProxyReward,
+    JointRewardError as LegacyJointRewardError,
     joint_reward_config_sha256,
 )
 from models.bev_planner.vehicle_mode_reward import (
@@ -42,9 +40,13 @@ from models.bev_planner.vehicle_mode_reward import (
     GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256,
     VEHICLE_MODE_REWARD_CONTRACT,
     VEHICLE_MODE_REWARD_CONTRACT_SHA256,
+    JointRewardError,
+    VehicleModeCounterfactualReward,
     VehicleModeRewardConfig,
+    VehicleModeRewardResult,
     vehicle_mode_reward_config_sha256,
 )
+from models.bev_planner.ddim_transition import DDIMNoiseBundle
 from models.bev_planner.trajectory_optimizer import (
     KinematicTrajectoryOptimizer,
     KinematicTrajectoryOptimizerConfig,
@@ -157,7 +159,6 @@ _PREVIOUS_GRPO_OPEN_REWARD_APPLICATION_CONTRACT_SHA256 = hashlib.sha256(
 REWARD_COLUMNS = (
     "total_reward",
     "progress_reward",
-    "formation_reward",
     "gap_reward",
     "ttc_reward",
     "road_reward",
@@ -482,7 +483,7 @@ def _validate_grpo_checkpoint_contract(
                 if isinstance(raw_reward_config, Mapping)
                 else None
             )
-        except (TypeError, ValueError, JointRewardError) as exc:
+        except (TypeError, ValueError, LegacyJointRewardError) as exc:
             raise RewardComparisonError(
                 "historical grpo_open reward config is invalid"
             ) from exc
@@ -679,50 +680,85 @@ def _new_env(scenario: tuple[str, str], seed: int) -> object:
     return env
 
 
-def _mean_component(result: JointRewardResult, name: str) -> float:
-    values = np.asarray(result.components[name], dtype=np.float64)
-    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
-        raise RewardComparisonError(f"reward component {name} is invalid")
-    return float(values.mean())
+def _selected_vehicle_mode_values(
+    value: object,
+    selected_modes: np.ndarray,
+    *,
+    name: str,
+) -> np.ndarray:
+    """Gather one selected N=1 vehicle-mode value for each platoon role."""
+    modes = np.asarray(selected_modes, dtype=np.int64)
+    if modes.shape != (3,) or bool((modes < 0).any()) or bool((modes >= 10).any()):
+        raise RewardComparisonError("selected modes must have shape [3] within [0,10)")
+    array = np.asarray(value)
+    if array.shape == (3, 10, 1):
+        selected = array[np.arange(3), modes, 0]
+    elif array.shape == (3, 10):
+        selected = array[np.arange(3), modes]
+    else:
+        raise RewardComparisonError(
+            f"{name} must have shape [3,10,1] or [3,10], got {array.shape}"
+        )
+    selected = np.asarray(selected, dtype=np.float64)
+    if selected.shape != (3,) or not np.isfinite(selected).all():
+        raise RewardComparisonError(f"selected {name} values are invalid")
+    return selected
 
 
 def reward_values(
-    result: JointRewardResult,
-    config: JointRewardConfig,
+    result: VehicleModeRewardResult,
+    config: VehicleModeRewardConfig,
+    selected_modes: np.ndarray,
 ) -> dict[str, float]:
-    """Return signed weighted terms whose sum is exactly the joint reward."""
-
-    rewards = np.asarray(result.rewards, dtype=np.float64)
-    if rewards.ndim != 1 or rewards.size == 0 or not np.isfinite(rewards).all():
-        raise RewardComparisonError("joint total reward is invalid")
+    """Return active vehicle-mode signed terms for the model-selected modes."""
+    if not isinstance(result, VehicleModeRewardResult):
+        raise RewardComparisonError("reward result must be VehicleModeRewardResult")
+    if not isinstance(config, VehicleModeRewardConfig):
+        raise RewardComparisonError("reward config must be VehicleModeRewardConfig")
+    rewards = _selected_vehicle_mode_values(
+        result.rewards, selected_modes, name="total reward"
+    )
+    progress = _selected_vehicle_mode_values(
+        result.components["progress_score"], selected_modes, name="progress_score"
+    )
+    gap = _selected_vehicle_mode_values(
+        result.components["gap_penalty"], selected_modes, name="gap_penalty"
+    )
+    ttc = _selected_vehicle_mode_values(
+        result.components["ttc_penalty"], selected_modes, name="ttc_penalty"
+    )
+    road = _selected_vehicle_mode_values(
+        result.components["road_penalty"], selected_modes, name="road_penalty"
+    )
+    comfort = _selected_vehicle_mode_values(
+        result.components["comfort_penalty"], selected_modes, name="comfort_penalty"
+    )
+    collision = _selected_vehicle_mode_values(
+        result.collision, selected_modes, name="collision"
+    )
+    out_of_drivable = _selected_vehicle_mode_values(
+        result.out_of_drivable, selected_modes, name="out_of_drivable"
+    )
     values = {
         "total_reward": float(rewards.mean()),
-        "progress_reward": config.progress_weight
-        * _mean_component(result, "progress_score"),
-        "formation_reward": -config.formation_weight
-        * _mean_component(result, "formation_penalty"),
-        "gap_reward": -config.gap_weight
-        * _mean_component(result, "gap_penalty"),
-        "ttc_reward": -config.ttc_weight
-        * _mean_component(result, "ttc_penalty"),
-        "road_reward": -config.road_weight
-        * _mean_component(result, "road_penalty"),
-        "comfort_reward": -config.comfort_weight
-        * _mean_component(result, "comfort_penalty"),
-        "collision_reward": -config.collision_penalty
-        * float(np.asarray(result.collision, dtype=np.float64).mean()),
+        "progress_reward": config.progress_weight * float(progress.mean()),
+        "gap_reward": -config.gap_weight * float(gap.mean()),
+        "ttc_reward": -config.ttc_weight * float(ttc.mean()),
+        "road_reward": -config.road_weight * float(road.mean()),
+        "comfort_reward": -config.comfort_weight * float(comfort.mean()),
+        "collision_reward": -config.collision_penalty * float(collision.mean()),
         "out_of_drivable_reward": -config.out_of_drivable_penalty
-        * float(np.asarray(result.out_of_drivable, dtype=np.float64).mean()),
+        * float(out_of_drivable.mean()),
     }
     component_sum = sum(values[name] for name in REWARD_COLUMNS[1:])
     if not math.isclose(
         component_sum,
         values["total_reward"],
         rel_tol=1.0e-6,
-        abs_tol=1.0e-6,
+        abs_tol=2.0e-6,
     ):
         raise RewardComparisonError(
-            "signed reward components do not sum to total_reward"
+            "active vehicle-mode reward components do not sum to total_reward"
         )
     return values
 
@@ -733,8 +769,9 @@ def _reward_row(
     scenario: tuple[str, str],
     seed: int,
     step: int,
-    result: JointRewardResult,
-    config: JointRewardConfig,
+    result: VehicleModeRewardResult,
+    config: VehicleModeRewardConfig,
+    selected_modes: np.ndarray,
 ) -> dict[str, object]:
     return {
         "model": model_id,
@@ -742,7 +779,7 @@ def _reward_row(
         "route": scenario[1],
         "seed": int(seed),
         "step": int(step),
-        **reward_values(result, config),
+        **reward_values(result, config, selected_modes),
     }
 
 
@@ -764,10 +801,11 @@ def _evaluate_model(
     model_id: str,
     planner: torch.nn.Module,
     *,
+    reference_planner: torch.nn.Module,
     device: torch.device,
     config: RewardComparisonConfig,
-    reward_backend: JointTrajectoryProxyReward,
-    reward_config: JointRewardConfig,
+    reward_backend: VehicleModeCounterfactualReward,
+    reward_config: VehicleModeRewardConfig,
     reference_initial_states: dict[tuple[str, str, int], np.ndarray],
     reference_initial_scenes: dict[tuple[str, str, int], str],
 ) -> list[dict[str, object]]:
@@ -879,19 +917,35 @@ def _evaluate_model(
                             device,
                             mode_valid_mask=execution_mask,
                         )
-                        noise = torch.randn(
-                            (1, 3, 10, 8, 2),
-                            dtype=torch.float32,
+                        noise_bundle = DDIMNoiseBundle.sample(
+                            batch["coarse_trajectories"][..., :2].shape,
                             device=device,
                             generator=generator,
                         )
                         _sync(device)
-                        output = planner_forward_from_batch(
-                            planner, batch, diffusion_noise=noise
+                        reference_output = planner_forward_from_batch(
+                            reference_planner,
+                            batch,
+                            ddim_noise_bundle=noise_bundle,
                         )
+                        if planner is reference_planner:
+                            output = reference_output
+                        else:
+                            output = planner_forward_from_batch(
+                                planner,
+                                batch,
+                                ddim_noise_bundle=noise_bundle,
+                            )
                         _sync(device)
                         raw_trajectories = (
                             output["selected_trajectory"][0]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
+                        current_all_modes = (
+                            output["trajectory_candidates"][0]
                             .detach()
                             .cpu()
                             .numpy()
@@ -904,12 +958,51 @@ def _evaluate_model(
                             .numpy()
                             .astype(np.int64, copy=False)
                         )
+                        frozen_all_modes = (
+                            reference_output["trajectory_candidates"][0]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
+                        frozen_argmax = (
+                            reference_output["selected_trajectory"][0]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
                         if raw_trajectories.shape != (3, 8, 3):
                             raise RewardComparisonError(
                                 "selected joint trajectory must have shape [3,8,3]"
                             )
-                        result = reward_backend.score(
-                            env, values, raw_trajectories[None]
+                        if current_all_modes.shape != (3, 10, 8, 3):
+                            raise RewardComparisonError(
+                                "current all-mode trajectories must have shape [3,10,8,3]"
+                            )
+                        if frozen_all_modes.shape != (3, 10, 8, 3):
+                            raise RewardComparisonError(
+                                "frozen all-mode trajectories must have shape [3,10,8,3]"
+                            )
+                        geometry_context = reward_backend.build_geometry_context(
+                            env, values, frozen_argmax
+                        )
+                        pretrain_reward = reward_backend.score_pretrain(
+                            env,
+                            values,
+                            frozen_all_modes,
+                            frozen_argmax,
+                            execution_mask,
+                            geometry_context=geometry_context,
+                        )
+                        result = reward_backend.score_all_mode_trajectories(
+                            env,
+                            values,
+                            current_all_modes,
+                            frozen_argmax,
+                            execution_mask,
+                            pretrain_reward,
+                            geometry_context=geometry_context,
                         )
                         rows.append(
                             _reward_row(
@@ -919,9 +1012,9 @@ def _evaluate_model(
                                 step=step_index,
                                 result=result,
                                 config=reward_config,
+                                selected_modes=selected_modes,
                             )
                         )
-
                         forced_safe_stop = False
                         try:
                             optimization = optimize_selected_model_trajectories(
@@ -1025,8 +1118,8 @@ def evaluate_reward_comparison(
     device = torch.device(cfg.device)
     _configure_deterministic_inference(device)
     models = _load_models(stage1_checkpoint, grpo_checkpoint, device)
-    reward_config = JointRewardConfig()
-    reward_backend = JointTrajectoryProxyReward(reward_config)
+    reward_config = VehicleModeRewardConfig(trajectories_per_mode=1)
+    reward_backend = VehicleModeCounterfactualReward(reward_config)
     reference_initial_states: dict[tuple[str, str, int], np.ndarray] = {}
     reference_initial_scenes: dict[tuple[str, str, int], str] = {}
     rows: list[dict[str, object]] = []
@@ -1035,6 +1128,7 @@ def evaluate_reward_comparison(
             _evaluate_model(
                 model_id,
                 models[model_id],
+                reference_planner=models["stage1_a"],
                 device=device,
                 config=cfg,
                 reward_backend=reward_backend,
